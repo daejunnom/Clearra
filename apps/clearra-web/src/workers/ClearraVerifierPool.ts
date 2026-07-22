@@ -58,7 +58,7 @@ class VerifierClient {
     this.worker = this.createWorker();
   }
 
-  prewarm(): Promise<void> {
+  prewarm(compiledModule?: WebAssembly.Module): Promise<void> {
     if (this.prewarmed) return this.prewarmed;
     this.worker ??= this.createWorker();
     const worker = this.worker;
@@ -87,8 +87,16 @@ class VerifierClient {
       worker.addEventListener('message', onMessage);
       worker.addEventListener('error', onError);
       try {
-        worker.postMessage({ type: 'prewarm' });
+        worker.postMessage({ type: 'prewarm', compiledModule });
       } catch (error) {
+        if (compiledModule) {
+          try {
+            worker.postMessage({ type: 'prewarm' });
+            return;
+          } catch {
+            // Report the original structured-clone failure below.
+          }
+        }
         rejectAndCleanup(asError(error));
       }
     }).catch((error) => {
@@ -98,8 +106,11 @@ class VerifierClient {
     return this.prewarmed;
   }
 
-  async initialize(initialization: string | ArrayBuffer): Promise<void> {
-    await this.prewarm();
+  async initialize(
+    initialization: string | ArrayBuffer,
+    compiledModule?: WebAssembly.Module
+  ): Promise<void> {
+    await this.prewarm(compiledModule);
     this.worker ??= this.createWorker();
     const worker = this.worker;
     this.candidatesVerified = 0;
@@ -267,25 +278,37 @@ export class ClearraVerifierPool {
   private active = false;
   private failure: Error | null = null;
 
-  async prewarm(size: number) {
+  async prewarm(size: number, compiledModule?: WebAssembly.Module) {
+    const generation = ++this.generation;
     try {
       while (this.clients.length < size) this.clients.push(new VerifierClient());
       while (this.clients.length > size) this.clients.pop()?.dispose();
-      await Promise.all(this.clients.map((client) => client.prewarm()));
+      for (const client of this.clients) {
+        if (generation !== this.generation) return;
+        await client.prewarm(compiledModule);
+      }
+      if (generation !== this.generation) return;
     } catch (error) {
+      if (generation !== this.generation) return;
       this.fail(error);
       throw this.failure;
     }
   }
 
-  async initialize(initialization: string | ArrayBuffer, size: number) {
+  async initialize(
+    initialization: string | ArrayBuffer,
+    size: number,
+    compiledModule?: WebAssembly.Module
+  ) {
     const generation = ++this.generation;
     this.active = true;
     this.failure = null;
     try {
       while (this.clients.length < size) this.clients.push(new VerifierClient());
       while (this.clients.length > size) this.clients.pop()?.dispose();
-      await Promise.all(this.clients.map((client) => client.initialize(initialization)));
+      await Promise.all(
+        this.clients.map((client) => client.initialize(initialization, compiledModule))
+      );
       this.assertActive(generation);
     } catch (error) {
       this.fail(error);

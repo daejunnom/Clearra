@@ -1,4 +1,5 @@
 export type ClearraWasmModule = {
+  compiled_module: () => WebAssembly.Module;
   configure_host: (capabilities: ClearraWasmHostCapabilities) => void;
   start_job: (commandText: string) => number;
   advance_job: (
@@ -126,7 +127,9 @@ type ClearraRawWasmExports = {
 };
 
 type ClearraWasmBindings = {
-  default: (moduleOrPath?: string | URL) => Promise<ClearraRawWasmExports>;
+  default: (input?: {
+    module_or_path: string | URL | WebAssembly.Module;
+  }) => Promise<ClearraRawWasmExports>;
 };
 
 type ClearraWasmArtifactManifest = {
@@ -154,7 +157,9 @@ export class ClearraWasmRuntimeError extends Error {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
-export function loadClearraWasmModule(): Promise<ClearraWasmModule> {
+export function loadClearraWasmModule(
+  sharedCompiledModule?: WebAssembly.Module
+): Promise<ClearraWasmModule> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
       const wasmRoot = `${deploymentBaseFromWorkerLocation(self.location.pathname)}/wasm`;
@@ -174,13 +179,31 @@ export function loadClearraWasmModule(): Promise<ClearraWasmModule> {
       const bindings = (await import(
         /* @vite-ignore */ bindingsUrl.href
       )) as ClearraWasmBindings;
-      const raw = await bindings.default(wasmUrl);
-      const module = wrapRawModule(raw);
+      const compiledModule =
+        sharedCompiledModule ?? (await compileClearraWasmModule(wasmUrl));
+      const raw = await bindings.default({ module_or_path: compiledModule });
+      const module = wrapRawModule(raw, compiledModule);
       module.configure_host(detectHostCapabilities());
       return module;
     })();
   }
   return wasmModulePromise;
+}
+
+async function compileClearraWasmModule(wasmUrl: URL): Promise<WebAssembly.Module> {
+  const response = await fetch(wasmUrl);
+  if (!response.ok) {
+    throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
+  }
+  if (typeof WebAssembly.compileStreaming === 'function') {
+    const fallbackResponse = response.clone();
+    try {
+      return await WebAssembly.compileStreaming(response);
+    } catch {
+      return WebAssembly.compile(await fallbackResponse.arrayBuffer());
+    }
+  }
+  return WebAssembly.compile(await response.arrayBuffer());
 }
 
 function deploymentBaseFromWorkerLocation(pathname: string): string {
@@ -193,7 +216,10 @@ function isSha256(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
 }
 
-function wrapRawModule(raw: ClearraRawWasmExports): ClearraWasmModule {
+function wrapRawModule(
+  raw: ClearraRawWasmExports,
+  compiledModule: WebAssembly.Module
+): ClearraWasmModule {
   if (raw.clearra_wasm_abi_version() !== 1) {
     throw new Error('unsupported Clearra WASM ABI version');
   }
@@ -229,6 +255,9 @@ function wrapRawModule(raw: ClearraRawWasmExports): ClearraWasmModule {
   };
 
   const module: ClearraWasmModule = {
+    compiled_module() {
+      return compiledModule;
+    },
     failure_diagnostics() {
       return {
         linearMemoryBytes: raw.memory.buffer.byteLength,

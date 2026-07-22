@@ -14,7 +14,7 @@ import {
 
 type ClearraWorkerMessage =
   | { type: 'prewarm_runtime'; workerCount: number }
-  | { type: 'run_command_text'; commandText?: string }
+  | { type: 'run_command_text'; commandText?: string; prewarmWorkerCount?: number }
   | { type: 'cancel_job'; jobId?: number }
   | { type: 'dispose_runtime' };
 
@@ -28,6 +28,9 @@ type ActiveJob = {
 let nextJobId = 1;
 let active: ActiveJob | null = null;
 let runtimePrewarm: Promise<void> | null = null;
+let runtimePrewarmGeneration = 0;
+let requestedPrewarmWorkerCount = 1;
+let completedPrewarmWorkerCount = 0;
 let loadedWasm: ClearraWasmModule | null = null;
 let failClosed = false;
 
@@ -44,7 +47,10 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
     cancelActiveJob(message.data.jobId);
     return;
   }
-  void runCommandText(message.data.commandText ?? '');
+  void runCommandText(
+    message.data.commandText ?? '',
+    message.data.prewarmWorkerCount ?? requestedPrewarmWorkerCount
+  );
 };
 
 self.addEventListener('error', (event) => {
@@ -57,11 +63,13 @@ self.addEventListener('unhandledrejection', (event) => {
   failCloseUnhandled(event.reason);
 });
 
-async function runCommandText(commandText: string) {
+async function runCommandText(commandText: string, prewarmWorkerCount: number) {
   if (active) {
     postRuntimeFailure(active.id, 'E_WASM_JOB_ALREADY_RUNNING', 'a WASM job is already active');
     return;
   }
+  requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
+  interruptIncompleteRuntimePrewarm();
   const jobId = nextJobId++;
   const job: ActiveJob = {
     id: jobId,
@@ -107,24 +115,47 @@ async function runCommandText(commandText: string) {
     closeFailClosedWorker();
   } finally {
     if (active === job) active = null;
+    if (!failClosed) startRuntimePrewarm(requestedPrewarmWorkerCount);
   }
 }
 
 function startRuntimePrewarm(workerCount: number) {
-  if (runtimePrewarm) return;
   const boundedWorkerCount = Math.max(1, Math.floor(workerCount));
-  runtimePrewarm = Promise.all([
-    loadClearraWasmModule().then((wasm) => {
+  requestedPrewarmWorkerCount = boundedWorkerCount;
+  if (runtimePrewarm || completedPrewarmWorkerCount >= boundedWorkerCount) return;
+  const generation = ++runtimePrewarmGeneration;
+  postRuntimePrewarmPhase('started', boundedWorkerCount);
+  runtimePrewarm = loadClearraWasmModule()
+    .then(async (wasm) => {
       loadedWasm = wasm;
-      return wasm.prewarm_gpu(null);
-    }),
-    prewarmDistributedWorkers(boundedWorkerCount)
-  ])
+      if (generation !== runtimePrewarmGeneration) return;
+      await wasm.prewarm_gpu(null);
+      if (generation !== runtimePrewarmGeneration) return;
+      await prewarmDistributedWorkers(boundedWorkerCount, wasm.compiled_module());
+      if (generation === runtimePrewarmGeneration) {
+        completedPrewarmWorkerCount = boundedWorkerCount;
+      }
+    })
     .then(() => undefined)
     .catch((error) => {
+      if (generation !== runtimePrewarmGeneration) return;
       disposeDistributedWorkers();
       console.warn('Clearra browser runtime warmup was incomplete', error);
+    })
+    .finally(() => {
+      if (generation === runtimePrewarmGeneration) {
+        runtimePrewarm = null;
+        postRuntimePrewarmPhase('finished', boundedWorkerCount);
+      }
     });
+}
+
+function interruptIncompleteRuntimePrewarm() {
+  if (!runtimePrewarm || completedPrewarmWorkerCount >= requestedPrewarmWorkerCount) return;
+  runtimePrewarmGeneration++;
+  runtimePrewarm = null;
+  completedPrewarmWorkerCount = 0;
+  disposeDistributedWorkers();
 }
 
 function cancelActiveJob(jobId: number | undefined) {
@@ -142,6 +173,9 @@ function cancelActiveJob(jobId: number | undefined) {
 }
 
 function disposeRuntime() {
+  runtimePrewarmGeneration++;
+  runtimePrewarm = null;
+  completedPrewarmWorkerCount = 0;
   const job = active;
   if (job) releaseJobResources(job, loadedWasm);
   else {
@@ -210,7 +244,9 @@ function failCloseUnhandled(error: unknown) {
 function closeFailClosedWorker() {
   if (failClosed) return;
   failClosed = true;
+  runtimePrewarmGeneration++;
   runtimePrewarm = null;
+  completedPrewarmWorkerCount = 0;
   loadedWasm = null;
   self.close();
 }
@@ -291,4 +327,12 @@ function formatByteCount(bytes: number): string {
 
 function postWorkerEvent(event: ClearraWasmWorkerEvent) {
   self.postMessage(event);
+}
+
+function postRuntimePrewarmPhase(phase: 'started' | 'finished', workerCount: number) {
+  self.postMessage({
+    type: 'runtime_prewarm',
+    phase,
+    workerCount
+  });
 }

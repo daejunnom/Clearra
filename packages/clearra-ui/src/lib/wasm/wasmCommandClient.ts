@@ -265,10 +265,15 @@ export function createBrowserVirtualFileHandle(file: File): ClearraVirtualFileHa
   };
 }
 
-export function postRunCommand(worker: Worker, request: ClearraWasmCommandRequest) {
+export function postRunCommand(
+  worker: Worker,
+  request: ClearraWasmCommandRequest,
+  prewarmWorkerCount = 1
+) {
   worker.postMessage({
     type: 'run_command_text',
     commandText: request.commandText,
+    prewarmWorkerCount,
     virtualFiles: request.virtualFiles ?? []
   });
 }

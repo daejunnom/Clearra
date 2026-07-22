@@ -57,7 +57,7 @@ export function updateWasmCommandText(commandText: string) {
   }));
 }
 
-export function runWasmCommand(worker: Worker) {
+export function runWasmCommand(worker: Worker, prewarmWorkerCount = 1) {
   const request = get(wasmWorkerState).request;
   wasmWorkerState.update((state) => ({
     ...state,
@@ -76,7 +76,7 @@ export function runWasmCommand(worker: Worker) {
     error: null,
     terminalLines: [...state.terminalLines, `$ ${displayCommandText(request.commandText)}`]
   }));
-  postRunCommand(worker, request);
+  postRunCommand(worker, request, prewarmWorkerCount);
 }
 
 function displayCommandText(commandText: string): string {
