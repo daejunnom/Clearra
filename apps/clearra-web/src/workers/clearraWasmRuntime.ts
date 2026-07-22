@@ -157,10 +157,8 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 export function loadClearraWasmModule(): Promise<ClearraWasmModule> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
-      const manifestUrl = new URL(
-        '/wasm/clearra_wasm.manifest.json',
-        self.location.origin
-      );
+      const wasmRoot = `${deploymentBaseFromWorkerLocation(self.location.pathname)}/wasm`;
+      const manifestUrl = new URL(`${wasmRoot}/clearra_wasm.manifest.json`, self.location.origin);
       const manifestResponse = await fetch(manifestUrl, { cache: 'no-store' });
       if (!manifestResponse.ok) {
         throw new Error(`Clearra WASM manifest unavailable: ${manifestResponse.status}`);
@@ -169,8 +167,8 @@ export function loadClearraWasmModule(): Promise<ClearraWasmModule> {
       if (manifest.schema_version !== 1 || !isSha256(manifest.wasm.sha256)) {
         throw new Error('Clearra WASM manifest is invalid');
       }
-      const bindingsUrl = new URL(`/wasm/${manifest.bindings.path}`, self.location.origin);
-      const wasmUrl = new URL(`/wasm/${manifest.wasm.path}`, self.location.origin);
+      const bindingsUrl = new URL(`${wasmRoot}/${manifest.bindings.path}`, self.location.origin);
+      const wasmUrl = new URL(`${wasmRoot}/${manifest.wasm.path}`, self.location.origin);
       bindingsUrl.searchParams.set('v', manifest.bindings.sha256);
       wasmUrl.searchParams.set('v', manifest.wasm.sha256);
       const bindings = (await import(
@@ -183,6 +181,12 @@ export function loadClearraWasmModule(): Promise<ClearraWasmModule> {
     })();
   }
   return wasmModulePromise;
+}
+
+function deploymentBaseFromWorkerLocation(pathname: string): string {
+  const appMarker = '/_app/';
+  const appIndex = pathname.lastIndexOf(appMarker);
+  return appIndex < 0 ? '' : pathname.slice(0, appIndex);
 }
 
 function isSha256(value: string): boolean {

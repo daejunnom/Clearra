@@ -129,6 +129,21 @@ It uses the source-built `wasm-bindgen` CLI rather than a downloaded helper
 executable. Generated JS/WASM lives in `apps/clearra-web/static/wasm` and is not
 review or release source.
 
+## Published Products
+
+The browser GUI is published from the exact `main` source through GitHub Pages:
+
+- https://daejunnom.github.io/Clearra/
+
+The Pages workflow builds the WASM module and static SvelteKit application in
+one job. Project-site assets use `/Clearra` as their deployment base, while
+local development keeps the empty-root base.
+
+Version tags publish the Linux x86_64 `clearra` CLI through GitHub Releases.
+The archive contains the exact native C core and WebGPU-enabled Rust adapter;
+it does not use fixture fallbacks. Windows and macOS CLI packages are not
+claimed until those release runners are connected and validated.
+
 ## Runtime Environments
 
 Runtime selection is explicit and host-preserving:
