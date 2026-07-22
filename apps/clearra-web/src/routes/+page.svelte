@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import { page } from '$app/stores';
   import { BuildProbabilityWorkspace, ForwardSearchWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
   import { onMount } from 'svelte';
@@ -14,7 +15,7 @@
 
   onMount(() => {
     if (!['pc', 'build-probability', 'damage', 'spin-finder'].includes(selectedTool ?? '')) {
-      void goto('/?tool=pc', { replaceState: true, noScroll: true, keepFocus: true });
+      void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
   });
 </script>

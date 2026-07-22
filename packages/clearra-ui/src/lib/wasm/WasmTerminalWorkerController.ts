@@ -93,7 +93,11 @@ export class WasmTerminalWorkerController {
       };
       worker.onerror = (event) => {
         event.preventDefault();
-        this.failClosedWorker(worker, 'E_WASM_WORKER_CRASH', event.message || 'WASM worker crashed');
+        const message = event.message || 'WASM worker crashed';
+        const location = event.filename
+          ? ` (${event.filename}:${event.lineno}:${event.colno})`
+          : '';
+        this.failClosedWorker(worker, 'E_WASM_WORKER_CRASH', `${message}${location}`);
       };
       worker.onmessageerror = () => {
         this.failClosedWorker(

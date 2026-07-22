@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added GitHub Pages delivery for the WASM GUI and tag-owned Linux x86_64 CLI
+  release archives with checksums.
 - Routed CLI, desktop, and WASM requests through the typed `AppRequest` /
   `AppResponse` application boundary and canonical `SearchProblem` compiler.
 - Connected product search to C Geometry Skeleton Exact Cover, host reduction, and C

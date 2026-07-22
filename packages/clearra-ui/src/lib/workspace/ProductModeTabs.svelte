@@ -10,20 +10,20 @@
 </script>
 
 <nav class="product-tabs" aria-label={label('workspaceMode')}>
-  <a href="/?tool=pc" class:active={active === 'pc'} aria-current={active === 'pc' ? 'page' : undefined}>
+  <a href="?tool=pc" class:active={active === 'pc'} aria-current={active === 'pc' ? 'page' : undefined}>
     <Grid3X3 size={16} strokeWidth={1.8} />{label('pcSearch')}
   </a>
   <a
-    href="/?tool=build-probability"
+    href="?tool=build-probability"
     class:active={active === 'build-probability'}
     aria-current={active === 'build-probability' ? 'page' : undefined}
   >
     <Blocks size={16} strokeWidth={1.8} />{label('buildProbability')}
   </a>
-  <a href="/?tool=damage" class:active={active === 'damage'} aria-current={active === 'damage' ? 'page' : undefined}>
+  <a href="?tool=damage" class:active={active === 'damage'} aria-current={active === 'damage' ? 'page' : undefined}>
     <Flame size={16} strokeWidth={1.8} />{label('maximumDamage')}
   </a>
-  <a href="/?tool=spin-finder" class:active={active === 'spin-finder'} aria-current={active === 'spin-finder' ? 'page' : undefined}>
+  <a href="?tool=spin-finder" class:active={active === 'spin-finder'} aria-current={active === 'spin-finder' ? 'page' : undefined}>
     <RotateCw size={16} strokeWidth={1.8} />{label('spinFinder')}
   </a>
 </nav>

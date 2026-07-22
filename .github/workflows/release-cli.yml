@@ -1,0 +1,61 @@
+name: Publish CLI Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/clearra-release/cargo-target
+          key: cli-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'core-c/**/*.c', 'core-c/**/*.h') }}
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          version="$(awk '/^\[workspace.package\]/{owner=1; next} owner && /^version = /{gsub(/[" ]/, "", $3); print $3; exit}' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo 'workspace package version is missing' >&2
+            exit 2
+          fi
+          if [[ "$GITHUB_REF_TYPE" == 'tag' && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf 'tag %s does not match workspace version %s\n' "$GITHUB_REF_NAME" "$version" >&2
+            exit 2
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build and package exact CLI
+        env:
+          CLEARRA_RELEASE_BUILD_ROOT: ${{ runner.temp }}/clearra-release
+        run: bash scripts/tools/package-release-cli.sh dist "${{ steps.version.outputs.version }}"
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearra-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          archive="dist/clearra-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
+          checksum="$archive.sha256"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$archive" "$checksum" \
+              --verify-tag \
+              --generate-notes \
+              --title "Clearra $GITHUB_REF_NAME"
