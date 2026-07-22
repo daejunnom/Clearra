@@ -1,0 +1,38 @@
+[package]
+name = "clearra-invariant-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+native-c-core = ["clearra-core-executor/native-c-core"]
+
+[lib]
+test = false
+
+[dependencies]
+clearra-build-coverage = { path = "../clearra-build-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-core-ffi = { path = "../clearra-core-ffi" }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-exact-cover = { path = "../clearra-exact-cover" }
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-profiles = { path = "../clearra-profiles" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-setup-search = { path = "../clearra-setup-search" }
+clearra-supply = { path = "../clearra-supply" }
+clearra-ui-schema = { path = "../clearra-ui-schema" }
+clearra-validation = { path = "../clearra-validation" }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

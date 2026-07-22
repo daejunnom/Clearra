@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "skin_id": "invalid-missing-piece",
+  "atlas_path": "atlas.png",
+  "atlas_format": "png",
+  "atlas_width": 144,
+  "atlas_height": 16,
+  "tile_width": 16,
+  "tile_height": 16,
+  "runtime_raw_svg_allowed": false,
+  "required_pieces": [
+    "I",
+    "O",
+    "T",
+    "S",
+    "Z",
+    "J",
+    "L"
+  ],
+  "pieces": {
+    "I": { "x": 32, "y": 0, "width": 16, "height": 16 },
+    "O": { "x": 48, "y": 0, "width": 16, "height": 16 },
+    "S": { "x": 80, "y": 0, "width": 16, "height": 16 },
+    "Z": { "x": 96, "y": 0, "width": 16, "height": 16 },
+    "J": { "x": 112, "y": 0, "width": 16, "height": 16 },
+    "L": { "x": 128, "y": 0, "width": 16, "height": 16 }
+  },
+  "special": {
+    "empty": { "x": 0, "y": 0, "width": 16, "height": 16 },
+    "initial_gray": { "x": 16, "y": 0, "width": 16, "height": 16 }
+  },
+  "capability": { "render_exact": true, "supported": true },
+  "expected_error": "missing_piece:T"
+}

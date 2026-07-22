@@ -1,0 +1,83 @@
+{
+  "atlas_format": "png",
+  "atlas_height": 16,
+  "atlas_path": "atlas.png",
+  "atlas_width": 144,
+  "capability": {
+    "render_exact": true,
+    "supported": true
+  },
+  "display_name": "Clearra Default",
+  "pieces": {
+    "I": {
+      "height": 16,
+      "width": 16,
+      "x": 32,
+      "y": 0
+    },
+    "J": {
+      "height": 16,
+      "width": 16,
+      "x": 112,
+      "y": 0
+    },
+    "L": {
+      "height": 16,
+      "width": 16,
+      "x": 128,
+      "y": 0
+    },
+    "O": {
+      "height": 16,
+      "width": 16,
+      "x": 48,
+      "y": 0
+    },
+    "S": {
+      "height": 16,
+      "width": 16,
+      "x": 80,
+      "y": 0
+    },
+    "T": {
+      "height": 16,
+      "width": 16,
+      "x": 64,
+      "y": 0
+    },
+    "Z": {
+      "height": 16,
+      "width": 16,
+      "x": 96,
+      "y": 0
+    }
+  },
+  "required_pieces": [
+    "I",
+    "O",
+    "T",
+    "S",
+    "Z",
+    "J",
+    "L"
+  ],
+  "runtime_raw_svg_allowed": false,
+  "schema_version": 1,
+  "skin_id": "default",
+  "special": {
+    "empty": {
+      "height": 16,
+      "width": 16,
+      "x": 0,
+      "y": 0
+    },
+    "initial_gray": {
+      "height": 16,
+      "width": 16,
+      "x": 16,
+      "y": 0
+    }
+  },
+  "tile_height": 16,
+  "tile_width": 16
+}

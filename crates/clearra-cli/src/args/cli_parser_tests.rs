@@ -1,0 +1,300 @@
+use clearra_i18n::LanguageId;
+
+use super::*;
+
+#[test]
+fn parses_pc_args_outside_lib_router() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "2",
+        "--queue",
+        "IOT",
+        "--fixed",
+        "--no-hold",
+        "--objective",
+        "unique",
+        "--rule",
+        "srs-x",
+        "--kick-profile-json",
+        "{}",
+    ])
+    .expect("parsed invocation");
+
+    assert_eq!(invocation.format(), RenderFormat::Text);
+    match invocation.into_command() {
+        ParsedCliCommand::Pc(args) => {
+            assert_eq!(args.lines(), 2);
+            assert_eq!(args.queue(), "IOT");
+            assert!(args.fixed_queue());
+            assert!(!args.hold_enabled());
+            assert_eq!(args.objective(), "unique");
+            assert_eq!(args.rule(), Some("srs-x"));
+            assert_eq!(args.kick_profile_json(), Some("{}"));
+        }
+        command => panic!("expected pc command, got {command:?}"),
+    }
+}
+
+#[test]
+fn cpu_execution_aliases_select_cpu_and_preserve_thread_count() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--cpu-threads",
+        "6",
+        "--no-gpu",
+    ])
+    .expect("CPU-only invocation");
+
+    let ParsedCliCommand::Pc(args) = invocation.into_command() else {
+        panic!("expected pc command");
+    };
+    assert_eq!(args.backend(), Some("cpu"));
+    assert_eq!(args.workers(), Some(6));
+    assert!(args.gpu_device().is_none());
+}
+
+#[test]
+fn parses_explicit_cpu_pool_warmup_and_all_thread_opt_in() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--workers",
+        "1",
+        "--use-all-cpu-threads",
+        "--cpu-warmup",
+    ])
+    .expect("CPU pool options");
+
+    let ParsedCliCommand::Pc(args) = invocation.into_command() else {
+        panic!("expected pc command");
+    };
+    assert_eq!(args.workers(), Some(1));
+    assert_eq!(args.use_all_logical_processors(), Some(true));
+    assert_eq!(args.cpu_warmup(), Some(true));
+}
+
+#[test]
+fn cpu_execution_aliases_reject_gpu_backend_and_device_conflicts() {
+    assert!(matches!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "4",
+            "--cpu-threads",
+            "4",
+            "--backend",
+            "gpu",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--backend",
+            ..
+        })
+    ));
+    assert!(matches!(
+        CliParser::parse([
+            "clearra",
+            "pc-scenario",
+            "--field",
+            "0",
+            "--queue",
+            "I",
+            "--no-gpu",
+            "--gpu-device",
+            "0",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--gpu-device",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn strips_global_format_before_command_parsing() {
+    let invocation = CliParser::parse(["clearra", "pc", "--format", "json", "--lines", "2"])
+        .expect("parsed invocation");
+
+    assert_eq!(invocation.format(), RenderFormat::Json);
+    assert!(matches!(invocation.into_command(), ParsedCliCommand::Pc(_)));
+}
+
+#[test]
+fn strips_global_language_before_command_parsing() {
+    let invocation = CliParser::parse(["clearra", "--lang", "ko-KR", "pc", "--lines", "2"])
+        .expect("parsed invocation");
+
+    assert_eq!(invocation.language(), LanguageId::Ko);
+    assert!(matches!(invocation.into_command(), ParsedCliCommand::Pc(_)));
+}
+
+#[test]
+fn rejects_unknown_language() {
+    assert_eq!(
+        CliParser::parse(["clearra", "--lang", "jp", "pc", "--lines", "2"]),
+        Err(CliParseError::InvalidValue {
+            option: "--lang",
+            value: "jp".to_owned()
+        })
+    );
+}
+
+#[test]
+fn strips_verbose_paths_as_global_option() {
+    let invocation = CliParser::parse(["clearra", "cover", "--verbose-paths", "--template", "x"])
+        .expect("parsed invocation");
+
+    assert!(invocation.verbose_paths());
+    assert!(matches!(
+        invocation.into_command(),
+        ParsedCliCommand::Cover(_)
+    ));
+}
+
+#[test]
+fn parses_text_output_verbosity_as_global_option() {
+    let verbose =
+        CliParser::parse(["clearra", "pc", "--verbose", "--lines", "2"]).expect("verbose");
+    assert_eq!(verbose.output_verbosity(), OutputVerbosity::Verbose);
+    assert_eq!(verbose.format(), RenderFormat::Text);
+
+    let diagnostics =
+        CliParser::parse(["clearra", "--diagnostics", "pc", "--lines", "2"]).expect("diagnostics");
+    assert_eq!(diagnostics.output_verbosity(), OutputVerbosity::Diagnostics);
+    assert_eq!(diagnostics.format(), RenderFormat::Text);
+}
+
+#[test]
+fn parses_pc_scenario_fixture_args() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc-scenario",
+        "--fixture",
+        "tests/fixtures/pc/example.json",
+        "--verify-expected",
+        "--kick-profile-json",
+        "{}",
+        "--format",
+        "json",
+    ])
+    .expect("parsed invocation");
+
+    assert_eq!(invocation.format(), RenderFormat::Json);
+    match invocation.into_command() {
+        ParsedCliCommand::PcScenario(args) => {
+            assert_eq!(args.fixture(), Some("tests/fixtures/pc/example.json"));
+            assert!(args.verify_expected());
+            assert_eq!(args.kick_profile_json(), Some("{}"));
+        }
+        command => panic!("expected pc-scenario command, got {command:?}"),
+    }
+}
+
+#[test]
+fn parses_cover_native_template_import_export_args() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "cover",
+        "--template-file",
+        "build-template.json",
+        "--export-template-json",
+    ])
+    .expect("parsed invocation");
+
+    match invocation.into_command() {
+        ParsedCliCommand::Cover(args) => {
+            assert_eq!(args.template_file(), Some("build-template.json"));
+            assert!(args.export_template_json());
+        }
+        command => panic!("expected cover command, got {command:?}"),
+    }
+}
+
+#[test]
+fn parses_command_specific_help_as_help_topic() {
+    let invocation = CliParser::parse(["clearra", "setup", "--help"]).expect("help");
+
+    assert_eq!(
+        invocation.into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Setup)
+    );
+}
+
+#[test]
+fn parses_continue_token_as_concrete_command() {
+    let token = "pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:oall:e0:hnone:qIIOOO";
+    let invocation = CliParser::parse(["clearra", "continue", token]).expect("continue");
+
+    assert_eq!(invocation.format(), RenderFormat::Text);
+    match invocation.into_command() {
+        ParsedCliCommand::Continue(args) => {
+            assert_eq!(args.token(), Some(token));
+        }
+        command => panic!("expected continue command, got {command:?}"),
+    }
+}
+
+#[test]
+fn reports_missing_and_invalid_option_values() {
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "--lines"]),
+        Err(CliParseError::MissingValue { option: "--lines" })
+    );
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "--lines", "two"]),
+        Err(CliParseError::InvalidValue {
+            option: "--lines",
+            value: "two".to_owned()
+        })
+    );
+}
+
+#[test]
+fn classifies_unsupported_and_unknown_commands() {
+    let unsupported = CliParser::parse(["clearra", "inspect"]).expect("unsupported command");
+    assert_eq!(
+        unsupported.into_command(),
+        ParsedCliCommand::Unsupported("inspect".to_owned())
+    );
+    assert_eq!(
+        CliParser::parse(["clearra", "wat"]),
+        Err(CliParseError::UnknownCommand {
+            command: "wat".to_owned()
+        })
+    );
+}
+
+#[test]
+fn parses_mvp2_cli_command_surfaces() {
+    assert!(matches!(
+        CliParser::parse(["clearra", "rules", "list"])
+            .expect("rules")
+            .into_command(),
+        ParsedCliCommand::Rules(_)
+    ));
+    assert!(matches!(
+        CliParser::parse(["clearra", "scoring", "inspect", "--profile", "jstris-ultra"])
+            .expect("scoring")
+            .into_command(),
+        ParsedCliCommand::Scoring(_)
+    ));
+    assert!(matches!(
+        CliParser::parse(["clearra", "path", "--lines", "2"])
+            .expect("path")
+            .into_command(),
+        ParsedCliCommand::Path(_)
+    ));
+    assert!(matches!(
+        CliParser::parse(["clearra", "percent", "--queue", "IOT"])
+            .expect("percent")
+            .into_command(),
+        ParsedCliCommand::Percent(_)
+    ));
+}

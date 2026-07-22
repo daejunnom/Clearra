@@ -1,0 +1,14 @@
+{
+  "fixture": "setup_basic",
+  "required_markers": [
+    "kind=setup",
+    "status=setup-executed",
+    "route=search-problem-core-executor",
+    "setup_raw_metrics=attached",
+    "setup_raw_coverage_export=inline",
+    "raw_coverage_export_path=inline://clearra/setup/raw-coverage/setup-family-0/union",
+    "coverage_reducer=pattern-bitset-union",
+    "build_variant_source=C BuildUp",
+    "coverage_probability=0.0"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "fixture": "continue_token_basic",
+  "required_markers": [
+    "kind=continue",
+    "status=continued-searched",
+    "continuation_kind=opening",
+    "input_continuation_token=pc2:l2:",
+    "route=search-problem-core-executor",
+    "compiled_goal=clear-to-empty",
+    "packing_backend=cpu",
+    "coverage_reducer=pattern-bitset-union"
+  ]
+}

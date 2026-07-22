@@ -1,0 +1,16 @@
+[package]
+name = "clearra-build-coverage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-exact-cover = { path = "../clearra-exact-cover" }
+clearra-profiles = { path = "../clearra-profiles" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

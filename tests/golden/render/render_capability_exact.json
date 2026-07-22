@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "render_capability",
+  "render_exact": true,
+  "supported": true,
+  "skin_id": "default",
+  "runtime_asset_format": "png-atlas"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "simple_family_union",
+  "kind": "setup-family-union-fixture",
+  "pattern_count": 4,
+  "rows": [
+    { "build_variant_id": 10, "patterns": [0, 1] },
+    { "build_variant_id": 11, "patterns": [1, 2] }
+  ],
+  "weights": "uniform",
+  "expected": {
+    "shape_family_id": 1,
+    "covered_pattern_count": 3,
+    "probability": 0.75,
+    "renormalized": false,
+    "forbidden_algorithm": "variant_probability_sum"
+  }
+}

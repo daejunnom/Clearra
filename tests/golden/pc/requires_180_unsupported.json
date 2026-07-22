@@ -1,0 +1,12 @@
+{
+  "fixture": "requires_180_unsupported",
+  "required_markers": [
+    "expected_unsupported=true",
+    "actual_unsupported=true",
+    "unsupported_stage=validation",
+    "unsupported_reason=scenario_requires_180_unsupported",
+    "validation_reason=scenario_requires_180_unsupported",
+    "fallback_used=false",
+    "status=scenario-unsupported-expected"
+  ]
+}

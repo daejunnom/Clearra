@@ -1,0 +1,2233 @@
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    piece::{piece_kind::PieceKind, rotation::RotationState},
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+};
+use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_pc_graph::request::PcCountPolicy;
+use clearra_problem::SearchProblem;
+use clearra_replay::{ExactScoringExecutionGraph, ScoringExecutionEdge, ScoringExecutionNode};
+use clearra_supply::pattern_universe::PatternPiecePositionIndex;
+
+use crate::{
+    performance::{ExecutorSearchStage, SearchStageSpan},
+    CorePathStep,
+};
+
+use super::{
+    catalog::GeometryCatalog,
+    coverage_product::CoverageProductEvaluator,
+    exact_collections::ExactHashSet,
+    geometry::{GeometryCandidate, TargetGroup},
+    piece_order_language::{CoverageCacheLookup, PieceOrderLanguageCache},
+    reachability::ReachabilityWorkspace,
+    realization_feasibility::RealizationFeasibilityWorkspace,
+    standard_bag_coverage::{StandardBagCoverage, StandardBagCoverageResult},
+    WasmExactSearchError,
+};
+
+// Keep the low-volume symbolic fast path intact, but recycle accelerator
+// arenas before wasm32's fixed address space is exhausted on full searches.
+const SYMBOLIC_CACHE_LIVE_LIMIT: usize = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct BuildEdge {
+    pub to: u32,
+    operation_index: u8,
+    pub piece: PieceKind,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    cleared_lines: u8,
+}
+
+impl BuildEdge {
+    pub(super) const fn canonical_key(&self) -> (u32, PieceKind, u8, RotationState, i8, i8, u8) {
+        (
+            self.to,
+            self.piece,
+            self.operation_index,
+            self.rotation,
+            self.x,
+            self.y,
+            self.cleared_lines,
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct BuildNode {
+    edge_start: u32,
+    edge_count: u32,
+    piece_edge_start: u32,
+    piece_edge_count: u32,
+    pub depth: u8,
+    pub live: bool,
+    accepting: bool,
+}
+
+const _: () = assert!(core::mem::size_of::<BuildNode>() == 20);
+
+impl BuildNode {
+    pub fn accepting(&self) -> bool {
+        self.accepting
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BuildOrderNodeSpec {
+    pub edge_start: u32,
+    pub edge_count: u32,
+    pub depth: u8,
+    pub accepting: bool,
+}
+
+#[derive(Debug)]
+pub(super) struct BuildOrderGraph {
+    pub nodes: Vec<BuildNode>,
+    edges: Vec<BuildEdge>,
+    piece_edges: Vec<BuildEdge>,
+    pub root: u32,
+    reachability_states: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct CoverageState {
+    node: u32,
+    cursor: u16,
+    hold: Option<PieceKind>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CandidateBuildResult {
+    pub buildable: bool,
+    pub covered_patterns: Option<PatternBitSet>,
+    pub symbolic_coverage_root: Option<u32>,
+    pub symbolic_covered_pattern_count: usize,
+    pub witness_pattern_id: Option<u32>,
+    pub build_variant_count: u128,
+    pub count_complete: bool,
+    pub representative_path: Vec<CorePathStep>,
+    pub graph_nodes: usize,
+    pub coverage_product_words: usize,
+    pub coverage_product_states: usize,
+    pub coverage_product_edge_checks: usize,
+    pub feasibility_states: usize,
+    pub feasibility_rejected: bool,
+    pub reachability_states: usize,
+    pub retained_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BuildCompletion {
+    ClearToEmpty,
+    ExactBoardAfterLineClears(u64),
+}
+
+impl BuildCompletion {
+    pub(super) fn accepts(self, projection: &mut CandidateProjection, subset: usize) -> bool {
+        let (board, _deleted_rows) = projection.state(subset);
+        match self {
+            Self::ClearToEmpty => board == 0,
+            Self::ExactBoardAfterLineClears(expected) => board == expected,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct BuildUpWorkspace {
+    realization_feasibility: RealizationFeasibilityWorkspace,
+    piece_order_languages: PieceOrderLanguageCache,
+    standard_bag_coverage: Option<StandardBagCoverage>,
+    standard_bag_coverage_initialized: bool,
+    reachability: ReachabilityWorkspace,
+    graph_nodes: Vec<BuildNode>,
+    graph_edges: Vec<BuildEdge>,
+    graph_piece_edges: Vec<BuildEdge>,
+    graph_edge_scratch: Vec<BuildEdge>,
+    graph_reachable_generations: Vec<u32>,
+    graph_subset_node_ids: Vec<u32>,
+    graph_subset_queue: Vec<u16>,
+    graph_generation: u32,
+    projection_deleted_rows: Vec<u16>,
+    projection_physical_boards: Vec<u64>,
+    projection_state_generations: Vec<u32>,
+    projection_generation: u32,
+}
+
+impl BuildUpWorkspace {
+    pub fn retained_bytes(&self) -> usize {
+        self.realization_feasibility.retained_bytes()
+            + self.piece_order_languages.retained_bytes()
+            + self
+                .standard_bag_coverage
+                .as_ref()
+                .map_or(0, StandardBagCoverage::retained_bytes)
+            + self.reachability.retained_bytes()
+            + self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
+            + (self.graph_edges.capacity()
+                + self.graph_piece_edges.capacity()
+                + self.graph_edge_scratch.capacity())
+                * core::mem::size_of::<BuildEdge>()
+            + self.projection_physical_boards.capacity() * core::mem::size_of::<u64>()
+            + self.projection_deleted_rows.capacity() * core::mem::size_of::<u16>()
+            + self.projection_state_generations.capacity() * core::mem::size_of::<u32>()
+            + self.graph_reachable_generations.capacity() * core::mem::size_of::<u32>()
+            + self.graph_subset_node_ids.capacity() * core::mem::size_of::<u32>()
+            + self.graph_subset_queue.capacity() * core::mem::size_of::<u16>()
+    }
+
+    pub const fn piece_language_coverage_hits(&self) -> usize {
+        self.piece_order_languages.coverage_hits()
+    }
+
+    pub const fn piece_language_coverage_misses(&self) -> usize {
+        self.piece_order_languages.coverage_misses()
+    }
+
+    pub const fn standard_bag_coverage_hits(&self) -> usize {
+        match self.standard_bag_coverage.as_ref() {
+            Some(coverage) => coverage.root_cache_hits(),
+            None => 0,
+        }
+    }
+
+    pub const fn standard_bag_coverage_misses(&self) -> usize {
+        match self.standard_bag_coverage.as_ref() {
+            Some(coverage) => coverage.root_cache_misses(),
+            None => 0,
+        }
+    }
+
+    pub const fn standard_bag_coverage_complete(&self) -> bool {
+        match self.standard_bag_coverage.as_ref() {
+            Some(coverage) => coverage.global_is_complete(),
+            None => false,
+        }
+    }
+
+    pub const fn reachability_metrics(&self) -> super::reachability::ReachabilityMetrics {
+        self.reachability.metrics()
+    }
+
+    pub fn merge_standard_bag_coverage(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
+        {
+            let coverage =
+                self.standard_bag_coverage
+                    .as_mut()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_standard_bag_coverage_not_initialized",
+                    ))?;
+            coverage.merge_global(root)?;
+        }
+        self.recycle_symbolic_caches_if_needed()
+    }
+
+    pub fn materialize_standard_bag_coverage(
+        &mut self,
+    ) -> Result<Option<PatternBitSet>, WasmExactSearchError> {
+        self.standard_bag_coverage
+            .as_mut()
+            .map(StandardBagCoverage::materialize_global)
+            .transpose()
+    }
+
+    pub fn materialize_standard_bag_root(
+        &self,
+        root: u32,
+    ) -> Result<PatternBitSet, WasmExactSearchError> {
+        self.standard_bag_coverage
+            .as_ref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_coverage_not_initialized",
+            ))?
+            .materialize_root(root)
+    }
+
+    fn cover_standard_bag_language(
+        &mut self,
+        problem: &SearchProblem,
+        language_root: u32,
+        control: &ExecutionControl,
+    ) -> Result<Option<StandardBagCoverageResult>, WasmExactSearchError> {
+        if !self.standard_bag_coverage_initialized {
+            let universe = problem.piece_source().materialized_universe().ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+            )?;
+            self.standard_bag_coverage = StandardBagCoverage::for_universe(
+                universe,
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                problem.supply().projects_unplaced_lookahead(),
+            )?;
+            self.standard_bag_coverage_initialized = true;
+        }
+        let Some(coverage) = self.standard_bag_coverage.as_mut() else {
+            return Ok(None);
+        };
+        coverage
+            .cover_language(&self.piece_order_languages, language_root, control)
+            .map(Some)
+    }
+
+    fn recycle_symbolic_caches_if_needed(&mut self) -> Result<(), WasmExactSearchError> {
+        let standard_live = self
+            .standard_bag_coverage
+            .as_ref()
+            .map_or(0, StandardBagCoverage::local_live_bytes);
+        if standard_live.saturating_add(self.piece_order_languages.local_live_bytes())
+            <= SYMBOLIC_CACHE_LIVE_LIMIT
+        {
+            return Ok(());
+        }
+        if let Some(coverage) = self.standard_bag_coverage.as_mut() {
+            coverage.flush_and_recycle_local_cache()?;
+        }
+        self.piece_order_languages.clear_retain_capacity();
+        Ok(())
+    }
+
+    fn recycle_graph(&mut self, mut graph: BuildOrderGraph) {
+        graph.nodes.clear();
+        graph.edges.clear();
+        graph.piece_edges.clear();
+        self.graph_nodes = graph.nodes;
+        self.graph_edges = graph.edges;
+        self.graph_piece_edges = graph.piece_edges;
+    }
+
+    fn recycle_projection(&mut self, projection: CandidateProjection) {
+        self.projection_deleted_rows = projection.deleted_rows;
+        self.projection_physical_boards = projection.physical_boards;
+        self.projection_state_generations = projection.state_generations;
+    }
+
+    fn begin_graph_generation(&mut self, state_count: usize) -> Result<u32, WasmExactSearchError> {
+        if self.graph_reachable_generations.len() < state_count {
+            self.graph_reachable_generations
+                .try_reserve_exact(state_count - self.graph_reachable_generations.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_reachable_storage_unavailable",
+                    )
+                })?;
+            self.graph_reachable_generations.resize(state_count, 0);
+            self.graph_subset_node_ids
+                .try_reserve_exact(state_count - self.graph_subset_node_ids.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_subset_index_storage_unavailable",
+                    )
+                })?;
+            self.graph_subset_node_ids.resize(state_count, 0);
+        }
+        self.graph_generation = self.graph_generation.wrapping_add(1);
+        if self.graph_generation == 0 {
+            self.graph_reachable_generations.fill(0);
+            self.graph_generation = 1;
+        }
+        Ok(self.graph_generation)
+    }
+}
+
+pub(super) struct CandidateProjection {
+    operation_cells: [u64; super::MAX_BOARD64_PIECES],
+    operation_count: u8,
+    row_contributors: [u16; 16],
+    width: u8,
+    height: u8,
+    initial_board: u64,
+    completed_target_rows: u16,
+    deleted_rows: Vec<u16>,
+    physical_boards: Vec<u64>,
+    state_generations: Vec<u32>,
+    generation: u32,
+    pub all_placed: usize,
+}
+
+impl CandidateProjection {
+    pub fn compile(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        workspace: &mut BuildUpWorkspace,
+        _completion: BuildCompletion,
+    ) -> Result<Self, WasmExactSearchError> {
+        let operation_count = candidate.row_ids().len();
+        if operation_count == 0 || operation_count > super::MAX_BOARD64_PIECES {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_candidate_projection_operation_count_invalid",
+            ));
+        }
+        let state_count = 1_usize << operation_count;
+        let all_placed = state_count - 1;
+        let row_bits = full_row_mask(catalog.width());
+        let mut operation_cells = [0_u64; super::MAX_BOARD64_PIECES];
+        let mut row_contributors = [0_u16; 16];
+        for (operation_index, row_id) in candidate.row_ids().iter().copied().enumerate() {
+            let cells = catalog.skeleton(row_id).cells;
+            operation_cells[operation_index] = cells;
+            let mut occupied = occupied_rows(catalog.width(), cells);
+            while occupied != 0 {
+                let row = occupied.trailing_zeros() as usize;
+                occupied &= occupied - 1;
+                row_contributors[row] |= 1_u16 << operation_index;
+            }
+        }
+        for row in 0..catalog.height() as usize {
+            let initial_row =
+                (catalog.initial_board() >> (row * catalog.width() as usize)) & row_bits;
+            if initial_row == row_bits && row_contributors[row] == 0 {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_initial_full_row_requires_preclear_normalization",
+                ));
+            }
+        }
+        let mut completed_target_rows = 0_u16;
+        let mut final_board = catalog.initial_board();
+        for &cells in operation_cells.iter().take(operation_count) {
+            final_board |= cells;
+        }
+        for row in 0..catalog.height() as usize {
+            let target_row = (final_board >> (row * catalog.width() as usize)) & row_bits;
+            if target_row == row_bits {
+                completed_target_rows |= 1_u16 << row;
+            }
+        }
+
+        let mut deleted_rows = core::mem::take(&mut workspace.projection_deleted_rows);
+        let mut physical_boards = core::mem::take(&mut workspace.projection_physical_boards);
+        let mut state_generations = core::mem::take(&mut workspace.projection_state_generations);
+        reserve_state_storage(&mut deleted_rows, state_count, 0_u16)?;
+        reserve_state_storage(&mut physical_boards, state_count, 0_u64)?;
+        reserve_state_storage(&mut state_generations, state_count, 0_u32)?;
+        workspace.projection_generation = workspace.projection_generation.wrapping_add(1);
+        if workspace.projection_generation == 0 {
+            state_generations.fill(0);
+            workspace.projection_generation = 1;
+        }
+        Ok(Self {
+            operation_cells,
+            operation_count: operation_count as u8,
+            row_contributors,
+            width: catalog.width(),
+            height: catalog.height(),
+            initial_board: catalog.initial_board(),
+            completed_target_rows,
+            deleted_rows,
+            physical_boards,
+            state_generations,
+            generation: workspace.projection_generation,
+            all_placed,
+        })
+    }
+
+    pub fn operation_count(&self) -> usize {
+        usize::from(self.operation_count)
+    }
+
+    pub fn state_count(&self) -> usize {
+        self.all_placed + 1
+    }
+
+    pub fn state(&mut self, subset: usize) -> (u64, u16) {
+        debug_assert!(subset <= self.all_placed);
+        if self.state_generations[subset] != self.generation {
+            let deleted = self.expected_deleted_rows(subset);
+            let mut logical_board = self.initial_board;
+            let mut selected = subset;
+            while selected != 0 {
+                let operation_index = selected.trailing_zeros() as usize;
+                selected &= selected - 1;
+                logical_board |= self.operation_cells[operation_index];
+            }
+            self.deleted_rows[subset] = deleted;
+            self.physical_boards[subset] =
+                compact_target_board(self.width, self.height, logical_board, deleted);
+            self.state_generations[subset] = self.generation;
+        }
+        (self.physical_boards[subset], self.deleted_rows[subset])
+    }
+
+    pub fn expected_deleted_rows(&self, subset: usize) -> u16 {
+        let subset_bits = subset as u16;
+        let mut deleted = 0_u16;
+        for row in 0..usize::from(self.height) {
+            if self.completed_target_rows & (1_u16 << row) == 0 {
+                continue;
+            }
+            let contributors = self.row_contributors[row];
+            if contributors != 0 && contributors & !subset_bits == 0 {
+                deleted |= 1_u16 << row;
+            }
+        }
+        deleted
+    }
+
+    pub fn confirm_transition(&mut self, subset: usize, board: u64, deleted_rows: u16) -> bool {
+        debug_assert!(subset <= self.all_placed);
+        if deleted_rows != self.expected_deleted_rows(subset) {
+            return false;
+        }
+        if self.state_generations[subset] == self.generation {
+            return self.deleted_rows[subset] == deleted_rows
+                && self.physical_boards[subset] == board;
+        }
+        self.deleted_rows[subset] = deleted_rows;
+        self.physical_boards[subset] = board;
+        self.state_generations[subset] = self.generation;
+        true
+    }
+}
+
+fn reserve_state_storage<T: Copy>(
+    storage: &mut Vec<T>,
+    state_count: usize,
+    empty: T,
+) -> Result<(), WasmExactSearchError> {
+    if storage.len() < state_count {
+        storage
+            .try_reserve_exact(state_count - storage.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_projection_storage_unavailable")
+            })?;
+        storage.resize(state_count, empty);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum CachedWitnessTransition {
+    Unknown,
+    Impossible,
+    Legal(BuildEdge),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct WitnessProductState {
+    subset: u16,
+    extra_draw: u8,
+    hold_code: u8,
+    active_patterns: u64,
+}
+
+#[derive(Clone, Copy)]
+struct WitnessStep {
+    edge: BuildEdge,
+    hold_kind: &'static str,
+}
+
+struct CandidateWitness {
+    global_pattern_index: usize,
+    path: Vec<WitnessStep>,
+    visited_product_states: usize,
+    retained_bytes: usize,
+}
+
+pub(super) fn verify_candidate(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
+    coverage_only_needs_witness: bool,
+    retain_trace: bool,
+    profile_scale: u64,
+    control: &ExecutionControl,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    verify_candidate_for_completion(
+        problem,
+        catalog,
+        candidate,
+        target,
+        workspace,
+        evaluator,
+        coverage_only_needs_witness,
+        retain_trace,
+        profile_scale,
+        BuildCompletion::ClearToEmpty,
+        control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn verify_candidate_for_completion(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
+    coverage_only_needs_witness: bool,
+    retain_trace: bool,
+    profile_scale: u64,
+    completion: BuildCompletion,
+    control: &ExecutionControl,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    let kick_profile_id = problem.kick_profile().profile_id();
+    if super::kick_profiles::builtin_kick_profile(kick_profile_id).is_none() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_exact_backend_requires_connected_kick_profile",
+        ));
+    }
+    if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
+        return Ok(infeasible_candidate_result(0));
+    }
+    workspace.reachability.configure(candidate.row_ids().len());
+    workspace
+        .reachability
+        .configure_kick_profile(kick_profile_id);
+    let projection_span =
+        SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateProjection, profile_scale);
+    let mut projection = CandidateProjection::compile(catalog, candidate, workspace, completion)?;
+    projection_span.finish(projection.state_count() as u64);
+    let result = verify_candidate_with_projection(
+        problem,
+        catalog,
+        candidate,
+        target,
+        &mut projection,
+        workspace,
+        evaluator,
+        coverage_only_needs_witness,
+        retain_trace,
+        profile_scale,
+        completion,
+        control,
+    );
+    workspace.recycle_projection(projection);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_candidate_with_projection(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    projection: &mut CandidateProjection,
+    workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
+    coverage_only_needs_witness: bool,
+    retain_trace: bool,
+    profile_scale: u64,
+    completion: BuildCompletion,
+    control: &ExecutionControl,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    let universe = problem.piece_source().materialized_universe().ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+    )?;
+    let feasibility_span =
+        SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateFeasibility, profile_scale);
+    let feasibility = workspace
+        .realization_feasibility
+        .analyze(catalog, candidate, projection, completion, control)?;
+    let feasibility_states = feasibility.explored_states();
+    feasibility_span.finish(feasibility_states as u64);
+    if feasibility.is_infeasible() {
+        return Ok(infeasible_candidate_result(feasibility_states));
+    }
+    if coverage_only_needs_witness
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && target.pattern_index.is_some()
+    {
+        return verify_first_pattern_witness(
+            problem,
+            catalog,
+            candidate,
+            target,
+            projection,
+            workspace,
+            retain_trace,
+            feasibility_states,
+            profile_scale,
+            completion,
+            control,
+        );
+    }
+    let graph_span = SearchStageSpan::begin_scaled(
+        ExecutorSearchStage::WasmBuildOrderReachability,
+        profile_scale,
+    );
+    let graph = BuildOrderGraph::build(
+        problem,
+        catalog,
+        candidate,
+        projection,
+        workspace,
+        problem.count_policy() == PcCountPolicy::CountUnique,
+        completion,
+    )?;
+    graph_span.finish(graph.nodes.len() as u64);
+    let mut covered_patterns = None;
+    let mut symbolic_coverage_root = None;
+    let mut symbolic_covered_pattern_count = 0usize;
+    let mut witness_pattern_id = None;
+    let mut build_variant_count = 0_u128;
+    let mut count_complete = true;
+    let mut representative_path = Vec::new();
+    let mut coverage_product_words = 0usize;
+    let mut coverage_product_states = 0usize;
+    let mut coverage_product_edge_checks = 0usize;
+    let coverage_span = SearchStageSpan::begin_scaled(
+        ExecutorSearchStage::WasmCoverageLanguageProduct,
+        profile_scale,
+    );
+    if graph.nodes[graph.root as usize].live {
+        let count_paths = problem.count_policy() == PcCountPolicy::CountAll;
+        if count_paths {
+            let Some(pattern_index) = target.pattern_index.as_deref() else {
+                workspace.recycle_graph(graph);
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_concrete_pattern_index_not_compiled",
+                ));
+            };
+            let product = match evaluator.evaluate(
+                &graph,
+                pattern_index,
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                problem.supply().projects_unplaced_lookahead(),
+                true,
+                false,
+                control,
+            ) {
+                Ok(product) => product,
+                Err(error) => {
+                    workspace.recycle_graph(graph);
+                    return Err(error);
+                }
+            };
+            if !product.coverage_bits.is_empty() {
+                covered_patterns = Some(product.coverage_bits);
+            }
+            build_variant_count = product.path_count;
+            count_complete = product.count_complete;
+            coverage_product_words = product.processed_words;
+            coverage_product_states = product.active_states;
+            coverage_product_edge_checks = product.edge_checks;
+        } else {
+            let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
+                Ok(language_id) => language_id,
+                Err(error) => {
+                    workspace.recycle_graph(graph);
+                    return Err(error);
+                }
+            };
+            let symbolic =
+                match workspace.cover_standard_bag_language(problem, language_id, control) {
+                    Ok(symbolic) => symbolic,
+                    Err(error) => {
+                        workspace.recycle_graph(graph);
+                        return Err(error);
+                    }
+                };
+            if let Some(symbolic) = symbolic {
+                coverage_product_states = symbolic.product_states;
+                coverage_product_edge_checks = symbolic.edge_checks;
+                if symbolic.covers_any_pattern {
+                    symbolic_coverage_root = Some(symbolic.root);
+                    symbolic_covered_pattern_count = symbolic.covered_pattern_count;
+                    witness_pattern_id = symbolic.witness_pattern_id;
+                }
+            } else {
+                let Some(pattern_index) = target.pattern_index.as_deref() else {
+                    workspace.recycle_graph(graph);
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_concrete_pattern_index_not_compiled",
+                    ));
+                };
+                let cache_lookup = match workspace
+                    .piece_order_languages
+                    .coverage(language_id, target.pattern_index_id)
+                {
+                    Ok(lookup) => lookup,
+                    Err(error) => {
+                        workspace.recycle_graph(graph);
+                        return Err(error);
+                    }
+                };
+                let coverage = match cache_lookup {
+                    CoverageCacheLookup::Hit(local_words) => {
+                        match target
+                            .pattern_index
+                            .as_deref()
+                            .expect("generic coverage requires its compiled pattern index")
+                            .expand_coverage_words(local_words.as_ref())
+                        {
+                            Ok(coverage) => coverage,
+                            Err(_) => {
+                                workspace.recycle_graph(graph);
+                                return Err(WasmExactSearchError::InvalidProblem(
+                                    "wasm_cached_coverage_expansion_failed",
+                                ));
+                            }
+                        }
+                    }
+                    CoverageCacheLookup::Miss {
+                        admit_after_compute,
+                    } => {
+                        let product = match evaluator.evaluate(
+                            &graph,
+                            pattern_index,
+                            problem.initial_hold(),
+                            problem.supply().hold_enabled(),
+                            problem.supply().projects_unplaced_lookahead(),
+                            false,
+                            false,
+                            control,
+                        ) {
+                            Ok(product) => product,
+                            Err(error) => {
+                                workspace.recycle_graph(graph);
+                                return Err(error);
+                            }
+                        };
+                        coverage_product_words = product.processed_words;
+                        coverage_product_states = product.active_states;
+                        coverage_product_edge_checks = product.edge_checks;
+                        if admit_after_compute {
+                            if let Err(error) = workspace.piece_order_languages.insert_coverage(
+                                language_id,
+                                target.pattern_index_id,
+                                evaluator.local_coverage_words(),
+                            ) {
+                                workspace.recycle_graph(graph);
+                                return Err(error);
+                            }
+                        }
+                        product.coverage_bits
+                    }
+                };
+                if !coverage.is_empty() {
+                    witness_pattern_id = coverage
+                        .first_pattern()
+                        .map(|pattern| pattern.index() as u32);
+                    covered_patterns = Some(coverage);
+                }
+            }
+        }
+        if retain_trace && representative_path.is_empty() {
+            let pattern_id = witness_pattern_id
+                .map(|pattern| {
+                    clearra_coverage::pattern::pattern_id::PatternId::new(pattern as usize)
+                })
+                .or_else(|| {
+                    covered_patterns
+                        .as_ref()
+                        .and_then(PatternBitSet::first_pattern)
+                });
+            if let Some(pattern_id) = pattern_id {
+                let sequence = universe.sequence(pattern_id);
+                representative_path = first_pattern_path(
+                    &graph,
+                    sequence.as_ref(),
+                    problem.supply().hold_enabled(),
+                    problem.supply().projects_unplaced_lookahead(),
+                    CoverageState {
+                        node: graph.root,
+                        cursor: problem.initial_hold().cursor(),
+                        hold: problem.initial_hold().hold_piece(),
+                    },
+                );
+            }
+        }
+    }
+    coverage_span.finish(coverage_product_edge_checks as u64);
+
+    let graph_nodes = graph.nodes.len();
+    let reachability_states = graph.reachability_states;
+    workspace.recycle_graph(graph);
+    Ok(CandidateBuildResult {
+        buildable: covered_patterns.is_some() || symbolic_coverage_root.is_some(),
+        witness_pattern_id: witness_pattern_id.or_else(|| {
+            covered_patterns
+                .as_ref()
+                .and_then(PatternBitSet::first_pattern)
+                .map(|pattern| pattern.index() as u32)
+        }),
+        covered_patterns,
+        symbolic_coverage_root,
+        symbolic_covered_pattern_count,
+        build_variant_count,
+        count_complete,
+        representative_path,
+        graph_nodes,
+        coverage_product_words,
+        coverage_product_states,
+        coverage_product_edge_checks,
+        feasibility_states,
+        feasibility_rejected: false,
+        reachability_states,
+        retained_bytes: 0,
+    })
+}
+
+fn infeasible_candidate_result(feasibility_states: usize) -> CandidateBuildResult {
+    CandidateBuildResult {
+        buildable: false,
+        covered_patterns: None,
+        symbolic_coverage_root: None,
+        symbolic_covered_pattern_count: 0,
+        witness_pattern_id: None,
+        build_variant_count: 0,
+        count_complete: true,
+        representative_path: Vec::new(),
+        graph_nodes: 0,
+        coverage_product_words: 0,
+        coverage_product_states: 0,
+        coverage_product_edge_checks: 0,
+        feasibility_states,
+        feasibility_rejected: true,
+        reachability_states: 0,
+        retained_bytes: 0,
+    }
+}
+
+fn verify_first_pattern_witness(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    projection: &mut CandidateProjection,
+    workspace: &mut BuildUpWorkspace,
+    retain_trace: bool,
+    feasibility_states: usize,
+    profile_scale: u64,
+    completion: BuildCompletion,
+    control: &ExecutionControl,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    let reachability_states_before = workspace.reachability.generated_state_count();
+    let witness_span =
+        SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmWitnessSearch, profile_scale);
+    let witness = find_first_pattern_witness(
+        problem, catalog, candidate, target, projection, workspace, completion, control,
+    )?;
+    let reachability_states = workspace
+        .reachability
+        .generated_state_count()
+        .saturating_sub(reachability_states_before);
+    witness_span.finish(reachability_states as u64);
+    let Some(witness) = witness else {
+        return Ok(CandidateBuildResult {
+            buildable: false,
+            covered_patterns: None,
+            symbolic_coverage_root: None,
+            symbolic_covered_pattern_count: 0,
+            witness_pattern_id: None,
+            build_variant_count: 0,
+            count_complete: true,
+            representative_path: Vec::new(),
+            graph_nodes: 0,
+            coverage_product_words: 0,
+            coverage_product_states: 0,
+            coverage_product_edge_checks: 0,
+            feasibility_states,
+            feasibility_rejected: false,
+            reachability_states,
+            retained_bytes: 0,
+        });
+    };
+    let representative_path = if retain_trace {
+        witness
+            .path
+            .iter()
+            .map(|step| {
+                CorePathStep::new(
+                    step.edge.piece,
+                    step.edge.rotation.quarter_turns(),
+                    i32::from(step.edge.x),
+                    i32::from(step.edge.y),
+                    step.hold_kind,
+                    step.edge.cleared_lines,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(CandidateBuildResult {
+        buildable: true,
+        covered_patterns: None,
+        symbolic_coverage_root: None,
+        symbolic_covered_pattern_count: 0,
+        witness_pattern_id: Some(witness.global_pattern_index as u32),
+        build_variant_count: 0,
+        count_complete: true,
+        representative_path,
+        graph_nodes: witness.visited_product_states,
+        coverage_product_words: 0,
+        coverage_product_states: witness.visited_product_states,
+        coverage_product_edge_checks: 0,
+        feasibility_states,
+        feasibility_rejected: false,
+        reachability_states,
+        retained_bytes: witness.retained_bytes,
+    })
+}
+
+fn find_first_pattern_witness(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    projection: &mut CandidateProjection,
+    workspace: &mut BuildUpWorkspace,
+    completion: BuildCompletion,
+    control: &ExecutionControl,
+) -> Result<Option<CandidateWitness>, WasmExactSearchError> {
+    let pattern_index =
+        target
+            .pattern_index
+            .as_deref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_witness_pattern_index_not_compiled",
+            ))?;
+    let initial_hold_code = match (
+        problem.initial_hold().hold_empty(),
+        problem.initial_hold().hold_piece(),
+    ) {
+        (true, None) => 0,
+        (false, Some(piece)) => witness_piece_code(piece),
+        _ => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_initial_hold_state_invalid",
+            ));
+        }
+    };
+    let transition_count = projection
+        .state_count()
+        .checked_mul(projection.operation_count())
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_witness_transition_storage_overflow",
+        ))?;
+    let mut transition_cache = vec![CachedWitnessTransition::Unknown; transition_count];
+    let mut failed = ExactHashSet::default();
+    let mut path = Vec::with_capacity(projection.operation_count());
+    let mut visited_product_states = 0usize;
+
+    for word_index in 0..pattern_index.word_count() {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let active_patterns = pattern_index.active_word(word_index);
+        if active_patterns == 0 {
+            continue;
+        }
+        failed.clear();
+        path.clear();
+        let root = WitnessProductState {
+            subset: 0,
+            extra_draw: 0,
+            hold_code: initial_hold_code,
+            active_patterns,
+        };
+        if let Some(accepted_bits) = visit_witness_state(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            pattern_index,
+            word_index,
+            root,
+            workspace,
+            &mut transition_cache,
+            &mut failed,
+            &mut path,
+            &mut visited_product_states,
+            completion,
+            control,
+        )? {
+            let local_pattern_index =
+                word_index * u64::BITS as usize + accepted_bits.trailing_zeros() as usize;
+            let global_pattern_index = pattern_index
+                .global_pattern_index(local_pattern_index)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_witness_pattern_index_missing",
+                ))?;
+            return Ok(Some(CandidateWitness {
+                global_pattern_index,
+                path,
+                visited_product_states,
+                retained_bytes: transition_cache.capacity()
+                    * core::mem::size_of::<CachedWitnessTransition>()
+                    + failed.capacity() * core::mem::size_of::<WitnessProductState>(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_witness_state(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    projection: &mut CandidateProjection,
+    pattern_index: &PatternPiecePositionIndex,
+    word_index: usize,
+    state: WitnessProductState,
+    workspace: &mut BuildUpWorkspace,
+    transition_cache: &mut [CachedWitnessTransition],
+    failed: &mut ExactHashSet<WitnessProductState>,
+    path: &mut Vec<WitnessStep>,
+    visited_product_states: &mut usize,
+    completion: BuildCompletion,
+    control: &ExecutionControl,
+) -> Result<Option<u64>, WasmExactSearchError> {
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    if state.active_patterns == 0 || failed.contains(&state) {
+        return Ok(None);
+    }
+    *visited_product_states = visited_product_states.saturating_add(1);
+    let subset = usize::from(state.subset);
+    if subset == projection.all_placed {
+        return Ok(completion
+            .accepts(projection, subset)
+            .then_some(state.active_patterns));
+    }
+    let depth = subset.count_ones() as usize;
+    let queue_position = problem
+        .initial_hold()
+        .cursor()
+        .checked_add(depth as u16)
+        .and_then(|position| position.checked_add(u16::from(state.extra_draw)))
+        .map(usize::from)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_witness_queue_position_overflow",
+        ))?;
+    for operation_index in 0..projection.operation_count() {
+        let operation_bit = 1_usize << operation_index;
+        if subset & operation_bit != 0 {
+            continue;
+        }
+        let Some(edge) = witness_transition(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            subset,
+            operation_index,
+            workspace,
+            transition_cache,
+        ) else {
+            continue;
+        };
+        let desired_piece = witness_piece_code(edge.piece);
+        let use_current = state.active_patterns
+            & pattern_index.piece_word_with_projected_standard_bag_lookahead(
+                queue_position,
+                desired_piece,
+                word_index,
+                problem.supply().projects_unplaced_lookahead(),
+            );
+        if use_current != 0 {
+            path.push(WitnessStep {
+                edge,
+                hold_kind: "use-current",
+            });
+            let next = WitnessProductState {
+                subset: edge.to as u16,
+                active_patterns: use_current,
+                ..state
+            };
+            if let Some(accepted) = visit_witness_state(
+                problem,
+                catalog,
+                candidate,
+                projection,
+                pattern_index,
+                word_index,
+                next,
+                workspace,
+                transition_cache,
+                failed,
+                path,
+                visited_product_states,
+                completion,
+                control,
+            )? {
+                return Ok(Some(accepted));
+            }
+            path.pop();
+        }
+        if !problem.supply().hold_enabled() {
+            continue;
+        }
+        if state.hold_code != 0 && state.hold_code == desired_piece {
+            for current_piece in 1..=7 {
+                let swap_bits = state.active_patterns
+                    & pattern_index.piece_word_with_projected_standard_bag_lookahead(
+                        queue_position,
+                        current_piece,
+                        word_index,
+                        problem.supply().projects_unplaced_lookahead(),
+                    );
+                if swap_bits == 0 {
+                    continue;
+                }
+                path.push(WitnessStep {
+                    edge,
+                    hold_kind: "swap-held",
+                });
+                let next = WitnessProductState {
+                    subset: edge.to as u16,
+                    hold_code: current_piece,
+                    active_patterns: swap_bits,
+                    ..state
+                };
+                if let Some(accepted) = visit_witness_state(
+                    problem,
+                    catalog,
+                    candidate,
+                    projection,
+                    pattern_index,
+                    word_index,
+                    next,
+                    workspace,
+                    transition_cache,
+                    failed,
+                    path,
+                    visited_product_states,
+                    completion,
+                    control,
+                )? {
+                    return Ok(Some(accepted));
+                }
+                path.pop();
+            }
+        } else if state.hold_code == 0 && state.extra_draw == 0 {
+            let desired_next = pattern_index.piece_word_with_projected_standard_bag_lookahead(
+                queue_position.saturating_add(1),
+                desired_piece,
+                word_index,
+                problem.supply().projects_unplaced_lookahead(),
+            );
+            for current_piece in 1..=7 {
+                let store_bits = state.active_patterns
+                    & desired_next
+                    & pattern_index.piece_word_with_projected_standard_bag_lookahead(
+                        queue_position,
+                        current_piece,
+                        word_index,
+                        problem.supply().projects_unplaced_lookahead(),
+                    );
+                if store_bits == 0 {
+                    continue;
+                }
+                path.push(WitnessStep {
+                    edge,
+                    hold_kind: "store-current-use-next",
+                });
+                let next = WitnessProductState {
+                    subset: edge.to as u16,
+                    extra_draw: 1,
+                    hold_code: current_piece,
+                    active_patterns: store_bits,
+                };
+                if let Some(accepted) = visit_witness_state(
+                    problem,
+                    catalog,
+                    candidate,
+                    projection,
+                    pattern_index,
+                    word_index,
+                    next,
+                    workspace,
+                    transition_cache,
+                    failed,
+                    path,
+                    visited_product_states,
+                    completion,
+                    control,
+                )? {
+                    return Ok(Some(accepted));
+                }
+                path.pop();
+            }
+        }
+    }
+    failed.insert(state);
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn witness_transition(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    projection: &mut CandidateProjection,
+    subset: usize,
+    operation_index: usize,
+    workspace: &mut BuildUpWorkspace,
+    transition_cache: &mut [CachedWitnessTransition],
+) -> Option<BuildEdge> {
+    let cache_index = subset * projection.operation_count() + operation_index;
+    match transition_cache[cache_index] {
+        CachedWitnessTransition::Impossible => return None,
+        CachedWitnessTransition::Legal(edge) => return Some(edge),
+        CachedWitnessTransition::Unknown => {}
+    }
+    let row_id = candidate.row_ids()[operation_index];
+    let row = catalog.skeleton(row_id);
+    let (board, deleted_rows) = projection.state(subset);
+    for realization in catalog.instantiations(row_id, deleted_rows) {
+        let lock_mask = realization.lock_mask;
+        let lock_y = realization.lock_y;
+        if board & lock_mask != 0 {
+            continue;
+        }
+        if !workspace.reachability.lock_reachable_instantiated(
+            catalog,
+            board,
+            row.piece,
+            realization,
+        ) {
+            continue;
+        }
+        let (next_board, cleared_current, cleared_lines) =
+            place_and_clear(catalog.width(), catalog.height(), board | lock_mask);
+        let next_deleted_rows =
+            merge_deleted_rows(catalog.height(), deleted_rows, cleared_current)?;
+        let child = subset | (1_usize << operation_index);
+        let (expected_board, expected_deleted_rows) = projection.state(child);
+        if next_deleted_rows != expected_deleted_rows || next_board != expected_board {
+            continue;
+        }
+        let edge = BuildEdge {
+            to: child as u32,
+            operation_index: operation_index as u8,
+            piece: row.piece,
+            rotation: realization.rotation,
+            x: realization.x,
+            y: lock_y,
+            cleared_lines,
+        };
+        transition_cache[cache_index] = CachedWitnessTransition::Legal(edge);
+        return Some(edge);
+    }
+    transition_cache[cache_index] = CachedWitnessTransition::Impossible;
+    None
+}
+
+const fn witness_piece_code(piece: PieceKind) -> u8 {
+    match piece {
+        PieceKind::I => 1,
+        PieceKind::O => 2,
+        PieceKind::T => 3,
+        PieceKind::S => 4,
+        PieceKind::Z => 5,
+        PieceKind::J => 6,
+        PieceKind::L => 7,
+    }
+}
+
+impl BuildOrderGraph {
+    pub(super) fn from_topological_parts(
+        specs: Vec<BuildOrderNodeSpec>,
+        edges: Vec<BuildEdge>,
+        root: u32,
+        reachability_states: usize,
+    ) -> Result<Self, WasmExactSearchError> {
+        if specs.is_empty() || root as usize >= specs.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_order_graph_root_invalid",
+            ));
+        }
+
+        let mut nodes = Vec::new();
+        nodes.try_reserve_exact(specs.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_build_order_node_storage_unavailable")
+        })?;
+        let mut piece_edges = Vec::new();
+        piece_edges.try_reserve(edges.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_build_order_edge_storage_unavailable")
+        })?;
+
+        for (node_index, spec) in specs.iter().copied().enumerate() {
+            let start = spec.edge_start as usize;
+            let end = start.checked_add(spec.edge_count as usize).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_build_order_edge_range_overflow"),
+            )?;
+            let source_edges =
+                edges
+                    .get(start..end)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_edge_range_invalid",
+                    ))?;
+            if spec.accepting && !source_edges.is_empty() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_order_accepting_node_has_edges",
+                ));
+            }
+            for edge in source_edges {
+                let Some(target) = specs.get(edge.to as usize) else {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_edge_target_invalid",
+                    ));
+                };
+                if edge.to as usize <= node_index || target.depth != spec.depth.saturating_add(1) {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_graph_not_topological",
+                    ));
+                }
+            }
+
+            let piece_edge_start = piece_edges.len() as u32;
+            let mut previous = None;
+            for edge in source_edges {
+                let key = (edge.to, edge.piece);
+                if previous == Some(key) {
+                    continue;
+                }
+                piece_edges.push(*edge);
+                previous = Some(key);
+            }
+            nodes.push(BuildNode {
+                edge_start: spec.edge_start,
+                edge_count: spec.edge_count,
+                piece_edge_start,
+                piece_edge_count: piece_edges.len() as u32 - piece_edge_start,
+                depth: spec.depth,
+                live: spec.accepting,
+                accepting: spec.accepting,
+            });
+        }
+
+        for index in (0..nodes.len()).rev() {
+            if nodes[index].live {
+                continue;
+            }
+            let start = nodes[index].edge_start as usize;
+            let end = start + nodes[index].edge_count as usize;
+            nodes[index].live = edges[start..end]
+                .iter()
+                .any(|edge| nodes[edge.to as usize].live);
+        }
+
+        Ok(Self {
+            nodes,
+            edges,
+            piece_edges,
+            root,
+            reachability_states,
+        })
+    }
+
+    pub(super) const fn edge(
+        to: u32,
+        operation_index: u8,
+        piece: PieceKind,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+        cleared_lines: u8,
+    ) -> BuildEdge {
+        BuildEdge {
+            to,
+            operation_index,
+            piece,
+            rotation,
+            x,
+            y,
+            cleared_lines,
+        }
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.nodes.capacity() * core::mem::size_of::<BuildNode>()
+            + (self.edges.capacity() + self.piece_edges.capacity())
+                * core::mem::size_of::<BuildEdge>()
+    }
+
+    pub(super) fn is_live(&self) -> bool {
+        self.nodes[self.root as usize].live
+    }
+
+    fn build(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        workspace: &mut BuildUpWorkspace,
+        piece_language_projection_only: bool,
+        completion: BuildCompletion,
+    ) -> Result<Self, WasmExactSearchError> {
+        if candidate.row_ids().len() > 15 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_buildup_operation_count_exceeds_bitset",
+            ));
+        }
+        // In target-frame semantics, the placed-operation subset uniquely
+        // determines both deleted logical rows and the compacted physical board.
+        // This is an exact quotient, not a hash: every contributor of a logical
+        // row must have been placed before that row can clear.
+        let operation_count = projection.operation_count();
+        let state_count = projection.state_count();
+        let all_placed = projection.all_placed;
+        let graph_generation = workspace.begin_graph_generation(state_count)?;
+        workspace.graph_reachable_generations[0] = graph_generation;
+        workspace.graph_subset_node_ids[0] = 0;
+        let mut nodes = core::mem::take(&mut workspace.graph_nodes);
+        nodes.clear();
+        nodes.push(BuildNode {
+            edge_start: 0,
+            edge_count: 0,
+            piece_edge_start: 0,
+            piece_edge_count: 0,
+            depth: 0,
+            live: false,
+            accepting: false,
+        });
+        let mut subset_queue = core::mem::take(&mut workspace.graph_subset_queue);
+        subset_queue.clear();
+        subset_queue.push(0);
+        let mut edges = core::mem::take(&mut workspace.graph_edges);
+        edges.clear();
+        let mut piece_edges = core::mem::take(&mut workspace.graph_piece_edges);
+        piece_edges.clear();
+        let mut edge_scratch = core::mem::take(&mut workspace.graph_edge_scratch);
+        edge_scratch.clear();
+        let reachability_states_before = workspace.reachability.generated_state_count();
+        let mut subset_cursor = 0usize;
+        while subset_cursor < subset_queue.len() {
+            let subset = usize::from(subset_queue[subset_cursor]);
+            subset_cursor += 1;
+            let node_index = workspace.graph_subset_node_ids[subset] as usize;
+            nodes[node_index].edge_start = edges.len() as u32;
+            nodes[node_index].piece_edge_start = piece_edges.len() as u32;
+            if subset == all_placed {
+                nodes[node_index].accepting = completion.accepts(projection, subset);
+                nodes[node_index].live = nodes[node_index].accepting;
+                continue;
+            }
+            edge_scratch.clear();
+            let (board, deleted_rows) = projection.state(subset);
+            for operation_index in 0..operation_count {
+                let operation_bit = 1_usize << operation_index;
+                if subset & operation_bit != 0 {
+                    continue;
+                }
+                let child = subset | operation_bit;
+                let row_id = candidate.row_ids()[operation_index];
+                let row = catalog.skeleton(row_id);
+                if piece_language_projection_only {
+                    let scratch_start = edge_scratch.len();
+                    let mut harddrop_edge = None;
+                    for realization in catalog.instantiations(row_id, deleted_rows) {
+                        let Some(edge) = geometric_build_edge(
+                            catalog,
+                            projection,
+                            child,
+                            operation_index,
+                            row.piece,
+                            board,
+                            deleted_rows,
+                            realization,
+                        ) else {
+                            continue;
+                        };
+                        edge_scratch.push(edge);
+                        if workspace.reachability.lock_harddrop_reachable_instantiated(
+                            catalog.width(),
+                            board,
+                            realization,
+                        ) {
+                            harddrop_edge = Some(edge);
+                            break;
+                        }
+                    }
+                    let selected = if let Some(edge) = harddrop_edge {
+                        Some(edge)
+                    } else {
+                        workspace.reachability.prepare_template(catalog, row.piece);
+                        let mut reachable = None;
+                        for edge in edge_scratch[scratch_start..].iter().copied() {
+                            if workspace.reachability.lock_reachable_after_harddrop_miss(
+                                catalog,
+                                board,
+                                row.piece,
+                                edge.rotation,
+                                edge.x,
+                                edge.y,
+                            ) {
+                                reachable = Some(edge);
+                                break;
+                            }
+                        }
+                        reachable
+                    };
+                    edge_scratch.truncate(scratch_start);
+                    if let Some(edge) = selected {
+                        edge_scratch.push(edge);
+                    }
+                } else {
+                    for realization in catalog.instantiations(row_id, deleted_rows) {
+                        let Some(edge) = geometric_build_edge(
+                            catalog,
+                            projection,
+                            child,
+                            operation_index,
+                            row.piece,
+                            board,
+                            deleted_rows,
+                            realization,
+                        ) else {
+                            continue;
+                        };
+                        if workspace.reachability.lock_reachable_instantiated(
+                            catalog,
+                            board,
+                            row.piece,
+                            realization,
+                        ) {
+                            edge_scratch.push(edge);
+                        }
+                    }
+                }
+            }
+            edge_scratch.sort_unstable_by_key(|edge| {
+                (
+                    edge.to,
+                    edge.operation_index,
+                    edge.piece,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                    edge.cleared_lines,
+                )
+            });
+            edge_scratch.dedup();
+            for edge in &mut edge_scratch {
+                let child_subset = edge.to as usize;
+                if workspace.graph_reachable_generations[child_subset] != graph_generation {
+                    workspace.graph_reachable_generations[child_subset] = graph_generation;
+                    let child_node = u32::try_from(nodes.len()).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem("wasm_build_order_node_index_overflow")
+                    })?;
+                    workspace.graph_subset_node_ids[child_subset] = child_node;
+                    nodes.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_build_order_node_storage_unavailable",
+                        )
+                    })?;
+                    subset_queue.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_build_order_queue_storage_unavailable",
+                        )
+                    })?;
+                    nodes.push(BuildNode {
+                        edge_start: 0,
+                        edge_count: 0,
+                        piece_edge_start: 0,
+                        piece_edge_count: 0,
+                        depth: child_subset.count_ones() as u8,
+                        live: false,
+                        accepting: false,
+                    });
+                    subset_queue.push(child_subset as u16);
+                }
+                edge.to = workspace.graph_subset_node_ids[child_subset];
+            }
+            let mut previous_piece_transition = None;
+            for edge in &edge_scratch {
+                let key = (edge.to, edge.piece);
+                if previous_piece_transition != Some(key) {
+                    piece_edges.push(*edge);
+                    previous_piece_transition = Some(key);
+                }
+            }
+            edges.extend_from_slice(&edge_scratch);
+            nodes[node_index].edge_count = edge_scratch.len() as u32;
+            nodes[node_index].piece_edge_count =
+                piece_edges.len() as u32 - nodes[node_index].piece_edge_start;
+        }
+        for index in (0..nodes.len()).rev() {
+            if nodes[index].live {
+                continue;
+            }
+            let start = nodes[index].edge_start as usize;
+            let end = start + nodes[index].edge_count as usize;
+            nodes[index].live = edges[start..end]
+                .iter()
+                .any(|edge| nodes[edge.to as usize].live);
+        }
+        edge_scratch.clear();
+        workspace.graph_edge_scratch = edge_scratch;
+        subset_queue.clear();
+        workspace.graph_subset_queue = subset_queue;
+        Ok(Self {
+            nodes,
+            edges,
+            piece_edges,
+            root: 0,
+            reachability_states: workspace
+                .reachability
+                .generated_state_count()
+                .saturating_sub(reachability_states_before),
+        })
+    }
+
+    pub fn max_depth(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|node| usize::from(node.depth))
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn edges(&self, node_index: usize) -> &[BuildEdge] {
+        let node = &self.nodes[node_index];
+        let start = node.edge_start as usize;
+        &self.edges[start..start + node.edge_count as usize]
+    }
+
+    pub fn piece_edges(&self, node_index: usize) -> &[BuildEdge] {
+        let node = &self.nodes[node_index];
+        let start = node.piece_edge_start as usize;
+        &self.piece_edges[start..start + node.piece_edge_count as usize]
+    }
+}
+
+pub(super) fn exact_scoring_execution_graph(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    identity: StandardBoard64TilingIdentity,
+    candidate_id: u64,
+    workspace: &mut BuildUpWorkspace,
+) -> Result<Option<ExactScoringExecutionGraph>, WasmExactSearchError> {
+    exact_scoring_execution_graph_for_completion(
+        problem,
+        catalog,
+        identity,
+        candidate_id,
+        workspace,
+        BuildCompletion::ClearToEmpty,
+    )
+}
+
+pub(super) fn exact_scoring_execution_graph_for_completion(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    identity: StandardBoard64TilingIdentity,
+    candidate_id: u64,
+    workspace: &mut BuildUpWorkspace,
+    completion: BuildCompletion,
+) -> Result<Option<ExactScoringExecutionGraph>, WasmExactSearchError> {
+    let mut row_ids = Vec::with_capacity(identity.placement_count());
+    for index in 0..identity.placement_count() {
+        let placement = identity
+            .placement(index)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_scoring_identity_placement_missing",
+            ))?;
+        let row_id = catalog
+            .skeleton_id(placement.piece(), placement.cells_mask())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_scoring_identity_not_in_geometry_catalog",
+            ))?;
+        row_ids.push(row_id);
+    }
+    let candidate = GeometryCandidate::from_rows(catalog, 0, &row_ids).ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_scoring_candidate_reconstruction_failed"),
+    )?;
+    if candidate.identity != identity {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_candidate_identity_mismatch",
+        ));
+    }
+
+    workspace.reachability.configure(candidate.row_ids().len());
+    workspace
+        .reachability
+        .configure_kick_profile(problem.kick_profile().profile_id());
+    let mut projection = CandidateProjection::compile(catalog, &candidate, workspace, completion)?;
+    let graph = match BuildOrderGraph::build(
+        problem,
+        catalog,
+        &candidate,
+        &mut projection,
+        workspace,
+        false,
+        completion,
+    ) {
+        Ok(graph) => graph,
+        Err(error) => {
+            workspace.recycle_projection(projection);
+            return Err(error);
+        }
+    };
+    if !graph.nodes[graph.root as usize].live {
+        workspace.recycle_graph(graph);
+        workspace.recycle_projection(projection);
+        return Ok(None);
+    }
+
+    let mut subsets = vec![usize::MAX; graph.nodes.len()];
+    subsets[graph.root as usize] = 0;
+    for node_index in 0..graph.nodes.len() {
+        let subset = subsets[node_index];
+        if subset == usize::MAX {
+            continue;
+        }
+        for edge in graph.edges(node_index) {
+            let child_subset = subset | (1_usize << edge.operation_index);
+            let child = &mut subsets[edge.to as usize];
+            if *child == usize::MAX {
+                *child = child_subset;
+            } else if *child != child_subset {
+                workspace.recycle_graph(graph);
+                workspace.recycle_projection(projection);
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_scoring_build_order_subset_mismatch",
+                ));
+            }
+        }
+    }
+
+    let mut scoring_nodes = Vec::with_capacity(graph.nodes.len());
+    let mut scoring_edges = Vec::new();
+    for (node_index, node) in graph.nodes.iter().enumerate() {
+        let edge_start = scoring_edges.len() as u32;
+        if node.live {
+            let subset = subsets[node_index];
+            let board = projection.state(subset).0;
+            for edge in graph
+                .edges(node_index)
+                .iter()
+                .filter(|edge| graph.nodes[edge.to as usize].live)
+            {
+                let lock_evidence = workspace.reachability.scoring_lock_evidence(
+                    catalog,
+                    board,
+                    edge.piece,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                );
+                let (blocked_t_corners, blocked_t_front_corners) = if edge.piece == PieceKind::T {
+                    t_corner_evidence(
+                        catalog.width(),
+                        catalog.height(),
+                        board,
+                        edge.rotation,
+                        edge.x,
+                        edge.y,
+                    )
+                } else {
+                    (0, 0)
+                };
+                let child_subset = subset | (1_usize << edge.operation_index);
+                let perfect_clear = edge.cleared_lines > 0 && projection.state(child_subset).0 == 0;
+                scoring_edges.push(
+                    ScoringExecutionEdge::new(
+                        edge.to,
+                        edge.operation_index,
+                        edge.piece,
+                        edge.rotation,
+                        edge.x,
+                        edge.y,
+                        edge.cleared_lines,
+                        blocked_t_corners,
+                        blocked_t_front_corners,
+                        lock_evidence,
+                    )
+                    .with_perfect_clear(perfect_clear),
+                );
+            }
+        }
+        scoring_nodes.push(ScoringExecutionNode::new(
+            edge_start,
+            scoring_edges.len() as u32 - edge_start,
+            node.accepting(),
+        ));
+    }
+    let result = ExactScoringExecutionGraph::new(
+        candidate_id,
+        identity,
+        graph.root,
+        scoring_nodes,
+        scoring_edges,
+    );
+    workspace.recycle_graph(graph);
+    workspace.recycle_projection(projection);
+    Ok(Some(result))
+}
+
+fn t_corner_evidence(
+    width: u8,
+    height: u8,
+    board_before: u64,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+) -> (u8, u8) {
+    let x = i32::from(x);
+    let y = i32::from(y);
+    let (center_x, center_y) = match rotation.quarter_turns() {
+        0 => (x + 1, y),
+        1 => (x, y + 1),
+        2 | 3 => (x + 1, y + 1),
+        _ => return (0, 0),
+    };
+    let corners = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
+    let front = match rotation.quarter_turns() {
+        0 => [(-1, 1), (1, 1)],
+        1 => [(1, -1), (1, 1)],
+        2 => [(-1, -1), (1, -1)],
+        3 => [(-1, -1), (-1, 1)],
+        _ => return (0, 0),
+    };
+    let blocked = |(dx, dy): (i32, i32)| {
+        let cell_x = center_x + dx;
+        let cell_y = center_y + dy;
+        if cell_x < 0 || cell_y < 0 || cell_x >= i32::from(width) {
+            return true;
+        }
+        if cell_y >= i32::from(height) {
+            return false;
+        }
+        let index = cell_y as u64 * u64::from(width) + cell_x as u64;
+        board_before & (1_u64 << index) != 0
+    };
+    (
+        corners
+            .into_iter()
+            .filter(|corner| blocked(*corner))
+            .count() as u8,
+        front.into_iter().filter(|corner| blocked(*corner)).count() as u8,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn geometric_build_edge(
+    catalog: &GeometryCatalog,
+    projection: &mut CandidateProjection,
+    child: usize,
+    operation_index: usize,
+    piece: PieceKind,
+    board: u64,
+    deleted_rows: u16,
+    realization: super::catalog::InstantiatedRealization,
+) -> Option<BuildEdge> {
+    let lock_mask = realization.lock_mask;
+    if board & lock_mask != 0 {
+        return None;
+    }
+    let (next_board, cleared_current, cleared_lines) =
+        place_and_clear(catalog.width(), catalog.height(), board | lock_mask);
+    let next_deleted_rows = merge_deleted_rows(catalog.height(), deleted_rows, cleared_current)?;
+    let (expected_board, expected_deleted_rows) = projection.state(child);
+    if next_deleted_rows != expected_deleted_rows || next_board != expected_board {
+        return None;
+    }
+    Some(BuildEdge {
+        to: child as u32,
+        operation_index: operation_index as u8,
+        piece,
+        rotation: realization.rotation,
+        x: realization.x,
+        y: realization.lock_y,
+        cleared_lines,
+    })
+}
+
+fn first_pattern_path(
+    graph: &BuildOrderGraph,
+    sequence: &[PieceKind],
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    initial: CoverageState,
+) -> Vec<CorePathStep> {
+    fn visit(
+        graph: &BuildOrderGraph,
+        sequence: &[PieceKind],
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        state: CoverageState,
+        seen: &mut ExactHashSet<CoverageState>,
+        path: &mut Vec<CorePathStep>,
+    ) -> bool {
+        if !seen.insert(state) {
+            return false;
+        }
+        let node = &graph.nodes[state.node as usize];
+        if node.accepting() {
+            return !projects_unplaced_lookahead
+                || (state.cursor as usize == sequence.len() && state.hold.is_none())
+                || (state.cursor as usize == sequence.len().saturating_add(1)
+                    && state.hold.is_some());
+        }
+        for edge in graph
+            .edges(state.node as usize)
+            .iter()
+            .filter(|edge| graph.nodes[edge.to as usize].live)
+        {
+            if projects_unplaced_lookahead
+                && hold_enabled
+                && state.cursor as usize == sequence.len()
+                && state.hold == Some(edge.piece)
+                && graph.nodes[edge.to as usize].accepting()
+                && first_standard_bag_lookahead(sequence).is_none()
+            {
+                path.push(CorePathStep::new(
+                    edge.piece,
+                    edge.rotation.quarter_turns(),
+                    i32::from(edge.x),
+                    i32::from(edge.y),
+                    "release-held-at-terminal",
+                    edge.cleared_lines,
+                ));
+                return true;
+            }
+            for (hold_kind, next) in hold_successors(
+                sequence,
+                hold_enabled,
+                projects_unplaced_lookahead,
+                state,
+                edge.piece,
+            ) {
+                path.push(CorePathStep::new(
+                    edge.piece,
+                    edge.rotation.quarter_turns(),
+                    i32::from(edge.x),
+                    i32::from(edge.y),
+                    hold_kind,
+                    edge.cleared_lines,
+                ));
+                if visit(
+                    graph,
+                    sequence,
+                    hold_enabled,
+                    projects_unplaced_lookahead,
+                    CoverageState {
+                        node: edge.to,
+                        ..next
+                    },
+                    seen,
+                    path,
+                ) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        false
+    }
+
+    let mut path = Vec::new();
+    let mut seen = ExactHashSet::default();
+    let _ = visit(
+        graph,
+        sequence,
+        hold_enabled,
+        projects_unplaced_lookahead,
+        initial,
+        &mut seen,
+        &mut path,
+    );
+    path
+}
+
+pub(super) fn representative_pattern_path(
+    problem: &SearchProblem,
+    graph: &BuildOrderGraph,
+    sequence: &[PieceKind],
+) -> Vec<CorePathStep> {
+    first_pattern_path(
+        graph,
+        sequence,
+        problem.supply().hold_enabled(),
+        problem.supply().projects_unplaced_lookahead(),
+        CoverageState {
+            node: graph.root,
+            cursor: problem.initial_hold().cursor(),
+            hold: problem.initial_hold().hold_piece(),
+        },
+    )
+}
+
+fn hold_successors(
+    sequence: &[PieceKind],
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    state: CoverageState,
+    required_piece: PieceKind,
+) -> Vec<(&'static str, CoverageState)> {
+    let cursor = state.cursor as usize;
+    let Some(current) = sequence.get(cursor).copied() else {
+        if projects_unplaced_lookahead && hold_enabled && cursor == sequence.len() {
+            let Some(lookahead) = first_standard_bag_lookahead(sequence) else {
+                return Vec::new();
+            };
+            let mut successors = Vec::with_capacity(2);
+            if lookahead == required_piece {
+                successors.push((
+                    "use-unplaced-lookahead",
+                    CoverageState {
+                        cursor: state.cursor.saturating_add(1),
+                        ..state
+                    },
+                ));
+            }
+            if state.hold == Some(required_piece) {
+                successors.push((
+                    "swap-held-with-unplaced-lookahead",
+                    CoverageState {
+                        cursor: state.cursor.saturating_add(1),
+                        hold: Some(lookahead),
+                        ..state
+                    },
+                ));
+            }
+            return successors;
+        }
+        return Vec::new();
+    };
+    let mut successors = Vec::with_capacity(3);
+    if current == required_piece {
+        successors.push((
+            "use-current",
+            CoverageState {
+                cursor: state.cursor.saturating_add(1),
+                ..state
+            },
+        ));
+    }
+    if !hold_enabled {
+        return successors;
+    }
+    if state.hold == Some(required_piece) {
+        successors.push((
+            "swap-held",
+            CoverageState {
+                cursor: state.cursor.saturating_add(1),
+                hold: Some(current),
+                ..state
+            },
+        ));
+    }
+    if state.hold.is_none() && sequence.get(cursor + 1).copied() == Some(required_piece) {
+        successors.push((
+            "store-current-use-next",
+            CoverageState {
+                cursor: state.cursor.saturating_add(2),
+                hold: Some(current),
+                ..state
+            },
+        ));
+    }
+    if state.hold.is_none()
+        && projects_unplaced_lookahead
+        && cursor + 1 == sequence.len()
+        && first_standard_bag_lookahead(sequence) == Some(required_piece)
+    {
+        successors.push((
+            "store-current-use-unplaced-lookahead",
+            CoverageState {
+                cursor: state.cursor.saturating_add(2),
+                hold: Some(current),
+                ..state
+            },
+        ));
+    }
+    successors
+}
+
+fn first_standard_bag_lookahead(sequence: &[PieceKind]) -> Option<PieceKind> {
+    let used_in_current_bag = sequence.len() % PieceKind::STANDARD_TETROMINOES.len();
+    if used_in_current_bag != PieceKind::STANDARD_TETROMINOES.len() - 1 {
+        return None;
+    }
+    let current_bag_start = sequence.len().saturating_sub(used_in_current_bag);
+    let mut missing = PieceKind::STANDARD_TETROMINOES.into_iter().filter(|piece| {
+        !sequence[current_bag_start..]
+            .iter()
+            .any(|used| used == piece)
+    });
+    let piece = missing.next()?;
+    missing.next().is_none().then_some(piece)
+}
+
+fn target_row_for_current_row(height: u8, deleted_rows: u16, current_row: u8) -> Option<u8> {
+    let mut visible_row = 0_u8;
+    for target_row in 0..height {
+        if deleted_rows & (1_u16 << target_row) != 0 {
+            continue;
+        }
+        if visible_row == current_row {
+            return Some(target_row);
+        }
+        visible_row += 1;
+    }
+    None
+}
+
+pub(super) fn merge_deleted_rows(height: u8, previous: u16, current: u16) -> Option<u16> {
+    let mut original = 0_u16;
+    for current_row in 0..height {
+        if current & (1_u16 << current_row) == 0 {
+            continue;
+        }
+        original |= 1_u16 << target_row_for_current_row(height, previous, current_row)?;
+    }
+    Some(previous | original)
+}
+
+pub(super) fn place_and_clear(width: u8, height: u8, board: u64) -> (u64, u16, u8) {
+    let row_bits = full_row_mask(width);
+    let mut cleared = 0_u16;
+    let mut compacted = 0_u64;
+    let mut output_row = 0_u8;
+    for input_row in 0..height {
+        let row = (board >> (input_row as usize * width as usize)) & row_bits;
+        if row == row_bits {
+            cleared |= 1_u16 << input_row;
+        } else {
+            compacted |= row << (output_row as usize * width as usize);
+            output_row += 1;
+        }
+    }
+    (compacted, cleared, cleared.count_ones() as u8)
+}
+
+pub(super) fn placement_is_grounded(width: u8, board: u64, placement: u64) -> bool {
+    let floor = full_row_mask(width);
+    placement & floor != 0 || ((placement >> width) & board) != 0
+}
+
+const fn full_row_mask(width: u8) -> u64 {
+    if width == u64::BITS as u8 {
+        u64::MAX
+    } else {
+        (1_u64 << width) - 1
+    }
+}
+
+fn compact_target_board(width: u8, height: u8, board: u64, deleted_rows: u16) -> u64 {
+    let row_bits = full_row_mask(width);
+    let mut compacted = 0_u64;
+    let mut output_row = 0_u8;
+    for target_row in 0..height {
+        if deleted_rows & (1_u16 << target_row) != 0 {
+            continue;
+        }
+        let row = (board >> (target_row as usize * width as usize)) & row_bits;
+        compacted |= row << (output_row as usize * width as usize);
+        output_row += 1;
+    }
+    compacted
+}
+
+fn occupied_rows(width: u8, mut cells: u64) -> u16 {
+    let mut rows = 0_u16;
+    while cells != 0 {
+        let cell = cells.trailing_zeros() as usize;
+        cells &= cells - 1;
+        rows |= 1_u16 << (cell / width as usize);
+    }
+    rows
+}
+// SRP rationale: this module has one behavior-level change reason: exact WASM BuildUp state expansion and trace preservation.

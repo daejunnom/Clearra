@@ -1,0 +1,23 @@
+[package]
+name = "clearra-output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["bitmap-render"]
+bitmap-render = ["dep:clearra-render"]
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-fumen = { path = "../clearra-fumen" }
+clearra-render = { path = "../clearra-render", optional = true }
+clearra-replay = { path = "../clearra-replay" }
+
+[dev-dependencies]
+clearra-geometry = { path = "../clearra-geometry" }
+
+[lints]
+workspace = true

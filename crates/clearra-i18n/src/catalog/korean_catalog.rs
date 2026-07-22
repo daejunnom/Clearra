@@ -1,0 +1,26 @@
+pub fn get(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "ui.language.selector.label" => "언어",
+        "ui.backend.auto.label" => "자동",
+        "ui.backend.auto.description" => "현재 쿼리에 가장 안전한 실행 백엔드를 선택합니다.",
+        "ui.backend.cpu.label" => "CPU",
+        "ui.backend.cpu.description" => "안정적인 CPU 실행 경로를 사용하는 사용자용 백엔드입니다.",
+        "ui.backend.gpu.label" => "GPU",
+        "ui.backend.gpu.description" => "frontier count 작업용 GPU 백엔드입니다.",
+        "ui.backend.hybrid.label" => "하이브리드",
+        "ui.backend.hybrid.description" => "GPU 후보 생성과 CPU BuildUp을 함께 쓰는 백엔드입니다.",
+        "ui.setup.result.total_solution_count" => "전체 해법 수",
+        "ui.setup.result.retained_trace_count" => "보존된 트레이스",
+        "ui.setup.result.count_complete" => "카운트 완료",
+        "ui.setup.result.continue_available" => "이어 탐색 가능",
+        "ui.setup.result.backend_fallback_reason" => "fallback 이유",
+        "ui.setup.result.coverage_probability" => "커버리지",
+        "ui.diagnostic.backend_fallback_used" => "백엔드 fallback 사용됨",
+        "ui.problem.opening_pc.label" => "오프닝 PC",
+        "ui.problem.scenario_pc.label" => "시나리오 PC",
+        "ui.problem.setup.label" => "셋업",
+        "ui.problem.build.label" => "빌드",
+        "cli.help.top_level" => "Clearra 명령줄",
+        _ => return None,
+    })
+}

@@ -1,0 +1,23 @@
+[package]
+name = "clearra-web-command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-app = { path = "../clearra-app", default-features = false }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-forward-search = { path = "../clearra-forward-search" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
+clearra-supply = { path = "../clearra-supply" }
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

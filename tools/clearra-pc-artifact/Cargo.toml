@@ -1,0 +1,35 @@
+[package]
+name = "clearra-pc-artifact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+gpu-backend = [
+    "clearra-core-executor/webgpu-search",
+    "dep:clearra-webgpu",
+    "dep:pollster",
+]
+stage-profiling = [
+    "clearra-core-executor/search-stage-profiling",
+    "clearra-core-ffi/search-stage-profiling",
+]
+
+[dependencies]
+clearra-core-domain = { path = "../../crates/clearra-core-domain" }
+clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["native-c-core"] }
+clearra-core-ffi = { path = "../../crates/clearra-core-ffi", features = ["native-c-core"] }
+clearra-coverage = { path = "../../crates/clearra-coverage" }
+clearra-fumen = { path = "../../crates/clearra-fumen" }
+clearra-pc-graph = { path = "../../crates/clearra-pc-graph" }
+clearra-problem = { path = "../../crates/clearra-problem" }
+clearra-rules = { path = "../../crates/clearra-rules" }
+clearra-webgpu = { path = "../../crates/clearra-webgpu", optional = true }
+pollster = { version = "0.4", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

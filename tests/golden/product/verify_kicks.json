@@ -1,0 +1,10 @@
+{
+  "fixture": "verify_kicks",
+  "required_markers": [
+    "kind=verify-kicks",
+    "status=verified",
+    "srs_profile_id=srs",
+    "srs_plus_profile_id=srs-plus",
+    "kick_verification_failures=0"
+  ]
+}

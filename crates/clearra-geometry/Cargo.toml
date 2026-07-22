@@ -1,0 +1,13 @@
+[package]
+name = "clearra-geometry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "document-features"
+version = "0.2.12"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Build-policy-safe documentation macro shim for Clearra product builds"
+
+[lib]
+path = "src/lib.rs"

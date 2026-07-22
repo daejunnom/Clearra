@@ -1,0 +1,38 @@
+[package]
+name = "clearra-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = ["bitmap-render"]
+bitmap-render = ["clearra-output/bitmap-render"]
+native-c-core = ["clearra-core-executor/native-c-core"]
+webgpu-search = ["clearra-core-executor/webgpu-search"]
+wasm-stage-profiling = [
+    "clearra-core-executor/wasm-stage-profiling",
+    "clearra-postprocess/stage-profiling",
+]
+
+[dependencies]
+clearra-build-coverage = { path = "../clearra-build-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-forward-search = { path = "../clearra-forward-search" }
+clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
+clearra-i18n = { path = "../clearra-i18n" }
+clearra-output = { path = "../clearra-output", default-features = false }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-postprocess = { path = "../clearra-postprocess" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
+clearra-validation = { path = "../clearra-validation" }
+
+[dev-dependencies]
+clearra-supply = { path = "../clearra-supply" }

@@ -1,0 +1,10 @@
+{
+  "fixture": "pc_then_next_pc_available",
+  "required_markers": [
+    "next_pc_available=true",
+    "continuation_token_available=true",
+    "continuation_token_version=pc2",
+    "continuation_token=pc2:l2:",
+    "continue_hint=clearra continue pc2:"
+  ]
+}

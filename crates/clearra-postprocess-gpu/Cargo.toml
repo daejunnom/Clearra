@@ -1,0 +1,15 @@
+[package]
+name = "clearra-postprocess-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-webgpu = { path = "../clearra-webgpu" }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[lints]
+workspace = true

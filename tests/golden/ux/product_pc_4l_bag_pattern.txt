@@ -1,0 +1,4 @@
+kind: pc
+route: search-problem-core-executor
+lines: 4
+coverage_reducer: pattern-bitset-union

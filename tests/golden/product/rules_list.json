@@ -1,0 +1,12 @@
+{
+  "fixture": "rules_list",
+  "required_markers": [
+    "kind=rules",
+    "action=list",
+    "profile_count=6",
+    "profile_0_id=srs",
+    "profile_0_kick_profile=srs",
+    "profile_3_id=srs-x",
+    "profile_3_unsupported_backend_reason=srs_x_profile_requires_imported_kick_table"
+  ]
+}

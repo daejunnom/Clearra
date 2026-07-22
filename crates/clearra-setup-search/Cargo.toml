@@ -1,0 +1,26 @@
+[package]
+name = "clearra-setup-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+native-c-core = ["clearra-core-executor/native-c-core"]
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-exact-cover = { path = "../clearra-exact-cover" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-profiles = { path = "../clearra-profiles" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
+clearra-supply = { path = "../clearra-supply" }
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "clearra-pc-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-profiles = { path = "../clearra-profiles" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-supply = { path = "../clearra-supply" }
+
+[lints]
+workspace = true

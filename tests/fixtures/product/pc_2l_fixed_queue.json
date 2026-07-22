@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "pc_2l_fixed_queue",
+  "command": ["pc", "--lines", "2", "--queue", "IIOOO", "--fixed", "--no-hold"],
+  "expected": {
+    "kind": "pc",
+    "route": "search-problem-core-executor",
+    "compiled_goal": "clear-to-empty",
+    "coverage_reducer": "pattern-bitset-union"
+  }
+}

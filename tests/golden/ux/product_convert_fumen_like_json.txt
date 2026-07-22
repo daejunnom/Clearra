@@ -1,0 +1,3 @@
+kind: convert
+from: fumen-like
+page_count: 1

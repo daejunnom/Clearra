@@ -1,0 +1,20 @@
+{
+  "name": "locked_reachable_via_multiple_movements",
+  "policy": "LockedReverseGraph",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x100000",
+  "operation": {
+    "piece": "O",
+    "rotation": 0,
+    "x": 0,
+    "y": 0
+  },
+  "expected": {
+    "harddrop_reachable": false,
+    "locked_reachable": true,
+    "visited_states_greater_than": 1
+  }
+}

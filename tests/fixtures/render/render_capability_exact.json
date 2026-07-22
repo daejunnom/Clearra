@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "fixture_id": "render_capability_exact",
+  "expected": {
+    "supported": true,
+    "render_exact": true,
+    "skin_id": "default",
+    "runtime_asset_format": "png-atlas"
+  }
+}

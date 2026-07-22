@@ -1,0 +1,282 @@
+import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
+
+export type ClearraVirtualFileHandle = {
+  handle_id: string;
+  display_name: string;
+  mime_type: string;
+  byte_len: number;
+  origin_kind: 'browser-file-input';
+};
+
+export type ClearraWasmCommandRequest = {
+  commandText: string;
+  virtualFiles?: ClearraVirtualFileHandle[];
+};
+
+export type ClearraDiagnostic = {
+  code: string;
+  severity: string;
+  message: string;
+};
+
+export type ClearraDiagnosticReport = {
+  diagnostics: ClearraDiagnostic[];
+};
+
+export type ClearraHostAppResponse = {
+  command: string | null;
+  status: 'success' | 'validation-failed' | 'unsupported' | 'execution-failed';
+  result: { kind: string } | null;
+  diagnostics: ClearraDiagnostic[];
+  backend_report: {
+    backend_requested: string;
+    backend_selected: string;
+    fallback_used: boolean;
+    fallback_reason: string | null;
+    backend_fallback_reason: string | null;
+    fallback_backend: string | null;
+    gpu_failure_class: string | null;
+    gpu_failure_stage: string | null;
+    discarded_partial_gpu_result: boolean;
+    gpu_device_requested: string | null;
+    gpu_device_selected_index: number | null;
+    gpu_device_selected_name: string | null;
+    gpu_device_selected_type: string | null;
+    gpu_device_selected_backend: string | null;
+  };
+  resource_report: {
+    solver_executed: boolean;
+    memory_status: string;
+    truncated: boolean;
+    truncation_reason: string | null;
+    peak_frontier_states: number;
+    peak_candidate_rows: number;
+    peak_hash_buckets: number;
+    peak_gpu_bytes: number;
+    peak_cpu_bytes: number;
+    build_worker_backlog_peak: number;
+    coverage_rows_emitted: number;
+    probability_complete: boolean;
+  };
+  capability_report: {
+    app_request_boundary: string;
+    executor_boundary: string;
+    render_capability: RenderCapabilityReport;
+  };
+  continuation: { available: boolean; token: string | null } | null;
+};
+
+export type ClearraWebGpuLimitsReport = {
+  max_storage_buffer_binding_size: number;
+  max_compute_workgroup_storage_size: number;
+  max_compute_invocations_per_workgroup: number;
+};
+
+export type ClearraWebGpuBackendReport = {
+  outcome_state: 'NotRequested' | 'Connected' | 'Unavailable';
+  webgpu_available: boolean;
+  webgpu_adapter_label_or_redacted: string;
+  webgpu_limits: ClearraWebGpuLimitsReport;
+  webgpu_required_limits: ClearraWebGpuLimitsReport;
+  webgpu_unavailable_reason: string | null;
+  expected_digest: string | null;
+  actual_digest: string | null;
+  shader: {
+    shader_compile_status: string;
+    shader_hash: string | null;
+    shader_version: string | null;
+    embedded_reviewed: boolean;
+    user_shader_allowed: boolean;
+    runtime_shader_injection_allowed: boolean;
+  };
+  memory: { wasm_memory_usage: string; wasm_memory_pressure: string };
+  fallback_used: boolean;
+  fallback_backend: string | null;
+  gpu_warmup_requested: boolean;
+  gpu_warmup_performed: boolean;
+  gpu_session_reused: boolean;
+  gpu_trust_state: 'NotUsed' | 'TrustedCpuSampleConfirmed' | 'Unavailable';
+  cpu_confirmed: boolean;
+  can_source_exact_probability: boolean;
+};
+
+export type ClearraBudgetStatus = {
+  state: string;
+  used: number;
+  limit: number | null;
+};
+
+export type ClearraBackendStatus = {
+  backend_requested: string;
+  backend_selected: string;
+  fallback_used: boolean;
+  fallback_reason: string | null;
+};
+
+export type ClearraMemoryStatus = {
+  state: string;
+  raw_pointer_exposed: boolean;
+};
+
+export type ClearraWasmSearchPathStep = {
+  piece: string;
+  rotation: number;
+  x: number;
+  y: number;
+  hold: string;
+  cleared_lines: number;
+};
+
+export type ClearraForwardPathStep = {
+  piece: string;
+  rotation: number;
+  x: number;
+  y: number;
+  hold: string;
+  cleared_lines: number;
+  spin_piece: string | null;
+  spin_mini: boolean;
+  damage: number;
+  total_damage: number;
+  placement_mask: string;
+  cleared_row_mask: number;
+  board_after_mask: string;
+};
+
+export type ClearraForwardSearchOutcome = {
+  id: string;
+  source_pattern_index: number;
+  source_queue: string;
+  group: 't' | 'other' | 'integrated' | null;
+  final_board_mask: string;
+  spin_piece: string | null;
+  spin_mini: boolean;
+  spin_lines: number;
+  total_damage: number;
+  path: ClearraForwardPathStep[];
+};
+
+export type ClearraSolutionProbability = {
+  solution_key: string;
+  probability: string;
+  covered_pattern_count: number;
+  pattern_count: number;
+  probability_complete: boolean;
+};
+
+export type ClearraWasmSearchReport = {
+  backend_selected: string;
+  workers_used: number;
+  cpu_parallel_execution: boolean;
+  cpu_parallel_decision_reason: string;
+  solution_found: boolean;
+  packing_candidate_count: number;
+  packing_candidate_set_digest: string;
+  packing_candidate_keys: string[];
+  unique_solution_count: number;
+  normalized_solution_set_hash: string;
+  normalized_solution_keys: string[];
+  solution_probabilities: ClearraSolutionProbability[];
+  build_variant_count: number;
+  build_variant_count_exact: string;
+  materialized_pattern_count: number;
+  covered_pattern_count: number;
+  coverage_probability: string;
+  probability_complete: boolean;
+  count_complete: boolean;
+  searched_nodes: number;
+  peak_frontier_states: number;
+  peak_cpu_bytes: number;
+  representative_candidate_id: string | null;
+  representative_pattern_id: number | null;
+  representative_path: ClearraWasmSearchPathStep[];
+  summary_fields: Array<[string, string]>;
+  forward_search_kind: 'damage' | 'spin-finder' | null;
+  forward_initial_board_mask: string | null;
+  maximum_damage: number | null;
+  forward_outcomes: ClearraForwardSearchOutcome[];
+};
+
+type ClearraWasmWorkerEventBase = {
+  schema_version: 1;
+  runtime: 'clearra-wasm';
+  job_id: number;
+};
+
+export type ClearraSearchProgressTelemetry = {
+  phase: 'preparing' | 'initializing' | 'searching' | 'draining' | 'merging';
+  producer_complete: boolean;
+  geometry_nodes: number;
+  candidates_emitted: number;
+  geometry_family_count: string | null;
+  candidates_verified: number;
+  build_nodes: number;
+  coverage_checks: number;
+  active_workers: number;
+  worker_count: number;
+  oldest_batch_ms: number;
+  pass_index: number;
+  pass_count: number;
+};
+
+export type ClearraWasmWorkerEvent = ClearraWasmWorkerEventBase &
+  (
+    | { event: 'started' }
+    | {
+        event: 'progress';
+        progress: {
+          done: number;
+          total: number;
+          label: string;
+          budget_status: ClearraBudgetStatus;
+          backend_status: ClearraBackendStatus;
+          memory_status: ClearraMemoryStatus;
+          telemetry?: ClearraSearchProgressTelemetry;
+        };
+      }
+    | { event: 'diagnostic'; diagnostic: ClearraDiagnostic }
+    | { event: 'partial_result'; partial: boolean; label: string; final_result: boolean }
+    | {
+        event: 'final_response';
+        response: ClearraHostAppResponse;
+        webgpu_backend: ClearraWebGpuBackendReport;
+        search_report: ClearraWasmSearchReport | null;
+      }
+    | { event: 'failed'; diagnostics: ClearraDiagnosticReport }
+    | { event: 'cancelled'; scope_released: boolean }
+  );
+
+export function buildWasmCommandRequest(
+  input: Partial<ClearraWasmCommandRequest>
+): ClearraWasmCommandRequest {
+  return {
+    commandText: input.commandText ?? 'clearra verify kicks',
+    virtualFiles: input.virtualFiles ?? []
+  };
+}
+
+export function createBrowserVirtualFileHandle(file: File): ClearraVirtualFileHandle {
+  return {
+    handle_id: crypto.randomUUID(),
+    display_name: file.name,
+    mime_type: file.type || 'application/octet-stream',
+    byte_len: file.size,
+    origin_kind: 'browser-file-input'
+  };
+}
+
+export function postRunCommand(worker: Worker, request: ClearraWasmCommandRequest) {
+  worker.postMessage({
+    type: 'run_command_text',
+    commandText: request.commandText,
+    virtualFiles: request.virtualFiles ?? []
+  });
+}
+
+export function postPrewarmRuntime(worker: Worker, workerCount: number) {
+  worker.postMessage({ type: 'prewarm_runtime', workerCount });
+}
+
+export function postCancelJob(worker: Worker, jobId?: number) {
+  worker.postMessage(jobId === undefined ? { type: 'cancel_job' } : { type: 'cancel_job', jobId });
+}

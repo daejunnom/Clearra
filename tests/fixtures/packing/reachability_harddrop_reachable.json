@@ -1,0 +1,19 @@
+{
+  "name": "harddrop_reachable",
+  "policy": "HarddropOnly",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x0",
+  "operation": {
+    "piece": "O",
+    "rotation": 0,
+    "x": 4,
+    "y": 0
+  },
+  "expected": {
+    "reachable": true,
+    "visited_states": 1
+  }
+}

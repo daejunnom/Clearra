@@ -1,0 +1,27 @@
+[package]
+name = "clearra-wasm-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+stage-profiling = ["clearra-wasm/stage-profiling", "dep:serde_json"]
+
+[dependencies]
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-wasm = { path = "../clearra-wasm", features = ["webgpu-search"] }
+serde_json = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
+[lib]
+name = "clearra_wasm"
+doctest = false
+crate-type = ["cdylib"]
+
+# This crate is the scalar/memory export boundary. It contains no pointer
+# dereference or unsafe block; stable WebAssembly export names require the
+# linkage attribute that the implementation crates intentionally forbid.

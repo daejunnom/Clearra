@@ -1,0 +1,6 @@
+{
+  "name": "valid_packing_and_valid_buildup",
+  "kind": "buildup-verifier-fixture",
+  "expected_status": "ok",
+  "notes": "Only a candidate that satisfies order, queue, hold, reachability, line clears, piece window, and goal becomes a BuildVariant."
+}

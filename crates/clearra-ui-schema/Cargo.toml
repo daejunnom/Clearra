@@ -1,0 +1,21 @@
+[package]
+name = "clearra-ui-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-build-coverage = { path = "../clearra-build-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-i18n = { path = "../clearra-i18n" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-profiles = { path = "../clearra-profiles" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
+clearra-setup-search = { path = "../clearra-setup-search" }
+clearra-validation = { path = "../clearra-validation" }
+
+[lints]
+workspace = true

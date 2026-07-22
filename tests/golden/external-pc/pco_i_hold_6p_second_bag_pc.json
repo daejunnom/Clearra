@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "kind": "external-pc-worker-golden",
+  "fixture_id": "pco_i_hold_6p_second_bag_pc",
+  "required_markers": [
+    "fixture=pco_i_hold_6p_second_bag_pc",
+    "source_id=pcinfo-korea-pco-6p-i-hold",
+    "setup_kind=i-hold-6p-pco",
+    "setup_contract=human-verified-reconstructed-pco-entry",
+    "hold_piece=I",
+    "hold_empty=false",
+    "placed_piece_count=6",
+    "placed_piece_sequence=TSZLOJ",
+    "left_side_piece_sequence=TSZ",
+    "left_tsz_side_mask=0x00000000000f0f0f",
+    "right_4x3_box=true",
+    "right_4x3_box_mask=0x000000003c0f03c0",
+    "right_4x3_box_columns=6-9",
+    "right_4x3_box_rows=0-2",
+    "second_bag_pc_entry=true",
+    "goal=clear-to-empty",
+    "oracle_kind=source-fumen-colored-tiling-set",
+    "documented_source_page_count=63",
+    "expected_normalized_unique_solution_count=63",
+    "fumen_like_prefix=v115@",
+    "source_solution_set_id=four-pco-opener-full-63",
+    "source_page_count=63",
+    "source_unique_label_count=58",
+    "operation_page_count=0",
+    "operation_replay_available=false",
+    "worker_correctness_basis=source-fumen-colored-tiling-set"
+  ],
+  "typed_assertions": {
+    "source_solution_label_count_min": 15
+  }
+}

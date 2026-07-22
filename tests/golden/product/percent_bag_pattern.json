@@ -1,0 +1,19 @@
+{
+  "fixture": "percent_bag_pattern",
+  "required_markers": [
+    "kind=percent",
+    "status=percent-executed",
+    "route=search-problem-core-executor",
+    "percent_workflow=queue pattern universe -> multiset-grouped C Packing -> pattern-specific C BuildUp coverage rows -> PatternBitSet union -> weighted probability",
+    "coverage_reducer=pattern-bitset-union",
+    "coverage_row_source=c-coverage-row-view",
+    "rust_objective_reducer=ObjectiveReducer::reduce",
+    "total_pattern_count=1",
+    "covered_pattern_count=0",
+    "renormalized=false",
+    "percent_reports_total_pattern_count=true",
+    "percent_reports_covered_pattern_count=true",
+    "percent_reports_probability_complete=true",
+    "coverage_probability=0"
+  ]
+}

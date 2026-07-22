@@ -1,0 +1,10 @@
+{
+  "fixture": "verify_all",
+  "required_markers": [
+    "pc=ok",
+    "setup=ok",
+    "build_coverage=ok",
+    "kicks=ok",
+    "kick_verification_failures=0"
+  ]
+}

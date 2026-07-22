@@ -1,0 +1,3 @@
+# Clearra runners set CARGO_TARGET_DIR to the platform artifact root. Keep this
+# file free of global linker flags: ManagedLocal does not build or launch test
+# harnesses, and product manifests belong to the explicit product build only.

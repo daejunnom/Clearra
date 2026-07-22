@@ -1,0 +1,46 @@
+[package]
+name = "clearra-core-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+native-c-core = ["clearra-core-ffi/native-c-core", "parallel"]
+search-stage-profiling = [
+    "native-c-core",
+    "clearra-core-ffi/search-stage-profiling",
+    "clearra-webgpu?/stage-profiling",
+]
+wasm-stage-profiling = ["clearra-webgpu?/stage-profiling", "dep:wasm-bindgen"]
+parallel = []
+webgpu-search = ["dep:clearra-webgpu", "dep:pollster"]
+experimental-native-gpu = ["clearra-core-ffi/experimental-native-gpu"]
+
+[dependencies]
+clearra-build-coverage = { path = "../clearra-build-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-core-ffi = { path = "../clearra-core-ffi" }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-replay = { path = "../clearra-replay" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-supply = { path = "../clearra-supply" }
+clearra-webgpu = { path = "../clearra-webgpu", optional = true }
+pollster = { version = "0.4", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2.126", optional = true }
+
+[dev-dependencies]
+clearra-core-ffi = { path = "../clearra-core-ffi", features = ["test-support"] }
+clearra-fumen = { path = "../clearra-fumen" }
+clearra-scoring = { path = "../clearra-scoring" }
+
+[lints]
+workspace = true

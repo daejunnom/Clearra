@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "kind": "external-pc-worker-fixture",
+  "fixture_id": "pco_opener_full_63",
+  "source": {
+    "source_id": "four-pco-opener-full-63",
+    "human_verified": true,
+    "source_notes": [
+      "The initial grey field is decoded from the FOUR PCO solution diagrams.",
+      "The 63-page source supplies exact colored placement masks but no operation replay.",
+      "This mirrored SRS+ fixture is distinct from the PC Info Korea source presentation while preserving the same occupancy family."
+    ]
+  },
+  "classification": {
+    "family": "pco",
+    "phase": "second-bag-pc-entry",
+    "setup_kind": "four-pco-opener",
+    "stress_level": "normal"
+  },
+  "input": {
+    "command": "pc-scenario",
+    "initial_fumen": "tests/fixtures/fumens/external-pc/pco_opener_full_63_setup.fumen",
+    "expected_solution_fumen": "tests/fixtures/fumens/external-pc/pco_opener_full_63_solutions.fumen",
+    "expected_setup_rows_top_down": [
+      "OOOXXXXXOO",
+      "OOOXXXXOOO",
+      "OOOXXXOOOO",
+      "OOOXXXXOOO"
+    ],
+    "field_transform": "none",
+    "board_width": 10,
+    "visible_height": 4,
+    "setup_contract": "four-source-v115-grey-occupancy-field",
+    "hold_piece": "I",
+    "hold_empty": false,
+    "placed_piece_count": 6,
+    "remaining_queue_source": "fresh-standard-7-bag",
+    "remaining_queue": "",
+    "queue_mode": "standard-7-bag",
+    "piece_window": 4,
+    "exact_pieces": 4,
+    "min_remaining_queue": 4,
+    "goal": "clear-to-empty",
+    "rule": "srs-plus",
+    "allow_hold": true,
+    "count_policy": "count-all",
+    "retained_trace_limit": 1,
+    "backend_modes": [
+      "cpu",
+      "gpu",
+      "hybrid"
+    ],
+    "materialized_budget": {
+      "max_candidates": 250000,
+      "max_patterns": 5040,
+      "max_frontier_states": 1000000
+    },
+    "materialized_expected": {
+      "solution_exists": true,
+      "count_complete": true,
+      "operation_replay_available": false
+    }
+  },
+  "source_solution_sets": [
+    {
+      "source_solution_set_id": "four-pco-opener-full-63",
+      "path": "tests/fixtures/external-pc/pco_opener_full_63.source_solutions.json",
+      "source_page_count": 63,
+      "source_unique_field_count": 63,
+      "operation_page_count": 0,
+      "operation_replay_available": false,
+      "worker_correctness_basis": "source-fumen-colored-tiling-set",
+      "scope_note": "The 63 colored fields are the exact normalized tiling-set oracle. They do not provide operation replay order."
+    }
+  ],
+  "expected": {
+    "oracle_kind": "source-fumen-colored-tiling-set",
+    "documented_source_page_count": 63,
+    "expected_normalized_unique_solution_count": 63,
+    "operation_replay_available": false,
+    "worker_correctness_basis": "source-fumen-colored-tiling-set"
+  },
+  "budget": {
+    "max_candidates": 250000,
+    "max_patterns": 5040,
+    "timeout_ms": 60000,
+    "trace_retention": "representative"
+  }
+}

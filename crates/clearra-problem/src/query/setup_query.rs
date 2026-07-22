@@ -1,0 +1,173 @@
+pub use super::{
+    setup_grouping::GroupingMode,
+    setup_hold_policy::SetupHoldPolicy,
+    setup_limits::{SetupLimits, SetupLimitsError},
+    setup_piece_budget::{PieceBudget, PieceBudgetError},
+    setup_probability_filter::{SetupProbabilityFilter, SetupProbabilityFilterError},
+    setup_queue_input::SetupQueueInput,
+};
+
+use clearra_core_domain::{board::board_size::BoardSize, pc::pc_target::PcTarget};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetupSearchQuery {
+    board_size: BoardSize,
+    target: PcTarget,
+    queue: SetupQueueInput,
+    hold_policy: SetupHoldPolicy,
+    piece_budget: PieceBudget,
+    probability_filter: SetupProbabilityFilter,
+    grouping_mode: GroupingMode,
+    limits: SetupLimits,
+}
+
+impl SetupSearchQuery {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        board_size: BoardSize,
+        target: PcTarget,
+        queue: SetupQueueInput,
+        hold_policy: SetupHoldPolicy,
+        piece_budget: PieceBudget,
+        probability_filter: SetupProbabilityFilter,
+        grouping_mode: GroupingMode,
+        limits: SetupLimits,
+    ) -> Self {
+        Self {
+            board_size,
+            target,
+            queue,
+            hold_policy,
+            piece_budget,
+            probability_filter,
+            grouping_mode,
+            limits,
+        }
+    }
+}
+impl SetupSearchQuery {
+    pub fn board_size(&self) -> BoardSize {
+        self.board_size
+    }
+}
+impl SetupSearchQuery {
+    pub fn target(&self) -> PcTarget {
+        self.target
+    }
+}
+impl SetupSearchQuery {
+    pub fn queue(&self) -> &SetupQueueInput {
+        &self.queue
+    }
+}
+impl SetupSearchQuery {
+    pub fn hold_policy(&self) -> SetupHoldPolicy {
+        self.hold_policy
+    }
+}
+impl SetupSearchQuery {
+    pub fn piece_budget(&self) -> &PieceBudget {
+        &self.piece_budget
+    }
+}
+impl SetupSearchQuery {
+    pub fn probability_filter(&self) -> SetupProbabilityFilter {
+        self.probability_filter
+    }
+}
+impl SetupSearchQuery {
+    pub fn grouping_mode(&self) -> GroupingMode {
+        self.grouping_mode
+    }
+}
+impl SetupSearchQuery {
+    pub fn limits(&self) -> SetupLimits {
+        self.limits
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_queue(mut self, queue: SetupQueueInput) -> Self {
+        self.queue = queue;
+        self
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_hold_policy(mut self, hold_policy: SetupHoldPolicy) -> Self {
+        self.hold_policy = hold_policy;
+        self
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_piece_budget(mut self, piece_budget: PieceBudget) -> Self {
+        self.piece_budget = piece_budget;
+        self
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_probability_filter(mut self, probability_filter: SetupProbabilityFilter) -> Self {
+        self.probability_filter = probability_filter;
+        self
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_grouping_mode(mut self, grouping_mode: GroupingMode) -> Self {
+        self.grouping_mode = grouping_mode;
+        self
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_limits(mut self, limits: SetupLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+}
+
+impl Default for SetupSearchQuery {
+    fn default() -> Self {
+        Self {
+            board_size: BoardSize::standard_10x20(),
+            target: PcTarget::two_lines(),
+            queue: SetupQueueInput::default(),
+            hold_policy: SetupHoldPolicy::default(),
+            piece_budget: PieceBudget::default(),
+            probability_filter: SetupProbabilityFilter::default(),
+            grouping_mode: GroupingMode::default(),
+            limits: SetupLimits::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::{
+        piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
+    };
+    use clearra_supply::{hold::hold_slot::HoldSlot, queue::fixed_sequence::FixedSequence};
+
+    use super::*;
+
+    #[test]
+    fn query_owns_canonical_setup_contract_parts() {
+        let filter = SetupProbabilityFilter::at_least(
+            ProbabilityValue::new(0.5).expect("probability threshold"),
+        );
+        let query = SetupSearchQuery::default()
+            .with_queue(SetupQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+            ])))
+            .with_hold_policy(SetupHoldPolicy::enabled_from_slot(HoldSlot::Occupied(
+                PieceKind::T,
+            )))
+            .with_probability_filter(filter)
+            .with_grouping_mode(GroupingMode::BuildVariant)
+            .with_limits(SetupLimits::new(1, 2, 3, 4, 5, 6).expect("limits"));
+
+        assert_eq!(query.target(), PcTarget::two_lines());
+        assert!(query.queue().fixed_queue().is_some());
+        assert_eq!(query.hold_policy().initial_piece(), Some(PieceKind::T));
+        assert_eq!(query.probability_filter(), filter);
+        assert_eq!(query.grouping_mode(), GroupingMode::BuildVariant);
+        assert_eq!(query.limits().max_patterns(), 5);
+        assert_eq!(query.limits().post_pc_retained_trace_limit(), 6);
+    }
+}

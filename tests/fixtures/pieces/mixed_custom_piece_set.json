@@ -1,0 +1,73 @@
+{
+  "schema_version": 3,
+  "piece_set": {
+    "id": "fixture-mixed-standard-tri",
+    "label": "Standard tetrominoes plus triomino",
+    "pieces": [
+      { "kind": "standard", "id": "std:I" },
+      { "kind": "standard", "id": "std:O" },
+      { "kind": "standard", "id": "std:T" },
+      { "kind": "standard", "id": "std:S" },
+      { "kind": "standard", "id": "std:Z" },
+      { "kind": "standard", "id": "std:J" },
+      { "kind": "standard", "id": "std:L" },
+      {
+        "kind": "custom",
+        "id": "custom:tri-v1",
+        "label": "Triomino",
+        "display": {
+          "color": "#ffcc00",
+          "glyph": "R"
+        },
+        "spawn_bounds": {
+          "min_x": 0,
+          "max_x": 2,
+          "min_y": 0,
+          "max_y": 2
+        },
+        "area": 3,
+        "symmetry": "mirror-x",
+        "canonical_key": "cells:0,0;1,0;0,1",
+        "rotations": [
+          {
+            "state": "zero",
+            "cells": [
+              { "x": 0, "y": 0 },
+              { "x": 1, "y": 0 },
+              { "x": 0, "y": 1 }
+            ]
+          },
+          {
+            "state": "right",
+            "cells": [
+              { "x": 0, "y": 0 },
+              { "x": 0, "y": 1 },
+              { "x": 1, "y": 1 }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "bag": {
+    "profile_id": "fixture-mixed-standard-tri-bag",
+    "piece_set_id": "fixture-mixed-standard-tri",
+    "bag_size": 4,
+    "boundary_models": {
+      "fixed_sequence": true,
+      "observed_window": true,
+      "bag_aligned_pattern": true
+    },
+    "entries": [
+      { "piece_id": "std:I", "multiplicity": 1, "weight": 1 },
+      { "piece_id": "custom:tri-v1", "multiplicity": 2, "weight": 1 },
+      { "piece_id": "std:T", "multiplicity": 1, "weight": 1 }
+    ]
+  },
+  "expected": {
+    "runtime_supported": false,
+    "diagnostic_code": "E_CUSTOM_PIECE_UNSUPPORTED_MVP",
+    "bag_diagnostic_code": "E_CUSTOM_BAG_UNSUPPORTED_MVP",
+    "reason": "custom_piece_runtime_not_connected"
+  }
+}

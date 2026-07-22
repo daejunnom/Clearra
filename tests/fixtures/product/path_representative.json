@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "path_representative",
+  "command": ["path", "--lines", "2", "--queue", "IIOOO", "--fixed", "--no-hold"],
+  "expected": {
+    "kind": "path",
+    "route": "search-problem-core-executor",
+    "representative_trace": true
+  }
+}

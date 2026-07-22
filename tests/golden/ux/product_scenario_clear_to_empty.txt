@@ -1,0 +1,4 @@
+kind: pc-scenario
+problem_preset: scenario-pc
+goal: clear-to-empty
+solution_found: true

@@ -1,0 +1,6 @@
+{
+  "name": "packing_possible_but_queue_order_impossible",
+  "kind": "buildup-verifier-fixture",
+  "expected_status": "queue_order_impossible",
+  "notes": "The static packing operation set can cover cells, but the fixed queue cannot produce the required piece order even with hold enabled."
+}

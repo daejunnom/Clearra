@@ -1,0 +1,20 @@
+{
+  "name": "opening_2l_empty",
+  "kind": "opening-pc-fixture",
+  "command": ["pc", "--lines", "2", "--queue", "IIOOO", "--fixed", "--no-hold"],
+  "problem": {
+    "preset": "opening-pc",
+    "initial_board_mask": "0x0000000000000000",
+    "target_lines": 2,
+    "exact_pieces": 5,
+    "hold_enabled": false,
+    "goal": "clear-to-empty"
+  },
+  "expected": {
+    "solution_exists": true,
+    "count_complete": false,
+    "coverage_probability": "0.0",
+    "packing_candidate_is_solution": false,
+    "executor_flow": "SearchProblem->C PackingProblem->C PackingResult->C BuildUpResult->CoverageRows->Rust ObjectiveResult->Rust OutputModel"
+  }
+}

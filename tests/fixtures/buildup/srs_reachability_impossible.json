@@ -1,0 +1,6 @@
+{
+  "name": "packing_possible_but_srs_reachability_impossible",
+  "kind": "buildup-verifier-fixture",
+  "expected_status": "reachability_impossible",
+  "notes": "The target placement is collision-free and grounded, but the SRS reachability bridge rejects it."
+}

@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "kind": "external-pc-worker-fixture",
+  "fixture_id": "tsar_cannon_after_2bag_full_42",
+  "source": {
+    "source_id": "hse30-tsar-cannon-full-42",
+    "human_verified": true,
+    "source_notes": [
+      "Use only the post-2-bag PC phase.",
+      "Use hse30 full 42 fumen.zui.jp solve set as primary source.",
+      "Do not use Hard Drop minimal solve count as correctness basis.",
+      "Do not use John Beak extra O/O placement variants as correctness basis."
+    ]
+  },
+  "classification": {
+    "family": "tsar-cannon",
+    "phase": "third-bag-pc-after-fixed-second-bag",
+    "setup_kind": "after-2bag-tst-tsd",
+    "stress_level": "stress"
+  },
+  "input": {
+    "command": "pc-scenario",
+    "initial_fumen": "tests/fixtures/fumens/external-pc/tsar_cannon_after_2bag_setup.fumen",
+    "expected_setup_rows_top_down": [
+      "XXXXXXXXOO",
+      "XXXXXXXXOO",
+      "OXXOOXXOOO",
+      "OOOOXXXOOO",
+      "OOOOOXOOOO"
+    ],
+    "source_fumen_from_registry": true,
+    "field_transform": "none",
+    "board_width": 10,
+    "visible_height": 5,
+    "setup_contract": "user-confirmed-v115-occupancy-field",
+    "remaining_queue_source": "fresh-standard-7-bag",
+    "remaining_queue": "",
+    "queue_mode": "standard-7-bag",
+    "hold_empty": true,
+    "piece_window": 6,
+    "exact_pieces": 6,
+    "goal": "clear-to-empty",
+    "rule": "srs-plus",
+    "allow_hold": true,
+    "count_policy": "count-unique",
+    "retained_trace_limit": 1,
+    "materialized_budget": {
+      "max_candidates": 5000000,
+      "max_patterns": 5040,
+      "max_frontier_states": 5000000
+    },
+    "backend_modes": [
+      "cpu",
+      "gpu",
+      "hybrid"
+    ],
+    "materialized_expected": {
+      "solution_exists": true,
+      "count_complete": true,
+      "accepted_retained_trace_keys": [],
+      "normalized_solution_oracle": "source-fumen-count-and-tiling-set",
+      "operation_replay_available": false
+    }
+  },
+  "source_counts": {
+    "minimal_solve_set": 18,
+    "minimal_plus_tspin_extra": 25,
+    "unique_solve_set": 42
+  },
+  "source_solution_sets": [
+    {
+      "source_solution_set_id": "hse30-tsar-cannon-full-42-v115",
+      "path": "tests/fixtures/external-pc/tsar_cannon_after_2bag_full_42.source_solutions.json",
+      "source_page_count": 42,
+      "source_unique_label_count": 39,
+      "operation_page_count": 0,
+      "operation_replay_available": false,
+      "worker_correctness_basis": "count-and-tiling-set-only",
+      "scope_note": "The user-confirmed v115 source diagram set is decoded directly. It verifies count and colored tiling masks only; it is not an operation-order or replay oracle."
+    }
+  ],
+  "clearra_count_policy": {
+    "worker_correctness_basis": "unique_solve_set",
+    "expected_unique_solution_count": 42,
+    "minimal_solve_set_is_metadata_only": true
+  },
+  "expected": {
+    "correctness_oracle": "source-fumen-count-and-tiling-set",
+    "solution_exists": true,
+    "final_board_empty": true,
+    "expected_unique_solution_count": 42,
+    "unique_solution_count_basis": "source-fumen-colored-tiling-set",
+    "pc_probability_source_percent": "98.69",
+    "tsd_pc_probability_source_percent": "73.2",
+    "minimal_solve_set_is_metadata_only": true,
+    "packing_candidate_is_solution": false,
+    "coverage_row_created_after_buildup": true,
+    "operation_replay_correctness_claimed": false
+  },
+  "budget": {
+    "max_candidates": 5000000,
+    "max_patterns": 5040,
+    "timeout_ms": 60000,
+    "trace_retention": "bounded-representative-set",
+    "allow_count_incomplete": false
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "source_label": "Clearra desktop occupancy-grid icon",
+  "origin_kind": "first-party-code-generated",
+  "generator": "Pillow geometric raster composition",
+  "license": "Clearra project license",
+  "redistribution": "allowed-with-project",
+  "runtime_raw_svg_allowed": false,
+  "icon_png_sha256": "074aed22f4be759e42ce5edbeb61fa6b2125dc804d8ce577a69c3ea03ea6b381",
+  "icon_ico_sha256": "f3a89b69082fe1abe5f64e5c6fa20ed59fd3ca6a307cfdd6eb085c20ca6da418"
+}

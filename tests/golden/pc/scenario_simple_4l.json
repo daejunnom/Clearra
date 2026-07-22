@@ -1,0 +1,12 @@
+{
+  "fixture": "scenario_simple_4l",
+  "required_markers": [
+    "problem_preset=scenario-pc",
+    "visible_height=4",
+    "initial_board_mask=0x00000000000003f0",
+    "piece_window=1",
+    "exact_pieces=1",
+    "solution_found=true",
+    "scenario_replay_token_version=sr2"
+  ]
+}

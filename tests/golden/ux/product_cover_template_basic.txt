@@ -1,0 +1,3 @@
+kind: build_coverage
+c_buildup_coverage_row_generated: false
+union_probability_reducer: BuildCoverageResult uses union probability

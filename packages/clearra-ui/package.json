@@ -1,0 +1,23 @@
+{
+  "name": "@clearra/ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/lib/index.ts",
+    "./components": "./src/lib/components/index.ts",
+    "./stores": "./src/lib/stores/index.ts",
+    "./host": "./src/lib/host/index.ts",
+    "./render": "./src/lib/render/index.ts",
+    "./wasm": "./src/lib/wasm/index.ts",
+    "./workspace": "./src/lib/workspace/index.ts"
+  },
+  "peerDependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "svelte": "^5.0.0"
+  },
+  "dependencies": {
+    "@lucide/svelte": "^1.25.0",
+    "tetris-fumen": "^1.1.3"
+  }
+}

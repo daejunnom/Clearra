@@ -1,0 +1,16 @@
+[package]
+name = "clearra-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "clearra-core-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+native-memory-binding = []
+native-c-core = ["native-memory-binding"]
+search-stage-profiling = ["native-c-core"]
+experimental-native-gpu = []
+# Checkpoint/oracle adapters used by downstream test targets. Product features
+# never enable this surface.
+test-support = []
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-exact-cover = { path = "../clearra-exact-cover" }
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-supply = { path = "../clearra-supply" }
+
+[dev-dependencies]
+clearra-coverage = { path = "../clearra-coverage" }
+
+[lints.rust]
+unsafe_code = "allow"

@@ -1,0 +1,26 @@
+{
+  "name": "unreachable_but_collision_free",
+  "mode": "locked",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x0",
+  "active_piece": "O",
+  "candidate_contract": {
+    "static_candidate_only": true,
+    "collision_free_is_not_reachability": true,
+    "packing_candidate_is_solution": false
+  },
+  "operation": {
+    "rotation": 0,
+    "x": 4,
+    "y": 2
+  },
+  "expected": {
+    "collision_free": true,
+    "harddrop_reachable": false,
+    "locked_candidate_present": false,
+    "coverage_row_created_directly": false
+  }
+}

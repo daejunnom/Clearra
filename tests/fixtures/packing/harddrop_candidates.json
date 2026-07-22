@@ -1,0 +1,31 @@
+{
+  "name": "harddrop_candidates",
+  "mode": "harddrop",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x0",
+  "active_piece": "T",
+  "rule": "no-kick",
+  "expected": {
+    "candidate_count": 34,
+    "duplicates_removed": true,
+    "blocked_fall_path_rejected": {
+      "board_mask": "0x100000",
+      "active_piece": "O",
+      "operation": {
+        "rotation": 0,
+        "x": 0,
+        "y": 0
+      }
+    },
+    "first_operation": {
+      "piece": "T",
+      "rotation": 0,
+      "x": 0,
+      "y": 0,
+      "mask": "0x807"
+    }
+  }
+}

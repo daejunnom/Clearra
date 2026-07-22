@@ -1,0 +1,33 @@
+[package]
+name = "clearra-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+asset-import = ["dep:resvg", "dep:tempfile"]
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-replay = { path = "../clearra-replay" }
+gif = "0.14.1"
+png = "0.18.0"
+resvg = { version = "0.47.0", optional = true, default-features = false }
+roxmltree = "0.21.1"
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10.9"
+tempfile = { version = "3", optional = true }
+
+[[bin]]
+name = "clearra-asset-import"
+path = "src/bin/clearra_asset_import.rs"
+required-features = ["asset-import"]
+
+[dev-dependencies]
+clearra-geometry = { path = "../clearra-geometry" }
+
+[lints]
+workspace = true

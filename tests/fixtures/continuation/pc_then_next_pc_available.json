@@ -1,0 +1,11 @@
+{
+  "name": "pc_then_next_pc_available",
+  "kind": "opening-continuation-fixture",
+  "command": ["pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold"],
+  "expected": {
+    "next_pc_available": true,
+    "next_pc_candidate": "2L",
+    "continuation_token_available": true,
+    "continuation_token_version": "pc2"
+  }
+}

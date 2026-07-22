@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "pc_4l_bag_pattern",
+  "command": ["pc", "--lines", "4", "--queue", "IOT"],
+  "expected": {
+    "status": "searched",
+    "route": "search-problem-core-executor",
+    "compiled_piece_window": 10,
+    "probability_complete": false,
+    "resource_truncation_reason": "candidate_budget_exceeded"
+  }
+}

@@ -1,0 +1,4 @@
+error E_GPU_WORKER_MISSING_MEMORY_TICKET GPU worker result did not include a memory ticket
+  location: backend.gpu_worker
+  evidence: memory_ticket_id=0
+  next: Reject the result and rerun with CPU confirmation evidence.

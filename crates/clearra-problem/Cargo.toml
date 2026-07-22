@@ -1,0 +1,18 @@
+[package]
+name = "clearra-problem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-profiles = { path = "../clearra-profiles" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-supply = { path = "../clearra-supply" }
+
+[lints]
+workspace = true

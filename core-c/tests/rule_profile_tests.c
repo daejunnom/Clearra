@@ -1,0 +1,252 @@
+#include "../src/rules/rules.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+#define EXPECT_STATUS(EXPR, EXPECTED)                                                   \
+    do {                                                                                \
+        ClearraRuleStatus actual_status = (EXPR);                                       \
+        if (actual_status != (EXPECTED)) {                                              \
+            fprintf(stderr, "%s:%d expected status %d but got %d\n", __FILE__, __LINE__, \
+                    (int)(EXPECTED), (int)actual_status);                               \
+            exit(1);                                                                    \
+        }                                                                               \
+    } while (0)
+
+#define EXPECT_TRUE(EXPR)                                                               \
+    do {                                                                                \
+        if (!(EXPR)) {                                                                  \
+            fprintf(stderr, "%s:%d expected true\n", __FILE__, __LINE__);              \
+            exit(1);                                                                    \
+        }                                                                               \
+    } while (0)
+
+#define EXPECT_FALSE(EXPR)                                                              \
+    do {                                                                                \
+        if ((EXPR)) {                                                                   \
+            fprintf(stderr, "%s:%d expected false\n", __FILE__, __LINE__);             \
+            exit(1);                                                                    \
+        }                                                                               \
+    } while (0)
+
+#define EXPECT_U16(EXPR, EXPECTED)                                                      \
+    do {                                                                                \
+        uint16_t actual_value = (uint16_t)(EXPR);                                       \
+        uint16_t expected_value = (uint16_t)(EXPECTED);                                 \
+        if (actual_value != expected_value) {                                           \
+            fprintf(stderr, "%s:%d expected %u but got %u\n", __FILE__, __LINE__,        \
+                    (unsigned)expected_value, (unsigned)actual_value);                  \
+            exit(1);                                                                    \
+        }                                                                               \
+    } while (0)
+
+#define EXPECT_I8(EXPR, EXPECTED)                                                       \
+    do {                                                                                \
+        int actual_value = (int)(EXPR);                                                 \
+        int expected_value = (int)(EXPECTED);                                           \
+        if (actual_value != expected_value) {                                           \
+            fprintf(stderr, "%s:%d expected %d but got %d\n", __FILE__, __LINE__,        \
+                    expected_value, actual_value);                                      \
+            exit(1);                                                                    \
+        }                                                                               \
+    } while (0)
+static clr_rule_profile_descriptor descriptor(uint32_t rule, uint32_t kick) {
+    clr_rule_profile_descriptor value = {0};
+    value.piece_set_profile_id = CLR_PIECE_SET_STANDARD_TETROMINOES;
+    value.bag_profile_id = CLR_BAG_STANDARD_7_BAG;
+    value.rule_profile_id = rule;
+    value.kick_profile_id = kick;
+    value.spawn_profile_id = CLR_SPAWN_STANDARD_10;
+    value.has_verified_kick_profile = 0;
+    return value;
+}static void kick_transition_count_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    clr_rule_profile_descriptor srs = descriptor(CLR_RULE_SRS, CLR_KICK_SRS_90);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs, &profile), CLEARRA_RULE_OK);
+    EXPECT_U16(profile.kick_table.transition_count, 56);
+    EXPECT_FALSE(profile.supports_180);
+
+    clr_rule_profile_descriptor srs_plus =
+        descriptor(CLR_RULE_SRS_PLUS, CLR_KICK_SRS_PLUS_180);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs_plus, &profile),
+                  CLEARRA_RULE_OK);
+    EXPECT_U16(profile.kick_table.transition_count, 80);
+    EXPECT_TRUE(profile.supports_180);
+
+    const ClearraCompactKickSequence *i_half = 0;
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_I,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_REVERSE,
+            &i_half),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(i_half->count, 6);
+    EXPECT_I8(i_half->offsets[0].dx, 0);
+    EXPECT_I8(i_half->offsets[0].dy, 0);
+    EXPECT_I8(i_half->offsets[5].dx, -1);
+    EXPECT_I8(i_half->offsets[5].dy, 0);
+}static void srs_transition_offsets_are_compact_runtime_view(void) {
+    ClearraCompactRuleProfile profile;
+    const ClearraCompactKickSequence *sequence = 0;
+    clr_rule_profile_descriptor srs = descriptor(CLR_RULE_SRS, CLR_KICK_SRS_90);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs, &profile), CLEARRA_RULE_OK);
+
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_T,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_RIGHT,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 5);
+    EXPECT_I8(sequence->offsets[1].dx, -1);
+    EXPECT_I8(sequence->offsets[1].dy, 0);
+}static void no_kick_has_zero_offset_only_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    const ClearraCompactKickSequence *sequence = 0;
+    clr_rule_profile_descriptor no_kick = descriptor(CLR_RULE_NO_KICK, CLR_KICK_NO_KICK);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&no_kick, &profile),
+                  CLEARRA_RULE_OK);
+
+    EXPECT_U16(profile.kick_table.transition_count, 56);
+    EXPECT_FALSE(profile.supports_180);
+    EXPECT_TRUE(clearra_kick_table_zero_offsets_only(&profile.kick_table));
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_I,
+            CLEARRA_RULE_ROTATION_RIGHT,
+            CLEARRA_RULE_ROTATION_REVERSE,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 1);
+    EXPECT_I8(sequence->offsets[0].dx, 0);
+    EXPECT_I8(sequence->offsets[0].dy, 0);
+}static void unsupported_rule_returns_status_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    clr_rule_profile_descriptor srs_x = descriptor(CLR_RULE_SRS_X, CLR_KICK_SRS_X);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs_x, &profile),
+                  CLEARRA_RULE_UNSUPPORTED_RULE);
+
+    clr_rule_profile_descriptor imported = descriptor(CLR_RULE_SRS, CLR_KICK_IMPORTED);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&imported, &profile),
+                  CLEARRA_RULE_UNSUPPORTED_KICK_PROFILE);
+}static void imported_verified_kick_profile_compiles_to_compact_descriptor_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    const ClearraCompactKickSequence *sequence = 0;
+    clr_rule_profile_descriptor imported = descriptor(CLR_RULE_SRS_X, CLR_KICK_IMPORTED);
+    imported.has_verified_kick_profile = 1;
+    imported.verified_supports_180 = 1;
+    imported.verified_transition_count = 1;
+    imported.verified_transitions[0].piece = CLR_PIECE_T;
+    imported.verified_transitions[0].from_rotation = CLEARRA_RULE_ROTATION_SPAWN;
+    imported.verified_transitions[0].to_rotation = CLEARRA_RULE_ROTATION_RIGHT;
+    imported.verified_transitions[0].sequence.count = 2;
+    imported.verified_transitions[0].sequence.offsets[0].dx = 0;
+    imported.verified_transitions[0].sequence.offsets[0].dy = 0;
+    imported.verified_transitions[0].sequence.offsets[1].dx = -1;
+    imported.verified_transitions[0].sequence.offsets[1].dy = 0;
+
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&imported, &profile),
+                  CLEARRA_RULE_OK);
+    EXPECT_U16(profile.rule_profile_id, CLR_RULE_SRS_X);
+    EXPECT_U16(profile.kick_profile_id, CLR_KICK_IMPORTED);
+    EXPECT_U16(profile.kick_table.transition_count, 1);
+    EXPECT_TRUE(profile.supports_180);
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_T,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_RIGHT,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 2);
+    EXPECT_I8(sequence->offsets[1].dx, -1);
+}static void srs_plus_capability_reported_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    const ClearraCompactKickSequence *sequence = 0;
+    const ClearraCompactKickSequence *mirrored_sequence = 0;
+    clr_rule_profile_descriptor srs_plus =
+        descriptor(CLR_RULE_SRS_PLUS, CLR_KICK_SRS_PLUS_180);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs_plus, &profile),
+                  CLEARRA_RULE_OK);
+
+    EXPECT_TRUE(profile.srs_plus_capability_reported);
+    EXPECT_TRUE(profile.kick_table.srs_plus_capability_reported);
+    EXPECT_TRUE(clearra_kick_table_supports_180(&profile.kick_table));
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_T,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_REVERSE,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 6);
+    EXPECT_I8(sequence->offsets[1].dx, 0);
+    EXPECT_I8(sequence->offsets[1].dy, 1);
+    EXPECT_I8(sequence->offsets[2].dx, 1);
+    EXPECT_I8(sequence->offsets[2].dy, 1);
+
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_I,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_REVERSE,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 6);
+    EXPECT_I8(sequence->offsets[0].dx, 0);
+    EXPECT_I8(sequence->offsets[0].dy, 0);
+    EXPECT_I8(sequence->offsets[1].dx, 0);
+    EXPECT_I8(sequence->offsets[1].dy, 1);
+    EXPECT_I8(sequence->offsets[5].dx, -1);
+    EXPECT_I8(sequence->offsets[5].dy, 0);
+
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_O,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_REVERSE,
+            &sequence),
+        CLEARRA_RULE_TRANSITION_NOT_FOUND);
+
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_I,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_RIGHT,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_I,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_LEFT,
+            &mirrored_sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 5);
+    EXPECT_U16(mirrored_sequence->count, 5);
+    for (uint8_t index = 0; index < sequence->count; index++) {
+        EXPECT_I8(mirrored_sequence->offsets[index].dx,
+                  -sequence->offsets[index].dx);
+        EXPECT_I8(mirrored_sequence->offsets[index].dy,
+                  sequence->offsets[index].dy);
+    }
+}int main(void) {
+    kick_transition_count_fixture();
+    srs_transition_offsets_are_compact_runtime_view();
+    no_kick_has_zero_offset_only_fixture();
+    unsupported_rule_returns_status_fixture();
+    imported_verified_kick_profile_compiles_to_compact_descriptor_fixture();
+    srs_plus_capability_reported_fixture();
+    return 0;
+}

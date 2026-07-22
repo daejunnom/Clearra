@@ -1,0 +1,21 @@
+[package]
+name = "clearra-scoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-replay = { path = "../clearra-replay" }
+clearra-spin = { path = "../clearra-spin" }
+serde_json.workspace = true
+
+[dev-dependencies]
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+clearra-rules = { path = "../clearra-rules" }
+
+[lints]
+workspace = true

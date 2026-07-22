@@ -1,0 +1,3 @@
+Clearra 명령줄
+usage: clearra
+--lang en|ko

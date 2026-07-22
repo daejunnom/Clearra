@@ -1,0 +1,29 @@
+[package]
+name = "clearra-postprocess"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+stage-profiling = ["dep:wasm-bindgen"]
+webgpu-postprocess = ["dep:clearra-postprocess-gpu"]
+
+[dependencies]
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-postprocess-gpu = { path = "../clearra-postprocess-gpu", optional = true }
+clearra-replay = { path = "../clearra-replay" }
+clearra-scoring = { path = "../clearra-scoring" }
+clearra-spin = { path = "../clearra-spin" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2.126", optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[lints]
+workspace = true

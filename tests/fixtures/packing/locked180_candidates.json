@@ -1,0 +1,29 @@
+{
+  "name": "locked180_candidates",
+  "mode": "locked180",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x0",
+  "active_piece": "T",
+  "rule": "srs-plus",
+  "expected": {
+    "candidate_count": 34,
+    "duplicates_removed": true,
+    "supports_180": true,
+    "uses_locked_reachability": true,
+    "half_turn_transition_present": true,
+    "locked180_only_operation": {
+      "board_mask": "0xc0800004",
+      "active_piece": "T",
+      "operation": {
+        "rotation": 2,
+        "x": 0,
+        "y": 0
+      },
+      "locked90_candidate_present": false,
+      "locked180_candidate_present": true
+    }
+  }
+}

@@ -1,0 +1,32 @@
+[package]
+name = "clearra-webgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+stage-profiling = ["dep:wasm-bindgen"]
+
+[dependencies]
+bytemuck = "1"
+futures-channel = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2.126", optional = true }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "webgpu"] }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[lints]
+workspace = true

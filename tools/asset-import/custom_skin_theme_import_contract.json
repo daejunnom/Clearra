@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "kind": "custom-skin-theme-import-contract",
+  "skin_id": "required",
+  "palette_id": "required",
+  "piece_mapping": "required-all-standard-pieces",
+  "grid_style": "required",
+  "background": "required",
+  "line_clear_highlight": "required",
+  "ownership_color_mode": "required",
+  "export_limits": "required",
+  "provenance": "required",
+  "manifest_and_provenance_required": true,
+  "runtime_preview_source": "png-atlas",
+  "runtime_raw_svg_allowed": false,
+  "raw_svg_not_passed_to_runtime_renderer": true,
+  "user_imported_asset_locations": [
+    "user_config_directory",
+    "user_cache_directory"
+  ],
+  "not_repository_assets": true,
+  "repository_assets_for_user_import": false,
+  "custom_skin_import_requires_provenance": true,
+  "custom_theme_preview_uses_png_atlas": true,
+  "custom_skin_schema_validates": true
+}

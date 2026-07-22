@@ -1,0 +1,19 @@
+{
+  "name": "collision_free_but_unreachable",
+  "policy": "HarddropOnly",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x0",
+  "operation": {
+    "piece": "O",
+    "rotation": 0,
+    "x": 4,
+    "y": 2
+  },
+  "expected": {
+    "collision_free": true,
+    "reachable": false
+  }
+}

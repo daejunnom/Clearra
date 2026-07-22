@@ -1,0 +1,38 @@
+{
+  "name": "locked_candidates",
+  "mode": "locked",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x0",
+  "active_piece": "T",
+  "rule": "srs",
+  "expected": {
+    "candidate_count": 34,
+    "duplicates_removed": true,
+    "rule_profile_id": "srs",
+    "reverse_graph_not_harddrop_alias": {
+      "board_mask": "0x100000",
+      "active_piece": "O",
+      "operation": {
+        "rotation": 0,
+        "x": 0,
+        "y": 0
+      },
+      "harddrop_reachable": false,
+      "locked_reachable": true
+    },
+    "collision_free_but_unreachable_rejected": {
+      "board_mask": "0x0",
+      "active_piece": "O",
+      "operation": {
+        "rotation": 0,
+        "x": 4,
+        "y": 2
+      },
+      "collision_free": true,
+      "locked_candidate_present": false
+    }
+  }
+}

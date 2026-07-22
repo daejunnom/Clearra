@@ -1,0 +1,33 @@
+{
+  "name": "requires_180_unsupported",
+  "source": {
+    "site": "harddrop",
+    "page": "normalized Clearra scenario fixture",
+    "section": "180 PC route",
+    "human_verified": true
+  },
+  "scenario": {
+    "board_width": 10,
+    "visible_height": 2,
+    "initial_board_mask": "0x00000000000003f0",
+    "remaining_queue": "I",
+    "hold": null,
+    "rule": "srs",
+    "requires_180": true,
+    "goal": "clear-to-empty",
+    "max_pieces": 1,
+    "exact_pieces": 1,
+    "min_remaining_queue": 0,
+    "allow_hold": true,
+    "count_policy": "count-all",
+    "retained_trace_limit": 1
+  },
+  "expected": {
+    "solution_exists": false,
+    "expected_total_solution_count": null,
+    "count_complete": false,
+    "unsupported": true,
+    "unsupported_reason": "scenario_requires_180_unsupported",
+    "accepted_retained_trace_keys": []
+  }
+}

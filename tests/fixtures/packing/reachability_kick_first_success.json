@@ -1,0 +1,35 @@
+{
+  "name": "kick_reachable_only_with_first_success_offset",
+  "policy": "LockedReverseGraph",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x100c01",
+  "operation": {
+    "piece": "T",
+    "from_rotation": 0,
+    "to_rotation": 1,
+    "x": 0,
+    "y": 0
+  },
+  "kick_offsets": [
+    { "dx": 0, "dy": 0 },
+    { "dx": 2, "dy": 0 }
+  ],
+  "expected": {
+    "reachable": true,
+    "kick_index": 1,
+    "x": 2,
+    "later_offset_used_when_earlier_offset_collides": true,
+    "first_success_prefers_earliest_valid_offset": {
+      "board_mask": "0x0",
+      "kick_offsets": [
+        { "dx": 1, "dy": 0 },
+        { "dx": 2, "dy": 0 }
+      ],
+      "expected_kick_index": 0,
+      "expected_x": 1
+    }
+  }
+}

@@ -1,0 +1,33 @@
+[package]
+name = "clearra-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+webgpu-search = ["clearra-app/webgpu-search"]
+stage-profiling = ["clearra-app/wasm-stage-profiling"]
+
+[dependencies]
+clearra-app = { path = "../clearra-app", default-features = false }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-core-executor = { path = "../clearra-core-executor", default-features = false }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-forward-search = { path = "../clearra-forward-search" }
+clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-web-command = { path = "../clearra-web-command" }
+
+[lib]
+doctest = false
+crate-type = ["rlib"]
+
+[dev-dependencies]
+clearra-host-contract = { path = "../clearra-host-contract", features = ["serde"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

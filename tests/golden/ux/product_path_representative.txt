@@ -1,0 +1,3 @@
+kind: path
+status: path-rendered
+representative_trace_source: retained-trace

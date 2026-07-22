@@ -1,0 +1,17 @@
+{
+  "name": "overlap_two_variants_one_pattern",
+  "kind": "coverage-union-fixture",
+  "pattern_universe_id": 1001,
+  "pattern_weight_model_id": 2001,
+  "pattern_count": 2,
+  "rows": [
+    { "candidate_id": 10, "row_kind": "Build", "patterns": [0] },
+    { "candidate_id": 11, "row_kind": "Build", "patterns": [0] }
+  ],
+  "weights": [0.4, 0.6],
+  "expected": {
+    "covered_pattern_count": 1,
+    "probability": 0.4,
+    "forbidden_algorithm": "variant_probability_sum"
+  }
+}

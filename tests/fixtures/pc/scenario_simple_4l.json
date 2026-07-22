@@ -1,0 +1,30 @@
+{
+  "name": "scenario_simple_4l",
+  "source": {
+    "site": "clearra",
+    "page": "MVP1.5 product acceptance",
+    "section": "scenario visible-height fixture",
+    "human_verified": true
+  },
+  "scenario": {
+    "board_width": 10,
+    "visible_height": 4,
+    "initial_board_mask": "0x00000000000003f0",
+    "remaining_queue": "I",
+    "hold": null,
+    "rule": "srs-90",
+    "requires_180": false,
+    "goal": "clear-to-empty",
+    "max_pieces": 1,
+    "exact_pieces": 1,
+    "min_remaining_queue": 0,
+    "allow_hold": true,
+    "count_policy": "count-all",
+    "retained_trace_limit": 1
+  },
+  "expected": {
+    "solution_exists": true,
+    "expected_total_solution_count": null,
+    "accepted_retained_trace_keys": []
+  }
+}

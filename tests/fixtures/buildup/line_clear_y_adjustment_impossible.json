@@ -1,0 +1,6 @@
+{
+  "name": "packing_possible_but_line_clear_y_adjustment_impossible",
+  "kind": "buildup-verifier-fixture",
+  "expected_status": "y_adjustment_impossible",
+  "notes": "A prior line clear changes the board coordinates so a later static operation cannot be replayed safely."
+}

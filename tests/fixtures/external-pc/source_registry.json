@@ -1,0 +1,43 @@
+﻿{
+    "schema_version":  1,
+    "kind":  "external-pc-source-registry",
+    "sources":  [
+                    {
+                        "source_id":  "pcinfo-korea-pco-6p-i-hold",
+                        "name":  "PC Info Korea - 1회차 초급 셋업 / 6p PCO I-hold",
+                        "source_url":  "https://sites.google.com/view/pcinfokorea/연속퍼클-정보/1회차/초급-셋업",
+                        "retrieved_at":  "2026-07-07",
+                        "source_kind":  "external-reference-metadata-only",
+                        "contains_images":  true,
+                        "contains_fumen_link":  false,
+                        "human_verified_required":  true,
+                        "redistribution_note":  "metadata-only; Clearra stores reconstructed typed board/fumen fixtures, not source images"
+                    },
+                    {
+                        "source_id":  "four-pco-opener-full-63",
+                        "name":  "FOUR - Perfect Clear Opener / full PCO source solution labels",
+                        "source_url":  "https://four.lol/perfect-clears/opener/",
+                        "retrieved_at":  "2026-07-07",
+                        "source_kind":  "external-reference-metadata-only",
+                        "contains_images":  true,
+                        "contains_fumen_link":  false,
+                        "preferred_solution_set_file":  "tests/fixtures/external-pc/pco_opener_full_63.source_solutions.json",
+                        "human_verified_required":  true,
+                        "redistribution_note":  "metadata-only; Clearra stores user-confirmed v115 fumen-derived labels, not source images"
+                    },
+                    {
+                        "source_id":  "hse30-tsar-cannon-full-42",
+                        "name":  "hse30 - Tsar Cannon build / full 42 solves",
+                        "source_url":  "https://hse30.tistory.com/1224",
+                        "retrieved_at":  "2026-07-07",
+                        "source_kind":  "external-fumen-reference",
+                        "contains_images":  true,
+                        "contains_fumen_link":  true,
+                        "human_verified_required":  true,
+                        "redistribution_note":  "store normalized fumen fixture and source metadata; avoid image golden",
+                        "preferred_fumen_link_label":  "전체 42개",
+                        "preferred_fumen_source_url":  "https://fumen.zui.jp/?D115@zgilg0zhB8glRpi0R4C8RpB8R4G8ywH8wwD8JeAgWZ?AUEg2AFbcRAyv78Aw3CwBFbEwCTn3LCsAAAAzgzhgli0B8B?tilRpg0C8BtB8RpG8ywH8wwD8JeAAPZAU4HOBFbcRAyv78A?w3CwBFbEwCvXUPCpAAAAzgilzhAtB8glRpi0BtC8RpB8g0A?tG8ywH8wwD8JeAAPZAzCg2AFbcRAyv78Aw3CwBFbEwCv33L?CsAAAAzgi0RpilB8Btg0RpglR4C8BtB8R4G8ywH8wwD8JeA?APZAz8P9AFbcRAyv78Aw3CwBFbEwCzHLWCqAAAAzgQ4zhi0?B8R4ilRpg0C8Q4glB8RpG8ywH8wwD8JeAAPZAz8f2AFbcRA?yv78Aw3CwBFbEwCvyjPCpAAAAzgQ4hlRph0AtB8R4glRpg0?BtC8Q4glB8g0AtG8ywH8wwD8JeAAPZAT43UBFbcRAyv78Aw?3CwBFbEwC6vytCsAAAAzgQ4zhh0AtB8R4ilg0BtC8Q4glB8?g0AtG8ywH8wwD8JeAAPZASEoABFbcRAyv78Aw3CwBFbEwC6?/rtCpAAAAzgQ4hlzhAtB8R4gli0BtC8Q4glB8g0AtG8ywH8?wwD8JeAAPZAyCIOBFbcRAyv78Aw3CwBFbEwC6vTWCpAAAAz?gzhglg0R4B8Btili0C8BtB8R4G8ywH8wwD8JeAAPZAy53UB?FbcRAyv78Aw3CwBFbEwC6/rtCpAAAAzgBtglg0zhB8ili0R?4C8BtB8R4G8ywH8wwD8JeAAPZARE4UBFbcRAyv78Aw3CwBF?bEwCz/TFDpAAAAzgRpg0ilR4B8Rpg0glzhC8h0B8R4G8ywH?8wwD8JeAAPZAxCoABFbcRAyv78Aw3CwBFbEwCpvKWCzAAAA?zgi0ilR4B8Btg0glzhC8BtB8R4G8ywH8wwD8JeAAPZAxCoA?BFbcRAyv78Aw3CwBFbEwCa+TPCzAAAAzgBti0ilB8zhg0gl?R4C8BtB8R4G8ywH8wwD8JeAAPZAx/35AFbcRAyv78Aw3CwB?FbEwCT+TPC6AAAAzgRpR4glh0AtB8Rpilg0BtC8R4B8g0At?G8ywH8wwD8JeAAPZAx/35AFbcRAyv78Aw3CwBFbEwC6/LgC?zAAAAzgQ4hlg0BtRpB8R4gli0RpC8Q4glB8BtG8ywH8wwD8?JeAAPZAR+HOBFbcRAyv78Aw3CwBFbEwCvvTWC6AAAAzgQ4h?lRph0AtB8R4glRpg0BtC8Q4glB8wwAtG8ywH8g0D8JeAAPZ?AR+/DBFbcRAyv78Aw3CwBFbEwCa3TWCqAAAAzgg0RpilR4B?8i0glzhC8RpB8R4G8ywH8wwD8JeAAPZAR+nABFbcRAyv78A?w3CwBFbEwCp/rtCvAAAAzgBti0RpglB8zhg0ilC8BtB8RpG?8ywH8wwD8JeAAPZAR+nABFbcRAyv78Aw3CwBFbEwCMeHgC6?AAAAzgBtglRpg0R4B8ilRpi0C8BtB8R4G8ywH8wwD8JeAAP?ZAR+nABFbcRAyv78Aw3CwBFbEwCKHstC6AAAAzgQ4zhh0At?B8R4ilg0BtC8Q4glB8wwAtG8ywH8g0D8JeAAPZAR7/DBFbc?RAyv78Aw3CwBFbEwC6yjPCpAAAAzgilzhAtB8glRpi0BtC8?RpB8wwAtG8ywH8g0D8JeAAPZAR7f2AFbcRAyv78Aw3CwBFb?EwCv33LCsAAAAzgi0RpilB8Btg0RpywC8BtB8R4G8R4wwH8?glD8JeAAPZAR4XHBFbcRAyv78Aw3CwBFbssC6+aPCsAAAAz?gilzhAtB8glRpywBtC8RpB8h0G8wwg0AtH8g0D8JeAAPZAR?4nABFbcRAyv78Aw3CwBFbUOCvXOMCsAAAAzgilQ4zhB8glR?pR4ywC8RpB8h0G8Q4g0wwH8g0D8JeAAPZAR4nABFbcRAyv7?8Aw3CwBFbUOCv+LMCsAAAAzgBti0glRpB8zhg0glRpC8BtB?8hlG8ywH8wwD8JeAAPYAZlnRASo78A1no2AlsCSASYVWCPe?PFDzgQ4hlywRpB8R4gli0RpC8Q4glB8g0AtG8wwBtH8AtD8?JeAAPYAZ1gRASo78A1no2AlsCSAS4qgCKNExCzgilQ4i0At?B8glRpR4whBtC8RpB8whAtG8Q4whg0H8whD8JeAAPYAYFjR?ASo78A1no2AlsCSASoEgCaNUPCzgzhhlRpB8Bti0Q4RpC8B?tB8R4G8g0glQ4H8glD8JeAAPYAYleRASo78A1no2AlsCSAS?IjFDKH8LCzgQ4hlzhAtB8R4gli0BtC8Q4glB8wwAtG8ywH8?g0D8JeAAPYAYleRASo78A1no2AlsCSASYlFDzi3LCzgilQ4?ywAtB8glRpR4wwBtC8RpB8h0G8Q4g0AtH8g0D8JeAAPYAYl?eRASo78A1no2AlsCSAS4GgCaNWWCzgilg0ywAtB8glRpi0B?tC8RpB8R4G8R4AtH8wwD8JeAAPYAX1pRASo78A1no2AlsCS?ASIbgC6/DxCzgi0Q4ywglB8Btg0R4ilC8BtB8RpG8Q4RpH8?wwD8JeAAPYAX1pRASo78A1no2AlsCSASIaFDzi/wCzgi0Q4?zhB8Btg0R4ilC8BtB8RpG8Q4RpH8glD8JeAAPYAX1pRASo7?8A1no2AlsCSASIaFDzSNPCzgilzhAtB8glRpi0BtC8RpB8R?4G8R4AtH8g0D8JeAAPYAX1pRASo78A1no2AlsCSASIbgC6P?9VCzgzhywglB8Bti0ilC8BtB8RpG8g0RpH8wwD8JeAAPYAX?FjRASo78A1no2AlsCSASIaFDqCOMCzgRpg0Q4zhB8Rpg0R4?ilC8h0B8glAtG8Q4BtH8AtD8JeAAPYAWFsRASo78A1no2Al?sCSAS4iWCK9CMCzgRpi0ilB8RpR4zhC8R4B8glAtG8g0BtH?8AtD8JeAAPYAV1pRASo78A1no2AlsCSAS4KuCJHUPCzgRpg?0Q4ywAtB8Rpg0R4glBtC8h0B8glAtG8Q4hlH8wwD8JeAAPY?AVVlRASo78A1no2AlsCSASYTFDK9KxCzgQ4hlzhAtB8R4gl?ywBtC8Q4glB8h0G8wwg0AtH8g0D8JeAAPYAVleRASo78A1n?o2AlsCSAS4mtCsXOMCzgRpR4ilAtB8RpzhBtC8R4B8wwAtG?8glxwH8wwD8JeAAPYAUVuRASo78A1no2AlsCSASYlFDJ3TW?CzgRpR4i0AtB8RpzhBtC8R4B8wwAtG8xwg0H8wwD8JeAAPY?AUVuRASo78A1no2AlsCSASYlFDJ3jPCzgi0RpilB8Btg0Rp?wwR4C8BtB8R4G8ywH8glD8JeAAPYAUVlRASo78A1no2AlsC?SASIjFDUn/VC",
+                        "source_link_retrieved_at":  "2026-07-07"
+                    }
+                ]
+}

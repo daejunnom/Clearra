@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "scenario_clear_to_empty",
+  "command": [
+    "pc-scenario",
+    "--field",
+    "0x00000000000003f0",
+    "--queue",
+    "I",
+    "--visible-height",
+    "4",
+    "--max-pieces",
+    "1",
+    "--exact-pieces",
+    "1",
+    "--count-policy",
+    "count-all",
+    "--retained-trace-limit",
+    "1"
+  ],
+  "expected": {
+    "kind": "pc-scenario",
+    "problem_preset": "scenario-pc",
+    "goal": "clear-to-empty",
+    "solution_found": true
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "queue_order_mismatch",
+  "kind": "buildup-verifier-fixture",
+  "expected_status": "queue_order_impossible",
+  "source_test": "packing_possible_but_queue_order_impossible_fixture",
+  "notes": "The packing operation set is geometrically coverable, but the fixed queue order cannot consume the required pieces even with hold."
+}

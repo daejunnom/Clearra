@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "convert_fumen_like_json",
+  "command": ["convert", "--from", "fumen-like", "--to", "json"],
+  "input_fumen": "tests/fixtures/fumens/clearra_pc_trace.fumen",
+  "expected": {
+    "kind": "convert",
+    "from": "fumen-like",
+    "to": "json"
+  }
+}

@@ -1,0 +1,3 @@
+kind: scoring
+action: list
+profile_count: 6

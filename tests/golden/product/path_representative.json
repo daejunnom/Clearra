@@ -1,0 +1,14 @@
+{
+  "fixture": "path_representative",
+  "required_markers": [
+    "kind=path",
+    "status=path-rendered",
+    "route=search-problem-core-executor",
+    "path_workflow=SearchProblem -> C Packing / BuildUp -> representative replay -> retained trace -> output",
+    "sample_trace_available=true",
+    "path_reports_representative_trace=true",
+    "retained_representative_trace=true",
+    "representative_trace_source=retained-trace",
+    "path_distinguishes_retained_trace_from_total_count=true"
+  ]
+}

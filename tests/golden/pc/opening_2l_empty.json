@@ -1,0 +1,10 @@
+{
+  "fixture": "opening_2l_empty",
+  "required_markers": [
+    "problem_preset=opening-pc",
+    "compiled_goal=clear-to-empty",
+    "compiled_piece_window=5",
+    "compiled_exact_pieces=5",
+    "packing_candidate_is_solution=false"
+  ]
+}

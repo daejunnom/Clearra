@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "cover_template_basic",
+  "command": ["cover", "--template", "basic"],
+  "expected": {
+    "kind": "build_coverage",
+    "route": "search-problem-core-executor",
+    "coverage_reducer": "pattern-bitset-union"
+  }
+}

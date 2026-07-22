@@ -1,0 +1,13 @@
+[package]
+name = "clearra-spin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-replay = { path = "../clearra-replay" }
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+{
+  "fixture": "convert_fumen_like_json",
+  "required_markers": [
+    "kind=convert",
+    "from=fumen-like",
+    "to=json",
+    "page_count=1",
+    "page_0=kind=pc"
+  ]
+}

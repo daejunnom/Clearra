@@ -1,0 +1,11 @@
+{
+  "fixture": "overlap_two_variants_one_pattern",
+  "required_markers": [
+    "row_kind=Build",
+    "pattern_universe_id=1001",
+    "pattern_weight_model_id=2001",
+    "covered_pattern_count=1",
+    "probability=0.4",
+    "variant_probability_sum=forbidden"
+  ]
+}

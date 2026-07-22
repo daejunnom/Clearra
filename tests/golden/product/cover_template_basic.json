@@ -1,0 +1,20 @@
+{
+  "fixture": "cover_template_basic",
+  "required_markers": [
+    "kind=build_coverage",
+    "status=cover-executed",
+    "route=search-problem-core-executor",
+    "build_coverage_flow=BuildTemplate -> SlotDomain -> SlotAssignment -> BuildUpProblem -> C BuildUp -> CoverageRow -> CoverageMatrix -> UnionProbability",
+    "assignment_count=1",
+    "c_coverage_row_count=0",
+    "c_buildup_coverage_row_generated=false",
+    "coverage_row_identity_validated=true",
+    "coverage_reducer=pattern-bitset-union",
+    "union_probability_reducer=BuildCoverageResult uses union probability",
+    "cover_reports_union_probability=true",
+    "cover_reports_c_coverage_row_count=true",
+    "slot_assignment_count_is_not_success_probability=true",
+    "success_probability_source=UnionProbability",
+    "build_coverage_probability=0"
+  ]
+}

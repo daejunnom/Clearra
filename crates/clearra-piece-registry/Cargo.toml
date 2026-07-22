@@ -1,0 +1,13 @@
+[package]
+name = "clearra-piece-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-profiles = { path = "../clearra-profiles" }
+
+[lints]
+workspace = true

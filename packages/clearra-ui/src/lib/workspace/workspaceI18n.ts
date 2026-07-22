@@ -1,0 +1,575 @@
+import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
+
+export type WorkspaceLanguage = 'en' | 'ko';
+
+const en = {
+  workspaceMode: 'Product mode',
+  pcSearch: 'PC search',
+  buildProbability: 'Build probability',
+  maximumDamage: 'Maximum damage',
+  damageResultMode: 'Damage results',
+  maximumDamageOnly: 'Maximum only',
+  damageAtLeast: 'At least',
+  minimumDamage: 'Minimum damage',
+  minimumDamageHelp: 'Returns every distinct legal execution whose total damage meets or exceeds this value.',
+  spinFinder: 'Spin finder',
+  run: 'Run search',
+  cancel: 'Cancel',
+  idle: 'Ready',
+  running: 'Searching',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+  validating: 'Validating',
+  cancelling: 'Cancelling',
+  language: 'Language',
+  english: 'English',
+  korean: '한국어',
+  workspace: 'Workspace',
+  field: 'Field',
+  targetLines: 'Target lines',
+  fieldHeight: 'Field height',
+  buildField: 'Build field',
+  editLayer: 'Editing layer',
+  editExistingLayer: 'Paint the existing field',
+  editTargetLayer: 'Paint the searched build',
+  editLayerHelp: 'Choose a layer beside Undo. Painting a cell removes it from the other layer.',
+  existingField: 'Existing field',
+  targetBuild: 'Target build',
+  clearLayer: 'Clear layer',
+  fumenExistingField: 'Import existing field from Fumen',
+  existingCells: 'Existing cells',
+  targetCells: 'Target cells',
+  filledCells: 'Filled cells',
+  piecesNeeded: 'Pieces needed',
+  clearField: 'Clear field',
+  mirrorField: 'Mirror field',
+  undo: 'Undo',
+  redo: 'Redo',
+  fumenInput: 'Import starting field from Fumen',
+  loadField: 'Load field',
+  fumenInvalid: 'Enter a valid v110/v115 Fumen whose occupied field fits within the current height.',
+  completedRowsCleared: '{count} completed starting row(s) were cleared before search.',
+  source: 'Piece source',
+  buildContract: 'Build contract',
+  lineClearPolicy: 'Line clears',
+  lineClearInverseExact: 'Inverse Lock-Clear (exact)',
+  queue: 'Queue',
+  queuePattern: 'Queue or pattern',
+  queuePlaceholder: 'IOTSZJL / P4 / [OISZ]',
+  queuePatternHelp: 'Pattern syntax',
+  queuePatternExact: 'Exact queue order; lowercase and uppercase letters are equivalent',
+  queuePatternP4: 'PN draws N ordered pieces from one standard bag; concatenate atoms for later bags',
+  queuePatternChoice: '[] lists the available pieces; [^] uses the standard-bag complement. Without a suffix, choose one',
+  queuePatternSuffix: 'Either group form accepts N for N ordered choices without replacement, or ! for every full order',
+  automatic: 'Automatic',
+  hold: 'Hold',
+  holdPiece: 'Initial hold',
+  empty: 'Empty',
+  search: 'Search',
+  rule: 'Rule',
+  scoreMode: 'Result aggregation',
+  scoreOff: 'All solutions',
+  minimumSolutions: 'Minimum solutions',
+  scoreSummary: 'Field average score',
+  initialB2B: 'Initial B2B',
+  spinProfile: 'Spin profile',
+  forwardContract: 'Forward search contract',
+  fixedQueue: 'Fixed queue',
+  sourceQueue: 'Source queue',
+  fixedQueueHelp: 'Enter the exact piece order. Pattern expressions are not expanded in this search.',
+  spinPatternHelp: 'Exact queues have no length limit. Pattern expressions may generate at most 8 pieces.',
+  spinQueueTooltip: 'Enter either an exact queue or a pattern expression. P4 draws four ordered pieces from one bag; [^T]4 draws four without replacement after excluding T. Pattern results are limited to eight pieces.',
+  forwardProgress: 'Search progress',
+  forwardProgressPreparing: 'Preparing forward search',
+  forwardProgressSearching: 'Expanding reachable states',
+  forwardProgressPatterns: 'Verifying supply patterns',
+  forwardProgressStarting: 'Preparing the first search batch',
+  forwardProgressStates: 'Processed states: {count}',
+  forwardProgressPatternCount: 'Verified patterns: {done}/{total}',
+  forwardSearchContract: 'Execution',
+  forwardDirection: 'Forward reachability',
+  initialCombo: 'Initial combo',
+  spinLines: 'Cleared lines',
+  spinPieceGroup: 'Spin piece group',
+  nonTPieces: 'Non-T pieces',
+  integratedSpins: 'All pieces',
+  any: 'Any',
+  tSpinOnly: 'T-spins only',
+  srsPlusAllMini: 'SRS+ All-Mini',
+  solutionProbabilities: 'Probability by solution',
+  solutionProbability: 'PC probability',
+  averageScore: 'Field average score',
+  scoreAccuracy: 'Score accuracy',
+  scoreStatus: 'Score status',
+  scoreReason: 'Score reason',
+  backend: 'Backend',
+  gpuDevice: 'GPU device',
+  useAllThreads: 'Use every logical processor',
+  limits: 'Resources',
+  copied: 'Copied',
+  progress: 'Progress',
+  progressPreparing: 'Preparing search catalog',
+  progressInitializing: 'Preparing workers',
+  progressSearching: 'Searching and verifying',
+  progressDraining: 'Finishing remaining verification',
+  progressMerging: 'Merging exact results',
+  progressFieldPass: 'Field {current}/{total}',
+  progressGeometry: 'Geometry {count}',
+  progressCandidateFamilies: 'Candidates {emitted}/{total}',
+  progressCandidates: 'Verified {verified}/{emitted}',
+  progressWorkers: 'Workers {active}/{total}',
+  progressTail: 'Oldest task {seconds}s',
+  progressBuild: 'BuildUp {count}',
+  progressCoverage: 'Coverage {count}',
+  elapsed: 'Elapsed',
+  results: 'Results',
+  buildProbabilityResults: 'Build probability results',
+  noBuildProbabilityResult: 'Run a build-probability search to populate this workspace.',
+  requestedBuild: 'Requested build',
+  clearedBuildResult: 'Field after line clears',
+  clearedBuildResultHelp: 'Completed rows are removed and the remaining cells become the next existing field.',
+  nextBuildBaseApplied: 'Applied the cleared field as the existing field for the next build.',
+  patterns: 'patterns',
+  buildableTilings: 'Buildable tilings',
+  candidateTilings: 'Candidate tilings',
+  spinSearch: 'Spin search',
+  spinSearchProbability: 'Spin probability',
+  spinSearchBuilds: 'Spin builds',
+  spinAccuracy: 'Spin accuracy',
+  overview: 'Overview',
+  solutions: 'Solutions',
+  diagnostics: 'Diagnostics',
+  noResult: 'Run a search to populate this workspace.',
+  noDiagnostics: 'No diagnostics',
+  noSolutions: 'No solutions retained',
+  noForwardResult: 'Run this forward search to populate the results.',
+  noForwardSolutions: 'No legal execution matched the request.',
+  bestRoutes: 'Best routes',
+  matchingDamageRoutes: 'Matching routes',
+  spinResults: 'Spin results',
+  damageRoute: 'Damage route {number}',
+  spinResult: 'Spin result {number}',
+  damage: 'damage',
+  mini: 'mini',
+  minoPlacement: 'Mino placement',
+  solutionCount: 'Solutions',
+  coverage: 'Coverage',
+  horizontalSymmetry: 'Horizontal symmetry',
+  originalAndMirror: 'Original + mirrored field',
+  originalBuildProbability: 'Original-field probability',
+  mirrorAddedPatterns: 'Patterns added by mirror',
+  useAsNextBase: 'Use current field as existing field',
+  buildSolutions: 'Builds',
+  buildVariants: 'Total solutions',
+  searchedNodes: 'Searched nodes',
+  resultHash: 'Solution set hash',
+  requestedBackend: 'Requested',
+  actualBackend: 'Executed',
+  workersUsed: 'Workers used',
+  executionDistribution: 'Postprocess execution',
+  fallbackUsed: 'Fallback',
+  trust: 'GPU trust',
+  device: 'Device',
+  memory: 'Peak CPU memory',
+  frontier: 'Peak frontier',
+  complete: 'Complete',
+  incomplete: 'Incomplete',
+  copyHash: 'Copy hash',
+  copy: 'Copy',
+  openFumen: 'Open Fumen',
+  status: 'Status',
+  runtime: 'Runtime',
+  outputKind: 'Output',
+  probabilityComplete: 'Probability complete',
+  countComplete: 'Count complete',
+  truncated: 'Truncated',
+  shader: 'Shader',
+  step: 'Step',
+  piece: 'Piece',
+  rotation: 'Rotation',
+  position: 'Position',
+  cleared: 'Cleared',
+  runtimeWeb: 'Browser WASM',
+  runtimeDesktop: 'Tauri desktop',
+  render: 'Render',
+  supported: 'Supported',
+  unsupported: 'Unsupported',
+  pending: 'Pending',
+  exact: 'Exact',
+  reason: 'Reason',
+  queue_invalid: 'Enter a piece queue or a valid pattern such as P4 or [OISZ].',
+  target_lines_invalid: 'Target lines must be an integer from 1 through 6.',
+  scenario_not_tileable: 'The empty field area must be divisible by four.',
+  scenario_full: 'The scenario field has no empty cells to solve.',
+  build_target_empty: 'Draw at least one target build cell.',
+  build_target_not_tileable: 'The target build cell count must be divisible by four.',
+  build_target_overlap: 'Existing and target build cells cannot overlap.',
+  worker_count_invalid: 'Worker count must be at least one.',
+  initial_b2b_invalid: 'Initial B2B must be a non-negative integer.',
+  minimum_damage_invalid: 'Minimum damage must be an integer from 0 through 4,294,967,295.',
+  forward_queue_invalid: 'Enter a valid fixed queue. Spin finder also accepts queue-pattern expressions.',
+  forward_pattern_too_long: 'Spin-search patterns may generate at most 8 pieces. Use a fixed queue for longer input.',
+  forward_height_invalid: 'Field height must be an integer from 1 through 24.',
+  initial_combo_invalid: 'Initial combo must be a non-negative integer.',
+  gpu_device_invalid: 'GPU device must be Automatic or a numeric adapter index.',
+  resultLimited: 'Showing {count} of {total} solutions.',
+  showMore: 'Show {count} more',
+  solutionNumber: 'Solution {number}',
+  solutionBoard: 'Rendered solution {number}',
+  copySolutionKey: 'Copy solution key',
+  invalidSolutionKey: 'This solution key could not be rendered.',
+  backendUnavailable: 'Backend report unavailable',
+  enabled: 'Enabled',
+  disabled: 'Disabled',
+  none: 'None',
+  yes: 'Yes',
+  no: 'No'
+} as const;
+
+const ko: Record<keyof typeof en, string> = {
+  workspaceMode: '제품 모드',
+  pcSearch: 'PC 탐색',
+  buildProbability: '구축 확률',
+  maximumDamage: '최고 데미지',
+  damageResultMode: '데미지 결과',
+  maximumDamageOnly: '최고만',
+  damageAtLeast: '지정값 이상',
+  minimumDamage: '최소 데미지',
+  minimumDamageHelp: '총 데미지가 지정값 이상인 서로 다른 모든 합법 실행을 반환합니다.',
+  spinFinder: '스핀 탐색',
+  run: '탐색 실행',
+  cancel: '취소',
+  idle: '준비됨',
+  running: '탐색 중',
+  completed: '완료',
+  cancelled: '취소됨',
+  failed: '실패',
+  validating: '검증 중',
+  cancelling: '취소 중',
+  language: '언어',
+  english: 'English',
+  korean: '한국어',
+  workspace: '작업공간',
+  field: '필드',
+  targetLines: '목표 줄',
+  fieldHeight: '필드 높이',
+  buildField: '구축 필드',
+  editLayer: '편집 레이어',
+  editExistingLayer: '기존 필드 그리기',
+  editTargetLayer: '탐색 필드 그리기',
+  editLayerHelp: '실행 취소 옆에서 레이어를 선택합니다. 칸을 그리면 다른 레이어에서는 지워집니다.',
+  existingField: '기존 필드',
+  targetBuild: '탐색 필드',
+  clearLayer: '레이어 비우기',
+  fumenExistingField: 'Fumen에서 기존 필드 불러오기',
+  existingCells: '기존 필드 칸',
+  targetCells: '탐색 필드 칸',
+  filledCells: '채운 칸',
+  piecesNeeded: '필요 미노',
+  clearField: '필드 비우기',
+  mirrorField: '좌우 반전',
+  undo: '실행 취소',
+  redo: '다시 실행',
+  fumenInput: 'Fumen에서 시작 필드 불러오기',
+  loadField: '필드 불러오기',
+  fumenInvalid: '현재 필드 높이에 들어오는 올바른 v110/v115 Fumen을 입력해 주세요.',
+  completedRowsCleared: '시작 필드의 완성된 줄 {count}개를 정리한 뒤 탐색을 시작했습니다.',
+  source: '미노 공급',
+  buildContract: '구축 계약',
+  lineClearPolicy: '줄 삭제',
+  lineClearInverseExact: 'Inverse Lock-Clear (정확)',
+  queue: '큐',
+  queuePattern: '큐 또는 패턴',
+  queuePlaceholder: 'IOTSZJL / P4 / [OISZ]',
+  queuePatternHelp: '패턴 문법',
+  queuePatternExact: '정확한 큐 순서; 영문 대소문자는 동일하게 처리',
+  queuePatternP4: 'PN은 표준 bag 하나에서 순서 있게 N개를 뽑고, 다음 bag은 이어서 표기',
+  queuePatternChoice: '[]는 나열한 미노 집합, [^]는 표준 bag에서 나열한 미노를 뺀 보집합; 접미사가 없으면 하나 선택',
+  queuePatternSuffix: '두 그룹 모두 N을 붙이면 중복 없이 순서 있게 N개 선택하고, !를 붙이면 전체 순서 생성',
+  automatic: '자동',
+  hold: '홀드',
+  holdPiece: '초기 홀드',
+  empty: '비어 있음',
+  search: '탐색',
+  rule: '룰',
+  scoreMode: '결과 집계',
+  scoreOff: '전체 해법',
+  minimumSolutions: '최소 해법',
+  scoreSummary: '필드 평균 점수',
+  initialB2B: '초기 B2B',
+  spinProfile: '스핀 프로필',
+  forwardContract: '정방향 탐색 계약',
+  fixedQueue: '고정 큐',
+  sourceQueue: '공급 큐',
+  fixedQueueHelp: '정확한 미노 순서를 입력합니다. 이 탐색에서는 패턴 문법을 확장하지 않습니다.',
+  spinPatternHelp: '고정 큐는 길이 제한이 없습니다. 패턴식은 최대 8개 미노까지만 생성할 수 있습니다.',
+  spinQueueTooltip: '고정 큐 또는 패턴식을 입력합니다. P4는 한 bag에서 순서 있게 4개를 뽑고, [^T]4는 T를 제외한 미노 중 중복 없이 4개를 뽑습니다. 패턴 결과는 최대 8개 미노입니다.',
+  forwardProgress: '탐색 진행도',
+  forwardProgressPreparing: '정방향 탐색 준비 중',
+  forwardProgressSearching: '도달 가능한 상태 확장 중',
+  forwardProgressPatterns: '공급 패턴 검증 중',
+  forwardProgressStarting: '첫 탐색 묶음 준비 중',
+  forwardProgressStates: '처리 상태: {count}',
+  forwardProgressPatternCount: '검증 패턴: {done}/{total}',
+  forwardSearchContract: '실행',
+  forwardDirection: '정방향 도달 탐색',
+  initialCombo: '초기 콤보',
+  spinLines: '삭제 줄',
+  spinPieceGroup: '스핀 미노 그룹',
+  nonTPieces: 'T 외 미노',
+  integratedSpins: '전체 미노',
+  any: '전체',
+  tSpinOnly: 'T스핀만',
+  srsPlusAllMini: 'SRS+ All-mini',
+  solutionProbabilities: '해법별 PC 확률',
+  solutionProbability: 'PC 확률',
+  averageScore: '필드 평균 점수',
+  scoreAccuracy: '점수 정확도',
+  scoreStatus: '점수 상태',
+  scoreReason: '점수 사유',
+  backend: '백엔드',
+  gpuDevice: 'GPU 장치',
+  useAllThreads: '모든 논리 프로세서 사용',
+  limits: '자원',
+  copied: '복사됨',
+  progress: '진행률',
+  progressPreparing: '탐색 카탈로그 준비 중',
+  progressInitializing: '워커 준비 중',
+  progressSearching: '탐색 및 검증 중',
+  progressDraining: '남은 검증 정리 중',
+  progressMerging: '정확 결과 병합 중',
+  progressFieldPass: '필드 {current}/{total}',
+  progressGeometry: 'Geometry {count}',
+  progressCandidateFamilies: '후보 {emitted}/{total}',
+  progressCandidates: '검증 {verified}/{emitted}',
+  progressWorkers: '워커 {active}/{total}',
+  progressTail: '최장 작업 {seconds}초',
+  progressBuild: 'BuildUp {count}',
+  progressCoverage: 'Coverage {count}',
+  elapsed: '경과 시간',
+  results: '결과',
+  buildProbabilityResults: '구축 확률 결과',
+  noBuildProbabilityResult: '구축 확률 탐색을 실행하면 이 영역에 결과가 표시됩니다.',
+  requestedBuild: '요청한 구축',
+  clearedBuildResult: '줄 삭제 후 필드',
+  clearedBuildResultHelp: '완성된 줄을 지우고 남은 칸을 다음 구축의 기존 필드로 사용합니다.',
+  nextBuildBaseApplied: '줄 삭제 후 필드를 다음 구축의 기존 필드로 적용했습니다.',
+  patterns: '패턴',
+  buildableTilings: '구축 가능한 타일링',
+  candidateTilings: '후보 타일링',
+  spinSearch: '스핀 탐색',
+  spinSearchProbability: '스핀 확률',
+  spinSearchBuilds: '스핀 구축',
+  spinAccuracy: '스핀 정확성',
+  overview: '개요',
+  solutions: '해법',
+  diagnostics: '진단',
+  noResult: '탐색을 실행하면 이 영역에 결과가 표시됩니다.',
+  noDiagnostics: '진단 없음',
+  noSolutions: '보존된 해법 없음',
+  noForwardResult: '정방향 탐색을 실행하면 이 영역에 결과가 표시됩니다.',
+  noForwardSolutions: '요청에 맞는 합법적 실행을 찾지 못했습니다.',
+  bestRoutes: '최적 경로',
+  matchingDamageRoutes: '조건 일치 경로',
+  spinResults: '스핀 결과',
+  damageRoute: '데미지 경로 {number}',
+  spinResult: '스핀 결과 {number}',
+  damage: '데미지',
+  mini: '미니',
+  minoPlacement: '미노 배치',
+  solutionCount: '해법 수',
+  coverage: '커버리지',
+  horizontalSymmetry: '좌우 대칭',
+  originalAndMirror: '원본 + 좌우반전 필드',
+  originalBuildProbability: '원본 필드 확률',
+  mirrorAddedPatterns: '미러로 추가된 패턴',
+  useAsNextBase: '현재 필드를 기존 필드로 사용',
+  buildSolutions: '구축 해법',
+  buildVariants: '전체 해법 수',
+  searchedNodes: '탐색 노드',
+  resultHash: '해법 집합 해시',
+  requestedBackend: '요청',
+  actualBackend: '실행',
+  workersUsed: '사용 워커',
+  executionDistribution: '후처리 실행',
+  fallbackUsed: '폴백',
+  trust: 'GPU 신뢰',
+  device: '장치',
+  memory: '최대 CPU 메모리',
+  frontier: '최대 프런티어',
+  complete: '완전',
+  incomplete: '불완전',
+  copyHash: '해시 복사',
+  copy: '복사',
+  openFumen: 'Fumen 열기',
+  status: '상태',
+  runtime: '런타임',
+  outputKind: '출력',
+  probabilityComplete: '확률 완전성',
+  countComplete: '개수 완전성',
+  truncated: '잘림',
+  shader: '셰이더',
+  step: '단계',
+  piece: '미노',
+  rotation: '회전',
+  position: '좌표',
+  cleared: '삭제 줄',
+  runtimeWeb: '브라우저 WASM',
+  runtimeDesktop: 'Tauri 데스크톱',
+  render: '렌더',
+  supported: '지원',
+  unsupported: '미지원',
+  pending: '대기',
+  exact: '정확성',
+  reason: '사유',
+  queue_invalid: '미노 큐 또는 P4, [OISZ] 같은 올바른 패턴을 입력해 주세요.',
+  target_lines_invalid: '목표 줄은 1~6 사이의 정수여야 합니다.',
+  scenario_not_tileable: '필드의 빈칸 수는 4의 배수여야 합니다.',
+  scenario_full: '탐색할 빈칸이 없습니다.',
+  build_target_empty: '탐색 필드를 한 칸 이상 그려 주세요.',
+  build_target_not_tileable: '탐색 필드의 칸 수는 4의 배수여야 합니다.',
+  build_target_overlap: '기존 필드와 탐색 필드는 겹칠 수 없습니다.',
+  worker_count_invalid: '워커 수는 1 이상이어야 합니다.',
+  initial_b2b_invalid: '초기 B2B는 0 이상의 정수여야 합니다.',
+  minimum_damage_invalid: '최소 데미지는 0~4,294,967,295 사이의 정수여야 합니다.',
+  forward_queue_invalid: '올바른 고정 큐를 입력해 주세요. 스핀 탐색은 큐 패턴식도 지원합니다.',
+  forward_pattern_too_long: '스핀 탐색 패턴은 최대 8개 미노까지만 생성할 수 있습니다. 더 긴 입력은 고정 큐를 사용해 주세요.',
+  forward_height_invalid: '필드 높이는 1~24 사이의 정수여야 합니다.',
+  initial_combo_invalid: '초기 콤보는 0 이상의 정수여야 합니다.',
+  gpu_device_invalid: 'GPU 장치는 자동 또는 숫자 어댑터 인덱스여야 합니다.',
+  resultLimited: '전체 {total}개 중 {count}개를 표시합니다.',
+  showMore: '{count}개 더 보기',
+  solutionNumber: '해법 {number}',
+  solutionBoard: '해법 {number} 렌더링',
+  copySolutionKey: '해법 키 복사',
+  invalidSolutionKey: '이 해법 키를 렌더링할 수 없습니다.',
+  backendUnavailable: '백엔드 보고서 없음',
+  enabled: '사용',
+  disabled: '사용 안 함',
+  none: '없음',
+  yes: '예',
+  no: '아니요'
+};
+
+export type WorkspaceMessageKey = keyof typeof en;
+
+export function workspaceMessage(
+  language: WorkspaceLanguage,
+  key: WorkspaceMessageKey,
+  values: Record<string, string | number> = {}
+): string {
+  let message: string = (language === 'ko' ? ko : en)[key];
+  for (const [name, value] of Object.entries(values)) {
+    message = message.replaceAll(`{${name}}`, String(value));
+  }
+  return message;
+}
+
+export function preferredWorkspaceLanguage(value?: string | null): WorkspaceLanguage {
+  return value?.toLowerCase().startsWith('ko') ? 'ko' : 'en';
+}
+
+export function workspaceProbability(
+  language: WorkspaceLanguage,
+  value: string | number | undefined
+): string {
+  if (value === undefined) return '—';
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return String(value);
+  const normalized = parsed === 0 ? 0 : parsed;
+  return `${(normalized * 100).toLocaleString(language, { maximumFractionDigits: 4 })}%`;
+}
+
+export function workspaceProgressLabel(
+  language: WorkspaceLanguage,
+  telemetry: ClearraSearchProgressTelemetry | null
+): string | null {
+  if (!telemetry) return null;
+  return workspaceMessage(
+    language,
+    {
+      preparing: 'progressPreparing',
+      initializing: 'progressInitializing',
+      searching: 'progressSearching',
+      draining: 'progressDraining',
+      merging: 'progressMerging'
+    }[telemetry.phase]
+  );
+}
+
+export function workspaceProgressDetail(
+  language: WorkspaceLanguage,
+  telemetry: ClearraSearchProgressTelemetry | null
+): string {
+  if (!telemetry) return '';
+  if (telemetry.phase === 'preparing') return '';
+  const formatters = workspaceProgressNumberFormatters[language];
+  const exact = (value: number) => formatters.exact.format(value);
+  const exactDecimal = (value: string) => {
+    try {
+      return formatters.exact.format(BigInt(value));
+    } catch {
+      return value;
+    }
+  };
+  const compact = (value: number) => formatters.compact.format(value);
+  const candidateFamilies = telemetry.geometry_family_count
+    ? workspaceMessage(language, 'progressCandidateFamilies', {
+        emitted: exact(telemetry.candidates_emitted),
+        total: exactDecimal(telemetry.geometry_family_count)
+      })
+    : null;
+  const verification = workspaceMessage(language, 'progressCandidates', {
+    verified: exact(telemetry.candidates_verified),
+    emitted: exact(telemetry.candidates_emitted)
+  });
+  const workers = workspaceMessage(language, 'progressWorkers', {
+    active: exact(telemetry.active_workers),
+    total: exact(telemetry.worker_count)
+  });
+  const pass =
+    telemetry.pass_count > 1
+      ? workspaceMessage(language, 'progressFieldPass', {
+          current: Math.min(telemetry.pass_index + 1, telemetry.pass_count),
+          total: telemetry.pass_count
+        })
+      : null;
+  const geometry = workspaceMessage(language, 'progressGeometry', {
+    count: compact(telemetry.geometry_nodes)
+  });
+  const build = workspaceMessage(language, 'progressBuild', {
+    count: compact(telemetry.build_nodes)
+  });
+  const coverage = workspaceMessage(language, 'progressCoverage', {
+    count: compact(telemetry.coverage_checks)
+  });
+  const tail = workspaceMessage(language, 'progressTail', {
+    seconds: (telemetry.oldest_batch_ms / 1000).toFixed(1)
+  });
+
+  if (telemetry.phase === 'initializing') return workers;
+  if (telemetry.phase === 'searching') {
+    return [pass, candidateFamilies ?? geometry, verification, workers].filter(Boolean).join(' · ');
+  }
+  if (telemetry.phase === 'draining') {
+    return [verification, workers, telemetry.oldest_batch_ms >= 1000 ? tail : null, build]
+      .filter(Boolean)
+      .join(' · ');
+  }
+  return [candidateFamilies ?? geometry, build, coverage].join(' · ');
+}
+
+const workspaceProgressNumberFormatters: Record<
+  WorkspaceLanguage,
+  { exact: Intl.NumberFormat; compact: Intl.NumberFormat }
+> = {
+  en: {
+    exact: new Intl.NumberFormat('en'),
+    compact: new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
+  },
+  ko: {
+    exact: new Intl.NumberFormat('ko'),
+    compact: new Intl.NumberFormat('ko', { notation: 'compact', maximumFractionDigits: 1 })
+  }
+};

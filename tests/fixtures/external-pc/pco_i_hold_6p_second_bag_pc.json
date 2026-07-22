@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "kind": "external-pc-worker-fixture",
+  "fixture_id": "pco_i_hold_6p_second_bag_pc",
+  "source": {
+    "source_id": "pcinfo-korea-pco-6p-i-hold",
+    "human_verified": true,
+    "source_notes": [
+      "Use only I-hold 6p PCO.",
+      "Exclude 7p PCO and no-hold PCO.",
+      "The setup field is the user-confirmed v115 payload decoded from the saved Hard Drop editor HTML."
+    ]
+  },
+  "classification": {
+    "family": "pco",
+    "phase": "second-bag-pc-entry",
+    "setup_kind": "i-hold-6p-pco",
+    "stress_level": "normal"
+  },
+  "input": {
+    "command": "pc-scenario",
+    "initial_fumen": "tests/fixtures/fumens/external-pc/pco_i_hold_6p_second_bag_pc_setup.fumen",
+    "expected_solution_fumen": "tests/fixtures/fumens/external-pc/pco_opener_full_63_solutions.fumen",
+    "expected_setup_rows_top_down": [
+      "OOXXXXXOOO",
+      "OOOXXXXOOO",
+      "OOOOXXXOOO",
+      "OOOXXXXOOO"
+    ],
+    "field_transform": "none",
+    "board_width": 10,
+    "visible_height": 4,
+    "setup_contract": "user-confirmed-v115-occupancy-field",
+    "hold_piece": "I",
+    "hold_empty": false,
+    "placed_piece_count": 6,
+    "second_bag_pc_entry": true,
+    "remaining_queue_source": "fresh-standard-7-bag",
+    "remaining_queue": "",
+    "queue_mode": "standard-7-bag",
+    "piece_window": 4,
+    "exact_pieces": 4,
+    "min_remaining_queue": 4,
+    "goal": "clear-to-empty",
+    "rule": "srs-plus",
+    "allow_hold": true,
+    "count_policy": "count-all",
+    "retained_trace_limit": 1,
+    "backend_modes": [
+      "cpu",
+      "gpu",
+      "hybrid"
+    ],
+    "materialized_budget": {
+      "max_candidates": 250000,
+      "max_patterns": 5040,
+      "max_frontier_states": 1000000
+    },
+    "materialized_expected": {
+      "solution_exists": true,
+      "count_complete": true,
+      "operation_replay_available": false
+    }
+  },
+  "source_solution_labels": [
+    {
+      "label": "I-OIJ",
+      "group": "no-t"
+    },
+    {
+      "label": "I-OLZ",
+      "group": "no-t",
+      "source_variant_count": 2
+    },
+    {
+      "label": "I-OJZ",
+      "group": "no-t",
+      "source_variant_count": 2
+    },
+    {
+      "label": "I-IJS",
+      "group": "no-t",
+      "may_require_180": true
+    },
+    {
+      "label": "I-LSZ",
+      "group": "no-t"
+    },
+    {
+      "label": "I-JSZ",
+      "group": "no-t"
+    },
+    {
+      "label": "I-TOZ",
+      "group": "no-lj"
+    },
+    {
+      "label": "I-TIZ",
+      "group": "no-lj"
+    },
+    {
+      "label": "I-TOL",
+      "group": "with-t-and-lj"
+    },
+    {
+      "label": "I-TOJ",
+      "group": "with-t-and-lj"
+    },
+    {
+      "label": "I-TIJ",
+      "group": "with-t-and-lj",
+      "may_require_180": true
+    },
+    {
+      "label": "I-TLS",
+      "group": "with-t-and-lj"
+    },
+    {
+      "label": "I-TLZ",
+      "group": "with-t-and-lj"
+    },
+    {
+      "label": "I-TJS",
+      "group": "with-t-and-lj"
+    },
+    {
+      "label": "I-TJZ",
+      "group": "with-t-and-lj"
+    }
+  ],
+  "source_solution_sets": [
+    {
+      "source_solution_set_id": "four-pco-opener-full-63",
+      "path": "tests/fixtures/external-pc/pco_opener_full_63.source_solutions.json",
+      "source_page_count": 63,
+      "source_unique_label_count": 58,
+      "operation_page_count": 0,
+      "operation_replay_available": false,
+      "worker_correctness_basis": "source-fumen-colored-tiling-set",
+      "scope_note": "The mirrored 63-page fumen provides the exact colored-field tiling set. Operation replay order remains unavailable."
+    }
+  ],
+  "expected": {
+    "oracle_kind": "source-fumen-colored-tiling-set",
+    "oracle_scope": "The 63-page source fumen is decoded into an exact normalized colored-tiling set; replay order is outside this oracle.",
+    "documented_source_page_count": 63,
+    "expected_normalized_unique_solution_count": 63,
+    "operation_replay_available": false,
+    "worker_correctness_basis": "source-fumen-colored-tiling-set"
+  },
+  "budget": {
+    "max_candidates": 250000,
+    "max_patterns": 5040,
+    "timeout_ms": 15000,
+    "trace_retention": "representative"
+  }
+}

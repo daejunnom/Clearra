@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "verify_all",
+  "command": ["verify"],
+  "expected": {
+    "status": "ok",
+    "pc": "ok",
+    "setup": "ok",
+    "build_coverage": "ok",
+    "kicks": "ok"
+  }
+}

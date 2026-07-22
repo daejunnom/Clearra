@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "continue_token_basic",
+  "seed_command": ["pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold"],
+  "command": ["continue", "<continuation_token>"],
+  "expected": {
+    "kind": "continue",
+    "route": "search-problem-core-executor",
+    "continuation_kind": "opening"
+  }
+}

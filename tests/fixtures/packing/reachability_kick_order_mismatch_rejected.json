@@ -1,0 +1,20 @@
+{
+  "name": "kick_order_mismatch_rejected",
+  "policy": "LockedReverseGraph",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x100c01",
+  "operation": {
+    "piece": "T",
+    "from_rotation": 0,
+    "to_rotation": 1,
+    "x": 0,
+    "y": 0
+  },
+  "expected": {
+    "must_not_accept_kick_index": 0,
+    "accepted_kick_index": 1
+  }
+}

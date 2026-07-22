@@ -1,0 +1,75 @@
+# Rust build output
+/target/
+/.cargo/target*/
+/cargo-target-tests/
+**/*.rs.bk
+*.pdb
+__pycache__/
+*.py[cod]
+
+# Generated dependency and build artifacts
+node_modules/
+/dist/
+/dist-server/
+/build/
+**/build/
+/coverage/
+/.cache/
+/.pnpm-store/
+/.turbo/
+/.vite/
+/.next/
+/.nuxt/
+**/.svelte-kit/
+**/src-tauri/gen/schemas/
+/storybook-static/
+/playwright-report/
+/test-results/
+/blob-report/
+/output/
+/apps/clearra-web/static/wasm/
+
+# Local credentials and machine configuration
+.env
+.env.*
+*.pem
+*.key
+*api-key*
+*apikey*
+*credential*
+*credentials*
+*private-key*
+*private_key*
+*service-account*.json
+*service_account*.json
+
+# Logs and temporary files
+/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tmp
+*.temp
+*.profraw
+*.profdata
+*.trace
+*.benchmark.json
+*.benchmark.csv
+.DS_Store
+Thumbs.db
+
+# Local bundle outputs
+/project_bundle.txt
+/package-bundle.txt
+/_local/project_bundle.txt
+/research-data/
+/*.local
+/*.local.*
+
+# Root handoff/design notes
+/Clearra 핸드오프.md
+/Clearra 체크리스트.md
+/Clearra 파일 구조.md
+/Clearra 프로그래밍 원칙.md

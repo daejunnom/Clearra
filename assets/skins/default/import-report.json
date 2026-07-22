@@ -1,0 +1,32 @@
+{
+  "atlas_png_sha256": "5effb8a2b1279914c7d0156c56a744cf9b738c6a217da6c26908dae79213d6d3",
+  "import_tool_version": "clearra-asset-import-v1",
+  "kind": "asset-import-security-report",
+  "license": "MIT",
+  "limits": {
+    "max_css_rules": 512,
+    "max_decompressed_bytes": 4194304,
+    "max_elements": 2000,
+    "max_external_references": 0,
+    "max_filters": 0,
+    "max_gradients": 128,
+    "max_group_depth": 32,
+    "max_import_time_ms": 10000,
+    "max_memory_mib": 256,
+    "max_path_commands": 20000,
+    "max_path_segments_per_path": 4096,
+    "max_raster_pixels": 16777216,
+    "max_svg_bytes": 1048576,
+    "max_viewbox_height": 4096,
+    "max_viewbox_width": 4096
+  },
+  "manifest_sha256": "0496f2455591df1d1f92a6dc9997da698db5b67ba11b4f61bad07730eeb3f138",
+  "origin_kind": "builtin-reviewed",
+  "original_file_sha256": "745c00be5101468a71e8fcb679bad91b2419b986f0ee257ea1ae1eb16d0b9a42",
+  "provenance_sha256": "4aa7acfcb96901c9fdc3467df9337bdd11181c8b4ea8496402e57cc632194af0",
+  "redistribution": "Permitted under the Clearra MIT license",
+  "sanitized_svg_sha256": "22c8ddad9360e2f229333b5a4431bba165ce8db9cae7ecb115f029a9d0be01b9",
+  "schema_version": 1,
+  "security_report_id": "clearra-asset-0496f2455591df1d",
+  "source_label": "tools/asset-import/default_skin_source.svg"
+}

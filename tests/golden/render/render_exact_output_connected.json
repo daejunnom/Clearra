@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "render_exact_output",
+  "skin_id": "default",
+  "formats": [
+    { "format": "png", "supported": true, "render_exact": true },
+    { "format": "gif", "supported": true, "render_exact": true }
+  ],
+  "png_board_sha256": "4c495fe647cf433c1fbd4ffdd6e33fd06b56593599de243e48683a4956c0c6d7",
+  "png_lock_frame_sha256": "466fcbf3f87a6dbfd81d53a33d4f5c33040c3bf5f419845c8507c33e0bf9b4e3",
+  "gif_timeline_sha256": "cdd5aaf1b9f4068f16ce35f8d64dc3ba98bffeeadd77feff4d3a473bddd42d27"
+}

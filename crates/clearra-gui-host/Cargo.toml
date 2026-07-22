@@ -1,0 +1,37 @@
+[package]
+name = "clearra-gui-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+native-c-core = ["clearra-app/native-c-core"]
+webgpu-search = ["clearra-app/webgpu-search"]
+
+[dependencies]
+clearra-app = { path = "../clearra-app" }
+clearra-build-coverage = { path = "../clearra-build-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-host-contract = { path = "../clearra-host-contract" }
+clearra-i18n = { path = "../clearra-i18n" }
+clearra-output = { path = "../clearra-output" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-problem = { path = "../clearra-problem" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-supply = { path = "../clearra-supply" }
+clearra-ui-schema = { path = "../clearra-ui-schema" }
+clearra-validation = { path = "../clearra-validation" }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+[lib]
+doctest = false
+
+[[test]]
+name = "gui_host_contract"
+path = "tests/gui_host_contract.rs"
+
+[lints]
+workspace = true

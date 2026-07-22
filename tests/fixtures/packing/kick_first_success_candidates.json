@@ -1,0 +1,33 @@
+{
+  "name": "kick_first_success_candidates",
+  "mode": "locked",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0x100c01",
+  "active_piece": "T",
+  "rule": "srs",
+  "candidate_contract": {
+    "static_candidate_only": true,
+    "collision_free_is_not_reachability": true,
+    "kick_first_success_order_required": true,
+    "packing_candidate_is_solution": false
+  },
+  "operation": {
+    "from_rotation": 0,
+    "to_rotation": 1,
+    "x": 0,
+    "y": 0
+  },
+  "kick_offsets": [
+    { "dx": 0, "dy": 0 },
+    { "dx": 2, "dy": 0 }
+  ],
+  "expected": {
+    "candidate_present": true,
+    "kick_index": 1,
+    "later_offset_used_when_earlier_offset_collides": true,
+    "coverage_row_created_directly": false
+  }
+}

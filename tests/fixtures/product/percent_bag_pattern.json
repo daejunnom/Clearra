@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "percent_bag_pattern",
+  "command": ["percent", "--queue", "IOT", "--bag-aligned", "--min-len", "3"],
+  "expected": {
+    "kind": "percent",
+    "route": "search-problem-core-executor",
+    "coverage_reducer": "pattern-bitset-union"
+  }
+}

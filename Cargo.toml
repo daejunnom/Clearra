@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clearra-core-domain",
+    "crates/clearra-problem",
+    "crates/clearra-core-ffi",
+    "crates/clearra-core-executor",
+    "crates/clearra-replay",
+    "crates/clearra-fumen",
+    "crates/clearra-render",
+    "crates/clearra-profiles",
+    "crates/clearra-piece-registry",
+    "crates/clearra-geometry",
+    "crates/clearra-rules",
+    "crates/clearra-supply",
+    "crates/clearra-pc-graph",
+    "crates/clearra-two-line",
+    "crates/clearra-exact-cover",
+    "crates/clearra-objectives",
+    "crates/clearra-coverage",
+    "crates/clearra-build-coverage",
+    "crates/clearra-setup-search",
+    "crates/clearra-spin",
+    "crates/clearra-scoring",
+    "crates/clearra-forward-search",
+    "crates/clearra-postprocess",
+    "crates/clearra-postprocess-gpu",
+    "crates/clearra-output",
+    "crates/clearra-validation",
+    "crates/clearra-i18n",
+    "crates/clearra-host-contract",
+    "crates/clearra-app",
+    "crates/clearra-gui-host",
+    "crates/clearra-web-command",
+    "crates/clearra-webgpu",
+    "crates/clearra-wasm",
+    "crates/clearra-wasm-abi",
+    "crates/clearra-cli",
+    "crates/clearra-ui-schema",
+    "crates/clearra-invariant-tests",
+    "tools/clearra-pc-artifact",
+]
+exclude = ["apps/clearra-desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde_json = "=1.0.145"
+
+[patch.crates-io]
+document-features = { path = "tools/vendor/document-features" }
+parking_lot_core = { path = "tools/vendor/parking_lot_core" }
+serde_json = { path = "tools/vendor/serde_json" }
+wgpu-hal = { path = "tools/vendor/wgpu-hal" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

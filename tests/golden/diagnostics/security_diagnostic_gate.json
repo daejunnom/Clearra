@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "kind": "diagnostic",
+  "contract": {
+    "command": {
+      "kind": "diagnostic"
+    },
+    "diagnostics": {
+      "count": 1,
+      "items": [
+        {
+          "code": "E_FRONTEND_TYPED_REQUEST_REQUIRED",
+          "severity": "error",
+          "message": "frontend attempted to bypass typed AppRequest construction",
+          "location": null,
+          "suggested_next_step": "Build a typed AppRequest before execution.",
+          "evidence": {
+            "frontend_route": "gui-host"
+          }
+        }
+      ]
+    }
+  }
+}

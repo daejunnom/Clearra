@@ -1,0 +1,163 @@
+use super::*;
+use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+use clearra_geometry::layout::board64_layout::Board64Layout;
+use clearra_replay::{BuildVariantOperation, BuildVariantReplayInput, ReplayEngine};
+
+#[test]
+fn dispatches_message_to_text_writer() {
+    let message = RenderMessage::new("pc").with_field("lines", "2");
+
+    assert_eq!(
+        RenderFormatDispatcher::render(&message, RenderFormat::Text),
+        "kind: pc\nlines: 2"
+    );
+}
+
+#[test]
+fn pc_text_default_is_human_sized() {
+    let message = RenderMessage::new("pc")
+        .with_value("status", "searched")
+        .with_value("lines", 2usize)
+        .with_value("queue_len", 7usize)
+        .with_value("coverage_probability", "1.0")
+        .with_value("executor_flow", "rust-shell-to-core")
+        .with_value("compact_problem_descriptor", "compact")
+        .with_value("gpu_backend_scope", "disabled")
+        .with_value("hybrid_scheduler", "not-supported")
+        .with_value("score_event_basis", "sample")
+        .with_value("coverage_row_view", "raw");
+
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Text);
+
+    assert!(rendered.contains("kind: pc"));
+    assert!(rendered.contains("status: searched"));
+    assert!(rendered.contains("lines: 2"));
+    assert!(rendered.contains("queue_len: 7"));
+    assert!(rendered.contains("coverage_probability: 1.0"));
+    assert!(!rendered.contains("executor_flow"));
+    assert!(!rendered.contains("compact_problem_descriptor"));
+    assert!(!rendered.contains("gpu_backend_scope"));
+    assert!(!rendered.contains("hybrid_scheduler"));
+    assert!(!rendered.contains("score_event_basis"));
+    assert!(!rendered.contains("coverage_row_view"));
+}
+
+#[test]
+fn pc_text_verbose_contains_executor_flow() {
+    let message = RenderMessage::new("pc")
+        .with_value("lines", 2usize)
+        .with_value("executor_flow", "rust-shell-to-core");
+
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::TextVerbose);
+
+    assert!(rendered.contains("lines: 2"));
+    assert!(rendered.contains("executor_flow: rust-shell-to-core"));
+}
+
+#[test]
+fn pc_json_still_contains_full_contract() {
+    let message = RenderMessage::new("pc")
+        .with_value("lines", 2usize)
+        .with_value("executor_flow", "rust-shell-to-core");
+
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+
+    assert!(rendered.contains("\"lines\":2"));
+    assert!(rendered.contains("\"executor_flow\":\"rust-shell-to-core\""));
+}
+
+#[test]
+fn dispatches_message_to_json_writer() {
+    let message = RenderMessage::new("pc").with_value("lines", 2usize);
+
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+    assert!(rendered.contains("\"schema_version\":2"));
+    assert!(rendered.contains("\"kind\":\"pc\""));
+    assert!(rendered.contains("\"summary\":{\"lines\":2}"));
+    assert!(rendered.contains("\"contract\":{\"command\""));
+}
+
+#[test]
+fn dispatches_message_to_fumen_like_writer() {
+    let message = RenderMessage::new("pc").with_field("lines", "2");
+
+    assert_eq!(
+        RenderFormatDispatcher::render(&message, RenderFormat::FumenLike),
+        "v115@vhAAgWVArORoDlcRPEjI8vBsOprDz4K6BSAAAA"
+    );
+}
+
+#[test]
+fn dispatches_replay_trace_to_all_output_formats() {
+    let layout = Board64Layout::standard_10_by_lines(2).expect("layout");
+    let input = BuildVariantReplayInput::new(
+        "variant-1",
+        layout,
+        0,
+        vec![BuildVariantOperation::new(
+            PieceKind::O,
+            RotationState::Zero,
+            0,
+            0,
+        )],
+    );
+    let trace = ReplayEngine::build_variant_to_trace(&input).expect("trace");
+
+    assert!(
+        RenderFormatDispatcher::render_replay_trace(&trace, RenderFormat::Text)
+            .contains("kind: replay-trace")
+    );
+    assert!(
+        RenderFormatDispatcher::render_replay_trace(&trace, RenderFormat::Json)
+            .contains("\"kind\":\"replay-trace\"")
+    );
+    assert!(
+        RenderFormatDispatcher::render_replay_trace(&trace, RenderFormat::FumenLike)
+            .starts_with("v115@")
+    );
+}
+
+#[test]
+fn png_gif_exact_output_renders_replay_trace() {
+    let golden = include_str!("../../../tests/golden/render/render_exact_output_connected.json");
+    let layout = Board64Layout::standard_10_by_lines(2).expect("layout");
+    let input = BuildVariantReplayInput::new(
+        "bitmap-output",
+        layout,
+        0,
+        vec![BuildVariantOperation::new(
+            PieceKind::O,
+            RotationState::Zero,
+            0,
+            0,
+        )],
+    );
+    let trace = ReplayEngine::build_variant_to_trace(&input).expect("trace");
+
+    for format in [ExactBitmapOutputFormat::Png, ExactBitmapOutputFormat::Gif] {
+        let rendered = RenderExactOutputGate::render_replay_trace(&trace, format)
+            .expect("exact bitmap output");
+
+        assert_eq!(rendered.format(), format);
+        assert!(rendered.render_exact());
+        assert_eq!(rendered.skin_id(), "default");
+        match format {
+            ExactBitmapOutputFormat::Png => assert!(rendered.bytes().starts_with(b"\x89PNG")),
+            ExactBitmapOutputFormat::Gif => assert!(rendered.bytes().starts_with(b"GIF89a")),
+        }
+        assert!(golden.contains(&format!("\"format\": \"{}\"", format.as_str())));
+    }
+    assert!(golden.contains("\"render_exact\": true"));
+    assert!(golden.contains("\"supported\": true"));
+}
+
+#[test]
+fn renderer_reports_export_limits() {
+    let limits = RenderExactOutputGate::bitmap_export_limits();
+
+    assert_eq!(limits.max_frame_width(), 1920);
+    assert_eq!(limits.max_frame_height(), 1080);
+    assert_eq!(limits.max_gif_frames(), 240);
+    assert_eq!(limits.max_frame_delay_ms(), 5000);
+    assert_eq!(limits.renderer(), "clearra-render-exact-bitmap");
+}

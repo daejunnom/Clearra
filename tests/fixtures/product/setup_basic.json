@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "mvp1-product-command-fixture",
+  "fixture_id": "setup_basic",
+  "command": ["setup", "--queue", "IOTSZJL", "--fixed"],
+  "expected": {
+    "kind": "setup",
+    "route": "search-problem-core-executor",
+    "raw_metrics": true,
+    "coverage_reducer": "pattern-bitset-union"
+  }
+}

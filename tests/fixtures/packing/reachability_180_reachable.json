@@ -1,0 +1,20 @@
+{
+  "name": "one_eighty_reachable",
+  "policy": "Locked180ReverseGraph",
+  "layout": {
+    "width": 10,
+    "height": 4
+  },
+  "board_mask": "0xc0800004",
+  "operation": {
+    "piece": "T",
+    "rotation": 2,
+    "x": 0,
+    "y": 0
+  },
+  "expected": {
+    "locked90_reachable": false,
+    "reachable": true,
+    "used_180": true
+  }
+}

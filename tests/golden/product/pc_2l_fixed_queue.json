@@ -1,0 +1,15 @@
+{
+  "fixture": "pc_2l_fixed_queue",
+  "required_markers": [
+    "kind=pc",
+    "route=search-problem-core-executor",
+    "problem_preset=opening-pc",
+    "compiled_goal=clear-to-empty",
+    "packing_backend=cpu",
+    "buildup_backend_owner=cpu",
+    "coverage_reducer=pattern-bitset-union",
+    "coverage_row_source=c-coverage-row-view",
+    "rust_objective_reducer=ObjectiveReducer::reduce",
+    "packing_candidate_is_solution=false"
+  ]
+}

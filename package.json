@@ -1,0 +1,9 @@
+{
+  "name": "clearra-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

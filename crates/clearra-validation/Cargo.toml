@@ -1,0 +1,25 @@
+[package]
+name = "clearra-validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-build-coverage = { path = "../clearra-build-coverage" }
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-core-ffi = { path = "../clearra-core-ffi" }
+clearra-coverage = { path = "../clearra-coverage" }
+clearra-geometry = { path = "../clearra-geometry" }
+clearra-objectives = { path = "../clearra-objectives" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-profiles = { path = "../clearra-profiles" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
+clearra-setup-search = { path = "../clearra-setup-search" }
+clearra-supply = { path = "../clearra-supply" }
+clearra-two-line = { path = "../clearra-two-line" }
+
+[lints]
+workspace = true

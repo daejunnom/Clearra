@@ -1,0 +1,3 @@
+kind: verify-kicks
+status: verified
+kick_verification_failures: 0

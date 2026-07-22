@@ -1,0 +1,11 @@
+{
+  "fixture": "simple_family_union",
+  "required_markers": [
+    "shape_family_id=1",
+    "covered_pattern_count=3",
+    "coverage_probability=0.75",
+    "renormalized=false",
+    "PatternBitSet OR union",
+    "variant_probability_sum=forbidden"
+  ]
+}

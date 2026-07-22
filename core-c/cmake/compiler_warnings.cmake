@@ -1,0 +1,23 @@
+function(clearra_core_enable_strict_warnings target_name)
+    if(MSVC)
+        target_compile_options(
+            ${target_name}
+            PRIVATE
+                /W4
+                /we4013
+                /we4024
+                /we4047
+                /we4133
+        )
+    else()
+        target_compile_options(
+            ${target_name}
+            PRIVATE
+                -Wall
+                -Wextra
+                -Werror=implicit-function-declaration
+                -Werror=incompatible-pointer-types
+                -Werror=int-conversion
+        )
+    endif()
+endfunction()

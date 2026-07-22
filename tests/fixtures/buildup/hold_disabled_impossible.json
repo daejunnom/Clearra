@@ -1,0 +1,6 @@
+{
+  "name": "packing_possible_but_hold_disabled_impossible",
+  "kind": "buildup-verifier-fixture",
+  "expected_status": "hold_disabled_impossible",
+  "notes": "The candidate would require hold to expose the desired operation piece, but hold is disabled."
+}

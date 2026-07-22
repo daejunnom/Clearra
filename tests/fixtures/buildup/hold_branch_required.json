@@ -1,0 +1,10 @@
+{
+  "name": "hold_branch_required",
+  "kind": "buildup-enumeration-fixture",
+  "expected_status": "enumerates_hold_branch",
+  "source_tests": [
+    "buildup_enumerate_variants_returns_multiple_hold_branches",
+    "buildup_enumerate_variants_preserves_hold_branch_kind"
+  ],
+  "notes": "EnumerateVariants must preserve current-piece and hold-piece branches instead of collapsing the first successful witness."
+}
