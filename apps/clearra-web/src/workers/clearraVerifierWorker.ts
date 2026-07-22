@@ -7,7 +7,7 @@ import {
 } from './clearraWasmRuntime';
 
 type VerifierRequest =
-  | { type: 'prewarm' }
+  | { type: 'prewarm'; compiledModule?: WebAssembly.Module }
   | { type: 'initialize'; initialization: string | ArrayBuffer }
   | { type: 'consume'; requestId: number; batch: ArrayBuffer }
   | { type: 'finish'; requestId: number };
@@ -35,7 +35,7 @@ self.onmessage = (event: MessageEvent<VerifierRequest>) => {
 async function handleRequest(request: VerifierRequest) {
   try {
     if (request.type === 'prewarm') {
-      wasm ??= await loadClearraWasmModule();
+      wasm ??= await loadClearraWasmModule(request.compiledModule);
       post({ type: 'prewarmed' });
       return;
     }

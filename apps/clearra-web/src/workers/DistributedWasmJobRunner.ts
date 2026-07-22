@@ -13,13 +13,14 @@ const PROGRESS_REFRESH_MS = 50;
 const yieldToWorkerHost = createWorkerHostYield();
 const sharedVerifierPool = new ClearraVerifierPool();
 
-export function prewarmDistributedWorkers(totalWorkerCount: number): Promise<void> {
-  return sharedVerifierPool
-    .prewarm(Math.max(0, Math.floor(totalWorkerCount) - 1))
-    .catch((error) => {
-      sharedVerifierPool.cancel();
-      throw error;
-    });
+export function prewarmDistributedWorkers(
+  totalWorkerCount: number,
+  compiledModule: WebAssembly.Module
+): Promise<void> {
+  return sharedVerifierPool.prewarm(
+    Math.max(0, Math.floor(totalWorkerCount) - 1),
+    compiledModule
+  );
 }
 
 export function disposeDistributedWorkers() {
@@ -101,7 +102,8 @@ export class DistributedWasmJobRunner {
       emitProgress();
       const verifierInitialization = this.pool.initialize(
         plan.workerInitialization ?? commandText,
-        verifierCount
+        verifierCount,
+        this.wasm.compiled_module()
       );
       void verifierInitialization.catch(() => undefined);
       await yieldToWorkerHost();

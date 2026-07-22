@@ -5,9 +5,17 @@ import { applyWasmWorkerEvent, cancelWasmCommand, runWasmCommand } from './wasmW
 const COOPERATIVE_CANCEL_GRACE_MS = 100;
 const OWNER_DISPOSE_GRACE_MS = 100;
 
+type RuntimePrewarmWorkerEvent = {
+  type: 'runtime_prewarm';
+  phase: 'started' | 'finished';
+  workerCount: number;
+};
+
 export class WasmTerminalWorkerController {
   private worker: Worker | null = null;
   private cancellingWorker: Worker | null = null;
+  private prewarmingWorker: Worker | null = null;
+  private prewarmWorkerCount = 1;
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private workerFactory: (() => Worker) | null) {}
@@ -19,18 +27,22 @@ export class WasmTerminalWorkerController {
   }
 
   run() {
+    if (this.worker && this.prewarmingWorker === this.worker) {
+      this.releaseWorker(this.worker);
+    }
     const worker = this.ensureWorker();
     if (!worker) return;
     try {
-      runWasmCommand(worker);
+      runWasmCommand(worker, this.prewarmWorkerCount);
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_MESSAGE_FAILED', errorMessage(error));
     }
   }
 
   prewarm(workerCount: number) {
+    this.prewarmWorkerCount = Math.max(1, Math.floor(workerCount));
     const worker = this.ensureWorker();
-    if (worker) this.prewarmWorker(worker, workerCount);
+    if (worker) this.prewarmWorker(worker, this.prewarmWorkerCount);
   }
 
   cancel() {
@@ -70,8 +82,14 @@ export class WasmTerminalWorkerController {
     if (!this.worker && this.workerFactory) {
       const worker = this.workerFactory();
       this.worker = worker;
-      worker.onmessage = (message: MessageEvent<ClearraWasmWorkerEvent>) => {
+      worker.onmessage = (
+        message: MessageEvent<ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent>
+      ) => {
         if (this.worker !== worker) return;
+        if (isRuntimePrewarmWorkerEvent(message.data)) {
+          this.prewarmingWorker = message.data.phase === 'started' ? worker : null;
+          return;
+        }
         if (this.cancellingWorker === worker) {
           if (message.data.event === 'cancelled') {
             applyWasmWorkerEvent(message.data);
@@ -142,6 +160,7 @@ export class WasmTerminalWorkerController {
 
   private prewarmWorker(worker: Worker, workerCount: number) {
     try {
+      this.prewarmingWorker = worker;
       postPrewarmRuntime(worker, workerCount);
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_PREWARM_FAILED', errorMessage(error));
@@ -151,6 +170,7 @@ export class WasmTerminalWorkerController {
   private releaseWorker(worker: Worker) {
     if (this.worker !== worker) return;
     this.clearCancelFallback();
+    if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
@@ -161,6 +181,7 @@ export class WasmTerminalWorkerController {
   private disposeOwnedWorker(worker: Worker) {
     if (this.worker !== worker) return;
     this.clearCancelFallback();
+    if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
@@ -178,6 +199,12 @@ export class WasmTerminalWorkerController {
     this.cancelFallback = null;
     this.cancellingWorker = null;
   }
+}
+
+function isRuntimePrewarmWorkerEvent(
+  event: ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent
+): event is RuntimePrewarmWorkerEvent {
+  return 'type' in event && event.type === 'runtime_prewarm';
 }
 
 function errorMessage(error: unknown): string {
