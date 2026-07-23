@@ -10,7 +10,17 @@ const MAX_DAMAGE = 0xffff_ffff;
 
 export type ForwardTool = 'damage' | 'spin-finder';
 export type ForwardDamageAggregation = 'maximum' | 'at-least';
-export type ForwardSpinLines = 'any' | 0 | 1 | 2 | 3 | 4;
+export type ForwardSpinLines =
+  | 'any'
+  | '0'
+  | '1'
+  | '2'
+  | '3'
+  | '4'
+  | '1+'
+  | '2+'
+  | '3+'
+  | '4+';
 export type ForwardSpinCategory = 'any' | 't' | 'other';
 
 export type ForwardSearchRequest = {
@@ -118,7 +128,7 @@ export function buildForwardSearchCommand(request: ForwardSearchRequest): string
       tokens.push('--minimum-damage', String(request.minimumDamage));
     }
   } else {
-    tokens.push('--lines', String(request.spinLines));
+    tokens.push('--lines', request.spinLines);
     tokens.push('--spin-category', request.spinCategory);
   }
   return tokens.join(' ');

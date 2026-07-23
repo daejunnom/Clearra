@@ -13,6 +13,7 @@ pub enum TSpinRecognition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NonTSpinRecognition {
     Disabled,
+    ImmobileRegular,
     ImmobileMini,
 }
 
@@ -85,7 +86,10 @@ impl SpinProfileId {
     }
 
     pub const fn non_t_spins_score_as_t_spin_mini(self) -> bool {
-        self.recognizes_non_t_immobile_spins()
+        matches!(
+            SpinProfile::builtin(self).non_t_spin_recognition(),
+            NonTSpinRecognition::ImmobileMini
+        )
     }
 
     #[allow(non_upper_case_globals)]
@@ -136,15 +140,15 @@ impl SpinProfile {
                 ),
                 SpinProfileId::AllSpin => (
                     TSpinRecognition::ThreeCorner,
-                    NonTSpinRecognition::ImmobileMini,
-                    SpinAwardPolicy::AllSpinAsTSpinMini,
-                    AllSpinScoreMapping::UseTSpinMiniTable,
+                    NonTSpinRecognition::ImmobileRegular,
+                    SpinAwardPolicy::AllSpins,
+                    AllSpinScoreMapping::NativeAllSpinTable,
                 ),
                 SpinProfileId::AllSpinPlus => (
                     TSpinRecognition::ThreeCornerOrImmobileMini,
-                    NonTSpinRecognition::ImmobileMini,
-                    SpinAwardPolicy::AllSpinAsTSpinMini,
-                    AllSpinScoreMapping::UseTSpinMiniTable,
+                    NonTSpinRecognition::ImmobileRegular,
+                    SpinAwardPolicy::AllSpins,
+                    AllSpinScoreMapping::NativeAllSpinTable,
                 ),
                 SpinProfileId::AllMini => (
                     TSpinRecognition::ThreeCorner,
@@ -194,7 +198,7 @@ impl SpinProfile {
     pub const fn recognizes_non_t_immobile_spins(self) -> bool {
         matches!(
             self.non_t_spin_recognition,
-            NonTSpinRecognition::ImmobileMini
+            NonTSpinRecognition::ImmobileRegular | NonTSpinRecognition::ImmobileMini
         )
     }
 

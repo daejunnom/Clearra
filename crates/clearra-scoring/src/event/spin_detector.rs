@@ -7,7 +7,7 @@ use clearra_replay::{
 use crate::spin::t_spin_corner_rule::{exact_t_spin_mini, fifth_kick_test_regular_override};
 use crate::{
     event::spin_event::SpinEvent,
-    profile::{ScoreProfile, SpinProfile, SpinRuleId, TSpinRecognition},
+    profile::{NonTSpinRecognition, ScoreProfile, SpinProfile, SpinRuleId, TSpinRecognition},
     spin::{
         BoardAnchor, KickEvidence, MovementInfo, RotationRequest, SpinClassificationInput,
         SpinClassifier, TSpinCornerRule, TraceCompleteness,
@@ -219,12 +219,19 @@ fn immobile_profile_fallback(
         return None;
     }
     let piece = piece.to_ascii_uppercase();
-    let accepted = if piece == 'T' {
-        spin_profile.allows_immobile_t_fallback()
+    let mini = if piece == 'T' {
+        if !spin_profile.allows_immobile_t_fallback() {
+            return None;
+        }
+        true
     } else {
-        spin_profile.recognizes_non_t_immobile_spins()
+        match spin_profile.non_t_spin_recognition() {
+            NonTSpinRecognition::Disabled => return None,
+            NonTSpinRecognition::ImmobileRegular => false,
+            NonTSpinRecognition::ImmobileMini => true,
+        }
     };
-    accepted.then_some(SpinEvent::new(piece, true, cleared_lines))
+    Some(SpinEvent::new(piece, mini, cleared_lines))
 }
 
 fn spin_classification_input_from_step(

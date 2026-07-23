@@ -195,8 +195,8 @@ SpinProfile t-spins / t-spins-plus:
   plus = immobile T fallback
 
 SpinProfile all-spin / all-spin-plus:
-  spin_award_policy = AllSpinAsTSpinMini
-  all_spin_score_mapping = UseTSpinMiniTable
+  spin_award_policy = AllSpins
+  all_spin_score_mapping = NativeAllSpinTable
 
 SpinProfile all-mini / all-mini-plus:
   spin_award_policy = AllMini

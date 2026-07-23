@@ -62,18 +62,70 @@ pub enum ForwardSpinCategory {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForwardSpinLineRequirement {
+    Any,
+    Exact(u8),
+    AtLeast(u8),
+}
+
+impl ForwardSpinLineRequirement {
+    pub const fn threshold(self) -> Option<u8> {
+        match self {
+            Self::Any => None,
+            Self::Exact(lines) | Self::AtLeast(lines) => Some(lines),
+        }
+    }
+
+    pub const fn matches(self, lines: u8) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Exact(required) => lines == required,
+            Self::AtLeast(required) => lines >= required,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ForwardSpinTarget {
-    lines: Option<u8>,
+    line_requirement: ForwardSpinLineRequirement,
     category: ForwardSpinCategory,
 }
 
 impl ForwardSpinTarget {
     pub const fn new(lines: Option<u8>, category: ForwardSpinCategory) -> Self {
-        Self { lines, category }
+        Self::with_line_requirement(
+            match lines {
+                Some(lines) => ForwardSpinLineRequirement::Exact(lines),
+                None => ForwardSpinLineRequirement::Any,
+            },
+            category,
+        )
+    }
+
+    pub const fn at_least(lines: u8, category: ForwardSpinCategory) -> Self {
+        Self::with_line_requirement(ForwardSpinLineRequirement::AtLeast(lines), category)
+    }
+
+    pub const fn with_line_requirement(
+        line_requirement: ForwardSpinLineRequirement,
+        category: ForwardSpinCategory,
+    ) -> Self {
+        Self {
+            line_requirement,
+            category,
+        }
     }
 
     pub const fn lines(self) -> Option<u8> {
-        self.lines
+        self.line_requirement.threshold()
+    }
+
+    pub const fn line_requirement(self) -> ForwardSpinLineRequirement {
+        self.line_requirement
+    }
+
+    pub const fn matches_lines(self, lines: u8) -> bool {
+        self.line_requirement.matches(lines)
     }
 
     pub const fn category(self) -> ForwardSpinCategory {
