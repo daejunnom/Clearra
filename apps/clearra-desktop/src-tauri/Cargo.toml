@@ -13,5 +13,9 @@ tauri = { version = "2", features = [] }
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[patch.crates-io]
+gpu-allocator = { path = "../../../tools/vendor/gpu-allocator" }
+wgpu-hal = { path = "../../../tools/vendor/wgpu-hal" }
+
 [lints.rust]
 unsafe_code = "forbid"

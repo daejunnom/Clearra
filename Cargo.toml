@@ -52,6 +52,7 @@ serde_json = "=1.0.145"
 
 [patch.crates-io]
 document-features = { path = "tools/vendor/document-features" }
+gpu-allocator = { path = "tools/vendor/gpu-allocator" }
 parking_lot_core = { path = "tools/vendor/parking_lot_core" }
 serde_json = { path = "tools/vendor/serde_json" }
 wgpu-hal = { path = "tools/vendor/wgpu-hal" }
