@@ -24,21 +24,20 @@ converts the form to `AppRequest`, validates it, calls `AppContext::run`, and
 serializes the resulting host `AppResponse`. It never builds CLI text, launches
 `clearra.exe`, or parses CLI output.
 
-The default build does not contain a native C GUI shell, shell-preview desktop
-binary, or fixture response generator. When the native solver is unavailable,
-the desktop returns the same honest application contract as other hosts:
-`Unsupported`, `E_NATIVE_CORE_UNAVAILABLE`, `backend_selected=none`, and an
-incomplete resource report. It does not synthesize a solution.
+The product build does not contain a native C GUI shell, shell-preview desktop
+binary, or fixture response generator. It executes the exact WASM CPU backend
+and connected WebGPU adapter through `clearra-app`. Backend unavailability is
+reported explicitly and never replaced with a synthetic solution.
 
 ## Jobs
 
 Long-running desktop work is owned by `clearra-gui-host/src/job`. A job emits
 started, progress, diagnostic, completed, failed, or cancelled events. A
 completed event carries the real host `AppResponse`; progress and cancellation
-events never expose native pointers. `get_job_events` returns every queued event
+events never expose raw pointers. `get_job_events` returns every queued event
 in order. A terminal event joins the worker and releases the queue slot before
-another job may start. Cancellation uses a shared token that reaches native
-Packing and BuildUp loops; it does not use a process kill shortcut.
+another job may start. Cancellation uses a shared token that reaches WASM CPU
+search loops; it does not use a process kill shortcut.
 
 ## Render State
 

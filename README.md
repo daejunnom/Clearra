@@ -84,7 +84,7 @@ retries through another execution surface.
 | `scripts/clearra.ps1 -Task ProductE2EBuilt` | Trusted-only product build followed by process E2E once. |
 | `scripts/clearra.ps1 -Task NativeLocal` | Managed builds only the C static library. With `Trusted`, runs CTest and native Rust tests. |
 | `scripts/clearra.ps1 -Task Validate` | Static dependency, unsafe-boundary, forbidden-API, and capability-contract checks. |
-| `scripts/clearra.ps1 -Task DesktopHost -ExecutionSurface Trusted` | On a source-execution-capable runner, compiles the desktop UI in memory, executes the native async GUI-host E2E, and attempts the Tauri compile once. Enforced UMCI requires the approved release package instead. |
+| `scripts/clearra.ps1 -Task DesktopHost -ExecutionSurface Trusted` | On a source-execution-capable runner, compiles the desktop UI in memory, executes the WASM CPU async GUI-host E2E, and attempts the Tauri compile once. Enforced UMCI requires the published release package instead. |
 | `scripts/clearra.ps1 -Task Strict -ExecutionSurface Trusted` | Required Rust, C, native-link, ProductE2E, and desktop execution. |
 | `scripts/clearra.ps1 -Task ReleaseAcceptance -ExecutionSurface Trusted` | Ordered debt, adversarial, sanitizer, Rust exact, product, WASM, desktop, and render release gate. |
 
@@ -139,10 +139,17 @@ The Pages workflow builds the WASM module and static SvelteKit application in
 one job. Project-site assets use `/Clearra` as their deployment base, while
 local development keeps the empty-root base.
 
-Version tags publish the Linux x86_64 `clearra` CLI through GitHub Releases.
-The archive contains the exact native C core and WebGPU-enabled Rust adapter;
-it does not use fixture fallbacks. Windows and macOS CLI packages are not
-claimed until those release runners are connected and validated.
+Version tags publish three standalone GitHub Release executables:
+
+- `Clearra-CLI-*-linux-x86_64`: Linux CLI
+- `Clearra-CLI-*-windows-x86_64.exe`: Windows CLI
+- `Clearra-GUI-*-windows-x86_64.exe`: SvelteKit/Tauri desktop GUI
+
+The CLI and desktop executables compile the exact WASM CPU search backend and
+WebGPU adapter into the host binary; they do not use fixture fallbacks or need
+a separate `.wasm` file. The Tauri executable embeds the built SvelteKit
+assets. GitHub records an immutable digest for each release asset, so Clearra
+does not publish duplicate `.sha256` sidecar files.
 
 ## Runtime Environments
 
@@ -176,6 +183,9 @@ SvelteKit/Tauri -> clearra-gui-host -> clearra-app -> AppResponse
 On a source-execution-capable development host, start it with
 `npm run tauri -w @clearra/desktop -- dev`.
 
+The tagged Windows GUI is the same product surface packaged as one Tauri
+executable; no separate CLI window or frontend directory is distributed.
+
 The desktop gate is intentionally Trusted-only:
 
 ```powershell
@@ -184,10 +194,10 @@ powershell -NoProfile -File scripts/clearra.ps1 -Task DesktopHost -ExecutionSurf
 
 There is no C GUI executable, CLI subprocess shortcut, or shell-preview desktop
 binary. On Windows, the gate records `Win32_DeviceGuard` and recent Code
-Integrity events, then invokes the native Tauri build once. A real application
+Integrity events, then invokes the Tauri build once. A real application
 control rejection produces `E_WINDOWS_LOCAL_SOURCE_BUILD_BLOCKED` and a release
 failure. The runner does not use WSL, sign or unblock local artifacts, or turn
-WASM evidence into a desktop success.
+another runtime's evidence into a desktop success.
 
 ## Build Ownership
 

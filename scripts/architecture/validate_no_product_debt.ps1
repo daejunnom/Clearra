@@ -115,7 +115,6 @@ function Invoke-NoProductDebtStaticValidation {
     }
 
     foreach ($libraryConsumer in @(
-        'scripts/desktop-host-check.ps1',
         'scripts/lib/no-product-debt.ps1',
         'scripts/lib/rust-exact-tests.ps1',
         'scripts/lib/product-process-surface.ps1',
@@ -228,8 +227,11 @@ function Invoke-NoProductDebtStaticValidation {
         $desktopManifest,
         '(?m)^clearra-gui-host\s*=\s*\{[^\r\n]*$'
     ).Value
-    if ($desktopGuiHostDependency -notmatch '"native-c-core"') {
-        Add-ArchitectureError 'NoProductDebt desktop product must enable clearra-gui-host/native-c-core'
+    if ($desktopGuiHostDependency -notmatch '"wasm-cpu-runtime"') {
+        Add-ArchitectureError 'NoProductDebt desktop product must enable the exact WASM CPU runtime'
+    }
+    if ($desktopGuiHostDependency -match '"native-c-core"') {
+        Add-ArchitectureError 'NoProductDebt desktop release must not depend on the retired Windows native C execution path'
     }
     if ($desktopGuiHostDependency -notmatch '"webgpu-search"') {
         Add-ArchitectureError 'NoProductDebt desktop product must enable the connected WebGPU search backend'

@@ -108,35 +108,15 @@ function Get-NoProductDebtNativeCoreLibraryDir {
 }
 
 function Invoke-NoProductDebtDesktopProbe {
-    param(
-        [string]$CargoPath,
-        [int]$Workers
-    )
+    param([string]$CargoPath)
 
-    Write-Output '[no-product-debt] native desktop AppRequest probe'
-    $libDir = Get-NoProductDebtNativeCoreLibraryDir $Workers
-    $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
-    try {
-        Sync-ClearraNativeCargoLinkState `
-            -LibraryDirectory $libDir `
-            -CargoTargetDirectory (Get-ClearraCargoTargetDir) `
-            -CargoPath $CargoPath
-        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS =
-            Add-ClearraWindowsNativeRustLinkFlags $previousWindowsRustFlags $libDir
-        Invoke-NoProductDebtRustCase $CargoPath 'clearra-gui-host' `
-            @('--features', 'native-c-core,webgpu-search', '--test', 'gui_host_contract') `
-            'tauri_command_calls_clearra_gui_host_only' `
-            'tauri_command_calls_clearra_gui_host_only' `
-            'desktop_real_app_request'
-    }
-    finally {
-        if ([string]::IsNullOrWhiteSpace($previousWindowsRustFlags)) {
-            Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousWindowsRustFlags
-        }
-    }
-    Write-Output 'no_product_debt_execution_surface=desktop route=tauri-gui-host-app-native process-launch=False'
+    Write-Output '[no-product-debt] WASM CPU desktop AppRequest probe'
+    Invoke-NoProductDebtRustCase $CargoPath 'clearra-gui-host' `
+        @('--features', 'wasm-cpu-runtime,webgpu-search', '--test', 'gui_host_contract') `
+        'tauri_command_calls_clearra_gui_host_only' `
+        'tauri_command_calls_clearra_gui_host_only' `
+        'desktop_real_app_request'
+    Write-Output 'no_product_debt_execution_surface=desktop route=tauri-gui-host-app-wasm-cpu process-launch=False'
 }
 
 function Invoke-NoProductDebtHoldLanguageProofProbe {
@@ -237,7 +217,7 @@ function Invoke-NoProductDebtGate {
             'renderer_gif_artifact'
 
         Invoke-NoProductDebtHoldLanguageProofProbe $Root $CargoPath $CargoTargetDir
-        Invoke-NoProductDebtDesktopProbe $CargoPath $Workers
+        Invoke-NoProductDebtDesktopProbe $CargoPath
         Invoke-NoProductDebtMaxScoreProbe $Root $CargoPath $Workers
     }
     finally {

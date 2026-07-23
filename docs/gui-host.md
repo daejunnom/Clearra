@@ -34,7 +34,7 @@ builder and calls application validation without executing the solver.
 host worker thread and emits a completed event containing the real host
 `AppResponse`. It does not emit a synthetic partial or marker-only final
 response. `cancel_job` sets the cooperative cancellation token; event JSON
-reports cancellation without exposing a native scope or pointer.
+reports cancellation without exposing an execution scope or raw pointer.
 
 ## Desktop Ownership
 

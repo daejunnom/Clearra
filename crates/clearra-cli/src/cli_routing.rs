@@ -5,6 +5,8 @@ use crate::{
     output::{AppResponseRenderer, CliOutput},
 };
 use clearra_app::{io::AppFilePolicy, AppContext};
+#[cfg(feature = "wasm-cpu-runtime")]
+use clearra_app::{AppCoreExecutorService, AppServices};
 
 pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     let format = invocation
@@ -28,10 +30,22 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .request()
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths));
-        let response = AppContext::default()
+        let response = product_app_context()
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths))
             .run(request);
         AppResponseRenderer::render(response, render_format, default_error)
     })
+}
+
+fn product_app_context() -> AppContext {
+    #[cfg(feature = "wasm-cpu-runtime")]
+    {
+        return AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+    }
+
+    #[cfg(not(feature = "wasm-cpu-runtime"))]
+    AppContext::default()
 }
