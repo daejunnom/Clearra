@@ -34,17 +34,17 @@ fn tetrio_default_and_all_spin_options_are_selectable() {
         default.drop_score_policy().as_str(),
         "hard-drop-2-soft-drop-1"
     );
-    assert_eq!(
-        all_spin.spin_award_policy().as_str(),
-        "all-spin-as-t-spin-mini"
-    );
-    assert_eq!(
-        all_spin_plus.spin_award_policy().as_str(),
-        "all-spin-as-t-spin-mini"
-    );
+    assert_eq!(all_spin.spin_award_policy().as_str(), "all-spins");
+    assert_eq!(all_spin_plus.spin_award_policy().as_str(), "all-spins");
+    for profile in [all_spin, all_spin_plus] {
+        assert_eq!(
+            profile.all_spin_score_mapping().as_str(),
+            "native-all-spin-table"
+        );
+    }
     assert_eq!(all_mini.spin_award_policy().as_str(), "all-mini");
     assert_eq!(all_mini_plus.spin_award_policy().as_str(), "all-mini");
-    for profile in [all_spin, all_spin_plus, all_mini, all_mini_plus] {
+    for profile in [all_mini, all_mini_plus] {
         assert_eq!(
             profile.all_spin_score_mapping().as_str(),
             "use-t-spin-mini-table"

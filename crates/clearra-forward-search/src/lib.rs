@@ -14,7 +14,7 @@ pub use parallel::{
 };
 pub use query::{
     ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory,
-    ForwardSpinTarget,
+    ForwardSpinLineRequirement, ForwardSpinTarget,
 };
 pub use result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup};
 pub use search::{ForwardSearchAdvance, ForwardSearchError, ForwardSearchSession};

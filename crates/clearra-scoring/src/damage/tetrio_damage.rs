@@ -5,6 +5,7 @@ pub enum TetrioDamageAction {
     NoClear,
     LineClear(u8),
     TSpin { mini: bool, lines: u8 },
+    AllSpin { lines: u8 },
     AllSpinMini { lines: u8 },
 }
 
@@ -18,7 +19,8 @@ impl TetrioDamageAction {
                 mini: spin.is_mini(),
                 lines,
             },
-            Some(_) => Self::AllSpinMini { lines },
+            Some(spin) if spin.is_mini() => Self::AllSpinMini { lines },
+            Some(_) => Self::AllSpin { lines },
             None => Self::LineClear(lines),
         }
     }
@@ -26,9 +28,10 @@ impl TetrioDamageAction {
     pub const fn lines(self) -> u8 {
         match self {
             Self::NoClear => 0,
-            Self::LineClear(lines) | Self::TSpin { lines, .. } | Self::AllSpinMini { lines } => {
-                lines
-            }
+            Self::LineClear(lines)
+            | Self::TSpin { lines, .. }
+            | Self::AllSpin { lines }
+            | Self::AllSpinMini { lines } => lines,
         }
     }
 
@@ -37,7 +40,10 @@ impl TetrioDamageAction {
             || (self.lines() > 0
                 && matches!(
                     self,
-                    Self::LineClear(4) | Self::TSpin { .. } | Self::AllSpinMini { .. }
+                    Self::LineClear(4)
+                        | Self::TSpin { .. }
+                        | Self::AllSpin { .. }
+                        | Self::AllSpinMini { .. }
                 ))
     }
 
@@ -65,6 +71,11 @@ impl TetrioDamageAction {
                 lines: 2,
             } => 1,
             Self::TSpin { .. } => 0,
+            Self::AllSpin { lines: 1 } => 2,
+            Self::AllSpin { lines: 2 } => 4,
+            Self::AllSpin { lines: 3 } => 6,
+            Self::AllSpin { lines: 4 } => 8,
+            Self::AllSpin { .. } => 0,
             Self::AllSpinMini { lines: 1 } => 0,
             Self::AllSpinMini { lines: 2 } => 1,
             Self::AllSpinMini { lines: 3 } => 2,

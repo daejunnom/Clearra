@@ -2,7 +2,7 @@ use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_forward_search::{
     ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory,
-    ForwardSpinTarget,
+    ForwardSpinLineRequirement, ForwardSpinTarget,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_objectives::policy::score_objective_policy::{
@@ -83,7 +83,7 @@ fn parse_forward_command(
     let mut initial_combo = None;
     let mut initial_back_to_back = None;
     let mut minimum_damage = None;
-    let mut target_lines = None;
+    let mut target_lines = ForwardSpinLineRequirement::Any;
     let mut target_category = ForwardSpinCategory::Any;
     let mut workers = None;
     let mut use_all_logical_processors = false;
@@ -185,9 +185,12 @@ fn parse_forward_command(
             "--lines" if spin_finder => {
                 let value = next_value(tokens, &mut cursor, "--lines")?;
                 target_lines = if value.eq_ignore_ascii_case("any") {
-                    None
+                    ForwardSpinLineRequirement::Any
                 } else {
-                    let lines = value.parse::<u8>().map_err(|_| {
+                    let (line_text, at_least) = value
+                        .strip_suffix('+')
+                        .map_or((value, false), |minimum| (minimum, true));
+                    let lines = line_text.parse::<u8>().map_err(|_| {
                         WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             format!("invalid --lines value '{value}'"),
@@ -196,10 +199,14 @@ fn parse_forward_command(
                     if lines > 4 {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
-                            "spin-finder --lines must be any or 0..4",
+                            "spin-finder --lines must be any, 0..4, or 0+..4+",
                         ));
                     }
-                    Some(lines)
+                    if at_least {
+                        ForwardSpinLineRequirement::AtLeast(lines)
+                    } else {
+                        ForwardSpinLineRequirement::Exact(lines)
+                    }
                 };
             }
             "--spin-category" if spin_finder => {
@@ -251,7 +258,10 @@ fn parse_forward_command(
         )
     })?;
     let mode = if spin_finder {
-        ForwardSearchMode::SpinFinder(ForwardSpinTarget::new(target_lines, target_category))
+        ForwardSearchMode::SpinFinder(ForwardSpinTarget::with_line_requirement(
+            target_lines,
+            target_category,
+        ))
     } else if let Some(minimum_damage) = minimum_damage {
         ForwardSearchMode::DamageAtLeast(minimum_damage)
     } else {

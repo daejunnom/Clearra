@@ -9,7 +9,10 @@ use clearra_scoring::{damage::TetrioDamageState, profile::SpinProfileId};
 
 use crate::{
     board::ForwardBoard,
-    query::{ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory, ForwardSpinTarget},
+    query::{
+        ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory, ForwardSpinLineRequirement,
+        ForwardSpinTarget,
+    },
     reachability::ReachabilityWorkspace,
     result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
     search::{
@@ -21,7 +24,7 @@ use crate::{
 const INIT_MAGIC: u32 = u32::from_le_bytes(*b"FWIN");
 const TASK_MAGIC: u32 = u32::from_le_bytes(*b"FWTK");
 const RESULT_MAGIC: u32 = u32::from_le_bytes(*b"FWRS");
-const WIRE_VERSION: u32 = 4;
+const WIRE_VERSION: u32 = 5;
 const MAX_WIRE_ITEMS: usize = 10_000_000;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
 
@@ -997,7 +1000,11 @@ fn encode_config(output: &mut Vec<u8>, config: ForwardSearchConfig) {
         }
         ForwardSearchMode::SpinFinder(target) => {
             output.push(1);
-            output.push(target.lines().unwrap_or(u8::MAX));
+            output.push(match target.line_requirement() {
+                ForwardSpinLineRequirement::Any => u8::MAX,
+                ForwardSpinLineRequirement::Exact(lines) => lines,
+                ForwardSpinLineRequirement::AtLeast(lines) => 0x80 | lines,
+            });
             output.push(match target.category() {
                 ForwardSpinCategory::Any => 0,
                 ForwardSpinCategory::T => 1,
@@ -1020,8 +1027,9 @@ fn decode_config(reader: &mut Reader<'_>) -> Result<ForwardSearchConfig, Forward
         2 => ForwardSearchMode::DamageAtLeast(reader.u32()?),
         1 => {
             let lines = match reader.u8()? {
-                u8::MAX => None,
-                value @ 0..=4 => Some(value),
+                u8::MAX => ForwardSpinLineRequirement::Any,
+                value @ 0..=4 => ForwardSpinLineRequirement::Exact(value),
+                value @ 0x80..=0x84 => ForwardSpinLineRequirement::AtLeast(value & 0x7f),
                 _ => {
                     return Err(ForwardParallelError::InvalidWire(
                         "forward_spin_lines_invalid",
@@ -1038,7 +1046,7 @@ fn decode_config(reader: &mut Reader<'_>) -> Result<ForwardSearchConfig, Forward
                     ))
                 }
             };
-            ForwardSearchMode::SpinFinder(ForwardSpinTarget::new(lines, category))
+            ForwardSearchMode::SpinFinder(ForwardSpinTarget::with_line_requirement(lines, category))
         }
         _ => return Err(ForwardParallelError::InvalidWire("forward_mode_invalid")),
     };

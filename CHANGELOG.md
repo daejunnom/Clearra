@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.2 - 2026-07-23
+
+- Preserved the held piece after the visible queue is exhausted so forward
+  damage and spin searches enumerate legal hold continuations.
+- Separated regular All-Spin and All-Spin+ awards from All-Mini profiles and
+  restored regular non-T spin damage without changing SRS+ kick behavior.
+- Added exact and minimum cleared-line requirements to Spin Finder, including
+  `N+` command syntax, complete continuation search, multi-worker transport,
+  and stable numeric selection in the English and Korean GUI.
+
 ## 0.1.1 - 2026-07-23
 
 - Added GitHub Pages delivery for the WASM GUI and tag-owned standalone Linux

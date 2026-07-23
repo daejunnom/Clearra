@@ -18,7 +18,10 @@ use clearra_scoring::{
 
 use crate::{
     board::{place_and_clear, ForwardBoard, ForwardBoardCatalog},
-    query::{ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory, ForwardSpinTarget},
+    query::{
+        ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory, ForwardSpinLineRequirement,
+        ForwardSpinTarget,
+    },
     reachability::ReachabilityWorkspace,
     result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
     t_spin_acceleration::TSpinAcceleration,
@@ -1200,6 +1203,14 @@ pub(crate) fn expand_search_node(
     let mut generated_locks = 0_u64;
     let spin_profile = SpinProfile::builtin(config.spin_profile);
     let t_spin_acceleration = TSpinAcceleration::for_search(config.mode, config.spin_profile);
+    let retain_matching_continuations = matches!(
+        config.mode,
+        ForwardSearchMode::SpinFinder(target)
+            if matches!(
+                target.line_requirement(),
+                ForwardSpinLineRequirement::AtLeast(_)
+            )
+    );
     if t_spin_acceleration
         .is_some_and(|acceleration| !acceleration.state_can_reach_target(queue, key))
     {
@@ -1271,15 +1282,14 @@ pub(crate) fn expand_search_node(
                 }
                 ForwardSearchMode::MaximumDamage | ForwardSearchMode::DamageAtLeast(_) => None,
             };
-            let (next_piece, next_cursor) = next_active(queue, source.cursor_after_selection);
+            let (next_piece, next_cursor, next_hold) = next_active(
+                queue,
+                source.cursor_after_selection,
+                source.hold_after_selection,
+            );
             let continuation_can_reach_target = next_piece.is_some_and(|active| {
                 t_spin_acceleration.is_none_or(|acceleration| {
-                    acceleration.supply_can_reach_target(
-                        queue,
-                        active,
-                        next_cursor,
-                        source.hold_after_selection,
-                    )
+                    acceleration.supply_can_reach_target(queue, active, next_cursor, next_hold)
                 })
             });
             if matches!(config.mode, ForwardSearchMode::SpinFinder(_))
@@ -1315,7 +1325,7 @@ pub(crate) fn expand_search_node(
                 board_after.words(),
             );
             if let Some(spin) = matching_spin {
-                actions.push(ExpandedAction::Spin {
+                let spin_action = |step| ExpandedAction::Spin {
                     board: board_after,
                     rotation: lock.rotation,
                     x: lock.x,
@@ -1325,8 +1335,13 @@ pub(crate) fn expand_search_node(
                     lines: spin.lines(),
                     total_damage: damage.state().total_damage(),
                     step,
-                });
-                continue;
+                };
+                if retain_matching_continuations {
+                    actions.push(spin_action(step.clone()));
+                } else {
+                    actions.push(spin_action(step));
+                    continue;
+                }
             }
 
             if let Some(active) = next_piece {
@@ -1334,7 +1349,7 @@ pub(crate) fn expand_search_node(
                     board: board_after,
                     active,
                     cursor: next_cursor,
-                    hold: source.hold_after_selection,
+                    hold: next_hold,
                     combo: damage.state().combo(),
                     back_to_back: damage.state().back_to_back(),
                 };
@@ -1471,17 +1486,19 @@ fn placement_sources(
     sources.into_iter().flatten()
 }
 
-fn next_active(queue: &[PieceKind], cursor: u16) -> (Option<PieceKind>, u16) {
-    queue
-        .get(usize::from(cursor))
-        .copied()
-        .map_or((None, cursor), |piece| {
-            (Some(piece), cursor.saturating_add(1))
-        })
+fn next_active(
+    queue: &[PieceKind],
+    cursor: u16,
+    hold: Option<PieceKind>,
+) -> (Option<PieceKind>, u16, Option<PieceKind>) {
+    if let Some(piece) = queue.get(usize::from(cursor)).copied() {
+        return (Some(piece), cursor.saturating_add(1), hold);
+    }
+    hold.map_or((None, cursor, None), |piece| (Some(piece), cursor, None))
 }
 
 fn spin_matches(target: ForwardSpinTarget, spin: SpinEvent) -> bool {
-    if target.lines().is_some_and(|lines| lines != spin.lines()) {
+    if !target.matches_lines(spin.lines()) {
         return false;
     }
     match target.category() {

@@ -150,10 +150,14 @@
         <span>{label('spinLines')}</span>
         <select value={request.spinLines} on:change={(event) => {
           const value = (event.currentTarget as HTMLSelectElement).value;
-          update({ spinLines: (value === 'any' ? 'any' : Number(value)) as ForwardSpinLines });
+          update({ spinLines: value as ForwardSpinLines });
         }}>
           <option value="any">{label('any')}</option>
           <option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+          <option value="1+">1 {label('orMoreLines')}</option>
+          <option value="2+">2 {label('orMoreLines')}</option>
+          <option value="3+">3 {label('orMoreLines')}</option>
+          <option value="4+">4 {label('orMoreLines')}</option>
         </select>
       </label>
       {#if categoryOptions.length > 1}
