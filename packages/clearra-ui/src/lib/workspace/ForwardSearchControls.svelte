@@ -107,6 +107,19 @@
     </label>
     </div>
 
+    <div class="b2b-preservation-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.preserveB2B}
+          on:change={(event) => update({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('preserveB2B')}</span>
+      </label>
+      <small class="workspace-field-help">{label('preserveB2BHelp')}</small>
+    </div>
+
   {#if request.tool === 'damage'}
     <label class="workspace-field wide damage-mode">
       <span>{label('damageResultMode')}</span>
@@ -185,6 +198,7 @@
   .queue-label { align-items: center; color: #66716d; display: flex; font-size: 11px; font-weight: 700; gap: 6px; }
   .queue-label label { display: inline; }
   .damage-mode { margin-top: 12px; }
+  .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
   .tooltip-trigger { background: transparent; border: 0; color: #52605b; cursor: help; display: inline-flex; outline: none; padding: 0; position: relative; }
   .tooltip-trigger:focus-visible { border-radius: 2px; outline: 2px solid #16877d; outline-offset: 2px; }
   .tooltip-trigger [role='tooltip'] { background: #17211e; border-radius: 4px; color: #fff; font-size: 10px; font-weight: 500; left: -8px; line-height: 1.5; max-width: min(300px, calc(100vw - 48px)); opacity: 0; padding: 8px 9px; pointer-events: none; position: absolute; top: calc(100% + 7px); transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; visibility: hidden; width: max-content; z-index: 20; }

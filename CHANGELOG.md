@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.3 - 2026-07-23
+
+- Added an optional B2B-preserving line-clear policy to forward damage and
+  spin searches.
+- When enabled, the search accepts only perfect clears, Quads, and spins
+  recognized by the selected spin profile while retaining zero-line placements.
+- Connected the policy to browser commands, English and Korean GUI controls,
+  and exact single- and multi-worker WASM execution.
+
 ## 0.1.2 - 2026-07-23
 
 - Preserved the held piece after the visible queue is exhausted so forward

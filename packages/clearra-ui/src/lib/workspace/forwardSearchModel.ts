@@ -35,6 +35,7 @@ export type ForwardSearchRequest = {
   minimumDamage: number;
   initialCombo: number;
   initialB2B: number;
+  preserveB2B: boolean;
   spinLines: ForwardSpinLines;
   spinCategory: ForwardSpinCategory;
 };
@@ -60,6 +61,7 @@ export function createDefaultForwardSearchRequest(tool: ForwardTool): ForwardSea
     minimumDamage: 0,
     initialCombo: 0,
     initialB2B: 0,
+    preserveB2B: false,
     spinLines: 'any',
     spinCategory: 'any'
   };
@@ -121,6 +123,7 @@ export function buildForwardSearchCommand(request: ForwardSearchRequest): string
     '--spin-profile',
     request.spinProfile
   ];
+  if (request.preserveB2B) tokens.push('--preserve-b2b');
   if (request.tool === 'damage') {
     if (request.initialCombo > 0) tokens.push('--initial-combo', String(request.initialCombo));
     tokens.push('--initial-b2b', String(request.initialB2B));

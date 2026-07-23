@@ -19,8 +19,8 @@ use clearra_scoring::{
 use crate::{
     board::{place_and_clear, ForwardBoard, ForwardBoardCatalog},
     query::{
-        ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory, ForwardSpinLineRequirement,
-        ForwardSpinTarget,
+        ForwardLineClearPolicy, ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory,
+        ForwardSpinLineRequirement, ForwardSpinTarget,
     },
     reachability::ReachabilityWorkspace,
     result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
@@ -479,6 +479,7 @@ pub(crate) struct ForwardSearchConfig {
     pub(crate) spin_profile: SpinProfileId,
     pub(crate) initial_combo: Option<u16>,
     pub(crate) initial_back_to_back: Option<u16>,
+    pub(crate) line_clear_policy: ForwardLineClearPolicy,
     pub(crate) mode: ForwardSearchMode,
 }
 
@@ -492,6 +493,7 @@ impl ForwardSearchConfig {
             spin_profile: query.spin_profile(),
             initial_combo: query.initial_combo(),
             initial_back_to_back: query.initial_back_to_back(),
+            line_clear_policy: query.line_clear_policy(),
             mode: query.mode(),
         }
     }
@@ -1265,6 +1267,8 @@ pub(crate) fn expand_search_node(
                 lock.evidence.scoring(lock.rotation, lock.immobile),
             )
             .with_perfect_clear(perfect_clear);
+            let preservation_requires_spin =
+                line_clear_requires_spin(config.line_clear_policy, cleared_lines, perfect_clear);
             let needs_exact_spin_confirmation = t_spin_acceleration.map_or(true, |acceleration| {
                 acceleration.needs_exact_confirmation(
                     source.piece,
@@ -1272,10 +1276,13 @@ pub(crate) fn expand_search_node(
                     lock.immobile,
                     blocked_corners,
                 )
-            });
+            }) || preservation_requires_spin;
             let spin = needs_exact_spin_confirmation
                 .then(|| SpinDetector::detect_scoring_edge_with_profile(edge, spin_profile))
                 .flatten();
+            if preservation_requires_spin && spin.is_none() {
+                continue;
+            }
             let matching_spin = match config.mode {
                 ForwardSearchMode::SpinFinder(target) => {
                     spin.filter(|event| spin_matches(target, *event))
@@ -1372,6 +1379,17 @@ pub(crate) fn expand_search_node(
         }
     }
     Ok(generated_locks)
+}
+
+fn line_clear_requires_spin(
+    policy: ForwardLineClearPolicy,
+    cleared_lines: u8,
+    perfect_clear: bool,
+) -> bool {
+    matches!(policy, ForwardLineClearPolicy::PreserveBackToBack)
+        && cleared_lines > 0
+        && cleared_lines != 4
+        && !perfect_clear
 }
 
 fn state_index_key(

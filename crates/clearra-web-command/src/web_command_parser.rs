@@ -1,8 +1,8 @@
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_forward_search::{
-    ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory,
-    ForwardSpinLineRequirement, ForwardSpinTarget,
+    ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery,
+    ForwardSpinCategory, ForwardSpinLineRequirement, ForwardSpinTarget,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_objectives::policy::score_objective_policy::{
@@ -82,6 +82,7 @@ fn parse_forward_command(
     let mut spin_profile = SpinProfileId::TSpins;
     let mut initial_combo = None;
     let mut initial_back_to_back = None;
+    let mut line_clear_policy = ForwardLineClearPolicy::Any;
     let mut minimum_damage = None;
     let mut target_lines = ForwardSpinLineRequirement::Any;
     let mut target_category = ForwardSpinCategory::Any;
@@ -172,6 +173,10 @@ fn parse_forward_command(
                     )
                 })?;
                 initial_back_to_back = (parsed > 0).then_some(parsed - 1);
+            }
+            "--preserve-b2b" => {
+                line_clear_policy = ForwardLineClearPolicy::PreserveBackToBack;
+                cursor += 1;
             }
             "--minimum-damage" if !spin_finder => {
                 let value = next_value(tokens, &mut cursor, "--minimum-damage")?;
@@ -277,7 +282,8 @@ fn parse_forward_command(
         initial_combo,
         initial_back_to_back,
         mode,
-    );
+    )
+    .with_line_clear_policy(line_clear_policy);
     if let Some(workers) = workers {
         if workers > worker_hardware_limit {
             return Err(WebCommandError::new(

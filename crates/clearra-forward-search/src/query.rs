@@ -159,6 +159,13 @@ impl ForwardSearchMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ForwardLineClearPolicy {
+    #[default]
+    Any,
+    PreserveBackToBack,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForwardSearchQuery {
     board: Board256Mask,
@@ -169,6 +176,7 @@ pub struct ForwardSearchQuery {
     spin_profile: SpinProfileId,
     initial_combo: Option<u16>,
     initial_back_to_back: Option<u16>,
+    line_clear_policy: ForwardLineClearPolicy,
     mode: ForwardSearchMode,
 }
 
@@ -219,6 +227,7 @@ impl ForwardSearchQuery {
             spin_profile,
             initial_combo,
             initial_back_to_back,
+            line_clear_policy: ForwardLineClearPolicy::Any,
             mode,
         }
     }
@@ -255,7 +264,19 @@ impl ForwardSearchQuery {
         self.initial_back_to_back
     }
 
+    pub const fn line_clear_policy(&self) -> ForwardLineClearPolicy {
+        self.line_clear_policy
+    }
+
     pub const fn mode(&self) -> ForwardSearchMode {
         self.mode
+    }
+
+    pub const fn with_line_clear_policy(
+        mut self,
+        line_clear_policy: ForwardLineClearPolicy,
+    ) -> Self {
+        self.line_clear_policy = line_clear_policy;
+        self
     }
 }
