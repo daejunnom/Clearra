@@ -1,4 +1,4 @@
-name: Publish CLI Release
+name: Publish Product Release
 
 on:
   push:
@@ -9,17 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  linux-x86_64:
+  metadata:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ runner.temp }}/clearra-release/cargo-target
-          key: cli-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'core-c/**/*.c', 'core-c/**/*.h') }}
       - name: Resolve release version
         id: version
         shell: bash
@@ -34,29 +29,114 @@ jobs:
             exit 2
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Build and package exact CLI
+
+  linux-cli:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/clearra-release/cargo-target
+          key: product-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'crates/**/*.toml') }}
+      - name: Build standalone WASM CPU CLI
         env:
           CLEARRA_RELEASE_BUILD_ROOT: ${{ runner.temp }}/clearra-release
-        run: bash scripts/tools/package-release-cli.sh dist "${{ steps.version.outputs.version }}"
-      - name: Upload workflow artifact
+        run: bash scripts/tools/package-release-cli.sh dist "${{ needs.metadata.outputs.version }}"
+      - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clearra-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu
+          name: clearra-linux-cli-v${{ needs.metadata.outputs.version }}
           path: dist/*
           if-no-files-found: error
+
+  windows-products:
+    needs: metadata
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/clearra-release/cargo-target
+          key: product-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json', 'crates/**/*.rs', 'crates/**/*.toml', 'apps/clearra-desktop/**/*') }}
+      - name: Install frontend toolchain
+        run: npm ci --ignore-scripts
+      - name: Configure external release target
+        shell: pwsh
+        run: |
+          $targetDir = Join-Path $env:RUNNER_TEMP 'clearra-release\cargo-target'
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          "CARGO_TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
+      - name: Build and exercise standalone WASM CPU CLI
+        shell: pwsh
+        run: |
+          cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
+          $cli = Join-Path $env:CARGO_TARGET_DIR 'release\clearra.exe'
+          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+            throw "Clearra CLI executable was not produced: $cli"
+          }
+          & $cli --format json rules list | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Clearra CLI rules smoke failed: $LASTEXITCODE" }
+          & $cli --format json pc --lines 2 --queue IJLOO --fixed --no-hold | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Clearra CLI solver smoke failed: $LASTEXITCODE" }
+      - name: Build standalone SvelteKit and Tauri GUI
+        run: npm run tauri -w @clearra/desktop -- build --no-bundle
+      - name: Stage Windows executables
+        shell: pwsh
+        run: |
+          $version = '${{ needs.metadata.outputs.version }}'
+          $releaseDir = Join-Path $env:CARGO_TARGET_DIR 'release'
+          $cli = Join-Path $releaseDir 'clearra.exe'
+          $gui = Join-Path $releaseDir 'clearra-desktop.exe'
+          if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) {
+            throw "Clearra GUI executable was not produced: $gui"
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -LiteralPath $cli -Destination "dist\Clearra-CLI-v$version-windows-x86_64.exe"
+          Copy-Item -LiteralPath $gui -Destination "dist\Clearra-GUI-v$version-windows-x86_64.exe"
+      - name: Upload Windows product artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearra-windows-products-v${{ needs.metadata.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [metadata, linux-cli, windows-products]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: clearra-*-v${{ needs.metadata.outputs.version }}
+          path: dist
+          merge-multiple: true
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          archive="dist/clearra-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
-          checksum="$archive.sha256"
+          mapfile -t assets < <(find dist -maxdepth 1 -type f -print | sort)
+          if [[ "${#assets[@]}" -ne 3 ]]; then
+            printf 'expected three standalone release assets, found %s\n' "${#assets[@]}" >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 2
+          fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$archive" "$checksum" \
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --verify-tag \
               --generate-notes \
               --title "Clearra $GITHUB_REF_NAME"
-          fi

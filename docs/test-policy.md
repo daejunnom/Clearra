@@ -105,7 +105,7 @@ never reported as passed by the compile-only path.
 | `NativeLocal` | C static-library build only | CTest plus native core-executor tests |
 | `COnly`, `COnlySplit`, `COnlyAsan`, `COnlyUbsan` | corresponding C library configuration only | corresponding CTest execution |
 | `Validate` | static architecture validation | same static validation |
-| `DesktopHost` | rejected before execution | application-control diagnostics, in-memory UI compile, native GUI-host async E2E, and one native Tauri compile attempt |
+| `DesktopHost` | rejected before execution | application-control diagnostics, in-memory UI compile, WASM CPU GUI-host async E2E, and one Tauri compile attempt |
 | `Strict`, `ReleaseAcceptance` | rejected before execution | mandatory executed evidence; any failure blocks release |
 
 `ReleaseAcceptance` runs `NoProductDebt -> AdversarialCorrectness ->

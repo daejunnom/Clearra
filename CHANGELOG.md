@@ -2,8 +2,11 @@
 
 ## Unreleased
 
-- Added GitHub Pages delivery for the WASM GUI and tag-owned Linux x86_64 CLI
-  release archives with checksums.
+## 0.1.1 - 2026-07-23
+
+- Added GitHub Pages delivery for the WASM GUI and tag-owned standalone Linux
+  CLI, Windows CLI, and Windows SvelteKit/Tauri GUI executables. GitHub's
+  release-asset digest replaces duplicate checksum sidecars.
 - Routed CLI, desktop, and WASM requests through the typed `AppRequest` /
   `AppResponse` application boundary and canonical `SearchProblem` compiler.
 - Connected product search to C Geometry Skeleton Exact Cover, host reduction, and C

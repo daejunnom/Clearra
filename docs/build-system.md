@@ -77,9 +77,9 @@ workspace and in every crate under `crates/`.
 is built only by the explicit `DesktopHost` gate. Tauri requires its standard
 `tauri-build` build script to generate application context and Windows resource
 metadata. This build script does not build or link the C core. The runner builds
-the C library once with CMake and supplies its directory through the
-target-scoped `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`; it does not modify global
-`RUSTFLAGS`.
+the exact WASM CPU backend and WebGPU adapter directly into the Tauri
+executable. The retired Windows native C execution path is not linked into the
+desktop release.
 
 `scripts/desktop-host-check.ps1` runs the isolated manifest with
 the same canonical `CARGO_TARGET_DIR` used by every other Cargo task, normally
@@ -99,21 +99,23 @@ correlates Code Integrity events 3033/3077 with the generated artifact and
 preserves the policy ID as `E_WINDOWS_LOCAL_SOURCE_BUILD_BLOCKED`. The gate never invokes
 WSL, signs, unblocks, copies, retries, or weakens the requested evidence.
 
-## Windows-hosted WASM Product Surface
+## Windows-hosted WASM Product Surfaces
 
-The Windows product computation surface is the browser-hosted WASM deployment
-unit produced from `clearra-wasm-abi`: `clearra_wasm.js` and
-`clearra_wasm_bg.wasm`. The source-built `wasm-bindgen` CLI matching
+The browser product computation surface is the WASM deployment unit produced
+from `clearra-wasm-abi`: `clearra_wasm.js` and `clearra_wasm_bg.wasm`. The
+source-built `wasm-bindgen` CLI matching
 `Cargo.lock` creates the reviewed host imports needed by WebGPU/wgpu while the
-implementation crate `clearra-wasm` remains an `rlib`. No generated PE solver,
-native C core, subprocess, WSL runtime, signing mutation, or policy bypass
-participates in product execution.
+implementation crate `clearra-wasm` remains an `rlib`.
 
-Windows application-control policy therefore applies only to the user's chosen
-WebAssembly host, not to a source-generated Clearra executable. A host load or
-execution failure is returned as that WASM runtime's explicit failure and is
-never retried through Windows native or WSL. Build helpers remain development
-inputs and do not ship with the artifact.
+Tagged releases also compile the same exact WASM CPU algorithm into standalone
+Windows CLI and SvelteKit/Tauri GUI executables. The GUI embeds its frontend;
+neither executable needs a sidecar `.wasm`, native C core, subprocess, WSL
+runtime, signing mutation, or policy bypass.
+
+Windows application-control policy applies normally to the published CLI and
+GUI executables. A load or execution failure is returned directly and is never
+retried through another path. Build helpers remain development inputs and do
+not ship with either artifact.
 
 The release and command-runtime gates stage the exact binding/module pair,
 verify the scalar/memory ABI through those bindings, and execute the PCO command
@@ -133,4 +135,5 @@ Trusted gates fail before source-generated execution when UMCI is enforced. On
 permitted runners they attempt the requested native process once and classify
 the actual result. They never retry a blocked executable through WSL, sign
 local output, or substitute fallback evidence. The isolated Tauri exception is
-explicit, `Trusted`-only, and does not alter the native-core policy.
+explicit, `Trusted`-only, and does not restore the retired Windows native C
+product path.

@@ -2123,7 +2123,7 @@ The one desktop product lives under `apps/clearra-desktop`. Its SvelteKit UI
 calls the Tauri command surface, Tauri delegates only to `clearra-gui-host`, and
 the host builds a typed request and calls `clearra-app`:
 
-`SvelteKit -> Tauri -> clearra-gui-host -> clearra-app -> validation -> clearra-problem -> clearra-core-executor -> core-c`.
+`SvelteKit -> Tauri -> clearra-gui-host -> clearra-app -> validation -> clearra-problem -> exact WASM CPU / WebGPU backend`.
 
 There is no CMake GUI product, shell-preview executable, CLI subprocess bridge,
 or fixture final response. The desktop host preserves the language preference
@@ -2136,7 +2136,7 @@ batched `get_job_events` command, exposes progress/backend/memory/resource
 status, and sends a real cancellation request. A terminal `Completed`, `Failed`,
 or `Cancelled` event joins the worker, releases the active queue slot, and allows
 the next job to start. The desktop gate compiles the Svelte/TypeScript sources
-in memory on every host. Native GUI-host lifecycle tests and Tauri compilation
+in memory on every host. WASM CPU GUI-host lifecycle tests and Tauri compilation
 run only when the host permits generated executable evidence; an unavailable
 host capability remains a release blocker rather than a static-pass substitute.
 

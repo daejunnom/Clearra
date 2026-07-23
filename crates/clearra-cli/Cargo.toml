@@ -12,6 +12,7 @@ workspace = true
 [features]
 default = []
 native-c-core = ["clearra-app/native-c-core"]
+wasm-cpu-runtime = []
 webgpu-search = ["clearra-app/webgpu-search"]
 
 [[bin]]

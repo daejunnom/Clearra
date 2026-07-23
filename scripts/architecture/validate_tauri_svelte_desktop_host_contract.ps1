@@ -65,8 +65,11 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         $tauriCargo,
         '(?m)^clearra-gui-host\s*=\s*\{[^\r\n]*$'
     ).Value
-    if ($guiHostDependency -notmatch '"native-c-core"') {
-        Add-ArchitectureError "U6 desktop product must enable the native clearra-app execution backend"
+    if ($guiHostDependency -notmatch '"wasm-cpu-runtime"') {
+        Add-ArchitectureError "U6 desktop product must enable the exact WASM CPU execution backend"
+    }
+    if ($guiHostDependency -match '"native-c-core"') {
+        Add-ArchitectureError "U6 desktop product must not restore the retired Windows native C execution backend"
     }
     if ($guiHostDependency -notmatch '"webgpu-search"') {
         Add-ArchitectureError "U6 desktop product must enable the connected WebGPU search backend"
@@ -177,11 +180,9 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         }
     }
     foreach ($requiredMarker in @(
-        'Invoke-CoreCBuild',
-        'Find-CoreCLibraryDir',
-        '"--features", "native-c-core,webgpu-search"',
+        '"--features", "wasm-cpu-runtime,webgpu-search"',
         '"--test", "gui_host_contract"',
-        'native_app_request=executed',
+        'wasm_cpu_app_request=executed',
         'async_job_e2e=executed',
         'Get-ClearraCargoTargetDir',
         'Get-ClearraApplicationControlStatus',
@@ -225,7 +226,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         'Assert-ClearraTauriBuildExecutionAvailable'
     )) {
         if ($desktopGate -like "*$forbiddenSkipMarker*") {
-            Add-ArchitectureError "U6 must execute the native command instead of statically skipping via '$forbiddenSkipMarker'"
+            Add-ArchitectureError "U6 must execute the requested command instead of statically skipping via '$forbiddenSkipMarker'"
         }
     }
     foreach ($forbiddenTargetMarker in @(

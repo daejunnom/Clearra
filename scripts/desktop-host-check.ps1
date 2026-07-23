@@ -13,7 +13,6 @@ Set-StrictMode -Version Latest
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 $ClearraScriptRoot = $PSScriptRoot
 . (Join-Path $PSScriptRoot "lib/progress.ps1")
-. (Join-Path $PSScriptRoot "lib/core-c-tests.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-execution-surface.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-start-helpers.ps1")
 Assert-ClearraTrustedExecutionSurface $ExecutionSurface "desktop host"
@@ -51,7 +50,7 @@ function Invoke-DesktopHostCommand {
 
 $applicationControl = Get-ClearraApplicationControlStatus
 $script:ApplicationControl = $applicationControl
-$stepCount = 6
+$stepCount = 5
 $script:Scope = New-ClearraProgressScope `
     -Name "desktop-host" `
     -Total $stepCount `
@@ -91,7 +90,6 @@ Invoke-DesktopHostCommand `
     )
 
 $previousCargoTargetDir = $env:CARGO_TARGET_DIR
-$previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
 Push-Location $Root
 try {
     if (-not [string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
@@ -99,37 +97,12 @@ try {
     }
     $env:CARGO_TARGET_DIR = Get-ClearraCargoTargetDir
 
-    Invoke-ClearraProgressCase -Scope $script:Scope -Name "build native C core" -Body {
-        $buildDir = Get-StartTestsPersistentBuildDir "core-c-library-cache"
-        $coreBuild = Invoke-CoreCBuild `
-            -BuildDir $buildDir `
-            -Configuration "Debug" `
-            -ConfigureArgs (Get-StartTestsCMakeConfigureArgs @("-DBUILD_TESTING=OFF")) `
-            -BuildWorkers ([Math]::Max(1, $Workers))
-        if ($coreBuild.Status -ne "Passed") {
-            throw "desktop native C core build failed: $($coreBuild.Reason)"
-        }
-        $script:DesktopNativeCoreLibraryDir = Find-CoreCLibraryDir $buildDir
-        if ([string]::IsNullOrWhiteSpace($script:DesktopNativeCoreLibraryDir)) {
-            throw "desktop native C core library was not found under $buildDir"
-        }
-    }
-
-    Sync-ClearraNativeCargoLinkState `
-        -LibraryDirectory $script:DesktopNativeCoreLibraryDir `
-        -CargoTargetDirectory $env:CARGO_TARGET_DIR `
-        -CargoPath $CargoPath `
-        -WorkspaceRoot $Root
-    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS =
-        Add-ClearraWindowsNativeRustLinkFlags `
-            $previousWindowsRustFlags `
-            $script:DesktopNativeCoreLibraryDir
     Invoke-DesktopHostCommand `
-        -Label "native GUI host async AppRequest E2E" `
+        -Label "WASM CPU GUI host async AppRequest E2E" `
         -FileName $CargoPath `
         -Arguments @(
             "test", "-p", "clearra-gui-host",
-            "--features", "native-c-core,webgpu-search",
+            "--features", "wasm-cpu-runtime,webgpu-search",
             "--test", "gui_host_contract",
             "--", "--test-threads=1"
         )
@@ -143,18 +116,13 @@ try {
         )
 
     Complete-ClearraProgressLine $script:Scope
-    Write-Output "[desktop-host] passed | product=apps/clearra-desktop | tauri=compiled | native_app_request=executed | async_job_e2e=executed | frontend_source=compiled-in-memory | wsl_used=false"
+    Write-Output "[desktop-host] passed | product=apps/clearra-desktop | tauri=compiled | wasm_cpu_app_request=executed | async_job_e2e=executed | frontend_source=compiled-in-memory | wsl_used=false"
 }
 finally {
     if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
         Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
     } else {
         $env:CARGO_TARGET_DIR = $previousCargoTargetDir
-    }
-    if ([string]::IsNullOrWhiteSpace($previousWindowsRustFlags)) {
-        Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-    } else {
-        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousWindowsRustFlags
     }
     Pop-Location
 }

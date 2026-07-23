@@ -1,5 +1,7 @@
 mod bridge {
     use clearra_app::AppContext;
+    #[cfg(feature = "wasm-cpu-runtime")]
+    use clearra_app::{AppCoreExecutorService, AppServices};
 
     use crate::{GuiJobHandle, GuiJobId, GuiJobQueue};
 
@@ -24,8 +26,20 @@ mod bridge {
 
     impl Default for DesktopTauriCommandBridge {
         fn default() -> Self {
-            Self::new(AppContext::default())
+            Self::new(product_app_context())
         }
+    }
+
+    fn product_app_context() -> AppContext {
+        #[cfg(feature = "wasm-cpu-runtime")]
+        {
+            return AppContext::new(
+                AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+            );
+        }
+
+        #[cfg(not(feature = "wasm-cpu-runtime"))]
+        AppContext::default()
     }
 }
 mod cancel_job {
