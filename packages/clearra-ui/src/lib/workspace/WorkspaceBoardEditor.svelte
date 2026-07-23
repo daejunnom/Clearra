@@ -40,9 +40,11 @@
   let undoStack: Snapshot[] = [];
   let redoStack: Snapshot[] = [];
   let painting = false;
+  let paintingPointer: number | null = null;
   let paintOccupied = true;
   let dragExisting = existingMask;
   let dragTarget = targetMask;
+  let boardElement: HTMLDivElement | null = null;
   let fumenInput = '';
   let fumenError = false;
   let lastExisting = existingMask;
@@ -63,9 +65,11 @@
   }
 
   function beginPaint(event: PointerEvent, x: number, y: number) {
-    if (event.button !== 0) return;
+    if (!event.isPrimary || event.button !== 0) return;
     event.preventDefault();
     painting = true;
+    paintingPointer = event.pointerId;
+    boardElement?.setPointerCapture(event.pointerId);
     const activeMask = activeLayer === 'existing' ? existingMask : targetMask;
     paintOccupied = !boardCellOccupied(activeMask, x, y);
     undoStack = [...undoStack.slice(-63), snapshot()];
@@ -75,8 +79,15 @@
     paintCell(x, y);
   }
 
-  function continuePaint(x: number, y: number) {
-    if (painting) paintCell(x, y);
+  function continuePaint(event: PointerEvent) {
+    if (!painting || event.pointerId !== paintingPointer || !boardElement) return;
+    event.preventDefault();
+    const bounds = boardElement.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const x = Math.floor(((event.clientX - bounds.left) * 10) / bounds.width);
+    const rowFromTop = Math.floor(((event.clientY - bounds.top) * height) / bounds.height);
+    if (x < 0 || x >= 10 || rowFromTop < 0 || rowFromTop >= height) return;
+    paintCell(x, height - rowFromTop - 1);
   }
 
   function keyboardToggle(event: MouseEvent, x: number, y: number) {
@@ -215,8 +226,13 @@
     }
   }
 
-  function stopPainting() {
+  function stopPainting(event: PointerEvent) {
+    if (paintingPointer !== null && event.pointerId !== paintingPointer) return;
+    if (paintingPointer !== null && boardElement?.hasPointerCapture(paintingPointer)) {
+      boardElement.releasePointerCapture(paintingPointer);
+    }
     painting = false;
+    paintingPointer = null;
   }
 </script>
 
@@ -302,7 +318,16 @@
   {/if}
 
   <div class="board-frame">
-    <div class:pc={mode !== 'build-probability'} class:build={mode === 'build-probability'} class="board" style={`--board-rows:${height}`}>
+    <div
+      bind:this={boardElement}
+      class:pc={mode !== 'build-probability'}
+      class:build={mode === 'build-probability'}
+      class="board"
+      role="group"
+      aria-label={label(boardLabel)}
+      style={`--board-rows:${height}`}
+      on:pointermove={continuePaint}
+    >
       {#each rows as y}
         {#each columns as x}
           <button
@@ -312,7 +337,6 @@
             aria-label={`${label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
             aria-pressed={boardCellOccupied(activeLayer === 'existing' ? existingMask : targetMask, x, y)}
             on:pointerdown={(event) => beginPaint(event, x, y)}
-            on:pointerenter={() => continuePaint(x, y)}
             on:click={(event) => keyboardToggle(event, x, y)}
           ><span></span></button>
         {/each}
@@ -370,7 +394,7 @@
   .legend i.existing { background: #737d79; }
   .legend i.target { background: #d8e2de; }
   .board-frame { background: #101817; border: 1px solid #253330; border-radius: 6px; box-shadow: inset 0 0 0 1px #090d0c; margin: 0 auto; max-width: 520px; padding: 14px; }
-  .board { aspect-ratio: calc(10 / var(--board-rows)); display: grid; gap: 0; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-template-rows: repeat(var(--board-rows), minmax(0, 1fr)); margin: 0 auto; max-height: 500px; max-width: 100%; touch-action: none; }
+  .board { -webkit-user-select: none; aspect-ratio: calc(10 / var(--board-rows)); display: grid; gap: 0; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-template-rows: repeat(var(--board-rows), minmax(0, 1fr)); margin: 0 auto; max-height: 500px; max-width: 100%; touch-action: none; user-select: none; }
   .board > button { aspect-ratio: 1; background: #1e2927; border: 0; border-radius: 0; box-shadow: inset 0 0 0 1px rgba(216, 226, 222, .2); cursor: crosshair; min-width: 0; padding: 0; }
   .board > button:hover, .board > button:focus-visible { background: #33423f; outline: 2px solid #75c8bc; outline-offset: -2px; }
   .board.build > button.existing { background: #737d79; box-shadow: inset 2px 2px 0 rgba(255,255,255,.1), inset -2px -2px 0 rgba(20,26,24,.25); }
