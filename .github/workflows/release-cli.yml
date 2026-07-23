@@ -140,3 +140,4 @@ jobs:
               --verify-tag \
               --generate-notes \
               --title "Clearra $GITHUB_REF_NAME"
+          fi
