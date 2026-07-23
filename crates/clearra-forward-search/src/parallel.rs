@@ -10,8 +10,8 @@ use clearra_scoring::{damage::TetrioDamageState, profile::SpinProfileId};
 use crate::{
     board::ForwardBoard,
     query::{
-        ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory, ForwardSpinLineRequirement,
-        ForwardSpinTarget,
+        ForwardLineClearPolicy, ForwardSearchMode, ForwardSearchQuery, ForwardSpinCategory,
+        ForwardSpinLineRequirement, ForwardSpinTarget,
     },
     reachability::ReachabilityWorkspace,
     result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
@@ -24,7 +24,7 @@ use crate::{
 const INIT_MAGIC: u32 = u32::from_le_bytes(*b"FWIN");
 const TASK_MAGIC: u32 = u32::from_le_bytes(*b"FWTK");
 const RESULT_MAGIC: u32 = u32::from_le_bytes(*b"FWRS");
-const WIRE_VERSION: u32 = 5;
+const WIRE_VERSION: u32 = 6;
 const MAX_WIRE_ITEMS: usize = 10_000_000;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
 
@@ -990,6 +990,10 @@ fn encode_config(output: &mut Vec<u8>, config: ForwardSearchConfig) {
     output.push(u8::from(config.hold_enabled));
     output.push(rule_code(config.rule_profile));
     output.push(spin_profile_code(config.spin_profile));
+    output.push(match config.line_clear_policy {
+        ForwardLineClearPolicy::Any => 0,
+        ForwardLineClearPolicy::PreserveBackToBack => 1,
+    });
     encode_option_u16(output, config.initial_combo);
     encode_option_u16(output, config.initial_back_to_back);
     match config.mode {
@@ -1020,6 +1024,15 @@ fn decode_config(reader: &mut Reader<'_>) -> Result<ForwardSearchConfig, Forward
     let hold_enabled = reader.bool()?;
     let rule_profile = rule_from_code(reader.u8()?)?;
     let spin_profile = spin_profile_from_code(reader.u8()?)?;
+    let line_clear_policy = match reader.u8()? {
+        0 => ForwardLineClearPolicy::Any,
+        1 => ForwardLineClearPolicy::PreserveBackToBack,
+        _ => {
+            return Err(ForwardParallelError::InvalidWire(
+                "forward_line_clear_policy_invalid",
+            ))
+        }
+    };
     let initial_combo = reader.option_u16()?;
     let initial_back_to_back = reader.option_u16()?;
     let mode = match reader.u8()? {
@@ -1058,6 +1071,7 @@ fn decode_config(reader: &mut Reader<'_>) -> Result<ForwardSearchConfig, Forward
         spin_profile,
         initial_combo,
         initial_back_to_back,
+        line_clear_policy,
         mode,
     })
 }
