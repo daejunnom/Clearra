@@ -5,7 +5,10 @@ use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCompletionGoal, PcContinuationToken, PcContinuationTokenCodec,
     PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow, SupplyWindowSize,
 };
-use clearra_supply::{piece_source::PieceSourceKind, queue::fixed_sequence::FixedSequence};
+use clearra_supply::{
+    piece_source::PieceSourceKind,
+    queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
+};
 
 use super::*;
 use crate::{
@@ -192,6 +195,64 @@ mod case_occupied_initial_hold_projects_terminal_standard_bag_lookahead {
             problem.supply().projects_unplaced_lookahead(),
             "the next bag piece replaces the terminal hold but is never placed"
         );
+        assert!(problem.supply().projects_standard_bag_lookahead());
+    }
+}
+
+mod case_finite_sources_project_terminal_hold_lookahead {
+    use super::*;
+
+    #[test]
+    fn fixed_and_pattern_sources_project_terminal_hold_lookahead() {
+        let fixed = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::L,
+                PieceKind::O,
+                PieceKind::J,
+            ])),
+            PieceWindow::new(3),
+        )
+        .with_exact_pieces(Some(3));
+        let pattern = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("[LOJ]!", 6).expect("LOJ pattern"),
+            ),
+            PieceWindow::new(3),
+        )
+        .with_exact_pieces(Some(3));
+
+        for query in [&fixed, &pattern] {
+            let problem =
+                ProblemCompiler::compile_scenario_pc(query).expect("finite source problem");
+            assert_eq!(problem.supply().source_sequence_length(), 3);
+            assert!(
+                problem.supply().projects_unplaced_lookahead(),
+                "the terminal held piece must be released by an unplaced lookahead"
+            );
+            assert!(
+                !problem.supply().projects_standard_bag_lookahead(),
+                "finite sources cannot infer an unknown draw from seven-bag complement rules"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_hold_does_not_project_terminal_lookahead() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("[LOJ]!", 6).expect("LOJ pattern"),
+            ),
+            PieceWindow::new(3),
+        )
+        .with_exact_pieces(Some(3))
+        .with_allow_hold(false);
+
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("no-hold problem");
+
+        assert!(!problem.supply().projects_unplaced_lookahead());
     }
 }
 

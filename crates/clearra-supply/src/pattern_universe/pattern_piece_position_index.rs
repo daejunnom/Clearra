@@ -159,9 +159,9 @@ impl PatternPiecePositionIndex {
         position: usize,
         piece_code: u8,
         word_index: usize,
-        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
     ) -> u64 {
-        if position < self.sequence_len || !projects_unplaced_lookahead {
+        if position < self.sequence_len || !projects_standard_bag_lookahead {
             return self.piece_word(position, piece_code, word_index);
         }
         if position != self.sequence_len

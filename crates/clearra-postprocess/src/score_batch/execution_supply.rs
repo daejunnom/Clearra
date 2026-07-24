@@ -13,6 +13,7 @@ pub(super) struct SupplyState {
 pub(super) trait ExecutionSupplyBatch {
     fn hold_enabled(&self) -> bool;
     fn projects_unplaced_lookahead(&self) -> bool;
+    fn projects_standard_bag_lookahead(&self) -> bool;
 }
 
 impl ExecutionSupplyBatch for ExactScoringExecutionBatch {
@@ -23,6 +24,10 @@ impl ExecutionSupplyBatch for ExactScoringExecutionBatch {
     fn projects_unplaced_lookahead(&self) -> bool {
         self.projects_unplaced_lookahead()
     }
+
+    fn projects_standard_bag_lookahead(&self) -> bool {
+        self.projects_standard_bag_lookahead()
+    }
 }
 
 impl ExecutionSupplyBatch for SpinCoverageExecutionBatch {
@@ -32,6 +37,10 @@ impl ExecutionSupplyBatch for SpinCoverageExecutionBatch {
 
     fn projects_unplaced_lookahead(&self) -> bool {
         self.projects_unplaced_lookahead()
+    }
+
+    fn projects_standard_bag_lookahead(&self) -> bool {
+        self.projects_standard_bag_lookahead()
     }
 }
 
@@ -54,7 +63,11 @@ pub(super) fn for_each_supply_successor(
 ) -> Result<(), ExactScoringExecutionCancelled> {
     let cursor = state.cursor as usize;
     let Some(current) = sequence.get(cursor).copied() else {
-        if batch.projects_unplaced_lookahead() && batch.hold_enabled() && cursor == sequence.len() {
+        if batch.projects_unplaced_lookahead()
+            && batch.projects_standard_bag_lookahead()
+            && batch.hold_enabled()
+            && cursor == sequence.len()
+        {
             if let Some(lookahead) = first_standard_bag_lookahead(sequence) {
                 if lookahead == required_piece {
                     visit(
@@ -122,6 +135,7 @@ pub(super) fn for_each_supply_successor(
     }
     if state.hold.is_none()
         && batch.projects_unplaced_lookahead()
+        && batch.projects_standard_bag_lookahead()
         && cursor + 1 == sequence.len()
         && first_standard_bag_lookahead(sequence) == Some(required_piece)
     {

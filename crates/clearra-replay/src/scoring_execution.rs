@@ -300,6 +300,7 @@ pub struct ExactScoringExecutionBatch {
     initial_hold: Option<PieceKind>,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
     kick_table_id: u64,
     rule_profile_id: u64,
     graphs: Vec<ExactScoringExecutionGraph>,
@@ -316,6 +317,7 @@ impl ExactScoringExecutionBatch {
         initial_hold: Option<PieceKind>,
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
         kick_table_id: u64,
         rule_profile_id: u64,
         graphs: Vec<ExactScoringExecutionGraph>,
@@ -337,6 +339,7 @@ impl ExactScoringExecutionBatch {
             initial_hold,
             hold_enabled,
             projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
             kick_table_id,
             rule_profile_id,
             graphs,
@@ -370,6 +373,10 @@ impl ExactScoringExecutionBatch {
 
     pub const fn projects_unplaced_lookahead(&self) -> bool {
         self.projects_unplaced_lookahead
+    }
+
+    pub const fn projects_standard_bag_lookahead(&self) -> bool {
+        self.projects_standard_bag_lookahead
     }
 
     pub const fn kick_table_id(&self) -> u64 {

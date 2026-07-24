@@ -486,11 +486,14 @@ mod piece_source_materializer {
             });
         }
 
-        let projects_unplaced_lookahead =
-            matches!(query.remaining_queue(), PcQueueInput::Standard7Bag)
-                && query.allow_hold()
-                && query.exact_pieces() == Some(geometry_piece_count)
-                && source_sequence_length == required_source_pieces;
+        // Releasing the final held piece consumes one source piece that is
+        // never placed. Its identity cannot affect geometry, so a finite
+        // fixed or pattern source needs the same terminal projection as an
+        // implicit standard bag when it ends at the exact placement window.
+        let projects_unplaced_lookahead = query.allow_hold()
+            && query.exact_pieces() == Some(geometry_piece_count)
+            && source_sequence_length == required_source_pieces
+            && automatic_source_pieces > source_sequence_length;
 
         Ok(ResolvedSupplyWindow {
             source_sequence_length,

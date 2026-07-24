@@ -403,6 +403,7 @@ fn run_branch(
                     || problem.objective().kind() == ObjectiveKind::MinimumCover;
                 let coverage_only_needs_witness = !solution_coverage_required
                     && problem.count_policy() == PcCountPolicy::CountUnique
+                    && target.single_pattern_witness_is_exact()
                     && (workspace.standard_bag_coverage_complete()
                         || shared_coverage.is_superset(target.possible_patterns.as_ref()));
                 let result = verify_candidate(

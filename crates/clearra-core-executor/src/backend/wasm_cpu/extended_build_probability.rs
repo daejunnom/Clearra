@@ -314,6 +314,7 @@ impl ExtendedBuildProbabilitySession {
                     self.problem.initial_hold(),
                     self.problem.supply().hold_enabled(),
                     self.problem.supply().projects_unplaced_lookahead(),
+                    self.problem.supply().projects_standard_bag_lookahead(),
                     false,
                     false,
                     control,
@@ -671,6 +672,7 @@ impl ExtendedBuildProbabilitySession {
                 self.problem.initial_hold().hold_piece(),
                 self.problem.supply().hold_enabled(),
                 self.problem.supply().projects_unplaced_lookahead(),
+                self.problem.supply().projects_standard_bag_lookahead(),
                 kick_table_id,
                 rule_profile_id,
                 core::mem::take(&mut self.spin_execution_graphs),
@@ -752,6 +754,10 @@ impl ExtendedBuildProbabilitySession {
             field(
                 "projects_unplaced_lookahead",
                 self.problem.supply().projects_unplaced_lookahead(),
+            ),
+            field(
+                "projects_standard_bag_lookahead",
+                self.problem.supply().projects_standard_bag_lookahead(),
             ),
             field("source_sequence_length", source_sequence_length),
             field(

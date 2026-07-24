@@ -587,7 +587,8 @@ fn visit_execution_paths(
             && state.cursor as usize == sequence.len()
             && state.hold == Some(edge.piece())
             && graph.node(edge.to()).is_some_and(|child| child.accepting())
-            && first_standard_bag_lookahead(sequence).is_none()
+            && (!batch.projects_standard_bag_lookahead()
+                || first_standard_bag_lookahead(sequence).is_none())
         {
             path.push(edge);
             holds.push(HoldDecision::ReleaseHeldAtTerminal {

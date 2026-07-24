@@ -731,6 +731,7 @@ impl WasmExactSearchSession {
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover;
         let coverage_only_needs_witness = !solution_coverage_required
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
+            && target.single_pattern_witness_is_exact()
             && (self.buildup_workspace.standard_bag_coverage_complete()
                 || self
                     .covered_patterns
@@ -1280,6 +1281,7 @@ impl WasmExactSearchSession {
             self.problem.initial_hold().hold_piece(),
             self.problem.supply().hold_enabled(),
             self.problem.supply().projects_unplaced_lookahead(),
+            self.problem.supply().projects_standard_bag_lookahead(),
             kick_table_id,
             rule_profile_id,
             graphs,
@@ -1554,6 +1556,10 @@ impl WasmExactSearchSession {
             field(
                 "projects_unplaced_lookahead",
                 self.problem.supply().projects_unplaced_lookahead(),
+            ),
+            field(
+                "projects_standard_bag_lookahead",
+                self.problem.supply().projects_standard_bag_lookahead(),
             ),
             field("source_sequence_length", source_sequence_length),
             field(

@@ -222,6 +222,14 @@ pub(super) struct TargetGroup {
     pub pattern_index: Option<Arc<PatternPiecePositionIndex>>,
 }
 
+impl TargetGroup {
+    /// Witness-only verification preserves candidate membership only when the
+    /// target group contains one concrete queue language.
+    pub fn single_pattern_witness_is_exact(&self) -> bool {
+        self.pattern_index.is_some() && self.possible_patterns.count_ones() == 1
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CompileFrame {
     remaining: u64,
