@@ -199,6 +199,13 @@ impl ExecutionSupplyBatch for SpinBatchRef<'_> {
             Self::Coverage(batch) => batch.projects_unplaced_lookahead(),
         }
     }
+
+    fn projects_standard_bag_lookahead(&self) -> bool {
+        match self {
+            Self::Scoring(batch) => batch.projects_standard_bag_lookahead(),
+            Self::Coverage(batch) => batch.projects_standard_bag_lookahead(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -379,7 +386,8 @@ impl<'a> SupplyTransitionCache<'a> {
             if key.release_held_at_terminal
                 && state.cursor as usize == sequence.len()
                 && state.hold == Some(key.required_piece)
-                && first_standard_bag_lookahead(sequence).is_none()
+                && (!self.batch.projects_standard_bag_lookahead()
+                    || first_standard_bag_lookahead(sequence).is_none())
             {
                 let words = branches
                     .entry((

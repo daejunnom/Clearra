@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.5 - 2026-07-25
+
+- Corrected finite fixed and pattern queue handling so an exact terminal held
+  piece can be released without inventing an unknown standard-bag draw.
+- Kept terminal hold projection separate from standard-bag complement
+  projection throughout BuildUp, coverage, replay, spin, and scoring paths.
+- Restricted witness-only BuildUp verification to a single concrete pattern,
+  preventing a representative witness from hiding solutions in grouped queue
+  languages.
+- Added exact WASM regression coverage for the finite `[LOJ]!` build
+  probability case and preserved complete count and probability reporting.
+
 ## 0.1.4 - 2026-07-24
 
 - Extended the selected-spin-profile B2B preservation policy to PC and build

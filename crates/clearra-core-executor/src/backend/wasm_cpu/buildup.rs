@@ -688,6 +688,7 @@ fn verify_candidate_with_projection(
                 problem.initial_hold(),
                 problem.supply().hold_enabled(),
                 problem.supply().projects_unplaced_lookahead(),
+                problem.supply().projects_standard_bag_lookahead(),
                 true,
                 false,
                 control,
@@ -773,6 +774,7 @@ fn verify_candidate_with_projection(
                             problem.initial_hold(),
                             problem.supply().hold_enabled(),
                             problem.supply().projects_unplaced_lookahead(),
+                            problem.supply().projects_standard_bag_lookahead(),
                             false,
                             false,
                             control,
@@ -824,6 +826,7 @@ fn verify_candidate_with_projection(
                     sequence.as_ref(),
                     problem.supply().hold_enabled(),
                     problem.supply().projects_unplaced_lookahead(),
+                    problem.supply().projects_standard_bag_lookahead(),
                     CoverageState {
                         node: graph.root,
                         cursor: problem.initial_hold().cursor(),
@@ -1121,7 +1124,7 @@ fn visit_witness_state(
                 queue_position,
                 desired_piece,
                 word_index,
-                problem.supply().projects_unplaced_lookahead(),
+                problem.supply().projects_standard_bag_lookahead(),
             );
         if use_current != 0 {
             path.push(WitnessStep {
@@ -1163,7 +1166,7 @@ fn visit_witness_state(
                         queue_position,
                         current_piece,
                         word_index,
-                        problem.supply().projects_unplaced_lookahead(),
+                        problem.supply().projects_standard_bag_lookahead(),
                     );
                 if swap_bits == 0 {
                     continue;
@@ -1203,7 +1206,7 @@ fn visit_witness_state(
                 queue_position.saturating_add(1),
                 desired_piece,
                 word_index,
-                problem.supply().projects_unplaced_lookahead(),
+                problem.supply().projects_standard_bag_lookahead(),
             );
             for current_piece in 1..=7 {
                 let store_bits = state.active_patterns
@@ -1212,7 +1215,7 @@ fn visit_witness_state(
                         queue_position,
                         current_piece,
                         word_index,
-                        problem.supply().projects_unplaced_lookahead(),
+                        problem.supply().projects_standard_bag_lookahead(),
                     );
                 if store_bits == 0 {
                     continue;
@@ -1939,6 +1942,7 @@ fn first_pattern_path(
     sequence: &[PieceKind],
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
     initial: CoverageState,
 ) -> Vec<CorePathStep> {
     fn visit(
@@ -1946,6 +1950,7 @@ fn first_pattern_path(
         sequence: &[PieceKind],
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
         state: CoverageState,
         seen: &mut ExactHashSet<CoverageState>,
         path: &mut Vec<CorePathStep>,
@@ -1970,7 +1975,8 @@ fn first_pattern_path(
                 && state.cursor as usize == sequence.len()
                 && state.hold == Some(edge.piece)
                 && graph.nodes[edge.to as usize].accepting()
-                && first_standard_bag_lookahead(sequence).is_none()
+                && (!projects_standard_bag_lookahead
+                    || first_standard_bag_lookahead(sequence).is_none())
             {
                 path.push(CorePathStep::new(
                     edge.piece,
@@ -1986,6 +1992,7 @@ fn first_pattern_path(
                 sequence,
                 hold_enabled,
                 projects_unplaced_lookahead,
+                projects_standard_bag_lookahead,
                 state,
                 edge.piece,
             ) {
@@ -2002,6 +2009,7 @@ fn first_pattern_path(
                     sequence,
                     hold_enabled,
                     projects_unplaced_lookahead,
+                    projects_standard_bag_lookahead,
                     CoverageState {
                         node: edge.to,
                         ..next
@@ -2024,6 +2032,7 @@ fn first_pattern_path(
         sequence,
         hold_enabled,
         projects_unplaced_lookahead,
+        projects_standard_bag_lookahead,
         initial,
         &mut seen,
         &mut path,
@@ -2041,6 +2050,7 @@ pub(super) fn representative_pattern_path(
         sequence,
         problem.supply().hold_enabled(),
         problem.supply().projects_unplaced_lookahead(),
+        problem.supply().projects_standard_bag_lookahead(),
         CoverageState {
             node: graph.root,
             cursor: problem.initial_hold().cursor(),
@@ -2053,12 +2063,17 @@ fn hold_successors(
     sequence: &[PieceKind],
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
     state: CoverageState,
     required_piece: PieceKind,
 ) -> Vec<(&'static str, CoverageState)> {
     let cursor = state.cursor as usize;
     let Some(current) = sequence.get(cursor).copied() else {
-        if projects_unplaced_lookahead && hold_enabled && cursor == sequence.len() {
+        if projects_unplaced_lookahead
+            && projects_standard_bag_lookahead
+            && hold_enabled
+            && cursor == sequence.len()
+        {
             let Some(lookahead) = first_standard_bag_lookahead(sequence) else {
                 return Vec::new();
             };
@@ -2121,6 +2136,7 @@ fn hold_successors(
     }
     if state.hold.is_none()
         && projects_unplaced_lookahead
+        && projects_standard_bag_lookahead
         && cursor + 1 == sequence.len()
         && first_standard_bag_lookahead(sequence) == Some(required_piece)
     {

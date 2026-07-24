@@ -42,6 +42,7 @@ impl CoverageProductEvaluator {
         initial_hold: HoldAutomatonState,
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
         count_paths: bool,
         stop_after_first_pattern: bool,
         control: &ExecutionControl,
@@ -178,7 +179,7 @@ impl CoverageProductEvaluator {
                                 queue_position,
                                 desired_piece,
                                 word_index,
-                                projects_unplaced_lookahead,
+                                projects_standard_bag_lookahead,
                             );
                         self.activate_transition(
                             edge.to as usize,
@@ -202,7 +203,7 @@ impl CoverageProductEvaluator {
                                             queue_position,
                                             current_piece,
                                             word_index,
-                                            projects_unplaced_lookahead,
+                                            projects_standard_bag_lookahead,
                                         );
                                 self.activate_transition(
                                     edge.to as usize,
@@ -223,14 +224,14 @@ impl CoverageProductEvaluator {
                                             queue_position.saturating_add(1),
                                             desired_piece,
                                             word_index,
-                                            projects_unplaced_lookahead,
+                                            projects_standard_bag_lookahead,
                                         )
                                     & pattern_index
                                         .piece_word_with_projected_standard_bag_lookahead(
                                             queue_position,
                                             current_piece,
                                             word_index,
-                                            projects_unplaced_lookahead,
+                                            projects_standard_bag_lookahead,
                                         );
                                 self.activate_transition(
                                     edge.to as usize,

@@ -83,6 +83,35 @@ fn occupied_initial_hold_plus_p7_solves_eight_piece_scenario() {
 }
 
 #[test]
+fn finite_pattern_releases_terminal_hold_for_complete_build_coverage() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xe0380e0380 --height 4 --patterns [LOJ]! --hold empty --no-mirror --workers 1",
+        )
+        .expect("finite-pattern build probability result");
+    let report = result
+        .search_report()
+        .unwrap_or_else(|| panic!("WASM search report: {:?}", result.app_response()));
+
+    assert!(report.count_complete);
+    assert!(report.probability_complete);
+    assert!(report.projects_unplaced_lookahead);
+    assert_eq!(report.source_sequence_length, 3);
+    assert_eq!(report.covered_pattern_count, 6);
+    assert_eq!(report.unique_solution_count, 2);
+    assert_eq!(report.normalized_solution_set_hash, "cts1:2770e9c1ff9a940e");
+    assert!(
+        (report
+            .coverage_probability
+            .parse::<f64>()
+            .expect("coverage probability")
+            - 1.0)
+            .abs()
+            <= f64::EPSILON
+    );
+}
+
+#[test]
 fn inverse_b2b_constraint_removes_a_normal_non_pc_line_clear() {
     let request = WasmCommandRuntime::default()
         .compile_command_text(

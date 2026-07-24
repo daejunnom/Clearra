@@ -445,6 +445,11 @@ mod supply_provenance {
         }
     }
     impl SupplyProvenance {
+        pub fn projects_standard_bag_lookahead(&self) -> bool {
+            self.projects_unplaced_lookahead && matches!(self.queue, PcQueueInput::Standard7Bag)
+        }
+    }
+    impl SupplyProvenance {
         pub const fn supply_window_resolution(&self) -> &'static str {
             if self.projects_unplaced_lookahead {
                 "projected-terminal-lookahead"
