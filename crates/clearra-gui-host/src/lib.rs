@@ -50,3 +50,6 @@ pub use validation::{
     GuiBackendValidator, GuiFilePathValidator, GuiFormValidator, GuiRenderValidator,
     GuiValidationDiagnostic, GuiValidationSummary,
 };
+
+#[cfg(test)]
+mod gui_host_contract_tests;

@@ -4,10 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
-use clearra_replay::{ExactScoringExecutionBatch, ExactScoringExecutionGraph, HoldDecision};
+use clearra_replay::{
+    ExactScoringExecutionBatch, ExactScoringExecutionGraph, HoldDecision, ScoringExecutionEdge,
+    ScoringExecutionNode, SpinCoverageExecutionBatch, SpinCoverageExecutionGraph,
+};
 use clearra_scoring::{
     event::SpinDetector,
     profile::{SpinProfile, SpinProfileId},
@@ -17,7 +20,7 @@ use super::{
     exact_scoring_execution_materializer::ExactScoringExecutionCancelled,
     execution_supply::{
         first_standard_bag_lookahead, for_each_supply_successor, terminal_supply_state_is_accepted,
-        SupplyState,
+        ExecutionSupplyBatch, SupplyState,
     },
 };
 
@@ -25,9 +28,31 @@ use super::{
 pub struct TSpinCoverageOnlyMaterialization {
     covered_patterns: PatternBitSet,
     candidate_ids: BTreeSet<u64>,
-    candidate_identities: BTreeSet<StandardBoard64TilingIdentity>,
-    execution_count: u128,
+    candidate_keys: BTreeSet<String>,
+    candidate_coverages: Vec<CandidatePatternCoverage>,
+    witnessed_pattern_count: u128,
     complete: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CandidatePatternCoverage {
+    candidate_id: u64,
+    candidate_key: String,
+    covered_patterns: PatternBitSet,
+}
+
+impl CandidatePatternCoverage {
+    pub const fn candidate_id(&self) -> u64 {
+        self.candidate_id
+    }
+
+    pub fn candidate_key(&self) -> &str {
+        &self.candidate_key
+    }
+
+    pub fn covered_patterns(&self) -> &PatternBitSet {
+        &self.covered_patterns
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,16 +118,140 @@ impl TSpinCoverageOnlyMaterialization {
         self.candidate_ids.iter().copied()
     }
 
-    pub fn candidate_identities(&self) -> impl Iterator<Item = StandardBoard64TilingIdentity> + '_ {
-        self.candidate_identities.iter().copied()
+    pub fn candidate_keys(&self) -> impl Iterator<Item = &str> + '_ {
+        self.candidate_keys.iter().map(String::as_str)
     }
 
-    pub const fn execution_count(&self) -> u128 {
-        self.execution_count
+    pub fn candidate_coverages(&self) -> &[CandidatePatternCoverage] {
+        &self.candidate_coverages
+    }
+
+    pub const fn witnessed_pattern_count(&self) -> u128 {
+        self.witnessed_pattern_count
     }
 
     pub const fn complete(&self) -> bool {
         self.complete
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpinBatchRef<'a> {
+    Scoring(&'a ExactScoringExecutionBatch),
+    Coverage(&'a SpinCoverageExecutionBatch),
+}
+
+impl<'a> SpinBatchRef<'a> {
+    fn patterns(self) -> &'a [Vec<PieceKind>] {
+        match self {
+            Self::Scoring(batch) => batch.patterns(),
+            Self::Coverage(batch) => batch.patterns(),
+        }
+    }
+
+    const fn initial_cursor(self) -> u16 {
+        match self {
+            Self::Scoring(batch) => batch.initial_cursor(),
+            Self::Coverage(batch) => batch.initial_cursor(),
+        }
+    }
+
+    const fn initial_hold(self) -> Option<PieceKind> {
+        match self {
+            Self::Scoring(batch) => batch.initial_hold(),
+            Self::Coverage(batch) => batch.initial_hold(),
+        }
+    }
+
+    const fn complete(self) -> bool {
+        match self {
+            Self::Scoring(batch) => batch.complete(),
+            Self::Coverage(batch) => batch.complete(),
+        }
+    }
+
+    fn graph_count(self) -> usize {
+        match self {
+            Self::Scoring(batch) => batch.graphs().len(),
+            Self::Coverage(batch) => batch.graphs().len(),
+        }
+    }
+
+    fn graph(self, index: usize) -> Option<SpinGraphRef<'a>> {
+        match self {
+            Self::Scoring(batch) => batch.graphs().get(index).map(SpinGraphRef::Scoring),
+            Self::Coverage(batch) => batch.graphs().get(index).map(SpinGraphRef::Coverage),
+        }
+    }
+}
+
+impl ExecutionSupplyBatch for SpinBatchRef<'_> {
+    fn hold_enabled(&self) -> bool {
+        match self {
+            Self::Scoring(batch) => batch.hold_enabled(),
+            Self::Coverage(batch) => batch.hold_enabled(),
+        }
+    }
+
+    fn projects_unplaced_lookahead(&self) -> bool {
+        match self {
+            Self::Scoring(batch) => batch.projects_unplaced_lookahead(),
+            Self::Coverage(batch) => batch.projects_unplaced_lookahead(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpinGraphRef<'a> {
+    Scoring(&'a ExactScoringExecutionGraph),
+    Coverage(&'a SpinCoverageExecutionGraph),
+}
+
+impl<'a> SpinGraphRef<'a> {
+    const fn candidate_id(self) -> u64 {
+        match self {
+            Self::Scoring(graph) => graph.candidate_id(),
+            Self::Coverage(graph) => graph.candidate_id(),
+        }
+    }
+
+    fn candidate_key(self) -> String {
+        match self {
+            Self::Scoring(graph) => {
+                NormalizedTilingSolutionKey::from_standard_board64_identity(graph.identity())
+                    .as_str()
+                    .to_owned()
+            }
+            Self::Coverage(graph) => graph.candidate_key().to_owned(),
+        }
+    }
+
+    const fn root(self) -> u32 {
+        match self {
+            Self::Scoring(graph) => graph.root(),
+            Self::Coverage(graph) => graph.root(),
+        }
+    }
+
+    fn node(self, index: u32) -> Option<ScoringExecutionNode> {
+        match self {
+            Self::Scoring(graph) => graph.node(index),
+            Self::Coverage(graph) => graph.node(index),
+        }
+    }
+
+    fn node_count(self) -> usize {
+        match self {
+            Self::Scoring(graph) => graph.node_count(),
+            Self::Coverage(graph) => graph.node_count(),
+        }
+    }
+
+    fn edges(self, node: ScoringExecutionNode) -> &'a [ScoringExecutionEdge] {
+        match self {
+            Self::Scoring(graph) => graph.edges(node),
+            Self::Coverage(graph) => graph.edges(node),
+        }
     }
 }
 
@@ -128,96 +277,41 @@ struct ProductState {
     has_target_spin: bool,
 }
 
-#[derive(Clone, Debug)]
-struct WeightedPatternClass {
-    multiplicity: u128,
+#[derive(Clone, Debug, Default)]
+struct PatternSet {
     words: Vec<u64>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct WeightedPatternSet {
-    classes: Vec<WeightedPatternClass>,
-}
-
-impl WeightedPatternSet {
+impl PatternSet {
     fn single(words: Vec<u64>) -> Self {
-        Self {
-            classes: vec![WeightedPatternClass {
-                multiplicity: 1,
-                words,
-            }],
-        }
+        Self { words }
     }
 
-    fn add_filtered(&mut self, source: &Self, mask: &[u64]) {
-        for class in &source.classes {
-            if let Some(words) = intersect_words(&class.words, mask) {
-                self.add_class(class.multiplicity, words);
-            }
+    fn add_filtered(&mut self, source: &Self, mask: &[u64], already_covered: &[u64]) {
+        if self.words.is_empty() {
+            self.words.resize(source.words.len(), 0);
         }
-    }
-
-    fn add_class(&mut self, multiplicity: u128, mut pending: Vec<u64>) {
-        let mut overlaps = Vec::<WeightedPatternClass>::new();
-        for class in &mut self.classes {
-            let mut overlap = vec![0_u64; pending.len()];
-            let mut overlap_nonempty = false;
-            for ((existing, incoming), overlap_word) in class
-                .words
-                .iter_mut()
-                .zip(pending.iter_mut())
-                .zip(overlap.iter_mut())
-            {
-                let shared = *existing & *incoming;
-                *overlap_word = shared;
-                *existing &= !shared;
-                *incoming &= !shared;
-                overlap_nonempty |= shared != 0;
-            }
-            if overlap_nonempty {
-                overlaps.push(WeightedPatternClass {
-                    multiplicity: class.multiplicity.saturating_add(multiplicity),
-                    words: overlap,
-                });
-            }
-        }
-        self.classes
-            .retain(|class| words_are_nonempty(&class.words));
-        for overlap in overlaps {
-            self.merge_disjoint_class(overlap);
-        }
-        if words_are_nonempty(&pending) {
-            self.merge_disjoint_class(WeightedPatternClass {
-                multiplicity,
-                words: pending,
-            });
-        }
-    }
-
-    fn merge_disjoint_class(&mut self, incoming: WeightedPatternClass) {
-        if let Some(existing) = self
-            .classes
+        for (((target, source), mask), covered) in self
+            .words
             .iter_mut()
-            .find(|class| class.multiplicity == incoming.multiplicity)
+            .zip(&source.words)
+            .zip(mask)
+            .zip(already_covered)
         {
-            for (target, source) in existing.words.iter_mut().zip(incoming.words) {
-                *target |= source;
-            }
-        } else {
-            self.classes.push(incoming);
+            *target |= source & mask & !covered;
         }
     }
 }
 
 struct SupplyTransitionCache<'a> {
-    batch: &'a ExactScoringExecutionBatch,
+    batch: SpinBatchRef<'a>,
     word_count: usize,
     transitions: BTreeMap<TransitionCacheKey, Vec<TransitionMask>>,
     terminal_masks: BTreeMap<(u16, Option<PieceKind>), Arc<[u64]>>,
 }
 
 impl<'a> SupplyTransitionCache<'a> {
-    fn new(batch: &'a ExactScoringExecutionBatch) -> Self {
+    fn new(batch: SpinBatchRef<'a>) -> Self {
         Self {
             batch,
             word_count: batch.patterns().len().div_ceil(u64::BITS as usize),
@@ -254,7 +348,7 @@ impl<'a> SupplyTransitionCache<'a> {
             let mut words = vec![0_u64; self.word_count];
             for (pattern_id, sequence) in self.batch.patterns().iter().enumerate() {
                 if terminal_supply_state_is_accepted(
-                    self.batch,
+                    &self.batch,
                     sequence,
                     SupplyState {
                         node: 0,
@@ -299,7 +393,7 @@ impl<'a> SupplyTransitionCache<'a> {
                 set_pattern(words, pattern_id);
             }
             for_each_supply_successor(
-                self.batch,
+                &self.batch,
                 sequence,
                 state,
                 key.required_piece,
@@ -360,6 +454,50 @@ impl TSpinCoverageOnlyMaterializer {
         pattern_range: Range<usize>,
         control: &ExecutionControl,
     ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
+        Self::materialize_batch(
+            SpinBatchRef::Scoring(batch),
+            Some(target),
+            pattern_range,
+            control,
+        )
+    }
+
+    pub fn materialize_spin_batch(
+        batch: &SpinCoverageExecutionBatch,
+        target: SpinCoverageTarget,
+        pattern_range: Range<usize>,
+        control: &ExecutionControl,
+    ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
+        Self::materialize_batch(
+            SpinBatchRef::Coverage(batch),
+            Some(target),
+            pattern_range,
+            control,
+        )
+    }
+
+    pub fn materialize_all_paths(
+        batch: &ExactScoringExecutionBatch,
+        pattern_range: Range<usize>,
+        control: &ExecutionControl,
+    ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
+        Self::materialize_batch(SpinBatchRef::Scoring(batch), None, pattern_range, control)
+    }
+
+    pub fn materialize_all_spin_paths(
+        batch: &SpinCoverageExecutionBatch,
+        pattern_range: Range<usize>,
+        control: &ExecutionControl,
+    ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
+        Self::materialize_batch(SpinBatchRef::Coverage(batch), None, pattern_range, control)
+    }
+
+    fn materialize_batch(
+        batch: SpinBatchRef<'_>,
+        target: Option<SpinCoverageTarget>,
+        pattern_range: Range<usize>,
+        control: &ExecutionControl,
+    ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
         let pattern_count = batch.patterns().len();
         let start = pattern_range.start.min(pattern_count);
         let end = pattern_range.end.min(pattern_count).max(start);
@@ -369,20 +507,21 @@ impl TSpinCoverageOnlyMaterializer {
             set_pattern(&mut initial_words, pattern_id);
         }
         let mut covered_words = vec![0_u64; word_count];
-        let mut candidate_ids = BTreeSet::new();
-        let mut candidate_identities = BTreeSet::new();
-        let mut execution_count = 0_u128;
+        let mut coverage_by_candidate = BTreeMap::<String, (u64, PatternBitSet)>::new();
         let mut cache = SupplyTransitionCache::new(batch);
         let mut complete = batch.complete();
 
-        for (graph_index, graph) in batch.graphs().iter().enumerate() {
+        for graph_index in 0..batch.graph_count() {
+            let graph = batch
+                .graph(graph_index)
+                .expect("spin execution graph index is in range");
             if control.is_cancelled() {
                 return Err(ExactScoringExecutionCancelled);
             }
             control.report_progress(
                 "t-spin-coverage",
                 graph_index as u64,
-                Some(batch.graphs().len() as u64),
+                Some(batch.graph_count() as u64),
             );
             let mut graph_words = vec![0_u64; word_count];
             let graph_complete = evaluate_graph_product(
@@ -391,28 +530,60 @@ impl TSpinCoverageOnlyMaterializer {
                 &initial_words,
                 &mut cache,
                 &mut graph_words,
-                &mut execution_count,
                 target,
                 control,
             )?;
             complete &= graph_complete;
             if words_are_nonempty(&graph_words) {
-                candidate_ids.insert(graph.candidate_id());
-                candidate_identities.insert(graph.identity());
+                let candidate_key = graph.candidate_key();
+                let graph_coverage = PatternBitSet::from_words(pattern_count, graph_words.clone())
+                    .expect("candidate coverage preserves the pattern universe");
+                match coverage_by_candidate.entry(candidate_key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert((graph.candidate_id(), graph_coverage));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let (candidate_id, coverage) = entry.get_mut();
+                        *candidate_id = (*candidate_id).min(graph.candidate_id());
+                        coverage
+                            .union_with(&graph_coverage)
+                            .expect("candidate coverage preserves the pattern universe");
+                    }
+                }
                 union_words(&mut covered_words, &graph_words);
             }
         }
         control.report_progress(
             "t-spin-coverage",
-            batch.graphs().len() as u64,
-            Some(batch.graphs().len() as u64),
+            batch.graph_count() as u64,
+            Some(batch.graph_count() as u64),
         );
+        let candidate_ids = coverage_by_candidate
+            .values()
+            .map(|(candidate_id, _)| *candidate_id)
+            .collect();
+        let candidate_keys = coverage_by_candidate.keys().cloned().collect();
+        let witnessed_pattern_count = coverage_by_candidate
+            .values()
+            .map(|(_, coverage)| u128::from(coverage.count_ones()))
+            .sum();
+        let candidate_coverages = coverage_by_candidate
+            .into_iter()
+            .map(
+                |(candidate_key, (candidate_id, covered_patterns))| CandidatePatternCoverage {
+                    candidate_id,
+                    candidate_key,
+                    covered_patterns,
+                },
+            )
+            .collect();
         Ok(TSpinCoverageOnlyMaterialization {
             covered_patterns: PatternBitSet::from_words(pattern_count, covered_words)
                 .expect("coverage product preserves the pattern universe"),
             candidate_ids,
-            candidate_identities,
-            execution_count,
+            candidate_keys,
+            candidate_coverages,
+            witnessed_pattern_count,
             complete,
         })
     }
@@ -420,17 +591,16 @@ impl TSpinCoverageOnlyMaterializer {
 
 #[allow(clippy::too_many_arguments)]
 fn evaluate_graph_product(
-    batch: &ExactScoringExecutionBatch,
-    graph: &ExactScoringExecutionGraph,
+    batch: SpinBatchRef<'_>,
+    graph: SpinGraphRef<'_>,
     initial_words: &[u64],
     cache: &mut SupplyTransitionCache<'_>,
     graph_words: &mut [u64],
-    execution_count: &mut u128,
-    target: SpinCoverageTarget,
+    target: Option<SpinCoverageTarget>,
     control: &ExecutionControl,
 ) -> Result<bool, ExactScoringExecutionCancelled> {
     let mut states = (0..graph.node_count())
-        .map(|_| BTreeMap::<ProductState, WeightedPatternSet>::new())
+        .map(|_| BTreeMap::<ProductState, PatternSet>::new())
         .collect::<Vec<_>>();
     let Some(root_states) = states.get_mut(graph.root() as usize) else {
         return Ok(false);
@@ -441,7 +611,7 @@ fn evaluate_graph_product(
             hold: batch.initial_hold(),
             has_target_spin: false,
         },
-        WeightedPatternSet::single(initial_words.to_vec()),
+        PatternSet::single(initial_words.to_vec()),
     );
 
     let mut complete = true;
@@ -456,18 +626,12 @@ fn evaluate_graph_product(
         let current_states = core::mem::take(&mut states[node_index]);
         if node.accepting() {
             for (state, patterns) in current_states {
-                if !state.has_target_spin {
+                if target.is_some() && !state.has_target_spin {
                     continue;
                 }
                 let terminal_mask = cache.terminal_mask(state);
-                for class in patterns.classes {
-                    if let Some(accepted) = intersect_words(&class.words, &terminal_mask) {
-                        let covered_count = word_popcount(&accepted);
-                        *execution_count = execution_count.saturating_add(
-                            class.multiplicity.saturating_mul(u128::from(covered_count)),
-                        );
-                        union_words(graph_words, &accepted);
-                    }
+                if let Some(accepted) = intersect_words(&patterns.words, &terminal_mask) {
+                    union_words(graph_words, &accepted);
                 }
             }
             continue;
@@ -485,7 +649,7 @@ fn evaluate_graph_product(
             }
             let release_held_at_terminal =
                 batch.projects_unplaced_lookahead() && batch.hold_enabled() && child.accepting();
-            let edge_has_target_spin = target.matches(edge);
+            let edge_has_target_spin = target.is_some_and(|target| target.matches(edge));
             for (state, patterns) in &current_states {
                 let transitions = cache.transitions(*state, edge.piece(), release_held_at_terminal);
                 for transition in transitions {
@@ -494,10 +658,11 @@ fn evaluate_graph_product(
                         hold: transition.next_hold,
                         has_target_spin: state.has_target_spin || edge_has_target_spin,
                     };
-                    states[child_index]
-                        .entry(next)
-                        .or_default()
-                        .add_filtered(patterns, &transition.pattern_words);
+                    states[child_index].entry(next).or_default().add_filtered(
+                        patterns,
+                        &transition.pattern_words,
+                        graph_words,
+                    );
                 }
             }
         }
@@ -531,10 +696,4 @@ fn union_words(target: &mut [u64], source: &[u64]) {
 
 fn words_are_nonempty(words: &[u64]) -> bool {
     words.iter().any(|word| *word != 0)
-}
-
-fn word_popcount(words: &[u64]) -> u32 {
-    words
-        .iter()
-        .fold(0_u32, |count, word| count.saturating_add(word.count_ones()))
 }

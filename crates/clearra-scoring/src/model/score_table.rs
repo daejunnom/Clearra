@@ -2,7 +2,7 @@ use clearra_spin::SpinAwardClass;
 
 use crate::{
     event::{clear_event::ClearEvent, score_event::ScoreEvent},
-    profile::ScoreModelId,
+    profile::{B2BPolicy, ScoreModelId},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,6 +16,10 @@ pub(crate) struct ScoreModelTable {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PerfectClearScore {
     Additive(u64),
+    GuidelineByLines {
+        bonuses: [u64; 5],
+        back_to_back_tetris_bonus: u64,
+    },
     ReplaceAction(u64),
 }
 
@@ -31,12 +35,42 @@ impl ScoreModelTable {
 }
 impl ScoreModelTable {
     pub(crate) fn score_clear(self, clear: ClearEvent) -> u64 {
-        self.apply_perfect_clear(self.line_score(clear.lines()), clear)
+        self.apply_perfect_clear(self.line_score(clear.lines()), clear, false)
     }
 }
 impl ScoreModelTable {
+    #[cfg(test)]
     pub(crate) fn score_event(self, event: ScoreEvent) -> u64 {
-        let base = event.spin().map_or_else(
+        self.apply_perfect_clear(self.action_score(event), event.clear(), event.b2b_before())
+    }
+
+    pub(crate) fn score_event_with_b2b(self, event: ScoreEvent, b2b_policy: B2BPolicy) -> u64 {
+        let action_score = self.action_score(event);
+        let applies_b2b = b2b_policy.enabled() && event.b2b_before() && event.is_difficult_clear();
+
+        match self.perfect_clear_score {
+            PerfectClearScore::Additive(_) | PerfectClearScore::GuidelineByLines { .. } => {
+                let adjusted_action = if applies_b2b {
+                    b2b_policy.adjusted_score(action_score)
+                } else {
+                    action_score
+                };
+                self.apply_perfect_clear(adjusted_action, event.clear(), event.b2b_before())
+            }
+            _ => {
+                let event_score =
+                    self.apply_perfect_clear(action_score, event.clear(), event.b2b_before());
+                if applies_b2b {
+                    b2b_policy.adjusted_score(event_score)
+                } else {
+                    event_score
+                }
+            }
+        }
+    }
+
+    fn action_score(self, event: ScoreEvent) -> u64 {
+        event.spin().map_or_else(
             || self.line_score(event.clear().lines()),
             |spin| {
                 if spin.is_mini() {
@@ -45,8 +79,7 @@ impl ScoreModelTable {
                     self.t_spin_score(spin.lines())
                 }
             },
-        );
-        self.apply_perfect_clear(base, event.clear())
+        )
     }
 }
 impl ScoreModelTable {
@@ -77,12 +110,28 @@ impl ScoreModelTable {
     }
 }
 impl ScoreModelTable {
-    fn apply_perfect_clear(self, action_score: u64, clear: ClearEvent) -> u64 {
+    fn apply_perfect_clear(
+        self,
+        action_score: u64,
+        clear: ClearEvent,
+        back_to_back_before: bool,
+    ) -> u64 {
         if !clear.is_perfect_clear() {
             return action_score;
         }
         match self.perfect_clear_score {
             PerfectClearScore::Additive(score) => action_score.saturating_add(score),
+            PerfectClearScore::GuidelineByLines {
+                bonuses,
+                back_to_back_tetris_bonus,
+            } => {
+                let bonus = if clear.lines() == 4 && back_to_back_before {
+                    back_to_back_tetris_bonus
+                } else {
+                    bonuses[line_index(clear.lines())]
+                };
+                action_score.saturating_add(bonus)
+            }
             PerfectClearScore::ReplaceAction(score) => score,
         }
     }
@@ -95,21 +144,32 @@ fn line_index(lines: u8) -> usize {
 pub(crate) struct GuidelineScoreTable;
 
 impl GuidelineScoreTable {
+    #[allow(dead_code)]
+    pub(crate) const SOURCE_NOTE: &'static str =
+        "Recent Guideline-compatible level-1 scoring: line clears 100/300/500/800; PC bonuses 800/1200/1800/2000 and 3200 for a B2B Tetris PC";
+
     pub(crate) const TABLE: ScoreModelTable = ScoreModelTable {
         line_clear_scores: [0, 100, 300, 500, 800],
         t_spin_scores: [400, 800, 1200, 1600, 1600],
         t_spin_mini_scores: [100, 200, 400, 800, 800],
-        perfect_clear_score: PerfectClearScore::Additive(3500),
+        perfect_clear_score: PerfectClearScore::GuidelineByLines {
+            bonuses: [0, 800, 1200, 1800, 2000],
+            back_to_back_tetris_bonus: 3200,
+        },
     };
 }
 
 pub(crate) struct JstrisUltraScoreTable;
 
 impl JstrisUltraScoreTable {
+    #[allow(dead_code)]
+    pub(crate) const SOURCE_NOTE: &'static str =
+        "Jstris Ultra scoring: Guideline-compatible action scores, +3000 PC, 1.5x B2B, 50x combo, and Mini T-Spin Double scored as T-Spin Double";
+
     pub(crate) const TABLE: ScoreModelTable = ScoreModelTable {
         line_clear_scores: [0, 100, 300, 500, 800],
         t_spin_scores: [400, 800, 1200, 1600, 1600],
-        t_spin_mini_scores: [100, 200, 400, 800, 800],
+        t_spin_mini_scores: [100, 200, 1200, 1600, 1600],
         perfect_clear_score: PerfectClearScore::Additive(3000),
     };
 }

@@ -22,6 +22,7 @@ wasm-stage-profiling = [
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-coverage = { path = "../clearra-coverage" }
 clearra-forward-search = { path = "../clearra-forward-search" }
 clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
 clearra-i18n = { path = "../clearra-i18n" }
@@ -30,6 +31,7 @@ clearra-objectives = { path = "../clearra-objectives" }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-postprocess = { path = "../clearra-postprocess" }
 clearra-problem = { path = "../clearra-problem" }
+clearra-replay = { path = "../clearra-replay" }
 clearra-rules = { path = "../clearra-rules" }
 clearra-scoring = { path = "../clearra-scoring" }
 clearra-validation = { path = "../clearra-validation" }

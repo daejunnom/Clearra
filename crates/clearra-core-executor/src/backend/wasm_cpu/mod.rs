@@ -64,6 +64,27 @@ pub(super) enum WasmExactSearchError {
 
 const MAX_BOARD64_PIECES: usize = 15;
 
+// Empty-hold terminal projection needs only the materialized queue multiset.
+// An occupied initial hold is itself a placed-piece source and must remain in
+// the Packing projection even when the replacing lookahead stays unplaced.
+fn packing_projection_hold_enabled(problem: &clearra_problem::SearchProblem) -> bool {
+    problem.supply().hold_enabled()
+        && (!problem.supply().projects_unplaced_lookahead()
+            || problem.initial_hold().hold_piece().is_some())
+}
+
+fn ensure_connected_kick_profile(
+    problem: &clearra_problem::SearchProblem,
+) -> Result<(), WasmExactSearchError> {
+    if kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id()).is_some() {
+        Ok(())
+    } else {
+        Err(WasmExactSearchError::InvalidProblem(
+            "wasm_exact_backend_requires_connected_kick_profile",
+        ))
+    }
+}
+
 const fn piece_index(piece: clearra_core_domain::piece::piece_kind::PieceKind) -> usize {
     use clearra_core_domain::piece::piece_kind::PieceKind;
 

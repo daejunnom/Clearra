@@ -30,9 +30,5 @@ serde_json.workspace = true
 [lib]
 doctest = false
 
-[[test]]
-name = "gui_host_contract"
-path = "tests/gui_host_contract.rs"
-
 [lints]
 workspace = true

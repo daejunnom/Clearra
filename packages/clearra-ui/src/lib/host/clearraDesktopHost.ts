@@ -8,10 +8,22 @@ export type ClearraDesktopRequest = {
   language: 'en' | 'ko';
   lines: number;
   queue: string;
+  patterns: string;
   hold_enabled: boolean;
   hold_piece: 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
   backend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
   rule: 'srs-plus' | string;
+  score_mode: 'off' | 'minimum-cover' | 'summary';
+  score_profile: 'guideline' | 'jstris-ultra' | 'tetrio';
+  spin_profile:
+    | 't-spins'
+    | 't-spins-plus'
+    | 'all-spin'
+    | 'all-spin-plus'
+    | 'all-mini'
+    | 'all-mini-plus';
+  preserve_b2b: boolean;
+  initial_b2b: number;
   board_mask: string;
   visible_height: number;
   piece_window: number | null;
@@ -79,14 +91,20 @@ export function buildDesktopAppRequest(
 ): ClearraDesktopRequest {
   return {
     app_request_model: 'clearra-app/AppRequest',
-    command: 'pc',
+    command: input.command ?? 'pc',
     language: input.language ?? 'en',
     lines: input.lines ?? 2,
     queue: input.queue ?? '',
-    hold_enabled: input.hold_enabled ?? false,
+    patterns: input.patterns ?? '',
+    hold_enabled: input.hold_enabled ?? true,
     hold_piece: input.hold_piece ?? 'empty',
     backend: input.backend ?? 'auto',
     rule: input.rule ?? 'srs-plus',
+    score_mode: input.score_mode ?? 'off',
+    score_profile: input.score_profile ?? 'tetrio',
+    spin_profile: input.spin_profile ?? 't-spins',
+    preserve_b2b: input.preserve_b2b ?? false,
+    initial_b2b: input.initial_b2b ?? 0,
     board_mask: input.board_mask ?? '0x0000000000000000',
     visible_height: input.visible_height ?? input.lines ?? 2,
     piece_window: input.piece_window ?? null,

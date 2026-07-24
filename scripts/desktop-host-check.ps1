@@ -103,7 +103,7 @@ try {
         -Arguments @(
             "test", "-p", "clearra-gui-host",
             "--features", "wasm-cpu-runtime,webgpu-search",
-            "--test", "gui_host_contract",
+            "--lib",
             "--", "--test-threads=1"
         )
 

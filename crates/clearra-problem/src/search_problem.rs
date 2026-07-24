@@ -489,9 +489,8 @@ mod piece_source_materializer {
         let projects_unplaced_lookahead =
             matches!(query.remaining_queue(), PcQueueInput::Standard7Bag)
                 && query.allow_hold()
-                && query.hold_state().piece().is_none()
                 && query.exact_pieces() == Some(geometry_piece_count)
-                && source_sequence_length == geometry_piece_count;
+                && source_sequence_length == required_source_pieces;
 
         Ok(ResolvedSupplyWindow {
             source_sequence_length,

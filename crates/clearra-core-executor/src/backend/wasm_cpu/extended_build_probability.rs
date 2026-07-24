@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
+use clearra_replay::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
 
 use crate::{CoreExecutionResult, CorePathStep};
 
@@ -21,6 +22,7 @@ use super::{
     },
     extended_geometry::{ExtendedGeometryAdvance, ExtendedGeometrySearch},
     extended_inverse_catalog::ExtendedInverseCatalog,
+    kick_profiles::replay_profile_ids,
     mix_digest, WasmExactSearchError,
 };
 
@@ -34,6 +36,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
     buildable_tilings: HashSet<ExtendedTilingKey>,
+    spin_execution_graphs: Vec<SpinCoverageExecutionGraph>,
     distributed_solution_keys: HashSet<String>,
     candidate_digest: u64,
     processed_candidate_count: usize,
@@ -45,7 +48,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     peak_build_order_nodes: usize,
     total_build_order_nodes: usize,
     peak_build_scratch_bytes: usize,
-    witnessed_pattern_executions: u128,
+    witnessed_pattern_count: u128,
     representative_path: Vec<CorePathStep>,
     representative_pattern_id: Option<u32>,
     representative_rank: Option<u64>,
@@ -57,6 +60,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     parallel_minimum_worker_candidates: usize,
     parallel_maximum_worker_candidates: usize,
     distributed_worker_memory_bytes: usize,
+    distributed_execution_constraint_materialized: bool,
     finished: bool,
 }
 
@@ -66,14 +70,10 @@ impl ExtendedBuildProbabilitySession {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
+        super::ensure_connected_kick_profile(problem)?;
         if field.is_compact() || !(7..=24).contains(&field.height()) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_extended_build_probability_height_invalid",
-            ));
-        }
-        if aggregation.requests_spin_coverage() {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_extended_build_probability_spin_not_supported",
             ));
         }
         if usize::from(problem.visible_height()) != usize::from(field.height()) {
@@ -101,7 +101,7 @@ impl ExtendedBuildProbabilitySession {
         let family = universe.packing_multiset_family(
             target_piece_count,
             problem.initial_hold(),
-            problem.supply().hold_enabled() && !problem.supply().projects_unplaced_lookahead(),
+            super::packing_projection_hold_enabled(problem),
         );
         if target_piece_count != 0 && family.is_empty() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -130,6 +130,7 @@ impl ExtendedBuildProbabilitySession {
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             buildable_tilings: HashSet::new(),
+            spin_execution_graphs: Vec::new(),
             distributed_solution_keys: HashSet::new(),
             candidate_digest: 0,
             processed_candidate_count: 0,
@@ -141,7 +142,7 @@ impl ExtendedBuildProbabilitySession {
             peak_build_order_nodes: 0,
             total_build_order_nodes: 0,
             peak_build_scratch_bytes: 0,
-            witnessed_pattern_executions: 0,
+            witnessed_pattern_count: 0,
             representative_path: Vec::new(),
             representative_pattern_id: None,
             representative_rank: None,
@@ -153,6 +154,7 @@ impl ExtendedBuildProbabilitySession {
             parallel_minimum_worker_candidates: 0,
             parallel_maximum_worker_candidates: 0,
             distributed_worker_memory_bytes: 0,
+            distributed_execution_constraint_materialized: false,
             finished: false,
         })
     }
@@ -252,6 +254,14 @@ impl ExtendedBuildProbabilitySession {
         self.processed_candidate_count = self.processed_candidate_count.saturating_add(1);
         let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
         let tiling_digest = tiling.digest();
+        let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || self.problem.objective().execution_constraints().requested();
+        let spin_candidate = execution_evidence_requested.then(|| {
+            (
+                tiling_digest,
+                tiling.canonical_key(self.catalog.initial_board(), self.field.height()),
+            )
+        });
         self.candidate_digest = mix_digest(self.candidate_digest, tiling_digest);
         let node_limit = self.remaining_node_budget();
         if self.problem.backend_request().max_nodes() != 0 && node_limit == 0 {
@@ -263,6 +273,7 @@ impl ExtendedBuildProbabilitySession {
             &candidate,
             &mut self.build_order_workspace,
             node_limit,
+            spin_candidate,
             control,
         )? {
             ExtendedBuildOrderResult::Incomplete {
@@ -280,6 +291,7 @@ impl ExtendedBuildProbabilitySession {
             }
             ExtendedBuildOrderResult::Complete {
                 graph,
+                spin_graph,
                 searched_nodes,
                 reachability_states,
                 scratch_bytes,
@@ -318,8 +330,8 @@ impl ExtendedBuildProbabilitySession {
                 if product.coverage_bits.is_empty() {
                     return Ok(());
                 }
-                self.witnessed_pattern_executions = self
-                    .witnessed_pattern_executions
+                self.witnessed_pattern_count = self
+                    .witnessed_pattern_count
                     .saturating_add(u128::from(product.coverage_bits.count_ones()));
                 let rank = external_ordinal.unwrap_or(self.processed_candidate_count as u64 - 1);
                 if self
@@ -356,6 +368,14 @@ impl ExtendedBuildProbabilitySession {
                         )
                     })?;
                 self.retain_buildable_tiling(tiling)?;
+                if let Some(spin_graph) = spin_graph {
+                    self.spin_execution_graphs.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_extended_spin_graph_storage_unavailable",
+                        )
+                    })?;
+                    self.spin_execution_graphs.push(spin_graph);
+                }
                 return Ok(());
             }
         }
@@ -447,6 +467,8 @@ impl ExtendedBuildProbabilitySession {
         self.parallel_minimum_worker_candidates = usize::MAX;
         self.parallel_maximum_worker_candidates = 0;
         self.distributed_worker_memory_bytes = 0;
+        self.distributed_execution_constraint_materialized =
+            self.problem.objective().execution_constraints().requested();
     }
 
     pub fn process_external_candidate(
@@ -502,6 +524,11 @@ impl ExtendedBuildProbabilitySession {
         self.covered_patterns.union_with(&coverage).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_extended_distributed_coverage_mismatch")
         })?;
+        if self.problem.objective().execution_constraints().requested() {
+            self.distributed_execution_constraint_materialized &= result
+                .bool_field("execution_constraint_materialized")
+                .unwrap_or(false);
+        }
 
         let worker_solution_count = result.usize_field("unique_solution_count").ok_or(
             WasmExactSearchError::InvalidProblem(
@@ -556,9 +583,9 @@ impl ExtendedBuildProbabilitySession {
         self.total_build_order_nodes = self
             .total_build_order_nodes
             .saturating_add(result.usize_field("total_build_order_nodes").unwrap_or(0));
-        self.witnessed_pattern_executions = self.witnessed_pattern_executions.saturating_add(
+        self.witnessed_pattern_count = self.witnessed_pattern_count.saturating_add(
             result
-                .field("witnessed_pattern_execution_count")
+                .field("witnessed_pattern_count")
                 .and_then(|value| value.parse::<u128>().ok())
                 .unwrap_or(0),
         );
@@ -615,7 +642,7 @@ impl ExtendedBuildProbabilitySession {
         Ok(BuildProbabilityAdvance::Completed(self.build_result()))
     }
 
-    fn build_result(&self) -> CoreExecutionResult {
+    fn build_result(&mut self) -> CoreExecutionResult {
         let universe = self
             .problem
             .piece_source()
@@ -627,6 +654,31 @@ impl ExtendedBuildProbabilitySession {
             .expect("coverage belongs to the materialized universe")
             .get();
         let complete = universe.complete() && self.truncated_reason.is_none();
+        let execution_constraints = self.problem.objective().execution_constraints();
+        let execution_evidence_requested =
+            self.aggregation.requests_spin_coverage() || execution_constraints.requested();
+        let spin_batch = if execution_evidence_requested
+            && !(execution_constraints.requested()
+                && self.distributed_execution_constraint_materialized)
+        {
+            let patterns = (0..universe.pattern_count())
+                .map(|pattern| universe.sequence_at(pattern).into_owned())
+                .collect();
+            let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
+            Some(SpinCoverageExecutionBatch::new(
+                patterns,
+                self.problem.initial_hold().cursor(),
+                self.problem.initial_hold().hold_piece(),
+                self.problem.supply().hold_enabled(),
+                self.problem.supply().projects_unplaced_lookahead(),
+                kick_table_id,
+                rule_profile_id,
+                core::mem::take(&mut self.spin_execution_graphs),
+                complete,
+            ))
+        } else {
+            None
+        };
         let source_sequence_length = universe.sequence_at(0).len();
         let mut normalized_keys = self
             .buildable_tilings
@@ -783,11 +835,13 @@ impl ExtendedBuildProbabilitySession {
                 "normalized_solution_set_hash",
                 super::build_probability::normalized_string_solution_set_hash(&normalized_keys),
             ),
-            field(
-                "witnessed_pattern_execution_count",
-                self.witnessed_pattern_executions,
-            ),
+            field("witnessed_pattern_count", self.witnessed_pattern_count),
             field("build_variant_count_exact", false),
+            field(
+                "build_probability_evaluation_basis",
+                "candidate-pattern-existence",
+            ),
+            field("build_path_multiplicity_counted", false),
             field("materialized_pattern_count", universe.pattern_count()),
             field("coverage_pattern_count", universe.pattern_count()),
             field("covered_pattern_count", self.covered_patterns.count_ones()),
@@ -857,8 +911,38 @@ impl ExtendedBuildProbabilitySession {
                 "postprocess_build_spin_requested",
                 self.aggregation.requests_spin_coverage(),
             ),
+            field(
+                "execution_constraint_preserve_b2b",
+                execution_constraints.preserves_back_to_back(),
+            ),
+            field(
+                "execution_constraint_spin_profile",
+                execution_constraints.spin_profile().as_str(),
+            ),
+            field(
+                "execution_constraint_materialized",
+                self.distributed_execution_constraint_materialized,
+            ),
             field("objective_search_complete", complete),
-            field("objective_complete", complete),
+            field(
+                "objective_complete",
+                complete
+                    && (!execution_constraints.requested()
+                        || self.distributed_execution_constraint_materialized),
+            ),
+            field(
+                "objective_incomplete_reason",
+                if !complete {
+                    self.truncated_reason
+                        .unwrap_or("pattern_universe_incomplete")
+                } else if execution_constraints.requested()
+                    && !self.distributed_execution_constraint_materialized
+                {
+                    "b2b_preservation_not_materialized"
+                } else {
+                    "none"
+                },
+            ),
             field(
                 "representative_pattern_id",
                 self.representative_pattern_id
@@ -870,9 +954,18 @@ impl ExtendedBuildProbabilitySession {
                     .map_or_else(|| "none".to_owned(), |rank| rank.to_string()),
             ),
         ];
-        CoreExecutionResult::new(fields, self.representative_path.clone())
+        let result = CoreExecutionResult::new(fields, self.representative_path.clone())
             .with_normalized_solution_keys(normalized_keys)
             .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
+            .with_spin_coverage_execution_batch(spin_batch);
+        if execution_constraints.requested() {
+            let pattern_weights = (0..universe.pattern_count())
+                .map(|pattern| universe.weight_at(pattern).get().to_string())
+                .collect();
+            result.with_postprocess_execution_batch(Vec::new(), complete, pattern_weights)
+        } else {
+            result
+        }
     }
 
     fn node_budget_exhausted(&self) -> bool {
@@ -915,6 +1008,11 @@ impl ExtendedBuildProbabilitySession {
                 .iter()
                 .map(|key| key.capacity())
                 .sum::<usize>()
+            + self
+                .spin_execution_graphs
+                .iter()
+                .map(SpinCoverageExecutionGraph::retained_bytes)
+                .sum::<usize>()
             + self.peak_build_scratch_bytes
     }
 }
@@ -922,3 +1020,5 @@ impl ExtendedBuildProbabilitySession {
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())
 }
+
+// SRP rationale: this module has one behavior-level change reason: exact extended-board build-probability evaluation.

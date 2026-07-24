@@ -43,7 +43,7 @@ Stable diagnostics:
 - `W_GUI_BACKEND_FALLBACK_REQUIRED`
 
 The executable desktop contract is checked by the existing
-`clearra-gui-host/tests/gui_host_contract.rs` target through
+`clearra-gui-host` library test target through
 `scripts/clearra.ps1 -Task DesktopHost`. Static architecture validation remains
 responsible only for dependency, forbidden API, public ABI, unsafe boundary,
 and unsupported capability checks.

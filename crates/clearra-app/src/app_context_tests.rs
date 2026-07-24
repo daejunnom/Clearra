@@ -63,13 +63,13 @@ mod case_app_pc_request_runs_without_cli_parser {
             assert!(response.render_model().is_none());
             assert_eq!(
                 response.error().map(|error| error.code()),
-                Some(AppErrorCode::NativeCoreUnavailable)
+                Some(AppErrorCode::Unsupported)
             );
             assert_eq!(response.backend_report().backend_selected(), "none");
             assert!(!response.backend_report().fallback_used());
             assert!(!response.resource_report().solver_executed());
             assert!(!response.resource_report().probability_complete());
-            assert!(response
+            assert!(!response
                 .diagnostics()
                 .validation()
                 .contains_code(DiagnosticCode::ENativeCoreUnavailable));
@@ -306,7 +306,11 @@ mod case_warning_allows_execution {
                 response.diagnostics()
             );
         } else {
-            assert!(response
+            assert_eq!(
+                response.error().map(|error| error.code()),
+                Some(AppErrorCode::Unsupported)
+            );
+            assert!(!response
                 .diagnostics()
                 .validation()
                 .contains_code(DiagnosticCode::ENativeCoreUnavailable));

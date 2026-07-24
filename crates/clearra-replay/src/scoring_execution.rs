@@ -229,6 +229,14 @@ impl ScoringExecutionNode {
     pub const fn accepting(self) -> bool {
         self.accepting
     }
+
+    pub const fn edge_start(self) -> u32 {
+        self.edge_start
+    }
+
+    pub const fn edge_count(self) -> u32 {
+        self.edge_count
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

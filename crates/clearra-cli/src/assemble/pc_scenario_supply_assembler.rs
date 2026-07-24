@@ -41,7 +41,7 @@ pub(super) fn inline_query(args: &PcScenarioArgs) -> Result<PcScenarioQuery, Str
         None => None,
     })
     .with_rule(
-        RuleProfileAssembler::parse_rule(args.rule().unwrap_or("srs-90"))
+        RuleProfileAssembler::parse_rule(args.rule().unwrap_or("srs-plus"))
             .map_err(|error| error.message())?,
     )
     .with_requires_180(args.requires_180())

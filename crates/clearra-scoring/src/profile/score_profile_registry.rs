@@ -1,5 +1,5 @@
 use crate::{
-    builtin::{jstris_ultra, ppt_profile, tetrio_score_with_spin_profile},
+    builtin::{guideline_score, jstris_ultra, ppt_profile, tetrio_score_with_spin_profile},
     profile::{score_profile::ScoreProfile, SpinProfileRegistry},
 };
 
@@ -15,7 +15,7 @@ impl ScoreProfileRegistry {
 }
 impl ScoreProfileRegistry {
     pub fn builtins() -> Self {
-        let mut profiles = vec![jstris_ultra(), ppt_profile()];
+        let mut profiles = vec![guideline_score(), jstris_ultra(), ppt_profile()];
         profiles.extend(
             SpinProfileRegistry::builtins()
                 .profiles()

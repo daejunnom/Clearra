@@ -20,10 +20,17 @@ use clearra_postprocess::{
     TSpinCoverageOnlyMaterializer,
 };
 use clearra_problem::SearchProblem;
-use clearra_scoring::{builtin::tetrio_pc_score_with_spin_profile, profile::SpinProfileId};
+use clearra_scoring::{
+    builtin::{
+        guideline_pc_score_with_spin_profile, jstris_ultra_pc_score_with_spin_profile,
+        tetrio_pc_score_with_spin_profile,
+    },
+    profile::SpinProfileId,
+};
 
 use crate::{
     diagnostics::AppDiagnosticReport,
+    execution_constraint_postprocess::apply_execution_constraints,
     io::{AppFilePolicy, AppFileResolver},
 };
 
@@ -150,6 +157,7 @@ impl AppCoreExecutorService {
         result: CoreExecutionResult,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        let result = apply_execution_constraints(result, control)?;
         if result.field("search_kind") == Some("build-probability") {
             apply_build_spin_postprocess(result, control)
         } else {
@@ -199,6 +207,7 @@ impl AppCoreExecutorService {
         result: CoreExecutionResult,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        let result = apply_execution_constraints(result, control)?;
         if result.field("search_kind") != Some("build-probability") {
             return self.materialize_pc_scoring_partition(result, control);
         }
@@ -213,9 +222,10 @@ impl AppCoreExecutorService {
             .unwrap_or(0);
         let pattern_count = result.usize_field("coverage_pattern_count").unwrap_or(0);
         let mut coverage_words = vec![0_u64; pattern_count.div_ceil(u64::BITS as usize)];
-        let mut candidate_identities = Vec::new();
-        let mut execution_count = 0_u128;
-        let mut complete = !result.exact_scoring_execution_batches().is_empty();
+        let mut candidate_keys = Vec::new();
+        let mut witnessed_pattern_count = 0_u128;
+        let mut complete = !result.exact_scoring_execution_batches().is_empty()
+            || !result.spin_coverage_execution_batches().is_empty();
         for batch in result.exact_scoring_execution_batches() {
             let materialized = TSpinCoverageOnlyMaterializer::materialize_target(
                 batch,
@@ -230,8 +240,28 @@ impl AppCoreExecutorService {
             {
                 *target_word |= source_word;
             }
-            candidate_identities.extend(materialized.candidate_identities());
-            execution_count = execution_count.saturating_add(materialized.execution_count());
+            candidate_keys.extend(materialized.candidate_keys().map(str::to_owned));
+            witnessed_pattern_count =
+                witnessed_pattern_count.saturating_add(materialized.witnessed_pattern_count());
+            complete &= materialized.complete();
+        }
+        for batch in result.spin_coverage_execution_batches() {
+            let materialized = TSpinCoverageOnlyMaterializer::materialize_spin_batch(
+                batch,
+                target,
+                0..batch.patterns().len(),
+                control,
+            )
+            .map_err(|_| CoreExecutionError::Cancelled)?;
+            for (target_word, source_word) in coverage_words
+                .iter_mut()
+                .zip(materialized.covered_patterns().words())
+            {
+                *target_word |= source_word;
+            }
+            candidate_keys.extend(materialized.candidate_keys().map(str::to_owned));
+            witnessed_pattern_count =
+                witnessed_pattern_count.saturating_add(materialized.witnessed_pattern_count());
             complete &= materialized.complete();
         }
         let shard = CorePostProcessSpinCoverage::new(
@@ -239,8 +269,8 @@ impl AppCoreExecutorService {
             pass_index,
             pattern_count,
             coverage_words,
-            candidate_identities,
-            execution_count,
+            candidate_keys,
+            witnessed_pattern_count,
             complete,
         );
         Ok(result.with_postprocess_spin_coverages(vec![shard]))
@@ -285,7 +315,7 @@ impl AppCoreExecutorService {
             return Err(CoreExecutionError::Cancelled);
         }
         control.report_progress("postprocess", 0, Some(1));
-        let result = apply_pc_postprocess(result, control)?;
+        let result = self.postprocess_search_result(result, control)?;
         control.report_progress("postprocess", 1, Some(1));
         Ok(result)
     }
@@ -381,6 +411,7 @@ impl AppCoreExecutorService {
                 component: "native_build_probability_backend_not_connected",
             }),
         }?;
+        let result = apply_execution_constraints(result, control)?;
         apply_build_spin_postprocess(result, control)
     }
 }
@@ -554,8 +585,9 @@ fn apply_build_spin_postprocess(
     let field_prefix = "spin_search";
     let rule_id = format!("{}-first-success", target.spin_profile().id().as_str());
     let batches = result.exact_scoring_execution_batches();
+    let spin_batches = result.spin_coverage_execution_batches();
     let shards = result.postprocess_spin_coverages();
-    if batches.is_empty() && shards.is_empty() {
+    if batches.is_empty() && spin_batches.is_empty() && shards.is_empty() {
         return Ok(result.with_replaced_fields(vec![
             (
                 format!("{field_prefix}_probability_complete"),
@@ -570,7 +602,7 @@ fn apply_build_spin_postprocess(
     }
     let mut pattern_ids = BTreeSet::new();
     let mut candidates_by_pass = BTreeMap::new();
-    let mut execution_count = 0_u128;
+    let mut witnessed_pattern_count = 0_u128;
     let mut materialization_complete = true;
     if shards.is_empty() {
         for (batch_index, batch) in batches.iter().enumerate() {
@@ -591,8 +623,33 @@ fn apply_build_spin_postprocess(
             candidates_by_pass
                 .entry(batch_index)
                 .or_insert_with(BTreeSet::new)
-                .extend(materialized.candidate_identities());
-            execution_count = execution_count.saturating_add(materialized.execution_count());
+                .extend(materialized.candidate_keys().map(str::to_owned));
+            witnessed_pattern_count =
+                witnessed_pattern_count.saturating_add(materialized.witnessed_pattern_count());
+            materialization_complete &= materialized.complete();
+        }
+        for (batch_offset, batch) in spin_batches.iter().enumerate() {
+            let batch_index = batches.len() + batch_offset;
+            let materialized = TSpinCoverageOnlyMaterializer::materialize_spin_batch(
+                batch,
+                target,
+                0..batch.patterns().len(),
+                control,
+            )
+            .map_err(|_| CoreExecutionError::Cancelled)?;
+            pattern_ids.extend(
+                materialized
+                    .covered_patterns()
+                    .covered_patterns()
+                    .into_iter()
+                    .map(|pattern| pattern.index()),
+            );
+            candidates_by_pass
+                .entry(batch_index)
+                .or_insert_with(BTreeSet::new)
+                .extend(materialized.candidate_keys().map(str::to_owned));
+            witnessed_pattern_count =
+                witnessed_pattern_count.saturating_add(materialized.witnessed_pattern_count());
             materialization_complete &= materialized.complete();
         }
     } else {
@@ -612,8 +669,9 @@ fn apply_build_spin_postprocess(
             candidates_by_pass
                 .entry(shard.pass_index())
                 .or_insert_with(BTreeSet::new)
-                .extend(shard.candidate_identities().iter().copied());
-            execution_count = execution_count.saturating_add(shard.execution_count());
+                .extend(shard.candidate_keys().iter().cloned());
+            witnessed_pattern_count =
+                witnessed_pattern_count.saturating_add(shard.witnessed_pattern_count());
         }
     }
     let original_candidate_count = candidates_by_pass.get(&0).map_or(0, BTreeSet::len);
@@ -650,15 +708,26 @@ fn apply_build_spin_postprocess(
         ),
         (
             format!("{field_prefix}_symmetry_batch_count"),
-            candidates_by_pass.len().max(batches.len()).to_string(),
+            candidates_by_pass
+                .len()
+                .max(batches.len() + spin_batches.len())
+                .to_string(),
         ),
         (
             format!("{field_prefix}_covered_pattern_count"),
             pattern_ids.len().to_string(),
         ),
         (
-            format!("{field_prefix}_execution_count"),
-            execution_count.to_string(),
+            format!("{field_prefix}_witnessed_pattern_count"),
+            witnessed_pattern_count.to_string(),
+        ),
+        (
+            format!("{field_prefix}_evaluation_basis"),
+            "candidate-pattern-existence".to_owned(),
+        ),
+        (
+            format!("{field_prefix}_path_multiplicity_counted"),
+            "false".to_owned(),
         ),
         (
             format!("{field_prefix}_probability"),
@@ -772,7 +841,12 @@ fn score_policy_from_result(result: &CoreExecutionResult) -> ScoreObjectivePolic
 fn score_profile_for_policy(
     policy: ScoreObjectivePolicy,
 ) -> clearra_scoring::profile::ScoreProfile {
-    tetrio_pc_score_with_spin_profile(spin_profile_id(policy.spin_profile()))
+    let spin_profile = spin_profile_id(policy.spin_profile());
+    match policy.profile() {
+        ScoreProfileSelection::Guideline => guideline_pc_score_with_spin_profile(spin_profile),
+        ScoreProfileSelection::JstrisUltra => jstris_ultra_pc_score_with_spin_profile(spin_profile),
+        ScoreProfileSelection::Tetrio => tetrio_pc_score_with_spin_profile(spin_profile),
+    }
 }
 
 fn candidate_execution_aggregates(

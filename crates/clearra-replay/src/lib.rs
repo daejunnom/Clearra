@@ -5,6 +5,7 @@ pub mod event;
 pub mod ownership;
 pub mod replay;
 mod scoring_execution;
+mod spin_coverage_execution;
 pub mod trace;
 
 pub use event::{
@@ -23,6 +24,7 @@ pub use scoring_execution::{
     ExactScoringExecutionBatch, ExactScoringExecutionGraph, ScoringExecutionEdge,
     ScoringExecutionNode, ScoringLockEvidence,
 };
+pub use spin_coverage_execution::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
 pub use trace::{
     BoardAfterStep, HoldDecision, LineClearEvent, PieceDecision, PlacementStep, SolutionTrace,
     SolutionTraceBuilder, SolutionTraceBuilderError, TraceCanonicalKey,

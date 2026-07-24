@@ -1,5 +1,6 @@
 //! Lightweight scoring contracts reserved for post-MVP search ranking.
 
+pub mod b2b_preservation;
 pub mod builtin;
 pub mod damage;
 pub mod event;

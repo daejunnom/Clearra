@@ -9,8 +9,9 @@ use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 use crate::{
     model::{GuiBackendForm, GuiScenarioPcForm},
     request::{
-        parse_piece_sequence, parse_queue_pattern, parse_rule_profile, score_objective_policy,
-        BackendRequestBuilder, RequestBuildError, RequestBuildErrorCode,
+        execution_constraint_objective_policy, parse_piece_sequence, parse_queue_pattern,
+        parse_rule_profile, score_objective_policy, BackendRequestBuilder, RequestBuildError,
+        RequestBuildErrorCode,
     },
 };
 
@@ -97,6 +98,11 @@ impl ScenarioRequestBuilder {
             form.spin_profile(),
             form.initial_b2b(),
             base_objective,
+        )?;
+        let objective = execution_constraint_objective_policy(
+            form.preserve_b2b(),
+            form.spin_profile(),
+            objective,
         )?;
         if objective.score().requested() {
             count_policy = PcCountPolicy::CountAll;

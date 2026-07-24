@@ -2,7 +2,10 @@ use clearra_objectives::policy::score_objective_policy::{
     ScoreObjectivePolicy, ScoreProfileSelection, SpinProfileSelection,
 };
 use clearra_scoring::{
-    builtin::tetrio_pc_score_with_spin_profile,
+    builtin::{
+        guideline_pc_score_with_spin_profile, jstris_ultra_pc_score_with_spin_profile,
+        tetrio_pc_score_with_spin_profile,
+    },
     profile::{ScoreProfile, SpinProfileId},
 };
 
@@ -16,6 +19,8 @@ pub(crate) fn score_profile(policy: ScoreObjectivePolicy) -> ScoreProfile {
         SpinProfileSelection::AllMiniPlus => SpinProfileId::AllMiniPlus,
     };
     match policy.profile() {
+        ScoreProfileSelection::Guideline => guideline_pc_score_with_spin_profile(spin_profile),
+        ScoreProfileSelection::JstrisUltra => jstris_ultra_pc_score_with_spin_profile(spin_profile),
         ScoreProfileSelection::Tetrio => tetrio_pc_score_with_spin_profile(spin_profile),
     }
 }

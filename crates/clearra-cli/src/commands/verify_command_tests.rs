@@ -10,7 +10,7 @@ fn verify_command_runs_validation_before_native_execution() {
     assert_eq!(output.exit_code(), ExitCode::Unsupported);
     assert!(output
         .stderr()
-        .contains(CliErrorCode::NativeCoreUnavailable.as_str()));
+        .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
 }
 
 #[test]
@@ -20,7 +20,7 @@ fn verify_command_default_reaches_native_execution_after_capability_validation()
     assert_eq!(output.exit_code(), ExitCode::Unsupported);
     assert!(output
         .stderr()
-        .contains(CliErrorCode::NativeCoreUnavailable.as_str()));
+        .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
 }
 
 #[test]

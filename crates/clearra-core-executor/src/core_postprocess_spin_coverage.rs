@@ -1,13 +1,11 @@
-use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorePostProcessSpinCoverage {
     target_id: String,
     pass_index: usize,
     pattern_count: usize,
     covered_pattern_words: Vec<u64>,
-    candidate_identities: Vec<StandardBoard64TilingIdentity>,
-    execution_count: u128,
+    candidate_keys: Vec<String>,
+    witnessed_pattern_count: u128,
     complete: bool,
 }
 
@@ -18,19 +16,19 @@ impl CorePostProcessSpinCoverage {
         pass_index: usize,
         pattern_count: usize,
         covered_pattern_words: Vec<u64>,
-        mut candidate_identities: Vec<StandardBoard64TilingIdentity>,
-        execution_count: u128,
+        mut candidate_keys: Vec<String>,
+        witnessed_pattern_count: u128,
         complete: bool,
     ) -> Self {
-        candidate_identities.sort_unstable();
-        candidate_identities.dedup();
+        candidate_keys.sort_unstable();
+        candidate_keys.dedup();
         Self {
             target_id: target_id.into(),
             pass_index,
             pattern_count,
             covered_pattern_words,
-            candidate_identities,
-            execution_count,
+            candidate_keys,
+            witnessed_pattern_count,
             complete,
         }
     }
@@ -51,12 +49,12 @@ impl CorePostProcessSpinCoverage {
         &self.covered_pattern_words
     }
 
-    pub fn candidate_identities(&self) -> &[StandardBoard64TilingIdentity] {
-        &self.candidate_identities
+    pub fn candidate_keys(&self) -> &[String] {
+        &self.candidate_keys
     }
 
-    pub const fn execution_count(&self) -> u128 {
-        self.execution_count
+    pub const fn witnessed_pattern_count(&self) -> u128 {
+        self.witnessed_pattern_count
     }
 
     pub const fn complete(&self) -> bool {

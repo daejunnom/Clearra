@@ -284,6 +284,11 @@ impl WasmBuildProbabilityCandidateProducer {
                 .ok_or("wasm_piece_source_not_materialized")?
                 .clone(),
             aggregation: self.aggregation,
+            execution_constraints_requested: self
+                .problem
+                .objective()
+                .execution_constraints()
+                .requested(),
             mirror_included: self.mirror_included,
             mirror_distinct: self.mirror_distinct,
             spin_coverages: Vec::new(),
@@ -469,6 +474,7 @@ pub struct WasmBuildProbabilityDistributedResultMerger {
     summaries: Vec<WasmDistributedGeometrySummary>,
     pattern_weights: WeightedPatternSet,
     aggregation: BuildProbabilityAggregation,
+    execution_constraints_requested: bool,
     mirror_included: bool,
     mirror_distinct: bool,
     spin_coverages: Vec<CorePostProcessSpinCoverage>,
@@ -514,7 +520,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
             self.mirror_included,
             self.mirror_distinct,
             &self.pattern_weights,
-            self.aggregation.requests_spin_coverage(),
+            self.aggregation.requests_spin_coverage() || self.execution_constraints_requested,
         )
         .map_err(map_error)?;
         Ok(apply_backend_execution(

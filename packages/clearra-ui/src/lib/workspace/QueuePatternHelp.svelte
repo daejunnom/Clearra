@@ -4,6 +4,7 @@
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let language: WorkspaceLanguage;
+  export let explainInitialHold = false;
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 </script>
@@ -15,6 +16,18 @@
     <div><dt>PN / P7P3</dt><dd>{label('queuePatternP4')}</dd></div>
     <div><dt>[OISZ] / [^TIZ]</dt><dd>{label('queuePatternChoice')}</dd></div>
     <div><dt>[...]N / [...]!</dt><dd>{label('queuePatternSuffix')}</dd></div>
+    {#if explainInitialHold}
+      <div class="wide"><dt>{label('holdPiece')}</dt><dd>{label('initialHoldHelp')}</dd></div>
+    {/if}
+    <div class="wide reference">
+      <dt>{label('queuePatternReferenceLabel')}</dt>
+      <dd>
+        {label('queuePatternReferenceDifference')}
+        <a href="https://hsterts.github.io/h-docs/sfinder/parameter-patterns/" target="_blank" rel="noreferrer">
+          {label('queuePatternReferenceLink')}
+        </a>
+      </dd>
+    </div>
   </dl>
 </details>
 
@@ -52,6 +65,16 @@
     display: grid;
     gap: 8px;
     grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .pattern-help dl > .wide {
+    grid-template-columns: 104px minmax(0, 1fr);
+  }
+
+  .pattern-help .reference a {
+    color: #155f59;
+    font-weight: 700;
+    margin-left: 4px;
   }
 
   .pattern-help dt {

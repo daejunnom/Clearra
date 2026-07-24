@@ -38,7 +38,7 @@
         on:value={(event) => patch({ queue: event.detail })}
       />
     </label>
-    <QueuePatternHelp {language} />
+    <QueuePatternHelp {language} explainInitialHold />
 
     <div class="workspace-switch-row">
       <label class="workspace-switch-label">
@@ -91,10 +91,22 @@
         />
       </label>
       <label class="workspace-field">
+        <span>{label('scoreProfile')}</span>
+        <select
+          value={request.scoreProfile}
+          disabled={request.scoreMode !== 'summary'}
+          on:change={(event) => patch({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreProfile'] })}
+        >
+          <option value="tetrio">{label('scoreProfileTetrio')}</option>
+          <option value="guideline">{label('scoreProfileGuideline')}</option>
+          <option value="jstris-ultra">{label('scoreProfileJstrisUltra')}</option>
+        </select>
+      </label>
+      <label class="workspace-field">
         <span>{label('spinProfile')}</span>
         <select
           value={request.spinProfile}
-          disabled={request.scoreMode !== 'summary'}
+          disabled={request.scoreMode !== 'summary' && !request.preserveB2B}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -107,6 +119,18 @@
       </label>
     </div>
     <div class="workspace-toggle-grid policy-toggle">
+      <div class="b2b-preservation-control">
+        <label class="workspace-switch-label">
+          <input
+            type="checkbox"
+            checked={request.preserveB2B}
+            on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
+          />
+          <span class="workspace-switch" aria-hidden="true"></span>
+          <span>{label('preserveB2B')}</span>
+        </label>
+        <small class="workspace-field-help">{label('preserveB2BHelp')}</small>
+      </div>
       <label class="workspace-switch-label">
         <input
           type="checkbox"
@@ -151,4 +175,5 @@
 
 <style>
   .policy-toggle { grid-template-columns: 1fr; }
+  .b2b-preservation-control { display: grid; gap: 5px; }
 </style>

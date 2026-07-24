@@ -11,6 +11,7 @@ use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_reg
 use clearra_replay::ScoringExecutionEdge;
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::{
+    b2b_preservation::BackToBackPreservationPolicy,
     damage::{TetrioDamageAction, TetrioDamageProfile, TetrioDamageState},
     event::{SpinDetector, SpinEvent},
     profile::{SpinProfile, SpinProfileId},
@@ -1267,8 +1268,11 @@ pub(crate) fn expand_search_node(
                 lock.evidence.scoring(lock.rotation, lock.immobile),
             )
             .with_perfect_clear(perfect_clear);
-            let preservation_requires_spin =
-                line_clear_requires_spin(config.line_clear_policy, cleared_lines, perfect_clear);
+            let preservation_requires_spin = matches!(
+                config.line_clear_policy,
+                ForwardLineClearPolicy::PreserveBackToBack
+            )
+                && BackToBackPreservationPolicy::requires_recognized_spin(edge);
             let needs_exact_spin_confirmation = t_spin_acceleration.map_or(true, |acceleration| {
                 acceleration.needs_exact_confirmation(
                     source.piece,
@@ -1379,17 +1383,6 @@ pub(crate) fn expand_search_node(
         }
     }
     Ok(generated_locks)
-}
-
-fn line_clear_requires_spin(
-    policy: ForwardLineClearPolicy,
-    cleared_lines: u8,
-    perfect_clear: bool,
-) -> bool {
-    matches!(policy, ForwardLineClearPolicy::PreserveBackToBack)
-        && cleared_lines > 0
-        && cleared_lines != 4
-        && !perfect_clear
 }
 
 fn state_index_key(

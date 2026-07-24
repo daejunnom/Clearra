@@ -59,7 +59,7 @@ impl SolutionProbabilityReport {
     }
 }
 
-pub(crate) fn probability_reports(
+pub fn probability_reports(
     identities: &[StandardBoard64TilingIdentity],
     coverage: &[SolutionCoverage],
     weights: &WeightedPatternSet,

@@ -39,6 +39,99 @@ fn opening_pc_command_preserves_observed_source_piece_count() {
 }
 
 #[test]
+fn pc_back_to_back_preservation_is_an_execution_constraint_not_a_score_request() {
+    let request = WebCommandParser::parse(
+        "clearra pc --lines 2 --queue IOTSL --preserve-b2b --spin-profile all-mini-plus",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    let objective = command.query().objective();
+    assert!(!objective.score().requested());
+    assert!(objective.execution_constraints().preserves_back_to_back());
+    assert_eq!(
+        objective.execution_constraints().spin_profile().as_str(),
+        "all-mini-plus"
+    );
+}
+
+#[test]
+fn pc_score_table_selection_is_independent_from_rotation_rule() {
+    let request = WebCommandParser::parse(
+        "clearra pc --lines 2 --queue IOTSL --score --score-profile jstris-ultra --rule srs-plus",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert_eq!(
+        command.query().objective().score().profile().as_str(),
+        "jstris-ultra"
+    );
+    assert_eq!(command.query().rule().id().as_str(), "srs-plus");
+}
+
+#[test]
+fn build_probability_back_to_back_preservation_reaches_the_core_query() {
+    let request = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --preserve-b2b --spin-profile t-spins-plus",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    let objective = command.query().core_query().objective();
+    assert!(!objective.score().requested());
+    assert!(objective.execution_constraints().preserves_back_to_back());
+    assert_eq!(
+        objective.execution_constraints().spin_profile().as_str(),
+        "t-spins-plus"
+    );
+}
+
+#[test]
+fn build_probability_preserves_rule_spin_profile_and_initial_hold() {
+    let request = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --hold T --no-mirror --aggregate spin --rule srs-x --spin-profile all-mini-plus",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert_eq!(
+        command.query().core_query().rule().id(),
+        clearra_rules::profile::rule_profile::RuleProfileId::SrsX
+    );
+    assert_eq!(
+        command.query().core_query().hold_state().piece(),
+        Some(PieceKind::T)
+    );
+    assert!(command.query().core_query().allow_hold());
+    assert_eq!(
+        command
+            .query()
+            .aggregation()
+            .spin_profile()
+            .expect("spin aggregation")
+            .as_str(),
+        "all-mini-plus"
+    );
+}
+
+#[test]
 fn browser_command_accepts_completed_group_followed_by_bag_permutation() {
     WebCommandParser::parse(
         "clearra pc --lines 2 --backend cpu --patterns [^TSZ]!P4 --max-patterns 20160",
@@ -46,6 +139,29 @@ fn browser_command_accepts_completed_group_followed_by_bag_permutation() {
     .expect("web command")
     .to_app_request()
     .expect("AppRequest");
+}
+
+#[test]
+fn scenario_initial_hold_remains_independent_from_p7_queue() {
+    let request = WebCommandParser::parse(
+        "clearra pc --lines 4 --board-mask 0x80787 --height 4 --pieces 8 --patterns P7 --hold S --backend cpu",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected AppCommand::Scenario");
+    };
+    assert_eq!(command.query().hold_state().piece(), Some(PieceKind::S));
+    assert!(matches!(
+        command.query().remaining_queue(),
+        clearra_pc_graph::request::PcQueueInput::Standard7Bag
+    ));
+    assert_eq!(
+        command.query().supply_window_size(),
+        Some(SupplyWindowSize::new(7))
+    );
 }
 
 #[test]
@@ -151,6 +267,11 @@ fn damage_command_compiles_to_typed_forward_search() {
         Some(&[PieceKind::T, PieceKind::I][..])
     );
     assert!(!command.query().hold_enabled());
+    assert_eq!(
+        command.query().rule_profile(),
+        clearra_rules::profile::rule_profile::RuleProfileId::SrsPlus
+    );
+    assert_eq!(command.query().spin_profile(), SpinProfileId::TSpins);
     assert_eq!(command.query().initial_back_to_back(), Some(1));
     assert_eq!(command.query().mode(), ForwardSearchMode::MaximumDamage);
 }
@@ -182,6 +303,11 @@ fn spin_finder_command_preserves_profile_and_target_group() {
     let AppCommand::SpinFinder(command) = request.command() else {
         panic!("expected AppCommand::SpinFinder");
     };
+    assert!(command.query().hold_enabled());
+    assert_eq!(
+        command.query().rule_profile(),
+        clearra_rules::profile::rule_profile::RuleProfileId::SrsX
+    );
     assert_eq!(command.query().spin_profile(), SpinProfileId::AllMiniPlus);
     let ForwardSearchMode::SpinFinder(target) = command.query().mode() else {
         panic!("expected spin-finder mode");

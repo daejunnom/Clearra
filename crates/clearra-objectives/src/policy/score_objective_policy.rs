@@ -20,6 +20,8 @@ impl ScoreObjectiveMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScoreProfileSelection {
+    Guideline,
+    JstrisUltra,
     Tetrio,
 }
 
@@ -62,6 +64,8 @@ impl SpinProfileSelection {
 impl ScoreProfileSelection {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "guideline" | "guideline-score" | "guideline-level-one" => Some(Self::Guideline),
+            "jstris" | "jstris-ultra" | "jstris-score" => Some(Self::JstrisUltra),
             "tetrio" | "tetrio-score" => Some(Self::Tetrio),
             _ => None,
         }
@@ -69,6 +73,8 @@ impl ScoreProfileSelection {
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Guideline => "guideline",
+            Self::JstrisUltra => "jstris-ultra",
             Self::Tetrio => "tetrio",
         }
     }
@@ -148,5 +154,27 @@ impl ScoreObjectivePolicy {
 impl Default for ScoreObjectivePolicy {
     fn default() -> Self {
         Self::DISABLED
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScoreProfileSelection;
+
+    #[test]
+    fn score_profile_selection_keeps_scoring_independent_from_rotation_physics() {
+        assert_eq!(
+            ScoreProfileSelection::parse("guideline"),
+            Some(ScoreProfileSelection::Guideline)
+        );
+        assert_eq!(
+            ScoreProfileSelection::parse("jstris"),
+            Some(ScoreProfileSelection::JstrisUltra)
+        );
+        assert_eq!(
+            ScoreProfileSelection::parse("tetrio"),
+            Some(ScoreProfileSelection::Tetrio)
+        );
+        assert_eq!(ScoreProfileSelection::parse("srs"), None);
     }
 }

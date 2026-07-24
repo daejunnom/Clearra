@@ -11,7 +11,7 @@ use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 const CANDIDATE_MAGIC: u32 = 0x4342_4131;
 const PARTIAL_MAGIC: u32 = 0x5052_5431;
 const PARTIAL_BATCH_MAGIC: u32 = 0x5052_4231;
-const WIRE_VERSION: u32 = 6;
+const WIRE_VERSION: u32 = 7;
 const MAX_WIRE_ITEMS: usize = 16_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,7 +113,13 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
                     48usize
                         .saturating_add(coverage.target_id().len())
                         .saturating_add(coverage.covered_pattern_words().len() * 8)
-                        .saturating_add(coverage.candidate_identities().len() * 145)
+                        .saturating_add(
+                            coverage
+                                .candidate_keys()
+                                .iter()
+                                .map(|key| key.len().saturating_add(4))
+                                .sum::<usize>(),
+                        )
                 })
                 .sum::<usize>(),
         )
@@ -194,11 +200,11 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
         for word in coverage.covered_pattern_words() {
             put_u64(&mut output, *word);
         }
-        put_u32(&mut output, coverage.candidate_identities().len() as u32);
-        for identity in coverage.candidate_identities() {
-            encode_identity(&mut output, *identity);
+        put_u32(&mut output, coverage.candidate_keys().len() as u32);
+        for key in coverage.candidate_keys() {
+            put_bytes(&mut output, key.as_bytes());
         }
-        put_u128(&mut output, coverage.execution_count());
+        put_u128(&mut output, coverage.witnessed_pattern_count());
         output.push(u8::from(coverage.complete()));
     }
     output
@@ -361,15 +367,15 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
         for _ in 0..word_count {
             words.push(reader.u64()?);
         }
-        let identity_count = reader.count()?;
-        let mut candidate_identities = Vec::new();
-        candidate_identities
-            .try_reserve_exact(identity_count)
-            .map_err(|_| DistributedWireError("partial_spin_identity_allocation_failed"))?;
-        for _ in 0..identity_count {
-            candidate_identities.push(decode_identity(&mut reader)?);
+        let key_count = reader.count()?;
+        let mut candidate_keys = Vec::new();
+        candidate_keys
+            .try_reserve_exact(key_count)
+            .map_err(|_| DistributedWireError("partial_spin_key_allocation_failed"))?;
+        for _ in 0..key_count {
+            candidate_keys.push(reader.string()?);
         }
-        let execution_count = reader.u128()?;
+        let witnessed_pattern_count = reader.u128()?;
         let complete = match reader.u8()? {
             0 => false,
             1 => true,
@@ -380,8 +386,8 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
             pass_index,
             pattern_count,
             words,
-            candidate_identities,
-            execution_count,
+            candidate_keys,
+            witnessed_pattern_count,
             complete,
         ));
     }

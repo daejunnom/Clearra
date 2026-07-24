@@ -347,6 +347,7 @@ fn parse_build_probability_command(
     let mut include_horizontal_mirror = true;
     let mut aggregation = BuildProbabilityAggregation::Buildability;
     let mut spin_profile = None;
+    let mut preserve_back_to_back = false;
     let mut rule = srs_plus();
     let mut cursor = 0usize;
 
@@ -454,6 +455,10 @@ fn parse_build_probability_command(
                     )
                 })?);
             }
+            "--preserve-b2b" => {
+                preserve_back_to_back = true;
+                cursor += 1;
+            }
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
             }
@@ -483,6 +488,7 @@ fn parse_build_probability_command(
             aggregation = BuildProbabilityAggregation::spin_search(profile);
         }
     }
+    let constraint_profile = spin_profile.unwrap_or(SpinProfileSelection::TSpins);
     if !hold_enabled && hold_piece.is_some_and(|piece| piece.is_some()) {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
@@ -523,6 +529,11 @@ fn parse_build_probability_command(
         .with_hold_enabled(hold_enabled)
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup);
+    if preserve_back_to_back {
+        request = request.with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(constraint_profile),
+        );
+    }
     if let Some(queue) = queue {
         request = request.with_queue(queue);
     }
@@ -585,6 +596,7 @@ fn parse_pc_command(
     let mut score_requested = false;
     let mut score_profile = None;
     let mut spin_profile = None;
+    let mut preserve_back_to_back = false;
     let mut rule = srs_plus();
     let mut initial_b2b: Option<u32> = None;
     let mut retained_trace_limit = 1usize;
@@ -703,7 +715,10 @@ fn parse_pc_command(
                         format!("invalid --spin-profile value '{value}'"),
                     )
                 })?);
-                score_requested = true;
+            }
+            "--preserve-b2b" => {
+                preserve_back_to_back = true;
+                cursor += 1;
             }
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
@@ -831,6 +846,9 @@ fn parse_pc_command(
         PcCountPolicy::CountAll => ObjectivePolicy::all(),
         PcCountPolicy::FirstSolution | PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
     });
+    if spin_profile.is_some() && !preserve_back_to_back {
+        score_requested = true;
+    }
     if score_requested && !objective.score().requested() {
         objective = objective.with_score_summary();
     }
@@ -840,8 +858,12 @@ fn parse_pc_command(
     if let Some(profile) = score_profile {
         objective = objective.with_score_profile(profile);
     }
-    if let Some(profile) = spin_profile {
+    if let Some(profile) = spin_profile.filter(|_| objective.score().requested()) {
         objective = objective.with_spin_profile(profile);
+    }
+    if preserve_back_to_back {
+        objective = objective
+            .with_back_to_back_preservation(spin_profile.unwrap_or(SpinProfileSelection::TSpins));
     }
     if objective.score().requested() {
         count_policy = PcCountPolicy::CountAll;

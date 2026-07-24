@@ -13,6 +13,7 @@ pub struct GuiOpeningPcForm {
     score_profile: String,
     spin_profile: String,
     initial_b2b: u32,
+    preserve_b2b: bool,
     solution_probabilities: bool,
 }
 
@@ -28,6 +29,7 @@ impl GuiOpeningPcForm {
             score_profile: "tetrio".to_owned(),
             spin_profile: "t-spins".to_owned(),
             initial_b2b: 0,
+            preserve_b2b: false,
             solution_probabilities: false,
         }
     }
@@ -42,6 +44,11 @@ impl GuiOpeningPcForm {
     pub fn with_queue_pattern(mut self, pattern: impl Into<String>, hold_enabled: bool) -> Self {
         self.fixed_queue = None;
         self.queue_pattern = Some(pattern.into());
+        self.hold_enabled = hold_enabled;
+        self
+    }
+
+    pub const fn with_hold_enabled(mut self, hold_enabled: bool) -> Self {
         self.hold_enabled = hold_enabled;
         self
     }
@@ -84,6 +91,10 @@ impl GuiOpeningPcForm {
         self.initial_b2b
     }
 
+    pub const fn preserve_b2b(&self) -> bool {
+        self.preserve_b2b
+    }
+
     pub fn with_score_input(mut self, mode: impl Into<String>, initial_b2b: u32) -> Self {
         self.score_mode = mode.into();
         self.initial_b2b = initial_b2b;
@@ -97,6 +108,11 @@ impl GuiOpeningPcForm {
     ) -> Self {
         self.score_profile = score_profile.into();
         self.spin_profile = spin_profile.into();
+        self
+    }
+
+    pub const fn with_back_to_back_preservation(mut self, value: bool) -> Self {
+        self.preserve_b2b = value;
         self
     }
 
@@ -132,6 +148,7 @@ pub struct GuiScenarioPcForm {
     score_profile: String,
     spin_profile: String,
     initial_b2b: u32,
+    preserve_b2b: bool,
     solution_probabilities: bool,
 }
 
@@ -162,6 +179,7 @@ impl GuiScenarioPcForm {
             score_profile: "tetrio".to_owned(),
             spin_profile: "t-spins".to_owned(),
             initial_b2b: 0,
+            preserve_b2b: false,
             solution_probabilities: false,
         }
     }
@@ -252,6 +270,10 @@ impl GuiScenarioPcForm {
         self.initial_b2b
     }
 
+    pub const fn preserve_b2b(&self) -> bool {
+        self.preserve_b2b
+    }
+
     pub fn with_score_input(mut self, mode: impl Into<String>, initial_b2b: u32) -> Self {
         self.score_mode = mode.into();
         self.initial_b2b = initial_b2b;
@@ -265,6 +287,11 @@ impl GuiScenarioPcForm {
     ) -> Self {
         self.score_profile = score_profile.into();
         self.spin_profile = spin_profile.into();
+        self
+    }
+
+    pub const fn with_back_to_back_preservation(mut self, value: bool) -> Self {
+        self.preserve_b2b = value;
         self
     }
 
@@ -368,6 +395,15 @@ impl GuiProblemForm {
             Self::ScenarioPc(form) => {
                 Self::ScenarioPc(form.with_score_profiles(score_profile, spin_profile))
             }
+            other => other,
+        }
+    }
+}
+impl GuiProblemForm {
+    pub fn with_back_to_back_preservation(self, value: bool) -> Self {
+        match self {
+            Self::OpeningPc(form) => Self::OpeningPc(form.with_back_to_back_preservation(value)),
+            Self::ScenarioPc(form) => Self::ScenarioPc(form.with_back_to_back_preservation(value)),
             other => other,
         }
     }

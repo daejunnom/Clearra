@@ -101,7 +101,7 @@ foreach ($requiredMarker in @(
     }
 $desktopSurface = @(
         Read-Text "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs"
-        Read-Text "crates/clearra-gui-host/tests/gui_host_contract.rs"
+        Read-Text "crates/clearra-gui-host/src/gui_host_contract_tests.rs"
         Read-Text "apps/clearra-desktop/src-tauri/src/commands.rs"
         Read-Text "apps/clearra-desktop/src-tauri/src/main.rs"
         Read-Text "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts"

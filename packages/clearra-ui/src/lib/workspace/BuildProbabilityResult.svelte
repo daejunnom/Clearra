@@ -46,8 +46,7 @@
     return `${(value / 1_048_576).toFixed(value >= 104_857_600 ? 0 : 1)} MiB`;
   }
 
-  function summaryNumber(key: string): number | undefined {
-    const value = summary[key];
+  function summaryNumber(value: string | undefined): number | undefined {
     if (value === undefined) return undefined;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
@@ -120,7 +119,7 @@
             {#if aggregation === 'spin'}
               <span>{label('spinSearchProbability')}</span>
               <strong>{workspaceProbability(language, summary.spin_search_probability)}</strong>
-              <small>{number(summaryNumber('spin_search_candidate_count'))} {label('spinSearchBuilds')} · {label('spinAccuracy')}: {summary.spin_search_accuracy ?? '—'}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
+              <small>{number(summaryNumber(summary.spin_search_candidate_count))} {label('spinSearchBuilds')} · {label('spinAccuracy')}: {summary.spin_search_accuracy ?? '—'}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
             {:else}
               <span>{label('buildProbability')}</span>
               <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
@@ -138,7 +137,7 @@
             <div><dt>{label('buildableTilings')}</dt><dd>{number(report?.unique_solution_count)}</dd></div>
             {#if summary.build_mirror_included === 'true'}
               <div><dt>{label('originalBuildProbability')}</dt><dd>{workspaceProbability(language, summary.original_coverage_probability)}</dd></div>
-              <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber('mirror_union_added_pattern_count'))}</dd></div>
+              <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber(summary.mirror_union_added_pattern_count))}</dd></div>
             {/if}
             <div><dt>{label('candidateTilings')}</dt><dd>{number(report?.packing_candidate_count)}</dd></div>
             <div><dt>{label('searchedNodes')}</dt><dd>{number(report?.searched_nodes)}</dd></div>

@@ -37,7 +37,7 @@
         on:value={(event) => patch({ queue: event.detail })}
       />
     </label>
-    <QueuePatternHelp {language} />
+    <QueuePatternHelp {language} explainInitialHold />
 
     <div class="workspace-switch-row">
       <label class="workspace-switch-label">
@@ -81,7 +81,7 @@
         <span>{label('spinProfile')}</span>
         <select
           value={request.spinProfile}
-          disabled={request.aggregation === 'buildability'}
+          disabled={request.aggregation === 'buildability' && !request.preserveB2B}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -93,6 +93,18 @@
         </select>
       </label>
     </div>
+    <div class="b2b-preservation-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.preserveB2B}
+          on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('preserveB2B')}</span>
+      </label>
+      <small class="workspace-field-help">{label('preserveB2BHelp')}</small>
+    </div>
   </section>
 
   {#if validationCodes.length}
@@ -101,3 +113,7 @@
     </ul>
   {/if}
 </WorkspaceControlPanel>
+
+<style>
+  .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
+</style>

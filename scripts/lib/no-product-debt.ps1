@@ -112,7 +112,7 @@ function Invoke-NoProductDebtDesktopProbe {
 
     Write-Output '[no-product-debt] WASM CPU desktop AppRequest probe'
     Invoke-NoProductDebtRustCase $CargoPath 'clearra-gui-host' `
-        @('--features', 'wasm-cpu-runtime,webgpu-search', '--test', 'gui_host_contract') `
+        @('--features', 'wasm-cpu-runtime,webgpu-search', '--lib') `
         'tauri_command_calls_clearra_gui_host_only' `
         'tauri_command_calls_clearra_gui_host_only' `
         'desktop_real_app_request'
