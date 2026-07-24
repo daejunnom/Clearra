@@ -37,7 +37,7 @@ fn rules_command_inspects_and_verifies_builtin_profiles() {
 }
 
 #[test]
-fn rules_command_discloses_exact_srs_plus_and_unsupported_extension_backends() {
+fn rules_command_discloses_exact_connected_srs_plus_and_srs_x_backends() {
     let srs_plus = RulesCommand::run(
         &RulesArgs::new(RulesAction::Inspect).with_profile(Some("srs-plus".to_owned())),
         RenderFormat::Text,
@@ -56,13 +56,11 @@ fn rules_command_discloses_exact_srs_plus_and_unsupported_extension_backends() {
         .stdout()
         .contains("c_compact_descriptor_ready: true"));
     assert_eq!(srs_x.exit_code(), ExitCode::Success);
-    assert!(srs_x.stdout().contains("search_backend_supported: false"));
-    assert!(srs_x
-        .stdout()
-        .contains("unsupported_backend_reason: srs_x_profile_requires_imported_kick_table"));
-    assert!(srs_x
-        .stdout()
-        .contains("unsupported_reason: srs_x_profile_requires_imported_kick_table"));
+    assert!(srs_x.stdout().contains("source_kind: built-in-exact"));
+    assert!(srs_x.stdout().contains("search_backend_supported: true"));
+    assert!(srs_x.stdout().contains("supports_exact_180: true"));
+    assert!(srs_x.stdout().contains("c_compact_descriptor_ready: true"));
+    assert!(srs_x.stdout().contains("unsupported_backend_reason: none"));
 }
 
 #[test]

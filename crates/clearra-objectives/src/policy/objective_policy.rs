@@ -2,6 +2,7 @@ use clearra_core_domain::objective::{
     objective_kind::ObjectiveKind, tie_policy::TiePolicy, trace_policy::TracePolicy,
 };
 
+use super::execution_constraint_policy::ExecutionConstraintPolicy;
 use super::score_objective_policy::{
     ScoreObjectivePolicy, ScoreProfileSelection, SpinProfileSelection,
 };
@@ -12,6 +13,7 @@ pub struct ObjectivePolicy {
     tie_policy: TiePolicy,
     trace_policy: TracePolicy,
     score: ScoreObjectivePolicy,
+    execution_constraints: ExecutionConstraintPolicy,
 }
 
 impl ObjectivePolicy {
@@ -21,6 +23,7 @@ impl ObjectivePolicy {
             tie_policy,
             trace_policy,
             score: ScoreObjectivePolicy::DISABLED,
+            execution_constraints: ExecutionConstraintPolicy::NONE,
         }
     }
 }
@@ -92,6 +95,14 @@ impl ObjectivePolicy {
         self.score = score.with_spin_profile(profile);
         self
     }
+
+    pub const fn with_back_to_back_preservation(
+        mut self,
+        spin_profile: SpinProfileSelection,
+    ) -> Self {
+        self.execution_constraints = ExecutionConstraintPolicy::preserve_back_to_back(spin_profile);
+        self
+    }
 }
 impl ObjectivePolicy {
     pub fn kind(self) -> ObjectiveKind {
@@ -111,6 +122,10 @@ impl ObjectivePolicy {
 impl ObjectivePolicy {
     pub const fn score(self) -> ScoreObjectivePolicy {
         self.score
+    }
+
+    pub const fn execution_constraints(self) -> ExecutionConstraintPolicy {
+        self.execution_constraints
     }
 }
 

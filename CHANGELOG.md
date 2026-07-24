@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.4 - 2026-07-24
+
+- Extended the selected-spin-profile B2B preservation policy to PC and build
+  probability searches, including exact single- and multi-worker WASM paths.
+- Added Guideline and Jstris Ultra score tables behind the shared score-profile
+  contract and connected score selection through CLI, WASM, and GUI requests.
+- Preserved command, queue pattern, initial hold, kick rule, spin profile, and
+  score profile identities across browser and Tauri request normalization.
+- Fixed initial-hold scenario compilation, exact spin-aware BuildUp filtering,
+  and unsupported kick-profile handling without weakening PC existence search.
+- Added clearer initial-hold guidance and corrected build-search control
+  spacing in the English and Korean GUI.
+
 ## 0.1.3 - 2026-07-23
 
 - Added an optional B2B-preserving line-clear policy to forward damage and

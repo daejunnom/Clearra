@@ -76,9 +76,8 @@ impl WebPcScenarioInput {
         .with_count_policy(self.count_policy)
         .with_retained_trace_limit(self.retained_trace_limit)
         .with_execution_policy(execution_policy);
-        // A fixed leading supply piece is represented internally as an
-        // occupied hold slot for the symbolic bag product. It already belongs
-        // to the input, so the bag suffix must not count it a second time.
+        // An occupied initial hold contributes one independently supplied
+        // piece. It is not removed from the queue or bag expression.
         let initial_hold_prefix = usize::from(self.allow_hold && self.hold_piece.is_some());
         let automatic_source_pieces = self
             .piece_window

@@ -1,4 +1,5 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
     SupplyWindowSize,
@@ -74,6 +75,7 @@ impl WebBuildProbabilityInput {
         execution_policy: PcExecutionPolicy,
         finite_standard_bag_len: Option<usize>,
         rule: RuleProfile,
+        objective: ObjectivePolicy,
     ) -> Result<BuildProbabilityQuery, BuildProbabilityFieldError> {
         let height = u8::try_from(self.visible_height)
             .map_err(|_| BuildProbabilityFieldError::HeightOutOfRange { height: u8::MAX })?;
@@ -92,8 +94,11 @@ impl WebBuildProbabilityInput {
         .with_hold_piece(self.hold_piece)
         .with_allow_hold(self.allow_hold)
         .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(objective)
         .with_retained_trace_limit(1)
         .with_execution_policy(execution_policy);
+        // Initial hold is an independent piece, not a queue prefix. The
+        // source therefore needs one fewer placed piece when it is occupied.
         let initial_hold_prefix = usize::from(self.allow_hold && self.hold_piece.is_some());
         let automatic_source_pieces = target_piece_count
             .saturating_add(usize::from(self.allow_hold))

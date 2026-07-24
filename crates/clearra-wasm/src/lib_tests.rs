@@ -63,6 +63,51 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn occupied_initial_hold_plus_p7_solves_eight_piece_scenario() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc --lines 4 --board-mask 0x80787 --height 4 --pieces 8 --patterns P7 --hold S --backend cpu --workers 1",
+        )
+        .expect("WASM scenario result");
+    let report = result
+        .search_report()
+        .unwrap_or_else(|| panic!("WASM search report: {:?}", result.app_response()));
+
+    assert!(
+        report.solution_found,
+        "initial hold S and the seven P7 pieces form the eight placed pieces"
+    );
+    assert!(report.count_complete);
+    assert!(report.projects_unplaced_lookahead);
+    assert_eq!(report.source_sequence_length, 7);
+}
+
+#[test]
+fn inverse_b2b_constraint_removes_a_normal_non_pc_line_clear() {
+    let request = WasmCommandRuntime::default()
+        .compile_command_text(
+            "clearra build-probability --base-mask 0x803f0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --preserve-b2b --spin-profile t-spins",
+        )
+        .expect("constrained request");
+    let response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    )
+    .run(request);
+    let core = response
+        .render_model()
+        .and_then(|model| model.core_result())
+        .expect("core result");
+
+    assert_eq!(
+        core.field("execution_constraint_materialized"),
+        Some("true")
+    );
+    assert_eq!(core.field("unique_solution_count"), Some("0"));
+    assert_eq!(core.field("covered_pattern_count"), Some("0"));
+    assert_eq!(core.field("solution_found"), Some("false"));
+}
+
+#[test]
 fn wasm_runtime_does_not_use_native_path_semantics() {
     let error = WasmCommandRuntime::default()
         .compile_command_text("clearra pc --fixture C:\\field.json")
@@ -154,46 +199,15 @@ fn wasm_user_shader_rejected() {
 }
 
 #[test]
-fn distributed_cpu_product_path_matches_serial_exact_result() {
+fn distributed_b2b_constraint_matches_serial_exact_result() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let serial_command = "clearra pc --lines 4 --count unique --backend cpu --workers 1 --queue IOTSZJLIOTS --preserve-b2b --spin-profile t-spins";
+    let distributed_command = "clearra pc --lines 4 --count unique --backend cpu --workers 2 --queue IOTSZJLIOTS --preserve-b2b --spin-profile t-spins";
     let serial = runtime
-        .run_command_text(
-            "clearra pc --lines 4 --count unique --backend cpu --workers 1 --queue IOTSZJLIOTS",
-        )
+        .run_command_text(serial_command)
         .expect("serial exact result");
-    let preparation = WasmDistributedCoordinator::prepare(
-        &runtime,
-        "clearra pc --lines 4 --count unique --backend cpu --workers 2 --queue IOTSZJLIOTS",
-    )
-    .expect("distributed preparation");
-    let mut coordinator = match preparation {
-        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
-        _ => panic!("4L two-worker request must use the distributed product path"),
-    };
-    let mut verifier = WasmDistributedVerifierRuntime::prepare(
-        &runtime,
-        "clearra pc --lines 4 --count unique --backend cpu --workers 2 --queue IOTSZJLIOTS",
-    )
-    .expect("distributed verifier");
-    loop {
-        match coordinator
-            .advance_producer(16_384, 16)
-            .expect("geometry producer")
-        {
-            WasmDistributedProducerAdvance::Pending => {}
-            WasmDistributedProducerAdvance::Batch(batch) => {
-                verifier.consume(&batch).expect("candidate batch");
-            }
-            WasmDistributedProducerAdvance::Completed => break,
-            WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
-        }
-    }
-    let partial = verifier.finish().expect("partial exact result");
-    coordinator
-        .absorb_partial(&partial)
-        .expect("merge partial exact result");
-    let distributed = coordinator.finish(2).expect("distributed exact result");
+    let distributed = run_distributed_cpu(&runtime, distributed_command);
 
     let serial_report = serial.search_report().expect("serial search report");
     let distributed_report = distributed
@@ -213,6 +227,71 @@ fn distributed_cpu_product_path_matches_serial_exact_result() {
     );
     assert!(distributed_report.cpu_parallel_execution);
     assert_eq!(distributed_report.workers_used, 2);
+    assert!(distributed_report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| { key == "execution_constraint_materialized" && value == "true" }));
+}
+
+#[test]
+fn distributed_build_probability_b2b_constraint_matches_serial_exact_result() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let serial_command = "clearra build-probability --base-mask 0x0 --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI --no-hold --no-mirror --workers 1 --preserve-b2b --spin-profile t-spins";
+    let distributed_command = "clearra build-probability --base-mask 0x0 --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI --no-hold --no-mirror --workers 2 --preserve-b2b --spin-profile t-spins";
+    let serial = runtime
+        .run_command_text(serial_command)
+        .expect("serial build probability result");
+    let distributed = run_distributed_cpu(&runtime, distributed_command);
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert_eq!(serial_report.unique_solution_count, 8);
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert_eq!(
+        distributed_report.covered_pattern_count,
+        serial_report.covered_pattern_count
+    );
+    assert!(distributed_report.cpu_parallel_execution);
+    assert_eq!(distributed_report.workers_used, 2);
+}
+
+fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecutionResult {
+    let preparation =
+        WasmDistributedCoordinator::prepare(runtime, command).expect("distributed preparation");
+    let mut coordinator = match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+        _ => panic!("two-worker request must use the distributed product path"),
+    };
+    let mut verifier =
+        WasmDistributedVerifierRuntime::prepare(runtime, command).expect("distributed verifier");
+    loop {
+        match coordinator
+            .advance_producer(16_384, 16)
+            .expect("geometry producer")
+        {
+            WasmDistributedProducerAdvance::Pending => {}
+            WasmDistributedProducerAdvance::Batch(batch) => {
+                verifier.consume(&batch).expect("candidate batch");
+            }
+            WasmDistributedProducerAdvance::Completed => break,
+            WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+        }
+    }
+    let partial = verifier.finish().expect("partial exact result");
+    coordinator
+        .absorb_partial(&partial)
+        .expect("merge partial exact result");
+    coordinator.finish(2).expect("distributed exact result")
 }
 
 #[cfg(feature = "webgpu-search")]

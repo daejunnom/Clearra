@@ -138,26 +138,16 @@ impl ScoreModelEvaluator {
 }
 impl ScoreModelEvaluator {
     fn score_for_event(profile: &ScoreProfile, event: ScoreEvent) -> u64 {
-        let event_score = Self::event_score(profile.score_model(), event);
+        let event_score = ScoreModelTable::for_model(profile.score_model()).map_or(0, |table| {
+            table.score_event_with_b2b(event, profile.b2b_policy())
+        });
         let combo_bonus = combo_score_bonus(profile, event);
-        let adjusted_event_score =
-            if profile.b2b_policy().enabled() && event.b2b_before() && event.is_difficult_clear() {
-                profile.b2b_policy().adjusted_score(event_score)
-            } else {
-                event_score
-            };
-
-        adjusted_event_score.saturating_add(combo_bonus)
+        event_score.saturating_add(combo_bonus)
     }
 }
 impl ScoreModelEvaluator {
     fn clear_score(model: ScoreModelId, clear: ClearEvent) -> u64 {
         ScoreModelTable::for_model(model).map_or(0, |table| table.score_clear(clear))
-    }
-}
-impl ScoreModelEvaluator {
-    fn event_score(model: ScoreModelId, event: ScoreEvent) -> u64 {
-        ScoreModelTable::for_model(model).map_or(0, |table| table.score_event(event))
     }
 }
 

@@ -89,6 +89,27 @@ pub(crate) fn score_objective_policy(
         .with_initial_b2b(initial_b2b))
 }
 
+pub(crate) fn execution_constraint_objective_policy(
+    preserve_b2b: bool,
+    spin_profile: &str,
+    base: clearra_objectives::policy::objective_policy::ObjectivePolicy,
+) -> Result<clearra_objectives::policy::objective_policy::ObjectivePolicy, RequestBuildError> {
+    if !preserve_b2b {
+        return Ok(base);
+    }
+    let spin_profile =
+        clearra_objectives::policy::score_objective_policy::SpinProfileSelection::parse(
+            spin_profile,
+        )
+        .ok_or_else(|| {
+            RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                format!("invalid GUI spin profile '{spin_profile}'"),
+            )
+        })?;
+    Ok(base.with_back_to_back_preservation(spin_profile))
+}
+
 pub(crate) fn parse_rule_profile(
     value: &str,
 ) -> Result<clearra_rules::profile::rule_profile::RuleProfile, RequestBuildError> {

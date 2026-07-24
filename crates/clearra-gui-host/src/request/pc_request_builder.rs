@@ -8,8 +8,9 @@ use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 use crate::{
     model::{GuiBackendForm, GuiOpeningPcForm},
     request::{
-        parse_piece_sequence, parse_queue_pattern, parse_rule_profile, score_objective_policy,
-        BackendRequestBuilder, RequestBuildError, RequestBuildErrorCode,
+        execution_constraint_objective_policy, parse_piece_sequence, parse_queue_pattern,
+        parse_rule_profile, score_objective_policy, BackendRequestBuilder, RequestBuildError,
+        RequestBuildErrorCode,
     },
 };
 
@@ -35,21 +36,25 @@ impl PcRequestBuilder {
             form.initial_b2b(),
             clearra_objectives::policy::objective_policy::ObjectivePolicy::unique(),
         )?;
+        let objective = execution_constraint_objective_policy(
+            form.preserve_b2b(),
+            form.spin_profile(),
+            objective,
+        )?;
         let mut query = OpeningPcSearchQuery::new(target)
             .with_rule(parse_rule_profile(form.rule())?)
             .with_objective(objective)
+            .with_hold_policy(if form.hold_enabled() {
+                PcHoldPolicy::EnabledEmpty
+            } else {
+                PcHoldPolicy::Disabled
+            })
             .with_execution_policy(policy);
         if let Some(queue) = form.fixed_queue() {
-            query = query
-                .with_queue(PcQueueInput::fixed_sequence(parse_piece_sequence(
-                    queue,
-                    "opening fixed queue",
-                )?))
-                .with_hold_policy(if form.hold_enabled() {
-                    PcHoldPolicy::EnabledEmpty
-                } else {
-                    PcHoldPolicy::Disabled
-                });
+            query = query.with_queue(PcQueueInput::fixed_sequence(parse_piece_sequence(
+                queue,
+                "opening fixed queue",
+            )?));
         }
         if let Some(pattern) = form.queue_pattern() {
             let finite_standard_bag_len =
@@ -63,13 +68,7 @@ impl PcRequestBuilder {
                     "opening queue pattern",
                 )?)
             };
-            query = query
-                .with_queue(queue)
-                .with_hold_policy(if form.hold_enabled() {
-                    PcHoldPolicy::EnabledEmpty
-                } else {
-                    PcHoldPolicy::Disabled
-                });
+            query = query.with_queue(queue);
             if let Some(length) = finite_standard_bag_len {
                 let required_pieces = usize::from(target.lines()) * 10 / 4;
                 query =

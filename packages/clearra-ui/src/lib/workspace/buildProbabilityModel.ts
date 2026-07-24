@@ -20,6 +20,7 @@ export type BuildProbabilityRequest = {
   aggregation: 'buildability' | 'spin';
   rule: RuleProfile;
   spinProfile: SpinProfile;
+  preserveB2B: boolean;
   workers: number;
 };
 
@@ -42,6 +43,7 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     aggregation: 'buildability',
     rule: 'srs-plus',
     spinProfile: 't-spins',
+    preserveB2B: false,
     workers: defaultWorkerCount()
   };
 }
@@ -74,8 +76,7 @@ export function buildProbabilityValidationCodes(
 export function buildProbabilityCommand(request: BuildProbabilityRequest): string {
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
-  const queue = queueWithInitialHold(request);
-  const parsedQueue = parseBrowserQueueInput(queue);
+  const parsedQueue = parseBrowserQueueInput(request.queue);
   const tokens = [
     'clearra',
     'build-probability',
@@ -86,19 +87,20 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
     '--height',
     String(request.height)
   ];
-  if (request.holdEnabled) tokens.push('--hold', 'empty');
+  if (request.holdEnabled) tokens.push('--hold', request.holdPiece);
   else tokens.push('--no-hold');
-  if (queue) {
+  if (request.queue) {
     tokens.push(
       parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
-      parsedQueue?.source ?? queue
+      parsedQueue?.source ?? request.queue
     );
   }
   tokens.push('--aggregate', request.aggregation);
   tokens.push('--rule', request.rule);
-  if (request.aggregation === 'spin') {
+  if (request.aggregation === 'spin' || request.preserveB2B) {
     tokens.push('--spin-profile', request.spinProfile);
   }
+  if (request.preserveB2B) tokens.push('--preserve-b2b');
   tokens.push(
     mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
   );
@@ -132,9 +134,4 @@ export function trimBuildProbabilityMask(mask: bigint, height: number): bigint {
 
 export function normalizeBuildQueue(value: string): string {
   return normalizeQueueInput(value);
-}
-
-function queueWithInitialHold(request: BuildProbabilityRequest): string {
-  if (!request.holdEnabled || request.holdPiece === 'empty') return request.queue;
-  return `${request.holdPiece}${request.queue}`;
 }

@@ -14,7 +14,9 @@ fn scoring_command_lists_and_inspects_canonical_profiles() {
     );
 
     assert_eq!(list.exit_code(), ExitCode::Success);
-    assert!(list.stdout().contains("profile_0_id: jstris-ultra"));
+    assert!(list.stdout().contains("profile_0_id: guideline"));
+    assert!(list.stdout().contains("profile_1_id: jstris-ultra"));
+    assert!(list.stdout().contains("profile_3_id: tetrio"));
     assert_eq!(inspect.exit_code(), ExitCode::Success);
     assert!(inspect.stdout().contains("score_model: tetrio"));
     assert!(inspect.stdout().contains("attack_model: tetrio"));

@@ -24,6 +24,22 @@ fn assembles_inline_scenario_query_with_verified_kick_profile() {
 }
 
 #[test]
+fn inline_scenario_defaults_to_srs_plus_and_enabled_hold() {
+    let args = PcScenarioArgs::new(None)
+        .with_field(Some("0x00000000000003f0".to_owned()))
+        .with_queue(Some("I".to_owned()))
+        .with_max_pieces(Some(1));
+
+    let assembly = PcScenarioQueryAssembler::assemble(&args).expect("assembly");
+
+    assert_eq!(
+        assembly.query().rule().id(),
+        clearra_rules::profile::rule_profile::RuleProfileId::SrsPlus
+    );
+    assert!(assembly.query().allow_hold());
+}
+
+#[test]
 fn assembles_fixture_scenario_query_and_source_fields() {
     let path = fixture_path("tests/fixtures/pc/example.json");
     let args = PcScenarioArgs::new(Some(path.display().to_string()));

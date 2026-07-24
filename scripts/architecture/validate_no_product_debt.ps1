@@ -225,7 +225,7 @@ function Invoke-NoProductDebtStaticValidation {
     $desktopManifest = Read-PhysicalText 'apps/clearra-desktop/src-tauri/Cargo.toml'
     $desktopGuiHostDependency = [regex]::Match(
         $desktopManifest,
-        '(?m)^clearra-gui-host\s*=\s*\{[^\r\n]*$'
+        '(?m)^clearra-gui-host\s*=\s*\{[^\r\n]*\r?$'
     ).Value
     if ($desktopGuiHostDependency -notmatch '"wasm-cpu-runtime"') {
         Add-ArchitectureError 'NoProductDebt desktop product must enable the exact WASM CPU runtime'

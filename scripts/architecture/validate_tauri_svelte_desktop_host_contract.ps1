@@ -181,7 +181,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     }
     foreach ($requiredMarker in @(
         '"--features", "wasm-cpu-runtime,webgpu-search"',
-        '"--test", "gui_host_contract"',
+        '"--lib"',
         'wasm_cpu_app_request=executed',
         'async_job_e2e=executed',
         'Get-ClearraCargoTargetDir',

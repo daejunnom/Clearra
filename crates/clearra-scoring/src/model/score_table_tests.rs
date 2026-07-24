@@ -50,6 +50,75 @@ fn score_model_tables_score_t_spins_separately_from_line_clears() {
 }
 
 #[test]
+fn guideline_level_one_perfect_clear_table_is_line_specific() {
+    let table = ScoreModelTable::for_model(ScoreModelId::Guideline).expect("guideline table");
+
+    assert!(GuidelineScoreTable::SOURCE_NOTE.contains("PC bonuses 800/1200/1800/2000"));
+    assert_eq!(table.score_clear(ClearEvent::new(1, true)), 900);
+    assert_eq!(table.score_clear(ClearEvent::new(2, true)), 1500);
+    assert_eq!(table.score_clear(ClearEvent::new(3, true)), 2300);
+    assert_eq!(table.score_clear(ClearEvent::new(4, true)), 2800);
+}
+
+#[test]
+fn guideline_back_to_back_tetris_pc_adjusts_action_and_pc_bonus_separately() {
+    let table = ScoreModelTable::for_model(ScoreModelId::Guideline).expect("guideline table");
+    let event = ScoreEvent::new(
+        0,
+        ClearEvent::new(4, true),
+        None,
+        ComboState::default(),
+        ComboState::default(),
+        true,
+        true,
+    );
+
+    assert_eq!(
+        table.score_event_with_b2b(event, crate::profile::B2BPolicy::multiplier(3, 2, 0)),
+        4400
+    );
+}
+
+#[test]
+fn jstris_ultra_scores_mini_double_and_b2b_by_its_profile_table() {
+    let table = ScoreModelTable::for_model(ScoreModelId::JstrisUltra).expect("jstris table");
+    let mini_double = ScoreEvent::new(
+        0,
+        ClearEvent::new(2, false),
+        Some(SpinEvent::new('T', true, 2)),
+        ComboState::default(),
+        ComboState::default(),
+        true,
+        true,
+    );
+
+    assert!(JstrisUltraScoreTable::SOURCE_NOTE.contains("1.5x B2B"));
+    assert_eq!(
+        table.score_event_with_b2b(mini_double, crate::profile::B2BPolicy::multiplier(3, 2, 0)),
+        1800
+    );
+}
+
+#[test]
+fn jstris_ultra_does_not_apply_b2b_multiplier_to_pc_bonus() {
+    let table = ScoreModelTable::for_model(ScoreModelId::JstrisUltra).expect("jstris table");
+    let event = ScoreEvent::new(
+        0,
+        ClearEvent::new(4, true),
+        None,
+        ComboState::default(),
+        ComboState::default(),
+        true,
+        true,
+    );
+
+    assert_eq!(
+        table.score_event_with_b2b(event, crate::profile::B2BPolicy::multiplier(3, 2, 0)),
+        4200
+    );
+}
+
+#[test]
 fn score_profile_covers_all_award_classes() {
     let table = ScoreModelTable::for_model(ScoreModelId::Guideline).expect("table");
 

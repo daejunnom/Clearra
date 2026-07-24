@@ -4,6 +4,7 @@ use clearra_core_domain::{
     board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
     solution::normalized_tiling_solution::{
+        normalized_tiling_solution_key_set_hash_from_sorted_strings,
         normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
         NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
     },
@@ -52,6 +53,7 @@ pub(crate) struct WasmBuildProbabilitySession {
     aggregation: BuildProbabilityAggregation,
     mirror_included: bool,
     mirror_distinct: bool,
+    execution_constraints_requested: bool,
     finished: bool,
 }
 
@@ -96,6 +98,10 @@ impl WasmBuildProbabilitySession {
             aggregation,
             mirror_included,
             mirror_distinct,
+            execution_constraints_requested: problem
+                .objective()
+                .execution_constraints()
+                .requested(),
             finished: false,
         })
     }
@@ -134,7 +140,8 @@ impl WasmBuildProbabilitySession {
                     self.mirror_included,
                     self.mirror_distinct,
                     &self.pattern_weights,
-                    self.aggregation.requests_spin_coverage(),
+                    self.aggregation.requests_spin_coverage()
+                        || self.execution_constraints_requested,
                 )?))
             }
         }
@@ -424,12 +431,15 @@ pub(super) fn merge_symmetry_results(
     }
 
     let mut scoring_batches = primary.take_exact_scoring_execution_batches();
+    let mut spin_coverage_batches = primary.take_spin_coverage_execution_batches();
     for result in &mut results {
         scoring_batches.extend(result.take_exact_scoring_execution_batches());
+        spin_coverage_batches.extend(result.take_spin_coverage_execution_batches());
     }
     let merged = primary
         .with_coverage_pattern_words(union_words)
         .with_exact_scoring_execution_batches(scoring_batches)
+        .with_spin_coverage_execution_batches(spin_coverage_batches)
         .with_replaced_fields(replacements);
     let merged = if materialize_postprocess_pattern_weights {
         let pattern_weight_strings = (0..pattern_weights.len())
@@ -461,14 +471,7 @@ pub(super) fn merge_symmetry_results(
 }
 
 pub(super) fn normalized_string_solution_set_hash(keys: &[String]) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for key in keys {
-        for byte in key.bytes().chain(core::iter::once(0)) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    format!("ctks1:{hash:016x}")
+    normalized_tiling_solution_key_set_hash_from_sorted_strings(keys)
 }
 
 fn count_coverage_words(words: &[u64], pattern_count: usize) -> usize {
@@ -565,6 +568,7 @@ pub(super) struct CompactBuildProbabilitySession {
     parallel_maximum_worker_candidates: usize,
     parallel_decision_reason: &'static str,
     distributed_spin_materialized: bool,
+    distributed_execution_constraint_materialized: bool,
     finished: bool,
 }
 
@@ -642,6 +646,7 @@ impl CompactBuildProbabilitySession {
         external_geometry: bool,
         shared_supply_catalog: Option<&CompactBuildProbabilitySharedCatalog>,
     ) -> Result<Self, WasmExactSearchError> {
+        super::ensure_connected_kick_profile(problem)?;
         let target_cells =
             field
                 .compact_target_mask()
@@ -698,8 +703,7 @@ impl CompactBuildProbabilitySession {
                 let family = universe.packing_multiset_family(
                     target_piece_count,
                     problem.initial_hold(),
-                    problem.supply().hold_enabled()
-                        && !problem.supply().projects_unplaced_lookahead(),
+                    super::packing_projection_hold_enabled(problem),
                 );
                 if family.is_empty() {
                     return Err(WasmExactSearchError::InvalidProblem(
@@ -760,6 +764,7 @@ impl CompactBuildProbabilitySession {
             parallel_maximum_worker_candidates: 0,
             parallel_decision_reason: "serial-build-probability-session",
             distributed_spin_materialized: false,
+            distributed_execution_constraint_materialized: false,
             finished: false,
         })
     }
@@ -970,6 +975,8 @@ impl CompactBuildProbabilitySession {
         self.parallel_minimum_worker_candidates = usize::MAX;
         self.parallel_maximum_worker_candidates = 0;
         self.parallel_decision_reason = "browser-worker-build-probability-pipeline";
+        self.distributed_execution_constraint_materialized =
+            self.problem.objective().execution_constraints().requested();
     }
 
     pub(super) fn process_external_candidate(
@@ -1008,7 +1015,9 @@ impl CompactBuildProbabilitySession {
                 )
             })?;
         }
-        let scoring_batch = if self.aggregation.requests_spin_coverage() {
+        let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || self.problem.objective().execution_constraints().requested();
+        let scoring_batch = if execution_evidence_requested {
             Some(self.prepare_exact_spin_execution_batch()?)
         } else {
             None
@@ -1039,6 +1048,11 @@ impl CompactBuildProbabilitySession {
             )
         })?;
         self.distributed_spin_materialized |= !result.postprocess_spin_coverages().is_empty();
+        if self.problem.objective().execution_constraints().requested() {
+            self.distributed_execution_constraint_materialized &= result
+                .bool_field("execution_constraint_materialized")
+                .unwrap_or(false);
+        }
 
         for identity in result.normalized_solution_identities() {
             if !self.buildable_tilings.contains(identity) {
@@ -1139,9 +1153,12 @@ impl CompactBuildProbabilitySession {
             })?;
         }
         self.finished = true;
-        let scoring_batch = if self.aggregation.requests_spin_coverage()
-            && !self.distributed_spin_materialized
-        {
+        let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || self.problem.objective().execution_constraints().requested();
+        let evidence_materialized = self.distributed_spin_materialized
+            || (self.problem.objective().execution_constraints().requested()
+                && self.distributed_execution_constraint_materialized);
+        let scoring_batch = if execution_evidence_requested && !evidence_materialized {
             let span = SearchStageSpan::begin(ExecutorSearchStage::WasmSpinExecutionGraphPrepare);
             let batch = self.prepare_exact_spin_execution_batch()?;
             span.finish(batch.graphs().len() as u64);
@@ -1226,6 +1243,12 @@ impl CompactBuildProbabilitySession {
             .get();
         let probability_complete = universe.complete() && self.truncated_reason.is_none();
         let count_complete = self.count_complete && self.truncated_reason.is_none();
+        let build_variant_count_exact = self.problem.count_policy()
+            == clearra_pc_graph::request::PcCountPolicy::CountAll
+            && count_complete;
+        let execution_constraints = self.problem.objective().execution_constraints();
+        let execution_constraint_complete = !execution_constraints.requested()
+            || self.distributed_execution_constraint_materialized;
         let solution_found = self.trivial_target || !self.buildable_tilings.is_empty();
         let mut identities = self.buildable_tilings.iter().copied().collect::<Vec<_>>();
         identities.sort_unstable();
@@ -1320,7 +1343,12 @@ impl CompactBuildProbabilitySession {
             ),
             field("normalized_solution_set_hash", normalized_hash),
             field("build_variant_count", self.build_variant_count),
-            field("build_variant_count_exact", count_complete),
+            field("build_variant_count_exact", build_variant_count_exact),
+            field(
+                "build_probability_evaluation_basis",
+                "candidate-pattern-existence",
+            ),
+            field("build_path_multiplicity_counted", false),
             field("materialized_pattern_count", universe.pattern_count()),
             field("coverage_pattern_count", universe.pattern_count()),
             field("covered_pattern_count", self.covered_patterns.count_ones()),
@@ -1377,10 +1405,36 @@ impl CompactBuildProbabilitySession {
                 self.aggregation.requests_spin_coverage(),
             ),
             field(
+                "execution_constraint_preserve_b2b",
+                execution_constraints.preserves_back_to_back(),
+            ),
+            field(
+                "execution_constraint_spin_profile",
+                execution_constraints.spin_profile().as_str(),
+            ),
+            field(
+                "execution_constraint_materialized",
+                self.distributed_execution_constraint_materialized,
+            ),
+            field(
                 "objective_search_complete",
                 count_complete && probability_complete,
             ),
-            field("objective_complete", count_complete && probability_complete),
+            field(
+                "objective_complete",
+                count_complete && probability_complete && execution_constraint_complete,
+            ),
+            field(
+                "objective_incomplete_reason",
+                if !count_complete || !probability_complete {
+                    self.truncated_reason
+                        .unwrap_or("pattern_universe_incomplete")
+                } else if !execution_constraint_complete {
+                    "b2b_preservation_not_materialized"
+                } else {
+                    "none"
+                },
+            ),
             field(
                 "representative_pattern_id",
                 self.representative_pattern_id
@@ -1392,11 +1446,23 @@ impl CompactBuildProbabilitySession {
                     .map_or_else(|| "none".to_owned(), |rank| rank.to_string()),
             ),
         ];
-        CoreExecutionResult::new(fields, self.representative_path.clone())
+        let result = CoreExecutionResult::new(fields, self.representative_path.clone())
             .with_normalized_solution_keys(normalized_keys)
             .with_normalized_solution_identities(identities)
             .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
-            .with_exact_scoring_execution_batch(scoring_batch)
+            .with_exact_scoring_execution_batch(scoring_batch);
+        if execution_constraints.requested() {
+            let pattern_weights = (0..universe.pattern_count())
+                .map(|pattern| universe.weight_at(pattern).get().to_string())
+                .collect();
+            result.with_postprocess_execution_batch(
+                Vec::new(),
+                count_complete && probability_complete,
+                pattern_weights,
+            )
+        } else {
+            result
+        }
     }
 
     fn retained_bytes(&self) -> usize {

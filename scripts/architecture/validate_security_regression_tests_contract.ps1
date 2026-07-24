@@ -4,7 +4,7 @@ $requiredFiles = @(
         "crates/clearra-core-ffi/src/buildup/build_variant_view.rs",
         "crates/clearra-core-executor/src/backend/gpu_worker/gpu_worker_contract_tests.rs",
         "crates/clearra-render/src/lib.rs",
-        "crates/clearra-gui-host/tests/gui_host_contract.rs",
+        "crates/clearra-gui-host/src/gui_host_contract_tests.rs",
         "crates/clearra-wasm/src/lib.rs",
         "scripts/clearra.ps1",
         "scripts/verify.ps1",
@@ -78,7 +78,7 @@ foreach ($requiredMarker in @(
             Add-ArchitectureError "render tests must keep T5 raw SVG regression marker '$requiredMarker'"
         }
     }
-$guiHostTests = Read-Text "crates/clearra-gui-host/tests/gui_host_contract.rs"
+$guiHostTests = Read-Text "crates/clearra-gui-host/src/gui_host_contract_tests.rs"
 foreach ($requiredMarker in @(
         "gui_subprocess_forbidden",
         "gui_does_not_spawn_clearra_exe",

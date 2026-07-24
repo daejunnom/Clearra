@@ -1,5 +1,5 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_replay::{ExactScoringExecutionBatch, HoldDecision};
+use clearra_replay::{ExactScoringExecutionBatch, HoldDecision, SpinCoverageExecutionBatch};
 
 use super::exact_scoring_execution_materializer::ExactScoringExecutionCancelled;
 
@@ -10,8 +10,33 @@ pub(super) struct SupplyState {
     pub hold: Option<PieceKind>,
 }
 
+pub(super) trait ExecutionSupplyBatch {
+    fn hold_enabled(&self) -> bool;
+    fn projects_unplaced_lookahead(&self) -> bool;
+}
+
+impl ExecutionSupplyBatch for ExactScoringExecutionBatch {
+    fn hold_enabled(&self) -> bool {
+        self.hold_enabled()
+    }
+
+    fn projects_unplaced_lookahead(&self) -> bool {
+        self.projects_unplaced_lookahead()
+    }
+}
+
+impl ExecutionSupplyBatch for SpinCoverageExecutionBatch {
+    fn hold_enabled(&self) -> bool {
+        self.hold_enabled()
+    }
+
+    fn projects_unplaced_lookahead(&self) -> bool {
+        self.projects_unplaced_lookahead()
+    }
+}
+
 pub(super) fn terminal_supply_state_is_accepted(
-    batch: &ExactScoringExecutionBatch,
+    batch: &impl ExecutionSupplyBatch,
     sequence: &[PieceKind],
     state: SupplyState,
 ) -> bool {
@@ -21,7 +46,7 @@ pub(super) fn terminal_supply_state_is_accepted(
 }
 
 pub(super) fn for_each_supply_successor(
-    batch: &ExactScoringExecutionBatch,
+    batch: &impl ExecutionSupplyBatch,
     sequence: &[PieceKind],
     state: SupplyState,
     required_piece: PieceKind,

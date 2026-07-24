@@ -22,6 +22,8 @@
   const dispatch = createEventDispatcher<{ change: ForwardSearchRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: categoryOptions = spinCategoryOptions(request.spinProfile);
+  $: selectedRuleLabel =
+    request.rule === 'srs-plus' ? 'SRS+' : request.rule === 'srs-x' ? 'SRS-X' : 'SRS';
   $: if (!categoryOptions.includes(request.spinCategory)) update({ spinCategory: 'any' });
 
   function update(change: Partial<ForwardSearchRequest>) {
@@ -82,7 +84,7 @@
     <div class="workspace-contract-band">
       <ShieldCheck size={15} strokeWidth={1.8} />
       <span>{label('forwardSearchContract')}</span>
-      <b>SRS+ · {label('forwardDirection')}</b>
+      <b>{selectedRuleLabel} · {label('forwardDirection')}</b>
     </div>
 
     <div class="workspace-field-grid">

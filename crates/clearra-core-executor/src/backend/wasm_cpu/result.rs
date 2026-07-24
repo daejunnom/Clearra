@@ -150,6 +150,7 @@ pub(crate) struct WasmExactSearchSession {
     parallel_minimum_worker_candidates: usize,
     parallel_maximum_worker_candidates: usize,
     parallel_decision_reason: &'static str,
+    distributed_execution_constraint_materialized: bool,
     cpu_warmup_requested: bool,
     cpu_warmup_performed: bool,
     gpu_warmup_requested: bool,
@@ -205,6 +206,7 @@ impl WasmExactSearchSession {
         problem: &SearchProblem,
         external_geometry: bool,
     ) -> Result<Self, WasmExactSearchError> {
+        super::ensure_connected_kick_profile(problem)?;
         let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
         let catalog = Arc::new(GeometryCatalog::compile(problem)?);
         catalog_span.finish(catalog.skeleton_count() as u64);
@@ -229,7 +231,7 @@ impl WasmExactSearchSession {
         let multiset_family = universe.packing_multiset_family(
             target_piece_count,
             problem.initial_hold(),
-            problem.supply().hold_enabled() && !problem.supply().projects_unplaced_lookahead(),
+            super::packing_projection_hold_enabled(problem),
         );
         if multiset_family.is_empty() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -304,6 +306,7 @@ impl WasmExactSearchSession {
             } else {
                 "parallel-feature-disabled"
             },
+            distributed_execution_constraint_materialized: false,
             cpu_warmup_requested: problem.backend_policy().cpu_warmup(),
             cpu_warmup_performed: false,
             gpu_warmup_requested: problem.backend_policy().gpu_warmup(),
@@ -633,6 +636,13 @@ impl WasmExactSearchSession {
         self.parallel_minimum_worker_candidates = usize::MAX;
         self.parallel_maximum_worker_candidates = 0;
         self.parallel_decision_reason = "browser-worker-candidate-pipeline";
+        if self.problem.objective().execution_constraints().requested()
+            && self.solution_coverage.is_none()
+        {
+            self.solution_coverage = Some(ExactHashMap::default());
+        }
+        self.distributed_execution_constraint_materialized =
+            self.problem.objective().execution_constraints().requested();
         Ok(self)
     }
 
@@ -946,6 +956,11 @@ impl WasmExactSearchSession {
         self.build_variant_count = next_variants.unwrap_or(u128::MAX);
         self.count_complete &=
             next_variants.is_some() && result.bool_field("count_complete").unwrap_or(false);
+        if self.problem.objective().execution_constraints().requested() {
+            self.distributed_execution_constraint_materialized &= result
+                .bool_field("execution_constraint_materialized")
+                .unwrap_or(false);
+        }
 
         self.peak_build_nodes = self
             .peak_build_nodes
@@ -1202,7 +1217,9 @@ impl WasmExactSearchSession {
         self.finished = true;
         let result_span = SearchStageSpan::begin(ExecutorSearchStage::WasmResultCanonicalize);
         let scoring_requested = self.problem.objective().score().requested();
-        let scoring_batch = if scoring_requested {
+        let execution_constraints = self.problem.objective().execution_constraints();
+        let execution_evidence_requested = scoring_requested || execution_constraints.requested();
+        let scoring_batch = if execution_evidence_requested {
             Some(self.prepare_exact_scoring_execution_batch()?)
         } else {
             None
@@ -1412,6 +1429,8 @@ impl WasmExactSearchSession {
             ObjectiveKind::MinimumCover => "minimum-cover",
         };
         let score_policy = self.problem.objective().score();
+        let execution_constraints = self.problem.objective().execution_constraints();
+        let execution_constraint_requested = execution_constraints.requested();
         let scoring_execution_complete = scoring_batch
             .as_ref()
             .is_some_and(ExactScoringExecutionBatch::complete);
@@ -1756,12 +1775,19 @@ impl WasmExactSearchSession {
             field("objective_search_complete", count_complete),
             field(
                 "objective_complete",
-                non_score_objective_complete && !score_objective_requested,
+                non_score_objective_complete
+                    && !score_objective_requested
+                    && (!execution_constraint_requested
+                        || self.distributed_execution_constraint_materialized),
             ),
             field(
                 "objective_incomplete_reason",
                 if score_objective_requested {
                     "score_matrix_not_materialized"
+                } else if execution_constraint_requested
+                    && !self.distributed_execution_constraint_materialized
+                {
+                    "b2b_preservation_not_materialized"
                 } else if minimum_cover_requested {
                     minimum_cover_reason
                 } else {
@@ -1774,6 +1800,18 @@ impl WasmExactSearchSession {
             field(
                 "spin_profile_requested",
                 score_policy.spin_profile().as_str(),
+            ),
+            field(
+                "execution_constraint_preserve_b2b",
+                execution_constraints.preserves_back_to_back(),
+            ),
+            field(
+                "execution_constraint_spin_profile",
+                execution_constraints.spin_profile().as_str(),
+            ),
+            field(
+                "execution_constraint_materialized",
+                self.distributed_execution_constraint_materialized,
             ),
             field("score_initial_b2b", score_policy.initial_b2b()),
             field("postprocess_execution_complete", scoring_execution_complete),
@@ -1807,7 +1845,7 @@ impl WasmExactSearchSession {
                     .unwrap_or_default(),
             ),
         ];
-        let pattern_weights = if score_policy.requested() {
+        let pattern_weights = if score_policy.requested() || execution_constraint_requested {
             (0..universe.pattern_count())
                 .map(|pattern| universe.weight_at(pattern).get().to_string())
                 .collect()

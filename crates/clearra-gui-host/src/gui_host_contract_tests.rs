@@ -1,9 +1,50 @@
-use clearra_gui_host::{
+use crate::{
     DesktopTauriCommandBridge, GuiAppState, GuiBackendChoice, GuiBackendForm, GuiExecutionPhase,
-    GuiExecutionState, GuiHostLanguageResolver, GuiJobId, GuiOutputFormat, GuiProblemForm,
-    GuiScreen,
+    GuiExecutionState, GuiHostLanguageResolver, GuiJobId, GuiOpeningPcForm, GuiOutputFormat,
+    GuiProblemForm, GuiScreen, PcRequestBuilder,
 };
 use serde_json::Value;
+
+mod case_gui_pc_request_preserves_back_to_back_constraint {
+    use clearra_app::AppCommand;
+
+    use super::*;
+
+    #[test]
+    fn gui_pc_request_preserves_back_to_back_constraint() {
+        let form = GuiOpeningPcForm::new(2, "srs-plus")
+            .with_score_profiles("tetrio", "all-mini-plus")
+            .with_back_to_back_preservation(true);
+        let command = PcRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI PC request");
+        let AppCommand::Pc(command) = command else {
+            panic!("expected PC command");
+        };
+        let constraint = command.query().objective().execution_constraints();
+
+        assert!(constraint.preserves_back_to_back());
+        assert_eq!(constraint.spin_profile().as_str(), "all-mini-plus");
+        assert!(!command.query().objective().score().requested());
+    }
+}
+
+mod case_gui_opening_pc_preserves_hold_selection_without_queue_override {
+    use clearra_app::AppCommand;
+
+    use super::*;
+
+    #[test]
+    fn gui_opening_pc_preserves_hold_selection_without_queue_override() {
+        let form = GuiOpeningPcForm::new(2, "srs-plus").with_hold_enabled(false);
+        let command = PcRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI PC request");
+        let AppCommand::Pc(command) = command else {
+            panic!("expected PC command");
+        };
+
+        assert!(!command.query().hold_policy().is_enabled());
+    }
+}
 
 mod case_gui_app_state_builds_app_request_preview_from_forms {
     use super::*;
@@ -213,7 +254,7 @@ mod case_tauri_command_calls_clearra_gui_host_only {
                 .as_array()
                 .expect("diagnostics array")
                 .iter()
-                .any(|diagnostic| diagnostic["code"] == "E_NATIVE_CORE_UNAVAILABLE"));
+                .any(|diagnostic| diagnostic["code"] == "E_PRODUCT_RUNTIME_UNSUPPORTED"));
         }
         #[cfg(feature = "native-c-core")]
         {

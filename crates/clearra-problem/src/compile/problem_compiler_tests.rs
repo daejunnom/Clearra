@@ -3,7 +3,7 @@ use clearra_core_domain::{
 };
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCompletionGoal, PcContinuationToken, PcContinuationTokenCodec,
-    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow, SupplyWindowSize,
 };
 use clearra_supply::{piece_source::PieceSourceKind, queue::fixed_sequence::FixedSequence};
 
@@ -167,6 +167,31 @@ mod case_scenario_compiles_to_search_problem {
         assert_eq!(problem.exact_pieces(), Some(2));
         assert_eq!(problem.goal(), PcCompletionGoal::ClearToEmpty);
         assert_eq!(problem.exact_target_policy(), ExactTargetPolicy::None);
+    }
+}
+
+mod case_occupied_initial_hold_projects_terminal_standard_bag_lookahead {
+    use super::*;
+
+    #[test]
+    fn occupied_initial_hold_projects_terminal_standard_bag_lookahead() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0x80787),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(8),
+        )
+        .with_hold_piece(Some(PieceKind::S))
+        .with_supply_window_size(SupplyWindowSize::new(7))
+        .with_exact_pieces(Some(8));
+
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("scenario problem");
+
+        assert_eq!(problem.initial_hold().hold_piece(), Some(PieceKind::S));
+        assert_eq!(problem.supply().source_sequence_length(), 7);
+        assert!(
+            problem.supply().projects_unplaced_lookahead(),
+            "the next bag piece replaces the terminal hold but is never placed"
+        );
     }
 }
 

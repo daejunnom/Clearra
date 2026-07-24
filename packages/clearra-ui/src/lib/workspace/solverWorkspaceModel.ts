@@ -1,5 +1,5 @@
 export type ScoreMode = 'off' | 'minimum-cover' | 'summary';
-export type ScoreProfile = 'tetrio';
+export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x';
 export type SpinProfile =
   | 't-spins'
@@ -21,6 +21,7 @@ export type SolverWorkspaceRequest = {
   scoreProfile: ScoreProfile;
   rule: RuleProfile;
   spinProfile: SpinProfile;
+  preserveB2B: boolean;
   initialB2B: number;
   solutionProbabilities: boolean;
   backend: SearchBackend;
@@ -48,6 +49,7 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     scoreProfile: 'tetrio',
     rule: 'srs-plus',
     spinProfile: 't-spins',
+    preserveB2B: false,
     initialB2B: 0,
     solutionProbabilities: false,
     backend: 'auto',
@@ -175,11 +177,6 @@ export function parseBrowserQueueInput(value: string): BrowserQueueInput | null 
   };
 }
 
-export function queueInputWithInitialHold(request: SolverWorkspaceRequest): string {
-  if (!request.holdEnabled || request.holdPiece === 'empty') return request.queue;
-  return `${request.holdPiece}${request.queue}`;
-}
-
 export function boardCellMask(x: number, y: number): bigint {
   return 1n << BigInt(y * 10 + x);
 }
@@ -291,8 +288,7 @@ export function workspaceValidationCodes(
 export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   const tokens = ['clearra', 'pc', '--lines', String(request.lines)];
   const pieceWindow = scenarioPieceWindow(request);
-  const queue = queueInputWithInitialHold(request);
-  const parsedQueue = parseBrowserQueueInput(queue);
+  const parsedQueue = parseBrowserQueueInput(request.queue);
   tokens.push(
     '--board-mask',
     boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
@@ -301,10 +297,13 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     '--pieces',
     String(pieceWindow ?? 1)
   );
-  if (request.holdEnabled) tokens.push('--hold', 'empty');
+  if (request.holdEnabled) tokens.push('--hold', request.holdPiece);
   else tokens.push('--no-hold');
-  if (queue) {
-    tokens.push(parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue', parsedQueue?.source ?? queue);
+  if (request.queue) {
+    tokens.push(
+      parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
+      parsedQueue?.source ?? request.queue
+    );
   }
   tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all', '--backend', request.backend);
   tokens.push('--rule', request.rule);
@@ -313,9 +312,12 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   if (request.scoreMode === 'summary') tokens.push('--score');
   if (request.scoreMode === 'summary') {
     tokens.push('--score-profile', request.scoreProfile);
-    tokens.push('--spin-profile', request.spinProfile);
     tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
   }
+  if (request.scoreMode === 'summary' || request.preserveB2B) {
+    tokens.push('--spin-profile', request.spinProfile);
+  }
+  if (request.preserveB2B) tokens.push('--preserve-b2b');
   if (request.gpuDevice !== 'auto' && request.backend !== 'cpu') {
     tokens.push('--gpu-device', request.gpuDevice);
   }
@@ -330,8 +332,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
 }
 
 export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, language: 'en' | 'ko') {
-  const queue = queueInputWithInitialHold(request);
-  const parsedQueue = parseBrowserQueueInput(queue);
+  const parsedQueue = parseBrowserQueueInput(request.queue);
   return {
     app_request_model: 'clearra-app/AppRequest' as const,
     command: 'pc-scenario' as const,
@@ -340,7 +341,7 @@ export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, lang
     queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
     patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
     hold_enabled: request.holdEnabled,
-    hold_piece: 'empty' as const,
+    hold_piece: request.holdEnabled ? request.holdPiece : ('empty' as const),
     backend: request.backend,
     rule: request.rule,
     board_mask: boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
@@ -350,6 +351,7 @@ export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, lang
     score_mode: request.scoreMode,
     score_profile: request.scoreProfile,
     spin_profile: request.spinProfile,
+    preserve_b2b: request.preserveB2B,
     initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
     solution_probabilities: request.solutionProbabilities,
     workers: Math.max(1, Math.trunc(request.workers)),

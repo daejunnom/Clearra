@@ -1,6 +1,8 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
-use clearra_replay::{ExactScoringExecutionBatch, ReplayTrace as PostProcessReplayTrace};
+use clearra_replay::{
+    ExactScoringExecutionBatch, ReplayTrace as PostProcessReplayTrace, SpinCoverageExecutionBatch,
+};
 
 use crate::{
     core_postprocess_execution::CorePostProcessExecution,
@@ -86,6 +88,7 @@ pub struct CoreExecutionResult {
     solution_coverages: Vec<SolutionCoverage>,
     solution_probabilities: Vec<SolutionProbabilityReport>,
     exact_scoring_execution_batches: Vec<ExactScoringExecutionBatch>,
+    spin_coverage_execution_batches: Vec<SpinCoverageExecutionBatch>,
     postprocess_score_cells: Vec<CorePostProcessScoreCell>,
     postprocess_score_cells_complete: bool,
     postprocess_score_profile_id: Option<String>,
@@ -110,6 +113,7 @@ impl CoreExecutionResult {
             solution_coverages: Vec::new(),
             solution_probabilities: Vec::new(),
             exact_scoring_execution_batches: Vec::new(),
+            spin_coverage_execution_batches: Vec::new(),
             postprocess_score_cells: Vec::new(),
             postprocess_score_cells_complete: false,
             postprocess_score_profile_id: None,
@@ -145,6 +149,12 @@ impl CoreExecutionResult {
         self
     }
 
+    pub fn with_path_steps(mut self, path_steps: Vec<CorePathStep>) -> Self {
+        self.execution_report =
+            SearchExecutionReport::from_summary_fields(&self.fields, path_steps);
+        self
+    }
+
     pub fn with_coverage_pattern_words(mut self, words: Vec<u64>) -> Self {
         self.coverage_pattern_words = words;
         self
@@ -176,6 +186,22 @@ impl CoreExecutionResult {
         batches: Vec<ExactScoringExecutionBatch>,
     ) -> Self {
         self.exact_scoring_execution_batches = batches;
+        self
+    }
+
+    pub fn with_spin_coverage_execution_batch(
+        mut self,
+        batch: Option<SpinCoverageExecutionBatch>,
+    ) -> Self {
+        self.spin_coverage_execution_batches = batch.into_iter().collect();
+        self
+    }
+
+    pub fn with_spin_coverage_execution_batches(
+        mut self,
+        batches: Vec<SpinCoverageExecutionBatch>,
+    ) -> Self {
+        self.spin_coverage_execution_batches = batches;
         self
     }
 
@@ -314,6 +340,10 @@ impl CoreExecutionResult {
         &self.exact_scoring_execution_batches
     }
 
+    pub fn spin_coverage_execution_batches(&self) -> &[SpinCoverageExecutionBatch] {
+        &self.spin_coverage_execution_batches
+    }
+
     pub fn postprocess_score_cells(&self) -> &[CorePostProcessScoreCell] {
         &self.postprocess_score_cells
     }
@@ -334,6 +364,12 @@ impl CoreExecutionResult {
         &mut self,
     ) -> Vec<ExactScoringExecutionBatch> {
         core::mem::take(&mut self.exact_scoring_execution_batches)
+    }
+
+    pub(crate) fn take_spin_coverage_execution_batches(
+        &mut self,
+    ) -> Vec<SpinCoverageExecutionBatch> {
+        core::mem::take(&mut self.spin_coverage_execution_batches)
     }
 }
 impl CoreExecutionResult {

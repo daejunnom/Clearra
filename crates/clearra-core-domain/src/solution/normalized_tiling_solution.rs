@@ -362,6 +362,15 @@ pub fn normalized_tiling_solution_set_hash_from_sorted_standard_board64_identiti
     format!("cts1:{:016x}", hasher.finish())
 }
 
+pub fn normalized_tiling_solution_key_set_hash_from_sorted_strings(keys: &[String]) -> String {
+    let mut hasher = StableFnv64::default();
+    for key in keys {
+        hasher.write(key.as_bytes());
+        hasher.write(&[0]);
+    }
+    format!("ctks1:{:016x}", hasher.finish())
+}
+
 const fn piece_sort_key(piece: PieceKind) -> u8 {
     match piece {
         PieceKind::I => 0,

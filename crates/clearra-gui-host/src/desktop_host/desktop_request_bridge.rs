@@ -114,7 +114,7 @@ mod error {
 mod form_parser {
     use serde_json::Value;
 
-    use crate::{GuiAppState, GuiBackendForm, GuiProblemForm};
+    use crate::{GuiAppState, GuiBackendForm, GuiOpeningPcForm, GuiProblemForm};
 
     use super::error::DesktopTauriCommandError;
 
@@ -153,13 +153,15 @@ mod form_parser {
         let hold_enabled = value
             .get("hold_enabled")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let problem_form = match command {
             "pc" if !patterns.trim().is_empty() => {
                 GuiProblemForm::opening_pc_queue_pattern(lines, rule, patterns, hold_enabled)
             }
-            "pc" if queue.trim().is_empty() => GuiProblemForm::opening_pc(lines, rule),
+            "pc" if queue.trim().is_empty() => GuiProblemForm::OpeningPc(
+                GuiOpeningPcForm::new(lines, rule).with_hold_enabled(hold_enabled),
+            ),
             "pc" => GuiProblemForm::opening_pc_fixed_queue(lines, rule, queue, hold_enabled),
             "pc-scenario" => {
                 let visible_height = value
@@ -239,9 +241,14 @@ mod form_parser {
             .get("solution_probabilities")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let preserve_b2b = value
+            .get("preserve_b2b")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let problem_form = problem_form
             .with_score_input(score_mode, initial_b2b)
             .with_score_profiles(score_profile, spin_profile)
+            .with_back_to_back_preservation(preserve_b2b)
             .with_solution_probabilities(solution_probabilities);
 
         let mut backend_form = GuiBackendForm::from_backend_id(backend).with_allow_fallback(
@@ -596,3 +603,42 @@ mod validate_request {
 
 pub use bridge::DesktopTauriCommandBridge;
 pub use error::DesktopTauriCommandError;
+
+#[cfg(test)]
+mod tests {
+    use crate::GuiProblemForm;
+
+    use super::form_parser::desktop_form_builds_app_request;
+
+    #[test]
+    fn desktop_request_defaults_hold_on_and_preserves_explicit_off() {
+        let default_state = desktop_form_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "backend": "cpu"
+            }"#,
+        )
+        .expect("desktop default request");
+        let GuiProblemForm::OpeningPc(default_form) = default_state.problem_form() else {
+            panic!("expected opening PC form");
+        };
+        assert!(default_form.hold_enabled());
+
+        let disabled_state = desktop_form_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "hold_enabled": false,
+                "backend": "cpu"
+            }"#,
+        )
+        .expect("desktop no-hold request");
+        let GuiProblemForm::OpeningPc(disabled_form) = disabled_state.problem_form() else {
+            panic!("expected opening PC form");
+        };
+        assert!(!disabled_form.hold_enabled());
+    }
+}

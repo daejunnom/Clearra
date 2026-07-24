@@ -396,7 +396,13 @@ impl WebCommandRequest {
                 |piece| input.clone().with_leading_hold_piece(piece),
             );
             let query = input
-                .to_query(queue, policy, finite_standard_bag_len, self.rule)
+                .to_query(
+                    queue,
+                    policy,
+                    finite_standard_bag_len,
+                    self.rule,
+                    self.objective,
+                )
                 .map_err(|error| {
                     WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,

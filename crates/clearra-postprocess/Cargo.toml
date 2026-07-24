@@ -23,6 +23,7 @@ clearra-spin = { path = "../clearra-spin" }
 wasm-bindgen = { version = "0.2.126", optional = true }
 
 [dev-dependencies]
+clearra-geometry = { path = "../clearra-geometry" }
 pollster = "0.4"
 
 [lints]
