@@ -13,6 +13,18 @@ if (!bindingsPath || !commandText) {
 
 const workBudget = positiveInteger(workBudgetText, 'WORK_BUDGET');
 const debugLifecycle = process.env.CLEARRA_WASM_PROBE_DEBUG === '1';
+const progressInterval = optionalPositiveInteger(
+  process.env.CLEARRA_WASM_PROBE_PROGRESS_INTERVAL,
+  'CLEARRA_WASM_PROBE_PROGRESS_INTERVAL',
+);
+const stopMemoryBytes = optionalPositiveInteger(
+  process.env.CLEARRA_WASM_PROBE_STOP_MEMORY_BYTES,
+  'CLEARRA_WASM_PROBE_STOP_MEMORY_BYTES',
+);
+const stopAdvanceCalls = optionalPositiveInteger(
+  process.env.CLEARRA_WASM_PROBE_STOP_ADVANCE_CALLS,
+  'CLEARRA_WASM_PROBE_STOP_ADVANCE_CALLS',
+);
 const wasmPath = resolve(dirname(bindingsPath), 'clearra_wasm_bg.wasm');
 const wasmBytes = fs.readFileSync(wasmPath);
 const loadStarted = performance.now();
@@ -51,12 +63,40 @@ if (debugLifecycle) console.error(`[wasm-probe] job-started id=${jobId}`);
 let advanceCalls = 0;
 let terminalStatus = 0;
 const searchStarted = performance.now();
+let progressStarted = searchStarted;
 while (terminalStatus === 0) {
   if (debugLifecycle && advanceCalls < 4) {
     console.error(`[wasm-probe] advance begin call=${advanceCalls + 1}`);
   }
   terminalStatus = api.advanceJob(jobId, workBudget);
   advanceCalls += 1;
+  if (
+    progressInterval !== null &&
+    (advanceCalls % progressInterval === 0 || terminalStatus !== 0)
+  ) {
+    const now = performance.now();
+    console.error(JSON.stringify({
+      advance_calls: advanceCalls,
+      terminal_status: terminalStatus,
+      elapsed_ms: now - searchStarted,
+      interval_elapsed_ms: now - progressStarted,
+      wasm_memory_bytes: api.memory.buffer.byteLength,
+    }));
+    progressStarted = now;
+  }
+  if (
+    stopMemoryBytes !== null &&
+    api.memory.buffer.byteLength >= stopMemoryBytes
+  ) {
+    api.cancelJob(jobId);
+    throw new Error(
+      `diagnostic memory stop reached: ${api.memory.buffer.byteLength} bytes`,
+    );
+  }
+  if (stopAdvanceCalls !== null && advanceCalls >= stopAdvanceCalls) {
+    api.cancelJob(jobId);
+    throw new Error(`diagnostic advance stop reached: ${advanceCalls} calls`);
+  }
   if (debugLifecycle && advanceCalls <= 4) {
     console.error(`[wasm-probe] advance end call=${advanceCalls} status=${terminalStatus}`);
   }
@@ -230,4 +270,9 @@ function positiveInteger(value, label) {
     throw new Error(`${label} must be a positive integer`);
   }
   return parsed;
+}
+
+function optionalPositiveInteger(value, label) {
+  if (value === undefined || value === '') return null;
+  return positiveInteger(value, label);
 }

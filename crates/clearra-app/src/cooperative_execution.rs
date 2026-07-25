@@ -1,7 +1,8 @@
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::{
     CoreExecutionError, WasmBuildProbabilityAdvance, WasmBuildProbabilitySession,
-    WasmCpuSearchAdvance, WasmCpuSearchError, WasmCpuSearchSession,
+    WasmCpuSearchAdvance, WasmCpuSearchError, WasmCpuSearchSession, WasmSetupSearchAdvance,
+    WasmSetupSearchSession,
 };
 use clearra_forward_search::{
     ForwardSearchAdvance, ForwardSearchError, ForwardSearchReport, ForwardSearchSession,
@@ -53,6 +54,7 @@ struct CooperativeSearchExecution {
 
 enum CooperativeSearchSession {
     Pc(WasmCpuSearchSession),
+    Setup(WasmSetupSearchSession),
     BuildProbability(WasmBuildProbabilitySession),
     Forward(ForwardSearchSession),
 }
@@ -64,6 +66,7 @@ pub(crate) enum CooperativeSearchResponseKind {
     Pc,
     Path(OpeningPcSearchQuery),
     Scenario(Option<crate::commands::ScenarioAppRenderContract>),
+    Setup,
     BuildProbability {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
@@ -87,6 +90,7 @@ impl AppContext {
             AppCommand::Pc(_)
                 | AppCommand::Path(_)
                 | AppCommand::Scenario(_)
+                | AppCommand::Setup(_)
                 | AppCommand::BuildProbability(_)
         );
         if (!forward && !core_search)
@@ -169,6 +173,36 @@ impl AppContext {
                         context: self.clone(),
                         state: CooperativeExecutionState::Ready(Some(self.finalize_response(
                             forward_search_error_response(error),
+                            command_kind,
+                            &output_policy,
+                        ))),
+                    },
+                };
+            }
+            AppCommand::Setup(command) => {
+                let session = WasmSetupSearchSession::new(command.query());
+                let response_kind = CooperativeSearchResponseKind::Setup;
+                return match session {
+                    Ok(session) => CooperativeAppExecution {
+                        context: self.clone(),
+                        state: CooperativeExecutionState::Search(CooperativeSearchExecution {
+                            session: CooperativeSearchSession::Setup(session),
+                            response_kind,
+                            command_kind,
+                            output_policy,
+                            validation_report,
+                            backend_requested,
+                            gpu_device_requested,
+                        }),
+                    },
+                    Err(error) => CooperativeAppExecution {
+                        context: self.clone(),
+                        state: CooperativeExecutionState::Ready(Some(self.finalize_response(
+                            wasm_search_error_response(
+                                error,
+                                &backend_requested,
+                                gpu_device_requested,
+                            ),
                             command_kind,
                             &output_policy,
                         ))),
@@ -261,12 +295,18 @@ impl CooperativeAppExecution {
                     Ok(CooperativeBackendAdvance::Cancelled)
                     | Err(WasmCpuSearchError::Cancelled) => CooperativeAppAdvance::Cancelled,
                     Ok(CooperativeBackendAdvance::CompletedCore(result)) => {
-                        let response = match self
-                            .context
-                            .services()
-                            .core_executor()
-                            .postprocess_search_result(result, control)
-                        {
+                        let result = if matches!(
+                            &search.response_kind,
+                            CooperativeSearchResponseKind::Setup
+                        ) {
+                            Ok(result)
+                        } else {
+                            self.context
+                                .services()
+                                .core_executor()
+                                .postprocess_search_result(result, control)
+                        };
+                        let response = match result {
                             Ok(result) => response_from_search(search.response_kind, result),
                             Err(CoreExecutionError::Cancelled) => {
                                 return CooperativeAppAdvance::Cancelled
@@ -407,6 +447,7 @@ pub(crate) fn response_from_search(
         CooperativeSearchResponseKind::Scenario(None) => {
             AppResponse::success(AppRenderModel::Scenario(result))
         }
+        CooperativeSearchResponseKind::Setup => AppResponse::success(AppRenderModel::Setup(result)),
         CooperativeSearchResponseKind::BuildProbability { .. } => {
             AppResponse::success(AppRenderModel::BuildProbability(result))
         }
@@ -438,6 +479,13 @@ fn advance_search_session(
                 Ok(CooperativeBackendAdvance::CompletedCore(result))
             }
             WasmCpuSearchAdvance::Cancelled => Ok(CooperativeBackendAdvance::Cancelled),
+        },
+        CooperativeSearchSession::Setup(session) => match session.advance(work_budget, control)? {
+            WasmSetupSearchAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
+            WasmSetupSearchAdvance::Completed(result) => {
+                Ok(CooperativeBackendAdvance::CompletedCore(result))
+            }
+            WasmSetupSearchAdvance::Cancelled => Ok(CooperativeBackendAdvance::Cancelled),
         },
         CooperativeSearchSession::BuildProbability(session) => {
             match session.advance(work_budget, control)? {

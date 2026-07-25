@@ -29,6 +29,34 @@ impl SolutionCoverage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NormalizedSolutionCoverage {
+    solution_key: String,
+    covered_patterns: PatternBitSet,
+}
+
+impl NormalizedSolutionCoverage {
+    pub fn new(solution_key: impl Into<String>, covered_patterns: PatternBitSet) -> Self {
+        let solution_key = solution_key.into();
+        assert!(
+            !solution_key.is_empty(),
+            "normalized solution coverage key must be nonempty"
+        );
+        Self {
+            solution_key,
+            covered_patterns,
+        }
+    }
+
+    pub fn solution_key(&self) -> &str {
+        &self.solution_key
+    }
+
+    pub fn covered_patterns(&self) -> &PatternBitSet {
+        &self.covered_patterns
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SolutionProbabilityReport {
     solution_key: String,
     probability: String,

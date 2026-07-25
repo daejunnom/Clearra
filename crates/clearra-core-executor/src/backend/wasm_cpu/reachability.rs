@@ -960,12 +960,26 @@ fn scoring_lock_is_immobile(
     else {
         return false;
     };
-    template.translation_targets[target_index]
+    let translations_blocked = template.translation_targets[target_index]
         .iter()
         .all(|target| {
             *target == INVALID_STATE_INDEX
                 || board & template.state_masks[usize::from(*target)] != 0
-        })
+        });
+    let upward_blocked = state_index(
+        template.width,
+        template.ceiling,
+        State {
+            rotation,
+            x,
+            y: y.saturating_add(1),
+        },
+    )
+    .is_none_or(|target| {
+        template.state_masks[target] == INVALID_STATE_MASK
+            || board & template.state_masks[target] != 0
+    });
+    translations_blocked && upward_blocked
 }
 
 fn reverse_rotation_is_first_success(

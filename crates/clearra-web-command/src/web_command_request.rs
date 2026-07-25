@@ -1,8 +1,9 @@
 use clearra_app::{
     AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand, PcAppCommand,
-    ResourceBudget, ScenarioAppCommand, SpinFinderAppCommand, VerifyAppCommand,
+    ResourceBudget, ScenarioAppCommand, SetupAppCommand, SpinFinderAppCommand, VerifyAppCommand,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
+use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_forward_search::{ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -10,6 +11,7 @@ use clearra_pc_graph::request::{
     PcQueueInput, PcSolutionProbabilityPolicy, RequestedSearchBackend, SupplyWindowSize,
     WorkerPolicy,
 };
+use clearra_problem::{SetupCycleResetBorrowPolicy, SetupSearchQuery};
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
 use clearra_supply::queue::{queue_parser, queue_pattern_expression::QueuePatternExpression};
 
@@ -33,6 +35,8 @@ pub struct WebCommandRequest {
     scenario: Option<WebPcScenarioInput>,
     build_probability: Option<WebBuildProbabilityInput>,
     forward_search: Option<ForwardSearchQuery>,
+    setup_remaining: Option<Vec<PieceKind>>,
+    setup_allow_post_cycle_borrow: bool,
     max_patterns: Option<usize>,
     max_nodes: Option<usize>,
     max_frontier_states: Option<usize>,
@@ -67,6 +71,8 @@ impl WebCommandRequest {
             scenario: None,
             build_probability: None,
             forward_search: None,
+            setup_remaining: None,
+            setup_allow_post_cycle_borrow: false,
             max_patterns: None,
             max_nodes: None,
             max_frontier_states: None,
@@ -102,6 +108,8 @@ impl WebCommandRequest {
             scenario: None,
             build_probability: None,
             forward_search: None,
+            setup_remaining: None,
+            setup_allow_post_cycle_borrow: false,
             max_patterns: None,
             max_nodes: None,
             max_frontier_states: None,
@@ -117,6 +125,16 @@ impl WebCommandRequest {
             verify_scope: scope,
             virtual_files: Vec::new(),
         }
+    }
+}
+impl WebCommandRequest {
+    pub fn setup(remaining: Vec<PieceKind>, allow_post_cycle_borrow: bool) -> Self {
+        let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
+        request.command_kind = "setup".to_owned();
+        request.allow_backend_fallback = false;
+        request.setup_remaining = Some(remaining);
+        request.setup_allow_post_cycle_borrow = allow_post_cycle_borrow;
+        request
     }
 }
 impl WebCommandRequest {
@@ -301,6 +319,33 @@ impl WebCommandRequest {
                     None,
                     None,
                 )),
+            );
+        }
+        if self.command_kind == "setup" {
+            let remaining = self.setup_remaining.clone().ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::MissingValue,
+                    "setup requires remaining pieces",
+                )
+            })?;
+            let borrow_policy = if self.setup_allow_post_cycle_borrow {
+                SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
+            } else {
+                SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse
+            };
+            let query = SetupSearchQuery::default()
+                .with_remaining_pieces(remaining)
+                .with_cycle_reset_borrow_policy(borrow_policy);
+            let workers = self.workers.unwrap_or_else(|| {
+                WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
+            });
+            return Ok(
+                AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query)))
+                    .with_resource_budget(ResourceBudget::new(
+                        u16::try_from(workers).unwrap_or(u16::MAX),
+                        None,
+                        None,
+                    )),
             );
         }
         if !matches!(self.command_kind.as_str(), "pc" | "build-probability") {
@@ -519,7 +564,10 @@ impl WebCommandRequest {
 }
 impl WebCommandRequest {
     pub fn backend_requested(&self) -> &'static str {
-        if matches!(self.command_kind.as_str(), "pc" | "build-probability") {
+        if matches!(
+            self.command_kind.as_str(),
+            "pc" | "build-probability" | "setup"
+        ) {
             self.backend.as_str()
         } else {
             "cpu"

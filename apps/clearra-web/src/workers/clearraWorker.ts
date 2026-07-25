@@ -69,7 +69,6 @@ async function runCommandText(commandText: string, prewarmWorkerCount: number) {
     return;
   }
   requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
-  interruptIncompleteRuntimePrewarm();
   const jobId = nextJobId++;
   const job: ActiveJob = {
     id: jobId,
@@ -82,9 +81,10 @@ async function runCommandText(commandText: string, prewarmWorkerCount: number) {
   let failureCode = 'E_WASM_MODULE_LOAD_FAILED';
   let wasm: ClearraWasmModule | null = null;
   try {
-    // Entry prewarm is opportunistic. A serial plan must not wait for every
-    // distributed verifier; distributed plans await their pool in run().
-    wasm = await loadClearraWasmModule();
+    // Reuse entry prewarm instead of terminating a compiled coordinator and
+    // rebuilding the same verifier pool on the first request.
+    await runtimePrewarm;
+    wasm = loadedWasm ?? (await loadClearraWasmModule());
     loadedWasm = wasm;
     if (job.cancelled) {
       releaseJobResources(job, wasm);
@@ -105,12 +105,13 @@ async function runCommandText(commandText: string, prewarmWorkerCount: number) {
       closeFailClosedWorker();
     }
   } catch (error) {
+    const diagnostics = wasm?.failure_diagnostics();
     releaseJobResources(job, wasm);
     if (job.cancelled) {
       emitCancelled(job);
     } else {
       job.terminalPosted = true;
-      postRuntimeFailure(job.id, failureCode, error, wasm?.failure_diagnostics());
+      postRuntimeFailure(job.id, failureCode, error, diagnostics);
     }
     closeFailClosedWorker();
   } finally {
@@ -129,9 +130,14 @@ function startRuntimePrewarm(workerCount: number) {
     .then(async (wasm) => {
       loadedWasm = wasm;
       if (generation !== runtimePrewarmGeneration) return;
-      await wasm.prewarm_gpu(null);
-      if (generation !== runtimePrewarmGeneration) return;
-      await prewarmDistributedWorkers(boundedWorkerCount, wasm.compiled_module());
+      const gpuWarmup = wasm.prewarm_gpu(null).catch((error) => {
+        console.warn('Clearra GPU warmup was unavailable', error);
+        return 'unavailable' as const;
+      });
+      await Promise.all([
+        gpuWarmup,
+        prewarmDistributedWorkers(boundedWorkerCount, wasm.compiled_module())
+      ]);
       if (generation === runtimePrewarmGeneration) {
         completedPrewarmWorkerCount = boundedWorkerCount;
       }
@@ -148,14 +154,6 @@ function startRuntimePrewarm(workerCount: number) {
         postRuntimePrewarmPhase('finished', boundedWorkerCount);
       }
     });
-}
-
-function interruptIncompleteRuntimePrewarm() {
-  if (!runtimePrewarm || completedPrewarmWorkerCount >= requestedPrewarmWorkerCount) return;
-  runtimePrewarmGeneration++;
-  runtimePrewarm = null;
-  completedPrewarmWorkerCount = 0;
-  disposeDistributedWorkers();
 }
 
 function cancelActiveJob(jobId: number | undefined) {

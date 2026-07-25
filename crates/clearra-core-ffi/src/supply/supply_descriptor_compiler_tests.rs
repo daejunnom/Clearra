@@ -142,6 +142,15 @@ fn setup_and_build_presets_keep_raw_queue_separate_from_materialized_piece_sourc
     let setup_query = clearra_problem::query::SetupSearchQuery::default().with_queue(
         clearra_problem::query::SetupQueueInput::fixed_sequence(FixedSequence::new(vec![
             PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
         ])),
     );
     let setup_problem = ProblemCompiler::compile_setup(&setup_query).expect("setup problem");

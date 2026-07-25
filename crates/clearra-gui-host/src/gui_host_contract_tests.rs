@@ -1,7 +1,7 @@
 use crate::{
     DesktopTauriCommandBridge, GuiAppState, GuiBackendChoice, GuiBackendForm, GuiExecutionPhase,
     GuiExecutionState, GuiHostLanguageResolver, GuiJobId, GuiOpeningPcForm, GuiOutputFormat,
-    GuiProblemForm, GuiScreen, PcRequestBuilder,
+    GuiProblemForm, GuiScreen, PcRequestBuilder, SetupRequestBuilder,
 };
 use serde_json::Value;
 
@@ -43,6 +43,30 @@ mod case_gui_opening_pc_preserves_hold_selection_without_queue_override {
         };
 
         assert!(!command.query().hold_policy().is_enabled());
+    }
+}
+
+mod case_gui_setup_request_uses_residue_and_cycle_boundary_policy {
+    use clearra_app::AppCommand;
+    use clearra_problem::SetupCycleResetBorrowPolicy;
+
+    use super::*;
+
+    #[test]
+    fn gui_setup_request_uses_residue_and_cycle_boundary_policy() {
+        let form = crate::GuiSetupSearchForm::new("I,T,O", true, "srs-plus");
+        let command = SetupRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI setup request");
+        let AppCommand::Setup(command) = command else {
+            panic!("expected setup command");
+        };
+
+        assert_eq!(command.query().residue().remaining_count(), 3);
+        assert_eq!(command.query().residue().cycle(), Some(7));
+        assert_eq!(
+            command.query().cycle_reset_borrow_policy(),
+            SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
+        );
     }
 }
 

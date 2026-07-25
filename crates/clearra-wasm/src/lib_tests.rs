@@ -63,6 +63,35 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn wasm_setup_command_preserves_the_exact_residue_contract() {
+    let request = WasmCommandRuntime::default()
+        .compile_command_text("clearra setup --remaining SIOS")
+        .expect("setup AppRequest");
+
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(command.query().residue().remaining_count(), 4);
+    assert_eq!(command.query().residue().cycle(), Some(2));
+    assert_eq!(
+        command.query().residue().duplicate_piece(),
+        Some(clearra_core_domain::piece::piece_kind::PieceKind::S)
+    );
+
+    let cycle_boundary = WasmCommandRuntime::default()
+        .compile_command_text("clearra setup --remaining IOT --allow-post-cycle-borrow")
+        .expect("cycle-seven setup AppRequest");
+    let AppCommand::Setup(command) = cycle_boundary.command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(command.query().residue().cycle(), Some(7));
+    assert_eq!(
+        command.query().cycle_reset_borrow_policy(),
+        clearra_problem::SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
+    );
+}
+
+#[test]
 fn occupied_initial_hold_plus_p7_solves_eight_piece_scenario() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
@@ -134,6 +163,101 @@ fn inverse_b2b_constraint_removes_a_normal_non_pc_line_clear() {
     assert_eq!(core.field("unique_solution_count"), Some("0"));
     assert_eq!(core.field("covered_pattern_count"), Some("0"));
     assert_eq!(core.field("solution_found"), Some("false"));
+}
+
+#[test]
+fn all_piece_spin_profiles_do_not_promote_an_upward_mobile_o_clear() {
+    let runtime = WasmCommandRuntime::default();
+    let base_command = "clearra pc --lines 4 --board-mask 0xf3fcff3fcf --height 4 --pieces 2 --queue OO --no-hold --backend cpu --workers 1";
+    let unconstrained = runtime
+        .run_command_text(base_command)
+        .expect("unconstrained O-piece perfect clear");
+    assert!(
+        unconstrained
+            .search_report()
+            .expect("unconstrained search report")
+            .solution_found
+    );
+
+    for profile in ["all-spin", "all-spin-plus", "all-mini", "all-mini-plus"] {
+        let constrained = runtime
+            .run_command_text(&format!(
+                "{base_command} --preserve-b2b --spin-profile {profile}"
+            ))
+            .unwrap_or_else(|error| panic!("{profile} constrained search failed: {error:?}"));
+        let report = constrained
+            .search_report()
+            .unwrap_or_else(|| panic!("{profile} search report"));
+        assert!(
+            !report.solution_found,
+            "{profile} must reject the first ordinary O double before the final perfect clear"
+        );
+        assert_eq!(report.unique_solution_count, 0, "{profile}");
+        assert_eq!(report.covered_pattern_count, 0, "{profile}");
+    }
+}
+
+#[test]
+fn all_mini_plus_b2b_build_probability_matches_the_93_percent_reference() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xe81a06fffbf --height 8 --patterns P7 --hold empty --aggregate build --rule srs-plus --spin-profile all-mini-plus --preserve-b2b --include-mirror --workers 1",
+        )
+        .expect("All-Mini+ B2B build probability");
+    let report = result
+        .search_report()
+        .unwrap_or_else(|| panic!("WASM search report: {:?}", result.app_response()));
+
+    assert_eq!(report.materialized_pattern_count, 5_040);
+    assert_eq!(report.covered_pattern_count, 4_704);
+    assert!(
+        (report
+            .coverage_probability
+            .parse::<f64>()
+            .expect("coverage probability")
+            - 4_704.0 / 5_040.0)
+            .abs()
+            <= 1.0e-12
+    );
+}
+
+#[test]
+fn all_mini_plus_b2b_pc_preserves_asymmetric_srs_plus_hold_paths() {
+    let runtime = WasmCommandRuntime::default();
+    let result = runtime
+        .run_command_text(
+            "clearra pc --lines 5 --board-mask 0xf01e0783f0f --height 5 --pieces 7 --patterns P7 --hold empty --backend cpu --workers 1 --preserve-b2b --spin-profile all-mini-plus",
+        )
+        .expect("All-Mini+ B2B 5L PC probability");
+    let report = result
+        .search_report()
+        .unwrap_or_else(|| panic!("WASM search report: {:?}", result.app_response()));
+
+    assert_eq!(report.materialized_pattern_count, 5_040);
+    // ISOTZLJ and its hold-equivalent patterns use an asymmetric first-success
+    // I-kick predecessor; reverse kick lookup must not discard those 18 queues.
+    assert_eq!(report.covered_pattern_count, 4_032);
+    assert!(
+        (report
+            .coverage_probability
+            .parse::<f64>()
+            .expect("coverage probability")
+            - 4_032.0 / 5_040.0)
+            .abs()
+            <= 1.0e-12
+    );
+
+    let fixed_queue = runtime
+        .run_command_text(
+            "clearra pc --lines 5 --board-mask 0xf01e0783f0f --height 5 --pieces 7 --patterns ISOTZLJ --hold empty --backend cpu --workers 1 --preserve-b2b --spin-profile all-mini-plus",
+        )
+        .expect("asymmetric SRS+ hold path");
+    let fixed_queue_report = fixed_queue
+        .search_report()
+        .unwrap_or_else(|| panic!("WASM search report: {:?}", fixed_queue.app_response()));
+
+    assert_eq!(fixed_queue_report.materialized_pattern_count, 1);
+    assert_eq!(fixed_queue_report.covered_pattern_count, 1);
 }
 
 #[test]
@@ -309,6 +433,7 @@ fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecu
             .expect("geometry producer")
         {
             WasmDistributedProducerAdvance::Pending => {}
+            WasmDistributedProducerAdvance::Initialization(_) => {}
             WasmDistributedProducerAdvance::Batch(batch) => {
                 verifier.consume(&batch).expect("candidate batch");
             }

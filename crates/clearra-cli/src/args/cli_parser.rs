@@ -126,7 +126,9 @@ impl CliHelpTopic {
                 Self::Percent => {
                     "usage: clearra percent --queue IOTSZ [--observed|--bag-aligned|--fixed] [--min-len N] [--max-patterns N]"
                 }
-                Self::Setup => "usage: clearra setup --queue IOTSZJL [--fixed]",
+                Self::Setup => {
+                    "usage: clearra setup --remaining IOTSZJL [--allow-post-cycle-borrow]\nremaining pieces include an existing hold piece; one duplicated kind identifies that hold explicitly"
+                }
                 Self::Cover => {
                     "usage: clearra cover [--template name|--template-json json|--template-file path] [--export-template-json]"
                 }

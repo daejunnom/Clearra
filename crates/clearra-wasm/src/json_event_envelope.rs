@@ -582,6 +582,85 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
         }
         output.push(']');
     });
+    object.optional_object(
+        "setup_report",
+        report.setup_report.as_ref(),
+        |nested, setup| {
+            nested.number("cycle", setup.cycle);
+            nested.string("remaining_pieces", &setup.remaining_pieces);
+            nested.boolean("post_cycle_borrow_enabled", setup.post_cycle_borrow_enabled);
+            nested.string("coverage_semantics", &setup.coverage_semantics);
+            nested.string("geometry_family_count", &setup.geometry_family_count);
+            nested.number("partial_build_node_count", setup.partial_build_node_count);
+            nested.boolean("complete", setup.complete);
+            nested.array("hold_conditions", |output| {
+                output.push('[');
+                for (condition_index, condition) in setup.hold_conditions.iter().enumerate() {
+                    if condition_index != 0 {
+                        output.push(',');
+                    }
+                    let mut condition_object = JsonObject::begin(output);
+                    condition_object.string("condition_id", &condition.condition_id);
+                    condition_object
+                        .optional_string("initial_hold", condition.initial_hold.as_deref());
+                    condition_object.string("pattern_expression", &condition.pattern_expression);
+                    condition_object.number("pattern_count", condition.pattern_count);
+                    condition_object.number("candidate_count", condition.candidate_count);
+                    condition_object.boolean("result_truncated", condition.result_truncated);
+                    condition_object.boolean("complete", condition.complete);
+                    condition_object.array("candidates", |output| {
+                        output.push('[');
+                        for (candidate_index, candidate) in condition.candidates.iter().enumerate()
+                        {
+                            if candidate_index != 0 {
+                                output.push(',');
+                            }
+                            let mut candidate_object = JsonObject::begin(output);
+                            candidate_object.string("setup_id", &candidate.setup_id);
+                            candidate_object.string("board_mask", &candidate.board_mask);
+                            candidate_object.number("min_locks", candidate.min_locks);
+                            candidate_object.number("max_locks", candidate.max_locks);
+                            candidate_object
+                                .number("build_covered_patterns", candidate.build_covered_patterns);
+                            candidate_object
+                                .number("joint_covered_patterns", candidate.joint_covered_patterns);
+                            candidate_object
+                                .string("build_probability", &candidate.build_probability);
+                            candidate_object
+                                .string("joint_probability", &candidate.joint_probability);
+                            candidate_object.string(
+                                "conditional_pc_probability",
+                                &candidate.conditional_pc_probability,
+                            );
+                            candidate_object.array("representative_path", |output| {
+                                output.push('[');
+                                for (step_index, step) in
+                                    candidate.representative_path.iter().enumerate()
+                                {
+                                    if step_index != 0 {
+                                        output.push(',');
+                                    }
+                                    let mut step_object = JsonObject::begin(output);
+                                    step_object.string("piece", &step.piece);
+                                    step_object.number("rotation", step.rotation);
+                                    step_object.number("x", step.x);
+                                    step_object.number("y", step.y);
+                                    step_object.string("hold", &step.hold);
+                                    step_object.number("cleared_lines", step.cleared_lines);
+                                    step_object.finish();
+                                }
+                                output.push(']');
+                            });
+                            candidate_object.finish();
+                        }
+                        output.push(']');
+                    });
+                    condition_object.finish();
+                }
+                output.push(']');
+            });
+        },
+    );
 }
 
 fn write_object_array<T>(

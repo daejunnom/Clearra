@@ -34,15 +34,11 @@ $scoringExportAction = Read-Text "crates/clearra-cli/src/scoring/scoring_export_
 $scoringOutputFields = Read-Text "crates/clearra-cli/src/scoring/scoring_output_fields.rs"
 $scoringCommandSurface = "$scoringCommand`n$scoringCommandTests`n$scoringListAction`n$scoringInspectAction`n$scoringImportAction`n$scoringExportAction`n$scoringOutputFields"
 $setupCommand = Read-Text "crates/clearra-cli/src/commands/setup_command.rs"
-$setupSearchService = (Read-Text "crates/clearra-setup-search/src/service/setup_search_service.rs") + "`n" +
-(Read-Text "crates/clearra-setup-search/src/service/setup_search_service_tests.rs")
-$setupPatternSource = Read-Text "crates/clearra-setup-search/src/service/setup_pattern_source.rs"
-$setupCandidateEnumerator = Read-Text "crates/clearra-setup-search/src/service/setup_candidate_enumerator.rs"
-$setupFamilyGrouper = Read-Text "crates/clearra-setup-search/src/service/setup_family_grouper.rs"
-$setupCoveragePlan = Read-Text "crates/clearra-setup-search/src/service/setup_coverage_plan.rs"
-$setupPostPcAdapter = Read-Text "crates/clearra-setup-search/src/service/setup_post_pc_adapter.rs"
-$setupShapePacker = Read-Text "crates/clearra-setup-search/src/service/setup_shape_packer.rs"
-$setupSummaryBuilder = Read-Text "crates/clearra-setup-search/src/service/setup_summary_builder.rs"
+$setupAppCommand = Read-Text "crates/clearra-app/src/commands/setup_app_command.rs"
+$setupBackend = Read-Text "crates/clearra-core-executor/src/backend/wasm_setup_search_backend.rs"
+$setupFinder = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_finder.rs"
+$setupPartialBuild = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_partial_build.rs"
+$setupCoverageGraph = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_coverage_graph.rs"
 $cliErrorCode = Read-Text "crates/clearra-cli/src/error/cli_error_code.rs"
 $cliCommandsMod = Read-Text "crates/clearra-cli/src/commands/mod.rs"
 $continueCommand = Read-Text "crates/clearra-cli/src/commands/continue_command.rs"
@@ -662,64 +658,42 @@ foreach ($requiredMarker in @("scoring_command_lists_and_inspects_canonical_prof
         Add-ArchitectureError "ScoringCommand tests must preserve scoring command behavior marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("SetupSearchService::execute(&query)", "validate_setup_search_query", "result.summary_fields()", "CommandRenderer::render")) {
+foreach ($requiredMarker in @("SetupQueryAssembler::assemble", "AppCommand::Setup", "SetupAppCommand::new", "AppResponseRenderer::render")) {
     if ($setupCommand -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "SetupCommand must execute setup search after validation marker '$requiredMarker'"
+        Add-ArchitectureError "SetupCommand must remain a thin setup product adapter marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("SetupPatternSource::from_query", "enumerate_build_candidates", "family_map_for_candidates", "ShapeEnumerator::from_masks", "TilingEnumerator::single_tiling", "SetupCoveragePlan::new", "coverage_for_patterns", "evaluate_post_pc", "SetupEvaluator", "SetupResultFilter", "SetupResultSorter", "SetupScoreAggregation", "SetupSummaryBuilder::summary_fields", "ScoreProfile", "status", "setup-searched", "execution_scope", "mvp2", "enumeration_strategy", "queue-pattern-shape-tiling-build-post-pc", "shape_family_enumeration_complete", "tiling_variant_enumeration_complete", "build_variant_enumeration_complete", "post_pc_mode", "scenario-clear-to-empty", "post_pc_evaluation_attached", "setup_foundation_reason", "wide_enumeration_and_post_pc_attached", "family_scores", "setup_search_service_attaches_post_pc_and_score_profile_to_build_results")) {
-    if ($setupSearchService -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "SetupSearchService must stay a setup MVP2 orchestration flow marker '$requiredMarker'"
+foreach ($requiredMarker in @("validate_setup_search_query", "execute_setup_with_control", "AppRenderModel::Setup")) {
+    if ($setupAppCommand -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "SetupAppCommand must validate and execute the exact setup backend marker '$requiredMarker'"
     }
 }
-foreach ($forbiddenMarker in @("ObservedQueueExpansion", "PostPcEvaluator", "PostPcScenarioInput", "RuleProfileId::SrsPlus", "requires_180, false", "pack_piece_sequence", "setup_piece_shape", "result_{index}_")) {
-    if ($setupSearchService -like "*$forbiddenMarker*") {
-        Add-ArchitectureError "SetupSearchService must delegate setup pipeline detail marker '$forbiddenMarker' to service submodules"
+foreach ($requiredMarker in @("WasmSetupSearchBackend", "WasmSetupSearchSession", "execute_with_control")) {
+    if ($setupBackend -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "setup backend must own cooperative WASM execution marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("ObservedQueueExpansion", "SetupQueueInput::Observed", "SetupQueueInput::FixedSequence", "SetupQueueInput::BagAlignedPattern", "WeightedPatternSet::uniform", "probability_complete", "expansion_truncated")) {
-    if ($setupPatternSource -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_pattern_source.rs must own setup pattern source expansion marker '$requiredMarker'"
+foreach ($requiredMarker in @("SetupCoverageSession", "SetupSupplyTransitionCatalog", "merge_exact_state_coverage", "setup_coverage_semantics", '"oracle"', "representative_paths")) {
+    if ($setupFinder -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "setup finder must own family-quotient and exact product coverage marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("SetupBuildCandidate", "push_normal_prefix_candidates", "push_hold_first_candidates", "push_initial_hold_candidates", "pack_piece_sequence", "dedupe_candidates")) {
-    if ($setupCandidateEnumerator -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_candidate_enumerator.rs must own setup candidate enumeration marker '$requiredMarker'"
+foreach ($requiredMarker in @("PartialBuildGraph", "PartialBuildGraphBuilder", "GeometryCompletionOracle", "compact_live_graph", "1..=9")) {
+    if ($setupPartialBuild -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "setup partial BuildUp graph must own partial-state transition marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("TilingKey", "BuildKey", "family_map_for_candidates", "unique_shape_count", "tiling_groups_for_family", "build_groups_for_tiling")) {
-    if ($setupFamilyGrouper -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_family_grouper.rs must own shape family/tiling/build grouping marker '$requiredMarker'"
+foreach ($requiredMarker in @("SetupCoverageGraph", "intern_node", "source_classes", "node_edges", "edge_scratch.sort_unstable", "edge_scratch.dedup")) {
+    if ($setupCoverageGraph -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "setup coverage quotient must preserve exact canonical graph marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("SetupCoveragePlan", "SetupCoverageBuilder", "SetupUnionCoverage", "PatternBitSet::from_patterns", "PatternId::new", "coverage_for_patterns", "build_union")) {
-    if ($setupCoveragePlan -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_coverage_plan.rs must own setup coverage planning marker '$requiredMarker'"
-    }
-}
-foreach ($requiredMarker in @("PostPcEvaluator", "PostPcScenarioInput", "PcQueueInput::fixed_sequence", "PcCountPolicy::CountAll", "post_pc_retained_trace_limit", "visible_height_for_mask")) {
-    if ($setupPostPcAdapter -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_post_pc_adapter.rs must own setup build-to-post-PC scenario adapter marker '$requiredMarker'"
-    }
-}
-foreach ($forbiddenMarker in @("pattern_count.max", "with_retained_trace_limit(pattern_count", ".min(64)")) {
-    if ($setupPostPcAdapter -like "*$forbiddenMarker*") {
-        Add-ArchitectureError "setup_post_pc_adapter.rs must not derive trace retention from coverage pattern count marker '$forbiddenMarker'"
-    }
-}
-foreach ($requiredMarker in @("pack_piece_sequence", "setup_piece_shape", "visible_height_for_mask", "SetupPieceShape")) {
-    if ($setupShapePacker -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_shape_packer.rs must own setup geometry packing marker '$requiredMarker'"
-    }
-}
-foreach ($requiredMarker in @("SetupSummaryBuilder", "summary_fields", "format_probability", "family_scores", "score_evaluation_basis")) {
-    if ($setupSummaryBuilder -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "setup_summary_builder.rs must own setup result summary field marker '$requiredMarker'"
-    }
-}
-foreach ($requiredMarker in @("execution_scope: mvp2", "post_pc_mode: scenario-clear-to-empty", "setup_foundation_reason: wide_enumeration_and_post_pc_attached")) {
-    if ($setupCommand -notlike "*$requiredMarker*" -and $cliEntrypoint -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "Setup CLI tests must assert setup MVP2 disclosure marker '$requiredMarker'"
+foreach ($obsoletePath in @(
+    "crates/clearra-setup-search/src/service/setup_search_service.rs",
+    "crates/clearra-setup-search/src/service/setup_shape_packer.rs"
+)) {
+    if (Test-Path -LiteralPath (Join-Path $Root $obsoletePath)) {
+        Add-ArchitectureError "obsolete setup candidate fabrication path must not exist: $obsoletePath"
     }
 }
 foreach ($requiredMarker in @("process_e2e_pc_scenario_inline_json_counts_solutions", "process_e2e_mvp2_cli_commands_are_routed", "process_e2e_continue_command_accepts_scenario_token_without_prompting")) {

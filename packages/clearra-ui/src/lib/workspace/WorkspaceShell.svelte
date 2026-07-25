@@ -5,7 +5,7 @@
   import WorkspaceHeader from './WorkspaceHeader.svelte';
   import type { WorkspaceLanguage } from './workspaceI18n';
 
-  export let activeMode: 'pc' | 'build-probability' | 'damage' | 'spin-finder';
+  export let activeMode: 'pc' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
   export let language: WorkspaceLanguage;
   export let active = false;
   export let statusLabel: string;
@@ -15,6 +15,7 @@
   export let dimensionValue: number;
   export let dimensionMin = 1;
   export let dimensionMax = 24;
+  export let showDimension = true;
   export let cancelLabel: string;
   export let runLabel: string;
   export let runDisabled = false;
@@ -43,17 +44,21 @@
   />
 
   <section class="workspace-nav" aria-label={workspaceLabel}>
-    <label class="dimension-field">
-      <span>{dimensionLabel}</span>
-      <input
-        type="number"
-        min={dimensionMin}
-        max={dimensionMax}
-        step="1"
-        value={dimensionValue}
-        on:input={(event) => dispatch('dimension', Number((event.currentTarget as HTMLInputElement).value))}
-      />
-    </label>
+    {#if showDimension}
+      <label class="dimension-field">
+        <span>{dimensionLabel}</span>
+        <input
+          type="number"
+          min={dimensionMin}
+          max={dimensionMax}
+          step="1"
+          value={dimensionValue}
+          on:input={(event) => dispatch('dimension', Number((event.currentTarget as HTMLInputElement).value))}
+        />
+      </label>
+    {:else}
+      <div class="nav-spacer"></div>
+    {/if}
     <div class="run-actions">
       <button class="cancel" type="button" disabled={!active} on:click={() => dispatch('cancel')}>
         <Square size={14} fill="currentColor" />{cancelLabel}
@@ -90,6 +95,7 @@
   .app-shell { background: #eef1ed; color: #17211e; min-height: 100vh; }
   .workspace-nav { align-items: end; display: flex; gap: 18px; margin: 0 auto; max-width: 1460px; padding: 18px 24px 4px; }
   .dimension-field { display: grid; gap: 5px; margin-right: auto; }
+  .nav-spacer { margin-right: auto; }
   .dimension-field span { color: #65716c; font-size: 11px; font-weight: 700; }
   .dimension-field input { background: #fff; border: 1px solid #cbd3ce; border-radius: 5px; color: #26322e; font-size: 13px; height: 38px; padding: 0 10px; width: 130px; }
   .dimension-field input:focus { border-color: #16877d; box-shadow: 0 0 0 3px #16877d1f; outline: 0; }

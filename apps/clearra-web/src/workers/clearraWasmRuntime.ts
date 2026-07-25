@@ -41,6 +41,7 @@ export type ClearraDistributedPlan = {
   fallbackUsed: boolean;
   fallbackReason: string | null;
   workerInitialization: ArrayBuffer | null;
+  deferredInitialization: boolean;
 };
 
 export type ClearraDistributedVerifierConsume = {
@@ -50,6 +51,7 @@ export type ClearraDistributedVerifierConsume = {
 
 export type ClearraDistributedProducerResult =
   | { status: 'pending' | 'completed' | 'cancelled' }
+  | { status: 'initialization'; initialization: ArrayBuffer }
   | { status: 'batch'; batch: ArrayBuffer };
 
 export type ClearraDistributedCoreProgress = {
@@ -87,6 +89,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_transfer_ptr: () => number;
   clearra_wasm_distributed_prepare: () => number;
   clearra_wasm_distributed_worker_initialization: () => number;
+  clearra_wasm_distributed_worker_initialization_deferred: () => number;
   clearra_wasm_distributed_worker_count: () => number;
   clearra_wasm_distributed_requested_backend: () => number;
   clearra_wasm_distributed_preparation_fallback_reason: () => number;
@@ -157,7 +160,7 @@ export class ClearraWasmRuntimeError extends Error {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
-export function loadClearraWasmModule(
+export async function loadClearraWasmModule(
   sharedCompiledModule?: WebAssembly.Module
 ): Promise<ClearraWasmModule> {
   if (!wasmModulePromise) {
@@ -187,7 +190,13 @@ export function loadClearraWasmModule(
       return module;
     })();
   }
-  return wasmModulePromise;
+  const attempt = wasmModulePromise;
+  try {
+    return await attempt;
+  } catch (error) {
+    if (wasmModulePromise === attempt) wasmModulePromise = null;
+    throw error;
+  }
 }
 
 async function compileClearraWasmModule(wasmUrl: URL): Promise<WebAssembly.Module> {
@@ -314,7 +323,9 @@ function wrapRawModule(
         selectedBackend: selectedMode === 'gpu-multi' ? 'webgpu' : 'wasm-cpu',
         fallbackUsed: fallbackReasonCode !== 0,
         fallbackReason: fallbackReasonCode === 1 ? 'gpu_kernel_unavailable' : null,
-        workerInitialization: initialization.byteLength === 0 ? null : initialization
+        workerInitialization: initialization.byteLength === 0 ? null : initialization,
+        deferredInitialization:
+          raw.clearra_wasm_distributed_worker_initialization_deferred() !== 0
       };
     },
     distributed_produce(workBudget, batchCapacity) {
@@ -323,6 +334,9 @@ function wrapRawModule(
       if (status === 1) return { status: 'batch', batch: outputBytes() };
       if (status === 2) return { status: 'completed' };
       if (status === 3) return { status: 'cancelled' };
+      if (status === 4) {
+        return { status: 'initialization', initialization: outputBytes() };
+      }
       if (status !== 0) throw new Error(`invalid distributed producer status: ${status}`);
       return { status: 'pending' };
     },

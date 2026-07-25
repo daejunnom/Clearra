@@ -3,9 +3,12 @@
 function Invoke-CoreExecutorValidation() {
 foreach ($requiredPath in @(
         "crates/clearra-core-executor/src/service/pc_service.rs",
-        "crates/clearra-core-executor/src/service/setup_service.rs",
         "crates/clearra-core-executor/src/service/cover_service.rs",
         "crates/clearra-core-executor/src/service/percent_service.rs",
+        "crates/clearra-core-executor/src/backend/wasm_setup_search_backend.rs",
+        "crates/clearra-core-executor/src/backend/wasm_cpu/setup_finder.rs",
+        "crates/clearra-core-executor/src/backend/wasm_cpu/setup_partial_build.rs",
+        "crates/clearra-core-executor/src/backend/wasm_cpu/setup_coverage_graph.rs",
         "crates/clearra-core-executor/src/backend/backend_kind.rs",
         "crates/clearra-core-executor/src/backend/backend_capability.rs",
         "crates/clearra-core-executor/src/backend/backend_selector.rs",
@@ -21,15 +24,30 @@ foreach ($requiredPath in @(
         }
     }
 $executorLib = Read-Text "crates/clearra-core-executor/src/lib.rs"
-foreach ($requiredMarker in @("pub mod service", "PackingRunner", "BuildUpRunner", "PcService", "SetupService", "CoverService", "PercentService")) {
+foreach ($requiredMarker in @("pub mod service", "PackingRunner", "BuildUpRunner", "PcService", "WasmSetupSearchBackend", "CoverService", "PercentService")) {
         if ($executorLib -notlike "*$requiredMarker*") {
             Add-ArchitectureError "clearra-core-executor lib.rs must export M17 executor marker '$requiredMarker'"
         }
     }
 $coreExecutor = Read-Text "crates/clearra-core-executor/src/core_executor.rs"
-foreach ($requiredMarker in @("SearchProblemPreset::OpeningPc", "PcService::execute", "SetupService::execute", "CoverService::execute")) {
+foreach ($requiredMarker in @("SearchProblemPreset::OpeningPc", "PcService::execute", "SearchProblemPreset::Setup => Err(CoreExecutionError::UnsupportedProblem)", "CoverService::execute")) {
         if ($coreExecutor -notlike "*$requiredMarker*") {
             Add-ArchitectureError "CoreExecutor must stay a thin M17 service router marker '$requiredMarker'"
+        }
+    }
+$setupBackend = Read-Text "crates/clearra-core-executor/src/backend/wasm_setup_search_backend.rs"
+foreach ($requiredMarker in @("WasmSetupSearchBackend", "WasmSetupSearchSession", "execute_with_control", "Cancelled")) {
+        if ($setupBackend -notlike "*$requiredMarker*") {
+            Add-ArchitectureError "WASM setup backend must own the exact setup execution surface marker '$requiredMarker'"
+        }
+    }
+foreach ($obsoletePath in @(
+        "crates/clearra-core-executor/src/service/setup_service.rs",
+        "crates/clearra-setup-search/src/service/setup_shape_packer.rs",
+        "crates/clearra-setup-search/src/service/setup_search_service.rs"
+    )) {
+        if (Test-Path -LiteralPath (Join-Path $Root $obsoletePath)) {
+            Add-ArchitectureError "obsolete setup product path must not exist: $obsoletePath"
         }
     }
 foreach ($forbiddenMarker in @("CPackingProblemBuilder::from_search_problem", "CBuildUpProblemBuilder::from_packing_candidate", "ObjectiveReducer::reduce")) {

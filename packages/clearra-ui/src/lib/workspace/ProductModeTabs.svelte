@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { Blocks, Flame, Grid3X3, RotateCw } from '@lucide/svelte';
+  import { Blocks, Flame, Grid3X3, Layers3, RotateCw } from '@lucide/svelte';
 
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
-  export let active: 'pc' | 'build-probability' | 'damage' | 'spin-finder';
+  export let active: 'pc' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
   export let language: WorkspaceLanguage;
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -12,6 +12,9 @@
 <nav class="product-tabs" aria-label={label('workspaceMode')}>
   <a href="?tool=pc" class:active={active === 'pc'} aria-current={active === 'pc' ? 'page' : undefined}>
     <Grid3X3 size={16} strokeWidth={1.8} />{label('pcSearch')}
+  </a>
+  <a href="?tool=setup" class:active={active === 'setup'} aria-current={active === 'setup' ? 'page' : undefined}>
+    <Layers3 size={16} strokeWidth={1.8} />{label('setupFinder')}
   </a>
   <a
     href="?tool=build-probability"

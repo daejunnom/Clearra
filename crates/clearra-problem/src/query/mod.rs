@@ -9,6 +9,7 @@ pub mod setup_piece_budget;
 pub mod setup_probability_filter;
 pub mod setup_query;
 pub mod setup_queue_input;
+pub mod setup_residue_input;
 pub mod spin_target_query;
 
 pub use build_probability_query::{
@@ -32,6 +33,9 @@ pub use setup_query::{
     SetupQueueInput as SetupQueryQueueInput, SetupSearchQuery,
 };
 pub use setup_queue_input::SetupQueueInput;
+pub use setup_residue_input::{
+    cycle_for_remaining_count, SetupCycleResetBorrowPolicy, SetupResidueInput,
+};
 pub use spin_target_query::{
     SpinTargetBaseQuery, SpinTargetQuery, SpinTargetQuerySource, SpinTargetTraceRequirement,
 };

@@ -20,6 +20,23 @@ pub(super) fn setup_supported_diagnostic(query: &SetupSearchQuery) -> Diagnostic
         query.hold_policy().is_enabled().to_string(),
     ))
     .with_evidence(ValidationEvidence::new(
+        "remaining_pieces",
+        query
+            .residue()
+            .pieces()
+            .iter()
+            .map(|piece| piece.as_ascii())
+            .collect::<String>(),
+    ))
+    .with_evidence(ValidationEvidence::new(
+        "pc_cycle",
+        query
+            .residue()
+            .cycle()
+            .map(|cycle| cycle.to_string())
+            .unwrap_or_else(|| "invalid".to_owned()),
+    ))
+    .with_evidence(ValidationEvidence::new(
         "min_probability",
         probability_filter
             .min_probability()

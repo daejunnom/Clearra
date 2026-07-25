@@ -1,0 +1,389 @@
+use clearra_core_domain::piece::piece_kind::PieceKind;
+
+use super::{
+    mix_digest,
+    setup_partial_build::{PartialBuildGraph, PartialBuildNode},
+    WasmExactSearchError,
+};
+
+const EMPTY_REFERENCE: u32 = u32::MAX;
+const NO_SHAPE_INDEX: u32 = u32::MAX;
+const INITIAL_BUCKET_COUNT: usize = 1024;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub(super) struct SetupCoverageEdge(u32);
+
+impl SetupCoverageEdge {
+    const CHILD_BITS: u32 = 29;
+    const CHILD_MASK: u32 = (1_u32 << Self::CHILD_BITS) - 1;
+
+    fn new(child: u32, piece: PieceKind) -> Result<Self, WasmExactSearchError> {
+        let piece_index = piece_index(piece);
+        if child > Self::CHILD_MASK {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_child_index_overflow",
+            ));
+        }
+        Ok(Self((u32::from(piece_index) << Self::CHILD_BITS) | child))
+    }
+
+    pub(super) const fn child(self) -> u32 {
+        self.0 & Self::CHILD_MASK
+    }
+
+    pub(super) const fn piece_code(self) -> u8 {
+        ((self.0 >> Self::CHILD_BITS) as u8) + 1
+    }
+
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+
+    pub(super) fn from_raw(raw: u32) -> Result<Self, WasmExactSearchError> {
+        let piece_code = (raw >> Self::CHILD_BITS) as u8 + 1;
+        if !(1..=7).contains(&piece_code) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_wire_piece_code_invalid",
+            ));
+        }
+        Ok(Self(raw))
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<SetupCoverageEdge>() == 4);
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(super) struct SetupCoverageNode {
+    pub(super) edge_start: u32,
+    next_same_bucket: u32,
+    shape_index: u32,
+    pub(super) edge_count: u16,
+    pub(super) depth: u8,
+    flags: u8,
+}
+
+const NODE_ACCEPTING: u8 = 1;
+
+impl SetupCoverageNode {
+    pub(super) const fn accepting(self) -> bool {
+        self.flags & NODE_ACCEPTING != 0
+    }
+
+    pub(super) const fn shape_index(self) -> Option<u32> {
+        if self.shape_index == NO_SHAPE_INDEX {
+            None
+        } else {
+            Some(self.shape_index)
+        }
+    }
+
+    pub(super) const fn flags(self) -> u8 {
+        self.flags
+    }
+
+    pub(super) fn from_wire(
+        edge_start: u32,
+        edge_count: u16,
+        shape_index: u32,
+        depth: u8,
+        flags: u8,
+    ) -> Result<Self, WasmExactSearchError> {
+        if flags & !NODE_ACCEPTING != 0 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_wire_flags_invalid",
+            ));
+        }
+        Ok(Self {
+            edge_start,
+            next_same_bucket: EMPTY_REFERENCE,
+            shape_index,
+            edge_count,
+            depth,
+            flags,
+        })
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<SetupCoverageNode>() == 16);
+
+pub(super) struct SetupCoverageGraph {
+    pub(super) nodes: Vec<SetupCoverageNode>,
+    pub(super) edges: Vec<SetupCoverageEdge>,
+    pub(super) root: u32,
+}
+
+impl SetupCoverageGraph {
+    pub(super) fn compile(source: &PartialBuildGraph) -> Result<Self, WasmExactSearchError> {
+        let mut compiler = SetupCoverageGraphCompiler::new(source.nodes.len())?;
+        for source_index in (0..source.nodes.len()).rev() {
+            let node = source.nodes[source_index];
+            if !node.live() {
+                continue;
+            }
+            compiler.edge_scratch.clear();
+            let edge_start = node.edge_start as usize;
+            let edge_end = edge_start + node.edge_count as usize;
+            compiler
+                .edge_scratch
+                .try_reserve(edge_end.saturating_sub(edge_start))
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "setup_coverage_graph_edge_scratch_unavailable",
+                    )
+                })?;
+            for edge in &source.edges[edge_start..edge_end] {
+                if !source.nodes[edge.to as usize].live() {
+                    continue;
+                }
+                let child = compiler.source_classes[edge.to as usize];
+                if child == EMPTY_REFERENCE {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "setup_coverage_graph_not_topological",
+                    ));
+                }
+                compiler
+                    .edge_scratch
+                    .push(SetupCoverageEdge::new(child, edge.piece)?);
+            }
+            compiler.edge_scratch.sort_unstable();
+            compiler.edge_scratch.dedup();
+            let class = compiler.intern_node(node)?;
+            compiler.source_classes[source_index] = class;
+        }
+        let root = compiler
+            .source_classes
+            .get(source.root as usize)
+            .copied()
+            .filter(|reference| *reference != EMPTY_REFERENCE)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_root_missing",
+            ))?;
+        Ok(Self {
+            nodes: compiler.nodes,
+            edges: compiler.edges,
+            root,
+        })
+    }
+
+    pub(super) fn from_wire_parts(
+        nodes: Vec<SetupCoverageNode>,
+        edges: Vec<SetupCoverageEdge>,
+        root: u32,
+    ) -> Result<Self, WasmExactSearchError> {
+        if root as usize >= nodes.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_wire_root_out_of_range",
+            ));
+        }
+        for node in &nodes {
+            let start = node.edge_start as usize;
+            let end = start.checked_add(node.edge_count as usize).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "setup_coverage_graph_wire_edge_range_overflow",
+                ),
+            )?;
+            if end > edges.len() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "setup_coverage_graph_wire_edge_range_out_of_bounds",
+                ));
+            }
+        }
+        if edges
+            .iter()
+            .any(|edge| edge.child() as usize >= nodes.len())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_wire_child_out_of_range",
+            ));
+        }
+        Ok(Self { nodes, edges, root })
+    }
+}
+
+struct SetupCoverageGraphCompiler {
+    nodes: Vec<SetupCoverageNode>,
+    edges: Vec<SetupCoverageEdge>,
+    bucket_heads: Vec<u32>,
+    source_classes: Vec<u32>,
+    edge_scratch: Vec<SetupCoverageEdge>,
+    interning_disabled: bool,
+}
+
+impl SetupCoverageGraphCompiler {
+    fn new(source_node_count: usize) -> Result<Self, WasmExactSearchError> {
+        let mut source_classes = Vec::new();
+        source_classes
+            .try_reserve_exact(source_node_count)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_coverage_graph_class_storage_unavailable",
+                )
+            })?;
+        source_classes.resize(source_node_count, EMPTY_REFERENCE);
+        Ok(Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            bucket_heads: Vec::new(),
+            source_classes,
+            edge_scratch: Vec::new(),
+            interning_disabled: false,
+        })
+    }
+
+    fn intern_node(&mut self, source: PartialBuildNode) -> Result<u32, WasmExactSearchError> {
+        self.ensure_buckets();
+        let shape_index = source.shape_index().unwrap_or(NO_SHAPE_INDEX);
+        let flags = u8::from(source.accepting()) * NODE_ACCEPTING;
+        let hash = coverage_node_hash(
+            source.depth,
+            shape_index,
+            source.accepting(),
+            &self.edge_scratch,
+        );
+        if !self.interning_disabled {
+            let bucket = hash as usize & (self.bucket_heads.len() - 1);
+            let mut reference = self.bucket_heads[bucket];
+            while reference != EMPTY_REFERENCE {
+                let node = self.nodes[reference as usize];
+                if node.depth == source.depth
+                    && node.shape_index == shape_index
+                    && node.flags == flags
+                    && self.node_edges(node) == self.edge_scratch.as_slice()
+                {
+                    return Ok(reference);
+                }
+                reference = node.next_same_bucket;
+            }
+        }
+
+        let reference = u32::try_from(self.nodes.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_coverage_graph_node_index_overflow")
+        })?;
+        if reference > SetupCoverageEdge::CHILD_MASK {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_coverage_graph_node_index_overflow",
+            ));
+        }
+        let edge_start = u32::try_from(self.edges.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_coverage_graph_edge_index_overflow")
+        })?;
+        let edge_count = u16::try_from(self.edge_scratch.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_coverage_graph_edge_count_overflow")
+        })?;
+        self.nodes.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_coverage_graph_node_storage_unavailable")
+        })?;
+        self.edges
+            .try_reserve_exact(self.edge_scratch.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_coverage_graph_edge_storage_unavailable",
+                )
+            })?;
+        let next_same_bucket = if self.interning_disabled {
+            EMPTY_REFERENCE
+        } else {
+            self.bucket_heads[hash as usize & (self.bucket_heads.len() - 1)]
+        };
+        self.edges.extend_from_slice(&self.edge_scratch);
+        self.nodes.push(SetupCoverageNode {
+            edge_start,
+            next_same_bucket,
+            shape_index,
+            edge_count,
+            depth: source.depth,
+            flags,
+        });
+        if !self.interning_disabled {
+            let bucket = hash as usize & (self.bucket_heads.len() - 1);
+            self.bucket_heads[bucket] = reference;
+            self.grow_buckets_if_needed();
+        }
+        Ok(reference)
+    }
+
+    fn node_edges(&self, node: SetupCoverageNode) -> &[SetupCoverageEdge] {
+        let start = node.edge_start as usize;
+        &self.edges[start..start + node.edge_count as usize]
+    }
+
+    fn ensure_buckets(&mut self) {
+        if !self.bucket_heads.is_empty() || self.interning_disabled {
+            return;
+        }
+        if self
+            .bucket_heads
+            .try_reserve_exact(INITIAL_BUCKET_COUNT)
+            .is_err()
+        {
+            self.interning_disabled = true;
+            return;
+        }
+        self.bucket_heads
+            .resize(INITIAL_BUCKET_COUNT, EMPTY_REFERENCE);
+    }
+
+    fn grow_buckets_if_needed(&mut self) {
+        if self.interning_disabled
+            || self.nodes.len().saturating_mul(4) < self.bucket_heads.len().saturating_mul(3)
+        {
+            return;
+        }
+        let Some(new_count) = self.bucket_heads.len().checked_mul(2) else {
+            self.interning_disabled = true;
+            return;
+        };
+        let mut replacement = Vec::new();
+        if replacement.try_reserve_exact(new_count).is_err() {
+            self.interning_disabled = true;
+            return;
+        }
+        replacement.resize(new_count, EMPTY_REFERENCE);
+        for reference in 0..self.nodes.len() {
+            let node = self.nodes[reference];
+            let hash = coverage_node_hash(
+                node.depth,
+                node.shape_index,
+                node.accepting(),
+                self.node_edges(node),
+            );
+            let bucket = hash as usize & (new_count - 1);
+            self.nodes[reference].next_same_bucket = replacement[bucket];
+            replacement[bucket] = reference as u32;
+        }
+        self.bucket_heads = replacement;
+    }
+}
+
+fn coverage_node_hash(
+    depth: u8,
+    shape_index: u32,
+    accepting: bool,
+    edges: &[SetupCoverageEdge],
+) -> u64 {
+    let mut hash = mix_digest(0, u64::from(depth));
+    hash = mix_digest(hash, u64::from(shape_index));
+    hash = mix_digest(hash, u64::from(accepting));
+    hash = mix_digest(hash, edges.len() as u64);
+    for edge in edges {
+        hash = mix_digest(hash, u64::from(edge.0));
+    }
+    hash
+}
+
+const fn piece_index(piece: PieceKind) -> u8 {
+    match piece {
+        PieceKind::I => 0,
+        PieceKind::O => 1,
+        PieceKind::T => 2,
+        PieceKind::S => 3,
+        PieceKind::Z => 4,
+        PieceKind::J => 5,
+        PieceKind::L => 6,
+    }
+}
+
+// This module owns one exact responsibility: removing language-equivalent
+// setup states from the coverage hot path without changing the evidence graph.

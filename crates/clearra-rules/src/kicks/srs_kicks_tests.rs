@@ -123,7 +123,7 @@ fn srs_plus_profile_preserves_symmetric_i_and_transition_specific_180_kicks() {
             ))
             .expect("I 0->2")
             .offsets(),
-        offsets([(0, 0), (0, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)])
+        offsets([(0, 0), (0, 1)])
     );
     assert!(profile
         .sequence_for(KickTransition::new(
@@ -132,6 +132,24 @@ fn srs_plus_profile_preserves_symmetric_i_and_transition_specific_180_kicks() {
             RotationState::Two
         ))
         .is_none());
+}
+
+#[test]
+fn srs_x_retains_the_extended_i_180_sequence() {
+    let profile = SrsKicks::srs_x_profile();
+
+    assert_eq!(profile.id(), KickTableProfileId::SrsX);
+    assert_eq!(
+        profile
+            .sequence_for(KickTransition::new(
+                PieceKind::I,
+                RotationState::Zero,
+                RotationState::Two
+            ))
+            .expect("SRS-X I 0->2")
+            .offsets(),
+        offsets([(0, 0), (0, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)])
+    );
 }
 
 fn jlstz_transition_fixtures() -> Vec<(RotationState, RotationState, Vec<KickOffset>)> {

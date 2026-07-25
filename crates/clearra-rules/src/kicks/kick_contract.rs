@@ -430,26 +430,10 @@ fn srs_plus_i_180_expected_sequences() -> Vec<(RotationState, RotationState, Kic
     use RotationState::{Left, Right, Two, Zero};
 
     vec![
-        (
-            Zero,
-            Two,
-            sequence([(0, 0), (0, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)]),
-        ),
-        (
-            Right,
-            Left,
-            sequence([(1, 1), (1, 0), (0, 0), (2, 0), (0, 1), (2, 1)]),
-        ),
-        (
-            Two,
-            Zero,
-            sequence([(-1, -1), (0, -1), (0, 1), (0, 0), (-1, 1), (-1, 0)]),
-        ),
-        (
-            Left,
-            Right,
-            sequence([(0, 0), (-1, 0), (-1, 2), (-1, 1), (0, 2), (0, 1)]),
-        ),
+        (Zero, Two, sequence([(0, 0), (0, 1)])),
+        (Right, Left, sequence([(0, 0), (1, 0)])),
+        (Two, Zero, sequence([(0, 0), (0, -1)])),
+        (Left, Right, sequence([(0, 0), (-1, 0)])),
     ]
 }
 

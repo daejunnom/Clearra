@@ -23,6 +23,7 @@ pub mod problem_lowering;
 pub mod resource;
 pub mod result_views;
 pub mod service;
+pub mod setup_finder_report;
 pub mod solution_probability;
 pub mod spin;
 
@@ -36,6 +37,8 @@ pub use backend::{
     WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier, WasmProductSearchBackend,
+    WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+    WasmSetupSearchAdvance, WasmSetupSearchBackend, WasmSetupSearchSession,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,
@@ -56,10 +59,12 @@ pub use result_views::{
     ObjectiveResult, PackingCandidateView, PackingResult, ReplayTrace, SearchExecutionReport,
 };
 pub use service::{
-    CoverService, CoverServiceError, PcService, PcServiceError, PercentService,
-    PercentServiceError, SetupService, SetupServiceError,
+    CoverService, CoverServiceError, PcService, PcServiceError, PercentService, PercentServiceError,
 };
-pub use solution_probability::{SolutionCoverage, SolutionProbabilityReport};
+pub use setup_finder_report::{SetupCandidateReport, SetupFinderReport, SetupHoldConditionReport};
+pub use solution_probability::{
+    NormalizedSolutionCoverage, SolutionCoverage, SolutionProbabilityReport,
+};
 pub use spin::{BuildVariantReplayEvidence, BuildVariantReplayEvidenceError};
 
 pub fn native_core_runtime_available() -> bool {

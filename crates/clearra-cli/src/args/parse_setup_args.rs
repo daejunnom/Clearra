@@ -4,22 +4,18 @@ use super::{
 };
 
 pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseError> {
-    let mut queue = String::new();
-    let mut fixed_queue = false;
+    let mut remaining = "IOTSZJL".to_owned();
+    let mut allow_post_cycle_borrow = false;
     let mut index = 0;
 
     while index < args.len() {
         match args[index].as_str() {
-            "--queue" | "-q" => {
-                queue = option_value(args, index, "--queue")?.to_owned();
+            "--remaining" | "--queue" | "-q" => {
+                remaining = option_value(args, index, "--remaining")?.to_owned();
                 index += 2;
             }
-            "--fixed" | "--fixed-queue" => {
-                fixed_queue = true;
-                index += 1;
-            }
-            "--observed" | "--observed-queue" => {
-                fixed_queue = false;
+            "--allow-post-cycle-borrow" => {
+                allow_post_cycle_borrow = true;
                 index += 1;
             }
             "--help" | "-h" => return Ok(ParsedCliCommand::Help(CliHelpTopic::Setup)),
@@ -27,5 +23,8 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
         }
     }
 
-    Ok(ParsedCliCommand::Setup(SetupArgs::new(queue, fixed_queue)))
+    Ok(ParsedCliCommand::Setup(SetupArgs::new(
+        remaining,
+        allow_post_cycle_borrow,
+    )))
 }

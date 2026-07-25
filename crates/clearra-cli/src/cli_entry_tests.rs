@@ -25,10 +25,6 @@ fn expected_solver_backend() -> &'static str {
     "core-c-cpu-packing-cpu-buildup"
 }
 
-fn expected_setup_covered_pattern_count() -> usize {
-    0
-}
-
 mod case_run_with_args_routes_pc_command_through_validation {
     use super::*;
 
@@ -320,39 +316,18 @@ mod case_run_with_args_routes_setup_command {
     use super::*;
 
     #[test]
+    #[ignore = "full empty-4L exact setup acceptance runs in the release exact suite"]
     fn run_with_args_routes_setup_command() {
-        let output = run_with_args([
-            "clearra",
-            "--verbose",
-            "setup",
-            "--queue",
-            "IOTSZJL",
-            "--fixed",
-        ]);
+        let output = run_with_args(["clearra", "--verbose", "setup", "--remaining", "IOTSZJL"]);
 
         assert_eq!(output.exit_code(), ExitCode::Success);
-        assert!(output.stdout().contains("status: setup-executed"));
+        assert!(output.stdout().contains("status: setup-finder-complete"));
         assert!(output
             .stdout()
-            .contains("execution_scope: m20-setup-search-product-path"));
-        assert!(output.stdout().contains("problem_preset: setup"));
-        assert!(output.stdout().contains("build_variant_source: C BuildUp"));
-        assert!(output.stdout().contains("shape_family_id: setup-family-0"));
-        assert!(output.stdout().contains(&format!(
-            "covered_pattern_count: {}",
-            expected_setup_covered_pattern_count()
-        )));
-        assert!(output.stdout().contains("post_pc_solution_count: 0"));
-        assert!(output.stdout().contains("score_basis: none"));
-        assert!(output.stdout().contains("backend_report: attached"));
-        assert!(output.stdout().contains(
-            "raw_coverage_export_path: inline://clearra/setup/raw-coverage/setup-family-0/union"
-        ));
-        assert!(!output.stdout().contains("condition_summary"));
-        assert!(output
-            .stdout()
-            .contains("route: search-problem-core-executor"));
-        assert!(output.stdout().contains("queue_len: 7"));
+            .contains("backend_selected: wasm-cpu-setup-family-quotient"));
+        assert!(output.stdout().contains("coverage_semantics: oracle"));
+        assert!(output.stdout().contains("cycle: 1"));
+        assert!(output.stdout().contains("remaining_pieces: IOTSZJL"));
     }
 }
 

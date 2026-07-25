@@ -1,5 +1,7 @@
 use clearra_profiles::search::search_defaults::SearchDefaults;
 
+pub const SETUP_FINDER_DEFAULT_MAX_PATTERNS: usize = 2_000_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SetupLimits {
     max_shape_families: usize,
@@ -82,7 +84,15 @@ impl SetupLimits {
 
 impl Default for SetupLimits {
     fn default() -> Self {
-        SearchDefaults::MVP1.into()
+        let defaults = SearchDefaults::MVP1;
+        Self {
+            max_shape_families: defaults.setup_max_shape_families(),
+            max_tiling_variants_per_family: defaults.setup_max_tiling_variants_per_family(),
+            max_build_variants_per_tiling: defaults.setup_max_build_variants_per_tiling(),
+            max_results: defaults.setup_max_results(),
+            max_patterns: SETUP_FINDER_DEFAULT_MAX_PATTERNS,
+            post_pc_retained_trace_limit: defaults.scenario_retained_trace_limit(),
+        }
     }
 }
 

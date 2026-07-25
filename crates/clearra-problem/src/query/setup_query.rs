@@ -5,6 +5,7 @@ pub use super::{
     setup_piece_budget::{PieceBudget, PieceBudgetError},
     setup_probability_filter::{SetupProbabilityFilter, SetupProbabilityFilterError},
     setup_queue_input::SetupQueueInput,
+    setup_residue_input::{SetupCycleResetBorrowPolicy, SetupResidueInput},
 };
 
 use clearra_core_domain::{board::board_size::BoardSize, pc::pc_target::PcTarget};
@@ -19,6 +20,8 @@ pub struct SetupSearchQuery {
     probability_filter: SetupProbabilityFilter,
     grouping_mode: GroupingMode,
     limits: SetupLimits,
+    residue: SetupResidueInput,
+    cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy,
 }
 
 impl SetupSearchQuery {
@@ -42,6 +45,8 @@ impl SetupSearchQuery {
             probability_filter,
             grouping_mode,
             limits,
+            residue: SetupResidueInput::default(),
+            cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
         }
     }
 }
@@ -86,6 +91,15 @@ impl SetupSearchQuery {
     }
 }
 impl SetupSearchQuery {
+    pub fn residue(&self) -> &SetupResidueInput {
+        &self.residue
+    }
+
+    pub fn cycle_reset_borrow_policy(&self) -> SetupCycleResetBorrowPolicy {
+        self.cycle_reset_borrow_policy
+    }
+}
+impl SetupSearchQuery {
     pub fn with_queue(mut self, queue: SetupQueueInput) -> Self {
         self.queue = queue;
         self
@@ -121,18 +135,34 @@ impl SetupSearchQuery {
         self
     }
 }
+impl SetupSearchQuery {
+    pub fn with_remaining_pieces(
+        mut self,
+        pieces: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+    ) -> Self {
+        self.residue = SetupResidueInput::new(pieces);
+        self
+    }
+
+    pub fn with_cycle_reset_borrow_policy(mut self, policy: SetupCycleResetBorrowPolicy) -> Self {
+        self.cycle_reset_borrow_policy = policy;
+        self
+    }
+}
 
 impl Default for SetupSearchQuery {
     fn default() -> Self {
         Self {
-            board_size: BoardSize::standard_10x20(),
-            target: PcTarget::two_lines(),
+            board_size: BoardSize::new(10, 4).expect("fixed setup finder board"),
+            target: PcTarget::four_lines(),
             queue: SetupQueueInput::default(),
             hold_policy: SetupHoldPolicy::default(),
             piece_budget: PieceBudget::default(),
             probability_filter: SetupProbabilityFilter::default(),
             grouping_mode: GroupingMode::default(),
             limits: SetupLimits::default(),
+            residue: SetupResidueInput::default(),
+            cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
         }
     }
 }
@@ -162,7 +192,7 @@ mod tests {
             .with_grouping_mode(GroupingMode::BuildVariant)
             .with_limits(SetupLimits::new(1, 2, 3, 4, 5, 6).expect("limits"));
 
-        assert_eq!(query.target(), PcTarget::two_lines());
+        assert_eq!(query.target(), PcTarget::four_lines());
         assert!(query.queue().fixed_queue().is_some());
         assert_eq!(query.hold_policy().initial_piece(), Some(PieceKind::T));
         assert_eq!(query.probability_filter(), filter);

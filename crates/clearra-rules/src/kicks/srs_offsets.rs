@@ -134,6 +134,18 @@ pub fn srs_plus_i_180_offsets(from: RotationState, to: RotationState) -> Vec<Kic
     use RotationState::{Left, Right, Two, Zero};
 
     match (from, to) {
+        (Zero, Two) => offsets([(0, 0), (0, 1)]),
+        (Right, Left) => offsets([(0, 0), (1, 0)]),
+        (Two, Zero) => offsets([(0, 0), (0, -1)]),
+        (Left, Right) => offsets([(0, 0), (-1, 0)]),
+        _ => vec![],
+    }
+}
+
+pub fn srs_x_i_180_offsets(from: RotationState, to: RotationState) -> Vec<KickOffset> {
+    use RotationState::{Left, Right, Two, Zero};
+
+    match (from, to) {
         (Zero, Two) => offsets([(0, 0), (0, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)]),
         (Right, Left) => offsets([(1, 1), (1, 0), (0, 0), (2, 0), (0, 1), (2, 1)]),
         (Two, Zero) => offsets([(-1, -1), (0, -1), (0, 1), (0, 0), (-1, 1), (-1, 0)]),

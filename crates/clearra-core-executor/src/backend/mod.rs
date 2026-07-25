@@ -30,6 +30,8 @@ pub mod search_backend_warmup;
 pub mod wasm_build_probability_backend;
 mod wasm_cpu;
 pub mod wasm_cpu_search_backend;
+pub mod wasm_setup_parallel_backend;
+pub mod wasm_setup_search_backend;
 
 pub use backend_capability::BackendCapability;
 pub use backend_fallback::BackendFallback;
@@ -105,6 +107,12 @@ pub use wasm_cpu::{
 pub use wasm_cpu_search_backend::{
     WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
     WasmProductSearchBackend,
+};
+pub use wasm_setup_parallel_backend::{
+    WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+};
+pub use wasm_setup_search_backend::{
+    WasmSetupSearchAdvance, WasmSetupSearchBackend, WasmSetupSearchSession,
 };
 
 #[cfg(all(test, feature = "experimental-native-gpu"))]

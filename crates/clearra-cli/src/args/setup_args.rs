@@ -1,30 +1,30 @@
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupArgs {
-    queue: String,
-    fixed_queue: bool,
+    remaining: String,
+    allow_post_cycle_borrow: bool,
 }
 
 impl SetupArgs {
-    pub fn new(queue: impl Into<String>, fixed_queue: bool) -> Self {
+    pub fn new(remaining: impl Into<String>, allow_post_cycle_borrow: bool) -> Self {
         Self {
-            queue: queue.into(),
-            fixed_queue,
+            remaining: remaining.into(),
+            allow_post_cycle_borrow,
         }
     }
 }
 impl SetupArgs {
-    pub fn queue(&self) -> &str {
-        &self.queue
+    pub fn remaining(&self) -> &str {
+        &self.remaining
     }
 }
 impl SetupArgs {
-    pub fn fixed_queue(&self) -> bool {
-        self.fixed_queue
+    pub fn allow_post_cycle_borrow(&self) -> bool {
+        self.allow_post_cycle_borrow
     }
 }
 
 impl Default for SetupArgs {
     fn default() -> Self {
-        Self::new("", false)
+        Self::new("IOTSZJL", false)
     }
 }

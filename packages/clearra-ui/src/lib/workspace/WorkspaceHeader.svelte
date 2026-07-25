@@ -5,7 +5,7 @@
   import ProductModeTabs from './ProductModeTabs.svelte';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
-  export let activeMode: 'pc' | 'build-probability' | 'damage' | 'spin-finder';
+  export let activeMode: 'pc' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
   export let language: WorkspaceLanguage;
   export let active = false;
   export let statusLabel: string;

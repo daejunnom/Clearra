@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::solution::normalized_tiling_solution::{
     PiecePlacementMask, StandardBoard64TilingIdentity,
 };
@@ -214,6 +215,282 @@ fn residual_hash(key: ResidualKey) -> u64 {
     mix_digest(mix_digest(0, key.remaining), u64::from(key.packed_counts))
 }
 
+struct GeometryCompilerState {
+    family: GeometrySolutionFamily,
+    residual_memo: ResidualMemo,
+    admissible_prefixes: Vec<u32>,
+    projection_cache: ProjectionReachabilityCache,
+}
+
+pub(super) struct GeometryCompletionOracle {
+    state: Option<GeometryCompilerState>,
+    targets: Arc<[TargetGroup]>,
+    target_depth: u8,
+    traversal_marks: Vec<u32>,
+    row_marks: Vec<u32>,
+    traversal_generation: u32,
+    row_generation: u32,
+    traversal_stack: Vec<u32>,
+    candidate_rows: Vec<u32>,
+}
+
+impl GeometryCompletionOracle {
+    fn new(
+        state: GeometryCompilerState,
+        targets: Arc<[TargetGroup]>,
+        target_depth: u8,
+        skeleton_count: usize,
+    ) -> Result<Self, WasmExactSearchError> {
+        let family_value_count = state.family.node_count() as usize + 2;
+        let mut traversal_marks = Vec::new();
+        traversal_marks
+            .try_reserve_exact(family_value_count)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_completion_traversal_storage_unavailable",
+                )
+            })?;
+        traversal_marks.resize(family_value_count, 0);
+        let mut row_marks = Vec::new();
+        row_marks.try_reserve_exact(skeleton_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_completion_row_storage_unavailable")
+        })?;
+        row_marks.resize(skeleton_count, 0);
+        Ok(Self {
+            state: Some(state),
+            targets,
+            target_depth,
+            traversal_marks,
+            row_marks,
+            traversal_generation: 0,
+            row_generation: 0,
+            traversal_stack: Vec::new(),
+            candidate_rows: Vec::new(),
+        })
+    }
+
+    pub(super) fn collect_available_rows(
+        &mut self,
+        remaining: u64,
+        packed_counts: u32,
+        catalog: &GeometryCatalog,
+        output: &mut Vec<u32>,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        output.clear();
+        if remaining == 0 {
+            return Ok(());
+        }
+        let root = self.ensure_family_root(
+            ResidualKey {
+                remaining,
+                packed_counts,
+            },
+            catalog,
+            control,
+        )?;
+        if root == FAMILY_INVALID || root == FAMILY_EMPTY {
+            return Ok(());
+        }
+        self.collect_family_rows(root)?;
+
+        let mut candidates = std::mem::take(&mut self.candidate_rows);
+        candidates.sort_unstable();
+        candidates.dedup();
+        output.try_reserve(candidates.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_completion_output_storage_unavailable")
+        })?;
+        let state = self
+            .state
+            .as_ref()
+            .expect("setup completion compiler state exists");
+        for row_id in candidates.iter().copied() {
+            let row = catalog.skeleton(row_id);
+            if row.cells & remaining != row.cells {
+                continue;
+            }
+            let Some(next_counts) = add_packed_piece(packed_counts, piece_index(row.piece)) else {
+                continue;
+            };
+            if state
+                .admissible_prefixes
+                .binary_search(&next_counts)
+                .is_ok()
+            {
+                output.push(row_id);
+            }
+        }
+        candidates.clear();
+        self.candidate_rows = candidates;
+        Ok(())
+    }
+
+    fn collect_family_rows(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
+        self.candidate_rows.clear();
+        self.advance_traversal_generation();
+        self.advance_row_generation();
+        self.traversal_stack.clear();
+        self.traversal_stack.try_reserve(64).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_completion_stack_storage_unavailable")
+        })?;
+        self.traversal_stack.push(root);
+        while let Some(reference) = self.traversal_stack.pop() {
+            if reference == FAMILY_INVALID || reference == FAMILY_EMPTY {
+                continue;
+            }
+            let index = reference as usize;
+            let mark =
+                self.traversal_marks
+                    .get_mut(index)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_completion_family_reference_invalid",
+                    ))?;
+            if *mark == self.traversal_generation {
+                continue;
+            }
+            *mark = self.traversal_generation;
+            let node = self
+                .state
+                .as_ref()
+                .expect("setup completion compiler state exists")
+                .family
+                .node(reference)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_completion_family_node_missing",
+                ))?;
+            match node.kind {
+                FamilyNodeKind::Append => {
+                    let row_index = node.row_id as usize;
+                    let row_mark = self.row_marks.get_mut(row_index).ok_or(
+                        WasmExactSearchError::InvalidProblem("setup_completion_family_row_invalid"),
+                    )?;
+                    if *row_mark != self.row_generation {
+                        *row_mark = self.row_generation;
+                        self.candidate_rows.push(node.row_id);
+                    }
+                    self.traversal_stack.push(node.left);
+                }
+                FamilyNodeKind::Union | FamilyNodeKind::Product => {
+                    self.traversal_stack.push(node.left);
+                    self.traversal_stack.push(node.right);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_family_root(
+        &mut self,
+        key: ResidualKey,
+        catalog: &GeometryCatalog,
+        control: &ExecutionControl,
+    ) -> Result<u32, WasmExactSearchError> {
+        if let Some(root) = self
+            .state
+            .as_ref()
+            .expect("setup completion compiler state exists")
+            .residual_memo
+            .lookup(key)
+        {
+            return Ok(root);
+        }
+
+        let used_counts = unpack_piece_counts(key.packed_counts);
+        let used_total = used_counts.iter().copied().sum::<u8>();
+        let state = self
+            .state
+            .as_ref()
+            .expect("setup completion compiler state exists");
+        let valid = used_total <= self.target_depth
+            && key.remaining.count_ones() as usize
+                == usize::from(self.target_depth - used_total) * 4
+            && state
+                .admissible_prefixes
+                .binary_search(&key.packed_counts)
+                .is_ok();
+        if !valid {
+            self.state
+                .as_mut()
+                .expect("setup completion compiler state exists")
+                .residual_memo
+                .insert(key, FAMILY_INVALID);
+            return Ok(FAMILY_INVALID);
+        }
+
+        let state = self
+            .state
+            .take()
+            .expect("setup completion compiler state exists");
+        let mut compiler = FamilyCompiler::from_residual(
+            key.remaining,
+            Arc::clone(&self.targets),
+            used_counts,
+            state,
+        );
+        let mut work = 0_usize;
+        loop {
+            if work & 1023 == 0 && control.is_cancelled() {
+                self.state = Some(compiler.into_completion_state());
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            work = work.saturating_add(1);
+            match compiler.advance(catalog) {
+                CompileAdvance::Pending => {}
+                CompileAdvance::Complete => {
+                    let root = compiler.root_family;
+                    self.state = Some(compiler.into_completion_state());
+                    self.ensure_traversal_capacity()?;
+                    return Ok(root);
+                }
+                CompileAdvance::ResourceIncomplete => {
+                    self.state = Some(compiler.into_completion_state());
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "setup_completion_family_storage_unavailable",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn ensure_traversal_capacity(&mut self) -> Result<(), WasmExactSearchError> {
+        let required = self
+            .state
+            .as_ref()
+            .expect("setup completion compiler state exists")
+            .family
+            .node_count() as usize
+            + 2;
+        if required <= self.traversal_marks.len() {
+            return Ok(());
+        }
+        self.traversal_marks
+            .try_reserve(required - self.traversal_marks.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_completion_traversal_storage_unavailable",
+                )
+            })?;
+        self.traversal_marks.resize(required, 0);
+        Ok(())
+    }
+
+    fn advance_traversal_generation(&mut self) {
+        self.traversal_generation = self.traversal_generation.wrapping_add(1);
+        if self.traversal_generation == 0 {
+            self.traversal_marks.fill(0);
+            self.traversal_generation = 1;
+        }
+    }
+
+    fn advance_row_generation(&mut self) {
+        self.row_generation = self.row_generation.wrapping_add(1);
+        if self.row_generation == 0 {
+            self.row_marks.fill(0);
+            self.row_generation = 1;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct TargetGroup {
     pub key: PieceMultisetKey,
@@ -317,8 +594,16 @@ struct FamilyCompiler {
 
 impl FamilyCompiler {
     fn new(required_cells: u64, targets: Arc<[TargetGroup]>) -> Self {
-        let target_depth = targets.first().map_or(0, |target| target.key.total_count());
         let admissible_prefixes = compile_admissible_prefixes(&targets);
+        Self::new_with_admissible_prefixes(required_cells, targets, admissible_prefixes)
+    }
+
+    fn new_with_admissible_prefixes(
+        required_cells: u64,
+        targets: Arc<[TargetGroup]>,
+        admissible_prefixes: Vec<u32>,
+    ) -> Self {
+        let target_depth = targets.first().map_or(0, |target| target.key.total_count());
         Self {
             targets,
             admissible_prefixes,
@@ -336,6 +621,43 @@ impl FamilyCompiler {
             hall_pruned_states: 0,
             column_pruned_states: 0,
             component_compositions: 0,
+        }
+    }
+
+    fn from_residual(
+        remaining: u64,
+        targets: Arc<[TargetGroup]>,
+        used_counts: [u8; 7],
+        state: GeometryCompilerState,
+    ) -> Self {
+        let target_depth = targets.first().map_or(0, |target| target.key.total_count());
+        let depth = used_counts.iter().copied().sum();
+        Self {
+            targets,
+            admissible_prefixes: state.admissible_prefixes,
+            used_counts,
+            stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0)],
+            residual_memo: state.residual_memo,
+            projection_cache: state.projection_cache,
+            family: state.family,
+            component_entries: Vec::new(),
+            target_depth,
+            root_family: FAMILY_INVALID,
+            expanded_nodes: 0,
+            peak_frontier: 1,
+            domain_pruned_states: 0,
+            hall_pruned_states: 0,
+            column_pruned_states: 0,
+            component_compositions: 0,
+        }
+    }
+
+    fn into_completion_state(self) -> GeometryCompilerState {
+        GeometryCompilerState {
+            family: self.family,
+            residual_memo: self.residual_memo,
+            admissible_prefixes: self.admissible_prefixes,
+            projection_cache: self.projection_cache,
         }
     }
 
@@ -656,6 +978,133 @@ impl FamilyCompiler {
     }
 }
 
+pub(super) enum GeometryFamilyCompileAdvance {
+    Pending,
+    Complete(CompiledGeometryFamily),
+    ResourceIncomplete(&'static str),
+    Cancelled,
+}
+
+pub(super) struct GeometryFamilyCompileSession {
+    compiler: Option<FamilyCompiler>,
+}
+
+pub(super) struct CompiledGeometryFamily {
+    pub completion_oracle: GeometryCompletionOracle,
+    pub candidate_family_count: Option<u128>,
+    pub expanded_nodes: usize,
+}
+
+impl GeometryFamilyCompileSession {
+    pub fn new(
+        required_cells: u64,
+        mut target_keys: Vec<PieceMultisetKey>,
+        mut admissible_prefixes: Vec<u32>,
+    ) -> Result<Self, WasmExactSearchError> {
+        target_keys.sort_unstable();
+        target_keys.dedup();
+        if target_keys.is_empty() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_geometry_has_no_admissible_piece_multiset",
+            ));
+        }
+        let target_depth = target_keys[0].total_count();
+        if target_keys
+            .iter()
+            .any(|target| target.total_count() != target_depth)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_geometry_target_depth_mismatch",
+            ));
+        }
+        admissible_prefixes.sort_unstable();
+        admissible_prefixes.dedup();
+        if admissible_prefixes.binary_search(&0).is_err()
+            || target_keys.iter().any(|target| {
+                admissible_prefixes
+                    .binary_search(&pack_piece_counts(target.counts()))
+                    .is_err()
+            })
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_geometry_admissible_prefix_domain_incomplete",
+            ));
+        }
+        let possible_patterns = Arc::new(PatternBitSet::all(1));
+        let targets = target_keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| TargetGroup {
+                key,
+                pattern_index_id: index as u32,
+                possible_patterns: Arc::clone(&possible_patterns),
+                pattern_index: None,
+            })
+            .collect::<Vec<_>>();
+        Ok(Self {
+            compiler: Some(FamilyCompiler::new_with_admissible_prefixes(
+                required_cells,
+                targets.into(),
+                admissible_prefixes,
+            )),
+        })
+    }
+
+    pub fn advance(
+        &mut self,
+        catalog: &GeometryCatalog,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> GeometryFamilyCompileAdvance {
+        let Some(compiler) = self.compiler.as_mut() else {
+            return GeometryFamilyCompileAdvance::ResourceIncomplete(
+                "setup_geometry_compile_session_already_finished",
+            );
+        };
+        for _ in 0..work_budget.max(1) {
+            if control.is_cancelled() {
+                return GeometryFamilyCompileAdvance::Cancelled;
+            }
+            match compiler.advance(catalog) {
+                CompileAdvance::Pending => {}
+                CompileAdvance::ResourceIncomplete => {
+                    return GeometryFamilyCompileAdvance::ResourceIncomplete(
+                        "geometry_solution_family_storage_unavailable",
+                    );
+                }
+                CompileAdvance::Complete => {
+                    let compiler = self.compiler.take().expect("geometry compiler exists");
+                    let candidate_family_count = compiler.candidate_family_count();
+                    let targets = Arc::clone(&compiler.targets);
+                    let target_depth = compiler.target_depth;
+                    let expanded_nodes = compiler.expanded_nodes;
+                    let state = compiler.into_completion_state();
+                    let completion_oracle = match GeometryCompletionOracle::new(
+                        state,
+                        targets,
+                        target_depth,
+                        catalog.skeleton_count(),
+                    ) {
+                        Ok(oracle) => oracle,
+                        Err(WasmExactSearchError::InvalidProblem(reason)) => {
+                            return GeometryFamilyCompileAdvance::ResourceIncomplete(reason);
+                        }
+                        Err(WasmExactSearchError::Cancelled) => {
+                            return GeometryFamilyCompileAdvance::Cancelled;
+                        }
+                    };
+                    return GeometryFamilyCompileAdvance::Complete(CompiledGeometryFamily {
+                        completion_oracle,
+                        candidate_family_count,
+                        expanded_nodes,
+                    });
+                }
+            }
+        }
+        GeometryFamilyCompileAdvance::Pending
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TraversalTask {
     family: u32,
@@ -966,6 +1415,16 @@ pub(super) fn pack_piece_counts(counts: [u8; 7]) -> u32 {
         .fold(0_u32, |packed, (index, count)| {
             packed | (u32::from(count) << (index * 4))
         })
+}
+
+pub(super) fn unpack_piece_counts(packed: u32) -> [u8; 7] {
+    std::array::from_fn(|index| ((packed >> (index * 4)) & 0x0f) as u8)
+}
+
+pub(super) fn add_packed_piece(packed: u32, piece: usize) -> Option<u32> {
+    let shift = piece.checked_mul(4)?;
+    let count = (packed >> shift) & 0x0f;
+    (count < 0x0f).then_some(packed + (1_u32 << shift))
 }
 
 fn signature_total_count(signature: u32) -> u8 {

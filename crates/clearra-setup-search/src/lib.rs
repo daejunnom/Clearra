@@ -8,5 +8,4 @@ pub mod family;
 pub mod identity;
 pub mod query;
 pub mod result;
-pub mod service;
 pub mod variant;

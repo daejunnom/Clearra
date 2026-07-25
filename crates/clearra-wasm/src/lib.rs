@@ -27,7 +27,8 @@ pub use distributed_wire::{
 pub use host_contract_bridge::wasm_worker_event_to_host_contract;
 pub use wasm_command_runtime::{
     WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult, WasmForwardPathStep,
-    WasmForwardSearchOutcome, WasmSearchPathStep, WasmSearchReport, WasmSolutionProbability,
+    WasmForwardSearchOutcome, WasmSearchPathStep, WasmSearchReport, WasmSetupCandidate,
+    WasmSetupFinderReport, WasmSetupHoldCondition, WasmSolutionProbability,
 };
 pub use wasm_host_capabilities::WasmHostCapabilities;
 pub use wasm_worker_job::{

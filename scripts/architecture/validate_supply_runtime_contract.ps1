@@ -115,17 +115,30 @@ foreach ($requiredMarker in @(
         }
     }
 $pcService = Get-PcServiceValidationSurface
-$setupService = Read-Text "crates/clearra-core-executor/src/service/setup_service.rs"
 $coverService = Read-Text "crates/clearra-core-executor/src/service/cover_service.rs"
-foreach ($surface in @($pcService, $setupService, $coverService)) {
+foreach ($surface in @($pcService, $coverService)) {
         foreach ($requiredMarker in @(
                 "compact_supply_provenance_id",
                 "compact_piece_source_kind",
                 "compact_piece_multiset_count"
             )) {
             if ($surface -notlike "*$requiredMarker*") {
-                Add-ArchitectureError "M23 executor services must preserve compact supply result marker '$requiredMarker'"
+                Add-ArchitectureError "M23 native executor services must preserve compact supply result marker '$requiredMarker'"
             }
+        }
+    }
+$setupSupply = @(
+        Read-Text "crates/clearra-problem/src/compile/setup_condition_compiler.rs"
+        Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_finder.rs"
+    ) -join "`n"
+foreach ($requiredMarker in @(
+        "QueuePatternExpression::parse",
+        "with_hold_piece",
+        "materialized_universe",
+        "PatternPiecePositionIndex"
+    )) {
+        if ($setupSupply -notlike "*$requiredMarker*") {
+            Add-ArchitectureError "M23 setup finder must consume the supply-owned materialized universe marker '$requiredMarker'"
         }
     }
 $cacheIdentity = @(
