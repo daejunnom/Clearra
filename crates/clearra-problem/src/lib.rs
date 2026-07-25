@@ -27,10 +27,10 @@ pub use query::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFieldError,
     BuildProbabilityQuery, BuildProblemLimits, BuildQuery, BuildTemplateBridge, GroupingMode,
     PcQuery, PieceBudget, PieceBudgetError, ScenarioQuery, ScenarioQuerySource,
-    SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupLimits, SetupLimitsError,
-    SetupProbabilityFilter, SetupProbabilityFilterError, SetupQueueInput, SetupResidueInput,
-    SetupSearchQuery, SpinTargetBaseQuery, SpinTargetQuery, SpinTargetQuerySource,
-    SpinTargetTraceRequirement,
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupLimits,
+    SetupLimitsError, SetupProbabilityFilter, SetupProbabilityFilterError, SetupQueueInput,
+    SetupResidueInput, SetupSearchQuery, SpinTargetBaseQuery, SpinTargetQuery,
+    SpinTargetQuerySource, SpinTargetTraceRequirement,
 };
 pub use search_problem::{
     BackendPolicy, ContinuationPolicy, CountPolicy, ExactTargetPolicy, HoldAutomatonState,

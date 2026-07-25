@@ -228,6 +228,27 @@ fn parses_command_specific_help_as_help_topic() {
 }
 
 #[test]
+fn parses_setup_candidate_priority() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "build",
+    ])
+    .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        args.candidate_priority(),
+        clearra_setup_search::query::SetupCandidatePriority::BuildProbabilityFirst
+    );
+}
+
+#[test]
 fn parses_continue_token_as_concrete_command() {
     let token = "pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:oall:e0:hnone:qIIOOO";
     let invocation = CliParser::parse(["clearra", "continue", token]).expect("continue");

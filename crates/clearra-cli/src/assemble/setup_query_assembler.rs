@@ -22,7 +22,8 @@ impl SetupQueryAssembler {
 
         Ok(SetupSearchQuery::default()
             .with_remaining_pieces(pieces)
-            .with_cycle_reset_borrow_policy(borrow_policy))
+            .with_cycle_reset_borrow_policy(borrow_policy)
+            .with_candidate_priority(args.candidate_priority()))
     }
 }
 

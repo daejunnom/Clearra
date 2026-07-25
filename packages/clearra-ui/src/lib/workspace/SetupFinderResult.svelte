@@ -2,11 +2,11 @@
   import { CheckCircle2, Search } from '@lucide/svelte';
 
   import type {
-    ClearraSetupCandidate,
     ClearraSetupFinderReport,
     ClearraSetupHoldCondition
   } from '../wasm/wasmCommandClient';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import { replaySetupPlacementBoard, setupFinalBoard } from './setupPlacementBoard';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -21,7 +21,6 @@
   export let elapsedMs = 0;
 
   const PAGE_SIZE = 100;
-  const cells = Array.from({ length: 40 }, (_, index) => index);
   let visibleCount = PAGE_SIZE;
   let lastIdentity = '';
 
@@ -42,6 +41,16 @@
     0
   ) ?? 0;
   $: visibleGroups = visibleSetupGroups(report, visibleCount);
+  $: renderedGroups = visibleGroups.map((condition) => ({
+    ...condition,
+    candidates: condition.candidates.map((candidate) => ({
+      candidate,
+      board: replaySetupPlacementBoard(
+        candidate.board_mask,
+        candidate.representative_path
+      ) ?? setupFinalBoard(candidate.board_mask)
+    }))
+  }));
   $: visibleCandidateCount = visibleGroups.reduce(
     (total, group) => total + group.candidates.length,
     0
@@ -84,16 +93,6 @@
     return groups;
   }
 
-  function occupied(candidate: ClearraSetupCandidate, displayIndex: number): boolean {
-    try {
-      const x = displayIndex % 10;
-      const displayY = Math.floor(displayIndex / 10);
-      const y = 3 - displayY;
-      return (BigInt(candidate.board_mask) & (1n << BigInt(y * 10 + x))) !== 0n;
-    } catch {
-      return false;
-    }
-  }
 </script>
 
 <ResultWorkspaceFrame
@@ -150,8 +149,8 @@
       </div>
     {/if}
   {:else if activeTab === 'solutions'}
-    {#if visibleGroups.length}
-      {#each visibleGroups as condition}
+    {#if renderedGroups.length}
+      {#each renderedGroups as condition}
         <section class="condition-group">
           <div class="condition-heading">
             <div>
@@ -161,26 +160,35 @@
             <span>{number(condition.candidate_count)}</span>
           </div>
           <ol class="setup-grid">
-            {#each condition.candidates as candidate}
+            {#each condition.candidates as result}
               <li>
-                <div class="setup-board" role="img" aria-label={candidate.setup_id}>
-                  {#each cells as cell}
-                    <span class:filled={occupied(candidate, cell)}></span>
+                <div
+                  class="setup-board"
+                  style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`}
+                  role="img"
+                  aria-label={result.candidate.setup_id}
+                >
+                  {#each result.board.cells as cell}
+                    <span
+                      class:empty={cell === null}
+                      class:existing={cell === 'G'}
+                      class={`piece-${cell ?? 'empty'}`}
+                    ></span>
                   {/each}
                 </div>
                 <div class="setup-metrics">
-                  <strong>{label('jointProbability')}: {workspaceProbability(language, candidate.joint_probability)}</strong>
-                  <span>{label('buildProbability')}: {workspaceProbability(language, candidate.build_probability)}</span>
-                  <span>{label('conditionalPcProbability')}: {workspaceProbability(language, candidate.conditional_pc_probability)}</span>
-                  <span>{candidate.min_locks === candidate.max_locks
-                    ? label('lockCount', { count: candidate.min_locks })
-                    : label('lockRange', { min: candidate.min_locks, max: candidate.max_locks })}</span>
+                  <strong>{label('jointProbability')}: {workspaceProbability(language, result.candidate.joint_probability)}</strong>
+                  <span>{label('buildProbability')}: {workspaceProbability(language, result.candidate.build_probability)}</span>
+                  <span>{label('conditionalPcProbability')}: {workspaceProbability(language, result.candidate.conditional_pc_probability)}</span>
+                  <span>{result.candidate.min_locks === result.candidate.max_locks
+                    ? label('lockCount', { count: result.candidate.min_locks })
+                    : label('lockRange', { min: result.candidate.min_locks, max: result.candidate.max_locks })}</span>
                 </div>
-                {#if candidate.representative_path.length}
+                {#if result.candidate.representative_path.length}
                   <details class="setup-path">
                     <summary>{label('representativeBuild')}</summary>
                     <ol>
-                      {#each candidate.representative_path as step}
+                      {#each result.candidate.representative_path as step}
                         <li>
                           <b>{step.piece}</b>
                           <span>R{step.rotation} · ({step.x}, {step.y})</span>
@@ -251,9 +259,17 @@
   .condition-heading > span { background: #e7eeeb; border-radius: 3px; color: #285049; font-size: 10px; font-weight: 800; padding: 4px 7px; }
   .setup-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); list-style: none; margin: 0; padding: 0; }
   .setup-grid li { background: #f3f5f4; border: 1px solid #d7ded9; border-radius: 6px; min-width: 0; padding: 10px; }
-  .setup-board { aspect-ratio: 2.5; background: #101817; border: 1px solid #253330; border-radius: 4px; display: grid; gap: 0; grid-template-columns: repeat(10, 1fr); grid-template-rows: repeat(4, 1fr); overflow: hidden; }
-  .setup-board span { background: #1e2927; box-shadow: inset 0 0 0 1px rgba(216, 226, 222, .18); }
-  .setup-board span.filled { background: #d8e2de; box-shadow: inset 2px 2px 0 rgba(255,255,255,.18), inset -2px -2px 0 rgba(41,56,51,.18); }
+  .setup-board { background: #101817; border: 1px solid #253330; border-radius: 4px; display: grid; gap: 0; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-template-rows: repeat(var(--rows), minmax(0, 1fr)); overflow: hidden; }
+  .setup-board span { background: var(--cell-color); box-shadow: 0 0 0 .5px var(--cell-color); min-height: 0; min-width: 0; }
+  .setup-board span.empty { --cell-color: #1e2927; box-shadow: inset 0 0 0 1px rgba(216, 226, 222, .18); }
+  .setup-board span.existing { --cell-color: #d8e2de; }
+  .piece-I { --cell-color: #60d6db; }
+  .piece-O { --cell-color: #f2cb52; }
+  .piece-T { --cell-color: #c47bdc; }
+  .piece-S { --cell-color: #70c982; }
+  .piece-Z { --cell-color: #ec7771; }
+  .piece-J { --cell-color: #6d91e5; }
+  .piece-L { --cell-color: #eaa05d; }
   .setup-metrics { display: grid; gap: 3px; margin-top: 8px; }
   .setup-metrics strong { color: #075f58; font-size: 11px; }
   .setup-metrics span { color: #697570; font-size: 10px; }

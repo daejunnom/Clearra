@@ -76,6 +76,7 @@ fn parse_setup_command(
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut remaining = "IOTSZJL".to_owned();
     let mut allow_post_cycle_borrow = false;
+    let mut candidate_priority = clearra_problem::SetupCandidatePriority::All;
     let mut workers = None;
     let mut use_all_logical_processors = false;
     let mut cursor = 0_usize;
@@ -88,6 +89,17 @@ fn parse_setup_command(
             "--allow-post-cycle-borrow" => {
                 allow_post_cycle_borrow = true;
                 cursor += 1;
+            }
+            "--priority" => {
+                let value = next_value(tokens, &mut cursor, "--priority")?;
+                let Some(priority) = clearra_problem::SetupCandidatePriority::from_keyword(value)
+                else {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid setup priority '{value}'; expected all, build, or pc"),
+                    ));
+                };
+                candidate_priority = priority;
             }
             "--workers" => {
                 workers = Some(parse_positive(
@@ -137,6 +149,7 @@ fn parse_setup_command(
         }
     }
     let mut request = WebCommandRequest::setup(pieces, allow_post_cycle_borrow)
+        .with_setup_candidate_priority(candidate_priority)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(workers) = workers {

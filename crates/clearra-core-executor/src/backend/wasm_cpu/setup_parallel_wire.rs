@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_problem::{SetupCycleResetBorrowPolicy, SetupLimits, SetupSearchQuery};
+use clearra_problem::{
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLimits, SetupSearchQuery,
+};
 
 use super::{
     setup_coverage_graph::{SetupCoverageEdge, SetupCoverageGraph, SetupCoverageNode},
@@ -9,7 +11,7 @@ use super::{
     WasmExactSearchError,
 };
 
-const INITIALIZATION_MAGIC: [u8; 4] = *b"CSP2";
+const INITIALIZATION_MAGIC: [u8; 4] = *b"CSP3";
 const TASK_MAGIC: [u8; 4] = *b"CST2";
 const RESULT_MAGIC: [u8; 4] = *b"CSR2";
 const NO_WITNESS: u32 = u32::MAX;
@@ -82,6 +84,11 @@ pub(super) fn encode_initialization(
     output.push(u8::from(
         query.cycle_reset_borrow_policy() == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse,
     ));
+    output.push(match query.candidate_priority() {
+        SetupCandidatePriority::All => 0,
+        SetupCandidatePriority::BuildProbabilityFirst => 1,
+        SetupCandidatePriority::PcProbabilityFirst => 2,
+    });
     for value in [
         limits.max_shape_families(),
         limits.max_tiling_variants_per_family(),
@@ -156,6 +163,16 @@ pub(super) fn decode_initialization(
             ));
         }
     };
+    let candidate_priority = match reader.u8()? {
+        0 => SetupCandidatePriority::All,
+        1 => SetupCandidatePriority::BuildProbabilityFirst,
+        2 => SetupCandidatePriority::PcProbabilityFirst,
+        _ => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_candidate_priority_invalid",
+            ));
+        }
+    };
     let mut limits = [0_usize; 6];
     for value in &mut limits {
         *value = reader.usize_from_u64("setup_parallel_limit_overflow")?;
@@ -167,6 +184,7 @@ pub(super) fn decode_initialization(
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(residue)
         .with_cycle_reset_borrow_policy(borrow_policy)
+        .with_candidate_priority(candidate_priority)
         .with_limits(limits);
 
     let root = reader.u32()?;

@@ -1,6 +1,9 @@
+export type SetupCandidatePriority = 'all' | 'build' | 'pc';
+
 export type SetupFinderRequest = {
   remaining: string;
   allowPostCycleBorrow: boolean;
+  candidatePriority: SetupCandidatePriority;
 };
 
 export type SetupFinderValidationCode =
@@ -14,7 +17,8 @@ const PIECES = 'IOTSZJL';
 export function createDefaultSetupFinderRequest(): SetupFinderRequest {
   return {
     remaining: PIECES,
-    allowPostCycleBorrow: false
+    allowPostCycleBorrow: false,
+    candidatePriority: 'all'
   };
 }
 
@@ -70,6 +74,7 @@ export function buildSetupFinderCommand(request: SetupFinderRequest): string {
   return [
     'clearra setup',
     `--remaining ${remaining}`,
+    request.candidatePriority === 'all' ? '' : `--priority ${request.candidatePriority}`,
     request.allowPostCycleBorrow ? '--allow-post-cycle-borrow' : ''
   ].filter(Boolean).join(' ');
 }

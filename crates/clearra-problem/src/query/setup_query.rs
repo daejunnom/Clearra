@@ -1,4 +1,5 @@
 pub use super::{
+    setup_candidate_priority::SetupCandidatePriority,
     setup_grouping::GroupingMode,
     setup_hold_policy::SetupHoldPolicy,
     setup_limits::{SetupLimits, SetupLimitsError},
@@ -22,6 +23,7 @@ pub struct SetupSearchQuery {
     limits: SetupLimits,
     residue: SetupResidueInput,
     cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy,
+    candidate_priority: SetupCandidatePriority,
 }
 
 impl SetupSearchQuery {
@@ -47,6 +49,7 @@ impl SetupSearchQuery {
             limits,
             residue: SetupResidueInput::default(),
             cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
+            candidate_priority: SetupCandidatePriority::default(),
         }
     }
 }
@@ -98,6 +101,10 @@ impl SetupSearchQuery {
     pub fn cycle_reset_borrow_policy(&self) -> SetupCycleResetBorrowPolicy {
         self.cycle_reset_borrow_policy
     }
+
+    pub fn candidate_priority(&self) -> SetupCandidatePriority {
+        self.candidate_priority
+    }
 }
 impl SetupSearchQuery {
     pub fn with_queue(mut self, queue: SetupQueueInput) -> Self {
@@ -148,6 +155,11 @@ impl SetupSearchQuery {
         self.cycle_reset_borrow_policy = policy;
         self
     }
+
+    pub fn with_candidate_priority(mut self, priority: SetupCandidatePriority) -> Self {
+        self.candidate_priority = priority;
+        self
+    }
 }
 
 impl Default for SetupSearchQuery {
@@ -163,6 +175,7 @@ impl Default for SetupSearchQuery {
             limits: SetupLimits::default(),
             residue: SetupResidueInput::default(),
             cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
+            candidate_priority: SetupCandidatePriority::default(),
         }
     }
 }
@@ -190,6 +203,7 @@ mod tests {
             )))
             .with_probability_filter(filter)
             .with_grouping_mode(GroupingMode::BuildVariant)
+            .with_candidate_priority(SetupCandidatePriority::PcProbabilityFirst)
             .with_limits(SetupLimits::new(1, 2, 3, 4, 5, 6).expect("limits"));
 
         assert_eq!(query.target(), PcTarget::four_lines());
@@ -197,6 +211,10 @@ mod tests {
         assert_eq!(query.hold_policy().initial_piece(), Some(PieceKind::T));
         assert_eq!(query.probability_filter(), filter);
         assert_eq!(query.grouping_mode(), GroupingMode::BuildVariant);
+        assert_eq!(
+            query.candidate_priority(),
+            SetupCandidatePriority::PcProbabilityFirst
+        );
         assert_eq!(query.limits().max_patterns(), 5);
         assert_eq!(query.limits().post_pc_retained_trace_limit(), 6);
     }
