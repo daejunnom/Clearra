@@ -2,10 +2,7 @@ use clearra_core_domain::{
     board::board_size::BoardSize, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
 };
 use clearra_setup_search::query::{
-    SetupHoldPolicy, SetupLimits, SetupProbabilityFilter, SetupQueueInput, SetupSearchQuery,
-};
-use clearra_supply::queue::{
-    bag_aligned_pattern::BagAlignedPattern, fixed_sequence::FixedSequence,
+    SetupHoldPolicy, SetupLimits, SetupProbabilityFilter, SetupSearchQuery,
 };
 
 use crate::diagnostic::diagnostic_code::{DiagnosticCode, DiagnosticSeverity};
@@ -13,46 +10,47 @@ use crate::diagnostic::diagnostic_code::{DiagnosticCode, DiagnosticSeverity};
 use super::SetupQueryValidator;
 
 #[test]
-fn setup_query_validator_accepts_fixed_sequence_duplicates() {
-    let query = SetupSearchQuery::default().with_queue(SetupQueueInput::fixed_sequence(
-        FixedSequence::new(vec![PieceKind::I, PieceKind::O, PieceKind::I]),
-    ));
+fn setup_query_validator_accepts_one_explicit_hold_duplicate() {
+    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+        PieceKind::I,
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::S,
+        PieceKind::Z,
+        PieceKind::J,
+    ]);
 
     let report = SetupQueryValidator::validate(&query);
 
     assert!(!report.has_errors());
-    assert!(report.contains_code(DiagnosticCode::ISupplyFixedSequenceAccepted));
-    assert!(!report.contains_code(DiagnosticCode::ESupplyInvalidDuplicate));
+    assert!(report.contains_code(DiagnosticCode::ISetupQueryMvpSupported));
 }
 
 #[test]
-fn setup_query_validator_rejects_bag_aligned_pattern_duplicates() {
-    let query = SetupSearchQuery::default().with_queue(SetupQueueInput::bag_aligned_pattern(
-        BagAlignedPattern::new(vec![PieceKind::I, PieceKind::O, PieceKind::I]),
-    ));
+fn setup_query_validator_rejects_multiple_explicit_hold_duplicates() {
+    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+        PieceKind::I,
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::S,
+        PieceKind::Z,
+    ]);
 
     let report = SetupQueryValidator::validate(&query);
 
     assert!(report.has_errors());
     assert!(report.diagnostics().iter().any(|diagnostic| {
-        diagnostic.code() == DiagnosticCode::ESupplyInvalidDuplicate
+        diagnostic.code() == DiagnosticCode::ESetupQueryInvalid
             && diagnostic.severity() == DiagnosticSeverity::Error
     }));
 }
 
 #[test]
 fn setup_query_validator_rejects_outside_mvp_target_and_board() {
-    let query = SetupSearchQuery::default()
-        .with_queue(SetupQueueInput::fixed_sequence(FixedSequence::new(vec![
-            PieceKind::I,
-            PieceKind::O,
-            PieceKind::T,
-            PieceKind::S,
-            PieceKind::Z,
-            PieceKind::J,
-            PieceKind::L,
-        ])))
-        .with_limits(Default::default());
+    let query = SetupSearchQuery::default();
     let query = SetupSearchQuery::new(
         BoardSize::new(12, 20).expect("board"),
         PcTarget::new(8).expect("target"),

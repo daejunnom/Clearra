@@ -1,6 +1,5 @@
 use clearra_app::{AppCommand, SetupAppCommand};
-use clearra_problem::{SetupQueueInput, SetupSearchQuery};
-use clearra_supply::queue::observed_queue::ObservedQueue;
+use clearra_problem::{SetupCycleResetBorrowPolicy, SetupSearchQuery};
 
 use crate::{
     model::{GuiBackendForm, GuiSetupSearchForm},
@@ -28,16 +27,18 @@ impl SetupRequestBuilder {
         }
         BackendRequestBuilder::validate_form(backend)?;
 
-        let sequence = parse_piece_sequence(form.queue(), "setup queue")?;
+        let sequence = parse_piece_sequence(form.remaining_pieces(), "setup remaining pieces")?;
         let pieces = sequence.pieces().to_vec();
-        let queue = if form.fixed_queue() {
-            SetupQueueInput::fixed_sequence(sequence)
+        let borrow_policy = if form.allow_post_cycle_borrow() {
+            SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
         } else {
-            SetupQueueInput::observed(ObservedQueue::new(pieces))
+            SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse
         };
 
         Ok(AppCommand::Setup(SetupAppCommand::new(
-            SetupSearchQuery::default().with_queue(queue),
+            SetupSearchQuery::default()
+                .with_remaining_pieces(pieces)
+                .with_cycle_reset_borrow_policy(borrow_policy),
         )))
     }
 }

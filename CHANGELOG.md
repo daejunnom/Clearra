@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-26
+
+- Added the exact 4-line Setup Finder product path, deriving buildable partial
+  setups from inverse lock-clear geometry families instead of synthetic shelf
+  placements or per-solution continuation searches.
+- Added residue and initial-hold condition compilation, exact build/joint/
+  conditional pattern coverage, representative setup boards, and complete
+  setup reports across CLI, browser WASM, and desktop request surfaces.
+- Added segmented multi-worker setup evaluation with canonical result merging,
+  cooperative progress and cancellation, bounded worker memory accounting, and
+  a serial fallback for small searches.
+- Connected the Setup Finder workspace between PC Search and Build Probability
+  with English and Korean controls, validation, result rendering, and stable
+  query semantics.
+- Improved inverse geometry and reachability reuse while preserving exact
+  candidate, coverage, hold, kick, and line-clear identities.
+- Parallelized browser verifier prewarm, overlapped CPU and GPU preparation,
+  reused the warmed worker pool for the first search, and removed a WASM timing
+  trap from WebGPU initialization.
+
 ## 0.1.5 - 2026-07-25
 
 - Corrected finite fixed and pattern queue handling so an exact terminal held

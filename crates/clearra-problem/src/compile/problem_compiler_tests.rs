@@ -310,6 +310,15 @@ mod case_setup_post_pc_compiles_to_scenario_search_problem {
         let query = SetupSearchQuery::default()
             .with_queue(SetupQueueInput::fixed_sequence(FixedSequence::new(vec![
                 PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::S,
+                PieceKind::Z,
+                PieceKind::J,
+                PieceKind::L,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
             ])))
             .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T));
         let problem = ProblemCompiler::compile_setup(&query).expect("setup-post-pc problem");
@@ -319,7 +328,7 @@ mod case_setup_post_pc_compiles_to_scenario_search_problem {
         assert!(problem.setup_query().is_some());
         assert_eq!(problem.goal(), PcCompletionGoal::ClearToEmpty);
         assert_eq!(problem.initial_hold().hold_piece(), Some(PieceKind::T));
-        assert_eq!(problem.piece_window().max_pieces(), 7);
+        assert_eq!(problem.piece_window().max_pieces(), 10);
     }
 }
 
@@ -331,6 +340,15 @@ mod case_setup_query_compiles_to_search_problem {
         let query = SetupSearchQuery::default()
             .with_queue(SetupQueueInput::fixed_sequence(FixedSequence::new(vec![
                 PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::S,
+                PieceKind::Z,
+                PieceKind::J,
+                PieceKind::L,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
             ])))
             .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T));
         let problem = ProblemCompiler::compile_setup(&query).expect("setup problem");
@@ -338,9 +356,9 @@ mod case_setup_query_compiles_to_search_problem {
         assert_eq!(problem.preset().as_str(), "setup");
         assert!(problem.setup_query().is_some());
         assert_eq!(problem.initial_board().width(), 10);
-        assert_eq!(problem.visible_height(), 2);
-        assert_eq!(problem.search_height(), 20);
-        assert_eq!(problem.piece_window().max_pieces(), 7);
+        assert_eq!(problem.visible_height(), 4);
+        assert_eq!(problem.search_height(), 4);
+        assert_eq!(problem.piece_window().max_pieces(), 10);
         assert_eq!(problem.supply().hold_piece(), Some(PieceKind::T));
         assert_eq!(problem.budget().max_results(), query.limits().max_results());
     }

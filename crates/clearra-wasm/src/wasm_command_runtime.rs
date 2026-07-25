@@ -83,6 +83,45 @@ pub struct WasmSearchReport {
     pub forward_initial_board_mask: Option<String>,
     pub maximum_damage: Option<u32>,
     pub forward_outcomes: Vec<WasmForwardSearchOutcome>,
+    pub setup_report: Option<WasmSetupFinderReport>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmSetupFinderReport {
+    pub cycle: u8,
+    pub remaining_pieces: String,
+    pub post_cycle_borrow_enabled: bool,
+    pub coverage_semantics: String,
+    pub geometry_family_count: String,
+    pub partial_build_node_count: usize,
+    pub complete: bool,
+    pub hold_conditions: Vec<WasmSetupHoldCondition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmSetupHoldCondition {
+    pub condition_id: String,
+    pub initial_hold: Option<String>,
+    pub pattern_expression: String,
+    pub pattern_count: usize,
+    pub candidate_count: usize,
+    pub result_truncated: bool,
+    pub complete: bool,
+    pub candidates: Vec<WasmSetupCandidate>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmSetupCandidate {
+    pub setup_id: String,
+    pub board_mask: String,
+    pub min_locks: u8,
+    pub max_locks: u8,
+    pub build_covered_patterns: usize,
+    pub joint_covered_patterns: usize,
+    pub build_probability: String,
+    pub joint_probability: String,
+    pub conditional_pc_probability: String,
+    pub representative_path: Vec<WasmSearchPathStep>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -380,6 +419,61 @@ impl WasmSearchReport {
             forward_initial_board_mask: None,
             maximum_damage: None,
             forward_outcomes: Vec::new(),
+            setup_report: result
+                .setup_finder_report()
+                .map(|report| WasmSetupFinderReport {
+                    cycle: report.cycle(),
+                    remaining_pieces: report.remaining_pieces().to_owned(),
+                    post_cycle_borrow_enabled: report.post_cycle_borrow_enabled(),
+                    coverage_semantics: report.coverage_semantics().to_owned(),
+                    geometry_family_count: report.geometry_family_count().to_owned(),
+                    partial_build_node_count: report.partial_build_node_count(),
+                    complete: report.complete(),
+                    hold_conditions: report
+                        .hold_conditions()
+                        .iter()
+                        .map(|condition| WasmSetupHoldCondition {
+                            condition_id: condition.condition_id().to_owned(),
+                            initial_hold: condition
+                                .initial_hold()
+                                .map(|piece| piece.as_ascii().to_string()),
+                            pattern_expression: condition.pattern_expression().to_owned(),
+                            pattern_count: condition.pattern_count(),
+                            candidate_count: condition.candidate_count(),
+                            result_truncated: condition.result_truncated(),
+                            complete: condition.complete(),
+                            candidates: condition
+                                .candidates()
+                                .iter()
+                                .map(|candidate| WasmSetupCandidate {
+                                    setup_id: candidate.setup_id().to_owned(),
+                                    board_mask: format!("0x{:x}", candidate.board_mask()),
+                                    min_locks: candidate.min_locks(),
+                                    max_locks: candidate.max_locks(),
+                                    build_covered_patterns: candidate.build_covered_patterns(),
+                                    joint_covered_patterns: candidate.joint_covered_patterns(),
+                                    build_probability: candidate.build_probability().to_owned(),
+                                    joint_probability: candidate.joint_probability().to_owned(),
+                                    conditional_pc_probability: candidate
+                                        .conditional_pc_probability()
+                                        .to_owned(),
+                                    representative_path: candidate
+                                        .representative_path()
+                                        .iter()
+                                        .map(|step| WasmSearchPathStep {
+                                            piece: step.piece().as_ascii().to_string(),
+                                            rotation: step.rotation(),
+                                            x: step.x(),
+                                            y: step.y(),
+                                            hold: step.hold().to_owned(),
+                                            cleared_lines: step.cleared_lines(),
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                }),
         })
     }
 }

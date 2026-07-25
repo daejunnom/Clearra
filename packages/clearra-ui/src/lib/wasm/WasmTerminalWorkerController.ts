@@ -28,7 +28,9 @@ export class WasmTerminalWorkerController {
 
   run() {
     if (this.worker && this.prewarmingWorker === this.worker) {
-      this.releaseWorker(this.worker);
+      // The worker awaits in-flight prewarm and preserves its compiled
+      // coordinator module and verifier pool for the requested job.
+      this.prewarmingWorker = null;
     }
     const worker = this.ensureWorker();
     if (!worker) return;

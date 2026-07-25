@@ -1,32 +1,6 @@
 use super::*;
 
 #[test]
-fn process_e2e_x3_setup_reports_raw_metrics_without_condition_summary() {
-    let setup = clearra()
-        .args(["--verbose", "setup", "--queue", "IOTSZJL", "--fixed"])
-        .output()
-        .expect("clearra-cli process runs");
-    assert!(setup.status.success());
-    assert!(setup.stderr.is_empty());
-    let stdout = String::from_utf8(setup.stdout).expect("setup stdout utf8");
-
-    for marker in [
-        "shape_family_id: setup-family-0",
-        expected_setup_tiling_variant_count(),
-        expected_setup_build_variant_count(),
-        expected_setup_covered_pattern_count(),
-        expected_setup_coverage_probability(),
-        "post_pc_solution_count: 0",
-        "score_basis: none",
-        "backend_report: attached",
-        "raw_coverage_export_path: inline://clearra/setup/raw-coverage/setup-family-0/union",
-    ] {
-        assert!(stdout.contains(marker), "missing setup raw metric {marker}");
-    }
-    assert!(!stdout.contains("condition_summary"));
-}
-
-#[test]
 fn process_e2e_m19_backend_policy_reports_fallback_and_backend_split() {
     let output = clearra()
         .args([

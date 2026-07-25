@@ -1,5 +1,6 @@
 use clearra_pc_graph::request::GpuDeviceSelection;
-use std::time::Instant;
+
+use crate::performance::{host_elapsed_ns, host_now, HostInstant};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuSearchWarmupReport {
@@ -59,9 +60,8 @@ impl GpuSearchWarmupReport {
         }
     }
 
-    fn with_elapsed(mut self, started_at: Instant) -> Self {
-        self.initialization_elapsed_ns =
-            u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    fn with_elapsed(mut self, started_at: HostInstant) -> Self {
+        self.initialization_elapsed_ns = host_elapsed_ns(started_at);
         self
     }
 }
@@ -80,14 +80,14 @@ pub fn prewarm_gpu_search(device: GpuDeviceSelection) -> GpuSearchWarmupReport {
 
     #[cfg(not(feature = "webgpu-search"))]
     {
-        let started_at = Instant::now();
+        let started_at = host_now();
         let _ = device;
         GpuSearchWarmupReport::unavailable("webgpu_search_not_connected").with_elapsed(started_at)
     }
 }
 
 pub async fn prewarm_gpu_search_async(device: GpuDeviceSelection) -> GpuSearchWarmupReport {
-    let started_at = Instant::now();
+    let started_at = host_now();
     #[cfg(feature = "webgpu-search")]
     {
         return match clearra_webgpu::WebGpuGeometryExactCoverBackend::connect_selected(

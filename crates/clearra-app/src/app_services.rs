@@ -8,7 +8,7 @@ use clearra_core_domain::execution_cancellation::{ExecutionCancellationToken, Ex
 use clearra_core_executor::{
     CoreExecutionError, CoreExecutionResult, CoreExecutor, CorePostProcessScoreCell,
     CorePostProcessSpinCoverage, PercentService, PercentServiceError, WasmBuildProbabilityBackend,
-    WasmCpuSearchBackend, WasmCpuSearchError,
+    WasmCpuSearchBackend, WasmCpuSearchError, WasmSetupSearchBackend,
 };
 use clearra_i18n::{LanguageId, LanguagePreference, LanguageResolver};
 use clearra_objectives::policy::score_objective_policy::{
@@ -19,7 +19,7 @@ use clearra_postprocess::{
     PcScoringPostProcessInput, PcScoringPostProcessor, ScoreCell, ScoreMatrix, SpinCoverageTarget,
     TSpinCoverageOnlyMaterializer,
 };
-use clearra_problem::SearchProblem;
+use clearra_problem::{SearchProblem, SetupSearchQuery};
 use clearra_scoring::{
     builtin::{
         guideline_pc_score_with_spin_profile, jstris_ultra_pc_score_with_spin_profile,
@@ -274,6 +274,18 @@ impl AppCoreExecutorService {
             complete,
         );
         Ok(result.with_postprocess_spin_coverages(vec![shard]))
+    }
+}
+impl AppCoreExecutorService {
+    pub fn execute_setup_with_control(
+        &self,
+        query: &SetupSearchQuery,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        if control.is_cancelled() {
+            return Err(CoreExecutionError::Cancelled);
+        }
+        WasmSetupSearchBackend::execute_with_control(query, control).map_err(core_error_from_wasm)
     }
 }
 impl AppCoreExecutorService {

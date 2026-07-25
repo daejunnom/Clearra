@@ -9,8 +9,9 @@ pub mod search_problem;
 mod search_problem_fields;
 
 pub use compile::{
+    compile_setup_search_condition, compile_setup_search_conditions, setup_search_condition_count,
     PackingProblemCompiler, PackingProblemKind, PackingProblemSpec, ProblemCompileError,
-    ProblemCompiler, SpinTargetCompiler,
+    ProblemCompiler, SetupConditionCompileError, SetupSearchCondition, SpinTargetCompiler,
 };
 pub use extended_pc_search_contract::{ExtendedPcSearchContract, ExtendedPcSearchContractError};
 pub use goal::{
@@ -25,9 +26,10 @@ pub use preset::{
 pub use query::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFieldError,
     BuildProbabilityQuery, BuildProblemLimits, BuildQuery, BuildTemplateBridge, GroupingMode,
-    PcQuery, PieceBudget, PieceBudgetError, ScenarioQuery, ScenarioQuerySource, SetupHoldPolicy,
-    SetupLimits, SetupLimitsError, SetupProbabilityFilter, SetupProbabilityFilterError,
-    SetupQueueInput, SetupSearchQuery, SpinTargetBaseQuery, SpinTargetQuery, SpinTargetQuerySource,
+    PcQuery, PieceBudget, PieceBudgetError, ScenarioQuery, ScenarioQuerySource,
+    SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupLimits, SetupLimitsError,
+    SetupProbabilityFilter, SetupProbabilityFilterError, SetupQueueInput, SetupResidueInput,
+    SetupSearchQuery, SpinTargetBaseQuery, SpinTargetQuery, SpinTargetQuerySource,
     SpinTargetTraceRequirement,
 };
 pub use search_problem::{

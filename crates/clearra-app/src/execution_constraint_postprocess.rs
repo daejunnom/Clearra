@@ -10,7 +10,7 @@ use clearra_core_domain::{
 };
 use clearra_core_executor::{
     solution_probability::probability_reports, CoreExecutionError, CoreExecutionResult,
-    SolutionCoverage,
+    NormalizedSolutionCoverage, SolutionCoverage,
 };
 use clearra_coverage::cover::exact_minimum_cover::exact_minimum_cover;
 use clearra_coverage::pattern::{
@@ -18,8 +18,7 @@ use clearra_coverage::pattern::{
 };
 use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
 use clearra_postprocess::{
-    BackToBackExecutionFilter, CandidatePatternCoverage, TSpinCoverageOnlyMaterialization,
-    TSpinCoverageOnlyMaterializer,
+    BackToBackExecutionFilter, CandidatePatternCoverage, TSpinCoverageOnlyMaterializer,
 };
 use clearra_replay::{ExactScoringExecutionBatch, SpinCoverageExecutionBatch};
 use clearra_scoring::profile::SpinProfileId;
@@ -91,6 +90,8 @@ pub(crate) fn apply_execution_constraints(
             component: "b2b_preservation_pattern_universe_missing",
         });
     }
+    let authoritative_coverage = authoritative_solution_coverages(&result, pattern_count)?;
+    validate_execution_graph_authority(&result, &authoritative_coverage)?;
 
     let mut accepted = BTreeMap::<String, PatternBitSet>::new();
     let mut pass_results = Vec::<PassConstraintResult>::new();
@@ -108,10 +109,15 @@ pub(crate) fn apply_execution_constraints(
         )
         .map_err(|_| CoreExecutionError::Cancelled)?;
         complete &= materialized.complete();
+        let pass = merge_candidate_coverages(
+            &mut accepted,
+            materialized.candidate_coverages(),
+            &authoritative_coverage,
+            pattern_count,
+        )?;
         witnessed_pattern_count =
-            witnessed_pattern_count.saturating_add(materialized.witnessed_pattern_count());
-        merge_candidate_coverages(&mut accepted, materialized.candidate_coverages())?;
-        pass_results.push(PassConstraintResult::from_materialization(&materialized));
+            witnessed_pattern_count.saturating_add(pass.witnessed_pattern_count);
+        pass_results.push(pass);
         filtered_scoring_batches.push(filtered);
     }
     for batch in result.spin_coverage_execution_batches() {
@@ -123,10 +129,15 @@ pub(crate) fn apply_execution_constraints(
         )
         .map_err(|_| CoreExecutionError::Cancelled)?;
         complete &= materialized.complete();
+        let pass = merge_candidate_coverages(
+            &mut accepted,
+            materialized.candidate_coverages(),
+            &authoritative_coverage,
+            pattern_count,
+        )?;
         witnessed_pattern_count =
-            witnessed_pattern_count.saturating_add(materialized.witnessed_pattern_count());
-        merge_candidate_coverages(&mut accepted, materialized.candidate_coverages())?;
-        pass_results.push(PassConstraintResult::from_materialization(&materialized));
+            witnessed_pattern_count.saturating_add(pass.witnessed_pattern_count);
+        pass_results.push(pass);
         filtered_spin_batches.push(filtered);
     }
     if !complete {
@@ -134,7 +145,6 @@ pub(crate) fn apply_execution_constraints(
             component: "b2b_preservation_execution_evidence_incomplete",
         });
     }
-
     let weights = materialized_weights(&result, pattern_count)?;
     let probability_complete = result.bool_field("probability_complete").unwrap_or(false);
     let count_complete = result.bool_field("count_complete").unwrap_or(false);
@@ -260,7 +270,6 @@ pub(crate) fn apply_execution_constraints(
     } else {
         "none"
     };
-
     let mut replacements = vec![
         field("solution_found", solution_count != 0),
         field("unique_solution_count", solution_count),
@@ -307,6 +316,10 @@ pub(crate) fn apply_execution_constraints(
         ]);
     }
     append_build_symmetry_fields(&mut replacements, &pass_results, &weights);
+    let normalized_solution_coverages = accepted
+        .iter()
+        .map(|(key, coverage)| NormalizedSolutionCoverage::new(key.clone(), coverage.clone()))
+        .collect();
 
     Ok(result
         .with_replaced_fields(replacements)
@@ -316,6 +329,7 @@ pub(crate) fn apply_execution_constraints(
         .with_normalized_solution_identities(identities)
         .with_coverage_pattern_words(union.words().to_vec())
         .with_solution_coverages(solution_coverages)
+        .with_normalized_solution_coverages(normalized_solution_coverages)
         .with_solution_probabilities(solution_probabilities)
         .with_exact_scoring_execution_batches(filtered_scoring_batches)
         .with_spin_coverage_execution_batches(filtered_spin_batches))
@@ -336,21 +350,145 @@ fn coverage_union<'a>(
     Ok(union)
 }
 
+fn authoritative_solution_coverages(
+    result: &CoreExecutionResult,
+    pattern_count: usize,
+) -> Result<BTreeMap<String, PatternBitSet>, CoreExecutionError> {
+    let mut authoritative = BTreeMap::<String, PatternBitSet>::new();
+    for coverage in result.normalized_solution_coverages() {
+        merge_authoritative_coverage(
+            &mut authoritative,
+            coverage.solution_key(),
+            coverage.covered_patterns(),
+            pattern_count,
+        )?;
+    }
+    for coverage in result.solution_coverages() {
+        let key = NormalizedTilingSolutionKey::from_standard_board64_identity(coverage.identity());
+        merge_authoritative_coverage(
+            &mut authoritative,
+            key.as_str(),
+            coverage.covered_patterns(),
+            pattern_count,
+        )?;
+    }
+    if authoritative.is_empty() {
+        return Err(CoreExecutionError::RuntimeUnavailable {
+            component: "b2b_preservation_authoritative_coverage_missing",
+        });
+    }
+    Ok(authoritative)
+}
+
+fn merge_authoritative_coverage(
+    authoritative: &mut BTreeMap<String, PatternBitSet>,
+    candidate_key: &str,
+    coverage: &PatternBitSet,
+    pattern_count: usize,
+) -> Result<(), CoreExecutionError> {
+    if coverage.pattern_count() != pattern_count {
+        return Err(CoreExecutionError::RuntimeUnavailable {
+            component: "b2b_preservation_authoritative_coverage_mismatch",
+        });
+    }
+    authoritative
+        .entry(candidate_key.to_owned())
+        .or_insert_with(|| PatternBitSet::new(pattern_count))
+        .union_with(coverage)
+        .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+            component: "b2b_preservation_authoritative_coverage_mismatch",
+        })
+}
+
+fn validate_execution_graph_authority(
+    result: &CoreExecutionResult,
+    authoritative: &BTreeMap<String, PatternBitSet>,
+) -> Result<(), CoreExecutionError> {
+    let scoring_complete = result
+        .exact_scoring_execution_batches()
+        .iter()
+        .flat_map(|batch| batch.graphs())
+        .all(|graph| {
+            let key = NormalizedTilingSolutionKey::from_standard_board64_identity(graph.identity());
+            authoritative.contains_key(key.as_str())
+        });
+    let spin_complete = result
+        .spin_coverage_execution_batches()
+        .iter()
+        .flat_map(|batch| batch.graphs())
+        .all(|graph| authoritative.contains_key(graph.candidate_key()));
+    if scoring_complete && spin_complete {
+        Ok(())
+    } else {
+        Err(CoreExecutionError::RuntimeUnavailable {
+            component: "b2b_preservation_candidate_coverage_missing",
+        })
+    }
+}
+
 fn merge_candidate_coverages(
     accepted: &mut BTreeMap<String, PatternBitSet>,
     coverages: &[CandidatePatternCoverage],
-) -> Result<(), CoreExecutionError> {
+    authoritative: &BTreeMap<String, PatternBitSet>,
+    pattern_count: usize,
+) -> Result<PassConstraintResult, CoreExecutionError> {
+    let mut pass_coverage = PatternBitSet::new(pattern_count);
+    let mut pass_solutions = BTreeSet::new();
+    let mut witnessed_pattern_count = 0_u128;
     for coverage in coverages {
+        let allowed = authoritative.get(coverage.candidate_key()).ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_candidate_coverage_missing",
+            },
+        )?;
+        let constrained = coverage_intersection(coverage.covered_patterns(), allowed)?;
+        if constrained.is_empty() {
+            continue;
+        }
         let entry = accepted
             .entry(coverage.candidate_key().to_owned())
-            .or_insert_with(|| PatternBitSet::new(coverage.covered_patterns().pattern_count()));
-        entry.union_with(coverage.covered_patterns()).map_err(|_| {
+            .or_insert_with(|| PatternBitSet::new(pattern_count));
+        entry
+            .union_with(&constrained)
+            .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_candidate_coverage_mismatch",
+            })?;
+        pass_coverage.union_with(&constrained).map_err(|_| {
             CoreExecutionError::RuntimeUnavailable {
                 component: "b2b_preservation_candidate_coverage_mismatch",
             }
         })?;
+        pass_solutions.insert(coverage.candidate_key());
+        witnessed_pattern_count =
+            witnessed_pattern_count.saturating_add(u128::from(constrained.count_ones()));
     }
-    Ok(())
+    Ok(PassConstraintResult {
+        coverage: pass_coverage,
+        solution_count: pass_solutions.len(),
+        witnessed_pattern_count,
+    })
+}
+
+fn coverage_intersection(
+    left: &PatternBitSet,
+    right: &PatternBitSet,
+) -> Result<PatternBitSet, CoreExecutionError> {
+    if left.pattern_count() != right.pattern_count() {
+        return Err(CoreExecutionError::RuntimeUnavailable {
+            component: "b2b_preservation_candidate_coverage_mismatch",
+        });
+    }
+    PatternBitSet::from_words(
+        left.pattern_count(),
+        left.words()
+            .iter()
+            .zip(right.words())
+            .map(|(left, right)| left & right)
+            .collect(),
+    )
+    .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+        component: "b2b_preservation_candidate_coverage_mismatch",
+    })
 }
 
 fn materialized_weights(
@@ -466,15 +604,7 @@ fn retain_accepted_spin_batches(
 struct PassConstraintResult {
     coverage: PatternBitSet,
     solution_count: usize,
-}
-
-impl PassConstraintResult {
-    fn from_materialization(materialized: &TSpinCoverageOnlyMaterialization) -> Self {
-        Self {
-            coverage: materialized.covered_patterns().clone(),
-            solution_count: materialized.candidate_keys().count(),
-        }
-    }
+    witnessed_pattern_count: u128,
 }
 
 fn append_build_symmetry_fields(

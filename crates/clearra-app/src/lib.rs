@@ -12,6 +12,7 @@ mod cooperative_execution;
 pub mod diagnostics;
 mod distributed_forward_execution;
 mod distributed_search_execution;
+mod distributed_setup_execution;
 mod execution_constraint_postprocess;
 pub mod gui_bridge;
 pub mod io;
@@ -56,6 +57,9 @@ pub use distributed_forward_execution::{
     DistributedForwardPreparation, PreparedDistributedForwardSearch,
 };
 pub use distributed_search_execution::{DistributedSearchPreparation, PreparedDistributedSearch};
+pub use distributed_setup_execution::{
+    DistributedSetupPreparation, PreparedDistributedSetupSearch,
+};
 pub use gui_bridge::{
     GuiAppRequestPreview, GuiBackendCapabilityView, GuiBridgeError, GuiBridgeErrorCode,
     GuiCommandPreview, GuiDisabledReason, GuiFormState, GuiFormValidation, GuiGpuBackendOptionView,

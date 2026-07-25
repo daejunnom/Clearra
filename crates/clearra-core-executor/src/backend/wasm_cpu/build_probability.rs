@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use clearra_core_domain::{
     board::board_size::BoardSize,
@@ -19,7 +19,7 @@ use clearra_supply::hold_automaton::HoldAutomatonState;
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
-    CoreExecutionResult, CorePathStep,
+    CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage, SolutionCoverage,
 };
 
 use super::{
@@ -33,7 +33,7 @@ use super::{
         WasmCandidatePacket, WasmCandidateProducerAdvance, WasmDistributedBackendExecution,
         WasmDistributedGeometrySummary, WasmDistributedProgress,
     },
-    exact_collections::ExactHashSet,
+    exact_collections::{ExactHashMap, ExactHashSet},
     geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, SharedTargetGroups},
     kick_profiles::replay_profile_ids,
     standard_bag_coverage::StandardBagCoverage,
@@ -270,6 +270,9 @@ pub(super) fn merge_symmetry_results(
     let all_results = core::iter::once(&primary)
         .chain(results.iter())
         .collect::<Vec<_>>();
+    let merged_solution_coverages = merge_board64_solution_coverages(&all_results, pattern_count)?;
+    let merged_normalized_solution_coverages =
+        merge_normalized_solution_coverages(&all_results, pattern_count)?;
     let board64_identity_surface = all_results
         .iter()
         .all(|result| result.field("board_storage") != Some("board256-canonical"));
@@ -438,6 +441,8 @@ pub(super) fn merge_symmetry_results(
     }
     let merged = primary
         .with_coverage_pattern_words(union_words)
+        .with_solution_coverages(merged_solution_coverages)
+        .with_normalized_solution_coverages(merged_normalized_solution_coverages)
         .with_exact_scoring_execution_batches(scoring_batches)
         .with_spin_coverage_execution_batches(spin_coverage_batches)
         .with_replaced_fields(replacements);
@@ -547,6 +552,7 @@ pub(super) struct CompactBuildProbabilitySession {
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
     buildable_tilings: ExactHashSet<StandardBoard64TilingIdentity>,
+    solution_coverage: Option<ExactHashMap<StandardBoard64TilingIdentity, PatternBitSet>>,
     candidate_count: usize,
     candidate_digest: u64,
     build_variant_count: u128,
@@ -743,6 +749,11 @@ impl CompactBuildProbabilitySession {
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             buildable_tilings: ExactHashSet::default(),
+            solution_coverage: problem
+                .objective()
+                .execution_constraints()
+                .requested()
+                .then(ExactHashMap::default),
             candidate_count: 0,
             candidate_digest: 0,
             build_variant_count: 0,
@@ -832,8 +843,9 @@ impl CompactBuildProbabilitySession {
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
         )?;
-        let coverage_only_needs_witness = self.problem.count_policy()
-            == clearra_pc_graph::request::PcCountPolicy::CountUnique
+        let solution_coverage_required = self.solution_coverage.is_some();
+        let coverage_only_needs_witness = !solution_coverage_required
+            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
             && target.single_pattern_witness_is_exact()
             && (self.buildup.standard_bag_coverage_complete()
                 || self
@@ -869,6 +881,12 @@ impl CompactBuildProbabilitySession {
             .total_reachability_states
             .saturating_add(result.reachability_states);
 
+        let retain_solution_coverage = self.solution_coverage.is_some();
+        let mut candidate_coverage = result
+            .covered_patterns
+            .as_ref()
+            .filter(|_| retain_solution_coverage)
+            .cloned();
         if let Some(bits) = result.covered_patterns.as_ref() {
             self.covered_patterns.union_with(bits).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
@@ -877,9 +895,30 @@ impl CompactBuildProbabilitySession {
             })?;
         }
         if let Some(root) = result.symbolic_coverage_root {
+            if retain_solution_coverage {
+                let materialized = self.buildup.materialize_standard_bag_root(root)?;
+                if let Some(coverage) = candidate_coverage.as_mut() {
+                    coverage.union_with(&materialized).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_build_probability_solution_coverage_universe_mismatch",
+                        )
+                    })?;
+                } else {
+                    candidate_coverage = Some(materialized);
+                }
+            }
             self.buildup.merge_standard_bag_coverage(root)?;
         }
         if result.buildable {
+            if retain_solution_coverage {
+                let candidate_coverage =
+                    candidate_coverage
+                        .as_ref()
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "wasm_build_probability_solution_coverage_missing",
+                        ))?;
+                self.merge_solution_coverage(candidate.identity, candidate_coverage)?;
+            }
             self.buildable_tilings.try_reserve(1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
                     "wasm_build_probability_solution_storage_unavailable",
@@ -905,6 +944,34 @@ impl CompactBuildProbabilitySession {
             }
         }
         Ok(())
+    }
+
+    fn merge_solution_coverage(
+        &mut self,
+        identity: StandardBoard64TilingIdentity,
+        coverage: &PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        let map = self
+            .solution_coverage
+            .as_mut()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_solution_coverage_not_requested",
+            ))?;
+        if !map.contains_key(&identity) {
+            map.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_coverage_storage_unavailable",
+                )
+            })?;
+        }
+        map.entry(identity)
+            .or_insert_with(|| PatternBitSet::new(coverage.pattern_count()))
+            .union_with(coverage)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_coverage_universe_mismatch",
+                )
+            })
     }
 
     pub(super) fn advance_distributed_geometry(
@@ -1063,6 +1130,11 @@ impl CompactBuildProbabilitySession {
                     )
                 })?;
                 self.buildable_tilings.insert(*identity);
+            }
+        }
+        if self.solution_coverage.is_some() {
+            for coverage in result.solution_coverages() {
+                self.merge_solution_coverage(coverage.identity(), coverage.covered_patterns())?;
             }
         }
         let worker_candidates = result.usize_field("packing_candidate_count").unwrap_or(0);
@@ -1264,6 +1336,30 @@ impl CompactBuildProbabilitySession {
             .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
             .map(|key| key.as_str().to_owned())
             .collect::<Vec<_>>();
+        let solution_coverages = self
+            .solution_coverage
+            .as_ref()
+            .map(|coverage| {
+                let mut entries = coverage
+                    .iter()
+                    .map(|(identity, patterns)| SolutionCoverage::new(*identity, patterns.clone()))
+                    .collect::<Vec<_>>();
+                entries.sort_unstable_by_key(SolutionCoverage::identity);
+                entries
+            })
+            .unwrap_or_default();
+        let normalized_solution_coverages = solution_coverages
+            .iter()
+            .map(|coverage| {
+                NormalizedSolutionCoverage::new(
+                    NormalizedTilingSolutionKey::from_standard_board64_identity(
+                        coverage.identity(),
+                    )
+                    .as_str(),
+                    coverage.covered_patterns().clone(),
+                )
+            })
+            .collect();
         let source_sequence_length = universe.sequence_at(0).len();
         let fields = vec![
             field(
@@ -1456,6 +1552,8 @@ impl CompactBuildProbabilitySession {
             .with_normalized_solution_keys(normalized_keys)
             .with_normalized_solution_identities(identities)
             .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
+            .with_solution_coverages(solution_coverages)
+            .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_exact_scoring_execution_batch(scoring_batch);
         if execution_constraints.requested() {
             let pattern_weights = (0..universe.pattern_count())
@@ -1479,7 +1577,62 @@ impl CompactBuildProbabilitySession {
             + self.covered_patterns.retained_bytes()
             + self.buildable_tilings.capacity()
                 * core::mem::size_of::<StandardBoard64TilingIdentity>()
+            + self.solution_coverage.as_ref().map_or(0, |coverage| {
+                coverage.capacity()
+                    * (core::mem::size_of::<StandardBoard64TilingIdentity>()
+                        + core::mem::size_of::<PatternBitSet>())
+                    + coverage
+                        .values()
+                        .map(PatternBitSet::retained_bytes)
+                        .sum::<usize>()
+            })
     }
+}
+
+fn merge_board64_solution_coverages(
+    results: &[&CoreExecutionResult],
+    pattern_count: usize,
+) -> Result<Vec<SolutionCoverage>, WasmExactSearchError> {
+    let mut merged = BTreeMap::<StandardBoard64TilingIdentity, PatternBitSet>::new();
+    for result in results {
+        for coverage in result.solution_coverages() {
+            let entry = merged
+                .entry(coverage.identity())
+                .or_insert_with(|| PatternBitSet::new(pattern_count));
+            entry.union_with(coverage.covered_patterns()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_coverage_merge_mismatch",
+                )
+            })?;
+        }
+    }
+    Ok(merged
+        .into_iter()
+        .map(|(identity, coverage)| SolutionCoverage::new(identity, coverage))
+        .collect())
+}
+
+fn merge_normalized_solution_coverages(
+    results: &[&CoreExecutionResult],
+    pattern_count: usize,
+) -> Result<Vec<NormalizedSolutionCoverage>, WasmExactSearchError> {
+    let mut merged = BTreeMap::<String, PatternBitSet>::new();
+    for result in results {
+        for coverage in result.normalized_solution_coverages() {
+            let entry = merged
+                .entry(coverage.solution_key().to_owned())
+                .or_insert_with(|| PatternBitSet::new(pattern_count));
+            entry.union_with(coverage.covered_patterns()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_normalized_coverage_merge_mismatch",
+                )
+            })?;
+        }
+    }
+    Ok(merged
+        .into_iter()
+        .map(|(key, coverage)| NormalizedSolutionCoverage::new(key, coverage))
+        .collect())
 }
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {

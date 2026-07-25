@@ -10,9 +10,7 @@ use crate::{
     buildup::BuildUpRunnerError,
     core_execution_result::CoreExecutionResult,
     packing::PackingRunnerError,
-    service::{
-        CoverService, CoverServiceError, PcService, PcServiceError, SetupService, SetupServiceError,
-    },
+    service::{CoverService, CoverServiceError, PcService, PcServiceError},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,7 +25,6 @@ pub enum CoreExecutionError {
         resource_report: ResourceReport,
     },
     Pc(String),
-    Setup(String),
     Cover(String),
     Cancelled,
 }
@@ -59,9 +56,7 @@ impl CoreExecutor {
             SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc => {
                 PcService::execute_with_control(problem, control).map_err(core_error_from_pc)
             }
-            SearchProblemPreset::Setup => {
-                SetupService::execute_with_control(problem, control).map_err(core_error_from_setup)
-            }
+            SearchProblemPreset::Setup => Err(CoreExecutionError::UnsupportedProblem),
             SearchProblemPreset::Build => {
                 CoverService::execute_with_control(problem, control).map_err(core_error_from_cover)
             }
@@ -107,11 +102,9 @@ impl CoreExecutionError {
         match self {
             Self::UnsupportedProblem => Some("problem_runtime_unsupported"),
             Self::RuntimeUnavailable { component } => Some(component),
-            Self::ResourceIncomplete { .. }
-            | Self::Pc(_)
-            | Self::Setup(_)
-            | Self::Cover(_)
-            | Self::Cancelled => None,
+            Self::ResourceIncomplete { .. } | Self::Pc(_) | Self::Cover(_) | Self::Cancelled => {
+                None
+            }
         }
     }
 }
@@ -169,49 +162,6 @@ fn core_error_from_pc(error: PcServiceError) -> CoreExecutionError {
             CoreExecutionError::RuntimeUnavailable { component: reason }
         }
         other => CoreExecutionError::Pc(format!("{other:?}")),
-    }
-}
-
-fn core_error_from_setup(error: SetupServiceError) -> CoreExecutionError {
-    match error {
-        SetupServiceError::UnsupportedPreset => CoreExecutionError::UnsupportedProblem,
-        SetupServiceError::Packing(PackingRunnerError::ExecutionCancelled)
-        | SetupServiceError::Packing(PackingRunnerError::Native(
-            NativeCoreError::ExecutionCancelled,
-        ))
-        | SetupServiceError::BuildUp(BuildUpRunnerError::ExecutionCancelled)
-        | SetupServiceError::BuildUp(BuildUpRunnerError::Native(
-            NativeCoreError::ExecutionCancelled,
-        )) => CoreExecutionError::Cancelled,
-        SetupServiceError::Packing(PackingRunnerError::Native(NativeCoreError::Unavailable)) => {
-            CoreExecutionError::RuntimeUnavailable {
-                component: "core_c_packing_runtime_unavailable",
-            }
-        }
-        SetupServiceError::Packing(PackingRunnerError::Native(
-            NativeCoreError::PackingIncomplete {
-                status,
-                resource_report,
-            },
-        )) => CoreExecutionError::resource_incomplete("packing", status, resource_report),
-        SetupServiceError::Packing(PackingRunnerError::Backend(error)) => {
-            CoreExecutionError::RuntimeUnavailable {
-                component: error.reason(),
-            }
-        }
-        SetupServiceError::Packing(PackingRunnerError::BackendExecutorUnavailable {
-            reason,
-            ..
-        }) => CoreExecutionError::RuntimeUnavailable { component: reason },
-        SetupServiceError::BuildUp(BuildUpRunnerError::Native(NativeCoreError::Unavailable)) => {
-            CoreExecutionError::RuntimeUnavailable {
-                component: "core_c_buildup_runtime_unavailable",
-            }
-        }
-        SetupServiceError::BuildUp(BuildUpRunnerError::UnsupportedPieceSource { reason }) => {
-            CoreExecutionError::RuntimeUnavailable { component: reason }
-        }
-        other => CoreExecutionError::Setup(format!("{other:?}")),
     }
 }
 

@@ -39,6 +39,56 @@ fn opening_pc_command_preserves_observed_source_piece_count() {
 }
 
 #[test]
+fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
+    let request = WebCommandParser::parse("clearra setup --remaining SIOS")
+        .expect("setup command")
+        .to_app_request()
+        .expect("AppRequest");
+
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    assert_eq!(command.query().residue().remaining_count(), 4);
+    assert_eq!(command.query().residue().cycle(), Some(2));
+    assert_eq!(
+        command.query().residue().duplicate_piece(),
+        Some(PieceKind::S)
+    );
+
+    let cycle_boundary =
+        WebCommandParser::parse("clearra setup --remaining IOT --allow-post-cycle-borrow")
+            .expect("cycle-seven setup command")
+            .to_app_request()
+            .expect("AppRequest");
+    let AppCommand::Setup(command) = cycle_boundary.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    assert_eq!(command.query().residue().cycle(), Some(7));
+    assert_eq!(
+        command.query().cycle_reset_borrow_policy(),
+        clearra_problem::SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
+    );
+}
+
+#[test]
+fn setup_command_rejects_unknown_product_options() {
+    let error = WebCommandParser::parse("clearra setup --remaining IOTSZJL --online-policy")
+        .expect_err("unfinished online policy must not enter the product contract");
+
+    assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+}
+
+#[test]
+fn setup_browser_command_defaults_to_reserved_multithread_worker_count() {
+    let request = WebCommandParser::parse_with_worker_limit("clearra setup --remaining IOTS", 12)
+        .expect("setup command")
+        .to_app_request()
+        .expect("AppRequest");
+
+    assert_eq!(request.resource_budget().workers(), 11);
+}
+
+#[test]
 fn pc_back_to_back_preservation_is_an_execution_constraint_not_a_score_request() {
     let request = WebCommandParser::parse(
         "clearra pc --lines 2 --queue IOTSL --preserve-b2b --spin-profile all-mini-plus",

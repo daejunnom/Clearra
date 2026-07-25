@@ -10,12 +10,10 @@ pub mod pc_service;
 mod pc_service_tests;
 pub mod pc_summary_builder;
 pub mod percent_service;
-pub mod setup_service;
 
 pub use cover_service::{CoverService, CoverServiceError};
 pub use pc_service::{PcService, PcServiceError};
 pub use percent_service::{PercentService, PercentServiceError};
-pub use setup_service::{SetupService, SetupServiceError};
 
 pub(crate) fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())

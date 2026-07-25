@@ -353,34 +353,23 @@ mod case_pc_command_uses_search_problem_core_executor {
     }
 }
 
-mod case_setup_reports_raw_metrics_and_union_probability {
+mod case_setup_command_assembles_exact_residue_request {
+    use clearra_problem::SetupCycleResetBorrowPolicy;
+
     use super::*;
 
     #[test]
-    fn setup_reports_raw_metrics_and_union_probability() {
-        let stdout = product_fixture_stdout("tests/fixtures/product/setup_basic.json");
-        let json = product_contract_json_assert::json_from_stdout(&stdout);
+    fn setup_command_assembles_exact_residue_request() {
+        let query = crate::assemble::SetupQueryAssembler::assemble(&crate::args::SetupArgs::new(
+            "I,T,O", true,
+        ))
+        .expect("setup residue request");
 
-        assert_markers(
-            "MVP1 setup command",
-            &output_marker_text(&stdout),
-            include_str!("../../../tests/golden/product/setup_basic.json"),
-        );
+        assert_eq!(query.residue().remaining_count(), 3);
+        assert_eq!(query.residue().cycle(), Some(7));
         assert_eq!(
-            product_contract_json_assert::string_field(&json, "route"),
-            "search-problem-core-executor"
-        );
-        assert_eq!(
-            product_contract_json_assert::string_field(&json, "setup_raw_metrics"),
-            "attached"
-        );
-        assert_eq!(
-            product_contract_json_assert::string_field(&json, "coverage_reducer"),
-            "pattern-bitset-union"
-        );
-        assert!(
-            product_contract_json_assert::find_field(&json, "condition_summary").is_none(),
-            "setup output must not reintroduce condition_summary"
+            query.cycle_reset_borrow_policy(),
+            SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
         );
     }
 }

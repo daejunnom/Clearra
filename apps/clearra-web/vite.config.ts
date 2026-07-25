@@ -1,8 +1,10 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+import { wasmArtifactGuard } from './wasmArtifactGuard';
+
 export default defineConfig({
-  plugins: [sveltekit()],
+  plugins: [wasmArtifactGuard(), sveltekit()],
   server: {
     strictPort: false
   }

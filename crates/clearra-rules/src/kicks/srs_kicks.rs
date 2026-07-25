@@ -8,7 +8,7 @@ use super::kick_table::{
 };
 use super::srs_offsets::{
     jlstz_offsets, srs_i_offsets, srs_plus_i_180_offsets, srs_plus_i_offsets,
-    srs_plus_jlstz_180_offsets,
+    srs_plus_jlstz_180_offsets, srs_x_i_180_offsets,
 };
 
 pub use super::srs_offsets::{eight_direction_transitions, one_eighty_transitions};
@@ -136,7 +136,7 @@ fn srs_x_profile_entries() -> Vec<KickTableEntry> {
                     KickTableEntry::new(
                         KickTransition::new(piece, from, to),
                         if piece == PieceKind::I {
-                            KickOffsetSequence::new(srs_plus_i_180_offsets(from, to))
+                            KickOffsetSequence::new(srs_x_i_180_offsets(from, to))
                         } else {
                             KickOffsetSequence::new(srs_plus_jlstz_180_offsets(from, to))
                         },

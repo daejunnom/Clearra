@@ -1,7 +1,7 @@
 use clearra_app::{
     AppCommand, AppCoreExecutorService, AppRequest, DistributedForwardPreparation,
-    DistributedSearchPreparation, ExecutionControl, PreparedDistributedForwardSearch,
-    PreparedDistributedSearch,
+    DistributedSearchPreparation, DistributedSetupPreparation, ExecutionControl,
+    PreparedDistributedForwardSearch, PreparedDistributedSearch, PreparedDistributedSetupSearch,
 };
 #[cfg(feature = "webgpu-search")]
 use clearra_core_executor::WasmWebGpuCandidateProducer;
@@ -10,7 +10,8 @@ use clearra_core_executor::{
     WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
     WasmCpuCandidateProducer, WasmCpuSearchBackend, WasmDistributedGeometrySummary,
     WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
-    WasmProductSearchBackend,
+    WasmProductSearchBackend, WasmSetupParallelCoordinator, WasmSetupParallelProduce,
+    WasmSetupParallelWorker,
 };
 use clearra_forward_search::{
     ForwardParallelCoordinator, ForwardParallelProduce, ForwardParallelWorker,
@@ -62,6 +63,7 @@ pub enum WasmDistributedPreparation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WasmDistributedProducerAdvance {
     Pending,
+    Initialization(Vec<u8>),
     Batch(Vec<u8>),
     Completed,
     Cancelled,
@@ -87,6 +89,7 @@ enum DistributedCandidateProducer {
     Cpu(WasmCpuCandidateProducer),
     BuildProbability(WasmBuildProbabilityCandidateProducer),
     Forward(ForwardParallelCoordinator),
+    Setup(WasmSetupParallelCoordinator),
     #[cfg(feature = "webgpu-search")]
     WebGpu(WasmWebGpuCandidateProducer),
 }
@@ -101,6 +104,7 @@ enum DistributedVerifier {
     Pc(WasmDistributedVerifier),
     BuildProbability(WasmBuildProbabilityDistributedVerifier),
     Forward(ForwardParallelWorker),
+    Setup(WasmSetupParallelWorker),
 }
 
 enum DistributedResultMerger {
@@ -112,6 +116,7 @@ enum DistributedResultMerger {
 enum DistributedPreparedSearch {
     Core(PreparedDistributedSearch),
     Forward(PreparedDistributedForwardSearch),
+    Setup(PreparedDistributedSetupSearch),
 }
 
 pub struct WasmDistributedVerifierConsume {
@@ -126,6 +131,46 @@ impl WasmDistributedCoordinator {
     ) -> Result<WasmDistributedPreparation, WasmCommandRuntimeError> {
         let prepared = runtime.prepare_command_text(command_text)?;
         let (request, webgpu_requested) = prepared.into_parts();
+        if matches!(request.command(), AppCommand::Setup(_)) {
+            let requested_workers = usize::from(request.resource_budget().workers()).max(1);
+            if requested_workers < 2 {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
+            let prepared = match runtime
+                .app_context()
+                .prepare_distributed_setup_search(request)
+            {
+                DistributedSetupPreparation::Ready(response) => {
+                    return Ok(WasmDistributedPreparation::Ready(
+                        WasmExecutionResult::from_app_response(response, false),
+                    ));
+                }
+                DistributedSetupPreparation::Search(prepared) => prepared,
+            };
+            let producer = WasmSetupParallelCoordinator::new(prepared.query(), requested_workers)
+                .map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_SETUP_START", error.reason())
+            })?;
+            if producer.task_count() < 2 {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
+            let worker_count = requested_workers.min(producer.task_count() + 1);
+            return Ok(WasmDistributedPreparation::Coordinator(Self {
+                prepared: Some(DistributedPreparedSearch::Setup(prepared)),
+                producer: Some(DistributedCandidateProducer::Setup(producer)),
+                merger: None,
+                summary: None,
+                completed_progress: WasmDistributedProgress::default(),
+                forward_completed: false,
+                worker_count,
+                webgpu_requested: false,
+                mode: WasmDistributedMode::CpuMulti,
+                requested_backend: WasmDistributedRequestedBackend::Cpu,
+                preparation_fallback_reason: WasmDistributedFallbackReason::None,
+                backend_execution_override: None,
+                control: ExecutionControl::default(),
+            }));
+        }
         if matches!(
             request.command(),
             AppCommand::Damage(_) | AppCommand::SpinFinder(_)
@@ -301,6 +346,10 @@ impl WasmDistributedCoordinator {
         }
     }
 
+    pub fn worker_initialization_deferred(&self) -> bool {
+        matches!(self.producer, Some(DistributedCandidateProducer::Setup(_)))
+    }
+
     pub fn progress(&self) -> WasmDistributedProgress {
         if let Some(producer) = &self.producer {
             return producer.progress();
@@ -327,6 +376,37 @@ impl WasmDistributedCoordinator {
     ) -> Result<WasmDistributedProducerAdvance, WasmCommandRuntimeError> {
         if self.summary.is_some() || self.forward_completed {
             return Ok(WasmDistributedProducerAdvance::Completed);
+        }
+        if matches!(self.producer, Some(DistributedCandidateProducer::Setup(_))) {
+            let status = match self.producer.as_mut() {
+                Some(DistributedCandidateProducer::Setup(producer)) => producer
+                    .advance(work_budget, batch_capacity, &self.control)
+                    .map_err(|error| {
+                        distributed_error("E_WASM_DISTRIBUTED_SETUP_PRODUCER", error.reason())
+                    })?,
+                _ => {
+                    return Err(distributed_error(
+                        "E_WASM_DISTRIBUTED_STATE",
+                        "setup task producer is not active",
+                    ));
+                }
+            };
+            return match status {
+                WasmSetupParallelProduce::Pending => Ok(WasmDistributedProducerAdvance::Pending),
+                WasmSetupParallelProduce::Initialization(bytes) => {
+                    Ok(WasmDistributedProducerAdvance::Initialization(bytes))
+                }
+                WasmSetupParallelProduce::Batch(bytes) => {
+                    Ok(WasmDistributedProducerAdvance::Batch(bytes))
+                }
+                WasmSetupParallelProduce::Completed => {
+                    self.forward_completed = true;
+                    Ok(WasmDistributedProducerAdvance::Completed)
+                }
+                WasmSetupParallelProduce::Cancelled => {
+                    Ok(WasmDistributedProducerAdvance::Cancelled)
+                }
+            };
         }
         if matches!(
             self.producer,
@@ -433,6 +513,12 @@ impl WasmDistributedCoordinator {
     }
 
     pub fn absorb_partial(&mut self, input: &[u8]) -> Result<(), WasmCommandRuntimeError> {
+        if let Some(DistributedCandidateProducer::Setup(producer)) = self.producer.as_mut() {
+            producer.absorb(input).map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_SETUP_MERGE", error.reason())
+            })?;
+            return Ok(());
+        }
         if let Some(DistributedCandidateProducer::Forward(producer)) = self.producer.as_mut() {
             producer.absorb(input, &self.control).map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_FORWARD_MERGE", error.reason())
@@ -457,6 +543,33 @@ impl WasmDistributedCoordinator {
         mut self,
         workers_used: usize,
     ) -> Result<WasmExecutionResult, WasmCommandRuntimeError> {
+        if matches!(self.producer, Some(DistributedCandidateProducer::Setup(_))) {
+            let producer = match self.producer.take() {
+                Some(DistributedCandidateProducer::Setup(producer)) => producer,
+                _ => {
+                    return Err(distributed_error(
+                        "E_WASM_DISTRIBUTED_STATE",
+                        "setup result coordinator is not ready",
+                    ));
+                }
+            };
+            let result = producer.finish(workers_used).map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_SETUP_FINISH", error.reason())
+            })?;
+            let prepared = match self.prepared.take() {
+                Some(DistributedPreparedSearch::Setup(prepared)) => prepared,
+                _ => {
+                    return Err(distributed_error(
+                        "E_WASM_DISTRIBUTED_STATE",
+                        "setup app search is not prepared",
+                    ));
+                }
+            };
+            return Ok(WasmExecutionResult::from_app_response(
+                prepared.complete(result),
+                false,
+            ));
+        }
         if matches!(self.merger, Some(DistributedResultMerger::Forward(_))) {
             let merger = match self.merger.take() {
                 Some(DistributedResultMerger::Forward(merger)) => merger,
@@ -536,6 +649,7 @@ impl DistributedCandidateProducer {
             Self::Cpu(producer) => producer.advance(control),
             Self::BuildProbability(producer) => producer.advance(control),
             Self::Forward(_) => Err("forward_producer_requires_batch_advance"),
+            Self::Setup(_) => Err("setup_producer_requires_task_batch_advance"),
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.advance(control),
         }
@@ -548,6 +662,7 @@ impl DistributedCandidateProducer {
                 .into_merger()
                 .map(DistributedResultMerger::BuildProbability),
             Self::Forward(producer) => Ok(DistributedResultMerger::Forward(producer)),
+            Self::Setup(_) => Err("setup_producer_owns_its_result_merger"),
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.into_merger().map(DistributedResultMerger::Pc),
         }
@@ -565,6 +680,11 @@ impl DistributedCandidateProducer {
                     ..WasmDistributedProgress::default()
                 }
             }
+            Self::Setup(producer) => WasmDistributedProgress {
+                candidates: producer.dispatched_conditions(),
+                coverage_checks: producer.received_conditions(),
+                ..WasmDistributedProgress::default()
+            },
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.progress(),
         }
@@ -581,6 +701,7 @@ impl DistributedVerifier {
             Self::Pc(verifier) => verifier.consume(candidate, control),
             Self::BuildProbability(verifier) => verifier.consume(candidate, control),
             Self::Forward(_) => Err("forward_verifier_requires_forward_task_wire"),
+            Self::Setup(_) => Err("setup_verifier_requires_setup_task_wire"),
         }
     }
 
@@ -589,6 +710,7 @@ impl DistributedVerifier {
             Self::Pc(verifier) => verifier.finish().map(|result| vec![result]),
             Self::BuildProbability(verifier) => verifier.finish(),
             Self::Forward(_) => Ok(Vec::new()),
+            Self::Setup(_) => Ok(Vec::new()),
         }
     }
 
@@ -606,6 +728,7 @@ impl DistributedVerifier {
                     ..WasmDistributedProgress::default()
                 }
             }
+            Self::Setup(_) => WasmDistributedProgress::default(),
         }
     }
 }
@@ -678,11 +801,21 @@ impl WasmDistributedVerifierRuntime {
         runtime: &WasmCommandRuntime,
         initialization: &[u8],
     ) -> Result<Self, WasmCommandRuntimeError> {
-        let verifier = ForwardParallelWorker::new(initialization).map_err(|error| {
-            distributed_error("E_WASM_DISTRIBUTED_FORWARD_VERIFIER_START", error.reason())
-        })?;
+        let verifier = if WasmSetupParallelWorker::accepts_initialization(initialization) {
+            DistributedVerifier::Setup(WasmSetupParallelWorker::new(initialization).map_err(
+                |error| {
+                    distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFIER_START", error.reason())
+                },
+            )?)
+        } else {
+            DistributedVerifier::Forward(ForwardParallelWorker::new(initialization).map_err(
+                |error| {
+                    distributed_error("E_WASM_DISTRIBUTED_FORWARD_VERIFIER_START", error.reason())
+                },
+            )?)
+        };
         Ok(Self {
-            verifier: DistributedVerifier::Forward(verifier),
+            verifier,
             postprocessor: *runtime.app_context().services().core_executor(),
             control: ExecutionControl::default(),
         })
@@ -696,6 +829,16 @@ impl WasmDistributedVerifierRuntime {
             let (candidate_count, partial) =
                 verifier.consume(input, &self.control).map_err(|error| {
                     distributed_error("E_WASM_DISTRIBUTED_FORWARD_VERIFY", error.reason())
+                })?;
+            return Ok(WasmDistributedVerifierConsume {
+                candidate_count,
+                partial: Some(partial),
+            });
+        }
+        if let DistributedVerifier::Setup(verifier) = &mut self.verifier {
+            let (candidate_count, partial) =
+                verifier.consume(input, &self.control).map_err(|error| {
+                    distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason())
                 })?;
             return Ok(WasmDistributedVerifierConsume {
                 candidate_count,
@@ -721,7 +864,10 @@ impl WasmDistributedVerifierRuntime {
     }
 
     pub fn finish(&mut self) -> Result<Vec<u8>, WasmCommandRuntimeError> {
-        if matches!(self.verifier, DistributedVerifier::Forward(_)) {
+        if matches!(
+            self.verifier,
+            DistributedVerifier::Forward(_) | DistributedVerifier::Setup(_)
+        ) {
             return Ok(Vec::new());
         }
         let results = self

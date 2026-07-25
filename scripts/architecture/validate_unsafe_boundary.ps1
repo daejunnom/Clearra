@@ -10,6 +10,7 @@ function Test-RustUnsafeBoundaryAllowed([string]$RelativePath) {
 
     if ($normalized -in @(
             "crates/clearra-core-executor/src/performance/search_stage_profiler.rs",
+            "crates/clearra-core-executor/src/performance/host_clock.rs",
             "crates/clearra-postprocess/src/score_batch/exact_scoring_execution_materializer.rs",
             "crates/clearra-webgpu/src/geometry_exact_cover_timing.rs"
         )) {

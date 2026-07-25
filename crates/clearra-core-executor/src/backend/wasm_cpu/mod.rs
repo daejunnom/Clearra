@@ -34,6 +34,14 @@ mod piece_order_language;
 mod reachability;
 mod realization_feasibility;
 mod result;
+mod setup_coverage_graph;
+mod setup_finder;
+mod setup_graph_builder;
+mod setup_parallel;
+mod setup_parallel_segmented;
+mod setup_parallel_wire;
+mod setup_partial_build;
+mod setup_representative;
 mod standard_bag_coverage;
 #[cfg(feature = "webgpu-search")]
 mod webgpu_distributed;
@@ -51,6 +59,10 @@ pub use distributed::{
     WasmDistributedResultMerger, WasmDistributedVerifier,
 };
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
+pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
+pub(crate) use setup_parallel::{
+    WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+};
 #[cfg(feature = "webgpu-search")]
 pub use webgpu_distributed::WasmWebGpuCandidateProducer;
 #[cfg(feature = "webgpu-search")]

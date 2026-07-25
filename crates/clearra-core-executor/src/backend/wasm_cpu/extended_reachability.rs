@@ -400,11 +400,26 @@ fn first_successful_kick(
 fn scoring_lock_is_immobile(
     template: &ExtendedReachabilityTemplate,
     board: ExtendedBoard,
-    state_index: usize,
+    lock_state_index: usize,
 ) -> bool {
-    template.translations[state_index].iter().all(|target| {
-        *target == INVALID_STATE || board.intersects(template.state_masks[usize::from(*target)])
-    })
+    let translations_blocked = template.translations[lock_state_index]
+        .iter()
+        .all(|target| {
+            *target == INVALID_STATE || board.intersects(template.state_masks[usize::from(*target)])
+        });
+    let state = state_from_index(template.width, template.ceiling, lock_state_index);
+    let upward_blocked = state_index(
+        template.width,
+        template.ceiling,
+        State {
+            y: state.y.saturating_add(1),
+            ..state
+        },
+    )
+    .is_none_or(|target| {
+        !template.valid_states[target] || board.intersects(template.state_masks[target])
+    });
+    translations_blocked && upward_blocked
 }
 
 fn compile_translations(

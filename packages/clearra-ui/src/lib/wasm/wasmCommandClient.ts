@@ -164,6 +164,41 @@ export type ClearraSolutionProbability = {
   probability_complete: boolean;
 };
 
+export type ClearraSetupCandidate = {
+  setup_id: string;
+  board_mask: string;
+  min_locks: number;
+  max_locks: number;
+  build_covered_patterns: number;
+  joint_covered_patterns: number;
+  build_probability: string;
+  joint_probability: string;
+  conditional_pc_probability: string;
+  representative_path: ClearraWasmSearchPathStep[];
+};
+
+export type ClearraSetupHoldCondition = {
+  condition_id: string;
+  initial_hold: string | null;
+  pattern_expression: string;
+  pattern_count: number;
+  candidate_count: number;
+  result_truncated: boolean;
+  complete: boolean;
+  candidates: ClearraSetupCandidate[];
+};
+
+export type ClearraSetupFinderReport = {
+  cycle: number;
+  remaining_pieces: string;
+  post_cycle_borrow_enabled: boolean;
+  coverage_semantics: 'oracle';
+  geometry_family_count: string;
+  partial_build_node_count: number;
+  complete: boolean;
+  hold_conditions: ClearraSetupHoldCondition[];
+};
+
 export type ClearraWasmSearchReport = {
   backend_selected: string;
   workers_used: number;
@@ -195,6 +230,7 @@ export type ClearraWasmSearchReport = {
   forward_initial_board_mask: string | null;
   maximum_damage: number | null;
   forward_outcomes: ClearraForwardSearchOutcome[];
+  setup_report: ClearraSetupFinderReport | null;
 };
 
 type ClearraWasmWorkerEventBase = {

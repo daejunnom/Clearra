@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
 use clearra_replay::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
 
-use crate::{CoreExecutionResult, CorePathStep};
+use crate::{CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage};
 
 use super::{
     build_probability::BuildProbabilityAdvance,
@@ -36,6 +36,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
     buildable_tilings: HashSet<ExtendedTilingKey>,
+    solution_coverage: Option<HashMap<String, PatternBitSet>>,
     spin_execution_graphs: Vec<SpinCoverageExecutionGraph>,
     distributed_solution_keys: HashSet<String>,
     candidate_digest: u64,
@@ -130,6 +131,11 @@ impl ExtendedBuildProbabilitySession {
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             buildable_tilings: HashSet::new(),
+            solution_coverage: problem
+                .objective()
+                .execution_constraints()
+                .requested()
+                .then(HashMap::new),
             spin_execution_graphs: Vec::new(),
             distributed_solution_keys: HashSet::new(),
             candidate_digest: 0,
@@ -256,12 +262,11 @@ impl ExtendedBuildProbabilitySession {
         let tiling_digest = tiling.digest();
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested();
-        let spin_candidate = execution_evidence_requested.then(|| {
-            (
-                tiling_digest,
-                tiling.canonical_key(self.catalog.initial_board(), self.field.height()),
-            )
-        });
+        let candidate_key = execution_evidence_requested
+            .then(|| tiling.canonical_key(self.catalog.initial_board(), self.field.height()));
+        let spin_candidate = candidate_key
+            .as_ref()
+            .map(|candidate_key| (tiling_digest, candidate_key.clone()));
         self.candidate_digest = mix_digest(self.candidate_digest, tiling_digest);
         let node_limit = self.remaining_node_budget();
         if self.problem.backend_request().max_nodes() != 0 && node_limit == 0 {
@@ -368,6 +373,15 @@ impl ExtendedBuildProbabilitySession {
                             "wasm_extended_coverage_universe_mismatch",
                         )
                     })?;
+                if self.solution_coverage.is_some() {
+                    let candidate_key =
+                        candidate_key
+                            .as_ref()
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_extended_solution_coverage_key_missing",
+                            ))?;
+                    self.merge_solution_coverage(candidate_key, &product.coverage_bits)?;
+                }
                 self.retain_buildable_tiling(tiling)?;
                 if let Some(spin_graph) = spin_graph {
                     self.spin_execution_graphs.try_reserve(1).map_err(|_| {
@@ -395,6 +409,35 @@ impl ExtendedBuildProbabilitySession {
         }
         self.buildable_tilings.insert(tiling);
         Ok(())
+    }
+
+    fn merge_solution_coverage(
+        &mut self,
+        candidate_key: &str,
+        coverage: &PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        let solution_coverage =
+            self.solution_coverage
+                .as_mut()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_solution_coverage_not_requested",
+                ))?;
+        if !solution_coverage.contains_key(candidate_key) {
+            solution_coverage.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_solution_coverage_storage_unavailable",
+                )
+            })?;
+        }
+        solution_coverage
+            .entry(candidate_key.to_owned())
+            .or_insert_with(|| PatternBitSet::new(coverage.pattern_count()))
+            .union_with(coverage)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_solution_coverage_universe_mismatch",
+                )
+            })
     }
 
     pub fn advance_distributed_geometry(
@@ -550,6 +593,11 @@ impl ExtendedBuildProbabilitySession {
             })?;
         self.distributed_solution_keys
             .extend(result.normalized_solution_keys().iter().cloned());
+        if self.solution_coverage.is_some() {
+            for coverage in result.normalized_solution_coverages() {
+                self.merge_solution_coverage(coverage.solution_key(), coverage.covered_patterns())?;
+            }
+        }
 
         let worker_candidates = result.usize_field("packing_candidate_count").unwrap_or(0);
         if worker_candidates != 0 {
@@ -690,6 +738,20 @@ impl ExtendedBuildProbabilitySession {
         normalized_keys.extend(self.distributed_solution_keys.iter().cloned());
         normalized_keys.sort_unstable();
         normalized_keys.dedup();
+        let mut normalized_solution_coverages = self
+            .solution_coverage
+            .as_ref()
+            .map(|coverage| {
+                coverage
+                    .iter()
+                    .map(|(key, patterns)| {
+                        NormalizedSolutionCoverage::new(key.clone(), patterns.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        normalized_solution_coverages
+            .sort_unstable_by(|left, right| left.solution_key().cmp(right.solution_key()));
         let logical_target =
             super::extended_board::ExtendedBoard::from_mask(self.field.target_board());
         let mut completed_rows = 0_u32;
@@ -962,6 +1024,7 @@ impl ExtendedBuildProbabilitySession {
         ];
         let result = CoreExecutionResult::new(fields, self.representative_path.clone())
             .with_normalized_solution_keys(normalized_keys)
+            .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
             .with_spin_coverage_execution_batch(spin_batch);
         if execution_constraints.requested() {
@@ -1009,6 +1072,12 @@ impl ExtendedBuildProbabilitySession {
                 .iter()
                 .map(ExtendedTilingKey::retained_bytes)
                 .sum::<usize>()
+            + self.solution_coverage.as_ref().map_or(0, |coverage| {
+                coverage
+                    .iter()
+                    .map(|(key, patterns)| key.capacity() + patterns.retained_bytes())
+                    .sum::<usize>()
+            })
             + self
                 .distributed_solution_keys
                 .iter()

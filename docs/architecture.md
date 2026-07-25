@@ -647,7 +647,6 @@ by brittle full-stdout byte snapshots. The T4 fixture set is:
 - `scenario_clear_to_empty`
 - `path_representative`
 - `percent_uniform_bag`
-- `setup_basic`
 - `cover_template_basic`
 - `continue_token_basic`
 - `rules_verify_basic`
@@ -867,11 +866,14 @@ and failure contracts and cannot be reclassified as Windows success.
 
 ## M17 Core Executor
 
-M17 makes `clearra-core-executor` the Rust orchestration facade over the C core
-boundary. CoreExecutor is a thin router: PC-like presets go to `PcService`,
-setup presets go to `SetupService`, and build coverage presets go to
-`CoverService`. CLI code must not call clearra-core-ffi, `core-c`, packing
-runners, or BuildUp runners directly.
+M17 makes `clearra-core-executor` the Rust orchestration facade over the exact
+search backends. `CoreExecutor` remains the compiled-`SearchProblem` router:
+PC-like presets go to `PcService`, and build coverage presets go to
+`CoverService`. Setup finder queries have a different fixed-input contract and
+enter through `SetupAppCommand -> WasmSetupSearchBackend`; a legacy
+`SearchProblemPreset::Setup` is rejected rather than routed to another setup
+implementation. CLI code must not call clearra-core-ffi, `core-c`, packing
+runners, or backend internals directly.
 
 The executor flow is:
 
@@ -880,8 +882,10 @@ The executor flow is:
 The concrete Rust split is:
 
 - `service/pc_service.rs` owns PC execution orchestration and summary fields.
-- `service/setup_service.rs`, `service/cover_service.rs`, and
-  `service/percent_service.rs` own non-PC executor entry surfaces.
+- `service/cover_service.rs` and `service/percent_service.rs` own the remaining
+  non-PC compiled-problem entry surfaces.
+- `backend/wasm_setup_search_backend.rs` owns cooperative setup session
+  execution; `backend/wasm_cpu/setup_finder.rs` owns the exact setup algorithm.
 - `packing/packing_runner.rs` owns `CPackingProblemBuilder` conversion and the
   C packing result boundary.
 - `buildup/buildup_runner.rs` owns `CBuildUpProblemBuilder`, C BuildUp result
@@ -1002,59 +1006,71 @@ requested backend string. A non-native local build returns
 native build that actually executes C CPU hot paths reports `candidate_backend=cpu-packing`,
 `buildup_backend=cpu-buildup`, and `native_c_core_executed=true`.
 
-## M20 Setup Search Product Path
+## M20 Setup Finder Product Path
 
-Setup search uses the same C core Packing/BuildUp boundary as PC execution.
-Setup enumeration owns the high-level setup model, but
-BuildVariant creation is gated by executor output instead of being emitted
-directly from a tiling group.
+Setup finder searches common playable prefixes of the empty 10x4 PC solution
+family. It does not generate arbitrary intermediate boards and does not cut
+prefixes from a materialized list of complete solutions.
 
-The setup flow is:
+The product flow is:
 
-`SetupQuery -> ShapeFamily candidates -> TilingVariant candidates -> SearchProblem -> C Packing -> C BuildUp -> BuildVariant -> PatternBitSet coverage -> setup union probability -> raw metrics/export`
+`remaining-piece multiset -> exact residue/hold conditions -> admissible 10-lock signatures -> inverse lock-clear geometry family -> FamilyQuotient Partial BuildUp -> lazy hold/pattern product -> forward/backward coverage -> setup-shape union`
 
-ShapeFamily grouping and TilingVariant identity are preserved in
-`clearra-setup-search`. `SetupCoreBuildGate` compiles the `SetupSearchQuery`
-with `ProblemCompiler::compile_setup`, runs `PackingRunner::run` and
-`BuildUpRunner::run`, then hands a `BuildUpVariantProof` to
-`BuildVariantEnumerator::from_core_buildup`. A setup BuildVariant must not be
-created on the product path without that proof. M10 tightens that proof so it is
-attached to the candidate build input: occupied shape, hold requirement, and
-placed piece count must match the `TilingVariant` before a BuildVariant is
-created. The setup path must use `SetupCoreBuildGate::proof_for_candidate` and
-must not treat query-level BuildUp success as a reusable approval for unrelated
-tilings.
+The remaining-piece count determines the PC cycle. A unique multiset is split
+into separate empty-hold and held-piece conditions; those conditions are
+reported separately and are never averaged. One duplicated piece explicitly
+identifies the held piece. Cycle-reset borrowing is a provenance policy and is
+available only for cycle seven.
 
-Coverage remains a Rust probability contract. `SetupCoveragePlan` uses
-`SetupCoverageBuilder`, `SetupUnionCoverage`, and PatternBitSet OR semantics;
-setup probability must never sum duplicate build variant probabilities.
+`FamilyQuotient Partial BuildUp` consumes canonical placement rows from the
+compressed `Append / Union / Product` geometry DAG. Each partial node owns its
+current board, inverse lock-clear state, and residual completion family. Nodes
+with equivalent exact continuation state union their residual families before
+the next layer is expanded. The root is only the search source. Every live
+non-root prefix from one through nine locks is eligible for shape grouping;
+depth is not a pruning proof.
 
-Post-setup PC remains scenario-shaped: setup variants are adapted through
-`PostPcScenarioInput` into `PcScenarioQuery`, then
-`ProblemCompiler::compile_scenario_pc` and `CoreExecutor::execute` evaluate
-clear-to-empty. Public setup output uses `setup_raw_metrics`,
-`setup_raw_coverage_export`, `coverage_overlap_report`, and
-`diagnostic_evidence`; condition_summary is absent.
+Coverage is evaluated on the exact product state:
 
-## X3 MVP2 Setup Raw Metrics
+`partial node x hold state x queue cursor/extra draw x pattern word`
 
-X3 keeps setup output interpretable without reintroducing condition summary.
-Setup results expose raw metrics that users and GUI filters can inspect
-directly: `shape_family_id`, `shape_family_count`, `tiling_variant_count`,
-`build_variant_count`, `covered_pattern_count`, `coverage_probability`,
-`queue_prefix`, `queue_prefix_len`, `hold_required`, `hold_piece`,
-`bag_boundary_offsets`, `bag_boundary_ambiguous`, `requires_180`,
-`requires_180_evidence`, `rule_profile_evidence`,
-`post_pc_solution_count`, `score_basis`, `backend_report`, and
-`raw_coverage_export_path`.
+The forward value is the set of patterns that can build the state. The backward
+value is the set that can still reach a complete PC. The required equation is:
 
-The `raw_coverage_export_path` may be an inline export locator such as
-`inline://clearra/setup/raw-coverage/...` until a file-backed export command is
-requested. It must not pretend that a file was written. The setup explorer
-schema must expose these raw metric columns so filtering can be based on
-numbers and backend evidence rather than interpreted advice.
+`JointCoverage(state) = ForwardCoverage(state) AND BackwardPcLiveness(state)`
 
-X3 contract markers: condition_summary field absent; raw metrics sufficient for filtering; GUI setup explorer can consume schema.
+The intersection happens before states are merged into a visible setup shape.
+Shape coverage is then a PatternBitSet OR over those exact intersections.
+Intersecting `OR(forward)` with `OR(backward)` after shape grouping is forbidden
+because it can combine incompatible temporal states.
+
+Each visible candidate reports build, joint, and conditional probability plus
+an exact representative placement/hold path. Output limits are applied only
+after all shape coverage has been accumulated and ranked. The stable coverage
+semantics are `Oracle`: each complete pattern may choose its own legal path.
+Online coverage is not exposed until an observation-class policy engine is
+connected.
+
+The only product entry is:
+
+`CLI or web command -> SetupAppCommand -> validation -> WasmSetupSearchBackend -> SetupFinderReport`
+
+The old `SetupSearchService`, deterministic shelf packing, and per-candidate
+post-PC continuation path do not exist in the product source.
+
+## X3 Setup Finder Result Contract
+
+Each hold condition reports its condition identity, explicit initial hold,
+materialized pattern expression, pattern count, total candidate count,
+truncation state, and ranked candidates. Each candidate reports its setup shape
+mask, minimum and maximum representative lock depth, build and joint covered
+pattern counts, build/joint/conditional probabilities, and one legal
+representative path.
+
+The top-level report records the inferred cycle, canonical residue, cycle-reset
+borrow policy, geometry family count, partial graph node count, completeness,
+and `coverage_semantics=oracle`. A resource or allocation failure is an error;
+it must not return a complete-looking partial result.
 
 ## M11 / M21 Build Coverage Product Path
 

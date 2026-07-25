@@ -283,10 +283,7 @@ export class ClearraVerifierPool {
     try {
       while (this.clients.length < size) this.clients.push(new VerifierClient());
       while (this.clients.length > size) this.clients.pop()?.dispose();
-      for (const client of this.clients) {
-        if (generation !== this.generation) return;
-        await client.prewarm(compiledModule);
-      }
+      await Promise.all(this.clients.map((client) => client.prewarm(compiledModule)));
       if (generation !== this.generation) return;
     } catch (error) {
       if (generation !== this.generation) return;

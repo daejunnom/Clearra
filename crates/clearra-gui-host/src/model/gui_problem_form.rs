@@ -307,28 +307,32 @@ impl GuiScenarioPcForm {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GuiSetupSearchForm {
-    queue: String,
-    fixed_queue: bool,
+    remaining_pieces: String,
+    allow_post_cycle_borrow: bool,
     rule: String,
 }
 
 impl GuiSetupSearchForm {
-    pub fn new(queue: impl Into<String>, fixed_queue: bool, rule: impl Into<String>) -> Self {
+    pub fn new(
+        remaining_pieces: impl Into<String>,
+        allow_post_cycle_borrow: bool,
+        rule: impl Into<String>,
+    ) -> Self {
         Self {
-            queue: queue.into(),
-            fixed_queue,
+            remaining_pieces: remaining_pieces.into(),
+            allow_post_cycle_borrow,
             rule: rule.into(),
         }
     }
 }
 impl GuiSetupSearchForm {
-    pub fn queue(&self) -> &str {
-        &self.queue
+    pub fn remaining_pieces(&self) -> &str {
+        &self.remaining_pieces
     }
 }
 impl GuiSetupSearchForm {
-    pub const fn fixed_queue(&self) -> bool {
-        self.fixed_queue
+    pub const fn allow_post_cycle_borrow(&self) -> bool {
+        self.allow_post_cycle_borrow
     }
 }
 impl GuiSetupSearchForm {
@@ -510,11 +514,15 @@ impl GuiProblemForm {
 }
 impl GuiProblemForm {
     pub fn setup_search(
-        queue: impl Into<String>,
-        fixed_queue: bool,
+        remaining_pieces: impl Into<String>,
+        allow_post_cycle_borrow: bool,
         rule: impl Into<String>,
     ) -> Self {
-        Self::SetupSearch(GuiSetupSearchForm::new(queue, fixed_queue, rule))
+        Self::SetupSearch(GuiSetupSearchForm::new(
+            remaining_pieces,
+            allow_post_cycle_borrow,
+            rule,
+        ))
     }
 }
 impl GuiProblemForm {

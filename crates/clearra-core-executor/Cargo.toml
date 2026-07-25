@@ -15,7 +15,7 @@ search-stage-profiling = [
 ]
 wasm-stage-profiling = ["clearra-webgpu?/stage-profiling", "dep:wasm-bindgen"]
 parallel = []
-webgpu-search = ["dep:clearra-webgpu", "dep:pollster"]
+webgpu-search = ["dep:clearra-webgpu", "dep:pollster", "dep:wasm-bindgen"]
 experimental-native-gpu = ["clearra-core-ffi/experimental-native-gpu"]
 
 [dependencies]

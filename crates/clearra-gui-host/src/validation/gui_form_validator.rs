@@ -48,7 +48,7 @@ impl GuiFormValidator {
                 );
             }
             GuiProblemForm::SetupSearch(setup) => {
-                validate_piece_queue(setup.queue(), "setup.queue", summary);
+                validate_piece_queue(setup.remaining_pieces(), "setup.remaining_pieces", summary);
             }
             GuiProblemForm::BuildCoverage(cover) => {
                 if cover.template_id().trim().is_empty() {

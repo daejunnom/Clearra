@@ -70,7 +70,6 @@ $rustSurface = @(
         Read-Text "crates/clearra-core-executor/src/packing/hybrid_scheduler_report.rs"
         Read-Text "crates/clearra-core-executor/src/packing/packing_metrics.rs"
         Read-Text "crates/clearra-core-executor/src/service/pc_pipeline_fields.rs"
-        Read-Text "crates/clearra-core-executor/src/service/setup_service.rs"
         Read-Text "crates/clearra-core-executor/src/service/cover_service.rs"
         Read-Text "crates/clearra-ui-schema/src/setup_explorer/backend_options_schema.rs"
     ) -join "`n"

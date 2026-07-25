@@ -1,53 +1,123 @@
-# Setup Search
+# Setup Finder
 
-Setup search groups candidates by final occupied shape. Tiling variants and build variants are preserved as variants, while family probability is computed from PatternBitSet union coverage instead of summing variant probabilities.
+Setup Finder searches buildable prefixes of the fixed empty 10x4 perfect-clear
+family. It does not generate arbitrary intermediate boards and does not rerun a
+post-PC search for every visible candidate.
 
-The MVP2 service path emits `execution_scope=mvp2`, uses the `queue-pattern-shape-tiling-build-post-pc` enumeration strategy, and reports `post_pc_mode=scenario-clear-to-empty` with `post_pc_evaluation_attached=true`. It analyzes fixed, bag-aligned, and observed queue sources into materialized pattern ids, creates setup shape candidates, groups them into shape families, preserves tiling/build layers, attaches scenario post-PC evaluation by compiling a scenario preset into `SearchProblem`, and optionally evaluates retained traces with a score profile.
+```text
+empty 10x4 PC geometry family
+-> family quotient partial BuildUp
+-> exact hold/bag product coverage
+-> setup-shape coverage union
+```
 
-Enumeration is still bounded by `SetupLimits`: `shape_family_enumeration_complete`, `tiling_variant_enumeration_complete`, and `build_variant_enumeration_complete` disclose whether limits truncated any layer. The current tiling stage is placement-based deterministic shelf packing, not a full external setup solver. The probability invariant is strict: setup/build probability is always measured by OR-ing `PatternBitSet` coverage and applying `WeightedPatternSet` union probability. Score aggregation must never sum duplicate variant probabilities.
+## Residue And Hold Contract
 
-Setup output does not provide human-interpreted setup summary text. It exposes raw
-exports only: `setup_raw_metrics`, `setup_raw_coverage_export`, `backend_report`,
-`score_basis`, `diagnostic_evidence`, `coverage_overlap_report`,
-`build_variant_metrics`, and `raw_condition_data`. X3 raw metrics include
-`shape_family_id`, `tiling_variant_count`, `build_variant_count`,
-`covered_pattern_count`, `coverage_probability`, `post_pc_solution_count`,
-`score_basis`, `backend_report`, and `raw_coverage_export_path`; the setup
-explorer schema consumes these fields for filtering without condition summary.
+The input is the complete supply remaining before the next bag boundary:
 
-X5 raw metrics use `schema_version=2` and `metrics_kind=setup_raw_metrics`.
-The v2 contract also exposes `shape_family_count`,
-`score_aggregation_attached`, `setup_raw_metrics`,
-`setup_raw_coverage_export`, `coverage_overlap_report`,
-`build_variant_metrics`, and `diagnostic_evidence`. Raw coverage export is
-machine-readable: it carries `pattern_universe_id`,
-`pattern_weight_model_id`, `pattern_count`, `rows[]`, `family_unions[]`, and
-`overlap_report`. These fields are analysis inputs only. The solver must not
-state that a setup condition is good or bad, must not display raw counts as
-probability, and must not hide coverage overlap.
+```text
+current bag remainder
++ current hold piece, when one exists
+```
 
-## Spin And Score Coverage In Setup Search
+The residue count determines the PC cycle.
 
-Setup search may attach spin or score objectives to the same pattern universe
-used for setup/build coverage. These objectives do not create a separate
-probability rule:
+| Remaining pieces | PC cycle |
+| ---: | ---: |
+| 7 | 1 |
+| 4 | 2 |
+| 1 | 3 |
+| 5 | 4 |
+| 2 | 5 |
+| 6 | 6 |
+| 3 | 7 |
 
-- setup probability uses `CoverageRowKind::Setup` or `CoverageRowKind::Build`;
-- spin target probability uses `CoverageRowKind::SpinTarget(spin_target_id)`;
-- score matrix cells use `CoverageRowKind::ScoreCell(score_objective_cell_id)`.
+At most one piece kind may occur twice. That duplicate is an explicit initial
+hold piece. When no duplicate is present, empty hold and each possible occupied
+hold are separate result conditions. They are never assigned an invented shared
+probability.
 
-Every row must carry `pattern_universe_id`, `pattern_count`, and
-`pattern_weight_model_id`. The setup explorer must not merge rows from different
-observed expansions, bag-aligned universes, or weight models even if their bit
-lengths match.
+Cycle-seven borrowing is provenance-based. By default, only the current
+three-piece remainder and the next complete bag may be locked. The explicit
+cycle-seven option permits one additional lock from the bag after that reset.
+Seeing a piece in preview is not equivalent to locking it into a setup.
 
-Spin target filters such as TSD probability or all-spin double availability are
-applied only after BuildUp enumeration and replay. A shape family or tiling
-variant may be a promising setup, but it is not a spin target hit until an
-accepted BuildVariant produces replay evidence satisfying `SpinTargetPredicate`.
+## Geometry And Partial BuildUp
 
-Score aggregation must distinguish retained trace samples from pattern-universe
-expectations. Setup result fields may expose retained-trace averages for
-debugging, but raw metrics must label them separately from
-`covered_pattern_conditional_average_score` and
-`unconditional_expected_score`.
+The WASM CPU backend compiles the inverse lock-clear skeleton catalog once and
+represents all complete tilings as an immutable geometry solution family.
+Removing a concrete placement from that family produces a quotient family. The
+partial graph therefore stores:
+
+```text
+exact board after lock and clear
+deleted-row state
+residual geometry family
+concrete placement edges
+```
+
+Nodes with the same future-relevant board and deleted-row state may merge only
+by exact union of their residual families. Placement reachability, SRS+ kick
+rules, line-clear adjustment, and concrete realization identity are checked
+before an edge enters the graph.
+
+The root is not a setup. Every PC-live prefix from one through nine locks is
+eligible. Lock depth is output metadata, not a pruning proof. Visible shapes
+merge only after the exact product coverage described below has been computed.
+
+## Exact Coverage Product
+
+Each hold condition owns a materialized `PatternUniverse` and
+`WeightedPatternSet`. Coverage runs over:
+
+```text
+partial-build node
+x queue cursor
+x hold state
+x one optional empty-hold extra draw
+x pattern word
+```
+
+For every exact state:
+
+```text
+BuildCoverage = forward-reachable patterns
+PcLiveness = patterns with a legal completion
+JointCoverage = BuildCoverage AND PcLiveness
+```
+
+Only then are exact-state words OR-unioned into a setup shape. Computing
+`OR(BuildCoverage) AND OR(PcLiveness)` after shape grouping is forbidden because
+it can combine incompatible temporal states.
+
+Variant counts are never probabilities. Build and joint probabilities are
+measured from `PatternBitSet` union coverage with the condition's weight model.
+Each candidate reports:
+
+- `Build`: probability that the setup shape is buildable.
+- `Joint`: probability that the setup is buildable and the same exact state can
+  complete the PC.
+- `Conditional`: `Joint / Build`.
+
+The stable semantics are Oracle coverage: each concrete pattern may choose its
+own legal path. An online observation-policy result is not exposed.
+
+## Product Boundary
+
+The product route is:
+
+```text
+CLI or web command
+-> SetupAppCommand
+-> setup validation
+-> WasmSetupSearchBackend
+-> SetupFinderReport
+```
+
+The report separates hold conditions and includes the inferred cycle, canonical
+residue, cycle-reset policy, geometry-family count, partial-graph node count,
+candidate completeness, and exact representative placement/hold paths.
+
+Output limits are applied only after all shape coverage has been accumulated.
+Allocation failure, cancellation, or incomplete source materialization must not
+produce a complete-looking setup result.

@@ -1,6 +1,5 @@
 use clearra_core_domain::piece::piece_kind::{PieceKind, UnknownPieceKind};
-use clearra_setup_search::query::{SetupQueueInput, SetupSearchQuery};
-use clearra_supply::queue::{fixed_sequence::FixedSequence, observed_queue::ObservedQueue};
+use clearra_setup_search::query::{SetupCycleResetBorrowPolicy, SetupSearchQuery};
 
 use crate::args::setup_args::SetupArgs;
 
@@ -14,19 +13,21 @@ pub struct SetupQueryAssembler;
 
 impl SetupQueryAssembler {
     pub fn assemble(args: &SetupArgs) -> Result<SetupSearchQuery, SetupQueryAssemblyError> {
-        let pieces = parse_queue(args.queue())?;
-        let queue = if args.fixed_queue() {
-            SetupQueueInput::fixed_sequence(FixedSequence::new(pieces))
+        let pieces = parse_remaining(args.remaining())?;
+        let borrow_policy = if args.allow_post_cycle_borrow() {
+            SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
         } else {
-            SetupQueueInput::observed(ObservedQueue::new(pieces))
+            SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse
         };
 
-        Ok(SetupSearchQuery::default().with_queue(queue))
+        Ok(SetupSearchQuery::default()
+            .with_remaining_pieces(pieces)
+            .with_cycle_reset_borrow_policy(borrow_policy))
     }
 }
 
-fn parse_queue(queue: &str) -> Result<Vec<PieceKind>, SetupQueryAssemblyError> {
-    queue
+fn parse_remaining(remaining: &str) -> Result<Vec<PieceKind>, SetupQueryAssemblyError> {
+    remaining
         .chars()
         .filter(|value| !value.is_whitespace() && *value != ',')
         .map(parse_piece)
@@ -34,7 +35,7 @@ fn parse_queue(queue: &str) -> Result<Vec<PieceKind>, SetupQueryAssemblyError> {
 }
 
 fn parse_piece(value: char) -> Result<PieceKind, SetupQueryAssemblyError> {
-    PieceKind::from_ascii(value)
+    PieceKind::from_ascii(value.to_ascii_uppercase())
         .map_err(|UnknownPieceKind| SetupQueryAssemblyError::UnknownPiece { value })
 }
 

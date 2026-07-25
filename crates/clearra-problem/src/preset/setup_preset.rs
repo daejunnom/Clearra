@@ -31,14 +31,10 @@ impl SetupPreset {
             self.query.target().lines().into(),
             0,
         );
-        let core_query = PcScenarioQuery::new(
-            board,
-            queue,
-            PieceWindow::new(self.query.piece_budget().max_piece_count() as usize),
-        )
-        .with_hold_piece(self.query.hold_policy().initial_piece())
-        .with_allow_hold(self.query.hold_policy().is_enabled())
-        .with_retained_trace_limit(self.query.limits().post_pc_retained_trace_limit());
+        let core_query = PcScenarioQuery::new(board, queue, PieceWindow::new(10))
+            .with_hold_piece(self.query.hold_policy().initial_piece())
+            .with_allow_hold(self.query.hold_policy().is_enabled())
+            .with_retained_trace_limit(self.query.limits().post_pc_retained_trace_limit());
 
         ScenarioQuery::setup_preset(core_query, self.query)
     }
@@ -57,6 +53,15 @@ mod tests {
         let setup = SetupSearchQuery::default()
             .with_queue(SetupQueueInput::fixed_sequence(FixedSequence::new(vec![
                 PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::S,
+                PieceKind::Z,
+                PieceKind::J,
+                PieceKind::L,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
             ])))
             .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T));
         let scenario = SetupPreset::from_query(setup).into_scenario_query();
@@ -66,9 +71,9 @@ mod tests {
         assert_eq!(scenario.initial_board().width(), 10);
         assert_eq!(
             scenario.initial_board().visible_height(),
-            u16::from(PcTarget::two_lines().lines())
+            u16::from(PcTarget::four_lines().lines())
         );
-        assert_eq!(scenario.piece_window().max_pieces(), 7);
+        assert_eq!(scenario.piece_window().max_pieces(), 10);
         assert_eq!(
             scenario.core_query().hold_state().piece(),
             Some(PieceKind::T)

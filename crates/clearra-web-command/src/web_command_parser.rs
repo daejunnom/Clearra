@@ -54,6 +54,7 @@ impl WebCommandParser {
             "build-probability" => {
                 parse_build_probability_command(&tokens[cursor..], worker_hardware_limit.max(1))
             }
+            "setup" => parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1)),
             "damage" => {
                 parse_forward_command(&tokens[cursor..], false, worker_hardware_limit.max(1))
             }
@@ -67,6 +68,81 @@ impl WebCommandParser {
             )),
         }
     }
+}
+
+fn parse_setup_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    let mut remaining = "IOTSZJL".to_owned();
+    let mut allow_post_cycle_borrow = false;
+    let mut workers = None;
+    let mut use_all_logical_processors = false;
+    let mut cursor = 0_usize;
+    while cursor < tokens.len() {
+        match tokens[cursor].as_str() {
+            "--remaining" | "--queue" => {
+                let option = tokens[cursor].clone();
+                remaining = next_value(tokens, &mut cursor, &option)?.to_owned();
+            }
+            "--allow-post-cycle-borrow" => {
+                allow_post_cycle_borrow = true;
+                cursor += 1;
+            }
+            "--workers" => {
+                workers = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--workers")?,
+                    "--workers",
+                )?);
+            }
+            "--use-all-cpu-threads" => {
+                use_all_logical_processors = true;
+                cursor += 1;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::UnsupportedCommand,
+                    format!("unsupported setup option '{flag}'"),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected setup token '{value}'"),
+                ));
+            }
+        }
+    }
+    let pieces =
+        clearra_supply::queue::queue_parser::parse_piece_sequence(&remaining.to_ascii_uppercase())
+            .map_err(|error| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("invalid setup residue: {error:?}"),
+                )
+            })?;
+    if let Some(workers) = workers {
+        let default_limit = WorkerPolicy::default_worker_limit_for_hardware(worker_hardware_limit);
+        if workers > worker_hardware_limit {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("--workers {workers} exceeds the hard limit of {worker_hardware_limit}"),
+            ));
+        }
+        if workers > default_limit && !use_all_logical_processors {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "using the reserved logical processor requires --use-all-cpu-threads",
+            ));
+        }
+    }
+    let mut request = WebCommandRequest::setup(pieces, allow_post_cycle_borrow)
+        .with_worker_hardware_limit(worker_hardware_limit)
+        .with_use_all_logical_processors(use_all_logical_processors);
+    if let Some(workers) = workers {
+        request = request.with_workers(workers);
+    }
+    Ok(request)
 }
 
 fn parse_forward_command(

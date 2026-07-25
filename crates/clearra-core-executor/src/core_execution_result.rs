@@ -9,7 +9,10 @@ use crate::{
     core_postprocess_score_cell::CorePostProcessScoreCell,
     core_postprocess_spin_coverage::CorePostProcessSpinCoverage,
     result_views::SearchExecutionReport,
-    solution_probability::{SolutionCoverage, SolutionProbabilityReport},
+    setup_finder_report::SetupFinderReport,
+    solution_probability::{
+        NormalizedSolutionCoverage, SolutionCoverage, SolutionProbabilityReport,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,6 +89,7 @@ pub struct CoreExecutionResult {
     representative_solution_identity: Option<StandardBoard64TilingIdentity>,
     coverage_pattern_words: Vec<u64>,
     solution_coverages: Vec<SolutionCoverage>,
+    normalized_solution_coverages: Vec<NormalizedSolutionCoverage>,
     solution_probabilities: Vec<SolutionProbabilityReport>,
     exact_scoring_execution_batches: Vec<ExactScoringExecutionBatch>,
     spin_coverage_execution_batches: Vec<SpinCoverageExecutionBatch>,
@@ -93,6 +97,7 @@ pub struct CoreExecutionResult {
     postprocess_score_cells_complete: bool,
     postprocess_score_profile_id: Option<String>,
     postprocess_spin_coverages: Vec<CorePostProcessSpinCoverage>,
+    setup_finder_report: Option<SetupFinderReport>,
 }
 
 impl CoreExecutionResult {
@@ -111,6 +116,7 @@ impl CoreExecutionResult {
             representative_solution_identity: None,
             coverage_pattern_words: Vec::new(),
             solution_coverages: Vec::new(),
+            normalized_solution_coverages: Vec::new(),
             solution_probabilities: Vec::new(),
             exact_scoring_execution_batches: Vec::new(),
             spin_coverage_execution_batches: Vec::new(),
@@ -118,6 +124,7 @@ impl CoreExecutionResult {
             postprocess_score_cells_complete: false,
             postprocess_score_profile_id: None,
             postprocess_spin_coverages: Vec::new(),
+            setup_finder_report: None,
         }
     }
 }
@@ -162,6 +169,14 @@ impl CoreExecutionResult {
 
     pub fn with_solution_coverages(mut self, coverage: Vec<SolutionCoverage>) -> Self {
         self.solution_coverages = coverage;
+        self
+    }
+
+    pub fn with_normalized_solution_coverages(
+        mut self,
+        coverage: Vec<NormalizedSolutionCoverage>,
+    ) -> Self {
+        self.normalized_solution_coverages = coverage;
         self
     }
 
@@ -222,6 +237,11 @@ impl CoreExecutionResult {
         coverages: Vec<CorePostProcessSpinCoverage>,
     ) -> Self {
         self.postprocess_spin_coverages = coverages;
+        self
+    }
+
+    pub fn with_setup_finder_report(mut self, report: SetupFinderReport) -> Self {
+        self.setup_finder_report = Some(report);
         self
     }
 }
@@ -328,6 +348,10 @@ impl CoreExecutionResult {
         &self.solution_coverages
     }
 
+    pub fn normalized_solution_coverages(&self) -> &[NormalizedSolutionCoverage] {
+        &self.normalized_solution_coverages
+    }
+
     pub fn solution_probabilities(&self) -> &[SolutionProbabilityReport] {
         &self.solution_probabilities
     }
@@ -358,6 +382,10 @@ impl CoreExecutionResult {
 
     pub fn postprocess_spin_coverages(&self) -> &[CorePostProcessSpinCoverage] {
         &self.postprocess_spin_coverages
+    }
+
+    pub fn setup_finder_report(&self) -> Option<&SetupFinderReport> {
+        self.setup_finder_report.as_ref()
     }
 
     pub(crate) fn take_exact_scoring_execution_batches(

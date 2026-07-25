@@ -43,7 +43,8 @@ use super::{
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 use crate::solution_probability::{
-    covers_all_identities, probability_reports, SolutionCoverage, SolutionProbabilityReport,
+    covers_all_identities, probability_reports, NormalizedSolutionCoverage, SolutionCoverage,
+    SolutionProbabilityReport,
 };
 
 // Keep browser-worker cancellation responsive without paying an ABI/event-loop
@@ -267,8 +268,9 @@ impl WasmExactSearchSession {
             covered_patterns,
             buildable_identities: ExactHashSet::default(),
             solution_coverage: (problem.solution_probability_policy().requested()
-                || problem.objective().kind() == ObjectiveKind::MinimumCover)
-                .then(ExactHashMap::default),
+                || problem.objective().kind() == ObjectiveKind::MinimumCover
+                || problem.objective().execution_constraints().requested())
+            .then(ExactHashMap::default),
             solution_coverage_bytes: 0,
             packing_candidate_count: 0,
             packing_candidate_digest: 0,
@@ -728,7 +730,8 @@ impl WasmExactSearchSession {
         let solution_probabilities_requested =
             self.problem.solution_probability_policy().requested();
         let solution_coverage_required = solution_probabilities_requested
-            || self.problem.objective().kind() == ObjectiveKind::MinimumCover;
+            || self.problem.objective().kind() == ObjectiveKind::MinimumCover
+            || self.problem.objective().execution_constraints().requested();
         let coverage_only_needs_witness = !solution_coverage_required
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
             && target.single_pattern_witness_is_exact()
@@ -1343,6 +1346,18 @@ impl WasmExactSearchSession {
                 entries
             })
             .unwrap_or_default();
+        let normalized_solution_coverages = solution_coverages
+            .iter()
+            .map(|coverage| {
+                NormalizedSolutionCoverage::new(
+                    NormalizedTilingSolutionKey::from_standard_board64_identity(
+                        coverage.identity(),
+                    )
+                    .as_str(),
+                    coverage.covered_patterns().clone(),
+                )
+            })
+            .collect();
         let minimum_cover_requested =
             self.problem.objective().kind() == ObjectiveKind::MinimumCover;
         let minimum_cover_product_reduction = minimum_cover_requested && include_normalized_keys;
@@ -1864,6 +1879,7 @@ impl WasmExactSearchSession {
             .with_representative_solution_identity(self.representative_identity)
             .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
             .with_solution_coverages(solution_coverages)
+            .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_solution_probabilities(solution_probabilities)
             .with_postprocess_execution_batch(
                 Vec::new(),

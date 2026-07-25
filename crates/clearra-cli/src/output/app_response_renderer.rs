@@ -48,7 +48,6 @@ fn render_success(
         AppRenderModel::Pc(result)
         | AppRenderModel::BuildProbability(result)
         | AppRenderModel::Scenario(result)
-        | AppRenderModel::Setup(result)
         | AppRenderModel::Cover(result)
         | AppRenderModel::Percent(result) => {
             let mut fields = SummaryRenderContract::render_fields(result.summary_fields());
@@ -78,6 +77,181 @@ fn render_success(
                     })),
                 ));
             }
+            CliOutput::success(CommandRenderer::render(
+                model.kind().as_str(),
+                fields,
+                format,
+            ))
+        }
+        AppRenderModel::Setup(result) => {
+            let mut fields = SummaryRenderContract::render_fields(result.summary_fields());
+            let Some(report) = result.setup_finder_report() else {
+                return CliOutput::error(
+                    default_error,
+                    "setup result did not include a setup finder report",
+                );
+            };
+            fields.extend([
+                RenderField::new("cycle", report.cycle()),
+                RenderField::new("remaining_pieces", report.remaining_pieces()),
+                RenderField::new(
+                    "post_cycle_borrow_enabled",
+                    report.post_cycle_borrow_enabled(),
+                ),
+                RenderField::new("coverage_semantics", report.coverage_semantics()),
+                RenderField::new(
+                    "geometry_family_count",
+                    RenderFieldValue::string(report.geometry_family_count()),
+                ),
+                RenderField::new(
+                    "partial_build_node_count",
+                    report.partial_build_node_count(),
+                ),
+                RenderField::new("complete", report.complete()),
+                RenderField::new(
+                    "hold_conditions",
+                    RenderFieldValue::array(report.hold_conditions().iter().map(|condition| {
+                        RenderFieldValue::object([
+                            (
+                                "condition_id",
+                                RenderFieldValue::string(condition.condition_id()),
+                            ),
+                            (
+                                "initial_hold",
+                                condition
+                                    .initial_hold()
+                                    .map_or(RenderFieldValue::Null, |piece| {
+                                        RenderFieldValue::string(piece.as_ascii().to_string())
+                                    }),
+                            ),
+                            (
+                                "pattern_expression",
+                                RenderFieldValue::string(condition.pattern_expression()),
+                            ),
+                            (
+                                "pattern_count",
+                                RenderFieldValue::from(condition.pattern_count()),
+                            ),
+                            (
+                                "candidate_count",
+                                RenderFieldValue::from(condition.candidate_count()),
+                            ),
+                            (
+                                "result_truncated",
+                                RenderFieldValue::bool(condition.result_truncated()),
+                            ),
+                            ("complete", RenderFieldValue::bool(condition.complete())),
+                            (
+                                "candidates",
+                                RenderFieldValue::array(condition.candidates().iter().map(
+                                    |candidate| {
+                                        RenderFieldValue::object([
+                                            (
+                                                "setup_id",
+                                                RenderFieldValue::string(candidate.setup_id()),
+                                            ),
+                                            (
+                                                "board_mask",
+                                                RenderFieldValue::string(format!(
+                                                    "0x{:x}",
+                                                    candidate.board_mask()
+                                                )),
+                                            ),
+                                            (
+                                                "min_locks",
+                                                RenderFieldValue::from(candidate.min_locks()),
+                                            ),
+                                            (
+                                                "max_locks",
+                                                RenderFieldValue::from(candidate.max_locks()),
+                                            ),
+                                            (
+                                                "build_covered_patterns",
+                                                RenderFieldValue::from(
+                                                    candidate.build_covered_patterns(),
+                                                ),
+                                            ),
+                                            (
+                                                "joint_covered_patterns",
+                                                RenderFieldValue::from(
+                                                    candidate.joint_covered_patterns(),
+                                                ),
+                                            ),
+                                            (
+                                                "build_probability",
+                                                RenderFieldValue::number(
+                                                    candidate.build_probability(),
+                                                ),
+                                            ),
+                                            (
+                                                "joint_probability",
+                                                RenderFieldValue::number(
+                                                    candidate.joint_probability(),
+                                                ),
+                                            ),
+                                            (
+                                                "conditional_pc_probability",
+                                                RenderFieldValue::number(
+                                                    candidate.conditional_pc_probability(),
+                                                ),
+                                            ),
+                                            (
+                                                "representative_path",
+                                                RenderFieldValue::array(
+                                                    candidate.representative_path().iter().map(
+                                                        |step| {
+                                                            RenderFieldValue::object([
+                                                                (
+                                                                    "piece",
+                                                                    RenderFieldValue::string(
+                                                                        step.piece()
+                                                                            .as_ascii()
+                                                                            .to_string(),
+                                                                    ),
+                                                                ),
+                                                                (
+                                                                    "rotation",
+                                                                    RenderFieldValue::from(
+                                                                        step.rotation(),
+                                                                    ),
+                                                                ),
+                                                                (
+                                                                    "x",
+                                                                    RenderFieldValue::from(
+                                                                        step.x(),
+                                                                    ),
+                                                                ),
+                                                                (
+                                                                    "y",
+                                                                    RenderFieldValue::from(
+                                                                        step.y(),
+                                                                    ),
+                                                                ),
+                                                                (
+                                                                    "hold",
+                                                                    RenderFieldValue::string(
+                                                                        step.hold(),
+                                                                    ),
+                                                                ),
+                                                                (
+                                                                    "cleared_lines",
+                                                                    RenderFieldValue::from(
+                                                                        step.cleared_lines(),
+                                                                    ),
+                                                                ),
+                                                            ])
+                                                        },
+                                                    ),
+                                                ),
+                                            ),
+                                        ])
+                                    },
+                                )),
+                            ),
+                        ])
+                    })),
+                ),
+            ]);
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
                 fields,

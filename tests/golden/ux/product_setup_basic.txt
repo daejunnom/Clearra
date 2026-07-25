@@ -1,3 +1,0 @@
-kind: setup
-setup_raw_metrics: attached
-coverage_reducer: pattern-bitset-union

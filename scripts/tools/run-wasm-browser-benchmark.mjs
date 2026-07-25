@@ -48,7 +48,14 @@ try {
         return;
       }
       const url = new URL(`http://127.0.0.1:${address.port}/`);
-      url.searchParams.set('command', options.command);
+      if (options.command) url.searchParams.set('command', options.command);
+      if (options['prewarm-workers']) {
+        url.searchParams.set('prewarmWorkers', options['prewarm-workers']);
+      }
+      if (options['prewarm-gpu']) url.searchParams.set('prewarmGpu', options['prewarm-gpu']);
+      if (options['runtime-prewarm-workers']) {
+        url.searchParams.set('runtimePrewarmWorkers', options['runtime-prewarm-workers']);
+      }
       browser = spawn(resolveBrowser(options.browser), [
         `--user-data-dir=${profile}`,
         '--headless=new',
@@ -224,7 +231,9 @@ function parseArgs(args) {
     if (!key?.startsWith('--') || value === undefined) throw new Error(`invalid argument: ${key ?? ''}`);
     parsed[key.slice(2)] = value;
   }
-  if (!parsed.root || !parsed.command) throw new Error('--root and --command are required');
+  if (!parsed.root || (!parsed.command && !parsed['prewarm-workers'])) {
+    throw new Error('--root and either --command or --prewarm-workers are required');
+  }
   return parsed;
 }
 

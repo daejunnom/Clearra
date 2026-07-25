@@ -325,6 +325,18 @@ pub extern "C" fn clearra_wasm_distributed_worker_initialization() -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_worker_initialization_deferred() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_some_and(WasmDistributedCoordinator::worker_initialization_deferred)
+            .into()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_geometry_nodes() -> u32 {
     ABI_STATE.with(|state| {
         state
@@ -415,6 +427,10 @@ pub extern "C" fn clearra_wasm_distributed_produce(work_budget: u32, batch_capac
         };
         match coordinator.advance_producer(work_budget as usize, batch_capacity as usize) {
             Ok(WasmDistributedProducerAdvance::Pending) => 0,
+            Ok(WasmDistributedProducerAdvance::Initialization(output)) => {
+                state.set_output_bytes(output);
+                4
+            }
             Ok(WasmDistributedProducerAdvance::Batch(output)) => {
                 state.set_output_bytes(output);
                 1

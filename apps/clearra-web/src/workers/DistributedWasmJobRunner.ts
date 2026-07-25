@@ -100,12 +100,15 @@ export class DistributedWasmJobRunner {
         job_id: this.jobId
       });
       emitProgress();
-      const verifierInitialization = this.pool.initialize(
-        plan.workerInitialization ?? commandText,
-        verifierCount,
-        this.wasm.compiled_module()
-      );
-      void verifierInitialization.catch(() => undefined);
+      let verifierInitialization: Promise<void> | null = null;
+      if (!plan.deferredInitialization) {
+        verifierInitialization = this.pool.initialize(
+          plan.workerInitialization ?? commandText,
+          verifierCount,
+          this.wasm.compiled_module()
+        );
+        void verifierInitialization.catch(() => undefined);
+      }
       await yieldToWorkerHost();
       this.requireActive();
       lastHostYield = performance.now();
@@ -117,7 +120,25 @@ export class DistributedWasmJobRunner {
           PRODUCER_WORK_BUDGET,
           CANDIDATE_BATCH_SIZE
         );
+        if (produced.status === 'initialization') {
+          if (verifierInitialization) {
+            throw new Error('distributed worker initialization was produced more than once');
+          }
+          verifierInitialization = this.pool.initialize(
+            produced.initialization,
+            verifierCount,
+            this.wasm.compiled_module()
+          );
+          void verifierInitialization.catch(() => undefined);
+          await yieldToWorkerHost();
+          lastHostYield = performance.now();
+          this.requireActive();
+          continue;
+        }
         if (produced.status === 'batch') {
+          if (!verifierInitialization) {
+            throw new Error('distributed task arrived before worker initialization');
+          }
           await verifierInitialization;
           this.requireActive();
           await this.pool.enqueue(produced.batch, (partial) =>
@@ -137,6 +158,9 @@ export class DistributedWasmJobRunner {
         this.requireActive();
       }
       this.requireActive();
+      if (!verifierInitialization) {
+        throw new Error('distributed producer completed without worker initialization');
+      }
       await verifierInitialization;
       this.requireActive();
 
