@@ -6,6 +6,7 @@
   import {
     explicitSetupHold,
     setupCycle,
+    type SetupCandidatePriority,
     type SetupFinderRequest,
     type SetupFinderValidationCode
   } from './setupFinderModel';
@@ -64,6 +65,20 @@
       <span>{label('pcTarget')}</span>
       <b>10×4 · SRS+</b>
     </div>
+    <label class="workspace-field wide priority-field">
+      <span>{label('setupCandidatePriority')}</span>
+      <select
+        value={request.candidatePriority}
+        on:change={(event) => update({
+          candidatePriority: (event.currentTarget as HTMLSelectElement).value as SetupCandidatePriority
+        })}
+      >
+        <option value="all">{label('setupPriorityAll')}</option>
+        <option value="build">{label('setupPriorityBuild')}</option>
+        <option value="pc">{label('setupPriorityPc')}</option>
+      </select>
+      <small class="workspace-field-help">{label('setupPriorityHelp')}</small>
+    </label>
     {#if cycle === 7}
       <div class="workspace-switch-row">
         <label class="workspace-switch-label">
@@ -103,4 +118,5 @@
   .residue-facts span { color: #68736f; }
   .residue-facts strong { color: #173f3a; text-align: right; }
   .boundary-help { display: block; margin-top: 8px; }
+  .priority-field { margin-top: 14px; }
 </style>

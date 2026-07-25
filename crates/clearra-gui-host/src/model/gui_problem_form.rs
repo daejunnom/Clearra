@@ -310,6 +310,7 @@ pub struct GuiSetupSearchForm {
     remaining_pieces: String,
     allow_post_cycle_borrow: bool,
     rule: String,
+    candidate_priority: String,
 }
 
 impl GuiSetupSearchForm {
@@ -322,6 +323,7 @@ impl GuiSetupSearchForm {
             remaining_pieces: remaining_pieces.into(),
             allow_post_cycle_borrow,
             rule: rule.into(),
+            candidate_priority: "all".to_owned(),
         }
     }
 }
@@ -338,6 +340,15 @@ impl GuiSetupSearchForm {
 impl GuiSetupSearchForm {
     pub fn rule(&self) -> &str {
         &self.rule
+    }
+
+    pub fn candidate_priority(&self) -> &str {
+        &self.candidate_priority
+    }
+
+    pub fn with_candidate_priority(mut self, priority: impl Into<String>) -> Self {
+        self.candidate_priority = priority.into();
+        self
     }
 }
 

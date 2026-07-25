@@ -54,6 +54,10 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
         command.query().residue().duplicate_piece(),
         Some(PieceKind::S)
     );
+    assert_eq!(
+        command.query().candidate_priority(),
+        clearra_problem::SetupCandidatePriority::All
+    );
 
     let cycle_boundary =
         WebCommandParser::parse("clearra setup --remaining IOT --allow-post-cycle-borrow")
@@ -68,6 +72,32 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
         command.query().cycle_reset_borrow_policy(),
         clearra_problem::SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
     );
+}
+
+#[test]
+fn setup_command_preserves_candidate_priority() {
+    for (keyword, expected) in [
+        ("all", clearra_problem::SetupCandidatePriority::All),
+        (
+            "build",
+            clearra_problem::SetupCandidatePriority::BuildProbabilityFirst,
+        ),
+        (
+            "pc",
+            clearra_problem::SetupCandidatePriority::PcProbabilityFirst,
+        ),
+    ] {
+        let request = WebCommandParser::parse(&format!(
+            "clearra setup --remaining IOTS --priority {keyword}"
+        ))
+        .expect("setup command")
+        .to_app_request()
+        .expect("AppRequest");
+        let AppCommand::Setup(command) = request.command() else {
+            panic!("expected AppCommand::Setup");
+        };
+        assert_eq!(command.query().candidate_priority(), expected);
+    }
 }
 
 #[test]

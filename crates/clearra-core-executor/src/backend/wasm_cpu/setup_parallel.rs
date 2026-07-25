@@ -18,9 +18,10 @@ use super::{
     piece_index,
     setup_coverage_graph::SetupCoverageGraph,
     setup_finder::{
-        covered_word_weight, decode_state, encode_state, finish_setup_result, probability_string,
-        CompletedSetupCoverage, SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
-        EXTRA_DRAW_STATE_COUNT, HOLD_STATE_COUNT,
+        compare_setup_candidates, covered_word_weight, decode_state, encode_state,
+        finish_setup_result, probability_string, CompletedSetupCoverage,
+        SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES, EXTRA_DRAW_STATE_COUNT,
+        HOLD_STATE_COUNT,
     },
     setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
     setup_parallel_segmented::{SegmentedArray, SegmentedGenerationArray},
@@ -236,7 +237,11 @@ impl WasmSetupParallelCoordinator {
         for (condition_index, merge) in condition_merges.into_iter().enumerate() {
             let condition = &shared.conditions[condition_index];
             peak_segment_pages = peak_segment_pages.max(merge.peak_segment_pages);
-            let result = merge.finish(&shared.graph.shapes, shared.query.limits().max_results())?;
+            let result = merge.finish(
+                &shared.graph.shapes,
+                shared.query.limits().max_results(),
+                shared.query.candidate_priority(),
+            )?;
             let resolver = SetupRepresentativeResolver::new(condition, &shared.graph)?;
             let targets = result
                 .selected_shapes
@@ -417,6 +422,7 @@ impl SetupConditionMerge {
         mut self,
         shapes: &[super::setup_partial_build::SetupShape],
         max_results: usize,
+        candidate_priority: clearra_problem::SetupCandidatePriority,
     ) -> Result<CompletedParallelCondition, WasmExactSearchError> {
         if self.received_tasks != self.expected_tasks {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -438,16 +444,17 @@ impl SetupConditionMerge {
             let right_shape = &shapes[*right];
             let left_coverage = self.accumulators.get(*left).copied().unwrap_or_default();
             let right_coverage = self.accumulators.get(*right).copied().unwrap_or_default();
-            right_coverage
-                .joint_weight
-                .total_cmp(&left_coverage.joint_weight)
-                .then_with(|| {
-                    right_coverage
-                        .build_weight
-                        .total_cmp(&left_coverage.build_weight)
-                })
-                .then_with(|| left_shape.min_locks.cmp(&right_shape.min_locks))
-                .then_with(|| left_shape.board.cmp(&right_shape.board))
+            compare_setup_candidates(
+                candidate_priority,
+                left_coverage.build_weight,
+                left_coverage.joint_weight,
+                left_shape.min_locks,
+                left_shape.board,
+                right_coverage.build_weight,
+                right_coverage.joint_weight,
+                right_shape.min_locks,
+                right_shape.board,
+            )
         });
         let candidate_count = self.covered_shapes.len();
         let mut candidate_boards = self
@@ -494,7 +501,7 @@ struct CompletedParallelCondition {
     selected_shapes: Vec<SetupParallelShapeResult>,
 }
 
-const TARGET_TASKS_PER_VERIFIER: usize = 2;
+const TARGET_TASKS_PER_VERIFIER: usize = 4;
 const MIN_WORDS_PER_TASK: usize = 128;
 
 fn plan_parallel_tasks(
@@ -1083,3 +1090,7 @@ fn check_cancel(control: &ExecutionControl, work: &mut usize) -> Result<(), Wasm
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "setup_parallel_tests.rs"]
+mod tests;

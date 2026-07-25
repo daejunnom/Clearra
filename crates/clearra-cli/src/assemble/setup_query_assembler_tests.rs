@@ -19,3 +19,16 @@ fn rejects_unknown_residue_piece() {
         Err(SetupQueryAssemblyError::UnknownPiece { value: 'X' })
     );
 }
+
+#[test]
+fn preserves_setup_candidate_priority() {
+    let args = SetupArgs::new("IOTS", false).with_candidate_priority(
+        clearra_setup_search::query::SetupCandidatePriority::PcProbabilityFirst,
+    );
+    let query = SetupQueryAssembler::assemble(&args).expect("setup query");
+
+    assert_eq!(
+        query.candidate_priority(),
+        clearra_setup_search::query::SetupCandidatePriority::PcProbabilityFirst
+    );
+}

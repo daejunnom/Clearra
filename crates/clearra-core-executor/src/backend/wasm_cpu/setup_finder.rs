@@ -2,11 +2,13 @@
 // It spans residue-aware coverage traversal through canonical setup result
 // assembly; shared graph construction and parallel transport remain separate
 // owners.
-use std::{collections::HashMap, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
-use clearra_problem::{SetupCycleResetBorrowPolicy, SetupSearchCondition, SetupSearchQuery};
+use clearra_problem::{
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupSearchCondition, SetupSearchQuery,
+};
 use clearra_supply::pattern_universe::PatternPiecePositionIndex;
 
 use crate::{
@@ -132,6 +134,7 @@ impl WasmSetupSearchSession {
                         Arc::clone(&graph),
                         Arc::clone(&coverage_graph),
                         query.limits().max_results(),
+                        query.candidate_priority(),
                     )?);
                 }
                 let mut session = active.take().expect("coverage session exists");
@@ -231,6 +234,10 @@ pub(super) fn finish_setup_result(
             (
                 "setup_cycle".to_owned(),
                 query.residue().cycle().unwrap_or_default().to_string(),
+            ),
+            (
+                "setup_candidate_priority".to_owned(),
+                query.candidate_priority().keyword().to_owned(),
             ),
             (
                 "geometry_candidate_family_count".to_owned(),
@@ -811,6 +818,7 @@ struct SetupCoverageSession {
     shape_touched: Vec<bool>,
     accumulators: Vec<ShapeCoverageAccumulator>,
     max_results: usize,
+    candidate_priority: SetupCandidatePriority,
 }
 
 impl SetupCoverageSession {
@@ -819,6 +827,7 @@ impl SetupCoverageSession {
         graph: Arc<PartialBuildGraph>,
         coverage_graph: Arc<SetupCoverageGraph>,
         max_results: usize,
+        candidate_priority: SetupCandidatePriority,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
         let universe = problem.piece_source().materialized_universe().ok_or(
@@ -861,6 +870,7 @@ impl SetupCoverageSession {
                 .map(|_| ShapeCoverageAccumulator::default())
                 .collect(),
             max_results,
+            candidate_priority,
         })
     }
 
@@ -1175,16 +1185,17 @@ impl SetupCoverageSession {
             let right_shape = &self.graph.shapes[*right];
             let left_coverage = &self.accumulators[*left];
             let right_coverage = &self.accumulators[*right];
-            right_coverage
-                .joint_weight
-                .total_cmp(&left_coverage.joint_weight)
-                .then_with(|| {
-                    right_coverage
-                        .build_weight
-                        .total_cmp(&left_coverage.build_weight)
-                })
-                .then_with(|| left_shape.min_locks.cmp(&right_shape.min_locks))
-                .then_with(|| left_shape.board.cmp(&right_shape.board))
+            compare_setup_candidates(
+                self.candidate_priority,
+                left_coverage.build_weight,
+                left_coverage.joint_weight,
+                left_shape.min_locks,
+                left_shape.board,
+                right_coverage.build_weight,
+                right_coverage.joint_weight,
+                right_shape.min_locks,
+                right_shape.board,
+            )
         });
         let candidate_count = shape_indexes.len();
         let mut candidate_boards = shape_indexes
@@ -1521,6 +1532,48 @@ pub(super) fn probability_string(value: f64) -> String {
         output.push('0');
     }
     output
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(super) fn compare_setup_candidates(
+    priority: SetupCandidatePriority,
+    left_build: f64,
+    left_joint: f64,
+    left_min_locks: u8,
+    left_board: u64,
+    right_build: f64,
+    right_joint: f64,
+    right_min_locks: u8,
+    right_board: u64,
+) -> Ordering {
+    let probability_order = match priority {
+        SetupCandidatePriority::All => right_joint
+            .total_cmp(&left_joint)
+            .then_with(|| right_build.total_cmp(&left_build)),
+        SetupCandidatePriority::BuildProbabilityFirst => {
+            right_build.total_cmp(&left_build).then_with(|| {
+                conditional_pc_probability(right_build, right_joint)
+                    .total_cmp(&conditional_pc_probability(left_build, left_joint))
+            })
+        }
+        SetupCandidatePriority::PcProbabilityFirst => {
+            conditional_pc_probability(right_build, right_joint)
+                .total_cmp(&conditional_pc_probability(left_build, left_joint))
+                .then_with(|| right_build.total_cmp(&left_build))
+        }
+    };
+    probability_order
+        .then_with(|| left_min_locks.cmp(&right_min_locks))
+        .then_with(|| left_board.cmp(&right_board))
+}
+
+fn conditional_pc_probability(build: f64, joint: f64) -> f64 {
+    if build == 0.0 {
+        0.0
+    } else {
+        joint / build
+    }
 }
 
 fn setup_candidate_set_hash(results: &[CompletedSetupCoverage]) -> String {

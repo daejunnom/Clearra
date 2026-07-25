@@ -127,7 +127,7 @@ impl CliHelpTopic {
                     "usage: clearra percent --queue IOTSZ [--observed|--bag-aligned|--fixed] [--min-len N] [--max-patterns N]"
                 }
                 Self::Setup => {
-                    "usage: clearra setup --remaining IOTSZJL [--allow-post-cycle-borrow]\nremaining pieces include an existing hold piece; one duplicated kind identifies that hold explicitly"
+                    "usage: clearra setup --remaining IOTSZJL [--priority all|build|pc] [--allow-post-cycle-borrow]\nremaining pieces form an unordered residue pattern; one duplicated kind identifies an existing hold explicitly; cycle seven preserves the reset bag unless post-cycle borrowing is requested"
                 }
                 Self::Cover => {
                     "usage: clearra cover [--template name|--template-json json|--template-file path] [--export-template-json]"

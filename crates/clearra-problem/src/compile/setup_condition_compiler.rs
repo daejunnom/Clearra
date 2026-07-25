@@ -196,11 +196,15 @@ fn pattern_expression(
     remaining_count: usize,
     borrow_policy: SetupCycleResetBorrowPolicy,
 ) -> String {
-    let future_draws = 10usize.saturating_sub(remaining_count)
-        + usize::from(
-            borrow_policy == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
-                && remaining_count == 3,
-        );
+    let locks_after_residue = 10usize.saturating_sub(remaining_count);
+    // Before cycle seven, the next bag still belongs to the same PC window.
+    // Materialize one additional draw so Hold may leave any observed piece
+    // unplaced instead of forcing the final held piece to be the leftover.
+    // Cycle seven deliberately stops at the reset boundary unless the caller
+    // explicitly permits borrowing from the following cycle.
+    let materialized_hold_slack = remaining_count != 3
+        || borrow_policy == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse;
+    let future_draws = locks_after_residue + usize::from(materialized_hold_slack);
     let mut expression = String::new();
     match queue_remainder {
         [] => {}
@@ -285,7 +289,7 @@ mod tests {
 
         assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].initial_hold(), Some(PieceKind::S));
-        assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P5");
+        assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P6");
         assert_eq!(conditions[0].cycle(), 4);
     }
 
@@ -293,7 +297,7 @@ mod tests {
     fn cycle_three_and_five_cross_two_future_bags() {
         assert_eq!(
             pattern_expression(&[PieceKind::T], 1, SetupCycleResetBorrowPolicy::default()),
-            "TP7P2"
+            "TP7P3"
         );
         assert_eq!(
             pattern_expression(
@@ -301,16 +305,64 @@ mod tests {
                 2,
                 SetupCycleResetBorrowPolicy::default()
             ),
-            "[IO]!P7P1"
+            "[IO]!P7P2"
         );
     }
 
     #[test]
+    fn cycle_two_materializes_the_hold_slack_piece_from_the_next_bag() {
+        let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+        ]);
+
+        let conditions = compile_setup_search_conditions(&query).expect("conditions");
+
+        assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P7");
+        assert_eq!(conditions[1].pattern_expression(), "[OTS]!P7");
+    }
+
+    #[test]
+    fn residue_input_order_does_not_change_the_compiled_pattern_domain() {
+        let iots = SetupSearchQuery::default().with_remaining_pieces(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+        ]);
+        let stoi = SetupSearchQuery::default().with_remaining_pieces(vec![
+            PieceKind::S,
+            PieceKind::T,
+            PieceKind::O,
+            PieceKind::I,
+        ]);
+
+        let compile_summary = |query: &SetupSearchQuery| {
+            compile_setup_search_conditions(query)
+                .expect("conditions")
+                .into_iter()
+                .map(|condition| {
+                    (
+                        condition.condition_id().to_owned(),
+                        condition.initial_hold(),
+                        condition.queue_remainder().to_vec(),
+                        condition.pattern_expression().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(compile_summary(&iots), compile_summary(&stoi));
+    }
+
+    #[test]
     fn cycle_seven_borrow_adds_one_post_reset_draw_only_when_requested() {
-        let remainder = [PieceKind::I, PieceKind::O, PieceKind::T];
+        let remainder = [PieceKind::T, PieceKind::S, PieceKind::Z];
         assert_eq!(
             pattern_expression(&remainder, 3, SetupCycleResetBorrowPolicy::default()),
-            "[IOT]!P7"
+            "[TSZ]!P7"
         );
         assert_eq!(
             pattern_expression(
@@ -318,7 +370,7 @@ mod tests {
                 3,
                 SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
             ),
-            "[IOT]!P7P1"
+            "[TSZ]!P7P1"
         );
     }
 }

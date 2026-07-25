@@ -11,7 +11,7 @@ use clearra_pc_graph::request::{
     PcQueueInput, PcSolutionProbabilityPolicy, RequestedSearchBackend, SupplyWindowSize,
     WorkerPolicy,
 };
-use clearra_problem::{SetupCycleResetBorrowPolicy, SetupSearchQuery};
+use clearra_problem::{SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupSearchQuery};
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
 use clearra_supply::queue::{queue_parser, queue_pattern_expression::QueuePatternExpression};
 
@@ -37,6 +37,7 @@ pub struct WebCommandRequest {
     forward_search: Option<ForwardSearchQuery>,
     setup_remaining: Option<Vec<PieceKind>>,
     setup_allow_post_cycle_borrow: bool,
+    setup_candidate_priority: SetupCandidatePriority,
     max_patterns: Option<usize>,
     max_nodes: Option<usize>,
     max_frontier_states: Option<usize>,
@@ -73,6 +74,7 @@ impl WebCommandRequest {
             forward_search: None,
             setup_remaining: None,
             setup_allow_post_cycle_borrow: false,
+            setup_candidate_priority: SetupCandidatePriority::default(),
             max_patterns: None,
             max_nodes: None,
             max_frontier_states: None,
@@ -110,6 +112,7 @@ impl WebCommandRequest {
             forward_search: None,
             setup_remaining: None,
             setup_allow_post_cycle_borrow: false,
+            setup_candidate_priority: SetupCandidatePriority::default(),
             max_patterns: None,
             max_nodes: None,
             max_frontier_states: None,
@@ -135,6 +138,11 @@ impl WebCommandRequest {
         request.setup_remaining = Some(remaining);
         request.setup_allow_post_cycle_borrow = allow_post_cycle_borrow;
         request
+    }
+
+    pub fn with_setup_candidate_priority(mut self, priority: SetupCandidatePriority) -> Self {
+        self.setup_candidate_priority = priority;
+        self
     }
 }
 impl WebCommandRequest {
@@ -335,7 +343,8 @@ impl WebCommandRequest {
             };
             let query = SetupSearchQuery::default()
                 .with_remaining_pieces(remaining)
-                .with_cycle_reset_borrow_policy(borrow_policy);
+                .with_cycle_reset_borrow_policy(borrow_policy)
+                .with_candidate_priority(self.setup_candidate_priority);
             let workers = self.workers.unwrap_or_else(|| {
                 WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
             });

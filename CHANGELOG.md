@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-26
+
+- Corrected Setup Finder residue compilation so unordered remaining pieces,
+  explicit initial hold, bag epoch, and cycle boundaries retain their exact
+  supply semantics.
+- Added automatic cycle derivation, exact hold-slack handling, and the
+  seventh-cycle bag-reset policy without treating residue input as a fixed
+  queue.
+- Added All, Build Probability First, and PC Probability First setup candidate
+  views across CLI, browser WASM, desktop host, and the English/Korean GUI,
+  while keeping full candidate counts and hashes independent of presentation.
+- Preserved complete setup placement replay in result boards and kept serial
+  and segmented multi-worker ordering, limits, and wire transport equivalent.
+- Expanded exact setup regressions for IOTS residue, initial hold, cycle
+  boundaries, candidate ranking, and parallel result merging.
+
 ## 0.2.0 - 2026-07-26
 
 - Added the exact 4-line Setup Finder product path, deriving buildable partial

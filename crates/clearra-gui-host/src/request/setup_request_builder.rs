@@ -1,5 +1,5 @@
 use clearra_app::{AppCommand, SetupAppCommand};
-use clearra_problem::{SetupCycleResetBorrowPolicy, SetupSearchQuery};
+use clearra_problem::{SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupSearchQuery};
 
 use crate::{
     model::{GuiBackendForm, GuiSetupSearchForm},
@@ -34,11 +34,22 @@ impl SetupRequestBuilder {
         } else {
             SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse
         };
+        let candidate_priority = SetupCandidatePriority::from_keyword(form.candidate_priority())
+            .ok_or_else(|| {
+                RequestBuildError::new(
+                    RequestBuildErrorCode::ValidationFailed,
+                    format!(
+                        "unsupported setup candidate priority {}",
+                        form.candidate_priority()
+                    ),
+                )
+            })?;
 
         Ok(AppCommand::Setup(SetupAppCommand::new(
             SetupSearchQuery::default()
                 .with_remaining_pieces(pieces)
-                .with_cycle_reset_borrow_policy(borrow_policy),
+                .with_cycle_reset_borrow_policy(borrow_policy)
+                .with_candidate_priority(candidate_priority),
         )))
     }
 }
