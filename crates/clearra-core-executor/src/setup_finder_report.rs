@@ -1,11 +1,14 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_problem::SetupSearchMode;
 
 use crate::CorePathStep;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupFinderReport {
+    search_mode: SetupSearchMode,
     cycle: u8,
     remaining_pieces: String,
+    queue_based_pieces: String,
     post_cycle_borrow_enabled: bool,
     geometry_family_count: String,
     partial_build_node_count: usize,
@@ -16,8 +19,10 @@ pub struct SetupFinderReport {
 impl SetupFinderReport {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        search_mode: SetupSearchMode,
         cycle: u8,
         remaining_pieces: String,
+        queue_based_pieces: String,
         post_cycle_borrow_enabled: bool,
         geometry_family_count: String,
         partial_build_node_count: usize,
@@ -25,8 +30,10 @@ impl SetupFinderReport {
         hold_conditions: Vec<SetupHoldConditionReport>,
     ) -> Self {
         Self {
+            search_mode,
             cycle,
             remaining_pieces,
+            queue_based_pieces,
             post_cycle_borrow_enabled,
             geometry_family_count,
             partial_build_node_count,
@@ -35,12 +42,20 @@ impl SetupFinderReport {
         }
     }
 
+    pub fn search_mode(&self) -> SetupSearchMode {
+        self.search_mode
+    }
+
     pub fn cycle(&self) -> u8 {
         self.cycle
     }
 
     pub fn remaining_pieces(&self) -> &str {
         &self.remaining_pieces
+    }
+
+    pub fn queue_based_pieces(&self) -> &str {
+        &self.queue_based_pieces
     }
 
     pub fn post_cycle_borrow_enabled(&self) -> bool {
@@ -149,6 +164,8 @@ pub struct SetupCandidateReport {
     joint_probability: String,
     conditional_pc_probability: String,
     representative_path: Vec<CorePathStep>,
+    solution_paths: Vec<Vec<CorePathStep>>,
+    solution_paths_complete: bool,
 }
 
 impl SetupCandidateReport {
@@ -176,7 +193,15 @@ impl SetupCandidateReport {
             joint_probability,
             conditional_pc_probability,
             representative_path,
+            solution_paths: Vec::new(),
+            solution_paths_complete: false,
         }
+    }
+
+    pub fn with_solution_paths(mut self, solution_paths: Vec<Vec<CorePathStep>>) -> Self {
+        self.solution_paths = solution_paths;
+        self.solution_paths_complete = true;
+        self
     }
 
     pub fn setup_id(&self) -> &str {
@@ -217,5 +242,17 @@ impl SetupCandidateReport {
 
     pub fn representative_path(&self) -> &[CorePathStep] {
         &self.representative_path
+    }
+
+    pub fn solution_paths(&self) -> &[Vec<CorePathStep>] {
+        &self.solution_paths
+    }
+
+    pub fn solution_path_count(&self) -> usize {
+        self.solution_paths.len()
+    }
+
+    pub fn solution_paths_complete(&self) -> bool {
+        self.solution_paths_complete
     }
 }

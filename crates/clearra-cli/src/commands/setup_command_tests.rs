@@ -13,6 +13,7 @@ fn setup_command_returns_exact_setup_finder_report() {
         .stdout()
         .contains("backend_selected: wasm-cpu-setup-family-quotient"));
     assert!(output.stdout().contains("coverage_semantics: oracle"));
+    assert!(output.stdout().contains("search_mode: oracle"));
     assert!(output.stdout().contains("cycle: 1"));
     assert!(output.stdout().contains("remaining_pieces: IOTSZJL"));
     assert!(output.stdout().contains("post_cycle_borrow_enabled: false"));

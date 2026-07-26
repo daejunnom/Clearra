@@ -127,7 +127,7 @@ impl CliHelpTopic {
                     "usage: clearra percent --queue IOTSZ [--observed|--bag-aligned|--fixed] [--min-len N] [--max-patterns N]"
                 }
                 Self::Setup => {
-                    "usage: clearra setup --remaining IOTSZJL [--priority all|build|pc] [--allow-post-cycle-borrow]\nremaining pieces form an unordered residue pattern; one duplicated kind identifies an existing hold explicitly; cycle seven preserves the reset bag unless post-cycle borrowing is requested"
+                    "usage: clearra setup --remaining IOTSZJL [--mode oracle] [--priority all|build|pc] [--setup-length auto|longer|shorter] [--allow-post-cycle-borrow]\n   or: clearra setup --remaining TI --mode qb --qb OS [--priority all|build|pc] [--setup-length auto|longer|shorter]\n--remaining is the unordered residue before the next bag boundary; one duplicated kind identifies an existing hold explicitly. --qb is the unordered observed subset at the front of the following standard bag, is appended after the residue, and every observed piece must be placed in the returned setup. Residue plus observed QB pieces may contain at most seven pieces. Setup candidates use one through eight placements; nine-piece setups are never searched. Priority all ranks joint Build x PC coverage. Setup length is independent; auto favors longer setups for all/build and shorter setups for pc"
                 }
                 Self::Cover => {
                     "usage: clearra cover [--template name|--template-json json|--template-file path] [--export-template-json]"

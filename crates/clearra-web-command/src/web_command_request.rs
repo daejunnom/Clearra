@@ -11,7 +11,10 @@ use clearra_pc_graph::request::{
     PcQueueInput, PcSolutionProbabilityPolicy, RequestedSearchBackend, SupplyWindowSize,
     WorkerPolicy,
 };
-use clearra_problem::{SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupSearchQuery};
+use clearra_problem::{
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference, SetupPathDetail,
+    SetupSearchMode, SetupSearchQuery,
+};
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
 use clearra_supply::queue::{queue_parser, queue_pattern_expression::QueuePatternExpression};
 
@@ -36,8 +39,12 @@ pub struct WebCommandRequest {
     build_probability: Option<WebBuildProbabilityInput>,
     forward_search: Option<ForwardSearchQuery>,
     setup_remaining: Option<Vec<PieceKind>>,
+    setup_queue_based_pieces: Option<Vec<PieceKind>>,
     setup_allow_post_cycle_borrow: bool,
     setup_candidate_priority: SetupCandidatePriority,
+    setup_length_preference: SetupLengthPreference,
+    setup_search_mode: SetupSearchMode,
+    setup_path_detail: Option<SetupPathDetail>,
     max_patterns: Option<usize>,
     max_nodes: Option<usize>,
     max_frontier_states: Option<usize>,
@@ -73,8 +80,12 @@ impl WebCommandRequest {
             build_probability: None,
             forward_search: None,
             setup_remaining: None,
+            setup_queue_based_pieces: None,
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
+            setup_length_preference: SetupLengthPreference::default(),
+            setup_search_mode: SetupSearchMode::default(),
+            setup_path_detail: None,
             max_patterns: None,
             max_nodes: None,
             max_frontier_states: None,
@@ -111,8 +122,12 @@ impl WebCommandRequest {
             build_probability: None,
             forward_search: None,
             setup_remaining: None,
+            setup_queue_based_pieces: None,
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
+            setup_length_preference: SetupLengthPreference::default(),
+            setup_search_mode: SetupSearchMode::default(),
+            setup_path_detail: None,
             max_patterns: None,
             max_nodes: None,
             max_frontier_states: None,
@@ -142,6 +157,27 @@ impl WebCommandRequest {
 
     pub fn with_setup_candidate_priority(mut self, priority: SetupCandidatePriority) -> Self {
         self.setup_candidate_priority = priority;
+        self
+    }
+
+    pub fn with_setup_length_preference(mut self, preference: SetupLengthPreference) -> Self {
+        self.setup_length_preference = preference;
+        self
+    }
+
+    pub fn with_setup_search_mode(mut self, mode: SetupSearchMode) -> Self {
+        self.setup_search_mode = mode;
+        self
+    }
+
+    pub fn with_setup_queue_based_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
+        self.setup_queue_based_pieces = Some(pieces);
+        self.setup_search_mode = SetupSearchMode::QueueBased;
+        self
+    }
+
+    pub fn with_setup_path_detail(mut self, detail: SetupPathDetail) -> Self {
+        self.setup_path_detail = Some(detail);
         self
     }
 }
@@ -341,10 +377,33 @@ impl WebCommandRequest {
             } else {
                 SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse
             };
-            let query = SetupSearchQuery::default()
-                .with_remaining_pieces(remaining)
+            let mut query = SetupSearchQuery::default().with_remaining_pieces(remaining);
+            match self.setup_search_mode {
+                SetupSearchMode::ShapeOracle => {
+                    if self.setup_queue_based_pieces.is_some() {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "shape-oracle setup search does not accept observed QB pieces",
+                        ));
+                    }
+                }
+                SetupSearchMode::QueueBased => {
+                    let pieces = self.setup_queue_based_pieces.clone().ok_or_else(|| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::MissingValue,
+                            "queue-based setup search requires observed next-bag pieces",
+                        )
+                    })?;
+                    query = query.with_queue_based_pieces(pieces);
+                }
+            }
+            let mut query = query
                 .with_cycle_reset_borrow_policy(borrow_policy)
-                .with_candidate_priority(self.setup_candidate_priority);
+                .with_candidate_priority(self.setup_candidate_priority)
+                .with_length_preference(self.setup_length_preference);
+            if let Some(detail) = self.setup_path_detail.clone() {
+                query = query.with_path_detail(detail);
+            }
             let workers = self.workers.unwrap_or_else(|| {
                 WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
             });

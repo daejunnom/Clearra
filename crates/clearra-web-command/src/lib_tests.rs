@@ -101,6 +101,104 @@ fn setup_command_preserves_candidate_priority() {
 }
 
 #[test]
+fn setup_command_preserves_setup_length_preference() {
+    for (keyword, expected) in [
+        ("auto", clearra_problem::SetupLengthPreference::Auto),
+        ("longer", clearra_problem::SetupLengthPreference::Longer),
+        ("shorter", clearra_problem::SetupLengthPreference::Shorter),
+    ] {
+        let request = WebCommandParser::parse(&format!(
+            "clearra setup --remaining IOTS --setup-length {keyword}"
+        ))
+        .expect("setup command")
+        .to_app_request()
+        .expect("AppRequest");
+        let AppCommand::Setup(command) = request.command() else {
+            panic!("expected AppCommand::Setup");
+        };
+        assert_eq!(command.query().length_preference(), expected);
+    }
+}
+
+#[test]
+fn setup_command_separates_residue_and_observed_queue_based_pieces() {
+    let request = WebCommandParser::parse("clearra setup --remaining TI --mode qb --qb OS")
+        .expect("QB setup command")
+        .to_app_request()
+        .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+
+    assert_eq!(
+        command.query().search_mode(),
+        clearra_problem::SetupSearchMode::QueueBased
+    );
+    assert_eq!(
+        command.query().residue().pieces(),
+        &[PieceKind::T, PieceKind::I]
+    );
+    assert_eq!(
+        command
+            .query()
+            .queue()
+            .as_fixed_sequence()
+            .expect("fixed QB queue")
+            .pieces(),
+        &[PieceKind::O, PieceKind::S]
+    );
+}
+
+#[test]
+fn setup_command_preserves_exact_path_detail_selection() {
+    let request = WebCommandParser::parse(
+        "clearra setup --remaining TI --mode qb --qb OS \
+         --paths-for setup-00080719e6 --condition hold-empty",
+    )
+    .expect("path detail command")
+    .to_app_request()
+    .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    let detail = command.query().path_detail().expect("path detail");
+
+    assert_eq!(detail.board_mask(), 0x0008_0719_e6);
+    assert_eq!(detail.condition_id(), "hold-empty");
+}
+
+#[test]
+fn setup_command_requires_both_path_detail_options() {
+    let error =
+        WebCommandParser::parse("clearra setup --remaining TI --paths-for setup-00080719e6")
+            .expect_err("missing condition must fail");
+
+    assert_eq!(error.code(), WebCommandErrorCode::MissingValue);
+}
+
+#[test]
+fn setup_command_requires_observed_pieces_in_queue_based_mode() {
+    let error = WebCommandParser::parse("clearra setup --remaining TI --mode qb")
+        .expect("parsed command")
+        .to_app_request()
+        .expect_err("QB mode without observations must fail");
+
+    assert_eq!(error.code(), WebCommandErrorCode::MissingValue);
+}
+
+#[test]
+fn setup_command_rejects_oracle_mode_with_queue_based_observations() {
+    for command in [
+        "clearra setup --remaining TI --mode oracle --qb OS",
+        "clearra setup --remaining TI --qb OS --mode oracle",
+    ] {
+        let error =
+            WebCommandParser::parse(command).expect_err("oracle and QB observations must conflict");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
 fn setup_command_rejects_unknown_product_options() {
     let error = WebCommandParser::parse("clearra setup --remaining IOTSZJL --online-policy")
         .expect_err("unfinished online policy must not enter the product contract");

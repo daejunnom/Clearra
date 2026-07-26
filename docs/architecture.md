@@ -1027,8 +1027,18 @@ compressed `Append / Union / Product` geometry DAG. Each partial node owns its
 current board, inverse lock-clear state, and residual completion family. Nodes
 with equivalent exact continuation state union their residual families before
 the next layer is expanded. The root is only the search source. Every live
-non-root prefix from one through nine locks is eligible for shape grouping;
-depth is not a pruning proof.
+non-root prefix from one through eight placements is eligible for shape grouping;
+depth is not a pruning proof. Depth-nine and terminal suffixes may be traversed
+only to prove that an eligible prefix completes the PC and are never exposed as
+setup candidates.
+
+Queue-based setup mode keeps the normal unordered cycle residue and adds a
+unique observed subset of the following standard bag. Residue plus observations
+may contain at most seven pieces. The compiler appends the observed subset and
+then its inferred bag complement to the supply language. A candidate is
+eligible only after every observed piece has been placed into the setup; an
+observed piece left in hold is not accepted. Setup candidates at nine placements are
+never registered in either search mode.
 
 Coverage is evaluated on the exact product state:
 
@@ -1045,7 +1055,9 @@ Intersecting `OR(forward)` with `OR(backward)` after shape grouping is forbidden
 because it can combine incompatible temporal states.
 
 Each visible candidate reports build, joint, and conditional probability plus
-an exact representative placement/hold path. Output limits are applied only
+an exact representative placement/hold path. Its placement-count range is
+derived only from PC-live exact states that satisfy the active supply contract,
+including complete observed-piece consumption in QB mode. Output limits are applied only
 after all shape coverage has been accumulated and ranked. The stable coverage
 semantics are `Oracle`: each complete pattern may choose its own legal path.
 Online coverage is not exposed until an observation-class policy engine is
@@ -1063,7 +1075,7 @@ post-PC continuation path do not exist in the product source.
 Each hold condition reports its condition identity, explicit initial hold,
 materialized pattern expression, pattern count, total candidate count,
 truncation state, and ranked candidates. Each candidate reports its setup shape
-mask, minimum and maximum representative lock depth, build and joint covered
+mask, minimum and maximum PC-live placement count, build and joint covered
 pattern counts, build/joint/conditional probabilities, and one legal
 representative path.
 

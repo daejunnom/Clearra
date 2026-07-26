@@ -2,14 +2,41 @@ pub use super::{
     setup_candidate_priority::SetupCandidatePriority,
     setup_grouping::GroupingMode,
     setup_hold_policy::SetupHoldPolicy,
+    setup_length_preference::SetupLengthPreference,
     setup_limits::{SetupLimits, SetupLimitsError},
     setup_piece_budget::{PieceBudget, PieceBudgetError},
     setup_probability_filter::{SetupProbabilityFilter, SetupProbabilityFilterError},
     setup_queue_input::SetupQueueInput,
     setup_residue_input::{SetupCycleResetBorrowPolicy, SetupResidueInput},
+    setup_search_mode::SetupSearchMode,
 };
 
 use clearra_core_domain::{board::board_size::BoardSize, pc::pc_target::PcTarget};
+use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupPathDetail {
+    board_mask: u64,
+    condition_id: String,
+}
+
+impl SetupPathDetail {
+    pub fn new(board_mask: u64, condition_id: impl Into<String>) -> Option<Self> {
+        let condition_id = condition_id.into();
+        (board_mask != 0 && board_mask >> 40 == 0 && !condition_id.is_empty()).then_some(Self {
+            board_mask,
+            condition_id,
+        })
+    }
+
+    pub const fn board_mask(&self) -> u64 {
+        self.board_mask
+    }
+
+    pub fn condition_id(&self) -> &str {
+        &self.condition_id
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetupSearchQuery {
@@ -24,6 +51,9 @@ pub struct SetupSearchQuery {
     residue: SetupResidueInput,
     cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy,
     candidate_priority: SetupCandidatePriority,
+    length_preference: SetupLengthPreference,
+    search_mode: SetupSearchMode,
+    path_detail: Option<SetupPathDetail>,
 }
 
 impl SetupSearchQuery {
@@ -50,6 +80,9 @@ impl SetupSearchQuery {
             residue: SetupResidueInput::default(),
             cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
             candidate_priority: SetupCandidatePriority::default(),
+            length_preference: SetupLengthPreference::default(),
+            search_mode: SetupSearchMode::default(),
+            path_detail: None,
         }
     }
 }
@@ -104,6 +137,18 @@ impl SetupSearchQuery {
 
     pub fn candidate_priority(&self) -> SetupCandidatePriority {
         self.candidate_priority
+    }
+
+    pub fn length_preference(&self) -> SetupLengthPreference {
+        self.length_preference
+    }
+
+    pub fn search_mode(&self) -> SetupSearchMode {
+        self.search_mode
+    }
+
+    pub fn path_detail(&self) -> Option<&SetupPathDetail> {
+        self.path_detail.as_ref()
     }
 }
 impl SetupSearchQuery {
@@ -160,6 +205,30 @@ impl SetupSearchQuery {
         self.candidate_priority = priority;
         self
     }
+
+    pub fn with_length_preference(mut self, preference: SetupLengthPreference) -> Self {
+        self.length_preference = preference;
+        self
+    }
+
+    pub fn with_search_mode(mut self, mode: SetupSearchMode) -> Self {
+        self.search_mode = mode;
+        self
+    }
+
+    pub fn with_path_detail(mut self, detail: SetupPathDetail) -> Self {
+        self.path_detail = Some(detail);
+        self
+    }
+
+    pub fn with_queue_based_pieces(
+        mut self,
+        pieces: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+    ) -> Self {
+        self.queue = SetupQueueInput::fixed_sequence(FixedSequence::new(pieces));
+        self.search_mode = SetupSearchMode::QueueBased;
+        self
+    }
 }
 
 impl Default for SetupSearchQuery {
@@ -176,6 +245,9 @@ impl Default for SetupSearchQuery {
             residue: SetupResidueInput::default(),
             cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
             candidate_priority: SetupCandidatePriority::default(),
+            length_preference: SetupLengthPreference::default(),
+            search_mode: SetupSearchMode::default(),
+            path_detail: None,
         }
     }
 }
@@ -217,5 +289,26 @@ mod tests {
         );
         assert_eq!(query.limits().max_patterns(), 5);
         assert_eq!(query.limits().post_pc_retained_trace_limit(), 6);
+        assert_eq!(query.search_mode(), SetupSearchMode::ShapeOracle);
+    }
+
+    #[test]
+    fn queue_based_pieces_preserve_order_without_replacing_residue() {
+        let query = SetupSearchQuery::default().with_queue_based_pieces(vec![
+            PieceKind::T,
+            PieceKind::O,
+            PieceKind::T,
+        ]);
+
+        assert_eq!(query.search_mode(), SetupSearchMode::QueueBased);
+        assert_eq!(
+            query
+                .queue()
+                .as_fixed_sequence()
+                .expect("fixed queue")
+                .pieces(),
+            &[PieceKind::T, PieceKind::O, PieceKind::T]
+        );
+        assert_eq!(query.residue().pieces(), PieceKind::STANDARD_TETROMINOES);
     }
 }

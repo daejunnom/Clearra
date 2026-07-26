@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use clearra_problem::SetupSearchCondition;
+use clearra_problem::{SetupCandidatePriority, SetupLengthPreference, SetupSearchCondition};
 use clearra_supply::pattern_universe::PatternPiecePositionIndex;
 
 use crate::CorePathStep;
@@ -8,8 +8,8 @@ use crate::CorePathStep;
 use super::{
     piece_index,
     setup_finder::{
-        decode_state, encode_state, setup_supply_transitions, SetupHoldAction,
-        EXTRA_DRAW_STATE_COUNT, HOLD_STATE_COUNT,
+        prefers_setup_representative_depth, setup_supply_transitions, SetupHoldAction,
+        SetupSupplyStateLayout,
     },
     setup_partial_build::{PartialBuildEdge, PartialBuildGraph, PartialBuildNode},
     WasmExactSearchError,
@@ -159,12 +159,17 @@ pub(super) struct SetupRepresentativeResolver<'a> {
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
     initial_cursor: u16,
+    state_layout: SetupSupplyStateLayout,
+    candidate_priority: SetupCandidatePriority,
+    length_preference: SetupLengthPreference,
 }
 
 impl<'a> SetupRepresentativeResolver<'a> {
     pub(super) fn new(
         condition: &SetupSearchCondition,
         graph: &'a PartialBuildGraph,
+        candidate_priority: SetupCandidatePriority,
+        length_preference: SetupLengthPreference,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
         let universe = problem.piece_source().materialized_universe().ok_or(
@@ -181,6 +186,12 @@ impl<'a> SetupRepresentativeResolver<'a> {
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
             projects_standard_bag_lookahead: problem.supply().projects_standard_bag_lookahead(),
             initial_cursor: problem.initial_hold().cursor(),
+            state_layout: SetupSupplyStateLayout::new(
+                condition.queue_based_queue_start(),
+                condition.queue_based_queue_len(),
+            ),
+            candidate_priority,
+            length_preference,
         })
     }
 
@@ -197,10 +208,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 .push((output_index, shape_index));
         }
         let state_capacity = self
-            .graph
-            .nodes
-            .len()
-            .checked_mul(EXTRA_DRAW_STATE_COUNT * HOLD_STATE_COUNT)
+            .state_layout
+            .state_capacity(self.graph.nodes.len())
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "setup_witness_state_capacity_overflow",
             ))?;
@@ -224,7 +233,9 @@ impl<'a> SetupRepresentativeResolver<'a> {
         let hold_code = self
             .initial_hold
             .map_or(0, |piece| piece_index(piece) as u8 + 1);
-        let root = encode_state(self.graph.root as usize, 0, hold_code);
+        let root = self
+            .state_layout
+            .encode(self.graph.root as usize, 0, hold_code, false);
         if self.pattern_index.active_word(word_index) & pattern_bit == 0 {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_witness_pattern_is_not_active",
@@ -238,7 +249,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 let record_index = scratch.depth_records[depth][cursor];
                 cursor += 1;
                 let state_index = scratch.records[record_index as usize].state as usize;
-                let (node_index, extra_draw, state_hold_code) = decode_state(state_index);
+                let (node_index, extra_draw, state_hold_code, hold_from_qb) =
+                    self.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() || !node.live() {
                     continue;
@@ -252,11 +264,12 @@ impl<'a> SetupRepresentativeResolver<'a> {
                         edge,
                         extra_draw,
                         state_hold_code,
+                        hold_from_qb,
                         pattern_bit,
                         word_index,
                     );
                     for transition in transitions.iter() {
-                        let (target_node, _, _) = decode_state(transition.target);
+                        let (target_node, _, _, _) = self.state_layout.decode(transition.target);
                         scratch.activate(
                             transition.target,
                             self.graph.nodes[target_node].depth,
@@ -274,14 +287,15 @@ impl<'a> SetupRepresentativeResolver<'a> {
         }
 
         for record in &mut scratch.records {
-            let (node_index, _, _) = decode_state(record.state as usize);
+            let (node_index, _, _, _) = self.state_layout.decode(record.state as usize);
             record.can_complete = self.graph.nodes[node_index].accepting();
         }
         for depth in (0..scratch.depth_records.len()).rev() {
             for cursor in 0..scratch.depth_records[depth].len() {
                 let record_index = scratch.depth_records[depth][cursor];
                 let record = scratch.records[record_index as usize];
-                let (node_index, extra_draw, state_hold_code) = decode_state(record.state as usize);
+                let (node_index, extra_draw, state_hold_code, hold_from_qb) =
+                    self.state_layout.decode(record.state as usize);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() || !node.live() {
                     continue;
@@ -296,6 +310,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
                         edge,
                         extra_draw,
                         state_hold_code,
+                        hold_from_qb,
                         pattern_bit,
                         word_index,
                     );
@@ -314,30 +329,55 @@ impl<'a> SetupRepresentativeResolver<'a> {
             }
         }
 
-        let mut unresolved = targets
+        let target_outputs = targets
             .iter()
             .map(|(output_index, shape_index)| (*shape_index as u32, *output_index))
             .collect::<HashMap<_, _>>();
+        let mut selected_records = HashMap::<u32, (u32, u8)>::new();
         for (record_index, record) in scratch.records.iter().copied().enumerate() {
             if !record.can_complete {
                 continue;
             }
-            let (node_index, _, _) = decode_state(record.state as usize);
+            let (node_index, extra_draw, _, hold_from_qb) =
+                self.state_layout.decode(record.state as usize);
+            if !self.state_layout.accepts_setup_candidate(
+                self.initial_cursor,
+                self.graph.nodes[node_index].depth,
+                extra_draw,
+                hold_from_qb,
+            ) {
+                continue;
+            }
             let Some(shape_index) = self.graph.nodes[node_index].shape_index() else {
                 continue;
             };
-            let Some(output_index) = unresolved.remove(&shape_index) else {
+            if !target_outputs.contains_key(&shape_index) {
                 continue;
-            };
-            paths[output_index] = self.reconstruct_path(record_index as u32, scratch)?;
-            if unresolved.is_empty() {
-                break;
+            }
+            let candidate_depth = self.graph.nodes[node_index].depth;
+            let should_replace =
+                selected_records
+                    .get(&shape_index)
+                    .is_none_or(|(_, selected_depth)| {
+                        prefers_setup_representative_depth(
+                            self.candidate_priority,
+                            self.length_preference,
+                            candidate_depth,
+                            *selected_depth,
+                        )
+                    });
+            if should_replace {
+                selected_records.insert(shape_index, (record_index as u32, candidate_depth));
             }
         }
-        if !unresolved.is_empty() {
+        if selected_records.len() != target_outputs.len() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_witness_path_reconstruction_failed",
             ));
+        }
+        for (shape_index, output_index) in target_outputs {
+            let (record_index, _) = selected_records[&shape_index];
+            paths[output_index] = self.reconstruct_path(record_index, scratch)?;
         }
         Ok(())
     }
@@ -349,6 +389,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
         edge: PartialBuildEdge,
         extra_draw: u8,
         hold_code: u8,
+        hold_from_qb: bool,
         active: u64,
         word_index: usize,
     ) -> CoverageTransitionSet {
@@ -370,11 +411,19 @@ impl<'a> SetupRepresentativeResolver<'a> {
             target_node.accepting(),
         );
         for transition in supply_transitions.iter() {
+            let next_hold_from_qb = self.state_layout.next_hold_provenance(
+                self.initial_cursor,
+                node.depth,
+                extra_draw,
+                hold_from_qb,
+                transition.hold_action,
+            );
             transitions.push(
-                encode_state(
+                self.state_layout.encode(
                     edge.to as usize,
                     transition.extra_draw,
                     transition.hold_code,
+                    next_hold_from_qb,
                 ),
                 transition.mask,
                 transition.hold_action,

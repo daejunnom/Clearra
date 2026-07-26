@@ -175,6 +175,9 @@ export type ClearraSetupCandidate = {
   joint_probability: string;
   conditional_pc_probability: string;
   representative_path: ClearraWasmSearchPathStep[];
+  solution_path_count?: number;
+  solution_paths_complete?: boolean;
+  solution_paths?: ClearraWasmSearchPathStep[][];
 };
 
 export type ClearraSetupHoldCondition = {
@@ -189,8 +192,10 @@ export type ClearraSetupHoldCondition = {
 };
 
 export type ClearraSetupFinderReport = {
+  search_mode: 'oracle' | 'qb';
   cycle: number;
   remaining_pieces: string;
+  queue_based_pieces: string;
   post_cycle_borrow_enabled: boolean;
   coverage_semantics: 'oracle';
   geometry_family_count: string;

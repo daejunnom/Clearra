@@ -2,6 +2,7 @@
 /target/
 /.cargo/target*/
 /cargo-target-tests/
+/apps/clearra-desktop/src-tauri/target/
 **/*.rs.bk
 *.pdb
 __pycache__/

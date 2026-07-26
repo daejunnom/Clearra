@@ -26,15 +26,11 @@ const worker =
         type: 'module'
       });
 let completed = false;
-let peakBrowserMemoryBytes: number | null = null;
-let memorySampleCount = 0;
-let memorySamplePending = false;
+let terminalBrowserMemoryBytes: number | null = null;
 let lastProgressPost = 0;
 let runtimePrewarmStarted = started;
 let runtimePrewarmElapsedMs: number | null = null;
 let runStarted = started;
-const memoryTimer = setInterval(() => void sampleBrowserMemory(), 1_000);
-void sampleBrowserMemory();
 
 worker.onmessage = (message: MessageEvent<Record<string, unknown>>) => {
   const event = message.data;
@@ -73,8 +69,6 @@ worker.onmessage = (message: MessageEvent<Record<string, unknown>>) => {
     elapsed_ms: elapsedMs,
     run_elapsed_ms: performance.now() - runStarted,
     runtime_prewarm_elapsed_ms: runtimePrewarmElapsedMs,
-    browser_memory_peak_bytes: peakBrowserMemoryBytes,
-    browser_memory_sample_count: memorySampleCount,
     capabilities: browserCapabilities(),
     command: commandText,
     event: compactTerminalEvent(event)
@@ -88,8 +82,6 @@ worker.onerror = (event) => {
     elapsed_ms: elapsedMs,
     run_elapsed_ms: performance.now() - runStarted,
     runtime_prewarm_elapsed_ms: runtimePrewarmElapsedMs,
-    browser_memory_peak_bytes: peakBrowserMemoryBytes,
-    browser_memory_sample_count: memorySampleCount,
     capabilities: browserCapabilities(),
     command: commandText,
     worker_error: event.message
@@ -112,10 +104,9 @@ if (prewarmWorkerCount === null) {
 async function complete(result: Record<string, unknown>) {
   if (completed) return;
   completed = true;
-  clearInterval(memoryTimer);
-  await sampleBrowserMemory();
-  result.browser_memory_peak_bytes = peakBrowserMemoryBytes;
-  result.browser_memory_sample_count = memorySampleCount;
+  terminalBrowserMemoryBytes = await measureBrowserMemory();
+  result.browser_memory_terminal_bytes = terminalBrowserMemoryBytes;
+  result.browser_memory_sample_count = terminalBrowserMemoryBytes === null ? 0 : 1;
   worker.terminate();
   status!.textContent = JSON.stringify(result, null, 2);
   const response = await fetch('/__result', {
@@ -127,25 +118,19 @@ async function complete(result: Record<string, unknown>) {
   document.title = 'Clearra WASM benchmark complete';
 }
 
-async function sampleBrowserMemory() {
-  if (memorySamplePending) return;
+async function measureBrowserMemory(): Promise<number | null> {
   const measure = (
     performance as Performance & {
       measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
     }
   ).measureUserAgentSpecificMemory;
-  if (!measure) return;
-  memorySamplePending = true;
+  if (!measure) return null;
   try {
     const sample = await measure.call(performance);
-    if (Number.isFinite(sample.bytes)) {
-      peakBrowserMemoryBytes = Math.max(peakBrowserMemoryBytes ?? 0, sample.bytes);
-      memorySampleCount += 1;
-    }
+    return Number.isFinite(sample.bytes) ? sample.bytes : null;
   } catch {
     // Memory telemetry is optional and must never affect solver execution.
-  } finally {
-    memorySamplePending = false;
+    return null;
   }
 }
 
@@ -159,8 +144,6 @@ async function postProgress(event: Record<string, unknown>) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         elapsed_ms: now - started,
-        browser_memory_peak_bytes: peakBrowserMemoryBytes,
-        browser_memory_sample_count: memorySampleCount,
         event
       })
     });
@@ -177,6 +160,43 @@ function compactTerminalEvent(event: Record<string, unknown>) {
     packing_candidate_keys: _packingCandidateKeys,
     ...compactSearchReport
   } = searchReport;
+  const setupReport = compactSearchReport.setup_report as
+    | Record<string, unknown>
+    | null
+    | undefined;
+  if (setupReport) {
+    const conditions = Array.isArray(setupReport.hold_conditions)
+      ? setupReport.hold_conditions.map((value) => {
+          const condition = value as Record<string, unknown>;
+          const candidates = Array.isArray(condition.candidates)
+            ? condition.candidates as Array<Record<string, unknown>>
+            : [];
+          const { candidates: _candidates, ...summary } = condition;
+          return {
+            ...summary,
+            first_candidate: candidates[0]
+              ? {
+                  setup_id: candidates[0].setup_id,
+                  board_mask: candidates[0].board_mask,
+                  min_locks: candidates[0].min_locks,
+                  max_locks: candidates[0].max_locks,
+                  build_covered_patterns: candidates[0].build_covered_patterns,
+                  joint_covered_patterns: candidates[0].joint_covered_patterns,
+                  build_probability: candidates[0].build_probability,
+                  joint_probability: candidates[0].joint_probability,
+                  conditional_pc_probability: candidates[0].conditional_pc_probability,
+                  solution_path_count: candidates[0].solution_path_count,
+                  solution_paths_complete: candidates[0].solution_paths_complete
+                }
+              : null
+          };
+        })
+      : [];
+    compactSearchReport.setup_report = {
+      ...setupReport,
+      hold_conditions: conditions
+    };
+  }
   return { ...event, search_report: compactSearchReport };
 }
 

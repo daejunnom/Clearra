@@ -3,12 +3,15 @@
   import { createEventDispatcher } from 'svelte';
 
   import QueueTextInput from '../components/QueueTextInput.svelte';
+  import QueuePatternHelp from './QueuePatternHelp.svelte';
   import {
     explicitSetupHold,
     setupCycle,
     type SetupCandidatePriority,
     type SetupFinderRequest,
-    type SetupFinderValidationCode
+    type SetupFinderValidationCode,
+    type SetupLengthPreference,
+    type SetupSearchMode
   } from './setupFinderModel';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
@@ -36,6 +39,24 @@
       <Database size={16} strokeWidth={1.8} />{label('setupResidue')}
     </h2>
     <label class="workspace-field wide">
+      <span>{label('setupSearchMode')}</span>
+      <select
+        value={request.searchMode}
+        on:change={(event) => {
+          const searchMode = (event.currentTarget as HTMLSelectElement).value as SetupSearchMode;
+          update({
+            searchMode
+          });
+        }}
+      >
+        <option value="oracle">{label('setupModeOracle')}</option>
+        <option value="qb">{label('setupModeQb')}</option>
+      </select>
+      <small class="workspace-field-help">
+        {label(request.searchMode === 'qb' ? 'setupModeQbHelp' : 'setupModeOracleHelp')}
+      </small>
+    </label>
+    <label class="workspace-field wide">
       <span>{label('remainingPieces')}</span>
       <QueueTextInput
         class="workspace-queue-input"
@@ -48,11 +69,31 @@
       />
       <small class="workspace-field-help">{label('setupResidueHelp')}</small>
     </label>
+    {#if request.searchMode === 'qb'}
+      <label class="workspace-field wide">
+        <span>{label('setupObservedQueue')}</span>
+        <QueueTextInput
+          class="workspace-queue-input"
+          value={request.qbQueue}
+          maxlength="7"
+          placeholder="OS"
+          spellcheck="false"
+          aria-invalid={validationCodes.length > 0}
+          on:value={(event) => update({ qbQueue: event.detail })}
+        />
+        <small class="workspace-field-help">{label('setupQbInputHelp')}</small>
+      </label>
+    {/if}
+    <QueuePatternHelp {language} mode={request.searchMode === 'qb' ? 'setup-qb' : 'setup'} />
 
     <div class="residue-facts">
       <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
       <span>{label('initialHold')}</span>
       <strong>{explicitHold ?? label('holdConditionsSeparated')}</strong>
+      {#if request.searchMode === 'qb'}
+        <span>{label('setupObservedPieces')}</span>
+        <strong>{request.qbQueue.replace(/[\s,]/g, '').length}</strong>
+      {/if}
     </div>
   </section>
 
@@ -78,6 +119,20 @@
         <option value="pc">{label('setupPriorityPc')}</option>
       </select>
       <small class="workspace-field-help">{label('setupPriorityHelp')}</small>
+    </label>
+    <label class="workspace-field wide priority-field">
+      <span>{label('setupLengthPreference')}</span>
+      <select
+        value={request.lengthPreference}
+        on:change={(event) => update({
+          lengthPreference: (event.currentTarget as HTMLSelectElement).value as SetupLengthPreference
+        })}
+      >
+        <option value="auto">{label('setupLengthAuto')}</option>
+        <option value="longer">{label('setupLengthLonger')}</option>
+        <option value="shorter">{label('setupLengthShorter')}</option>
+      </select>
+      <small class="workspace-field-help">{label('setupLengthHelp')}</small>
     </label>
     {#if cycle === 7}
       <div class="workspace-switch-row">

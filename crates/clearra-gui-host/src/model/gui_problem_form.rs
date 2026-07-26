@@ -311,6 +311,7 @@ pub struct GuiSetupSearchForm {
     allow_post_cycle_borrow: bool,
     rule: String,
     candidate_priority: String,
+    length_preference: String,
 }
 
 impl GuiSetupSearchForm {
@@ -324,6 +325,7 @@ impl GuiSetupSearchForm {
             allow_post_cycle_borrow,
             rule: rule.into(),
             candidate_priority: "all".to_owned(),
+            length_preference: "auto".to_owned(),
         }
     }
 }
@@ -348,6 +350,15 @@ impl GuiSetupSearchForm {
 
     pub fn with_candidate_priority(mut self, priority: impl Into<String>) -> Self {
         self.candidate_priority = priority.into();
+        self
+    }
+
+    pub fn length_preference(&self) -> &str {
+        &self.length_preference
+    }
+
+    pub fn with_length_preference(mut self, preference: impl Into<String>) -> Self {
+        self.length_preference = preference.into();
         self
     }
 }

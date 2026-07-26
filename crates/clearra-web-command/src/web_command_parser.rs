@@ -77,6 +77,11 @@ fn parse_setup_command(
     let mut remaining = "IOTSZJL".to_owned();
     let mut allow_post_cycle_borrow = false;
     let mut candidate_priority = clearra_problem::SetupCandidatePriority::All;
+    let mut length_preference = clearra_problem::SetupLengthPreference::Auto;
+    let mut explicit_search_mode = None;
+    let mut queue_based = None;
+    let mut path_detail_setup_id = None;
+    let mut path_detail_condition_id = None;
     let mut workers = None;
     let mut use_all_logical_processors = false;
     let mut cursor = 0_usize;
@@ -90,6 +95,19 @@ fn parse_setup_command(
                 allow_post_cycle_borrow = true;
                 cursor += 1;
             }
+            "--qb" => {
+                queue_based = Some(next_value(tokens, &mut cursor, "--qb")?.to_owned());
+            }
+            "--mode" => {
+                let value = next_value(tokens, &mut cursor, "--mode")?;
+                let Some(mode) = clearra_problem::SetupSearchMode::from_keyword(value) else {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid setup mode '{value}'; expected oracle or qb"),
+                    ));
+                };
+                explicit_search_mode = Some(mode);
+            }
             "--priority" => {
                 let value = next_value(tokens, &mut cursor, "--priority")?;
                 let Some(priority) = clearra_problem::SetupCandidatePriority::from_keyword(value)
@@ -100,6 +118,27 @@ fn parse_setup_command(
                     ));
                 };
                 candidate_priority = priority;
+            }
+            "--setup-length" => {
+                let value = next_value(tokens, &mut cursor, "--setup-length")?;
+                let Some(preference) = clearra_problem::SetupLengthPreference::from_keyword(value)
+                else {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid setup length preference '{value}'; expected auto, longer, or shorter"
+                        ),
+                    ));
+                };
+                length_preference = preference;
+            }
+            "--paths-for" => {
+                path_detail_setup_id =
+                    Some(next_value(tokens, &mut cursor, "--paths-for")?.to_owned());
+            }
+            "--condition" => {
+                path_detail_condition_id =
+                    Some(next_value(tokens, &mut cursor, "--condition")?.to_owned());
             }
             "--workers" => {
                 workers = Some(parse_positive(
@@ -133,6 +172,28 @@ fn parse_setup_command(
                     format!("invalid setup residue: {error:?}"),
                 )
             })?;
+    let queue_based_pieces = queue_based
+        .map(|value| {
+            clearra_supply::queue::queue_parser::parse_piece_sequence(&value.to_ascii_uppercase())
+                .map_err(|error| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid observed QB pieces: {error:?}"),
+                    )
+                })
+        })
+        .transpose()?;
+    let search_mode = match (explicit_search_mode, queue_based_pieces.is_some()) {
+        (Some(clearra_problem::SetupSearchMode::ShapeOracle), true) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "setup mode oracle cannot be combined with --qb",
+            ));
+        }
+        (Some(mode), _) => mode,
+        (None, true) => clearra_problem::SetupSearchMode::QueueBased,
+        (None, false) => clearra_problem::SetupSearchMode::ShapeOracle,
+    };
     if let Some(workers) = workers {
         let default_limit = WorkerPolicy::default_worker_limit_for_hardware(worker_hardware_limit);
         if workers > worker_hardware_limit {
@@ -150,12 +211,61 @@ fn parse_setup_command(
     }
     let mut request = WebCommandRequest::setup(pieces, allow_post_cycle_borrow)
         .with_setup_candidate_priority(candidate_priority)
+        .with_setup_length_preference(length_preference)
+        .with_setup_search_mode(search_mode)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors);
+    if let Some(pieces) = queue_based_pieces {
+        request = request.with_setup_queue_based_pieces(pieces);
+    }
+    match (path_detail_setup_id, path_detail_condition_id) {
+        (Some(setup_id), Some(condition_id)) => {
+            let board_mask = parse_setup_detail_id(&setup_id)?;
+            let detail = clearra_problem::SetupPathDetail::new(board_mask, condition_id)
+                .ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "invalid setup path detail request",
+                    )
+                })?;
+            request = request.with_setup_path_detail(detail);
+        }
+        (Some(_), None) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "--condition is required with --paths-for",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "--paths-for is required with --condition",
+            ));
+        }
+        (None, None) => {}
+    }
     if let Some(workers) = workers {
         request = request.with_workers(workers);
     }
     Ok(request)
+}
+
+fn parse_setup_detail_id(value: &str) -> Result<u64, WebCommandError> {
+    let digits = value.strip_prefix("setup-").ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "setup path detail id must start with 'setup-'",
+        )
+    })?;
+    u64::from_str_radix(digits, 16)
+        .ok()
+        .filter(|mask| *mask != 0 && *mask >> 40 == 0)
+        .ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "setup path detail id must contain a nonzero 10x4 board mask",
+            )
+        })
 }
 
 fn parse_forward_command(

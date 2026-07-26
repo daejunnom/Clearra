@@ -92,6 +92,40 @@ fn wasm_setup_command_preserves_the_exact_residue_contract() {
 }
 
 #[test]
+fn wasm_setup_command_separates_residue_and_observed_queue_based_pieces() {
+    let request = WasmCommandRuntime::default()
+        .compile_command_text("clearra setup --remaining TI --mode qb --qb OS")
+        .expect("QB setup AppRequest");
+
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        command.query().search_mode(),
+        clearra_problem::SetupSearchMode::QueueBased
+    );
+    assert_eq!(
+        command.query().residue().pieces(),
+        &[
+            clearra_core_domain::piece::piece_kind::PieceKind::T,
+            clearra_core_domain::piece::piece_kind::PieceKind::I,
+        ]
+    );
+    assert_eq!(
+        command
+            .query()
+            .queue()
+            .as_fixed_sequence()
+            .expect("fixed QB queue")
+            .pieces(),
+        &[
+            clearra_core_domain::piece::piece_kind::PieceKind::O,
+            clearra_core_domain::piece::piece_kind::PieceKind::S,
+        ]
+    );
+}
+
+#[test]
 fn occupied_initial_hold_plus_p7_solves_eight_piece_scenario() {
     let result = WasmCommandRuntime::default()
         .run_command_text(

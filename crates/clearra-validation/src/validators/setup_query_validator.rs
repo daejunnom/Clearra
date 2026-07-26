@@ -1,4 +1,4 @@
-use clearra_setup_search::query::{SetupCycleResetBorrowPolicy, SetupSearchQuery};
+use clearra_setup_search::query::{SetupCycleResetBorrowPolicy, SetupSearchMode, SetupSearchQuery};
 
 use crate::diagnostic::diagnostic_report::DiagnosticReport;
 
@@ -23,6 +23,9 @@ impl SetupQueryValidator {
         validate_fixed_setup_target(query, &mut report);
         report.append(validate_piece_budget(query.piece_budget()));
         validate_residue(query, &mut report);
+        if query.search_mode() == SetupSearchMode::QueueBased {
+            validate_queue_based_input(query, &mut report);
+        }
         validate_hold_policy(query.hold_policy(), &mut report);
         validate_probability_filter(query.probability_filter(), &mut report);
         validate_limits(query.limits(), &mut report);
@@ -92,6 +95,48 @@ fn validate_residue(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
             "setup.cycle_reset_borrow",
             "post-cycle piece use is only meaningful for the seventh PC cycle",
             "post_cycle_borrow_requested_outside_cycle_seven",
+        ));
+    }
+}
+
+fn validate_queue_based_input(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
+    let Some(queue) = query.queue().as_fixed_sequence() else {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "queue-based setup search requires an observed subset of the following standard bag",
+            "queue_based_setup_requires_fixed_queue",
+        ));
+        return;
+    };
+    if queue.is_empty() {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "queue-based setup search requires at least one observed next-bag piece",
+            "queue_based_setup_piece_count_out_of_range",
+        ));
+    }
+    if queue.len() + query.residue().remaining_count() > 7 {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "remaining setup pieces and observed next-bag pieces may contain at most seven pieces in total",
+            "queue_based_setup_combined_piece_count_out_of_range",
+        ));
+    }
+    if clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .any(|piece| {
+            queue
+                .pieces()
+                .iter()
+                .filter(|value| **value == piece)
+                .count()
+                > 1
+        })
+    {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "observed queue-based pieces must be a subset of one standard seven-bag",
+            "queue_based_setup_observed_piece_duplicate",
         ));
     }
 }

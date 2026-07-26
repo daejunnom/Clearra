@@ -7,7 +7,8 @@ use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
 use clearra_problem::{
-    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupSearchCondition, SetupSearchQuery,
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference,
+    SetupSearchCondition, SetupSearchQuery,
 };
 use clearra_supply::pattern_universe::PatternPiecePositionIndex;
 
@@ -19,6 +20,7 @@ use super::{
     exact_collections::ExactHashMap,
     geometry::add_packed_piece,
     piece_index,
+    setup_all_paths::{SetupAllPathEnumerator, SetupAllPathGraph},
     setup_coverage_graph::SetupCoverageGraph,
     setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
     setup_partial_build::{PartialBuildEdge, PartialBuildGraph, PartialBuildNode},
@@ -135,6 +137,8 @@ impl WasmSetupSearchSession {
                         Arc::clone(&coverage_graph),
                         query.limits().max_results(),
                         query.candidate_priority(),
+                        query.length_preference(),
+                        query.path_detail(),
                     )?);
                 }
                 let mut session = active.take().expect("coverage session exists");
@@ -204,9 +208,22 @@ pub(super) fn finish_setup_result(
         .iter()
         .map(|piece| piece.as_ascii())
         .collect::<String>();
+    let queue_based_pieces = query
+        .queue()
+        .as_fixed_sequence()
+        .map(|queue| {
+            queue
+                .pieces()
+                .iter()
+                .map(|piece| piece.as_ascii())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
     let report = SetupFinderReport::new(
+        query.search_mode(),
         query.residue().cycle().unwrap_or_default(),
         remaining_pieces.clone(),
+        queue_based_pieces.clone(),
         query.cycle_reset_borrow_policy() == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse,
         geometry_family_count.clone(),
         graph.nodes.len(),
@@ -230,7 +247,12 @@ pub(super) fn finish_setup_result(
             ("count_complete".to_owned(), "true".to_owned()),
             ("probability_complete".to_owned(), "true".to_owned()),
             ("setup_coverage_semantics".to_owned(), "oracle".to_owned()),
+            (
+                "setup_search_mode".to_owned(),
+                query.search_mode().keyword().to_owned(),
+            ),
             ("remaining_pieces".to_owned(), remaining_pieces),
+            ("queue_based_pieces".to_owned(), queue_based_pieces),
             (
                 "setup_cycle".to_owned(),
                 query.residue().cycle().unwrap_or_default().to_string(),
@@ -238,6 +260,10 @@ pub(super) fn finish_setup_result(
             (
                 "setup_candidate_priority".to_owned(),
                 query.candidate_priority().keyword().to_owned(),
+            ),
+            (
+                "setup_length_preference".to_owned(),
+                query.length_preference().keyword().to_owned(),
             ),
             (
                 "geometry_candidate_family_count".to_owned(),
@@ -291,13 +317,28 @@ pub(super) fn finish_setup_result(
     .with_setup_finder_report(report)
 }
 
-#[derive(Default)]
 struct ShapeCoverageAccumulator {
     build_covered_patterns: usize,
     joint_covered_patterns: usize,
     build_weight: f64,
     joint_weight: f64,
+    min_covered_locks: u8,
+    max_covered_locks: u8,
     witness: Option<SetupWitness>,
+}
+
+impl Default for ShapeCoverageAccumulator {
+    fn default() -> Self {
+        Self {
+            build_covered_patterns: 0,
+            joint_covered_patterns: 0,
+            build_weight: 0.0,
+            joint_weight: 0.0,
+            min_covered_locks: u8::MAX,
+            max_covered_locks: 0,
+            witness: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -412,7 +453,7 @@ pub(super) struct CompletedSetupCoverage {
     pub(super) candidate_boards: Vec<u64>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub(super) enum SetupHoldAction {
     #[default]
@@ -430,6 +471,114 @@ impl SetupHoldAction {
             Self::StoreCurrentUseNext => "store-current-use-next",
             Self::UseHeldTerminal => "use-held-terminal",
         }
+    }
+
+    pub(super) const fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub(super) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::UseCurrent),
+            1 => Some(Self::SwapHeld),
+            2 => Some(Self::StoreCurrentUseNext),
+            3 => Some(Self::UseHeldTerminal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SetupSupplyStateLayout {
+    queue_based_queue_start: u8,
+    queue_based_queue_len: u8,
+    hold_provenance_state_count: usize,
+}
+
+impl SetupSupplyStateLayout {
+    pub(super) const fn new(queue_based_queue_start: u8, queue_based_queue_len: u8) -> Self {
+        Self {
+            queue_based_queue_start,
+            queue_based_queue_len,
+            hold_provenance_state_count: if queue_based_queue_len == 0 { 1 } else { 2 },
+        }
+    }
+
+    pub(super) fn state_capacity(self, node_count: usize) -> Option<usize> {
+        node_count
+            .checked_mul(EXTRA_DRAW_STATE_COUNT * HOLD_STATE_COUNT)
+            .and_then(|value| value.checked_mul(self.hold_provenance_state_count))
+    }
+
+    pub(super) const fn has_same_encoding(self, other: Self) -> bool {
+        self.hold_provenance_state_count == other.hold_provenance_state_count
+    }
+
+    pub(super) fn encode(
+        self,
+        node: usize,
+        extra_draw: u8,
+        hold_code: u8,
+        hold_from_queue_based_prefix: bool,
+    ) -> usize {
+        debug_assert!(
+            self.queue_based_queue_len != 0 || !hold_from_queue_based_prefix,
+            "shape-oracle states never carry QB hold provenance"
+        );
+        ((node * EXTRA_DRAW_STATE_COUNT + usize::from(extra_draw)) * HOLD_STATE_COUNT
+            + usize::from(hold_code))
+            * self.hold_provenance_state_count
+            + usize::from(hold_from_queue_based_prefix)
+    }
+
+    pub(super) fn decode(self, index: usize) -> (usize, u8, u8, bool) {
+        let hold_from_queue_based_prefix = index % self.hold_provenance_state_count != 0;
+        let state_without_provenance = index / self.hold_provenance_state_count;
+        let hold_code = (state_without_provenance % HOLD_STATE_COUNT) as u8;
+        let node_and_extra = state_without_provenance / HOLD_STATE_COUNT;
+        (
+            node_and_extra / EXTRA_DRAW_STATE_COUNT,
+            (node_and_extra % EXTRA_DRAW_STATE_COUNT) as u8,
+            hold_code,
+            hold_from_queue_based_prefix,
+        )
+    }
+
+    pub(super) fn next_hold_provenance(
+        self,
+        initial_cursor: u16,
+        depth: u8,
+        extra_draw: u8,
+        current_hold_from_queue_based_prefix: bool,
+        action: SetupHoldAction,
+    ) -> bool {
+        let queue_position =
+            usize::from(initial_cursor) + usize::from(depth) + usize::from(extra_draw);
+        let queue_start = usize::from(self.queue_based_queue_start);
+        let queue_end = queue_start + usize::from(self.queue_based_queue_len);
+        let current_is_queue_based = (queue_start..queue_end).contains(&queue_position);
+        match action {
+            SetupHoldAction::UseCurrent => current_hold_from_queue_based_prefix,
+            SetupHoldAction::SwapHeld | SetupHoldAction::StoreCurrentUseNext => {
+                current_is_queue_based
+            }
+            SetupHoldAction::UseHeldTerminal => false,
+        }
+    }
+
+    pub(super) fn accepts_setup_candidate(
+        self,
+        initial_cursor: u16,
+        depth: u8,
+        extra_draw: u8,
+        hold_from_queue_based_prefix: bool,
+    ) -> bool {
+        let queue_end =
+            usize::from(self.queue_based_queue_start) + usize::from(self.queue_based_queue_len);
+        self.queue_based_queue_len == 0
+            || (usize::from(initial_cursor) + usize::from(depth) + usize::from(extra_draw)
+                >= queue_end
+                && !hold_from_queue_based_prefix)
     }
 }
 
@@ -806,6 +955,7 @@ struct SetupCoverageSession {
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
     initial_cursor: u16,
+    state_layout: SetupSupplyStateLayout,
     next_word: usize,
     alpha: Vec<[u64; COVERAGE_WORD_LANES]>,
     beta: Vec<[u64; COVERAGE_WORD_LANES]>,
@@ -819,6 +969,9 @@ struct SetupCoverageSession {
     accumulators: Vec<ShapeCoverageAccumulator>,
     max_results: usize,
     candidate_priority: SetupCandidatePriority,
+    length_preference: SetupLengthPreference,
+    path_target_board: Option<u64>,
+    all_paths: Option<SetupAllPathEnumerator>,
 }
 
 impl SetupCoverageSession {
@@ -828,6 +981,8 @@ impl SetupCoverageSession {
         coverage_graph: Arc<SetupCoverageGraph>,
         max_results: usize,
         candidate_priority: SetupCandidatePriority,
+        length_preference: SetupLengthPreference,
+        path_detail: Option<&clearra_problem::SetupPathDetail>,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
         let universe = problem.piece_source().materialized_universe().ok_or(
@@ -836,14 +991,35 @@ impl SetupCoverageSession {
         let pattern_index = PatternPiecePositionIndex::compile(universe).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_pattern_index_compile_failed")
         })?;
-        let state_capacity = coverage_graph
-            .nodes
-            .len()
-            .checked_mul(EXTRA_DRAW_STATE_COUNT * HOLD_STATE_COUNT)
+        let state_layout = SetupSupplyStateLayout::new(
+            condition.queue_based_queue_start(),
+            condition.queue_based_queue_len(),
+        );
+        let state_capacity = state_layout
+            .state_capacity(coverage_graph.nodes.len())
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "setup_coverage_state_capacity_overflow",
             ))?;
         let shape_count = graph.shapes.len();
+        let path_target_board = path_detail.map(clearra_problem::SetupPathDetail::board_mask);
+        let all_paths = if let Some(detail) = path_detail {
+            let shape_index = graph
+                .shapes
+                .iter()
+                .position(|shape| shape.board == detail.board_mask())
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_path_detail_shape_not_found",
+                ))?;
+            Some(SetupAllPathEnumerator::new(
+                condition,
+                Arc::new(SetupAllPathGraph::from_partial(&graph)),
+                u32::try_from(shape_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("setup_path_detail_shape_index_overflow")
+                })?,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             condition_id: condition.condition_id().to_owned(),
             initial_hold: condition.initial_hold(),
@@ -856,6 +1032,7 @@ impl SetupCoverageSession {
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
             projects_standard_bag_lookahead: problem.supply().projects_standard_bag_lookahead(),
             initial_cursor: problem.initial_hold().cursor(),
+            state_layout,
             next_word: 0,
             alpha: vec![EMPTY_COVERAGE_WORDS; state_capacity],
             beta: vec![EMPTY_COVERAGE_WORDS; state_capacity],
@@ -871,6 +1048,9 @@ impl SetupCoverageSession {
                 .collect(),
             max_results,
             candidate_priority,
+            length_preference,
+            path_target_board,
+            all_paths,
         })
     }
 
@@ -925,7 +1105,16 @@ impl SetupCoverageSession {
             root_bits,
             lane_count,
         )?;
-        self.activate_alpha(self.coverage_graph.root as usize, 0, hold_code, root_bits);
+        if let Some(all_paths) = &mut self.all_paths {
+            all_paths.run_word_range(word_start, word_start + lane_count, control)?;
+        }
+        self.activate_alpha(
+            self.coverage_graph.root as usize,
+            0,
+            hold_code,
+            false,
+            root_bits,
+        );
 
         for depth in 0..self.depth_states.len() {
             let mut cursor = 0;
@@ -934,7 +1123,8 @@ impl SetupCoverageSession {
                 let state_index = self.depth_states[depth][cursor];
                 cursor += 1;
                 let active = self.alpha[state_index];
-                let (node_index, extra_draw, hold_code) = decode_state(state_index);
+                let (node_index, extra_draw, hold_code, hold_from_qb) =
+                    self.state_layout.decode(state_index);
                 let node = self.coverage_graph.nodes[node_index];
                 if node.accepting() {
                     continue;
@@ -956,11 +1146,19 @@ impl SetupCoverageSession {
                             lane,
                         );
                         for transition in transitions.iter() {
+                            let next_hold_from_qb = self.state_layout.next_hold_provenance(
+                                self.initial_cursor,
+                                node.depth,
+                                extra_draw,
+                                hold_from_qb,
+                                transition.hold_action,
+                            );
                             self.activate_alpha_lane(
-                                encode_state(
+                                self.state_layout.encode(
                                     target_node,
                                     transition.extra_draw,
                                     transition.hold_code,
+                                    next_hold_from_qb,
                                 ),
                                 lane,
                                 active[lane] & transition.mask,
@@ -973,7 +1171,7 @@ impl SetupCoverageSession {
 
         for cursor in 0..self.touched_alpha.len() {
             let state_index = self.touched_alpha[cursor];
-            let (node_index, _, _) = decode_state(state_index);
+            let (node_index, _, _, _) = self.state_layout.decode(state_index);
             if self.coverage_graph.nodes[node_index].accepting() {
                 self.activate_beta(state_index, self.alpha[state_index]);
             }
@@ -983,7 +1181,8 @@ impl SetupCoverageSession {
                 check_setup_coverage_cancel(control, &mut cancellation_work)?;
                 let state_index = self.depth_states[depth][cursor];
                 let active = self.alpha[state_index];
-                let (node_index, extra_draw, hold_code) = decode_state(state_index);
+                let (node_index, extra_draw, hold_code, hold_from_qb) =
+                    self.state_layout.decode(state_index);
                 let node = self.coverage_graph.nodes[node_index];
                 if node.accepting() {
                     continue;
@@ -1006,10 +1205,18 @@ impl SetupCoverageSession {
                             lane,
                         );
                         for transition in transitions.iter() {
-                            let target = encode_state(
+                            let next_hold_from_qb = self.state_layout.next_hold_provenance(
+                                self.initial_cursor,
+                                node.depth,
+                                extra_draw,
+                                hold_from_qb,
+                                transition.hold_action,
+                            );
+                            let target = self.state_layout.encode(
                                 target_node,
                                 transition.extra_draw,
                                 transition.hold_code,
+                                next_hold_from_qb,
                             );
                             successful[lane] |=
                                 active[lane] & transition.mask & self.beta[target][lane];
@@ -1022,8 +1229,16 @@ impl SetupCoverageSession {
 
         for cursor in 0..self.touched_alpha.len() {
             let state_index = self.touched_alpha[cursor];
-            let (node_index, _, _) = decode_state(state_index);
+            let (node_index, extra_draw, _, hold_from_qb) = self.state_layout.decode(state_index);
             let node = self.coverage_graph.nodes[node_index];
+            if !self.state_layout.accepts_setup_candidate(
+                self.initial_cursor,
+                node.depth,
+                extra_draw,
+                hold_from_qb,
+            ) {
+                continue;
+            }
             let Some(shape_index) = node.shape_index().map(|index| index as usize) else {
                 continue;
             };
@@ -1045,6 +1260,13 @@ impl SetupCoverageSession {
                         word_index: word_start + lane,
                         pattern_bit: 1_u64 << joint.trailing_zeros(),
                     });
+                }
+                if joint != 0 {
+                    include_setup_depth_range(
+                        &mut accumulator.min_covered_locks,
+                        &mut accumulator.max_covered_locks,
+                        node.depth,
+                    );
                 }
             }
         }
@@ -1089,6 +1311,7 @@ impl SetupCoverageSession {
         edge: PartialBuildEdge,
         extra_draw: u8,
         hold_code: u8,
+        hold_from_qb: bool,
         active: u64,
         word_index: usize,
     ) -> CoverageTransitionSet {
@@ -1110,11 +1333,19 @@ impl SetupCoverageSession {
             target_node.accepting(),
         );
         for transition in supply_transitions.iter() {
+            let next_hold_from_qb = self.state_layout.next_hold_provenance(
+                self.initial_cursor,
+                node.depth,
+                extra_draw,
+                hold_from_qb,
+                transition.hold_action,
+            );
             transitions.push(
-                encode_state(
+                self.state_layout.encode(
                     edge.to as usize,
                     transition.extra_draw,
                     transition.hold_code,
+                    next_hold_from_qb,
                 ),
                 transition.mask,
                 transition.hold_action,
@@ -1128,9 +1359,14 @@ impl SetupCoverageSession {
         node: usize,
         extra_draw: u8,
         hold_code: u8,
+        hold_from_qb: bool,
         mask: [u64; COVERAGE_WORD_LANES],
     ) {
-        self.activate_alpha_index(encode_state(node, extra_draw, hold_code), mask);
+        self.activate_alpha_index(
+            self.state_layout
+                .encode(node, extra_draw, hold_code, hold_from_qb),
+            mask,
+        );
     }
 
     fn activate_alpha_index(&mut self, state: usize, mask: [u64; COVERAGE_WORD_LANES]) {
@@ -1138,7 +1374,7 @@ impl SetupCoverageSession {
             return;
         }
         if self.alpha[state] == EMPTY_COVERAGE_WORDS {
-            let (node, _, _) = decode_state(state);
+            let (node, _, _, _) = self.state_layout.decode(state);
             self.depth_states[self.coverage_graph.nodes[node].depth as usize].push(state);
             self.touched_alpha.push(state);
         }
@@ -1152,7 +1388,7 @@ impl SetupCoverageSession {
             return;
         }
         if self.alpha[state] == EMPTY_COVERAGE_WORDS {
-            let (node, _, _) = decode_state(state);
+            let (node, _, _, _) = self.state_layout.decode(state);
             self.depth_states[self.coverage_graph.nodes[node].depth as usize].push(state);
             self.touched_alpha.push(state);
         }
@@ -1180,6 +1416,19 @@ impl SetupCoverageSession {
             .filter(|(shape_index, _)| self.accumulators[*shape_index].joint_covered_patterns != 0)
             .map(|(shape_index, _)| shape_index)
             .collect::<Vec<_>>();
+        if let Some(target_board) = self.path_target_board {
+            shape_indexes
+                .retain(|shape_index| self.graph.shapes[*shape_index].board == target_board);
+        }
+        if shape_indexes.iter().any(|shape_index| {
+            let coverage = &self.accumulators[*shape_index];
+            coverage.min_covered_locks == u8::MAX
+                || coverage.min_covered_locks > coverage.max_covered_locks
+        }) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_covered_depth_range_missing",
+            ));
+        }
         shape_indexes.sort_by(|left, right| {
             let left_shape = &self.graph.shapes[*left];
             let right_shape = &self.graph.shapes[*right];
@@ -1187,13 +1436,16 @@ impl SetupCoverageSession {
             let right_coverage = &self.accumulators[*right];
             compare_setup_candidates(
                 self.candidate_priority,
+                self.length_preference,
                 left_coverage.build_weight,
                 left_coverage.joint_weight,
-                left_shape.min_locks,
+                left_coverage.min_covered_locks,
+                left_coverage.max_covered_locks,
                 left_shape.board,
                 right_coverage.build_weight,
                 right_coverage.joint_weight,
-                right_shape.min_locks,
+                right_coverage.min_covered_locks,
+                right_coverage.max_covered_locks,
                 right_shape.board,
             )
         });
@@ -1206,6 +1458,15 @@ impl SetupCoverageSession {
         let result_truncated = shape_indexes.len() > self.max_results;
         shape_indexes.truncate(self.max_results);
         let representative_paths = self.representative_paths(&shape_indexes)?;
+        let mut all_solution_paths = self
+            .all_paths
+            .take()
+            .map(SetupAllPathEnumerator::into_paths)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.into_core_path())
+            .collect::<Vec<_>>();
+        let detail_requested = self.path_target_board.is_some();
         let candidates = shape_indexes
             .into_iter()
             .zip(representative_paths)
@@ -1217,18 +1478,23 @@ impl SetupCoverageSession {
                 } else {
                     coverage.joint_weight / coverage.build_weight
                 };
-                SetupCandidateReport::new(
+                let candidate = SetupCandidateReport::new(
                     format!("setup-{:010x}", shape.board),
                     shape.board,
-                    shape.min_locks,
-                    shape.max_locks,
+                    coverage.min_covered_locks,
+                    coverage.max_covered_locks,
                     coverage.build_covered_patterns,
                     coverage.joint_covered_patterns,
                     probability_string(coverage.build_weight),
                     probability_string(coverage.joint_weight),
                     probability_string(conditional),
                     representative_path,
-                )
+                );
+                if detail_requested {
+                    candidate.with_solution_paths(std::mem::take(&mut all_solution_paths))
+                } else {
+                    candidate
+                }
             })
             .collect();
         Ok(CompletedSetupCoverage {
@@ -1262,10 +1528,8 @@ impl SetupCoverageSession {
                 .push((output_index, shape_index));
         }
         let state_capacity = self
-            .graph
-            .nodes
-            .len()
-            .checked_mul(EXTRA_DRAW_STATE_COUNT * HOLD_STATE_COUNT)
+            .state_layout
+            .state_capacity(self.graph.nodes.len())
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "setup_witness_state_capacity_overflow",
             ))?;
@@ -1294,7 +1558,9 @@ impl SetupCoverageSession {
         let hold_code = self
             .initial_hold
             .map_or(0, |piece| piece_index(piece) as u8 + 1);
-        let root = encode_state(self.graph.root as usize, 0, hold_code);
+        let root = self
+            .state_layout
+            .encode(self.graph.root as usize, 0, hold_code, false);
         if self.pattern_index.active_word(word_index) & pattern_bit == 0 {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_witness_pattern_is_not_active",
@@ -1314,7 +1580,8 @@ impl SetupCoverageSession {
                 let record_index = scratch.depth_records[depth][cursor];
                 cursor += 1;
                 let state_index = scratch.records[record_index as usize].state as usize;
-                let (node_index, extra_draw, state_hold_code) = decode_state(state_index);
+                let (node_index, extra_draw, state_hold_code, hold_from_qb) =
+                    self.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() || !node.live() {
                     continue;
@@ -1328,11 +1595,12 @@ impl SetupCoverageSession {
                         edge,
                         extra_draw,
                         state_hold_code,
+                        hold_from_qb,
                         pattern_bit,
                         word_index,
                     );
                     for transition in transitions.iter() {
-                        let (target_node, _, _) = decode_state(transition.target);
+                        let (target_node, _, _, _) = self.state_layout.decode(transition.target);
                         scratch.activate(
                             transition.target,
                             self.graph.nodes[target_node].depth,
@@ -1350,14 +1618,15 @@ impl SetupCoverageSession {
         }
 
         for record in &mut scratch.records {
-            let (node_index, _, _) = decode_state(record.state as usize);
+            let (node_index, _, _, _) = self.state_layout.decode(record.state as usize);
             record.can_complete = self.graph.nodes[node_index].accepting();
         }
         for depth in (0..scratch.depth_records.len()).rev() {
             for cursor in 0..scratch.depth_records[depth].len() {
                 let record_index = scratch.depth_records[depth][cursor];
                 let record = scratch.records[record_index as usize];
-                let (node_index, extra_draw, state_hold_code) = decode_state(record.state as usize);
+                let (node_index, extra_draw, state_hold_code, hold_from_qb) =
+                    self.state_layout.decode(record.state as usize);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() || !node.live() {
                     continue;
@@ -1372,6 +1641,7 @@ impl SetupCoverageSession {
                         edge,
                         extra_draw,
                         state_hold_code,
+                        hold_from_qb,
                         pattern_bit,
                         word_index,
                     );
@@ -1394,29 +1664,52 @@ impl SetupCoverageSession {
             .iter()
             .map(|(output_index, shape_index)| (*shape_index as u32, *output_index))
             .collect::<HashMap<_, _>>();
-        let mut unresolved = target_outputs;
+        let mut selected_records = HashMap::<u32, (u32, u8)>::new();
         for record_index in 0..scratch.records.len() {
             let record = scratch.records[record_index];
             if !record.can_complete {
                 continue;
             }
-            let (node_index, _, _) = decode_state(record.state as usize);
+            let (node_index, extra_draw, _, hold_from_qb) =
+                self.state_layout.decode(record.state as usize);
+            if !self.state_layout.accepts_setup_candidate(
+                self.initial_cursor,
+                self.graph.nodes[node_index].depth,
+                extra_draw,
+                hold_from_qb,
+            ) {
+                continue;
+            }
             let Some(shape_index) = self.graph.nodes[node_index].shape_index() else {
                 continue;
             };
-            let Some(output_index) = unresolved.remove(&shape_index) else {
+            if !target_outputs.contains_key(&shape_index) {
                 continue;
-            };
-            paths[output_index] =
-                self.reconstruct_representative_path(record_index as u32, scratch)?;
-            if unresolved.is_empty() {
-                break;
+            }
+            let candidate_depth = self.graph.nodes[node_index].depth;
+            let should_replace =
+                selected_records
+                    .get(&shape_index)
+                    .is_none_or(|(_, selected_depth)| {
+                        prefers_setup_representative_depth(
+                            self.candidate_priority,
+                            self.length_preference,
+                            candidate_depth,
+                            *selected_depth,
+                        )
+                    });
+            if should_replace {
+                selected_records.insert(shape_index, (record_index as u32, candidate_depth));
             }
         }
-        if !unresolved.is_empty() {
+        if selected_records.len() != target_outputs.len() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_witness_path_reconstruction_failed",
             ));
+        }
+        for (shape_index, output_index) in target_outputs {
+            let (record_index, _) = selected_records[&shape_index];
+            paths[output_index] = self.reconstruct_representative_path(record_index, scratch)?;
         }
         Ok(())
     }
@@ -1484,21 +1777,6 @@ fn check_setup_coverage_cancel(
     }
 }
 
-pub(super) fn encode_state(node: usize, extra_draw: u8, hold_code: u8) -> usize {
-    (node * EXTRA_DRAW_STATE_COUNT + usize::from(extra_draw)) * HOLD_STATE_COUNT
-        + usize::from(hold_code)
-}
-
-pub(super) fn decode_state(index: usize) -> (usize, u8, u8) {
-    let hold_code = (index % HOLD_STATE_COUNT) as u8;
-    let node_and_extra = index / HOLD_STATE_COUNT;
-    (
-        node_and_extra / EXTRA_DRAW_STATE_COUNT,
-        (node_and_extra % EXTRA_DRAW_STATE_COUNT) as u8,
-        hold_code,
-    )
-}
-
 pub(super) fn covered_word_weight(
     pattern_index: &PatternPiecePositionIndex,
     weights: &WeightedPatternSet,
@@ -1534,38 +1812,67 @@ pub(super) fn probability_string(value: f64) -> String {
     output
 }
 
+#[inline]
+pub(super) fn include_setup_depth_range(min_depth: &mut u8, max_depth: &mut u8, depth: u8) {
+    *min_depth = (*min_depth).min(depth);
+    *max_depth = (*max_depth).max(depth);
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub(super) fn compare_setup_candidates(
     priority: SetupCandidatePriority,
+    length_preference: SetupLengthPreference,
     left_build: f64,
     left_joint: f64,
     left_min_locks: u8,
+    left_max_locks: u8,
     left_board: u64,
     right_build: f64,
     right_joint: f64,
     right_min_locks: u8,
+    right_max_locks: u8,
     right_board: u64,
 ) -> Ordering {
-    let probability_order = match priority {
+    let length_preference = length_preference.resolve(priority);
+    let length_order = || match length_preference {
+        SetupLengthPreference::Longer => right_max_locks.cmp(&left_max_locks),
+        SetupLengthPreference::Shorter => left_min_locks.cmp(&right_min_locks),
+        SetupLengthPreference::Auto => unreachable!("setup length preference is resolved"),
+    };
+    let candidate_order = match priority {
         SetupCandidatePriority::All => right_joint
             .total_cmp(&left_joint)
+            .then_with(length_order)
             .then_with(|| right_build.total_cmp(&left_build)),
-        SetupCandidatePriority::BuildProbabilityFirst => {
-            right_build.total_cmp(&left_build).then_with(|| {
+        SetupCandidatePriority::BuildProbabilityFirst => right_build
+            .total_cmp(&left_build)
+            .then_with(length_order)
+            .then_with(|| {
                 conditional_pc_probability(right_build, right_joint)
                     .total_cmp(&conditional_pc_probability(left_build, left_joint))
-            })
-        }
+            }),
         SetupCandidatePriority::PcProbabilityFirst => {
             conditional_pc_probability(right_build, right_joint)
                 .total_cmp(&conditional_pc_probability(left_build, left_joint))
+                .then_with(length_order)
                 .then_with(|| right_build.total_cmp(&left_build))
         }
     };
-    probability_order
-        .then_with(|| left_min_locks.cmp(&right_min_locks))
-        .then_with(|| left_board.cmp(&right_board))
+    candidate_order.then_with(|| left_board.cmp(&right_board))
+}
+
+pub(super) const fn prefers_setup_representative_depth(
+    priority: SetupCandidatePriority,
+    length_preference: SetupLengthPreference,
+    candidate_depth: u8,
+    selected_depth: u8,
+) -> bool {
+    match length_preference.resolve(priority) {
+        SetupLengthPreference::Longer => candidate_depth > selected_depth,
+        SetupLengthPreference::Shorter => candidate_depth < selected_depth,
+        SetupLengthPreference::Auto => false,
+    }
 }
 
 fn conditional_pc_probability(build: f64, joint: f64) -> f64 {
