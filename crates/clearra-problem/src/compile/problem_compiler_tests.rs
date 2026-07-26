@@ -91,7 +91,13 @@ mod case_opening_preset_compiles_to_clear_to_empty_problem {
     #[test]
     fn opening_preset_compiles_to_clear_to_empty_problem() {
         let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_queue(
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::S,
+                PieceKind::Z,
+            ])),
         );
         let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
 

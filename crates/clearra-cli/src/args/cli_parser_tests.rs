@@ -249,6 +249,137 @@ fn parses_setup_candidate_priority() {
 }
 
 #[test]
+fn parses_setup_length_preference() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--setup-length",
+        "shorter",
+    ])
+    .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        args.length_preference(),
+        clearra_setup_search::query::SetupLengthPreference::Shorter
+    );
+}
+
+#[test]
+fn parses_queue_based_setup_mode() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "TI",
+        "--mode",
+        "qb",
+        "--qb",
+        "OS",
+    ])
+    .expect("QB setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        args.search_mode(),
+        clearra_setup_search::query::SetupSearchMode::QueueBased
+    );
+    assert_eq!(args.remaining(), "TI");
+    assert_eq!(args.queue_based_pieces(), Some("OS"));
+}
+
+#[test]
+fn parses_queue_based_setup_shorthand() {
+    let invocation = CliParser::parse(["clearra", "setup", "--remaining", "TI", "--qb", "OS"])
+        .expect("QB setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        args.search_mode(),
+        clearra_setup_search::query::SetupSearchMode::QueueBased
+    );
+    assert_eq!(args.queue_based_pieces(), Some("OS"));
+}
+
+#[test]
+fn parses_setup_path_detail_as_an_atomic_option_pair() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--paths-for",
+        "setup-4011c4f9",
+        "--condition",
+        "hold-T",
+    ])
+    .expect("setup path detail command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.path_detail_setup_id(), Some("setup-4011c4f9"));
+    assert_eq!(args.path_detail_condition_id(), Some("hold-T"));
+
+    assert!(matches!(
+        CliParser::parse([
+            "clearra",
+            "setup",
+            "--remaining",
+            "IOTS",
+            "--paths-for",
+            "setup-4011c4f9",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--condition",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rejects_oracle_mode_with_queue_based_observations_regardless_of_option_order() {
+    for args in [
+        [
+            "clearra",
+            "setup",
+            "--remaining",
+            "TI",
+            "--mode",
+            "oracle",
+            "--qb",
+            "OS",
+        ],
+        [
+            "clearra",
+            "setup",
+            "--remaining",
+            "TI",
+            "--qb",
+            "OS",
+            "--mode",
+            "oracle",
+        ],
+    ] {
+        assert!(matches!(
+            CliParser::parse(args),
+            Err(CliParseError::InvalidValue {
+                option: "--mode",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn parses_continue_token_as_concrete_command() {
     let token = "pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:oall:e0:hnone:qIIOOO";
     let invocation = CliParser::parse(["clearra", "continue", token]).expect("continue");

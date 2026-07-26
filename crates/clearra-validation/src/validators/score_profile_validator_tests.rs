@@ -22,7 +22,7 @@ fn score_profile_json_rejects_unknown_fields_and_unsupported_spin_rules() {
         r#"{"id":"x","display_name":"X","attack_model":"guideline","extra":true}"#,
     );
     let unsupported_spin = validate_score_profile_json(
-        r#"{"id":"x","display_name":"X","attack_model":"guideline","spin_rule":"all-spin"}"#,
+        r#"{"id":"x","display_name":"X","attack_model":"guideline","spin_rule":"unknown-spin"}"#,
     );
     let unsupported_accuracy = validate_score_profile_json(
         r#"{"id":"x","display_name":"X","attack_model":"guideline","accuracy_level":"profile-specific-exact"}"#,

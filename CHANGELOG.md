@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-07-26
+
+- Added exact queue-based Setup Finder input, observed-piece consumption, and
+  bag/hold provenance so visible QB pieces can participate in the setup without
+  being silently reordered or left unconsumed.
+- Added user-selectable setup length preferences and deterministic priority
+  tie-breaks while preserving complete candidate counts, hashes, and exact
+  build/joint probability semantics.
+- Added on-demand all-solution expansion for a selected setup. The initial
+  result remains compact; selecting a setup enumerates every distinct legal
+  placement and hold path with exact backward PC liveness.
+- Removed duplicate coverage traversal from selected-setup expansion, keeping
+  measured runtime and browser memory within the release performance budget.
+- Expanded CLI, browser WASM, Tauri host, validation, wire, documentation, and
+  English/Korean GUI contracts for the complete Setup Finder feature set.
+
 ## 0.2.1 - 2026-07-26
 
 - Corrected Setup Finder residue compilation so unordered remaining pieces,

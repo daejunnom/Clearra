@@ -2,12 +2,44 @@ use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     piece::piece_kind::PieceKind,
 };
-use clearra_problem::{SetupCandidatePriority, SetupLimits, SetupSearchQuery};
+use clearra_problem::{
+    SetupCandidatePriority, SetupLengthPreference, SetupLimits, SetupSearchQuery,
+};
 
 use super::{
-    compare_setup_candidates, merge_exact_state_coverage, WasmSetupSearchAdvance,
-    WasmSetupSearchSession,
+    compare_setup_candidates, include_setup_depth_range, merge_exact_state_coverage,
+    prefers_setup_representative_depth, SetupHoldAction, SetupSupplyStateLayout,
+    WasmSetupSearchAdvance, WasmSetupSearchSession,
 };
+
+#[test]
+fn queue_based_candidates_must_lock_every_observed_piece() {
+    let layout = SetupSupplyStateLayout::new(2, 2);
+
+    assert!(!layout.accepts_setup_candidate(0, 3, 0, false));
+    assert!(layout.accepts_setup_candidate(0, 4, 0, false));
+    assert!(!layout.accepts_setup_candidate(0, 4, 0, true));
+
+    let held_observed =
+        layout.next_hold_provenance(0, 2, 0, false, SetupHoldAction::StoreCurrentUseNext);
+    assert!(held_observed);
+    assert!(!layout.accepts_setup_candidate(0, 4, 0, held_observed));
+}
+
+#[test]
+fn queue_based_setup_depth_uses_only_paths_after_observed_piece_consumption() {
+    let layout = SetupSupplyStateLayout::new(2, 2);
+    let mut min_depth = u8::MAX;
+    let mut max_depth = 0;
+
+    for (depth, hold_from_qb) in [(3, false), (4, false), (4, true), (6, false)] {
+        if layout.accepts_setup_candidate(0, depth, 0, hold_from_qb) {
+            include_setup_depth_range(&mut min_depth, &mut max_depth, depth);
+        }
+    }
+
+    assert_eq!((min_depth, max_depth), (4, 6));
+}
 
 #[test]
 fn shape_merge_intersects_forward_and_backward_per_exact_state() {
@@ -29,19 +61,35 @@ fn setup_candidate_priority_uses_the_requested_lexicographic_tie_break() {
     use std::cmp::Ordering;
 
     assert_eq!(
-        compare_setup_candidates(SetupCandidatePriority::All, 0.8, 0.4, 3, 1, 0.7, 0.5, 3, 2,),
+        compare_setup_candidates(
+            SetupCandidatePriority::All,
+            SetupLengthPreference::Auto,
+            0.8,
+            0.4,
+            3,
+            3,
+            1,
+            0.7,
+            0.5,
+            3,
+            3,
+            2,
+        ),
         Ordering::Greater
     );
     assert_eq!(
         compare_setup_candidates(
             SetupCandidatePriority::BuildProbabilityFirst,
+            SetupLengthPreference::Auto,
             0.8,
             0.4,
+            3,
             3,
             2,
             0.7,
             0.63,
             3,
+            8,
             1,
         ),
         Ordering::Less
@@ -49,45 +97,128 @@ fn setup_candidate_priority_uses_the_requested_lexicographic_tie_break() {
     assert_eq!(
         compare_setup_candidates(
             SetupCandidatePriority::BuildProbabilityFirst,
+            SetupLengthPreference::Auto,
             0.8,
-            0.64,
+            0.4,
             3,
+            6,
             1,
             0.8,
             0.72,
             3,
+            4,
             2,
-        ),
-        Ordering::Greater
-    );
-    assert_eq!(
-        compare_setup_candidates(
-            SetupCandidatePriority::PcProbabilityFirst,
-            0.7,
-            0.63,
-            3,
-            2,
-            0.8,
-            0.64,
-            3,
-            1,
         ),
         Ordering::Less
     );
     assert_eq!(
         compare_setup_candidates(
-            SetupCandidatePriority::PcProbabilityFirst,
-            0.9,
-            0.45,
+            SetupCandidatePriority::All,
+            SetupLengthPreference::Auto,
+            0.8,
+            0.4,
             3,
+            6,
             1,
             0.8,
             0.4,
             3,
+            4,
             2,
         ),
         Ordering::Less
     );
+    assert_eq!(
+        compare_setup_candidates(
+            SetupCandidatePriority::All,
+            SetupLengthPreference::Shorter,
+            0.8,
+            0.4,
+            2,
+            6,
+            1,
+            0.8,
+            0.4,
+            4,
+            4,
+            2,
+        ),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_setup_candidates(
+            SetupCandidatePriority::PcProbabilityFirst,
+            SetupLengthPreference::Auto,
+            0.7,
+            0.63,
+            3,
+            8,
+            2,
+            0.8,
+            0.64,
+            3,
+            3,
+            1,
+        ),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_setup_candidates(
+            SetupCandidatePriority::PcProbabilityFirst,
+            SetupLengthPreference::Auto,
+            0.9,
+            0.45,
+            2,
+            8,
+            1,
+            0.8,
+            0.4,
+            4,
+            4,
+            2,
+        ),
+        Ordering::Less
+    );
+}
+
+#[test]
+fn setup_candidate_priority_selects_a_representative_with_matching_lock_advantage() {
+    assert!(prefers_setup_representative_depth(
+        SetupCandidatePriority::BuildProbabilityFirst,
+        SetupLengthPreference::Auto,
+        6,
+        4,
+    ));
+    assert!(!prefers_setup_representative_depth(
+        SetupCandidatePriority::BuildProbabilityFirst,
+        SetupLengthPreference::Auto,
+        3,
+        4,
+    ));
+    assert!(prefers_setup_representative_depth(
+        SetupCandidatePriority::PcProbabilityFirst,
+        SetupLengthPreference::Auto,
+        3,
+        4,
+    ));
+    assert!(prefers_setup_representative_depth(
+        SetupCandidatePriority::All,
+        SetupLengthPreference::Auto,
+        6,
+        4,
+    ));
+    assert!(prefers_setup_representative_depth(
+        SetupCandidatePriority::PcProbabilityFirst,
+        SetupLengthPreference::Longer,
+        6,
+        4,
+    ));
+    assert!(prefers_setup_representative_depth(
+        SetupCandidatePriority::BuildProbabilityFirst,
+        SetupLengthPreference::Shorter,
+        3,
+        4,
+    ));
 }
 
 #[test]

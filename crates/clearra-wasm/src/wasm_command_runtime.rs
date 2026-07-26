@@ -88,8 +88,10 @@ pub struct WasmSearchReport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmSetupFinderReport {
+    pub search_mode: String,
     pub cycle: u8,
     pub remaining_pieces: String,
+    pub queue_based_pieces: String,
     pub post_cycle_borrow_enabled: bool,
     pub coverage_semantics: String,
     pub geometry_family_count: String,
@@ -122,6 +124,9 @@ pub struct WasmSetupCandidate {
     pub joint_probability: String,
     pub conditional_pc_probability: String,
     pub representative_path: Vec<WasmSearchPathStep>,
+    pub solution_path_count: usize,
+    pub solution_paths_complete: bool,
+    pub solution_paths: Vec<Vec<WasmSearchPathStep>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -422,8 +427,10 @@ impl WasmSearchReport {
             setup_report: result
                 .setup_finder_report()
                 .map(|report| WasmSetupFinderReport {
+                    search_mode: report.search_mode().keyword().to_owned(),
                     cycle: report.cycle(),
                     remaining_pieces: report.remaining_pieces().to_owned(),
+                    queue_based_pieces: report.queue_based_pieces().to_owned(),
                     post_cycle_borrow_enabled: report.post_cycle_borrow_enabled(),
                     coverage_semantics: report.coverage_semantics().to_owned(),
                     geometry_family_count: report.geometry_family_count().to_owned(),
@@ -467,6 +474,24 @@ impl WasmSearchReport {
                                             y: step.y(),
                                             hold: step.hold().to_owned(),
                                             cleared_lines: step.cleared_lines(),
+                                        })
+                                        .collect(),
+                                    solution_path_count: candidate.solution_path_count(),
+                                    solution_paths_complete: candidate.solution_paths_complete(),
+                                    solution_paths: candidate
+                                        .solution_paths()
+                                        .iter()
+                                        .map(|path| {
+                                            path.iter()
+                                                .map(|step| WasmSearchPathStep {
+                                                    piece: step.piece().as_ascii().to_string(),
+                                                    rotation: step.rotation(),
+                                                    x: step.x(),
+                                                    y: step.y(),
+                                                    hold: step.hold().to_owned(),
+                                                    cleared_lines: step.cleared_lines(),
+                                                })
+                                                .collect()
                                         })
                                         .collect(),
                                 })

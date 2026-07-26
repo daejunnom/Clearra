@@ -43,9 +43,17 @@ pub(super) struct SetupGraphBuildSession {
 
 impl SetupGraphBuildSession {
     pub(super) fn new(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
-        let conditions = compile_setup_search_conditions(query).map_err(|_| {
+        let mut conditions = compile_setup_search_conditions(query).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_residue_condition_compile_failed")
         })?;
+        if let Some(detail) = query.path_detail() {
+            conditions.retain(|condition| condition.condition_id() == detail.condition_id());
+            if conditions.is_empty() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "setup_path_detail_condition_not_found",
+                ));
+            }
+        }
         let first = conditions
             .first()
             .ok_or(WasmExactSearchError::InvalidProblem(

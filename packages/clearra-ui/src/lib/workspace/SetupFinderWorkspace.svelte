@@ -1,15 +1,26 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { updateWasmCommandText, wasmWorkerState, WasmTerminalWorkerController } from '../wasm';
+  import {
+    buildWasmCommandRequest,
+    postRunCommand,
+    updateWasmCommandText,
+    wasmWorkerState,
+    WasmTerminalWorkerController,
+    type ClearraWasmWorkerEvent
+  } from '../wasm';
   import SetupFinderControls from './SetupFinderControls.svelte';
   import SetupFinderResult from './SetupFinderResult.svelte';
   import {
     buildSetupFinderCommand,
+    buildSetupPathDetailCommand,
     createDefaultSetupFinderRequest,
     setupCycle,
     setupFinderValidationCodes,
-    type SetupFinderRequest
+    setupPathDetailKey,
+    type SetupFinderRequest,
+    type SetupPathDetailRequest,
+    type SetupPathDetailState
   } from './setupFinderModel';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
@@ -23,8 +34,13 @@
   export let workerFactory: (() => Worker) | null = null;
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
+  const DETAIL_WORKER_RELEASE_MS = 100;
   const boardCells = Array.from({ length: 40 }, (_, index) => index);
   let request = createDefaultSetupFinderRequest();
+  let resultRequest: SetupFinderRequest | null = null;
+  let pathDetails: Record<string, SetupPathDetailState> = {};
+  let detailWorker: Worker | null = null;
+  let detailGeneration = 0;
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
   let runStartedAt = 0;
@@ -46,6 +62,7 @@
 
   onDestroy(() => {
     stopElapsedTimer();
+    disposeDetailWorker();
     workerController.dispose();
   });
 
@@ -62,6 +79,9 @@
 
   function run() {
     if (active || validationCodes.length) return;
+    disposeDetailWorker();
+    pathDetails = {};
+    resultRequest = { ...request };
     startElapsedTimer();
     updateWasmCommandText(buildSetupFinderCommand(request));
     workerController.run();
@@ -90,6 +110,148 @@
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {
     return status === 'completed' || status === 'failed' || status === 'cancelled';
+  }
+
+  async function loadSetupPaths(detail: SetupPathDetailRequest) {
+    const key = setupPathDetailKey(detail);
+    const existing = pathDetails[key];
+    if (existing?.status === 'loading' || existing?.status === 'complete') return;
+    if (!workerFactory || !resultRequest) {
+      updatePathDetail(key, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: label('pathDetailUnavailable')
+      });
+      return;
+    }
+
+    disposeDetailWorker();
+    workerController.dispose();
+    const generation = ++detailGeneration;
+    updatePathDetail(key, {
+      status: 'loading',
+      paths: [],
+      complete: false,
+      error: null
+    });
+
+    // The completed search worker owns a full catalog. Let it release before
+    // allocating the selected setup's exact path graph.
+    await new Promise((resolve) => setTimeout(resolve, DETAIL_WORKER_RELEASE_MS + 20));
+    if (generation !== detailGeneration || !workerFactory || !resultRequest) return;
+
+    const worker = workerFactory();
+    detailWorker = worker;
+    worker.onmessage = (message: MessageEvent<ClearraWasmWorkerEvent>) => {
+      if (detailWorker !== worker || generation !== detailGeneration) return;
+      const event = message.data;
+      if (!('event' in event)) return;
+      if (event.event === 'final_response') {
+        const condition = event.search_report?.setup_report?.hold_conditions.find(
+          (candidate) => candidate.condition_id === detail.conditionId
+        );
+        const candidate = condition?.candidates.find(
+          (candidate) => candidate.setup_id === detail.setupId
+        );
+        if (
+          event.response.status === 'success' &&
+          candidate?.solution_paths_complete === true
+        ) {
+          updatePathDetail(key, {
+            status: 'complete',
+            paths: candidate.solution_paths ?? [],
+            complete: true,
+            error: null
+          });
+        } else {
+          updatePathDetail(key, {
+            status: 'failed',
+            paths: [],
+            complete: false,
+            error:
+              event.response.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
+              label('pathDetailFailed')
+          });
+        }
+        releaseDetailWorker(worker);
+      } else if (event.event === 'failed') {
+        updatePathDetail(key, {
+          status: 'failed',
+          paths: [],
+          complete: false,
+          error:
+            event.diagnostics.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
+            label('pathDetailFailed')
+        });
+        releaseDetailWorker(worker);
+      } else if (event.event === 'cancelled') {
+        updatePathDetail(key, {
+          status: 'failed',
+          paths: [],
+          complete: false,
+          error: label('cancelled')
+        });
+        releaseDetailWorker(worker);
+      }
+    };
+    worker.onerror = (event) => {
+      event.preventDefault();
+      if (detailWorker !== worker || generation !== detailGeneration) return;
+      updatePathDetail(key, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: event.message || label('pathDetailFailed')
+      });
+      releaseDetailWorker(worker);
+    };
+    worker.onmessageerror = () => {
+      if (detailWorker !== worker || generation !== detailGeneration) return;
+      updatePathDetail(key, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: label('pathDetailFailed')
+      });
+      releaseDetailWorker(worker);
+    };
+    postRunCommand(
+      worker,
+      buildWasmCommandRequest({
+        commandText: buildSetupPathDetailCommand(resultRequest, detail)
+      }),
+      defaultWorkerCount(navigator.hardwareConcurrency)
+    );
+  }
+
+  function updatePathDetail(key: string, state: SetupPathDetailState) {
+    pathDetails = { ...pathDetails, [key]: state };
+  }
+
+  function disposeDetailWorker() {
+    detailGeneration += 1;
+    const worker = detailWorker;
+    detailWorker = null;
+    if (!worker) return;
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    worker.terminate();
+  }
+
+  function releaseDetailWorker(worker: Worker) {
+    if (detailWorker !== worker) return;
+    detailWorker = null;
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    try {
+      worker.postMessage({ type: 'dispose_runtime' });
+      setTimeout(() => worker.terminate(), DETAIL_WORKER_RELEASE_MS);
+    } catch {
+      worker.terminate();
+    }
   }
 </script>
 
@@ -139,7 +301,14 @@
     {validationCodes}
     on:change={(event) => updateRequest(event.detail)}
   />
-  <SetupFinderResult slot="result" view={runtimeView} {language} {elapsedMs} />
+  <SetupFinderResult
+    slot="result"
+    view={runtimeView}
+    {language}
+    {elapsedMs}
+    {pathDetails}
+    on:loadPaths={(event) => loadSetupPaths(event.detail)}
+  />
 </WorkspaceShell>
 
 <style>

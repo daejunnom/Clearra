@@ -54,7 +54,9 @@ mod case_gui_setup_request_uses_residue_and_cycle_boundary_policy {
 
     #[test]
     fn gui_setup_request_uses_residue_and_cycle_boundary_policy() {
-        let form = crate::GuiSetupSearchForm::new("I,T,O", true, "srs-plus");
+        let form = crate::GuiSetupSearchForm::new("I,T,O", true, "srs-plus")
+            .with_candidate_priority("pc")
+            .with_length_preference("longer");
         let command = SetupRequestBuilder::build_command(&form, &GuiBackendForm::default())
             .expect("GUI setup request");
         let AppCommand::Setup(command) = command else {
@@ -66,6 +68,14 @@ mod case_gui_setup_request_uses_residue_and_cycle_boundary_policy {
         assert_eq!(
             command.query().cycle_reset_borrow_policy(),
             SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
+        );
+        assert_eq!(
+            command.query().candidate_priority(),
+            clearra_problem::SetupCandidatePriority::PcProbabilityFirst
+        );
+        assert_eq!(
+            command.query().length_preference(),
+            clearra_problem::SetupLengthPreference::Longer
         );
     }
 }

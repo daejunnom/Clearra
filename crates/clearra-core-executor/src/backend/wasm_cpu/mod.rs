@@ -34,6 +34,7 @@ mod piece_order_language;
 mod reachability;
 mod realization_feasibility;
 mod result;
+mod setup_all_paths;
 mod setup_coverage_graph;
 mod setup_finder;
 mod setup_graph_builder;

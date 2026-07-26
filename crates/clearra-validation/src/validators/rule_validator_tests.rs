@@ -46,14 +46,15 @@ fn srs_plus_reports_180_capable_supported_rule() {
 }
 
 #[test]
-fn srs_x_reports_imported_profile_requirement() {
+fn srs_x_builtin_profile_is_supported() {
     let report = validate_rule_profile(srs_x());
 
-    assert!(report.has_errors());
-    assert!(report
-        .diagnostics()
+    assert!(!report.has_errors());
+    assert!(report.contains_code(DiagnosticCode::IRuleMvpSupported));
+    assert!(report.diagnostics().iter().any(|diagnostic| diagnostic
+        .evidence()
         .iter()
-        .any(|diagnostic| diagnostic.message().contains("imported kick profile")));
+        .any(|evidence| evidence.key() == "supports_exact_180" && evidence.value() == "true")));
 }
 
 #[test]

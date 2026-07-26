@@ -1,5 +1,6 @@
 <script lang="ts">
   import { CheckCircle2, Search } from '@lucide/svelte';
+  import { createEventDispatcher } from 'svelte';
 
   import type {
     ClearraSetupFinderReport,
@@ -15,22 +16,32 @@
     workspaceProgressLabel,
     type WorkspaceLanguage
   } from './workspaceI18n';
+  import {
+    setupPathDetailKey,
+    type SetupPathDetailRequest,
+    type SetupPathDetailState
+  } from './setupFinderModel';
 
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
+  export let pathDetails: Record<string, SetupPathDetailState> = {};
 
   const PAGE_SIZE = 100;
+  const PATH_PAGE_SIZE = 100;
+  const dispatch = createEventDispatcher<{ loadPaths: SetupPathDetailRequest }>();
   let visibleCount = PAGE_SIZE;
+  let visiblePathCounts: Record<string, number> = {};
   let lastIdentity = '';
 
   $: report = view.searchReport?.setup_report ?? null;
   $: identity = report
-    ? `${report.remaining_pieces}:${report.cycle}:${report.hold_conditions.map((value) => value.candidate_count).join(',')}`
+    ? `${report.search_mode}:${report.remaining_pieces}:${report.queue_based_pieces}:${report.cycle}:${report.hold_conditions.map((value) => value.candidate_count).join(',')}`
     : '';
   $: if (identity !== lastIdentity) {
     lastIdentity = identity;
     visibleCount = PAGE_SIZE;
+    visiblePathCounts = {};
   }
   $: retainedCandidateCount = report?.hold_conditions.reduce(
     (total, condition) => total + condition.candidates.length,
@@ -45,6 +56,10 @@
     ...condition,
     candidates: condition.candidates.map((candidate) => ({
       candidate,
+      pathKey: setupPathDetailKey({
+        conditionId: condition.condition_id,
+        setupId: candidate.setup_id
+      }),
       board: replaySetupPlacementBoard(
         candidate.board_mask,
         candidate.representative_path
@@ -66,7 +81,9 @@
     return value === undefined ? '—' : new Intl.NumberFormat(language).format(value);
   }
 
-  function holdLabel(condition: ClearraSetupHoldCondition): string {
+  function holdLabel(
+    condition: Pick<ClearraSetupHoldCondition, 'initial_hold'>
+  ): string {
     return condition.initial_hold ?? label('empty');
   }
 
@@ -93,6 +110,33 @@
     return groups;
   }
 
+  function requestPaths(
+    event: Event,
+    conditionId: string,
+    setupId: string
+  ) {
+    const details = event.currentTarget as HTMLDetailsElement;
+    const detail = { conditionId, setupId };
+    const state = pathDetails[setupPathDetailKey(detail)];
+    if (details.open && state?.status !== 'loading' && state?.status !== 'complete') {
+      dispatch('loadPaths', detail);
+    }
+  }
+
+  function retryPaths(conditionId: string, setupId: string) {
+    dispatch('loadPaths', { conditionId, setupId });
+  }
+
+  function visiblePathCount(key: string): number {
+    return visiblePathCounts[key] ?? PATH_PAGE_SIZE;
+  }
+
+  function showMorePaths(key: string) {
+    visiblePathCounts = {
+      ...visiblePathCounts,
+      [key]: visiblePathCount(key) + PATH_PAGE_SIZE
+    };
+  }
 </script>
 
 <ResultWorkspaceFrame
@@ -123,8 +167,10 @@
     {#if report}
       <div class="setup-overview">
         <div class="overview-lead">
-          <span>{label('pcCycle')}</span>
-          <strong>{label('cycleNumber', { cycle: report.cycle })}</strong>
+          <span>{label(report.search_mode === 'qb' ? 'setupModeQb' : 'pcCycle')}</span>
+          <strong>{report.search_mode === 'qb'
+            ? `${report.remaining_pieces} + ${report.queue_based_pieces}`
+            : label('cycleNumber', { cycle: report.cycle })}</strong>
           <small>{report.remaining_pieces} · {number(report.hold_conditions.length)} {label('holdConditions')}</small>
         </div>
         <dl>
@@ -134,7 +180,9 @@
           <div><dt>{label('countComplete')}</dt><dd>{label(report.complete ? 'complete' : 'incomplete')}</dd></div>
           <div><dt>{label('workersUsed')}</dt><dd>{number(view.searchReport?.workers_used)}</dd></div>
           <div><dt>{label('coverageSemantics')}</dt><dd>{label('oracleCoverage')}</dd></div>
-          <div><dt>{label('postCycleBorrow')}</dt><dd>{label(report.post_cycle_borrow_enabled ? 'enabled' : 'disabled')}</dd></div>
+          {#if report.search_mode === 'oracle'}
+            <div><dt>{label('postCycleBorrow')}</dt><dd>{label(report.post_cycle_borrow_enabled ? 'enabled' : 'disabled')}</dd></div>
+          {/if}
         </dl>
         <div class="condition-table">
           {#each report.hold_conditions as condition}
@@ -184,23 +232,78 @@
                     ? label('lockCount', { count: result.candidate.min_locks })
                     : label('lockRange', { min: result.candidate.min_locks, max: result.candidate.max_locks })}</span>
                 </div>
-                {#if result.candidate.representative_path.length}
-                  <details class="setup-path">
-                    <summary>{label('representativeBuild')}</summary>
-                    <ol>
-                      {#each result.candidate.representative_path as step}
-                        <li>
-                          <b>{step.piece}</b>
-                          <span>R{step.rotation} · ({step.x}, {step.y})</span>
-                          <span>{holdActionLabel(step.hold)}</span>
-                          {#if step.cleared_lines > 0}
-                            <span>{label('clearedLineCount', { count: step.cleared_lines })}</span>
-                          {/if}
-                        </li>
-                      {/each}
-                    </ol>
-                  </details>
-                {/if}
+                <details
+                  class="setup-path"
+                  on:toggle={(event) => requestPaths(
+                    event,
+                    condition.condition_id,
+                    result.candidate.setup_id
+                  )}
+                >
+                  <summary>
+                    {#if pathDetails[result.pathKey]?.status === 'loading'}
+                      {label('loadingBuildSolutions')}
+                    {:else if pathDetails[result.pathKey]?.status === 'complete'}
+                      {label('allBuildSolutions')} · {number(pathDetails[result.pathKey].paths.length)}
+                    {:else}
+                      {label('allBuildSolutions')}
+                    {/if}
+                  </summary>
+                  {#if pathDetails[result.pathKey]?.status === 'loading'}
+                    <p class="path-status">{label('loadingExactBuildSolutions')}</p>
+                  {:else if pathDetails[result.pathKey]?.status === 'failed'}
+                    <div class="path-error">
+                      <p>{pathDetails[result.pathKey].error ?? label('pathDetailFailed')}</p>
+                      <button
+                        type="button"
+                        on:click|stopPropagation={() => retryPaths(
+                          condition.condition_id,
+                          result.candidate.setup_id
+                        )}
+                      >{label('retry')}</button>
+                    </div>
+                  {:else if pathDetails[result.pathKey]?.status === 'complete'}
+                    {#if pathDetails[result.pathKey].paths.length}
+                      <div class="solution-paths">
+                        {#each pathDetails[result.pathKey].paths.slice(0, visiblePathCount(result.pathKey)) as path, pathIndex}
+                          <section class="solution-path">
+                            <h4>{label('buildSolutionNumber', { number: pathIndex + 1 })}</h4>
+                            <ol>
+                              {#each path as step}
+                                <li>
+                                  <b>{step.piece}</b>
+                                  <span>R{step.rotation} · ({step.x}, {step.y})</span>
+                                  <span>{holdActionLabel(step.hold)}</span>
+                                  {#if step.cleared_lines > 0}
+                                    <span>{label('clearedLineCount', { count: step.cleared_lines })}</span>
+                                  {/if}
+                                </li>
+                              {/each}
+                            </ol>
+                          </section>
+                        {/each}
+                      </div>
+                      {#if visiblePathCount(result.pathKey) < pathDetails[result.pathKey].paths.length}
+                        <button
+                          class="path-more"
+                          type="button"
+                          on:click={() => showMorePaths(result.pathKey)}
+                        >
+                          {label('showMore', {
+                            count: Math.min(
+                              PATH_PAGE_SIZE,
+                              pathDetails[result.pathKey].paths.length - visiblePathCount(result.pathKey)
+                            )
+                          })}
+                        </button>
+                      {/if}
+                    {:else}
+                      <p class="path-status">{label('noBuildSolutions')}</p>
+                    {/if}
+                  {:else}
+                    <p class="path-status">{label('loadExactBuildSolutions')}</p>
+                  {/if}
+                </details>
               </li>
             {/each}
           </ol>
@@ -275,10 +378,19 @@
   .setup-metrics span { color: #697570; font-size: 10px; }
   .setup-path { border-top: 1px solid #d8dfdb; margin-top: 8px; padding-top: 7px; }
   .setup-path summary { color: #37534d; cursor: pointer; font-size: 10px; font-weight: 750; }
-  .setup-path ol { display: grid; gap: 3px; list-style-position: inside; margin: 7px 0 0; padding: 0; }
-  .setup-path li { align-items: baseline; background: #e9eeeb; border: 0; display: grid; font-size: 9px; gap: 4px; grid-template-columns: 18px minmax(70px, .8fr) minmax(90px, 1fr); padding: 4px 6px; }
-  .setup-path li b { color: #154c46; }
-  .setup-path li span { color: #64706b; }
+  .path-status { color: #68736f; font-size: 10px; margin: 8px 0 0; }
+  .path-error { align-items: start; border-left: 2px solid #b95449; display: grid; gap: 7px; margin-top: 8px; padding-left: 8px; }
+  .path-error p { color: #8b3e36; font-size: 10px; margin: 0; overflow-wrap: anywhere; }
+  .path-error button, .path-more { background: #fff; border: 1px solid #aebbb6; border-radius: 4px; color: #174a45; cursor: pointer; font-size: 10px; font-weight: 750; min-height: 28px; padding: 0 9px; width: fit-content; }
+  .solution-paths { display: grid; gap: 8px; margin-top: 8px; }
+  .solution-path { border-top: 1px solid #d8dfdb; padding-top: 6px; }
+  .solution-path:first-child { border-top: 0; padding-top: 0; }
+  .solution-path h4 { color: #37534d; font-size: 9px; margin: 0 0 4px; }
+  .solution-path ol { display: grid; gap: 3px; list-style-position: inside; margin: 0; padding: 0; }
+  .solution-path li { align-items: baseline; background: #e9eeeb; border: 0; display: grid; font-size: 9px; gap: 4px; grid-template-columns: 18px minmax(70px, .8fr) minmax(90px, 1fr); padding: 4px 6px; }
+  .solution-path li b { color: #154c46; }
+  .solution-path li span { color: #64706b; }
+  .path-more { margin-top: 8px; }
   .load-more-row { display: flex; justify-content: center; padding-top: 18px; }
   .load-more-row button { background: #fff; border: 1px solid #aebbb6; border-radius: 5px; color: #174a45; cursor: pointer; font-size: 12px; font-weight: 750; min-height: 36px; padding: 0 16px; }
   .diagnostic-list { display: grid; gap: 1px; list-style: none; margin: 0; padding: 0; }

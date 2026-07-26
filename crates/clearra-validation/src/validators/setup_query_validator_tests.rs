@@ -91,3 +91,37 @@ fn valid_setup_query_reports_supported_mvp_contract() {
     assert!(!report.has_errors());
     assert!(report.contains_code(DiagnosticCode::ISetupQueryMvpSupported));
 }
+
+#[test]
+fn queue_based_setup_accepts_observed_next_bag_subset() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
+        .with_queue_based_pieces(vec![PieceKind::Z, PieceKind::J, PieceKind::L]);
+
+    let report = SetupQueryValidator::validate(&query);
+
+    assert!(!report.has_errors());
+}
+
+#[test]
+fn queue_based_setup_rejects_more_than_seven_combined_observations() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
+        .with_queue_based_pieces(vec![PieceKind::Z, PieceKind::J, PieceKind::L, PieceKind::O]);
+
+    let report = SetupQueryValidator::validate(&query);
+
+    assert!(report.has_errors());
+}
+
+#[test]
+fn queue_based_setup_rejects_duplicate_observed_next_bag_piece() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::O]);
+
+    let report = SetupQueryValidator::validate(&query);
+
+    assert!(report.has_errors());
+    assert!(report.contains_code(DiagnosticCode::ESetupQueryInvalid));
+}

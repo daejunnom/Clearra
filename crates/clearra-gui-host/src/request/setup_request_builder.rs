@@ -1,5 +1,7 @@
 use clearra_app::{AppCommand, SetupAppCommand};
-use clearra_problem::{SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupSearchQuery};
+use clearra_problem::{
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference, SetupSearchQuery,
+};
 
 use crate::{
     model::{GuiBackendForm, GuiSetupSearchForm},
@@ -44,12 +46,23 @@ impl SetupRequestBuilder {
                     ),
                 )
             })?;
+        let length_preference = SetupLengthPreference::from_keyword(form.length_preference())
+            .ok_or_else(|| {
+                RequestBuildError::new(
+                    RequestBuildErrorCode::ValidationFailed,
+                    format!(
+                        "unsupported setup length preference {}",
+                        form.length_preference()
+                    ),
+                )
+            })?;
 
         Ok(AppCommand::Setup(SetupAppCommand::new(
             SetupSearchQuery::default()
                 .with_remaining_pieces(pieces)
                 .with_cycle_reset_borrow_policy(borrow_policy)
-                .with_candidate_priority(candidate_priority),
+                .with_candidate_priority(candidate_priority)
+                .with_length_preference(length_preference),
         )))
     }
 }

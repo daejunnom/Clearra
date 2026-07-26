@@ -586,8 +586,10 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
         "setup_report",
         report.setup_report.as_ref(),
         |nested, setup| {
+            nested.string("search_mode", &setup.search_mode);
             nested.number("cycle", setup.cycle);
             nested.string("remaining_pieces", &setup.remaining_pieces);
+            nested.string("queue_based_pieces", &setup.queue_based_pieces);
             nested.boolean("post_cycle_borrow_enabled", setup.post_cycle_borrow_enabled);
             nested.string("coverage_semantics", &setup.coverage_semantics);
             nested.string("geometry_family_count", &setup.geometry_family_count);
@@ -651,6 +653,37 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
                                 }
                                 output.push(']');
                             });
+                            if candidate.solution_paths_complete {
+                                candidate_object
+                                    .number("solution_path_count", candidate.solution_path_count);
+                                candidate_object.boolean("solution_paths_complete", true);
+                                candidate_object.array("solution_paths", |output| {
+                                    output.push('[');
+                                    for (path_index, path) in
+                                        candidate.solution_paths.iter().enumerate()
+                                    {
+                                        if path_index != 0 {
+                                            output.push(',');
+                                        }
+                                        output.push('[');
+                                        for (step_index, step) in path.iter().enumerate() {
+                                            if step_index != 0 {
+                                                output.push(',');
+                                            }
+                                            let mut step_object = JsonObject::begin(output);
+                                            step_object.string("piece", &step.piece);
+                                            step_object.number("rotation", step.rotation);
+                                            step_object.number("x", step.x);
+                                            step_object.number("y", step.y);
+                                            step_object.string("hold", &step.hold);
+                                            step_object.number("cleared_lines", step.cleared_lines);
+                                            step_object.finish();
+                                        }
+                                        output.push(']');
+                                    }
+                                    output.push(']');
+                                });
+                            }
                             candidate_object.finish();
                         }
                         output.push(']');

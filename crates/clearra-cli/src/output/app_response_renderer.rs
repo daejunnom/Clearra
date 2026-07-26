@@ -92,6 +92,7 @@ fn render_success(
                 );
             };
             fields.extend([
+                RenderField::new("search_mode", report.search_mode().keyword()),
                 RenderField::new("cycle", report.cycle()),
                 RenderField::new("remaining_pieces", report.remaining_pieces()),
                 RenderField::new(
