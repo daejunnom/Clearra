@@ -17,31 +17,44 @@ empty 10x4 PC geometry family
 cycle residue, and coverage may select a different legal path for each complete
 future pattern.
 
-`qb` adds pieces observed from the following standard bag to the normal cycle
-residue:
+`qb` constrains the exact supply that must remain when the current PC finishes.
+The input is the next PC cycle's complete remaining inventory:
 
 ```text
-clearra setup --remaining TI --mode qb --qb OS
+next-cycle hold, when occupied
++ unconsumed suffix of the active standard bag
 ```
 
-The residue and observed groups are each unordered. For the example above,
-Clearra compiles the supply as:
+For example, cycle-five residue `TI` reaches a next-cycle inventory of six
+pieces. One duplicated kind is legal because one copy can be in hold:
 
 ```text
-[TI]![OS]![^OS]!P2
+clearra setup --remaining TI --mode qb --qb OOSITZ
 ```
 
-The observed group is a unique subset of one standard seven-bag. Its pieces are
-available to the actual setup after the residue and every observed piece must
-be placed into a returned setup; an observed piece left in hold does not
-qualify. Clearra infers the unobserved complement of that bag. Residue plus
-observed pieces may contain at most seven pieces, matching the practical
-hold/active/preview observation window.
+The order of `--qb` letters is irrelevant. Its exact count is derived from the
+current cycle:
 
-QB changes only the known supply prefix. It uses the same inverse lock-clear
-family quotient and partial BuildUp search as residue mode. Nine-piece setup
-candidates are never searched or reported in either mode; internal depth-nine
-and terminal states exist only as PC-completion evidence.
+| Current PC cycle | Next-cycle remaining pieces |
+| ---: | ---: |
+| 1 | 4 |
+| 2 | 1 |
+| 3 | 5 |
+| 4 | 2 |
+| 5 | 6 |
+| 6 | 3 |
+| 7 | 7 |
+
+Clearra keeps the broad current-cycle bag universe, derives the terminal
+hold-and-suffix inventory for each exact supply state, and retains only the
+compatible patterns. The retained patterns keep their original universe IDs
+and weights, so QB probability is not renormalized into a conditional 100%.
+This reverse terminal filter constrains current-cycle queues without requiring
+the requested inventory to be locked into the setup.
+
+QB uses the same inverse lock-clear family quotient and partial BuildUp search
+as residue mode. It does not append the QB letters as a mandatory consumed
+prefix.
 
 ## Residue And Hold Contract
 
@@ -70,10 +83,17 @@ The residue count determines the PC cycle.
 | 6 | 6 |
 | 3 | 7 |
 
-At most one piece kind may occur twice. That duplicate is an explicit initial
-hold piece. When no duplicate is present, empty hold and each possible occupied
-hold are separate result conditions. They are never assigned an invented shared
-probability.
+Product UI requests always start with an empty initial hold and require each
+residue piece kind to be unique. The CLI alone may request an occupied initial
+hold:
+
+```text
+clearra setup --remaining SIOS --initial-hold S
+```
+
+The selected piece must occur in `--remaining`; Clearra removes one matching
+copy from the queue remainder and starts it in hold. A request without
+`--initial-hold` never expands into multiple occupied-hold searches.
 
 Cycle-seven borrowing is provenance-based. By default, only the current
 three-piece remainder and the next complete bag may be placed. The explicit
@@ -95,20 +115,24 @@ concrete placement edges
 ```
 
 Nodes with the same future-relevant board and deleted-row state may merge only
-by exact union of their residual families. Placement reachability, SRS+ kick
-rules, line-clear adjustment, and concrete realization identity are checked
+by exact union of their residual families. Placement reachability, the selected
+SRS+/SRS/SRS-X/Jstris 180 kick profile, line-clear adjustment, and concrete realization identity are checked
 before an edge enters the graph.
 
-The root is not a setup. Every PC-live prefix from one through eight placements
-is eligible. Placement depth is output metadata, not a pruning proof. Visible shapes
-merge only after the exact product coverage described below has been computed.
-Depth-nine and terminal nodes may exist internally only to prove that an
-eligible prefix can complete the PC; they are never registered, covered, or
-reported as setup candidates.
+The root is not a setup. Every PC-live prefix from one through ten placements
+is represented. Placement depth is output metadata, not a pruning proof.
+Visible shapes merge only after the exact product coverage described below has
+been computed.
+
+`--max-setup-pieces N` selects which represented depths may enter the result,
+with `1 <= N <= 10`. The product default is `9`, preserving nine-piece setups
+while avoiding a result list dominated by terminal ten-piece perfect clears.
+Selecting `10` deliberately includes complete PC solutions, whose conditional
+PC probability is necessarily 100%.
 
 ## Exact Coverage Product
 
-Each hold condition owns a materialized `PatternUniverse` and
+The selected supply condition owns one materialized `PatternUniverse` and
 `WeightedPatternSet`. Coverage runs over:
 
 ```text
@@ -172,9 +196,21 @@ CLI or web command
 -> SetupFinderReport
 ```
 
-The report separates hold conditions and includes the inferred cycle, canonical
-residue, cycle-reset policy, geometry-family count, partial-graph node count,
-candidate completeness, and exact representative placement/hold paths.
+The report preserves the selected CLI hold condition and includes the inferred
+cycle, canonical residue, cycle-reset policy, geometry-family count,
+partial-graph node count, candidate completeness, and exact representative
+placement/hold paths. Product UI requests contain only the empty-hold
+condition.
+
+The setup card renders the setup mask as the existing field. Opening its
+solution detail materializes only the exact suffixes that continue from that
+field to an accepting perfect clear. These `solution_paths` are PC completion
+placements retained by the canonical partial-build graph, not alternate
+prefixes for constructing the setup and not queue/hold execution histories.
+The browser reuses both the completed WASM worker and the matching immutable
+partial-build graph for this follow-up request. A different setup query evicts
+that one-entry graph cache before it starts, and terminating the worker releases
+the cache.
 
 Output limits are applied only after all shape coverage has been accumulated.
 Allocation failure, cancellation, or incomplete source materialization must not

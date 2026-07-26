@@ -16,6 +16,7 @@ $uiForbiddenCanonicalIdLiterals = @(
     '"srs-90"',
     '"srs-plus"',
     '"srs-x"',
+    '"jstris-180"',
     '"asc"',
     '"ars"',
     '"no-kick"',

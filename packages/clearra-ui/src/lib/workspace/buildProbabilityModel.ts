@@ -5,7 +5,6 @@ import {
   normalizeQueueInput,
   occupiedCellCount,
   parseBrowserQueueInput,
-  type HoldPiece,
   type RuleProfile,
   type SpinProfile
 } from './solverWorkspaceModel';
@@ -16,7 +15,6 @@ export type BuildProbabilityRequest = {
   targetMask: bigint;
   queue: string;
   holdEnabled: boolean;
-  holdPiece: HoldPiece;
   aggregation: 'buildability' | 'spin';
   rule: RuleProfile;
   spinProfile: SpinProfile;
@@ -39,7 +37,6 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     targetMask: 0n,
     queue: '',
     holdEnabled: true,
-    holdPiece: 'empty',
     aggregation: 'buildability',
     rule: 'srs-plus',
     spinProfile: 't-spins',
@@ -87,7 +84,7 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
     '--height',
     String(request.height)
   ];
-  if (request.holdEnabled) tokens.push('--hold', request.holdPiece);
+  if (request.holdEnabled) tokens.push('--hold', 'empty');
   else tokens.push('--no-hold');
   if (request.queue) {
     tokens.push(

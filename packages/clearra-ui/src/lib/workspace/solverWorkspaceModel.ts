@@ -1,6 +1,6 @@
 export type ScoreMode = 'off' | 'minimum-cover' | 'summary';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
-export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x';
+export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
 export type SpinProfile =
   | 't-spins'
   | 't-spins-plus'
@@ -9,14 +9,12 @@ export type SpinProfile =
   | 'all-mini'
   | 'all-mini-plus';
 export type SearchBackend = 'auto' | 'cpu' | 'gpu' | 'hybrid';
-export type HoldPiece = 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
 
 export type SolverWorkspaceRequest = {
   lines: number;
   boardMask: bigint;
   queue: string;
   holdEnabled: boolean;
-  holdPiece: HoldPiece;
   scoreMode: ScoreMode;
   scoreProfile: ScoreProfile;
   rule: RuleProfile;
@@ -44,7 +42,6 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     boardMask: 0n,
     queue: '',
     holdEnabled: true,
-    holdPiece: 'empty',
     scoreMode: 'off',
     scoreProfile: 'tetrio',
     rule: 'srs-plus',
@@ -297,7 +294,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     '--pieces',
     String(pieceWindow ?? 1)
   );
-  if (request.holdEnabled) tokens.push('--hold', request.holdPiece);
+  if (request.holdEnabled) tokens.push('--hold', 'empty');
   else tokens.push('--no-hold');
   if (request.queue) {
     tokens.push(
@@ -341,7 +338,7 @@ export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, lang
     queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
     patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
     hold_enabled: request.holdEnabled,
-    hold_piece: request.holdEnabled ? request.holdPiece : ('empty' as const),
+    hold_piece: 'empty' as const,
     backend: request.backend,
     rule: request.rule,
     board_mask: boardMaskHex(trimBoardMask(request.boardMask, request.lines)),

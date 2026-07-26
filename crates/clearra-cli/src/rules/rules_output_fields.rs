@@ -51,6 +51,7 @@ pub(crate) fn builtin_kick_profile(profile_id: &str) -> Option<KickTableProfile>
     match KickTableProfileId::parse(profile_id)? {
         KickTableProfileId::Srs90 => Some(SrsKicks::profile()),
         KickTableProfileId::SrsPlus => Some(SrsKicks::srs_plus_profile()),
+        KickTableProfileId::Jstris180 => Some(SrsKicks::jstris_180_profile()),
         KickTableProfileId::NoKick => Some(NoKick::profile()),
         KickTableProfileId::SrsX
         | KickTableProfileId::Asc

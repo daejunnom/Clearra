@@ -77,6 +77,31 @@ mod case_gui_setup_request_uses_residue_and_cycle_boundary_policy {
             command.query().length_preference(),
             clearra_problem::SetupLengthPreference::Longer
         );
+        assert_eq!(command.query().rule().id().as_str(), "srs-plus");
+    }
+
+    #[test]
+    fn gui_setup_request_preserves_selected_kick_table() {
+        let form = crate::GuiSetupSearchForm::new("IOTS", false, "srs-x");
+        let command = SetupRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI setup request");
+        let AppCommand::Setup(command) = command else {
+            panic!("expected setup command");
+        };
+
+        assert_eq!(command.query().rule().id().as_str(), "srs-x");
+    }
+
+    #[test]
+    fn gui_setup_request_preserves_jstris_180_kick_table() {
+        let form = crate::GuiSetupSearchForm::new("IOTS", false, "jstris-180");
+        let command = SetupRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI setup request");
+        let AppCommand::Setup(command) = command else {
+            panic!("expected setup command");
+        };
+
+        assert_eq!(command.query().rule().id().as_str(), "jstris-180");
     }
 }
 

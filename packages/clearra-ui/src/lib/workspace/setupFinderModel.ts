@@ -1,4 +1,5 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient';
+import type { RuleProfile } from './solverWorkspaceModel';
 
 export type SetupCandidatePriority = 'all' | 'build' | 'pc';
 export type SetupLengthPreference = 'auto' | 'longer' | 'shorter';
@@ -6,11 +7,13 @@ export type SetupSearchMode = 'oracle' | 'qb';
 
 export type SetupFinderRequest = {
   searchMode: SetupSearchMode;
+  rule: RuleProfile;
   remaining: string;
   qbQueue: string;
   allowPostCycleBorrow: boolean;
   candidatePriority: SetupCandidatePriority;
   lengthPreference: SetupLengthPreference;
+  maxSetupPieces: number;
 };
 
 export type SetupFinderValidationCode =
@@ -21,7 +24,7 @@ export type SetupFinderValidationCode =
   | 'setup_qb_count_invalid'
   | 'setup_qb_piece_invalid'
   | 'setup_qb_duplicate_invalid'
-  | 'setup_qb_combined_count_invalid';
+  | 'setup_max_pieces_invalid';
 
 export type SetupPathDetailRequest = {
   conditionId: string;
@@ -40,11 +43,13 @@ const PIECES = 'IOTSZJL';
 export function createDefaultSetupFinderRequest(): SetupFinderRequest {
   return {
     searchMode: 'oracle',
+    rule: 'srs-plus',
     remaining: PIECES,
     qbQueue: '',
     allowPostCycleBorrow: false,
     candidatePriority: 'all',
-    lengthPreference: 'auto'
+    lengthPreference: 'auto',
+    maxSetupPieces: 9
   };
 }
 
@@ -69,9 +74,17 @@ export function setupCycle(remaining: string): number | null {
   }
 }
 
-export function explicitSetupHold(remaining: string): string | null {
-  const normalized = normalizedSetupResidue(remaining);
-  return [...PIECES].find((piece) => normalized.split(piece).length - 1 === 2) ?? null;
+export function nextSetupCycleRemainingCount(remaining: string): number | null {
+  switch (setupCycle(remaining)) {
+    case 1: return 4;
+    case 2: return 1;
+    case 3: return 5;
+    case 4: return 2;
+    case 5: return 6;
+    case 6: return 3;
+    case 7: return 7;
+    default: return null;
+  }
 }
 
 export function setupFinderValidationCodes(
@@ -87,25 +100,31 @@ export function setupFinderValidationCodes(
   const repeated = [...PIECES]
     .map((piece) => normalized.split(piece).length - 1)
     .filter((count) => count > 1);
-  if (repeated.length > 1 || repeated.some((count) => count > 2)) {
+  if (repeated.length > 0) {
     codes.push('setup_residue_duplicate_invalid');
   }
   if (request.allowPostCycleBorrow && setupCycle(normalized) !== 7) {
     codes.push('setup_cycle_borrow_invalid');
   }
   if (request.searchMode === 'qb') {
-    if (normalizedQb.length < 1) {
+    if (normalizedQb.length !== nextSetupCycleRemainingCount(normalized)) {
       codes.push('setup_qb_count_invalid');
     }
     if ([...normalizedQb].some((piece) => !PIECES.includes(piece))) {
       codes.push('setup_qb_piece_invalid');
     }
-    if ([...new Set(normalizedQb)].length !== normalizedQb.length) {
+    const qbCounts = [...PIECES].map(
+      (piece) => normalizedQb.split(piece).length - 1
+    );
+    if (qbCounts.some((count) => count > 2)
+      || qbCounts.filter((count) => count === 2).length > 1) {
       codes.push('setup_qb_duplicate_invalid');
     }
-    if (normalized.length + normalizedQb.length > 7) {
-      codes.push('setup_qb_combined_count_invalid');
-    }
+  }
+  if (!Number.isInteger(request.maxSetupPieces)
+    || request.maxSetupPieces < 1
+    || request.maxSetupPieces > 10) {
+    codes.push('setup_max_pieces_invalid');
   }
   return [...new Set(codes)];
 }
@@ -118,8 +137,10 @@ export function buildSetupFinderCommand(request: SetupFinderRequest): string {
     request.searchMode === 'qb'
       ? `--mode qb --qb ${normalizedSetupResidue(request.qbQueue)}`
       : '',
+    `--rule ${request.rule}`,
     request.candidatePriority === 'all' ? '' : `--priority ${request.candidatePriority}`,
     request.lengthPreference === 'auto' ? '' : `--setup-length ${request.lengthPreference}`,
+    `--max-setup-pieces ${request.maxSetupPieces}`,
     request.allowPostCycleBorrow ? '--allow-post-cycle-borrow' : ''
   ].filter(Boolean).join(' ');
 }

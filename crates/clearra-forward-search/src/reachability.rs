@@ -785,6 +785,7 @@ fn builtin_kick_profile(rule: RuleProfileId) -> Result<KickTableProfile, &'stati
         RuleProfileId::SrsPlus => Ok(SrsKicks::srs_plus_profile()),
         RuleProfileId::Srs => Ok(SrsKicks::profile()),
         RuleProfileId::SrsX => Ok(SrsKicks::srs_x_profile()),
+        RuleProfileId::Jstris180 => Ok(SrsKicks::jstris_180_profile()),
         RuleProfileId::NoKick => Ok(NoKick::profile()),
         RuleProfileId::Asc | RuleProfileId::Ars | RuleProfileId::Custom => {
             Err("forward_search_rule_profile_not_connected")
@@ -801,5 +802,101 @@ const fn piece_index(piece: PieceKind) -> usize {
         PieceKind::Z => 4,
         PieceKind::J => 5,
         PieceKind::L => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jstris_half_turn_kernel_uses_the_second_kick_after_the_origin_is_blocked() {
+        use RotationState::{Left, Right, Two, Zero};
+
+        for piece in [
+            PieceKind::I,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::S,
+            PieceKind::T,
+            PieceKind::Z,
+        ] {
+            let template = ReachabilityTemplate::compile(8, piece, RuleProfileId::Jstris180)
+                .expect("Jstris 180 reachability template");
+
+            for (from, expected_dx, expected_dy) in
+                [(Zero, 0, 1), (Right, 1, 0), (Two, 0, -1), (Left, -1, 0)]
+            {
+                let (source, blocker) = find_origin_only_blocker(&template, from)
+                    .unwrap_or_else(|| panic!("no isolated origin blocker for {piece:?} {from:?}"));
+                let targets = &template.rotations[source][2];
+                assert_eq!(targets.len(), 2, "{piece:?} {from:?}");
+                assert_eq!(targets[0].kick_index, 0, "{piece:?} {from:?}");
+                assert_eq!(
+                    (
+                        targets[1].kick_index,
+                        targets[1].kick_dx,
+                        targets[1].kick_dy
+                    ),
+                    (1, expected_dx, expected_dy),
+                    "{piece:?} {from:?}"
+                );
+
+                let mut board = ForwardBoard::EMPTY;
+                assert!(board.insert(blocker));
+                let selected = first_successful_kick::<1>(&template, board, source, 2)
+                    .expect("second Jstris kick remains placeable");
+                assert_eq!(
+                    (selected.kick_index, selected.kick_dx, selected.kick_dy),
+                    (1, expected_dx, expected_dy),
+                    "{piece:?} {from:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jstris_o_piece_has_no_rotation_edges() {
+        let template = ReachabilityTemplate::compile(8, PieceKind::O, RuleProfileId::Jstris180)
+            .expect("Jstris O reachability template");
+
+        assert!(template
+            .rotations
+            .iter()
+            .all(|slots| slots.iter().all(Vec::is_empty)));
+    }
+
+    fn find_origin_only_blocker(
+        template: &ReachabilityTemplate,
+        from: RotationState,
+    ) -> Option<(usize, u16)> {
+        for y in 0..8_i8 {
+            for x in 0..10_i8 {
+                let source = state_index(
+                    10,
+                    template.ceiling,
+                    State {
+                        rotation: from,
+                        x,
+                        y,
+                    },
+                )?;
+                let targets = &template.rotations[source][2];
+                if targets.len() != 2 {
+                    continue;
+                }
+                let source_mask = template.state_masks[source];
+                let origin_mask = template.state_masks[usize::from(targets[0].state)];
+                let kicked_mask = template.state_masks[usize::from(targets[1].state)];
+                if let Some(blocker) = (0..80_u16).find(|index| {
+                    origin_mask.contains(*index)
+                        && !kicked_mask.contains(*index)
+                        && !source_mask.contains(*index)
+                }) {
+                    return Some((source, blocker));
+                }
+            }
+        }
+        None
     }
 }

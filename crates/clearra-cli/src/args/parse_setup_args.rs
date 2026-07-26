@@ -8,8 +8,11 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut allow_post_cycle_borrow = false;
     let mut candidate_priority = clearra_setup_search::query::SetupCandidatePriority::All;
     let mut length_preference = clearra_setup_search::query::SetupLengthPreference::Auto;
+    let mut max_setup_pieces = 9_u8;
     let mut explicit_search_mode = None;
     let mut queue_based_pieces = None;
+    let mut rule = None;
+    let mut initial_hold = None;
     let mut path_detail_setup_id = None;
     let mut path_detail_condition_id = None;
     let mut index = 0;
@@ -26,6 +29,14 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
             }
             "--qb" => {
                 queue_based_pieces = Some(option_value(args, index, "--qb")?.to_owned());
+                index += 2;
+            }
+            "--initial-hold" => {
+                initial_hold = Some(option_value(args, index, "--initial-hold")?.to_owned());
+                index += 2;
+            }
+            "--rule" => {
+                rule = Some(option_value(args, index, "--rule")?.to_owned());
                 index += 2;
             }
             "--mode" => {
@@ -60,6 +71,18 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
                         })?;
                 index += 2;
             }
+            "--max-setup-pieces" => {
+                let value = option_value(args, index, "--max-setup-pieces")?;
+                max_setup_pieces = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|count| (1..=10).contains(count))
+                    .ok_or_else(|| CliParseError::InvalidValue {
+                        option: "--max-setup-pieces",
+                        value: value.to_owned(),
+                    })?;
+                index += 2;
+            }
             "--paths-for" => {
                 path_detail_setup_id = Some(option_value(args, index, "--paths-for")?.to_owned());
                 index += 2;
@@ -88,9 +111,16 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut setup_args = SetupArgs::new(remaining, allow_post_cycle_borrow)
         .with_candidate_priority(candidate_priority)
         .with_length_preference(length_preference)
+        .with_max_setup_pieces(max_setup_pieces)
         .with_search_mode(search_mode);
     if let Some(pieces) = queue_based_pieces {
         setup_args = setup_args.with_queue_based_pieces(pieces);
+    }
+    if let Some(value) = rule {
+        setup_args = setup_args.with_rule(value);
+    }
+    if let Some(value) = initial_hold {
+        setup_args = setup_args.with_initial_hold(value);
     }
     match (path_detail_setup_id, path_detail_condition_id) {
         (Some(setup_id), Some(condition_id)) => {

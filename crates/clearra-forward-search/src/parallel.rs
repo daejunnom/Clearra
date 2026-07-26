@@ -24,7 +24,7 @@ use crate::{
 const INIT_MAGIC: u32 = u32::from_le_bytes(*b"FWIN");
 const TASK_MAGIC: u32 = u32::from_le_bytes(*b"FWTK");
 const RESULT_MAGIC: u32 = u32::from_le_bytes(*b"FWRS");
-const WIRE_VERSION: u32 = 6;
+const WIRE_VERSION: u32 = 7;
 const MAX_WIRE_ITEMS: usize = 10_000_000;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
 
@@ -1422,6 +1422,7 @@ fn rule_code(profile: RuleProfileId) -> u8 {
         RuleProfileId::Asc => 4,
         RuleProfileId::Ars => 5,
         RuleProfileId::Custom => 6,
+        RuleProfileId::Jstris180 => 7,
     }
 }
 
@@ -1434,6 +1435,7 @@ fn rule_from_code(code: u8) -> Result<RuleProfileId, ForwardParallelError> {
         4 => Ok(RuleProfileId::Asc),
         5 => Ok(RuleProfileId::Ars),
         6 => Ok(RuleProfileId::Custom),
+        7 => Ok(RuleProfileId::Jstris180),
         _ => Err(ForwardParallelError::InvalidWire("forward_rule_invalid")),
     }
 }
@@ -1732,6 +1734,13 @@ mod tests {
         assert!(!should_layer_pattern_search(6, 0, 8));
         assert!(!should_layer_pattern_search(6, 3, 8));
         assert!(!should_layer_pattern_search(7, 5_040, 8));
+    }
+
+    #[test]
+    fn forward_parallel_wire_preserves_jstris_180_rule_identity() {
+        let id = RuleProfileId::Jstris180;
+
+        assert_eq!(rule_from_code(rule_code(id)).expect("Jstris rule code"), id);
     }
 }
 // SRP rationale: this module has one behavior-level change reason: deterministic multi-worker scheduling for exact forward search.

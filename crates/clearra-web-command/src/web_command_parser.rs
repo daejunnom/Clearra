@@ -78,8 +78,10 @@ fn parse_setup_command(
     let mut allow_post_cycle_borrow = false;
     let mut candidate_priority = clearra_problem::SetupCandidatePriority::All;
     let mut length_preference = clearra_problem::SetupLengthPreference::Auto;
+    let mut max_setup_pieces = 9_u8;
     let mut explicit_search_mode = None;
     let mut queue_based = None;
+    let mut rule = srs_plus();
     let mut path_detail_setup_id = None;
     let mut path_detail_condition_id = None;
     let mut workers = None;
@@ -132,6 +134,21 @@ fn parse_setup_command(
                 };
                 length_preference = preference;
             }
+            "--max-setup-pieces" => {
+                let value = next_value(tokens, &mut cursor, "--max-setup-pieces")?;
+                max_setup_pieces = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|count| (1..=10).contains(count))
+                    .ok_or_else(|| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!(
+                                "invalid maximum setup piece count '{value}'; expected 1 through 10"
+                            ),
+                        )
+                    })?;
+            }
             "--paths-for" => {
                 path_detail_setup_id =
                     Some(next_value(tokens, &mut cursor, "--paths-for")?.to_owned());
@@ -139,6 +156,9 @@ fn parse_setup_command(
             "--condition" => {
                 path_detail_condition_id =
                     Some(next_value(tokens, &mut cursor, "--condition")?.to_owned());
+            }
+            "--rule" => {
+                rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
             }
             "--workers" => {
                 workers = Some(parse_positive(
@@ -178,7 +198,7 @@ fn parse_setup_command(
                 .map_err(|error| {
                     WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
-                        format!("invalid observed QB pieces: {error:?}"),
+                        format!("invalid next-cycle remaining pieces: {error:?}"),
                     )
                 })
         })
@@ -210,8 +230,10 @@ fn parse_setup_command(
         }
     }
     let mut request = WebCommandRequest::setup(pieces, allow_post_cycle_borrow)
+        .with_rule(rule)
         .with_setup_candidate_priority(candidate_priority)
         .with_setup_length_preference(length_preference)
+        .with_setup_max_pieces(max_setup_pieces)
         .with_setup_search_mode(search_mode)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors);

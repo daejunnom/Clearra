@@ -2,13 +2,13 @@
 // It includes deterministic task partitioning, worker-local coverage
 // evaluation, and ordered coordinator reduction; wire encoding and segmented
 // storage remain separate owners.
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
 use clearra_problem::{
     compile_setup_search_condition, setup_search_condition_count, SetupSearchCondition,
-    SetupSearchQuery,
+    SetupSearchQuery, SetupTerminalSupplyTarget,
 };
 use clearra_supply::pattern_universe::PatternPiecePositionIndex;
 
@@ -16,12 +16,13 @@ use crate::{CoreExecutionResult, SetupCandidateReport, SetupHoldConditionReport}
 
 use super::{
     piece_index,
-    setup_all_paths::{SetupAllPathEnumerator, SetupAllPathGraph},
+    setup_all_paths::{enumerate_setup_completion_paths, SetupSolutionPath},
     setup_coverage_graph::SetupCoverageGraph,
     setup_finder::{
-        compare_setup_candidates, covered_word_weight, finish_setup_result,
-        include_setup_depth_range, probability_string, CompletedSetupCoverage,
-        SetupSupplyStateLayout, SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
+        compare_setup_candidates, compile_setup_pattern_index, covered_word_weight,
+        finish_setup_result, include_setup_depth_range, probability_string,
+        terminal_supply_target_word, CompletedSetupCoverage, SetupSupplyStateLayout,
+        SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
     },
     setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
     setup_parallel_segmented::{SegmentedArray, SegmentedGenerationArray},
@@ -55,6 +56,7 @@ pub(crate) struct WasmSetupParallelCoordinator {
     received_tasks: usize,
     next_merge_task: usize,
     condition_merges: Option<Vec<SetupConditionMerge>>,
+    solution_paths: Vec<SetupSolutionPath>,
     worker_count: usize,
 }
 
@@ -77,6 +79,7 @@ impl WasmSetupParallelCoordinator {
             received_tasks: 0,
             next_merge_task: 0,
             condition_merges: None,
+            solution_paths: Vec::new(),
             worker_count: worker_count.max(1),
         })
     }
@@ -106,10 +109,21 @@ impl WasmSetupParallelCoordinator {
                 SetupGraphBuildAdvance::Pending => Ok(WasmSetupParallelProduce::Pending),
                 SetupGraphBuildAdvance::Cancelled => Ok(WasmSetupParallelProduce::Cancelled),
                 SetupGraphBuildAdvance::Complete(shared) => {
+                    self.solution_paths = shared
+                        .query
+                        .path_detail()
+                        .map(|detail| {
+                            enumerate_setup_completion_paths(
+                                &shared.graph,
+                                detail.board_mask(),
+                                control,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
                     let initialization = encode_initialization(
                         &shared.query,
                         &shared.coverage_graph,
-                        &shared.graph,
                         &shared.graph.shapes,
                     )?;
                     let mut condition_task_counts = vec![0_usize; shared.conditions.len()];
@@ -235,6 +249,12 @@ impl WasmSetupParallelCoordinator {
                 )
             })?;
         let mut peak_segment_pages = 0_u32;
+        let mut solution_paths = Some(
+            std::mem::take(&mut self.solution_paths)
+                .into_iter()
+                .map(SetupSolutionPath::into_core_path)
+                .collect::<Vec<_>>(),
+        );
         for (condition_index, merge) in condition_merges.into_iter().enumerate() {
             let condition = &shared.conditions[condition_index];
             peak_segment_pages = peak_segment_pages.max(merge.peak_segment_pages);
@@ -253,6 +273,7 @@ impl WasmSetupParallelCoordinator {
                 &shared.graph,
                 shared.query.candidate_priority(),
                 shared.query.length_preference(),
+                shared.query.max_setup_pieces(),
             )?;
             let targets = result
                 .selected_shapes
@@ -267,13 +288,6 @@ impl WasmSetupParallelCoordinator {
                 })
                 .collect::<Vec<_>>();
             let paths = resolver.paths(&targets)?;
-            let mut solution_paths = Some(
-                result
-                    .solution_paths
-                    .into_iter()
-                    .map(|path| path.into_core_path())
-                    .collect::<Vec<_>>(),
-            );
             let path_target_board = shared
                 .query
                 .path_detail()
@@ -363,7 +377,6 @@ struct SetupConditionMerge {
     global_pattern_count: Option<u32>,
     accumulators: SegmentedArray<ShapeAccumulator>,
     covered_shapes: Vec<usize>,
-    solution_paths: HashSet<super::setup_all_paths::SetupSolutionPath>,
     peak_segment_pages: u32,
 }
 
@@ -375,7 +388,6 @@ impl SetupConditionMerge {
             global_pattern_count: None,
             accumulators: SegmentedArray::new(shape_count)?,
             covered_shapes: Vec::new(),
-            solution_paths: HashSet::new(),
             peak_segment_pages: 0,
         })
     }
@@ -393,16 +405,6 @@ impl SetupConditionMerge {
             }
             None => self.global_pattern_count = Some(result.global_pattern_count),
             _ => {}
-        }
-        if !result.solution_paths.is_empty() {
-            self.solution_paths
-                .try_reserve(result.solution_paths.len())
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "setup_all_paths_result_storage_unavailable",
-                    )
-                })?;
-            self.solution_paths.extend(result.solution_paths);
         }
         for shape in result.covered_shapes {
             let shape_index = shape.shape_index as usize;
@@ -557,14 +559,11 @@ impl SetupConditionMerge {
                 })
             })
             .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
-        let mut solution_paths = self.solution_paths.into_iter().collect::<Vec<_>>();
-        solution_paths.sort_unstable();
         Ok(CompletedParallelCondition {
             global_pattern_count,
             candidate_count,
             candidate_boards,
             selected_shapes,
-            solution_paths,
         })
     }
 }
@@ -574,7 +573,6 @@ struct CompletedParallelCondition {
     candidate_count: usize,
     candidate_boards: Vec<u64>,
     selected_shapes: Vec<SetupParallelShapeResult>,
-    solution_paths: Vec<super::setup_all_paths::SetupSolutionPath>,
 }
 
 const TARGET_TASKS_PER_VERIFIER: usize = 4;
@@ -627,9 +625,6 @@ pub(crate) struct WasmSetupParallelWorker {
     query: SetupSearchQuery,
     runtimes: Vec<Option<SetupParallelConditionRuntime>>,
     workspace: SegmentedCoverageWorkspace,
-    path_graph: Option<Arc<SetupAllPathGraph>>,
-    path_target_shape_index: Option<u32>,
-    path_enumerator: Option<SetupAllPathEnumerator>,
 }
 
 impl WasmSetupParallelWorker {
@@ -644,26 +639,15 @@ impl WasmSetupParallelWorker {
                 WasmExactSearchError::InvalidProblem("setup_parallel_worker_condition_count_failed")
             })?;
         let runtimes = (0..condition_count).map(|_| None).collect();
-        let queue_based_queue_len = match initialization.query.search_mode() {
-            clearra_problem::SetupSearchMode::ShapeOracle => 0,
-            clearra_problem::SetupSearchMode::QueueBased => initialization
-                .query
-                .queue()
-                .as_fixed_sequence()
-                .map_or(0, |queue| queue.len() as u8),
-        };
         let workspace = SegmentedCoverageWorkspace::new(
             Arc::clone(&initialization.graph),
             initialization.shape_count,
-            SetupSupplyStateLayout::new(0, queue_based_queue_len),
+            SetupSupplyStateLayout::new(),
         )?;
         Ok(Self {
             query: initialization.query,
             runtimes,
             workspace,
-            path_graph: initialization.path_graph,
-            path_target_shape_index: initialization.path_target_shape_index,
-            path_enumerator: None,
         })
     }
 
@@ -700,68 +684,15 @@ impl WasmSetupParallelWorker {
                 *runtime_slot = Some(SetupParallelConditionRuntime::compile(
                     condition_index,
                     &condition,
+                    self.query.max_setup_pieces(),
                 )?);
-                if self.path_enumerator.is_none() {
-                    if let (Some(graph), Some(target_shape_index)) =
-                        (&self.path_graph, self.path_target_shape_index)
-                    {
-                        self.path_enumerator = Some(SetupAllPathEnumerator::new(
-                            &condition,
-                            Arc::clone(graph),
-                            target_shape_index,
-                        )?);
-                    }
-                }
             }
             let runtime = runtime_slot
                 .as_ref()
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "setup_parallel_worker_runtime_missing",
                 ))?;
-            let mut result = if let Some(enumerator) = &mut self.path_enumerator {
-                enumerator.run_word_range(
-                    task.word_start as usize,
-                    task.word_end as usize,
-                    control,
-                )?;
-                let coverage = enumerator.take_coverage();
-                let covered_shapes = if coverage.build_covered_patterns == 0 {
-                    Vec::new()
-                } else {
-                    vec![SetupParallelShapeResult {
-                        shape_index: coverage.shape_index,
-                        build_covered_patterns: coverage.build_covered_patterns,
-                        joint_covered_patterns: coverage.joint_covered_patterns,
-                        build_weight: coverage.build_weight,
-                        joint_weight: coverage.joint_weight,
-                        min_covered_locks: coverage.min_covered_locks,
-                        max_covered_locks: coverage.max_covered_locks,
-                        witness_pattern_id: coverage.witness_pattern_id,
-                    }]
-                };
-                SetupParallelTaskResult {
-                    task_index: task.task_index,
-                    condition_index: task.condition_index,
-                    word_start: task.word_start,
-                    word_end: task.word_end,
-                    global_pattern_count: u32::try_from(
-                        runtime.pattern_index.global_pattern_count(),
-                    )
-                    .map_err(|_| {
-                        WasmExactSearchError::InvalidProblem(
-                            "setup_parallel_pattern_count_overflow",
-                        )
-                    })?,
-                    covered_shapes,
-                    solution_paths: enumerator.drain_paths()?,
-                    peak_segment_pages: u32::try_from(enumerator.peak_segment_pages())
-                        .unwrap_or(u32::MAX),
-                }
-            } else {
-                self.workspace.run_task(*task, runtime, control)?
-            };
-            result.solution_paths.sort_unstable();
-            results.push(result);
+            results.push(self.workspace.run_task(*task, runtime, control)?);
         }
         Ok((tasks.len(), encode_results(&results)?))
     }
@@ -776,6 +707,8 @@ struct SetupParallelConditionRuntime {
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
     initial_cursor: u16,
+    terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    max_setup_pieces: u8,
     state_layout: SetupSupplyStateLayout,
 }
 
@@ -783,6 +716,7 @@ impl SetupParallelConditionRuntime {
     fn compile(
         condition_index: usize,
         condition: &SetupSearchCondition,
+        max_setup_pieces: u8,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
         let universe = problem.piece_source().materialized_universe().ok_or(
@@ -795,18 +729,15 @@ impl SetupParallelConditionRuntime {
             initial_hold_code: condition
                 .initial_hold()
                 .map_or(0, |piece| piece_index(piece) as u8 + 1),
-            pattern_index: PatternPiecePositionIndex::compile(universe).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_parallel_pattern_index_compile_failed")
-            })?,
+            pattern_index: compile_setup_pattern_index(condition)?,
             weights: universe.weights().clone(),
             hold_enabled: problem.supply().hold_enabled(),
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
             projects_standard_bag_lookahead: problem.supply().projects_standard_bag_lookahead(),
             initial_cursor: problem.initial_hold().cursor(),
-            state_layout: SetupSupplyStateLayout::new(
-                condition.queue_based_queue_start(),
-                condition.queue_based_queue_len(),
-            ),
+            terminal_supply_target: condition.terminal_supply_target(),
+            max_setup_pieces,
+            state_layout: SetupSupplyStateLayout::new(),
         })
     }
 }
@@ -906,7 +837,6 @@ impl SegmentedCoverageWorkspace {
         if task.condition_index != runtime.condition_index
             || task.word_start >= task.word_end
             || task.word_end as usize > runtime.pattern_index.word_count()
-            || !self.state_layout.has_same_encoding(runtime.state_layout)
         {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_parallel_task_word_range_invalid",
@@ -957,12 +887,9 @@ impl SegmentedCoverageWorkspace {
             lane_count,
         )?;
         self.activate_alpha(
-            runtime.state_layout.encode(
-                self.graph.root as usize,
-                0,
-                runtime.initial_hold_code,
-                false,
-            ),
+            runtime
+                .state_layout
+                .encode(self.graph.root as usize, 0, runtime.initial_hold_code),
             root_bits,
         )?;
         let mut cancellation_work = 0_usize;
@@ -977,8 +904,7 @@ impl SegmentedCoverageWorkspace {
                     .state_values
                     .get(state_index)
                     .map_or(EMPTY_WORDS, |state| state.alpha);
-                let (node_index, extra_draw, hold_code, hold_from_qb) =
-                    runtime.state_layout.decode(state_index);
+                let (node_index, extra_draw, hold_code) = runtime.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() {
                     continue;
@@ -1001,19 +927,11 @@ impl SegmentedCoverageWorkspace {
                             )
                             .iter()
                         {
-                            let next_hold_from_qb = runtime.state_layout.next_hold_provenance(
-                                runtime.initial_cursor,
-                                node.depth,
-                                extra_draw,
-                                hold_from_qb,
-                                transition.hold_action,
-                            );
                             self.activate_alpha_lane(
                                 runtime.state_layout.encode(
                                     target_node,
                                     transition.extra_draw,
                                     transition.hold_code,
-                                    next_hold_from_qb,
                                 ),
                                 lane,
                                 active[lane] & transition.mask,
@@ -1026,12 +944,26 @@ impl SegmentedCoverageWorkspace {
 
         for cursor in 0..self.touched_states.len() {
             let state_index = self.touched_states[cursor];
-            let (node_index, _, _, _) = runtime.state_layout.decode(state_index);
+            let (node_index, extra_draw, hold_code) = runtime.state_layout.decode(state_index);
             if self.graph.nodes[node_index].accepting() {
-                let alpha = self
+                let mut alpha = self
                     .state_values
                     .get(state_index)
                     .map_or(EMPTY_WORDS, |state| state.alpha);
+                if let Some(target) = runtime.terminal_supply_target {
+                    for lane in 0..lane_count {
+                        alpha[lane] &= terminal_supply_target_word(
+                            &runtime.pattern_index,
+                            target,
+                            runtime.initial_cursor,
+                            self.graph.nodes[node_index].depth,
+                            extra_draw,
+                            hold_code,
+                            word_start + lane,
+                            alpha[lane],
+                        );
+                    }
+                }
                 self.activate_beta(state_index, alpha)?;
             }
         }
@@ -1043,8 +975,7 @@ impl SegmentedCoverageWorkspace {
                     .state_values
                     .get(state_index)
                     .map_or(EMPTY_WORDS, |state| state.alpha);
-                let (node_index, extra_draw, hold_code, hold_from_qb) =
-                    runtime.state_layout.decode(state_index);
+                let (node_index, extra_draw, hold_code) = runtime.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() {
                     continue;
@@ -1068,18 +999,10 @@ impl SegmentedCoverageWorkspace {
                             )
                             .iter()
                         {
-                            let next_hold_from_qb = runtime.state_layout.next_hold_provenance(
-                                runtime.initial_cursor,
-                                node.depth,
-                                extra_draw,
-                                hold_from_qb,
-                                transition.hold_action,
-                            );
                             let target = runtime.state_layout.encode(
                                 target_node,
                                 transition.extra_draw,
                                 transition.hold_code,
-                                next_hold_from_qb,
                             );
                             let backward = self
                                 .state_values
@@ -1095,15 +1018,9 @@ impl SegmentedCoverageWorkspace {
 
         for cursor in 0..self.touched_states.len() {
             let state_index = self.touched_states[cursor];
-            let (node_index, extra_draw, _, hold_from_qb) =
-                runtime.state_layout.decode(state_index);
+            let (node_index, _, _) = runtime.state_layout.decode(state_index);
             let node = self.graph.nodes[node_index];
-            if !runtime.state_layout.accepts_setup_candidate(
-                runtime.initial_cursor,
-                node.depth,
-                extra_draw,
-                hold_from_qb,
-            ) {
+            if node.depth > runtime.max_setup_pieces {
                 continue;
             }
             let Some(shape_index) = node.shape_index().map(|index| index as usize) else {
@@ -1215,7 +1132,7 @@ impl SegmentedCoverageWorkspace {
             state.alpha[lane] |= mask[lane];
         }
         if was_empty {
-            let (node, _, _, _) = self.state_layout.decode(state_index);
+            let (node, _, _) = self.state_layout.decode(state_index);
             self.depth_states[self.graph.nodes[node].depth as usize].push(state_index);
             self.touched_states.push(state_index);
         }
@@ -1235,7 +1152,7 @@ impl SegmentedCoverageWorkspace {
         let was_empty = first || state.alpha == EMPTY_WORDS;
         state.alpha[lane] |= mask;
         if was_empty {
-            let (node, _, _, _) = self.state_layout.decode(state_index);
+            let (node, _, _) = self.state_layout.decode(state_index);
             self.depth_states[self.graph.nodes[node].depth as usize].push(state_index);
             self.touched_states.push(state_index);
         }
@@ -1296,7 +1213,6 @@ impl SegmentedCoverageWorkspace {
                     WasmExactSearchError::InvalidProblem("setup_parallel_pattern_count_overflow")
                 })?,
             covered_shapes,
-            solution_paths: Vec::new(),
             peak_segment_pages: u32::try_from(self.peak_segment_pages).unwrap_or(u32::MAX),
         })
     }

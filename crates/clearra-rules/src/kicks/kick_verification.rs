@@ -100,7 +100,7 @@ pub struct KickProfileVerificationReport {
 
 impl KickProfileVerificationReport {
     pub fn verify_imported_profile(profile: &KickTableProfile) -> Self {
-        let expected_transitions = expected_transitions(profile.supports_180());
+        let expected_transitions = expected_transitions(profile);
         let missing_transition_count = expected_transitions
             .iter()
             .filter(|transition| profile.sequence_for(**transition).is_none())
@@ -186,15 +186,18 @@ impl VerifiedKickTableProfile {
     }
 }
 
-fn expected_transitions(include_180: bool) -> Vec<KickTransition> {
+fn expected_transitions(profile: &KickTableProfile) -> Vec<KickTransition> {
+    let omit_o_rotations =
+        profile.source_rule() == crate::profile::rule_profile::RuleProfileId::Jstris180;
     let base = PieceKind::STANDARD_TETROMINOES
         .into_iter()
+        .filter(|piece| !omit_o_rotations || *piece != PieceKind::O)
         .flat_map(|piece| {
             eight_direction_transitions()
                 .into_iter()
                 .map(move |(from, to)| KickTransition::new(piece, from, to))
         });
-    if !include_180 {
+    if !profile.supports_180() {
         return base.collect();
     }
     base.chain(

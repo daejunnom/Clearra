@@ -1,4 +1,6 @@
-use clearra_setup_search::query::{SetupCycleResetBorrowPolicy, SetupSearchMode, SetupSearchQuery};
+use clearra_setup_search::query::{
+    SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupSearchMode, SetupSearchQuery,
+};
 
 use crate::diagnostic::diagnostic_report::DiagnosticReport;
 
@@ -23,6 +25,7 @@ impl SetupQueryValidator {
         validate_fixed_setup_target(query, &mut report);
         report.append(validate_piece_budget(query.piece_budget()));
         validate_residue(query, &mut report);
+        validate_max_setup_pieces(query, &mut report);
         if query.search_mode() == SetupSearchMode::QueueBased {
             validate_queue_based_input(query, &mut report);
         }
@@ -33,6 +36,16 @@ impl SetupQueryValidator {
             report.push(setup_supported_diagnostic(query));
         }
         report
+    }
+}
+
+fn validate_max_setup_pieces(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
+    if !(1..=10).contains(&query.max_setup_pieces()) {
+        report.push(invalid_setup_query(
+            "setup.max_setup_pieces",
+            "maximum setup pieces must be between one and ten",
+            "setup_max_piece_count_out_of_range",
+        ));
     }
 }
 
@@ -60,31 +73,32 @@ fn validate_residue(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
         return;
     }
 
-    let duplicate_kinds = clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
+    let mut queue_remainder = residue.pieces().to_vec();
+    if let SetupHoldPolicy::EnabledWithPiece(piece) = query.hold_policy() {
+        let Some(index) = queue_remainder.iter().position(|value| *value == piece) else {
+            report.push(invalid_setup_query(
+                "setup.hold_policy",
+                "the selected initial hold must be included in the remaining-piece inventory",
+                "initial_hold_piece_missing_from_remaining_inventory",
+            ));
+            return;
+        };
+        queue_remainder.remove(index);
+    }
+    if clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
         .into_iter()
-        .filter(|piece| {
-            residue
-                .pieces()
+        .any(|piece| {
+            queue_remainder
                 .iter()
-                .filter(|value| **value == *piece)
+                .filter(|value| **value == piece)
                 .count()
                 > 1
-        })
-        .collect::<Vec<_>>();
-    if duplicate_kinds.len() > 1
-        || residue.pieces().iter().any(|piece| {
-            residue
-                .pieces()
-                .iter()
-                .filter(|value| *value == piece)
-                .count()
-                > 2
         })
     {
         report.push(invalid_setup_query(
             "setup.remaining_pieces",
-            "remaining setup pieces may contain at most one duplicated kind and at most two copies",
-            "remaining_piece_multiset_cannot_represent_one_hold_slot",
+            "queue-remainder pieces must be unique; select one matching piece with --initial-hold when the inventory contains an occupied hold",
+            "remaining_piece_duplicate_requires_explicit_initial_hold",
         ));
     }
 
@@ -103,40 +117,45 @@ fn validate_queue_based_input(query: &SetupSearchQuery, report: &mut DiagnosticR
     let Some(queue) = query.queue().as_fixed_sequence() else {
         report.push(invalid_setup_query(
             "setup.queue",
-            "queue-based setup search requires an observed subset of the following standard bag",
+            "queue-based setup search requires the exact next-cycle remaining inventory",
             "queue_based_setup_requires_fixed_queue",
         ));
         return;
     };
-    if queue.is_empty() {
+    let expected_count = match query.residue().cycle() {
+        Some(1) => 4,
+        Some(2) => 1,
+        Some(3) => 5,
+        Some(4) => 2,
+        Some(5) => 6,
+        Some(6) => 3,
+        Some(7) => 7,
+        _ => return,
+    };
+    if queue.len() != expected_count {
         report.push(invalid_setup_query(
             "setup.queue",
-            "queue-based setup search requires at least one observed next-bag piece",
+            "next-cycle remaining inventory must match the cycle reached after this PC",
             "queue_based_setup_piece_count_out_of_range",
         ));
     }
-    if queue.len() + query.residue().remaining_count() > 7 {
-        report.push(invalid_setup_query(
-            "setup.queue",
-            "remaining setup pieces and observed next-bag pieces may contain at most seven pieces in total",
-            "queue_based_setup_combined_piece_count_out_of_range",
-        ));
-    }
-    if clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
+    let repeated_counts = clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
         .into_iter()
-        .any(|piece| {
+        .map(|piece| {
             queue
                 .pieces()
                 .iter()
                 .filter(|value| **value == piece)
                 .count()
-                > 1
         })
+        .collect::<Vec<_>>();
+    if repeated_counts.iter().any(|count| *count > 2)
+        || repeated_counts.iter().filter(|count| **count == 2).count() > 1
     {
         report.push(invalid_setup_query(
             "setup.queue",
-            "observed queue-based pieces must be a subset of one standard seven-bag",
-            "queue_based_setup_observed_piece_duplicate",
+            "only one next-cycle piece kind may repeat through hold carryover",
+            "queue_based_setup_next_cycle_piece_duplicate",
         ));
     }
 }

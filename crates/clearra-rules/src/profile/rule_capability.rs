@@ -5,6 +5,7 @@ pub enum RuleKickModel {
     Srs90,
     SrsPlus180,
     SrsX,
+    Jstris180,
     Asc,
     Ars,
     NoKick,
@@ -17,6 +18,7 @@ impl RuleKickModel {
             Self::Srs90 => "srs-90",
             Self::SrsPlus180 => "srs-plus-180",
             Self::SrsX => "srs-x",
+            Self::Jstris180 => "jstris-180",
             Self::Asc => "asc",
             Self::Ars => "ars",
             Self::NoKick => "no-kick",
@@ -44,6 +46,7 @@ impl RuleCapability {
             RuleProfileId::Srs => RuleKickModel::Srs90,
             RuleProfileId::SrsPlus => RuleKickModel::SrsPlus180,
             RuleProfileId::SrsX => RuleKickModel::SrsX,
+            RuleProfileId::Jstris180 => RuleKickModel::Jstris180,
             RuleProfileId::Asc => RuleKickModel::Asc,
             RuleProfileId::Ars => RuleKickModel::Ars,
             RuleProfileId::NoKick => RuleKickModel::NoKick,
@@ -51,7 +54,10 @@ impl RuleCapability {
         };
         let supports_180 = matches!(
             rule.id(),
-            RuleProfileId::SrsPlus | RuleProfileId::SrsX | RuleProfileId::Asc
+            RuleProfileId::SrsPlus
+                | RuleProfileId::SrsX
+                | RuleProfileId::Jstris180
+                | RuleProfileId::Asc
         );
         let requires_spawn_reachability =
             matches!(rule.id(), RuleProfileId::Asc | RuleProfileId::Ars);
@@ -60,13 +66,17 @@ impl RuleCapability {
             RuleProfileId::Srs
                 | RuleProfileId::SrsPlus
                 | RuleProfileId::SrsX
+                | RuleProfileId::Jstris180
                 | RuleProfileId::NoKick
         );
         Self {
             two_line_supported: rule.is_two_line_supported(),
             kick_model,
             supports_180,
-            supports_exact_180: matches!(rule.id(), RuleProfileId::SrsPlus | RuleProfileId::SrsX),
+            supports_exact_180: matches!(
+                rule.id(),
+                RuleProfileId::SrsPlus | RuleProfileId::SrsX | RuleProfileId::Jstris180
+            ),
             requires_lock_reachability: !matches!(rule.id(), RuleProfileId::NoKick),
             requires_spawn_reachability,
             search_backend_supported,

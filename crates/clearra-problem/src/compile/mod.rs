@@ -15,6 +15,6 @@ pub use packing_problem_compiler::{
 pub use problem_compiler::ProblemCompiler;
 pub use setup_condition_compiler::{
     compile_setup_search_condition, compile_setup_search_conditions, setup_search_condition_count,
-    SetupConditionCompileError, SetupSearchCondition,
+    SetupConditionCompileError, SetupSearchCondition, SetupTerminalSupplyTarget,
 };
 pub use spin_target_compiler::SpinTargetCompiler;

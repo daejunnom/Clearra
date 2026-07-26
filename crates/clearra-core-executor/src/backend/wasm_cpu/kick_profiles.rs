@@ -20,6 +20,10 @@ pub(super) fn builtin_kick_profile(
             static PROFILE: OnceLock<KickTableProfile> = OnceLock::new();
             Some(PROFILE.get_or_init(SrsKicks::srs_x_profile))
         }
+        KickTableProfileId::Jstris180 => {
+            static PROFILE: OnceLock<KickTableProfile> = OnceLock::new();
+            Some(PROFILE.get_or_init(SrsKicks::jstris_180_profile))
+        }
         KickTableProfileId::NoKick => {
             static PROFILE: OnceLock<KickTableProfile> = OnceLock::new();
             Some(PROFILE.get_or_init(NoKick::profile))

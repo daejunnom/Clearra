@@ -120,7 +120,7 @@ foreach ($requiredMarker in @(
             "X1 MVP2 Rule / Kick Expansion",
             "clearra-rules",
             "RuleProfile + optional VerifiedKickTableProfile -> RuleDescriptorCompiler -> clr_rule_profile_descriptor -> clearra_rule_profile_from_descriptor -> ClearraCompactRuleProfile",
-            "SRS, SRS+, and NoKick compile to built-in C descriptors",
+            "SRS, SRS+, Jstris 180, and NoKick compile to built-in C descriptors",
             "Imported kick tables compile only through",
             "Unverified extension profiles such as SRS-X are rejected",
             "supports_exact_180",

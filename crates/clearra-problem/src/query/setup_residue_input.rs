@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn one_duplicate_identifies_the_explicit_hold_piece() {
+    fn duplicate_piece_reports_the_inventory_kind_available_for_explicit_hold() {
         let input =
             SetupResidueInput::new(vec![PieceKind::S, PieceKind::I, PieceKind::O, PieceKind::S]);
 

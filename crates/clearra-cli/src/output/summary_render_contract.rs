@@ -180,6 +180,7 @@ fn number_keys() -> BTreeSet<&'static str> {
         "kick_verification_cases",
         "kick_verification_failures",
         "issue_count",
+        "jstris_180_transitions",
         "lines",
         "materialized_pattern_count",
         "materialized_probability_mass",

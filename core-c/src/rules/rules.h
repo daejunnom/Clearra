@@ -82,11 +82,17 @@ ClearraRuleStatus clearra_kick_table_sequence_for(
     uint8_t to_rotation,
     const ClearraCompactKickSequence **out_sequence);
 bool clearra_kick_table_supports_180(const ClearraCompactKickTable *table);
-bool clearra_kick_table_zero_offsets_only(const ClearraCompactKickTable *table);ClearraCompactKickSequence clearra_no_kick_sequence(void);
-ClearraRuleStatus clearra_no_kick_table(ClearraCompactKickTable *out_table);ClearraRuleStatus clearra_srs_kick_table(ClearraCompactKickTable *out_table);
-ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table);ClearraRuleStatus clearra_spawn_profile_from_id(
+bool clearra_kick_table_zero_offsets_only(const ClearraCompactKickTable *table);
+ClearraCompactKickSequence clearra_no_kick_sequence(void);
+ClearraRuleStatus clearra_no_kick_table(ClearraCompactKickTable *out_table);
+ClearraRuleStatus clearra_srs_kick_table(ClearraCompactKickTable *out_table);
+ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table);
+ClearraRuleStatus clearra_jstris_180_kick_table(
+    ClearraCompactKickTable *out_table);
+ClearraRuleStatus clearra_spawn_profile_from_id(
     uint32_t spawn_profile_id,
-    ClearraCompactSpawnProfile *out_profile);ClearraRuleStatus clearra_rule_profile_from_descriptor(
+    ClearraCompactSpawnProfile *out_profile);
+ClearraRuleStatus clearra_rule_profile_from_descriptor(
     const clr_rule_profile_descriptor *descriptor,
     ClearraCompactRuleProfile *out_profile);
 #endif

@@ -152,6 +152,54 @@ fn srs_x_retains_the_extended_i_180_sequence() {
     );
 }
 
+#[test]
+fn jstris_180_uses_srs_quarter_turns_and_two_ordered_half_turn_kicks() {
+    use RotationState::{Left, Right, Two, Zero};
+
+    let profile = SrsKicks::jstris_180_profile();
+
+    assert_eq!(profile.id(), KickTableProfileId::Jstris180);
+    assert_eq!(profile.source_rule(), RuleProfileId::Jstris180);
+    assert_eq!(profile.transition_count(), 72);
+    assert_eq!(
+        profile
+            .sequence_for(KickTransition::new(PieceKind::I, Zero, Right))
+            .expect("Jstris I 0->R")
+            .offsets(),
+        offsets([(0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)])
+    );
+
+    for piece in [
+        PieceKind::I,
+        PieceKind::J,
+        PieceKind::L,
+        PieceKind::S,
+        PieceKind::T,
+        PieceKind::Z,
+    ] {
+        for (from, to, expected) in [
+            (Zero, Two, offsets([(0, 0), (0, 1)])),
+            (Right, Left, offsets([(0, 0), (1, 0)])),
+            (Two, Zero, offsets([(0, 0), (0, -1)])),
+            (Left, Right, offsets([(0, 0), (-1, 0)])),
+        ] {
+            assert_eq!(
+                profile
+                    .sequence_for(KickTransition::new(piece, from, to))
+                    .expect("Jstris half turn")
+                    .offsets(),
+                expected,
+                "{piece:?} {from:?}->{to:?}"
+            );
+        }
+    }
+
+    assert!(profile
+        .entries()
+        .iter()
+        .all(|entry| entry.transition().piece() != PieceKind::O));
+}
+
 fn jlstz_transition_fixtures() -> Vec<(RotationState, RotationState, Vec<KickOffset>)> {
     use RotationState::{Left, Right, Two, Zero};
 

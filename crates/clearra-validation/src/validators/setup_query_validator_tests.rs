@@ -10,16 +10,18 @@ use crate::diagnostic::diagnostic_code::{DiagnosticCode, DiagnosticSeverity};
 use super::SetupQueryValidator;
 
 #[test]
-fn setup_query_validator_accepts_one_explicit_hold_duplicate() {
-    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
-        PieceKind::I,
-        PieceKind::I,
-        PieceKind::O,
-        PieceKind::T,
-        PieceKind::S,
-        PieceKind::Z,
-        PieceKind::J,
-    ]);
+fn setup_query_validator_accepts_one_explicitly_selected_hold_duplicate() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+        ])
+        .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::I));
 
     let report = SetupQueryValidator::validate(&query);
 
@@ -28,7 +30,7 @@ fn setup_query_validator_accepts_one_explicit_hold_duplicate() {
 }
 
 #[test]
-fn setup_query_validator_rejects_multiple_explicit_hold_duplicates() {
+fn setup_query_validator_rejects_an_unselected_duplicate() {
     let query = SetupSearchQuery::default().with_remaining_pieces(vec![
         PieceKind::I,
         PieceKind::I,
@@ -46,6 +48,15 @@ fn setup_query_validator_rejects_multiple_explicit_hold_duplicates() {
         diagnostic.code() == DiagnosticCode::ESetupQueryInvalid
             && diagnostic.severity() == DiagnosticSeverity::Error
     }));
+}
+
+#[test]
+fn setup_query_validator_rejects_a_selected_hold_missing_from_inventory() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T])
+        .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::S));
+
+    assert!(SetupQueryValidator::validate(&query).has_errors());
 }
 
 #[test]
@@ -93,10 +104,17 @@ fn valid_setup_query_reports_supported_mvp_contract() {
 }
 
 #[test]
-fn queue_based_setup_accepts_observed_next_bag_subset() {
+fn queue_based_setup_accepts_exact_next_cycle_inventory_with_one_hold_duplicate() {
     let query = SetupSearchQuery::default()
-        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
-        .with_queue_based_pieces(vec![PieceKind::Z, PieceKind::J, PieceKind::L]);
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+            PieceKind::Z,
+        ]);
 
     let report = SetupQueryValidator::validate(&query);
 
@@ -104,10 +122,16 @@ fn queue_based_setup_accepts_observed_next_bag_subset() {
 }
 
 #[test]
-fn queue_based_setup_rejects_more_than_seven_combined_observations() {
+fn queue_based_setup_rejects_the_wrong_next_cycle_inventory_count() {
     let query = SetupSearchQuery::default()
-        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
-        .with_queue_based_pieces(vec![PieceKind::Z, PieceKind::J, PieceKind::L, PieceKind::O]);
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+            PieceKind::Z,
+        ]);
 
     let report = SetupQueryValidator::validate(&query);
 
@@ -115,10 +139,17 @@ fn queue_based_setup_rejects_more_than_seven_combined_observations() {
 }
 
 #[test]
-fn queue_based_setup_rejects_duplicate_observed_next_bag_piece() {
+fn queue_based_setup_rejects_two_duplicated_next_cycle_piece_kinds() {
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
-        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::O]);
+        .with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+        ]);
 
     let report = SetupQueryValidator::validate(&query);
 

@@ -10,7 +10,9 @@ uint8_t clearra_buildup_reachability_mode_for_rule(
         return CLEARRA_REACHABILITY_MODE_HARDDROP;
     }
     if (rule->kick_profile_id == CLR_KICK_SRS_PLUS_180 ||
-        rule->rule_profile_id == CLR_RULE_SRS_PLUS) {
+        rule->rule_profile_id == CLR_RULE_SRS_PLUS ||
+        rule->kick_profile_id == CLR_KICK_JSTRIS_180 ||
+        rule->rule_profile_id == CLR_RULE_JSTRIS_180) {
         return CLEARRA_REACHABILITY_MODE_LOCKED_180;
     }
     return CLEARRA_REACHABILITY_MODE_LOCKED;

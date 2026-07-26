@@ -36,6 +36,15 @@ fn kick_table_editor_schema_exposes_registry_preview_and_import_export() {
     assert!(srs_plus.supports_exact_180());
     assert!(srs_plus.c_compact_descriptor_ready());
     assert_eq!(srs_plus.unsupported_backend_reason(), "none");
+    let jstris = schema
+        .previews()
+        .iter()
+        .find(|preview| preview.profile_id() == KickTableProfileId::Jstris180.as_str())
+        .expect("Jstris 180 preview");
+    assert_eq!(jstris.transition_count(), 72);
+    assert!(jstris.first_success_order_preserved());
+    assert!(jstris.supports_exact_180());
+    assert!(jstris.c_compact_descriptor_ready());
 }
 
 #[test]

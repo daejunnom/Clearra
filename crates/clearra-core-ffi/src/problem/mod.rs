@@ -283,6 +283,7 @@ mod rule_constants {
     pub const C_RULE_ASC: u32 = 4;
     pub const C_RULE_ARS: u32 = 5;
     pub const C_RULE_NO_KICK: u32 = 6;
+    pub const C_RULE_JSTRIS_180: u32 = 7;
     pub const C_RULE_CUSTOM: u32 = 255;
     pub const C_KICK_SRS_90: u32 = 1;
     pub const C_KICK_NO_KICK: u32 = 2;
@@ -291,6 +292,7 @@ mod rule_constants {
     pub const C_KICK_ASC: u32 = 5;
     pub const C_KICK_ARS: u32 = 6;
     pub const C_KICK_IMPORTED: u32 = 7;
+    pub const C_KICK_JSTRIS_180: u32 = 8;
     pub const C_KICK_CUSTOM: u32 = 255;
     pub const C_SPAWN_STANDARD_10: u32 = 1;
     pub const C_SPAWN_ARIKA: u32 = 2;

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-07-26
+
+- Corrected Queue-Based Setup Finder semantics so the requested next-cycle
+  remaining inventory constrains the exact terminal hold and bag suffix without
+  forcing every observed piece into the setup or renormalizing its probability.
+- Removed implicit occupied-hold expansion from the product UI while preserving
+  explicit initial-hold analysis in the CLI with exact duplicate-piece and bag
+  provenance validation.
+- Added configurable one-through-ten-piece setup results and on-demand rendering
+  of the actual PC completion placements from a selected setup.
+- Added the exact Jstris 180 rule profile across Rust, C, WASM, CLI, Tauri, and
+  browser controls: standard SRS quarter turns, ordered two-offset half turns
+  for I/J/L/S/T/Z, and no O rotation transitions.
+- Expanded executable reachability, wire identity, compact C ABI, browser WASM,
+  validation, documentation, and English/Korean GUI coverage for the new rule
+  and corrected setup contracts.
+
 ## 0.2.2 - 2026-07-26
 
 - Added exact queue-based Setup Finder input, observed-piece consumption, and

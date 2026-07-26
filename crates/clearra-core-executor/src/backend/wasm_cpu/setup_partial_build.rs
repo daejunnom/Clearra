@@ -32,7 +32,7 @@ pub(super) struct PartialBuildNode {
 const NODE_LIVE: u8 = 1 << 0;
 const NODE_ACCEPTING: u8 = 1 << 1;
 const NO_SHAPE_INDEX: u32 = u32::MAX;
-const MAX_SETUP_CANDIDATE_LOCKS: u8 = 8;
+const MAX_SETUP_CANDIDATE_LOCKS: u8 = 10;
 
 impl PartialBuildNode {
     pub(super) const fn live(self) -> bool {

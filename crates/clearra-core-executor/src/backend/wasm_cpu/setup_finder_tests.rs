@@ -3,42 +3,101 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
 };
 use clearra_problem::{
-    SetupCandidatePriority, SetupLengthPreference, SetupLimits, SetupSearchQuery,
+    compile_setup_search_conditions, SetupCandidatePriority, SetupLengthPreference, SetupLimits,
+    SetupSearchQuery,
 };
 
 use super::{
-    compare_setup_candidates, include_setup_depth_range, merge_exact_state_coverage,
-    prefers_setup_representative_depth, SetupHoldAction, SetupSupplyStateLayout,
-    WasmSetupSearchAdvance, WasmSetupSearchSession,
+    compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
+    merge_exact_state_coverage, piece_index, prefers_setup_representative_depth,
+    terminal_supply_target_word, SetupSupplyStateLayout, WasmSetupSearchAdvance,
+    WasmSetupSearchSession,
 };
 
 #[test]
-fn queue_based_candidates_must_lock_every_observed_piece() {
-    let layout = SetupSupplyStateLayout::new(2, 2);
+fn queue_based_supply_layout_has_no_terminal_inventory_consumption_dimension() {
+    let layout = SetupSupplyStateLayout::new();
+    let state = layout.encode(7, 1, 3);
 
-    assert!(!layout.accepts_setup_candidate(0, 3, 0, false));
-    assert!(layout.accepts_setup_candidate(0, 4, 0, false));
-    assert!(!layout.accepts_setup_candidate(0, 4, 0, true));
-
-    let held_observed =
-        layout.next_hold_provenance(0, 2, 0, false, SetupHoldAction::StoreCurrentUseNext);
-    assert!(held_observed);
-    assert!(!layout.accepts_setup_candidate(0, 4, 0, held_observed));
+    assert_eq!(layout.decode(state), (7, 1, 3));
+    assert_eq!(
+        layout.state_capacity(2),
+        Some(2 * super::EXTRA_DRAW_STATE_COUNT * super::HOLD_STATE_COUNT)
+    );
 }
 
 #[test]
-fn queue_based_setup_depth_uses_only_paths_after_observed_piece_consumption() {
-    let layout = SetupSupplyStateLayout::new(2, 2);
+fn queue_based_setup_depth_keeps_every_partial_path() {
     let mut min_depth = u8::MAX;
     let mut max_depth = 0;
 
-    for (depth, hold_from_qb) in [(3, false), (4, false), (4, true), (6, false)] {
-        if layout.accepts_setup_candidate(0, depth, 0, hold_from_qb) {
-            include_setup_depth_range(&mut min_depth, &mut max_depth, depth);
-        }
+    for depth in [3, 4, 6] {
+        include_setup_depth_range(&mut min_depth, &mut max_depth, depth);
     }
 
-    assert_eq!((min_depth, max_depth), (4, 6));
+    assert_eq!((min_depth, max_depth), (3, 6));
+}
+
+#[test]
+fn queue_based_terminal_inventory_matches_hold_plus_exact_bag_suffix() {
+    let oracle =
+        SetupSearchQuery::default().with_remaining_pieces(vec![PieceKind::T, PieceKind::I]);
+    let condition = compile_setup_search_conditions(&oracle)
+        .expect("oracle condition")
+        .remove(0);
+    let pattern_index = compile_setup_pattern_index(&condition).expect("pattern index");
+    let queue_based_condition =
+        compile_setup_search_conditions(&oracle.with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+            PieceKind::Z,
+        ]))
+        .expect("queue-based condition")
+        .remove(0);
+    let target = queue_based_condition
+        .terminal_supply_target()
+        .expect("terminal target");
+    let filtered_index =
+        compile_setup_pattern_index(&queue_based_condition).expect("filtered pattern index");
+    assert_eq!(
+        filtered_index.global_pattern_count(),
+        pattern_index.global_pattern_count()
+    );
+    assert!(filtered_index.local_pattern_count() < filtered_index.global_pattern_count());
+    let hold_o = piece_index(PieceKind::O) as u8 + 1;
+    let piece_j = piece_index(PieceKind::J) as u8 + 1;
+    let piece_l = piece_index(PieceKind::L) as u8 + 1;
+
+    let mut matched = 0_u32;
+    for word_index in 0..pattern_index.word_count() {
+        let active = pattern_index.active_word(word_index);
+        let expected = active
+            & ((pattern_index.piece_word(9, piece_j, word_index)
+                & pattern_index.piece_word(10, piece_l, word_index))
+                | (pattern_index.piece_word(9, piece_l, word_index)
+                    & pattern_index.piece_word(10, piece_j, word_index)));
+        let actual = terminal_supply_target_word(
+            &pattern_index,
+            target,
+            0,
+            10,
+            1,
+            hold_o,
+            word_index,
+            active,
+        );
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            terminal_supply_target_word(&pattern_index, target, 0, 10, 0, 0, word_index, active,),
+            0
+        );
+        matched += actual.count_ones();
+    }
+    assert!(matched > 0);
 }
 
 #[test]
@@ -240,7 +299,7 @@ fn setup_finder_returns_exact_joint_witness_paths() {
 
     assert!(report.complete());
     assert_eq!(report.coverage_semantics(), "oracle");
-    assert_eq!(report.hold_conditions().len(), 4);
+    assert_eq!(report.hold_conditions().len(), 1);
     assert!(report
         .hold_conditions()
         .iter()

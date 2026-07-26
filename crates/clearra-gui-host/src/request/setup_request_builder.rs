@@ -6,7 +6,8 @@ use clearra_problem::{
 use crate::{
     model::{GuiBackendForm, GuiSetupSearchForm},
     request::{
-        parse_piece_sequence, BackendRequestBuilder, RequestBuildError, RequestBuildErrorCode,
+        parse_piece_sequence, parse_rule_profile, BackendRequestBuilder, RequestBuildError,
+        RequestBuildErrorCode,
     },
 };
 
@@ -18,15 +19,6 @@ impl SetupRequestBuilder {
         form: &GuiSetupSearchForm,
         backend: &GuiBackendForm,
     ) -> Result<AppCommand, RequestBuildError> {
-        if form.rule() != "srs-plus" {
-            return Err(RequestBuildError::new(
-                RequestBuildErrorCode::UnsupportedRule,
-                format!(
-                    "GUI setup request builder only supports srs-plus, got {}",
-                    form.rule()
-                ),
-            ));
-        }
         BackendRequestBuilder::validate_form(backend)?;
 
         let sequence = parse_piece_sequence(form.remaining_pieces(), "setup remaining pieces")?;
@@ -59,6 +51,7 @@ impl SetupRequestBuilder {
 
         Ok(AppCommand::Setup(SetupAppCommand::new(
             SetupSearchQuery::default()
+                .with_rule(parse_rule_profile(form.rule())?)
                 .with_remaining_pieces(pieces)
                 .with_cycle_reset_borrow_policy(borrow_policy)
                 .with_candidate_priority(candidate_priority)

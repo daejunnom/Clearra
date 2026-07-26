@@ -241,12 +241,91 @@ static clr_rule_profile_descriptor descriptor(uint32_t rule, uint32_t kick) {
         EXPECT_I8(mirrored_sequence->offsets[index].dy,
                   sequence->offsets[index].dy);
     }
-}int main(void) {
+}
+
+static void jstris_180_profile_matches_two_kick_reference_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    const ClearraCompactKickSequence *sequence = 0;
+    clr_rule_profile_descriptor jstris =
+        descriptor(CLR_RULE_JSTRIS_180, CLR_KICK_JSTRIS_180);
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&jstris, &profile),
+                  CLEARRA_RULE_OK);
+
+    EXPECT_U16(profile.kick_table.transition_count, 72);
+    EXPECT_TRUE(profile.supports_180);
+    EXPECT_FALSE(profile.srs_plus_capability_reported);
+
+    const uint8_t from_rotations[4] = {
+        CLEARRA_RULE_ROTATION_SPAWN,
+        CLEARRA_RULE_ROTATION_RIGHT,
+        CLEARRA_RULE_ROTATION_REVERSE,
+        CLEARRA_RULE_ROTATION_LEFT,
+    };
+    const uint8_t to_rotations[4] = {
+        CLEARRA_RULE_ROTATION_REVERSE,
+        CLEARRA_RULE_ROTATION_LEFT,
+        CLEARRA_RULE_ROTATION_SPAWN,
+        CLEARRA_RULE_ROTATION_RIGHT,
+    };
+    const int8_t expected_dx[4] = {0, 1, 0, -1};
+    const int8_t expected_dy[4] = {1, 0, -1, 0};
+    const uint8_t pieces[6] = {
+        CLR_PIECE_I,
+        CLR_PIECE_J,
+        CLR_PIECE_L,
+        CLR_PIECE_S,
+        CLR_PIECE_T,
+        CLR_PIECE_Z,
+    };
+
+    for (uint8_t piece_index = 0; piece_index < 6; piece_index++) {
+        for (uint8_t transition_index = 0; transition_index < 4;
+             transition_index++) {
+            EXPECT_STATUS(
+                clearra_kick_table_sequence_for(
+                    &profile.kick_table,
+                    pieces[piece_index],
+                    from_rotations[transition_index],
+                    to_rotations[transition_index],
+                    &sequence),
+                CLEARRA_RULE_OK);
+            EXPECT_U16(sequence->count, 2);
+            EXPECT_I8(sequence->offsets[0].dx, 0);
+            EXPECT_I8(sequence->offsets[0].dy, 0);
+            EXPECT_I8(sequence->offsets[1].dx, expected_dx[transition_index]);
+            EXPECT_I8(sequence->offsets[1].dy, expected_dy[transition_index]);
+        }
+    }
+
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_I,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_RIGHT,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 5);
+    EXPECT_I8(sequence->offsets[1].dx, -2);
+    EXPECT_I8(sequence->offsets[1].dy, 0);
+
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_O,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_RIGHT,
+            &sequence),
+        CLEARRA_RULE_TRANSITION_NOT_FOUND);
+}
+
+int main(void) {
     kick_transition_count_fixture();
     srs_transition_offsets_are_compact_runtime_view();
     no_kick_has_zero_offset_only_fixture();
     unsupported_rule_returns_status_fixture();
     imported_verified_kick_profile_compiles_to_compact_descriptor_fixture();
     srs_plus_capability_reported_fixture();
+    jstris_180_profile_matches_two_kick_reference_fixture();
     return 0;
 }

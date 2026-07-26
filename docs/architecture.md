@@ -189,13 +189,16 @@ The compact runtime files are `core-c/src/rules/rule_profile.c`,
 `srs_kicks.c`, `no_kick.c`, `kick_table.c`, and `spawn_profile.c`, with
 `rules.h` as the internal C contract. `clearra_rule_profile_from_descriptor`
 converts `clr_rule_profile_descriptor` values into `ClearraCompactRuleProfile`.
-M7 supports only SRS, SRS+, and NoKick built-ins. SRS-X, ASC, ARS, imported, and
-custom rules return explicit unsupported status instead of falling back.
+The compact runtime supports SRS, SRS+, Jstris 180, and NoKick built-ins.
+SRS-X reaches this boundary only through a verified imported descriptor; ASC,
+ARS, unverified imported, and custom rules return explicit unsupported status
+instead of falling back.
 
 The C descriptor conversion preserves kick transition count, 180 support flag,
 NoKick zero-offset-only behavior, unsupported rule status, and SRS+ capability
-reported state. SRS has 56 compact transitions, SRS+ has 80 compact transitions
-including 180 entries, and NoKick has 56 zero-offset transitions.
+reported state. SRS has 56 compact transitions, SRS+ has 80 compact transitions,
+Jstris 180 has 72 compact transitions with no O rotation entries, and NoKick has
+56 zero-offset transitions.
 
 ## M8 Sfinder-Compatible Candidate
 
@@ -1014,31 +1017,35 @@ prefixes from a materialized list of complete solutions.
 
 The product flow is:
 
-`remaining-piece multiset -> exact residue/hold conditions -> admissible 10-lock signatures -> inverse lock-clear geometry family -> FamilyQuotient Partial BuildUp -> lazy hold/pattern product -> forward/backward coverage -> setup-shape union`
+`remaining-piece multiset + selected initial hold -> admissible 10-lock signatures -> inverse lock-clear geometry family -> FamilyQuotient Partial BuildUp -> lazy hold/pattern product -> forward/backward coverage -> setup-shape union`
 
-The remaining-piece count determines the PC cycle. A unique multiset is split
-into separate empty-hold and held-piece conditions; those conditions are
-reported separately and are never averaged. One duplicated piece explicitly
-identifies the held piece. Cycle-reset borrowing is a provenance policy and is
-available only for cycle seven.
+The remaining-piece count determines the PC cycle. Product UI requests use one
+empty initial-hold condition. The CLI may explicitly select one occupied
+initial hold; that piece must be included in the remaining inventory and is
+removed from the queue remainder. The engine never expands a unique residue
+into one search per possible held piece. Cycle-reset borrowing is a provenance
+policy and is available only for cycle seven.
 
 `FamilyQuotient Partial BuildUp` consumes canonical placement rows from the
 compressed `Append / Union / Product` geometry DAG. Each partial node owns its
 current board, inverse lock-clear state, and residual completion family. Nodes
 with equivalent exact continuation state union their residual families before
 the next layer is expanded. The root is only the search source. Every live
-non-root prefix from one through eight placements is eligible for shape grouping;
-depth is not a pruning proof. Depth-nine and terminal suffixes may be traversed
-only to prove that an eligible prefix completes the PC and are never exposed as
-setup candidates.
+non-root prefix from one through ten placements is represented; depth is not a
+pruning proof. The request's `max_setup_pieces` field selects result depths from
+1 through 10 after exact coverage. Its product default is 9 so complete PCs do
+not dominate probability ordering, while callers may select 10 to expose
+terminal PC solutions.
 
-Queue-based setup mode keeps the normal unordered cycle residue and adds a
-unique observed subset of the following standard bag. Residue plus observations
-may contain at most seven pieces. The compiler appends the observed subset and
-then its inferred bag complement to the supply language. A candidate is
-eligible only after every observed piece has been placed into the setup; an
-observed piece left in hold is not accepted. Setup candidates at nine placements are
-never registered in either search mode.
+Queue-based setup mode keeps the normal unordered cycle residue and adds an
+exact terminal supply constraint for the next PC cycle. That target is the
+multiset union of the terminal hold and the unconsumed standard-bag suffix. Its
+required cardinality is derived from the current cycle, and one duplicated
+piece kind is permitted only as hold carryover. The compiler preserves the
+broad current-cycle pattern universe, derives compatible source queues from the
+terminal constraint, and retains the original global pattern IDs and weights.
+QB pieces are never appended as a mandatory setup prefix, and filtered
+probability is never renormalized.
 
 Coverage is evaluated on the exact product state:
 
@@ -1056,10 +1063,10 @@ because it can combine incompatible temporal states.
 
 Each visible candidate reports build, joint, and conditional probability plus
 an exact representative placement/hold path. Its placement-count range is
-derived only from PC-live exact states that satisfy the active supply contract,
-including complete observed-piece consumption in QB mode. Output limits are applied only
-after all shape coverage has been accumulated and ranked. The stable coverage
-semantics are `Oracle`: each complete pattern may choose its own legal path.
+derived only from PC-live exact states that satisfy the active supply contract.
+Output limits are applied only after all shape coverage has been accumulated
+and ranked. The stable coverage semantics are `Oracle`: each complete pattern
+may choose its own legal path.
 Online coverage is not exposed until an observation-class policy engine is
 connected.
 
@@ -1072,12 +1079,18 @@ post-PC continuation path do not exist in the product source.
 
 ## X3 Setup Finder Result Contract
 
-Each hold condition reports its condition identity, explicit initial hold,
-materialized pattern expression, pattern count, total candidate count,
-truncation state, and ranked candidates. Each candidate reports its setup shape
-mask, minimum and maximum PC-live placement count, build and joint covered
-pattern counts, build/joint/conditional probabilities, and one legal
+The selected supply condition reports its identity, optional CLI-selected
+initial hold, materialized pattern expression, pattern count, total candidate
+count, truncation state, and ranked candidates. Each candidate reports its
+setup shape mask, minimum and maximum PC-live placement count, build and joint
+covered pattern counts, build/joint/conditional probabilities, and one legal
 representative path.
+
+The representative path proves that the setup itself is buildable. On-demand
+`solution_paths` have a different contract: every returned path starts with the
+setup mask as its existing field and contains only the remaining placements
+that complete a perfect clear. The product UI renders the setup mask in the
+existing-field color and the completion placements by piece.
 
 The top-level report records the inferred cycle, canonical residue, cycle-reset
 borrow policy, geometry family count, partial graph node count, completeness,
@@ -1127,8 +1140,9 @@ The rules/kicks flow is:
 
 `RuleProfile + optional VerifiedKickTableProfile -> RuleDescriptorCompiler -> clr_rule_profile_descriptor -> clearra_rule_profile_from_descriptor -> ClearraCompactRuleProfile`
 
-SRS, SRS+, and NoKick compile to built-in C descriptors using
-`CLR_KICK_SRS_90`, `CLR_KICK_SRS_PLUS_180`, and `CLR_KICK_NO_KICK`.
+SRS, SRS+, Jstris 180, and NoKick compile to built-in C descriptors using
+`CLR_KICK_SRS_90`, `CLR_KICK_SRS_PLUS_180`, `CLR_KICK_JSTRIS_180`, and
+`CLR_KICK_NO_KICK`.
 Imported kick tables compile only through `VerifiedKickTableProfile`; the
 verified transitions are copied into the descriptor as compact piece/rotation
 offset sequences. Unverified extension profiles such as SRS-X are rejected by
@@ -1530,7 +1544,7 @@ readiness vocabulary: `supports_exact_180`, `c_compact_descriptor_ready`, and
 `unsupported_backend_reason`. `rules verify` reports missing transition,
 duplicate transition, and unsupported annotation counts without treating an
 unverified input as imported. `rules import` rejects unverified profiles, and
-registry-only or spawn-aware profiles such as SRS-X, ASC, and ARS must disclose
+profiles outside the direct compact surface, such as SRS-X, ASC, and ARS, must disclose
 disabled or unsupported backend reasons before execution.
 
 ## M23 Supply Runtime

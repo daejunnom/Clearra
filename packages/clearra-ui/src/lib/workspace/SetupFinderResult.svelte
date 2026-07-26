@@ -7,7 +7,11 @@
     ClearraSetupHoldCondition
   } from '../wasm/wasmCommandClient';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
-  import { replaySetupPlacementBoard, setupFinalBoard } from './setupPlacementBoard';
+  import {
+    replaySetupCompletionBoard,
+    replaySetupPlacementBoard,
+    setupFinalBoard
+  } from './setupPlacementBoard';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -79,19 +83,6 @@
 
   function number(value: number | undefined): string {
     return value === undefined ? '—' : new Intl.NumberFormat(language).format(value);
-  }
-
-  function holdLabel(
-    condition: Pick<ClearraSetupHoldCondition, 'initial_hold'>
-  ): string {
-    return condition.initial_hold ?? label('empty');
-  }
-
-  function holdActionLabel(action: string): string {
-    if (action === 'swap-held') return label('swapHeld');
-    if (action === 'store-current-use-next') return label('storeCurrentUseNext');
-    if (action === 'use-held-terminal') return label('useHeldTerminal');
-    return label('useCurrent');
   }
 
   function visibleSetupGroups(
@@ -169,9 +160,9 @@
         <div class="overview-lead">
           <span>{label(report.search_mode === 'qb' ? 'setupModeQb' : 'pcCycle')}</span>
           <strong>{report.search_mode === 'qb'
-            ? `${report.remaining_pieces} + ${report.queue_based_pieces}`
+            ? `${report.remaining_pieces} → ${report.queue_based_pieces}`
             : label('cycleNumber', { cycle: report.cycle })}</strong>
-          <small>{report.remaining_pieces} · {number(report.hold_conditions.length)} {label('holdConditions')}</small>
+          <small>{report.remaining_pieces}</small>
         </div>
         <dl>
           <div><dt>{label('geometryFamilies')}</dt><dd>{report.geometry_family_count}</dd></div>
@@ -187,7 +178,6 @@
         <div class="condition-table">
           {#each report.hold_conditions as condition}
             <div>
-              <strong>{label('initialHold')}: {holdLabel(condition)}</strong>
               <span>{condition.pattern_expression}</span>
               <span>{number(condition.pattern_count)} {label('patterns')}</span>
               <b>{number(condition.candidate_count)} {label('setups')}</b>
@@ -202,8 +192,8 @@
         <section class="condition-group">
           <div class="condition-heading">
             <div>
-              <h3>{label('initialHold')}: {holdLabel(condition)}</h3>
-              <p>{condition.pattern_expression} · {number(condition.pattern_count)} {label('patterns')}</p>
+              <h3>{condition.pattern_expression}</h3>
+              <p>{number(condition.pattern_count)} {label('patterns')}</p>
             </div>
             <span>{number(condition.candidate_count)}</span>
           </div>
@@ -266,20 +256,28 @@
                     {#if pathDetails[result.pathKey].paths.length}
                       <div class="solution-paths">
                         {#each pathDetails[result.pathKey].paths.slice(0, visiblePathCount(result.pathKey)) as path, pathIndex}
+                          {@const solutionBoard = replaySetupCompletionBoard(
+                            result.candidate.board_mask,
+                            path
+                          )}
                           <section class="solution-path">
                             <h4>{label('buildSolutionNumber', { number: pathIndex + 1 })}</h4>
-                            <ol>
-                              {#each path as step}
-                                <li>
-                                  <b>{step.piece}</b>
-                                  <span>R{step.rotation} · ({step.x}, {step.y})</span>
-                                  <span>{holdActionLabel(step.hold)}</span>
-                                  {#if step.cleared_lines > 0}
-                                    <span>{label('clearedLineCount', { count: step.cleared_lines })}</span>
-                                  {/if}
-                                </li>
-                              {/each}
-                            </ol>
+                            {#if solutionBoard}
+                              <div
+                                class="setup-board solution-board"
+                                style={`--rows:${solutionBoard.height};aspect-ratio:${10 / solutionBoard.height}`}
+                                role="img"
+                                aria-label={label('buildSolutionNumber', { number: pathIndex + 1 })}
+                              >
+                                {#each solutionBoard.cells as cell}
+                                  <span
+                                    class:empty={cell === null}
+                                    class:existing={cell === 'G'}
+                                    class={`piece-${cell ?? 'empty'}`}
+                                  ></span>
+                                {/each}
+                              </div>
+                            {/if}
                           </section>
                         {/each}
                       </div>
@@ -351,8 +349,8 @@
   dt { color: #68736f; font-size: 11px; }
   dd { color: #24312d; font-size: 12px; font-weight: 700; margin: 0; text-align: right; }
   .condition-table { display: grid; gap: 1px; }
-  .condition-table > div { align-items: center; background: #f1f4f2; display: grid; font-size: 11px; gap: 12px; grid-template-columns: minmax(120px, .8fr) minmax(150px, 1.2fr) minmax(100px, .6fr) minmax(90px, .5fr); padding: 10px 12px; }
-  .condition-table strong, .condition-table b { color: #29413b; }
+  .condition-table > div { align-items: center; background: #f1f4f2; display: grid; font-size: 11px; gap: 12px; grid-template-columns: minmax(160px, 1fr) minmax(120px, .7fr) minmax(90px, .5fr); padding: 10px 12px; }
+  .condition-table b { color: #29413b; }
   .condition-table span { color: #68736f; overflow-wrap: anywhere; }
   .condition-table b { text-align: right; }
   .condition-group + .condition-group { border-top: 1px solid #dce2de; margin-top: 24px; padding-top: 20px; }
@@ -386,10 +384,7 @@
   .solution-path { border-top: 1px solid #d8dfdb; padding-top: 6px; }
   .solution-path:first-child { border-top: 0; padding-top: 0; }
   .solution-path h4 { color: #37534d; font-size: 9px; margin: 0 0 4px; }
-  .solution-path ol { display: grid; gap: 3px; list-style-position: inside; margin: 0; padding: 0; }
-  .solution-path li { align-items: baseline; background: #e9eeeb; border: 0; display: grid; font-size: 9px; gap: 4px; grid-template-columns: 18px minmax(70px, .8fr) minmax(90px, 1fr); padding: 4px 6px; }
-  .solution-path li b { color: #154c46; }
-  .solution-path li span { color: #64706b; }
+  .solution-board { width: 100%; }
   .path-more { margin-top: 8px; }
   .load-more-row { display: flex; justify-content: center; padding-top: 18px; }
   .load-more-row button { background: #fff; border: 1px solid #aebbb6; border-radius: 5px; color: #174a45; cursor: pointer; font-size: 12px; font-weight: 750; min-height: 36px; padding: 0 16px; }

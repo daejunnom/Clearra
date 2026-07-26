@@ -1,6 +1,6 @@
 use crate::{BuildEditorSchema, RuleEditorSchema, ScoreProfileEditorSchema, SetupExplorerSchema};
 
-pub const UI_SCHEMA_SNAPSHOT_VERSION: u16 = 2;
+pub const UI_SCHEMA_SNAPSHOT_VERSION: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiSchemaSnapshot {
@@ -186,7 +186,7 @@ mod tests {
         let snapshot = UiSchemaSnapshot::mvp2();
 
         assert_eq!(snapshot.version(), UI_SCHEMA_SNAPSHOT_VERSION);
-        assert_eq!(snapshot.rule_preset_count(), 7);
+        assert_eq!(snapshot.rule_preset_count(), 8);
         assert_eq!(snapshot.kick_preview_count(), 6);
         assert_eq!(snapshot.score_profile_count(), 6);
         assert_eq!(snapshot.score_field_count(), 6);

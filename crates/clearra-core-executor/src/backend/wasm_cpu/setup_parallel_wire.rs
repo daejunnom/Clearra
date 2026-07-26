@@ -2,23 +2,20 @@ use std::sync::Arc;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_problem::{
-    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference, SetupLimits,
-    SetupPathDetail, SetupSearchMode, SetupSearchQuery,
+    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupLengthPreference,
+    SetupLimits, SetupPathDetail, SetupSearchMode, SetupSearchQuery,
 };
+use clearra_rules::profile::rule_profile::{RuleProfile, RuleProfileId};
 
 use super::{
-    setup_all_paths::{
-        SetupAllPathEdge, SetupAllPathGraph, SetupAllPathNode, SetupSolutionPath, SetupSolutionStep,
-    },
     setup_coverage_graph::{SetupCoverageEdge, SetupCoverageGraph, SetupCoverageNode},
-    setup_finder::SetupHoldAction,
-    setup_partial_build::{PartialBuildGraph, SetupShape},
+    setup_partial_build::SetupShape,
     WasmExactSearchError,
 };
 
-const INITIALIZATION_MAGIC: [u8; 4] = *b"CSP6";
+const INITIALIZATION_MAGIC: [u8; 4] = *b"CSPA";
 const TASK_MAGIC: [u8; 4] = *b"CST2";
-const RESULT_MAGIC: [u8; 4] = *b"CSR4";
+const RESULT_MAGIC: [u8; 4] = *b"CSR5";
 const NO_WITNESS: u32 = u32::MAX;
 
 pub(super) fn is_setup_parallel_initialization(input: &[u8]) -> bool {
@@ -68,7 +65,6 @@ pub(super) struct SetupParallelTaskResult {
     pub(super) word_end: u32,
     pub(super) global_pattern_count: u32,
     pub(super) covered_shapes: Vec<SetupParallelShapeResult>,
-    pub(super) solution_paths: Vec<SetupSolutionPath>,
     pub(super) peak_segment_pages: u32,
 }
 
@@ -76,14 +72,11 @@ pub(super) struct SetupParallelInitialization {
     pub(super) query: SetupSearchQuery,
     pub(super) graph: Arc<SetupCoverageGraph>,
     pub(super) shape_count: usize,
-    pub(super) path_graph: Option<Arc<SetupAllPathGraph>>,
-    pub(super) path_target_shape_index: Option<u32>,
 }
 
 pub(super) fn encode_initialization(
     query: &SetupSearchQuery,
     graph: &SetupCoverageGraph,
-    source_graph: &PartialBuildGraph,
     shapes: &[SetupShape],
 ) -> Result<Vec<u8>, WasmExactSearchError> {
     let limits = query.limits();
@@ -107,6 +100,12 @@ pub(super) fn encode_initialization(
     for piece in query.residue().pieces() {
         output.push(piece_code(*piece));
     }
+    output.push(match query.hold_policy() {
+        SetupHoldPolicy::Disabled => 0,
+        SetupHoldPolicy::EnabledEmpty => 1,
+        SetupHoldPolicy::EnabledWithPiece(piece) => piece_code(piece) + 2,
+    });
+    output.push(rule_profile_code(query.rule().id()));
     output.push(match query.search_mode() {
         SetupSearchMode::ShapeOracle => 0,
         SetupSearchMode::QueueBased => 1,
@@ -143,6 +142,7 @@ pub(super) fn encode_initialization(
         SetupLengthPreference::Longer => 1,
         SetupLengthPreference::Shorter => 2,
     });
+    output.push(query.max_setup_pieces());
     if let Some(detail) = query.path_detail() {
         output.push(1);
         push_u64(&mut output, detail.board_mask());
@@ -194,50 +194,6 @@ pub(super) fn encode_initialization(
     for edge in &graph.edges {
         push_u32(&mut output, edge.raw());
     }
-    if let Some(detail) = query.path_detail() {
-        let target_shape_index = u32::try_from(
-            shapes
-                .iter()
-                .position(|shape| shape.board == detail.board_mask())
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "setup_parallel_path_detail_shape_missing",
-                ))?,
-        )
-        .map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_parallel_path_detail_shape_index_overflow")
-        })?;
-        let path_graph = SetupAllPathGraph::from_partial(source_graph);
-        push_u32(&mut output, target_shape_index);
-        push_u32(&mut output, path_graph.root);
-        push_u32(
-            &mut output,
-            u32::try_from(path_graph.nodes.len()).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_all_paths_node_count_overflow")
-            })?,
-        );
-        push_u32(
-            &mut output,
-            u32::try_from(path_graph.edges.len()).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_all_paths_edge_count_overflow")
-            })?,
-        );
-        for node in &path_graph.nodes {
-            push_u64(&mut output, node.board);
-            push_u32(&mut output, node.edge_start);
-            push_u32(&mut output, node.edge_count);
-            push_u32(&mut output, node.shape_index);
-            output.push(node.depth);
-            output.push(u8::from(node.live) | (u8::from(node.accepting) << 1));
-        }
-        for edge in &path_graph.edges {
-            push_u32(&mut output, edge.to);
-            output.push(piece_code(edge.piece));
-            output.push(edge.rotation);
-            output.push(edge.x as u8);
-            output.push(edge.y as u8);
-            output.push(edge.cleared_lines);
-        }
-    }
     Ok(output)
 }
 
@@ -259,6 +215,17 @@ pub(super) fn decode_initialization(
     for _ in 0..residue_count {
         residue.push(piece_from_code(reader.u8()?)?);
     }
+    let hold_policy = match reader.u8()? {
+        0 => SetupHoldPolicy::Disabled,
+        1 => SetupHoldPolicy::EnabledEmpty,
+        code @ 2..=8 => SetupHoldPolicy::EnabledWithPiece(piece_from_code(code - 2)?),
+        _ => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_hold_policy_invalid",
+            ));
+        }
+    };
+    let rule = RuleProfile::new(rule_profile_from_code(reader.u8()?)?);
     let search_mode = match reader.u8()? {
         0 => SetupSearchMode::ShapeOracle,
         1 => SetupSearchMode::QueueBased,
@@ -269,9 +236,19 @@ pub(super) fn decode_initialization(
         }
     };
     let queue_based_count = reader.usize_from_u32("setup_parallel_queue_based_count_overflow")?;
+    let expected_queue_based_count = match residue_count {
+        7 => 4,
+        4 => 1,
+        1 => 5,
+        5 => 2,
+        2 => 6,
+        6 => 3,
+        3 => 7,
+        _ => 0,
+    };
     if (search_mode == SetupSearchMode::ShapeOracle && queue_based_count != 0)
         || (search_mode == SetupSearchMode::QueueBased
-            && (queue_based_count == 0 || residue_count + queue_based_count > 7))
+            && queue_based_count != expected_queue_based_count)
     {
         return Err(WasmExactSearchError::InvalidProblem(
             "setup_parallel_queue_based_count_invalid",
@@ -285,6 +262,21 @@ pub(super) fn decode_initialization(
         })?;
     for _ in 0..queue_based_count {
         queue_based_pieces.push(piece_from_code(reader.u8()?)?);
+    }
+    let mut queue_based_piece_counts = [0_u8; 7];
+    for piece in &queue_based_pieces {
+        queue_based_piece_counts[piece_code(*piece) as usize] += 1;
+    }
+    if queue_based_piece_counts.iter().any(|count| *count > 2)
+        || queue_based_piece_counts
+            .iter()
+            .filter(|count| **count == 2)
+            .count()
+            > 1
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_queue_based_inventory_invalid",
+        ));
     }
     let borrow_policy = match reader.u8()? {
         0 => SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse,
@@ -315,6 +307,12 @@ pub(super) fn decode_initialization(
             ));
         }
     };
+    let max_setup_pieces = reader.u8()?;
+    if !(1..=10).contains(&max_setup_pieces) {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_max_setup_pieces_invalid",
+        ));
+    }
     let path_detail = match reader.u8()? {
         0 => None,
         1 => {
@@ -338,14 +336,18 @@ pub(super) fn decode_initialization(
         limits[0], limits[1], limits[2], limits[3], limits[4], limits[5],
     )
     .map_err(|_| WasmExactSearchError::InvalidProblem("setup_parallel_limits_invalid"))?;
-    let mut query = SetupSearchQuery::default().with_remaining_pieces(residue);
+    let mut query = SetupSearchQuery::default()
+        .with_rule(rule)
+        .with_remaining_pieces(residue)
+        .with_hold_policy(hold_policy);
     if search_mode == SetupSearchMode::QueueBased {
-        query = query.with_queue_based_pieces(queue_based_pieces);
+        query = query.with_next_cycle_remaining_pieces(queue_based_pieces);
     }
     let mut query = query
         .with_cycle_reset_borrow_policy(borrow_policy)
         .with_candidate_priority(candidate_priority)
         .with_length_preference(length_preference)
+        .with_max_setup_pieces(max_setup_pieces)
         .with_limits(limits);
     if let Some(detail) = path_detail {
         query = query.with_path_detail(detail);
@@ -380,65 +382,6 @@ pub(super) fn decode_initialization(
     for _ in 0..edge_count {
         edges.push(SetupCoverageEdge::from_raw(reader.u32()?)?);
     }
-    let (path_graph, path_target_shape_index) = if query.path_detail().is_some() {
-        let target_shape_index = reader.u32()?;
-        if target_shape_index as usize >= shape_count {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_parallel_path_target_shape_out_of_range",
-            ));
-        }
-        let path_root = reader.u32()?;
-        let path_node_count = reader.usize_from_u32("setup_all_paths_node_count_overflow")?;
-        let path_edge_count = reader.usize_from_u32("setup_all_paths_edge_count_overflow")?;
-        let mut path_nodes = Vec::new();
-        path_nodes.try_reserve_exact(path_node_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_all_paths_node_storage_unavailable")
-        })?;
-        for _ in 0..path_node_count {
-            let board = reader.u64()?;
-            let edge_start = reader.u32()?;
-            let edge_count = reader.u32()?;
-            let shape_index = reader.u32()?;
-            let depth = reader.u8()?;
-            let flags = reader.u8()?;
-            if flags & !0b11 != 0 {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "setup_all_paths_node_flags_invalid",
-                ));
-            }
-            path_nodes.push(SetupAllPathNode {
-                board,
-                edge_start,
-                edge_count,
-                shape_index,
-                depth,
-                live: flags & 1 != 0,
-                accepting: flags & 2 != 0,
-            });
-        }
-        let mut path_edges = Vec::new();
-        path_edges.try_reserve_exact(path_edge_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_all_paths_edge_storage_unavailable")
-        })?;
-        for _ in 0..path_edge_count {
-            path_edges.push(SetupAllPathEdge {
-                to: reader.u32()?,
-                piece: piece_from_code(reader.u8()?)?,
-                rotation: reader.u8()?,
-                x: reader.u8()? as i8,
-                y: reader.u8()? as i8,
-                cleared_lines: reader.u8()?,
-            });
-        }
-        (
-            Some(Arc::new(SetupAllPathGraph::from_wire_parts(
-                path_nodes, path_edges, path_root,
-            )?)),
-            Some(target_shape_index),
-        )
-    } else {
-        (None, None)
-    };
     reader.finish()?;
     if nodes.iter().any(|node| {
         node.shape_index()
@@ -452,8 +395,6 @@ pub(super) fn decode_initialization(
         query,
         graph: Arc::new(SetupCoverageGraph::from_wire_parts(nodes, edges, root)?),
         shape_count,
-        path_graph,
-        path_target_shape_index,
     })
 }
 
@@ -533,25 +474,6 @@ pub(super) fn encode_results(
             output.push(shape.max_covered_locks);
             push_u32(&mut output, shape.witness_pattern_id);
         }
-        push_u32(
-            &mut output,
-            u32::try_from(result.solution_paths.len()).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_all_paths_count_overflow")
-            })?,
-        );
-        for path in &result.solution_paths {
-            output.push(u8::try_from(path.steps.len()).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_all_paths_step_count_overflow")
-            })?);
-            for step in &path.steps {
-                output.push(piece_code(step.piece));
-                output.push(step.rotation);
-                output.push(step.x as u8);
-                output.push(step.y as u8);
-                output.push(step.hold_action.code());
-                output.push(step.cleared_lines);
-            }
-        }
     }
     Ok(output)
 }
@@ -605,7 +527,7 @@ pub(super) fn decode_results(
                 || (shape.joint_covered_patterns != 0
                     && (shape.min_covered_locks == 0
                         || shape.min_covered_locks > shape.max_covered_locks
-                        || shape.max_covered_locks > 8))
+                        || shape.max_covered_locks > 10))
                 || (shape.joint_covered_patterns == 0 && shape.witness_pattern_id != NO_WITNESS)
                 || (shape.joint_covered_patterns != 0 && shape.witness_pattern_id == NO_WITNESS)
             {
@@ -615,42 +537,6 @@ pub(super) fn decode_results(
             }
             covered_shapes.push(shape);
         }
-        let path_count = reader.usize_from_u32("setup_all_paths_count_overflow")?;
-        let mut solution_paths = Vec::new();
-        solution_paths.try_reserve_exact(path_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_all_paths_result_storage_unavailable")
-        })?;
-        for _ in 0..path_count {
-            let step_count = reader.u8()? as usize;
-            if !(1..=8).contains(&step_count) {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "setup_all_paths_step_count_invalid",
-                ));
-            }
-            let mut steps = Vec::new();
-            steps.try_reserve_exact(step_count).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_all_paths_step_storage_unavailable")
-            })?;
-            for _ in 0..step_count {
-                let step = SetupSolutionStep {
-                    piece: piece_from_code(reader.u8()?)?,
-                    rotation: reader.u8()?,
-                    x: reader.u8()? as i8,
-                    y: reader.u8()? as i8,
-                    hold_action: SetupHoldAction::from_code(reader.u8()?).ok_or(
-                        WasmExactSearchError::InvalidProblem("setup_all_paths_hold_action_invalid"),
-                    )?,
-                    cleared_lines: reader.u8()?,
-                };
-                if step.rotation > 3 || step.cleared_lines > 7 {
-                    return Err(WasmExactSearchError::InvalidProblem(
-                        "setup_all_paths_step_invalid",
-                    ));
-                }
-                steps.push(step);
-            }
-            solution_paths.push(SetupSolutionPath { steps });
-        }
         results.push(SetupParallelTaskResult {
             task_index,
             condition_index,
@@ -658,7 +544,6 @@ pub(super) fn decode_results(
             word_end,
             global_pattern_count,
             covered_shapes,
-            solution_paths,
             peak_segment_pages,
         });
     }
@@ -680,6 +565,35 @@ fn piece_from_code(code: u8) -> Result<PieceKind, WasmExactSearchError> {
         .ok_or(WasmExactSearchError::InvalidProblem(
             "setup_parallel_piece_code_invalid",
         ))
+}
+
+fn rule_profile_code(profile: RuleProfileId) -> u8 {
+    match profile {
+        RuleProfileId::SrsPlus => 0,
+        RuleProfileId::Srs => 1,
+        RuleProfileId::SrsX => 2,
+        RuleProfileId::NoKick => 3,
+        RuleProfileId::Asc => 4,
+        RuleProfileId::Ars => 5,
+        RuleProfileId::Custom => 6,
+        RuleProfileId::Jstris180 => 7,
+    }
+}
+
+fn rule_profile_from_code(code: u8) -> Result<RuleProfileId, WasmExactSearchError> {
+    match code {
+        0 => Ok(RuleProfileId::SrsPlus),
+        1 => Ok(RuleProfileId::Srs),
+        2 => Ok(RuleProfileId::SrsX),
+        3 => Ok(RuleProfileId::NoKick),
+        4 => Ok(RuleProfileId::Asc),
+        5 => Ok(RuleProfileId::Ars),
+        6 => Ok(RuleProfileId::Custom),
+        7 => Ok(RuleProfileId::Jstris180),
+        _ => Err(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_rule_profile_invalid",
+        )),
+    }
 }
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {

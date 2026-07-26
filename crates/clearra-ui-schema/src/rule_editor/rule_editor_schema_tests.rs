@@ -13,6 +13,10 @@ fn rule_presets_use_canonical_rule_ids() {
         .presets()
         .iter()
         .any(|option| option.value() == RuleProfileId::Srs.as_str()));
+    assert!(schema
+        .presets()
+        .iter()
+        .any(|option| option.value() == RuleProfileId::Jstris180.as_str()));
     assert_eq!(
         schema.presets().last().map(DropdownOption::value),
         Some(custom_rule().id().as_str())

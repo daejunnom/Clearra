@@ -8,7 +8,17 @@ MVP2 kick semantics are still intentionally explicit:
 - `no-kick` uses only `(0, 0)` rotation offsets and harddrop/no-kick candidates.
 - `srs-plus` uses Clearra's built-in exact SRS+ table: regular SRS JLSTZ 90-degree kicks, y-axis-symmetric I-piece 90-degree kicks, and transition-specific 180-degree kicks. `rules list` and `rules inspect` disclose `source_kind=built-in-exact` and `supports_exact_180=true`.
 - `srs-x` uses SRS 90-degree kicks with the built-in Nullpomino/Heboris-style 180 table. The WASM product backend consumes this table directly and exactly. The C compact lowering remains a separate compatibility boundary and accepts SRS-X only through a verified imported profile; it must never fall back to SRS+, SRS, or NoKick.
+- `jstris-180` uses standard SRS 90-degree kicks and the Jstris two-offset 180 table for I/J/L/S/T/Z. Its ordered half-turn offsets are `0->2: (0,0),(0,1)`, `R->L: (0,0),(1,0)`, `2->0: (0,0),(0,-1)`, and `L->R: (0,0),(-1,0)`. O has no rotation transitions. The product and C compact backends consume the same 72-transition table.
 - `asc` and `ars` remain selectable registry descriptors whose spawn-aware reachability is unsupported. CLI inspection must report `search_backend_supported=false`, `c_compact_descriptor_ready=false`, and an `unsupported_backend_reason`, and validation must reject them before search.
+
+The Jstris profile is cross-checked against the pinned
+[`Physics::Jstris` implementation](https://github.com/wirelyre/tetra-tools/blob/2342953cb424cfd5ca94fa8eefdbe5434bd5ff1c/srs-4l/src/vector.rs)
+in wirelyre/tetra-tools commit
+`2342953cb424cfd5ca94fa8eefdbe5434bd5ff1c`. The
+[Jstris product](https://jstris.jezevec10.com/?mode=1&play=1) exposes an
+independent 180-degree rotation input, and the
+[Solution Finder guide](https://hsterts.github.io/h-docs/sfinder/) identifies
+the external Jstris 180 property profile used by existing analysis tools.
 
 Clearra does not yet import solution-finder-style property kick files. Those files preserve details such as direction-specific transition keys, aliases, 180-degree variants, and annotated T kick entries. MVP2 import/export currently uses strict JSON to produce `KickTableProfile`, and search can consume only `VerifiedKickTableProfile` overrides. Verified imported 180 profiles are the exact-180 path (`supports_exact_180=true`) and are reported as `c_compact_descriptor_ready=true` only when their source rule can be lowered to the current C compact descriptor. Raw kick JSON or property text must not enter search directly.
 
@@ -22,7 +32,7 @@ MVP2 owns the long-lived kick contract types:
   piece-specific transitions through profile entries, first-success order
   preservation, source/provenance, and `verified=true|false`.
 
-`verify kicks` uses these contracts for built-in SRS 90, no-kick, and SRS+ 180 profiles. `rules verify --input` reports `missing_transition_count`, `duplicate_transition_count`, `unsupported_annotation_count`, `verified_profile`, `c_compact_descriptor_ready`, and `unsupported_backend_reason` without pretending a profile was imported. `rules import --input` succeeds only for `VerifiedKickTableProfile` values; unverified profiles are rejected, while verified-but-backend-unsupported profiles must still disclose the unsupported backend reason. Imported kick JSON is strict: unknown fields are rejected, duplicate transitions keep the profile unverified, missing transitions are reported, invalid rotation transitions are rejected, unsupported piece ids are rejected, and first-success offset order is preserved. Future property import/export should produce and consume verified `KickTableProfile` values instead of letting search or CLI parse raw property text directly.
+`verify kicks` uses these contracts for built-in SRS 90, no-kick, SRS+ 180, SRS-X, and Jstris 180 profiles. `rules verify --input` reports `missing_transition_count`, `duplicate_transition_count`, `unsupported_annotation_count`, `verified_profile`, `c_compact_descriptor_ready`, and `unsupported_backend_reason` without pretending a profile was imported. `rules import --input` succeeds only for `VerifiedKickTableProfile` values; unverified profiles are rejected, while verified-but-backend-unsupported profiles must still disclose the unsupported backend reason. Imported kick JSON is strict: unknown fields are rejected, duplicate transitions keep the profile unverified, missing transitions are reported, invalid rotation transitions are rejected, unsupported piece ids are rejected, and first-success offset order is preserved. Future property import/export should produce and consume verified `KickTableProfile` values instead of letting search or CLI parse raw property text directly.
 
 X1 Rule / Kick Expansion keeps `SRS-X`, `ASC`, and `ARS` visible as named
 profiles while preventing silent runtime fallback. WASM uses the built-in
@@ -115,6 +125,7 @@ pub enum KickTableProfileId {
     SrsPlus,
     NoKick,
     SrsX,
+    Jstris180,
     Asc,
     Ars,
     Imported(ImportedKickProfileId),

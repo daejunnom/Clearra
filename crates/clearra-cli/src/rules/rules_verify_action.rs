@@ -95,6 +95,10 @@ impl RulesVerifyAction {
                     "srs_plus_180_transitions",
                     report.srs_plus_180_transition_count().to_string(),
                 ),
+                (
+                    "jstris_180_transitions",
+                    report.jstris_180_transition_count().to_string(),
+                ),
             ],
             format,
         )

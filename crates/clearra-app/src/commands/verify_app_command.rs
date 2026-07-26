@@ -200,6 +200,14 @@ fn kick_contract_fields(report: &KickContractReport) -> Vec<(String, String)> {
             report.srs_plus_180_transition_count().to_string(),
         ),
         (
+            "jstris_profile_id".to_owned(),
+            report.jstris_profile_id().to_owned(),
+        ),
+        (
+            "jstris_180_transitions".to_owned(),
+            report.jstris_180_transition_count().to_string(),
+        ),
+        (
             "kick_profile_registry_count".to_owned(),
             report.profile_registry_count().to_string(),
         ),

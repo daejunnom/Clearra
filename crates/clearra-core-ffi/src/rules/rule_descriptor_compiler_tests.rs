@@ -4,7 +4,7 @@ use clearra_problem::{ProblemCompiler, SearchProblem};
 use clearra_rules::{
     kicks::{KickTableProfile, KickTableProfileId, NoKick, SrsKicks, VerifiedKickTableProfile},
     profile::{
-        builtin_rules::{no_kick, srs, srs_plus, srs_x},
+        builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x},
         rule_capability::RuleCapability,
         rule_profile::{RuleProfile, RuleProfileId},
     },
@@ -12,8 +12,8 @@ use clearra_rules::{
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use crate::problem::{
-    C_KICK_IMPORTED, C_KICK_NO_KICK, C_KICK_SRS_90, C_KICK_SRS_PLUS_180, C_RULE_NO_KICK,
-    C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X,
+    C_KICK_IMPORTED, C_KICK_JSTRIS_180, C_KICK_NO_KICK, C_KICK_SRS_90, C_KICK_SRS_PLUS_180,
+    C_RULE_JSTRIS_180, C_RULE_NO_KICK, C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X,
 };
 
 use super::*;
@@ -37,6 +37,17 @@ fn srs_plus_profile_compiles_to_c_descriptor() {
 
     assert_eq!(descriptor.rule_profile_id, C_RULE_SRS_PLUS);
     assert_eq!(descriptor.kick_profile_id, C_KICK_SRS_PLUS_180);
+    assert_eq!(descriptor.has_verified_kick_profile, 0);
+}
+
+#[test]
+fn jstris_180_profile_compiles_to_c_descriptor() {
+    let problem = opening_problem_with_rule(jstris_180(), None);
+
+    let descriptor = RuleDescriptorCompiler::compile(&problem).expect("descriptor");
+
+    assert_eq!(descriptor.rule_profile_id, C_RULE_JSTRIS_180);
+    assert_eq!(descriptor.kick_profile_id, C_KICK_JSTRIS_180);
     assert_eq!(descriptor.has_verified_kick_profile, 0);
 }
 
@@ -136,6 +147,10 @@ fn opening_problem_with_rule(
     let mut query = OpeningPcSearchQuery::new(PcTarget::two_lines())
         .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
             PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
         ])))
         .with_rule(rule);
     if let Some(profile) = verified_profile {
