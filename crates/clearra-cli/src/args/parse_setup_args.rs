@@ -11,6 +11,7 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut max_setup_pieces = 9_u8;
     let mut explicit_search_mode = None;
     let mut queue_based_pieces = None;
+    let mut next_cycle_remaining_pieces = None;
     let mut rule = None;
     let mut initial_hold = None;
     let mut path_detail_setup_id = None;
@@ -29,6 +30,11 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
             }
             "--qb" => {
                 queue_based_pieces = Some(option_value(args, index, "--qb")?.to_owned());
+                index += 2;
+            }
+            "--next-cycle-remaining" => {
+                next_cycle_remaining_pieces =
+                    Some(option_value(args, index, "--next-cycle-remaining")?.to_owned());
                 index += 2;
             }
             "--initial-hold" => {
@@ -115,6 +121,9 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
         .with_search_mode(search_mode);
     if let Some(pieces) = queue_based_pieces {
         setup_args = setup_args.with_queue_based_pieces(pieces);
+    }
+    if let Some(pieces) = next_cycle_remaining_pieces {
+        setup_args = setup_args.with_next_cycle_remaining_pieces(pieces);
     }
     if let Some(value) = rule {
         setup_args = setup_args.with_rule(value);

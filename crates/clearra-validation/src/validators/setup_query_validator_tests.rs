@@ -104,7 +104,7 @@ fn valid_setup_query_reports_supported_mvp_contract() {
 }
 
 #[test]
-fn queue_based_setup_accepts_exact_next_cycle_inventory_with_one_hold_duplicate() {
+fn setup_accepts_exact_next_cycle_inventory_with_one_hold_duplicate() {
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
         .with_next_cycle_remaining_pieces(vec![
@@ -122,7 +122,7 @@ fn queue_based_setup_accepts_exact_next_cycle_inventory_with_one_hold_duplicate(
 }
 
 #[test]
-fn queue_based_setup_rejects_the_wrong_next_cycle_inventory_count() {
+fn setup_rejects_the_wrong_next_cycle_inventory_count() {
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
         .with_next_cycle_remaining_pieces(vec![
@@ -139,7 +139,7 @@ fn queue_based_setup_rejects_the_wrong_next_cycle_inventory_count() {
 }
 
 #[test]
-fn queue_based_setup_rejects_two_duplicated_next_cycle_piece_kinds() {
+fn setup_rejects_two_duplicated_next_cycle_piece_kinds() {
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
         .with_next_cycle_remaining_pieces(vec![
@@ -155,4 +155,53 @@ fn queue_based_setup_rejects_two_duplicated_next_cycle_piece_kinds() {
 
     assert!(report.has_errors());
     assert!(report.contains_code(DiagnosticCode::ESetupQueryInvalid));
+}
+
+#[test]
+fn queue_based_setup_accepts_distinct_observed_next_bag_group() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S]);
+
+    let report = SetupQueryValidator::validate(&query);
+
+    assert!(!report.has_errors());
+}
+
+#[test]
+fn queue_based_setup_rejects_duplicate_or_overlong_observations() {
+    for observed in [
+        vec![PieceKind::O, PieceKind::O],
+        vec![
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::T,
+        ],
+    ] {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+            .with_queue_based_pieces(observed);
+
+        assert!(SetupQueryValidator::validate(&query).has_errors());
+    }
+}
+
+#[test]
+fn observed_qb_and_next_cycle_inventory_validate_independently() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
+        .with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+            PieceKind::Z,
+        ]);
+
+    assert!(!SetupQueryValidator::validate(&query).has_errors());
 }

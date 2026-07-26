@@ -74,8 +74,8 @@ fn rejects_unknown_setup_kick_table() {
 }
 
 #[test]
-fn assembles_residue_and_next_cycle_inventory_separately() {
-    let args = SetupArgs::new("TI", false).with_queue_based_pieces("OOSITZ");
+fn assembles_residue_and_observed_qb_separately() {
+    let args = SetupArgs::new("TI", false).with_queue_based_pieces("OS");
     let query = SetupQueryAssembler::assemble(&args).expect("QB setup query");
 
     assert_eq!(
@@ -97,12 +97,59 @@ fn assembles_residue_and_next_cycle_inventory_separately() {
             .pieces(),
         &[
             clearra_core_domain::piece::piece_kind::PieceKind::O,
+            clearra_core_domain::piece::piece_kind::PieceKind::S,
+        ]
+    );
+    assert!(query.next_cycle_remaining_pieces().is_none());
+}
+
+#[test]
+fn assembles_next_cycle_inventory_without_changing_search_mode() {
+    let args = SetupArgs::new("TI", false).with_next_cycle_remaining_pieces("OOSITZ");
+    let query = SetupQueryAssembler::assemble(&args).expect("oracle setup query");
+
+    assert_eq!(
+        query.search_mode(),
+        clearra_setup_search::query::SetupSearchMode::ShapeOracle
+    );
+    assert_eq!(
+        query.next_cycle_remaining_pieces(),
+        Some(
+            &[
+                clearra_core_domain::piece::piece_kind::PieceKind::O,
+                clearra_core_domain::piece::piece_kind::PieceKind::O,
+                clearra_core_domain::piece::piece_kind::PieceKind::S,
+                clearra_core_domain::piece::piece_kind::PieceKind::I,
+                clearra_core_domain::piece::piece_kind::PieceKind::T,
+                clearra_core_domain::piece::piece_kind::PieceKind::Z,
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn assembles_observed_qb_and_next_cycle_inventory_together() {
+    let args = SetupArgs::new("TI", false)
+        .with_queue_based_pieces("OS")
+        .with_next_cycle_remaining_pieces("OOSITZ");
+    let query = SetupQueryAssembler::assemble(&args).expect("combined setup query");
+
+    assert_eq!(
+        query
+            .queue()
+            .as_fixed_sequence()
+            .expect("observed queue")
+            .pieces(),
+        &[
             clearra_core_domain::piece::piece_kind::PieceKind::O,
             clearra_core_domain::piece::piece_kind::PieceKind::S,
-            clearra_core_domain::piece::piece_kind::PieceKind::I,
-            clearra_core_domain::piece::piece_kind::PieceKind::T,
-            clearra_core_domain::piece::piece_kind::PieceKind::Z,
         ]
+    );
+    assert_eq!(
+        query
+            .next_cycle_remaining_pieces()
+            .map(|pieces| pieces.len()),
+        Some(6)
     );
 }
 
@@ -130,7 +177,7 @@ fn rejects_multi_piece_initial_hold() {
 }
 
 #[test]
-fn queue_based_mode_requires_next_cycle_inventory() {
+fn queue_based_mode_requires_observed_pieces() {
     let args = SetupArgs::new("TI", false)
         .with_search_mode(clearra_setup_search::query::SetupSearchMode::QueueBased);
 
@@ -142,11 +189,16 @@ fn queue_based_mode_requires_next_cycle_inventory() {
 
 #[test]
 fn assembles_selected_setup_and_hold_condition_for_exact_path_detail() {
-    let args = SetupArgs::new("IOTS", false).with_path_detail("setup-4011c4f9", "hold-T");
+    let args = SetupArgs::new("IOTS", false).with_path_detail(
+        "setup-004011c4f9-0002-000000000000000000000000000001",
+        "hold-T",
+    );
     let query = SetupQueryAssembler::assemble(&args).expect("path detail query");
     let detail = query.path_detail().expect("path detail");
 
     assert_eq!(detail.board_mask(), 0x4011_c4f9);
+    assert_eq!(detail.deleted_rows(), 2);
+    assert_eq!(detail.placement_rows(), 1);
     assert_eq!(detail.condition_id(), "hold-T");
 }
 

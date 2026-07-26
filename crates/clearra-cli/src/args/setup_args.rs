@@ -4,6 +4,7 @@ use clearra_setup_search::query::{SetupCandidatePriority, SetupLengthPreference,
 pub struct SetupArgs {
     remaining: String,
     queue_based_pieces: Option<String>,
+    next_cycle_remaining_pieces: Option<String>,
     allow_post_cycle_borrow: bool,
     candidate_priority: SetupCandidatePriority,
     length_preference: SetupLengthPreference,
@@ -20,6 +21,7 @@ impl SetupArgs {
         Self {
             remaining: remaining.into(),
             queue_based_pieces: None,
+            next_cycle_remaining_pieces: None,
             allow_post_cycle_borrow,
             candidate_priority: SetupCandidatePriority::default(),
             length_preference: SetupLengthPreference::default(),
@@ -66,6 +68,10 @@ impl SetupArgs {
         self.queue_based_pieces.as_deref()
     }
 
+    pub fn next_cycle_remaining_pieces(&self) -> Option<&str> {
+        self.next_cycle_remaining_pieces.as_deref()
+    }
+
     pub fn initial_hold(&self) -> Option<&str> {
         self.initial_hold.as_deref()
     }
@@ -106,6 +112,11 @@ impl SetupArgs {
     pub fn with_queue_based_pieces(mut self, pieces: impl Into<String>) -> Self {
         self.queue_based_pieces = Some(pieces.into());
         self.search_mode = SetupSearchMode::QueueBased;
+        self
+    }
+
+    pub fn with_next_cycle_remaining_pieces(mut self, pieces: impl Into<String>) -> Self {
+        self.next_cycle_remaining_pieces = Some(pieces.into());
         self
     }
 

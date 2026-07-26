@@ -93,9 +93,12 @@ fn wasm_setup_command_preserves_the_exact_residue_contract() {
 }
 
 #[test]
-fn wasm_setup_command_separates_residue_and_next_cycle_inventory() {
+fn wasm_setup_command_preserves_observed_qb_and_next_cycle_inventory() {
     let request = WasmCommandRuntime::default()
-        .compile_command_text("clearra setup --remaining TI --mode qb --qb OOSITZ")
+        .compile_command_text(
+            "clearra setup --remaining TI --mode qb --qb OS \
+             --next-cycle-remaining OOSITZ",
+        )
         .expect("QB setup AppRequest");
 
     let AppCommand::Setup(command) = request.command() else {
@@ -121,12 +124,21 @@ fn wasm_setup_command_separates_residue_and_next_cycle_inventory() {
             .pieces(),
         &[
             clearra_core_domain::piece::piece_kind::PieceKind::O,
-            clearra_core_domain::piece::piece_kind::PieceKind::O,
             clearra_core_domain::piece::piece_kind::PieceKind::S,
-            clearra_core_domain::piece::piece_kind::PieceKind::I,
-            clearra_core_domain::piece::piece_kind::PieceKind::T,
-            clearra_core_domain::piece::piece_kind::PieceKind::Z,
         ]
+    );
+    assert_eq!(
+        command.query().next_cycle_remaining_pieces(),
+        Some(
+            &[
+                clearra_core_domain::piece::piece_kind::PieceKind::O,
+                clearra_core_domain::piece::piece_kind::PieceKind::O,
+                clearra_core_domain::piece::piece_kind::PieceKind::S,
+                clearra_core_domain::piece::piece_kind::PieceKind::I,
+                clearra_core_domain::piece::piece_kind::PieceKind::T,
+                clearra_core_domain::piece::piece_kind::PieceKind::Z,
+            ][..]
+        )
     );
 }
 

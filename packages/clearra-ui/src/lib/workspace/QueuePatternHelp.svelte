@@ -16,9 +16,9 @@
   </summary>
   <dl>
     {#if mode === 'setup-qb'}
-      <div><dt>TI → OOSITZ</dt><dd>{label('setupQbQueueLetters')}</dd></div>
-      <div class="wide"><dt>hold + bag</dt><dd>{label('setupQbAllPieces')}</dd></div>
-      <div class="wide"><dt>4,1,5,2,6,3,7</dt><dd>{label('setupQbSevenLimit')}</dd></div>
+      <div><dt>TI → OS</dt><dd>{label('setupQbQueueLetters')}</dd></div>
+      <div class="wide"><dt>{label('setupQbObservedQueue')}</dt><dd>{label('setupQbAllPieces')}</dd></div>
+      <div class="wide"><dt>{label('setupQbBagLimit')}</dt><dd>{label('setupQbSevenLimit')}</dd></div>
     {:else if mode === 'setup'}
       <div><dt>IOTS</dt><dd>{label('setupQueueLetters')}</dd></div>
       <div class="wide"><dt>7,4,1,5,2,6,3</dt><dd>{label('setupQueueCycle')}</dd></div>

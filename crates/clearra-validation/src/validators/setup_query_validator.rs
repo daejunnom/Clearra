@@ -29,6 +29,7 @@ impl SetupQueryValidator {
         if query.search_mode() == SetupSearchMode::QueueBased {
             validate_queue_based_input(query, &mut report);
         }
+        validate_next_cycle_remaining_input(query, &mut report);
         validate_hold_policy(query.hold_policy(), &mut report);
         validate_probability_filter(query.probability_filter(), &mut report);
         validate_limits(query.limits(), &mut report);
@@ -117,9 +118,46 @@ fn validate_queue_based_input(query: &SetupSearchQuery, report: &mut DiagnosticR
     let Some(queue) = query.queue().as_fixed_sequence() else {
         report.push(invalid_setup_query(
             "setup.queue",
-            "queue-based setup search requires the exact next-cycle remaining inventory",
+            "queue-based setup search requires observed next-bag pieces",
             "queue_based_setup_requires_fixed_queue",
         ));
+        return;
+    };
+    if queue.is_empty() {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "queue-based setup search requires at least one observed next-bag piece",
+            "queue_based_setup_requires_observed_piece",
+        ));
+    }
+    if queue.len() + query.residue().remaining_count() > 7 {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "observed queue-based pieces and remaining pieces must fit in one bag",
+            "queue_based_setup_observed_piece_count_out_of_range",
+        ));
+    }
+    if clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .any(|piece| {
+            queue
+                .pieces()
+                .iter()
+                .filter(|value| **value == piece)
+                .count()
+                > 1
+        })
+    {
+        report.push(invalid_setup_query(
+            "setup.queue",
+            "observed queue-based pieces must be distinct",
+            "queue_based_setup_observed_piece_duplicate",
+        ));
+    }
+}
+
+fn validate_next_cycle_remaining_input(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
+    let Some(pieces) = query.next_cycle_remaining_pieces() else {
         return;
     };
     let expected_count = match query.residue().cycle() {
@@ -132,30 +170,24 @@ fn validate_queue_based_input(query: &SetupSearchQuery, report: &mut DiagnosticR
         Some(7) => 7,
         _ => return,
     };
-    if queue.len() != expected_count {
+    if pieces.len() != expected_count {
         report.push(invalid_setup_query(
-            "setup.queue",
+            "setup.next_cycle_remaining_pieces",
             "next-cycle remaining inventory must match the cycle reached after this PC",
-            "queue_based_setup_piece_count_out_of_range",
+            "next_cycle_remaining_piece_count_out_of_range",
         ));
     }
     let repeated_counts = clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
         .into_iter()
-        .map(|piece| {
-            queue
-                .pieces()
-                .iter()
-                .filter(|value| **value == piece)
-                .count()
-        })
+        .map(|piece| pieces.iter().filter(|value| **value == piece).count())
         .collect::<Vec<_>>();
     if repeated_counts.iter().any(|count| *count > 2)
         || repeated_counts.iter().filter(|count| **count == 2).count() > 1
     {
         report.push(invalid_setup_query(
-            "setup.queue",
+            "setup.next_cycle_remaining_pieces",
             "only one next-cycle piece kind may repeat through hold carryover",
-            "queue_based_setup_next_cycle_piece_duplicate",
+            "next_cycle_remaining_piece_duplicate",
         ));
     }
 }

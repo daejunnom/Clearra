@@ -40,6 +40,7 @@ pub struct WebCommandRequest {
     forward_search: Option<ForwardSearchQuery>,
     setup_remaining: Option<Vec<PieceKind>>,
     setup_queue_based_pieces: Option<Vec<PieceKind>>,
+    setup_next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
     setup_allow_post_cycle_borrow: bool,
     setup_candidate_priority: SetupCandidatePriority,
     setup_length_preference: SetupLengthPreference,
@@ -82,6 +83,7 @@ impl WebCommandRequest {
             forward_search: None,
             setup_remaining: None,
             setup_queue_based_pieces: None,
+            setup_next_cycle_remaining_pieces: None,
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
             setup_length_preference: SetupLengthPreference::default(),
@@ -125,6 +127,7 @@ impl WebCommandRequest {
             forward_search: None,
             setup_remaining: None,
             setup_queue_based_pieces: None,
+            setup_next_cycle_remaining_pieces: None,
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
             setup_length_preference: SetupLengthPreference::default(),
@@ -181,6 +184,11 @@ impl WebCommandRequest {
     pub fn with_setup_queue_based_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
         self.setup_queue_based_pieces = Some(pieces);
         self.setup_search_mode = SetupSearchMode::QueueBased;
+        self
+    }
+
+    pub fn with_setup_next_cycle_remaining_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
+        self.setup_next_cycle_remaining_pieces = Some(pieces);
         self
     }
 
@@ -393,7 +401,7 @@ impl WebCommandRequest {
                     if self.setup_queue_based_pieces.is_some() {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
-                            "shape-oracle setup search does not accept a next-cycle inventory",
+                            "shape-oracle setup search does not accept observed QB pieces",
                         ));
                     }
                 }
@@ -401,11 +409,14 @@ impl WebCommandRequest {
                     let pieces = self.setup_queue_based_pieces.clone().ok_or_else(|| {
                         WebCommandError::new(
                             WebCommandErrorCode::MissingValue,
-                            "queue-based setup search requires next-cycle remaining pieces",
+                            "queue-based setup search requires observed next-bag pieces",
                         )
                     })?;
-                    query = query.with_next_cycle_remaining_pieces(pieces);
+                    query = query.with_queue_based_pieces(pieces);
                 }
+            }
+            if let Some(pieces) = self.setup_next_cycle_remaining_pieces.clone() {
+                query = query.with_next_cycle_remaining_pieces(pieces);
             }
             let mut query = query
                 .with_cycle_reset_borrow_policy(borrow_policy)

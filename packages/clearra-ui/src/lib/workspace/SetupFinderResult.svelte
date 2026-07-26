@@ -40,7 +40,7 @@
 
   $: report = view.searchReport?.setup_report ?? null;
   $: identity = report
-    ? `${report.search_mode}:${report.remaining_pieces}:${report.queue_based_pieces}:${report.cycle}:${report.hold_conditions.map((value) => value.candidate_count).join(',')}`
+    ? `${report.search_mode}:${report.remaining_pieces}:${report.queue_based_pieces}:${report.next_cycle_remaining_pieces}:${report.cycle}:${report.hold_conditions.map((value) => value.candidate_count).join(',')}`
     : '';
   $: if (identity !== lastIdentity) {
     lastIdentity = identity;
@@ -171,6 +171,12 @@
           <div><dt>{label('countComplete')}</dt><dd>{label(report.complete ? 'complete' : 'incomplete')}</dd></div>
           <div><dt>{label('workersUsed')}</dt><dd>{number(view.searchReport?.workers_used)}</dd></div>
           <div><dt>{label('coverageSemantics')}</dt><dd>{label('oracleCoverage')}</dd></div>
+          {#if report.next_cycle_remaining_pieces}
+            <div>
+              <dt>{label('setupNextCycleRemaining')}</dt>
+              <dd>{report.next_cycle_remaining_pieces}</dd>
+            </div>
+          {/if}
           {#if report.search_mode === 'oracle'}
             <div><dt>{label('postCycleBorrow')}</dt><dd>{label(report.post_cycle_borrow_enabled ? 'enabled' : 'disabled')}</dd></div>
           {/if}

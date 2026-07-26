@@ -13,7 +13,7 @@ use super::{
     WasmExactSearchError,
 };
 
-const INITIALIZATION_MAGIC: [u8; 4] = *b"CSPA";
+const INITIALIZATION_MAGIC: [u8; 4] = *b"CSPB";
 const TASK_MAGIC: [u8; 4] = *b"CST2";
 const RESULT_MAGIC: [u8; 4] = *b"CSR5";
 const NO_WITNESS: u32 = u32::MAX;
@@ -129,6 +129,18 @@ pub(super) fn encode_initialization(
     for piece in queue_based_pieces {
         output.push(piece_code(*piece));
     }
+    let next_cycle_remaining_pieces = query.next_cycle_remaining_pieces().unwrap_or(&[]);
+    push_u32(
+        &mut output,
+        u32::try_from(next_cycle_remaining_pieces.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "setup_parallel_next_cycle_remaining_count_overflow",
+            )
+        })?,
+    );
+    for piece in next_cycle_remaining_pieces {
+        output.push(piece_code(*piece));
+    }
     output.push(u8::from(
         query.cycle_reset_borrow_policy() == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse,
     ));
@@ -146,6 +158,9 @@ pub(super) fn encode_initialization(
     if let Some(detail) = query.path_detail() {
         output.push(1);
         push_u64(&mut output, detail.board_mask());
+        push_u16(&mut output, detail.deleted_rows());
+        push_u64(&mut output, detail.placement_rows() as u64);
+        push_u64(&mut output, (detail.placement_rows() >> 64) as u64);
         push_string(&mut output, detail.condition_id())?;
     } else {
         output.push(0);
@@ -236,19 +251,9 @@ pub(super) fn decode_initialization(
         }
     };
     let queue_based_count = reader.usize_from_u32("setup_parallel_queue_based_count_overflow")?;
-    let expected_queue_based_count = match residue_count {
-        7 => 4,
-        4 => 1,
-        1 => 5,
-        5 => 2,
-        2 => 6,
-        6 => 3,
-        3 => 7,
-        _ => 0,
-    };
     if (search_mode == SetupSearchMode::ShapeOracle && queue_based_count != 0)
         || (search_mode == SetupSearchMode::QueueBased
-            && queue_based_count != expected_queue_based_count)
+            && (queue_based_count == 0 || queue_based_count + residue_count > 7))
     {
         return Err(WasmExactSearchError::InvalidProblem(
             "setup_parallel_queue_based_count_invalid",
@@ -263,19 +268,56 @@ pub(super) fn decode_initialization(
     for _ in 0..queue_based_count {
         queue_based_pieces.push(piece_from_code(reader.u8()?)?);
     }
-    let mut queue_based_piece_counts = [0_u8; 7];
-    for piece in &queue_based_pieces {
-        queue_based_piece_counts[piece_code(*piece) as usize] += 1;
+    if has_duplicate_piece(&queue_based_pieces) {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_queue_based_observation_invalid",
+        ));
     }
-    if queue_based_piece_counts.iter().any(|count| *count > 2)
-        || queue_based_piece_counts
+    let next_cycle_remaining_count =
+        reader.usize_from_u32("setup_parallel_next_cycle_remaining_count_overflow")?;
+    let expected_next_cycle_remaining_count = match residue_count {
+        7 => 4,
+        4 => 1,
+        1 => 5,
+        5 => 2,
+        2 => 6,
+        6 => 3,
+        3 => 7,
+        _ => 0,
+    };
+    if next_cycle_remaining_count != 0
+        && next_cycle_remaining_count != expected_next_cycle_remaining_count
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_next_cycle_remaining_count_invalid",
+        ));
+    }
+    let mut next_cycle_remaining_pieces = Vec::new();
+    next_cycle_remaining_pieces
+        .try_reserve_exact(next_cycle_remaining_count)
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "setup_parallel_next_cycle_remaining_storage_unavailable",
+            )
+        })?;
+    for _ in 0..next_cycle_remaining_count {
+        next_cycle_remaining_pieces.push(piece_from_code(reader.u8()?)?);
+    }
+    let mut next_cycle_remaining_piece_counts = [0_u8; 7];
+    for piece in &next_cycle_remaining_pieces {
+        next_cycle_remaining_piece_counts[piece_code(*piece) as usize] += 1;
+    }
+    if next_cycle_remaining_piece_counts
+        .iter()
+        .any(|count| *count > 2)
+        || next_cycle_remaining_piece_counts
             .iter()
             .filter(|count| **count == 2)
             .count()
             > 1
     {
         return Err(WasmExactSearchError::InvalidProblem(
-            "setup_parallel_queue_based_inventory_invalid",
+            "setup_parallel_next_cycle_remaining_inventory_invalid",
         ));
     }
     let borrow_policy = match reader.u8()? {
@@ -317,10 +359,15 @@ pub(super) fn decode_initialization(
         0 => None,
         1 => {
             let board_mask = reader.u64()?;
+            let deleted_rows = reader.u16()?;
+            let placement_rows = u128::from(reader.u64()?) | (u128::from(reader.u64()?) << 64);
             let condition_id = reader.string("setup_parallel_path_condition_invalid")?;
-            Some(SetupPathDetail::new(board_mask, condition_id).ok_or(
-                WasmExactSearchError::InvalidProblem("setup_parallel_path_detail_invalid"),
-            )?)
+            Some(
+                SetupPathDetail::new(board_mask, deleted_rows, placement_rows, condition_id)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_parallel_path_detail_invalid",
+                    ))?,
+            )
         }
         _ => {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -341,7 +388,10 @@ pub(super) fn decode_initialization(
         .with_remaining_pieces(residue)
         .with_hold_policy(hold_policy);
     if search_mode == SetupSearchMode::QueueBased {
-        query = query.with_next_cycle_remaining_pieces(queue_based_pieces);
+        query = query.with_queue_based_pieces(queue_based_pieces);
+    }
+    if !next_cycle_remaining_pieces.is_empty() {
+        query = query.with_next_cycle_remaining_pieces(next_cycle_remaining_pieces);
     }
     let mut query = query
         .with_cycle_reset_borrow_policy(borrow_policy)
@@ -565,6 +615,12 @@ fn piece_from_code(code: u8) -> Result<PieceKind, WasmExactSearchError> {
         .ok_or(WasmExactSearchError::InvalidProblem(
             "setup_parallel_piece_code_invalid",
         ))
+}
+
+fn has_duplicate_piece(pieces: &[PieceKind]) -> bool {
+    PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .any(|piece| pieces.iter().filter(|value| **value == piece).count() > 1)
 }
 
 fn rule_profile_code(profile: RuleProfileId) -> u8 {

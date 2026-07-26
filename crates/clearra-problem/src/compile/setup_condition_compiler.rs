@@ -82,8 +82,10 @@ pub enum SetupConditionCompileError {
     PostCycleBorrowOutsideCycleSeven,
     QueueBasedFixedQueueRequired,
     QueueBasedPieceCountInvalid,
-    QueueBasedNextCyclePieceCountInvalid,
+    QueueBasedObservedPieceCountInvalid,
     QueueBasedDuplicatePiece,
+    NextCycleRemainingPieceCountInvalid,
+    NextCycleRemainingDuplicatePiece,
     InitialHoldPieceMissing,
     Pattern(QueuePatternParseError),
     Problem(ProblemCompileError),
@@ -93,11 +95,19 @@ pub fn compile_setup_search_conditions(
     query: &SetupSearchQuery,
 ) -> Result<Vec<SetupSearchCondition>, SetupConditionCompileError> {
     let (cycle, pieces, hold_conditions) = setup_condition_inputs(query)?;
-    let terminal_supply_target = queue_based_target(query, cycle)?;
+    let queue_based_prefix = queue_based_prefix(query)?;
+    let terminal_supply_target = next_cycle_remaining_target(query, cycle)?;
     let mut conditions = hold_conditions
         .into_iter()
         .map(|initial_hold| {
-            compile_condition(query, cycle, &pieces, terminal_supply_target, initial_hold)
+            compile_condition(
+                query,
+                cycle,
+                &pieces,
+                queue_based_prefix,
+                terminal_supply_target,
+                initial_hold,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(detail) = query.path_detail() {
@@ -118,11 +128,19 @@ pub fn compile_setup_search_condition(
     condition_index: usize,
 ) -> Result<Option<SetupSearchCondition>, SetupConditionCompileError> {
     let (cycle, pieces, hold_conditions) = setup_condition_inputs(query)?;
-    let terminal_supply_target = queue_based_target(query, cycle)?;
+    let queue_based_prefix = queue_based_prefix(query)?;
+    let terminal_supply_target = next_cycle_remaining_target(query, cycle)?;
     selected_hold_conditions(query, hold_conditions)
         .nth(condition_index)
         .map(|initial_hold| {
-            compile_condition(query, cycle, &pieces, terminal_supply_target, initial_hold)
+            compile_condition(
+                query,
+                cycle,
+                &pieces,
+                queue_based_prefix,
+                terminal_supply_target,
+                initial_hold,
+            )
         })
         .transpose()
 }
@@ -138,20 +156,18 @@ fn selected_hold_conditions(
     })
 }
 
-fn queue_based_target(
+fn queue_based_prefix(
     query: &SetupSearchQuery,
-    cycle: u8,
-) -> Result<Option<[u8; 7]>, SetupConditionCompileError> {
+) -> Result<&[PieceKind], SetupConditionCompileError> {
     match query.search_mode() {
-        SetupSearchMode::ShapeOracle => Ok(None),
-        SetupSearchMode::QueueBased => queue_based_pieces(query, cycle).map(Some),
+        SetupSearchMode::ShapeOracle => Ok(&[]),
+        SetupSearchMode::QueueBased => queue_based_pieces(query),
     }
 }
 
 fn queue_based_pieces(
     query: &SetupSearchQuery,
-    cycle: u8,
-) -> Result<[u8; 7], SetupConditionCompileError> {
+) -> Result<&[PieceKind], SetupConditionCompileError> {
     let pieces = query
         .queue()
         .as_fixed_sequence()
@@ -160,8 +176,27 @@ fn queue_based_pieces(
     if pieces.is_empty() {
         return Err(SetupConditionCompileError::QueueBasedPieceCountInvalid);
     }
+    if pieces.len() + query.residue().remaining_count() > 7 {
+        return Err(SetupConditionCompileError::QueueBasedObservedPieceCountInvalid);
+    }
+    if PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .any(|piece| pieces.iter().filter(|value| **value == piece).count() > 1)
+    {
+        return Err(SetupConditionCompileError::QueueBasedDuplicatePiece);
+    }
+    Ok(pieces)
+}
+
+fn next_cycle_remaining_target(
+    query: &SetupSearchQuery,
+    cycle: u8,
+) -> Result<Option<[u8; 7]>, SetupConditionCompileError> {
+    let Some(pieces) = query.next_cycle_remaining_pieces() else {
+        return Ok(None);
+    };
     if pieces.len() != next_cycle_remaining_count(cycle) {
-        return Err(SetupConditionCompileError::QueueBasedNextCyclePieceCountInvalid);
+        return Err(SetupConditionCompileError::NextCycleRemainingPieceCountInvalid);
     }
     let mut counts = [0_u8; 7];
     for piece in pieces {
@@ -170,9 +205,9 @@ fn queue_based_pieces(
     if counts.iter().any(|count| *count > 2)
         || counts.iter().filter(|count| **count == 2).count() > 1
     {
-        return Err(SetupConditionCompileError::QueueBasedDuplicatePiece);
+        return Err(SetupConditionCompileError::NextCycleRemainingDuplicatePiece);
     }
-    Ok(counts)
+    Ok(Some(counts))
 }
 
 const fn next_cycle_remaining_count(cycle: u8) -> usize {
@@ -242,16 +277,18 @@ fn compile_condition(
     query: &SetupSearchQuery,
     cycle: u8,
     pieces: &[PieceKind],
+    queue_based_prefix: &[PieceKind],
     terminal_supply_counts: Option<[u8; 7]>,
     initial_hold: Option<PieceKind>,
 ) -> Result<SetupSearchCondition, SetupConditionCompileError> {
     let queue_remainder = pieces.to_vec();
     let pattern_expression = pattern_expression(
+        queue_based_prefix,
         &queue_remainder,
         query.residue().remaining_count(),
         query.cycle_reset_borrow_policy(),
     );
-    // Queue-based filtering is applied to the exact terminal supply state.
+    // Terminal inventory filtering is applied to the exact terminal supply state.
     // Keep the broad source factorized here so the compatible subset can retain
     // the original probability denominator.
     let expression = QueuePatternExpression::parse(
@@ -315,11 +352,16 @@ fn canonical_pieces(pieces: &[PieceKind]) -> Vec<PieceKind> {
 }
 
 fn pattern_expression(
+    queue_based_prefix: &[PieceKind],
     queue_remainder: &[PieceKind],
     remaining_count: usize,
     borrow_policy: SetupCycleResetBorrowPolicy,
 ) -> String {
-    let known_piece_count = remaining_count;
+    let known_piece_count = if queue_based_prefix.is_empty() {
+        remaining_count
+    } else {
+        remaining_count + PieceKind::STANDARD_TETROMINOES.len()
+    };
     // Before cycle seven, the next bag still belongs to the same PC window.
     // Materialize one additional draw so Hold may leave the final queue piece
     // unplaced instead of forcing the held piece to be the leftover.
@@ -339,6 +381,13 @@ fn pattern_expression(
             expression.push_str("]!");
         }
     }
+    if !queue_based_prefix.is_empty() {
+        append_unordered_piece_set(&mut expression, queue_based_prefix);
+        expression.push('[');
+        expression.push('^');
+        expression.extend(queue_based_prefix.iter().map(|piece| piece.as_ascii()));
+        expression.push_str("]!");
+    }
     let mut remaining_draws = future_draws;
     while remaining_draws != 0 {
         let draw = remaining_draws.min(7);
@@ -347,6 +396,18 @@ fn pattern_expression(
         remaining_draws -= draw;
     }
     expression
+}
+
+fn append_unordered_piece_set(expression: &mut String, pieces: &[PieceKind]) {
+    match pieces {
+        [] => {}
+        [piece] => expression.push(piece.as_ascii()),
+        pieces => {
+            expression.push('[');
+            expression.extend(pieces.iter().map(|piece| piece.as_ascii()));
+            expression.push_str("]!");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -469,11 +530,17 @@ mod tests {
     #[test]
     fn cycle_three_and_five_cross_two_future_bags() {
         assert_eq!(
-            pattern_expression(&[PieceKind::T], 1, SetupCycleResetBorrowPolicy::default()),
+            pattern_expression(
+                &[],
+                &[PieceKind::T],
+                1,
+                SetupCycleResetBorrowPolicy::default()
+            ),
             "TP7P3"
         );
         assert_eq!(
             pattern_expression(
+                &[],
                 &[PieceKind::I, PieceKind::O],
                 2,
                 SetupCycleResetBorrowPolicy::default()
@@ -532,7 +599,7 @@ mod tests {
 
     #[test]
     fn path_detail_compiles_only_the_requested_hold_condition() {
-        let detail = crate::query::SetupPathDetail::new(1, "hold-T").expect("path detail");
+        let detail = crate::query::SetupPathDetail::new(1, 0, 1, "hold-T").expect("path detail");
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
             .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T))
@@ -562,11 +629,12 @@ mod tests {
     fn cycle_seven_borrow_adds_one_post_reset_draw_only_when_requested() {
         let remainder = [PieceKind::T, PieceKind::S, PieceKind::Z];
         assert_eq!(
-            pattern_expression(&remainder, 3, SetupCycleResetBorrowPolicy::default()),
+            pattern_expression(&[], &remainder, 3, SetupCycleResetBorrowPolicy::default()),
             "[TSZ]!P7"
         );
         assert_eq!(
             pattern_expression(
+                &[],
                 &remainder,
                 3,
                 SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
@@ -576,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_based_condition_preserves_the_broad_source_and_stores_terminal_inventory() {
+    fn queue_based_condition_restores_observed_group_without_a_terminal_constraint() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::I, PieceKind::I, PieceKind::O, PieceKind::T])
             .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::I))
@@ -591,14 +659,8 @@ mod tests {
             conditions[0].queue_remainder(),
             &[PieceKind::I, PieceKind::O, PieceKind::T]
         );
-        assert_eq!(conditions[0].pattern_expression(), "[IOT]!P7");
-        assert_eq!(
-            conditions[0]
-                .terminal_supply_target()
-                .expect("terminal target")
-                .counts(),
-            [0, 0, 0, 1, 0, 0, 0]
-        );
+        assert_eq!(conditions[0].pattern_expression(), "[IOT]!S[^S]!");
+        assert!(conditions[0].terminal_supply_target().is_none());
     }
 
     #[test]
@@ -614,10 +676,11 @@ mod tests {
     }
 
     #[test]
-    fn cycle_five_qb_condition_accepts_hold_duplicate_in_next_cycle_inventory() {
+    fn observed_queue_and_next_cycle_inventory_compile_independently() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
-            .with_queue_based_pieces(vec![
+            .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
+            .with_next_cycle_remaining_pieces(vec![
                 PieceKind::O,
                 PieceKind::O,
                 PieceKind::S,
@@ -629,7 +692,7 @@ mod tests {
         let conditions = compile_setup_search_conditions(&query).expect("QB condition");
 
         assert_eq!(conditions.len(), 1);
-        assert_eq!(conditions[0].pattern_expression(), "[IT]!P7P2");
+        assert_eq!(conditions[0].pattern_expression(), "[IT]![OS]![^OS]!P2");
         assert_eq!(
             conditions[0]
                 .terminal_supply_target()
@@ -640,22 +703,65 @@ mod tests {
     }
 
     #[test]
-    fn queue_based_condition_requires_the_next_cycle_piece_count() {
+    fn queue_based_condition_rejects_too_many_observed_pieces() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
             .with_queue_based_pieces(vec![PieceKind::Z, PieceKind::J, PieceKind::L, PieceKind::O]);
 
         assert!(matches!(
             compile_setup_search_conditions(&query),
-            Err(SetupConditionCompileError::QueueBasedNextCyclePieceCountInvalid)
+            Err(SetupConditionCompileError::QueueBasedObservedPieceCountInvalid)
         ));
     }
 
     #[test]
-    fn queue_based_condition_rejects_more_than_one_duplicated_piece_kind() {
+    fn queue_based_condition_rejects_duplicate_observed_piece() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
-            .with_queue_based_pieces(vec![
+            .with_queue_based_pieces(vec![PieceKind::O, PieceKind::O]);
+
+        assert!(matches!(
+            compile_setup_search_conditions(&query),
+            Err(SetupConditionCompileError::QueueBasedDuplicatePiece)
+        ));
+    }
+
+    #[test]
+    fn next_cycle_inventory_is_available_in_oracle_mode() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
+            .with_next_cycle_remaining_pieces(vec![PieceKind::Z]);
+
+        let conditions = compile_setup_search_conditions(&query).expect("oracle condition");
+
+        assert_eq!(query.search_mode(), SetupSearchMode::ShapeOracle);
+        assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P7");
+        assert_eq!(
+            conditions[0]
+                .terminal_supply_target()
+                .expect("terminal target")
+                .counts(),
+            [0, 0, 0, 0, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn next_cycle_inventory_requires_the_cycle_specific_piece_count() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
+            .with_next_cycle_remaining_pieces(vec![PieceKind::Z, PieceKind::J]);
+
+        assert!(matches!(
+            compile_setup_search_conditions(&query),
+            Err(SetupConditionCompileError::NextCycleRemainingPieceCountInvalid)
+        ));
+    }
+
+    #[test]
+    fn next_cycle_inventory_rejects_multiple_duplicate_kinds() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+            .with_next_cycle_remaining_pieces(vec![
                 PieceKind::O,
                 PieceKind::O,
                 PieceKind::T,
@@ -666,7 +772,7 @@ mod tests {
 
         assert!(matches!(
             compile_setup_search_conditions(&query),
-            Err(SetupConditionCompileError::QueueBasedDuplicatePiece)
+            Err(SetupConditionCompileError::NextCycleRemainingDuplicatePiece)
         ));
     }
 }

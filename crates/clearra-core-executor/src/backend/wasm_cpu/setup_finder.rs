@@ -26,7 +26,7 @@ use super::{
         cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
         SetupSharedGraph,
     },
-    setup_partial_build::{PartialBuildEdge, PartialBuildGraph, PartialBuildNode},
+    setup_partial_build::{PartialBuildEdge, PartialBuildGraph, PartialBuildNode, SetupShape},
     WasmExactSearchError,
 };
 
@@ -246,11 +246,18 @@ pub(super) fn finish_setup_result(
                 .collect::<String>()
         })
         .unwrap_or_default();
+    let next_cycle_remaining_pieces = query
+        .next_cycle_remaining_pieces()
+        .unwrap_or(&[])
+        .iter()
+        .map(|piece| piece.as_ascii())
+        .collect::<String>();
     let report = SetupFinderReport::new(
         query.search_mode(),
         query.residue().cycle().unwrap_or_default(),
         remaining_pieces.clone(),
         queue_based_pieces.clone(),
+        next_cycle_remaining_pieces.clone(),
         query.cycle_reset_borrow_policy() == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse,
         geometry_family_count.clone(),
         graph.nodes.len(),
@@ -280,6 +287,10 @@ pub(super) fn finish_setup_result(
             ),
             ("remaining_pieces".to_owned(), remaining_pieces),
             ("queue_based_pieces".to_owned(), queue_based_pieces),
+            (
+                "next_cycle_remaining_pieces".to_owned(),
+                next_cycle_remaining_pieces,
+            ),
             (
                 "setup_cycle".to_owned(),
                 query.residue().cycle().unwrap_or_default().to_string(),
@@ -311,7 +322,7 @@ pub(super) fn finish_setup_result(
             ),
             (
                 "normalized_solution_key_algorithm".to_owned(),
-                "clearra-setup-candidate-key-v1".to_owned(),
+                "clearra-setup-candidate-key-v2-exact-partial-state".to_owned(),
             ),
             (
                 "normalized_solution_set_hash_algorithm".to_owned(),
@@ -356,7 +367,7 @@ fn cached_path_detail_result(
     let Some(coverage) = coverage else {
         return Ok(None);
     };
-    let setup_id = format!("setup-{:010x}", detail.board_mask());
+    let setup_id = detail.setup_id();
     let Some(completed) = coverage
         .iter()
         .find(|completed| completed.report.condition_id() == detail.condition_id())
@@ -371,7 +382,7 @@ fn cached_path_detail_result(
     {
         return Ok(None);
     }
-    let solution_paths = enumerate_setup_completion_paths(graph, detail.board_mask(), control)?
+    let solution_paths = enumerate_setup_completion_paths(graph, detail, control)?
         .into_iter()
         .map(SetupSolutionPath::into_core_path)
         .collect();
@@ -834,7 +845,7 @@ pub(super) fn compile_setup_pattern_index(
         .try_reserve_exact(full_index.word_count())
         .map_err(|_| {
             WasmExactSearchError::InvalidProblem(
-                "setup_queue_based_pattern_filter_storage_unavailable",
+                "setup_terminal_supply_pattern_filter_storage_unavailable",
             )
         })?;
     let hold_enabled = problem.supply().hold_enabled();
@@ -874,7 +885,7 @@ pub(super) fn compile_setup_pattern_index(
         compatible_count = compatible_count.saturating_add(compatible.count_ones() as usize);
         if compatible_count > condition.max_patterns() {
             return Err(WasmExactSearchError::InvalidProblem(
-                "setup_queue_based_compatible_pattern_limit_exceeded",
+                "setup_terminal_supply_compatible_pattern_limit_exceeded",
             ));
         }
         compatible_words.push(compatible);
@@ -885,7 +896,9 @@ pub(super) fn compile_setup_pattern_index(
     let compatible_patterns = full_index
         .expand_coverage_words(&compatible_words)
         .map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_queue_based_pattern_filter_expand_failed")
+            WasmExactSearchError::InvalidProblem(
+                "setup_terminal_supply_pattern_filter_expand_failed",
+            )
         })?;
     drop(full_index);
     PatternPiecePositionIndex::compile_subset_before(
@@ -894,7 +907,7 @@ pub(super) fn compile_setup_pattern_index(
         universe.pattern_count(),
     )
     .map_err(|_| {
-        WasmExactSearchError::InvalidProblem("setup_queue_based_pattern_subset_compile_failed")
+        WasmExactSearchError::InvalidProblem("setup_terminal_supply_pattern_subset_compile_failed")
     })
 }
 
@@ -1185,7 +1198,7 @@ struct SetupCoverageSession {
     candidate_priority: SetupCandidatePriority,
     length_preference: SetupLengthPreference,
     max_setup_pieces: u8,
-    path_target_board: Option<u64>,
+    path_target_shape_index: Option<usize>,
     solution_paths: Option<Vec<SetupSolutionPath>>,
 }
 
@@ -1213,13 +1226,16 @@ impl SetupCoverageSession {
                 "setup_coverage_state_capacity_overflow",
             ))?;
         let shape_count = graph.shapes.len();
-        let path_target_board = path_detail.map(clearra_problem::SetupPathDetail::board_mask);
+        let path_target_shape_index =
+            path_detail
+                .map(|detail| {
+                    graph.shape_index_for_detail(detail).ok_or(
+                        WasmExactSearchError::InvalidProblem("setup_path_detail_shape_not_found"),
+                    )
+                })
+                .transpose()?;
         let solution_paths = if let Some(detail) = path_detail {
-            Some(enumerate_setup_completion_paths(
-                &graph,
-                detail.board_mask(),
-                control,
-            )?)
+            Some(enumerate_setup_completion_paths(&graph, detail, control)?)
         } else {
             None
         };
@@ -1254,7 +1270,7 @@ impl SetupCoverageSession {
             candidate_priority,
             length_preference,
             max_setup_pieces,
-            path_target_board,
+            path_target_shape_index,
             solution_paths,
         })
     }
@@ -1590,9 +1606,8 @@ impl SetupCoverageSession {
             .filter(|(shape_index, _)| self.accumulators[*shape_index].joint_covered_patterns != 0)
             .map(|(shape_index, _)| shape_index)
             .collect::<Vec<_>>();
-        if let Some(target_board) = self.path_target_board {
-            shape_indexes
-                .retain(|shape_index| self.graph.shapes[*shape_index].board == target_board);
+        if let Some(target_shape_index) = self.path_target_shape_index {
+            shape_indexes.retain(|shape_index| *shape_index == target_shape_index);
         }
         if shape_indexes.iter().any(|shape_index| {
             let coverage = &self.accumulators[*shape_index];
@@ -1623,6 +1638,7 @@ impl SetupCoverageSession {
                 right_shape.board,
             )
         });
+        retain_best_setup_state_per_board(&mut shape_indexes, &self.graph.shapes)?;
         let candidate_count = shape_indexes.len();
         let mut candidate_boards = shape_indexes
             .iter()
@@ -1639,7 +1655,7 @@ impl SetupCoverageSession {
             .into_iter()
             .map(|path| path.into_core_path())
             .collect::<Vec<_>>();
-        let detail_requested = self.path_target_board.is_some();
+        let detail_requested = self.path_target_shape_index.is_some();
         let candidates = shape_indexes
             .into_iter()
             .zip(representative_paths)
@@ -1651,8 +1667,11 @@ impl SetupCoverageSession {
                 } else {
                     coverage.joint_weight / coverage.build_weight
                 };
+                let setup_id = self.graph.setup_id_for_shape(shape_index).ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_candidate_identity_missing"),
+                )?;
                 let candidate = SetupCandidateReport::new(
-                    format!("setup-{:010x}", shape.board),
+                    setup_id,
                     shape.board,
                     coverage.min_covered_locks,
                     coverage.max_covered_locks,
@@ -1664,12 +1683,12 @@ impl SetupCoverageSession {
                     representative_path,
                 );
                 if detail_requested {
-                    candidate.with_solution_paths(std::mem::take(&mut all_solution_paths))
+                    Ok(candidate.with_solution_paths(std::mem::take(&mut all_solution_paths)))
                 } else {
-                    candidate
+                    Ok(candidate)
                 }
             })
-            .collect();
+            .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
         Ok(CompletedSetupCoverage {
             report: SetupHoldConditionReport::new(
                 self.condition_id.clone(),
@@ -1927,6 +1946,21 @@ impl SetupCoverageSession {
         path.reverse();
         Ok(path)
     }
+}
+
+pub(super) fn retain_best_setup_state_per_board(
+    sorted_shape_indexes: &mut Vec<usize>,
+    shapes: &[SetupShape],
+) -> Result<(), WasmExactSearchError> {
+    let mut seen_boards = ExactHashMap::<u64, ()>::default();
+    seen_boards
+        .try_reserve(sorted_shape_indexes.len())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_candidate_board_dedupe_storage_unavailable")
+        })?;
+    sorted_shape_indexes
+        .retain(|shape_index| seen_boards.insert(shapes[*shape_index].board, ()).is_none());
+    Ok(())
 }
 
 fn merge_exact_state_coverage(

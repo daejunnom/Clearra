@@ -72,12 +72,12 @@
     </label>
     {#if request.searchMode === 'qb'}
       <label class="workspace-field wide">
-        <span>{label('setupNextCycleRemaining')}</span>
+        <span>{label('setupObservedQueue')}</span>
         <QueueTextInput
           class="workspace-queue-input"
           value={request.qbQueue}
           maxlength="7"
-          placeholder="OOSITZ"
+          placeholder="OS"
           spellcheck="false"
           aria-invalid={validationCodes.length > 0}
           on:value={(event) => update({ qbQueue: event.detail })}
@@ -85,14 +85,33 @@
         <small class="workspace-field-help">{label('setupQbInputHelp')}</small>
       </label>
     {/if}
+    <label class="workspace-field wide">
+      <span>{label('setupNextCycleRemaining')}</span>
+      <QueueTextInput
+        class="workspace-queue-input"
+        value={request.nextCycleRemaining}
+        maxlength="7"
+        placeholder={label('setupNextCycleOptionalPlaceholder')}
+        spellcheck="false"
+        aria-invalid={validationCodes.length > 0}
+        on:value={(event) => update({ nextCycleRemaining: event.detail })}
+      />
+      <small class="workspace-field-help">{label('setupNextCycleRemainingHelp')}</small>
+    </label>
     <QueuePatternHelp {language} mode={request.searchMode === 'qb' ? 'setup-qb' : 'setup'} />
 
     <div class="residue-facts">
       <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
       {#if request.searchMode === 'qb'}
-        <span>{label('setupNextCycleRemainingCount')}</span>
-        <strong>{request.qbQueue.replace(/[\s,]/g, '').length}/{nextRemainingCount ?? '—'}</strong>
+        <span>{label('setupObservedPieces')}</span>
+        <strong>{request.qbQueue.replace(/[\s,]/g, '').length}</strong>
       {/if}
+      <span>{label('setupNextCycleRemainingCount')}</span>
+      <strong>
+        {request.nextCycleRemaining
+          ? request.nextCycleRemaining.replace(/[\s,]/g, '').length
+          : '—'}/{nextRemainingCount ?? '—'}
+      </strong>
     </div>
   </section>
 

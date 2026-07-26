@@ -1037,15 +1037,20 @@ pruning proof. The request's `max_setup_pieces` field selects result depths from
 not dominate probability ordering, while callers may select 10 to expose
 terminal PC solutions.
 
-Queue-based setup mode keeps the normal unordered cycle residue and adds an
-exact terminal supply constraint for the next PC cycle. That target is the
-multiset union of the terminal hold and the unconsumed standard-bag suffix. Its
-required cardinality is derived from the current cycle, and one duplicated
-piece kind is permitted only as hold carryover. The compiler preserves the
-broad current-cycle pattern universe, derives compatible source queues from the
-terminal constraint, and retains the original global pattern IDs and weights.
-QB pieces are never appended as a mandatory setup prefix, and filtered
-probability is never renormalized.
+Queue-based setup mode keeps the normal unordered cycle residue and conditions
+the next bag on a distinct observed piece group. The group's letter order does
+not fix draw order. Observed pieces are available to partial BuildUp but are not
+mandatory setup locks.
+
+An independent optional terminal supply target may be used in either shape
+oracle or queue-based mode. The target is the multiset union of the terminal
+hold and the unconsumed standard-bag suffix. Its required cardinality is
+derived from the current cycle, and one duplicated piece kind is permitted
+only as hold carryover. The compiler preserves the broad source universe,
+derives compatible patterns from the terminal constraint, and retains the
+original global pattern IDs and weights. Filtered probability is never
+renormalized. Observed QB conditioning and terminal supply filtering may be
+combined without changing either contract.
 
 Coverage is evaluated on the exact product state:
 
@@ -1056,15 +1061,17 @@ value is the set that can still reach a complete PC. The required equation is:
 
 `JointCoverage(state) = ForwardCoverage(state) AND BackwardPcLiveness(state)`
 
-The intersection happens before states are merged into a visible setup shape.
-Shape coverage is then a PatternBitSet OR over those exact intersections.
-Intersecting `OR(forward)` with `OR(backward)` after shape grouping is forbidden
-because it can combine incompatible temporal states.
+The intersection is accumulated within one exact fixed-tiling partial state.
+States with the same visible board but different canonical placement rows or
+deleted-row state are not coverage-merged. After evaluation and ranking, one
+exact state is selected for each visible board. Intersecting `OR(forward)` with
+`OR(backward)` after board grouping is forbidden because it can combine
+incompatible temporal states and different tilings.
 
 Each visible candidate reports build, joint, and conditional probability plus
 an exact representative placement/hold path. Its placement-count range is
 derived only from PC-live exact states that satisfy the active supply contract.
-Output limits are applied only after all shape coverage has been accumulated
+Output limits are applied only after all exact-state coverage has been accumulated
 and ranked. The stable coverage semantics are `Oracle`: each complete pattern
 may choose its own legal path.
 Online coverage is not exposed until an observation-class policy engine is
@@ -1081,16 +1088,17 @@ post-PC continuation path do not exist in the product source.
 
 The selected supply condition reports its identity, optional CLI-selected
 initial hold, materialized pattern expression, pattern count, total candidate
-count, truncation state, and ranked candidates. Each candidate reports its
-setup shape mask, minimum and maximum PC-live placement count, build and joint
-covered pattern counts, build/joint/conditional probabilities, and one legal
-representative path.
+count, truncation state, and ranked candidates. Each candidate reports an
+opaque exact-state ID, setup board mask, minimum and maximum PC-live placement
+count, build and joint covered pattern counts, build/joint/conditional
+probabilities, and one legal representative path.
 
 The representative path proves that the setup itself is buildable. On-demand
 `solution_paths` have a different contract: every returned path starts with the
-setup mask as its existing field and contains only the remaining placements
-that complete a perfect clear. The product UI renders the setup mask in the
-existing-field color and the completion placements by piece.
+same fixed tiling identified by the card's board, deleted rows, and canonical
+placement set, then contains only the remaining placements that complete a
+perfect clear. The product UI renders the setup mask in the existing-field
+color and the completion placements by piece.
 
 The top-level report records the inferred cycle, canonical residue, cycle-reset
 borrow policy, geometry family count, partial graph node count, completeness,

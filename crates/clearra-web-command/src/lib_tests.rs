@@ -167,8 +167,8 @@ fn setup_command_preserves_the_complete_pc_piece_limit() {
 }
 
 #[test]
-fn setup_command_separates_residue_and_next_cycle_inventory() {
-    let request = WebCommandParser::parse("clearra setup --remaining TI --mode qb --qb OOSITZ")
+fn setup_command_separates_residue_and_observed_qb_pieces() {
+    let request = WebCommandParser::parse("clearra setup --remaining TI --mode qb --qb OS")
         .expect("QB setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -191,22 +191,77 @@ fn setup_command_separates_residue_and_next_cycle_inventory() {
             .as_fixed_sequence()
             .expect("fixed QB queue")
             .pieces(),
-        &[
-            PieceKind::O,
-            PieceKind::O,
-            PieceKind::S,
-            PieceKind::I,
-            PieceKind::T,
-            PieceKind::Z,
-        ]
+        &[PieceKind::O, PieceKind::S]
+    );
+    assert!(command.query().next_cycle_remaining_pieces().is_none());
+}
+
+#[test]
+fn setup_command_accepts_next_cycle_inventory_in_oracle_mode() {
+    let request =
+        WebCommandParser::parse("clearra setup --remaining TI --next-cycle-remaining OOSITZ")
+            .expect("oracle setup command")
+            .to_app_request()
+            .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+
+    assert_eq!(
+        command.query().search_mode(),
+        clearra_problem::SetupSearchMode::ShapeOracle
+    );
+    assert_eq!(
+        command.query().next_cycle_remaining_pieces(),
+        Some(
+            &[
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::S,
+                PieceKind::I,
+                PieceKind::T,
+                PieceKind::Z,
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn setup_command_combines_observed_qb_and_next_cycle_inventory() {
+    let request = WebCommandParser::parse(
+        "clearra setup --remaining TI --qb OS --next-cycle-remaining OOSITZ",
+    )
+    .expect("combined setup command")
+    .to_app_request()
+    .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+
+    assert_eq!(
+        command
+            .query()
+            .queue()
+            .as_fixed_sequence()
+            .expect("observed QB queue")
+            .pieces(),
+        &[PieceKind::O, PieceKind::S]
+    );
+    assert_eq!(
+        command
+            .query()
+            .next_cycle_remaining_pieces()
+            .map(|pieces| pieces.len()),
+        Some(6)
     );
 }
 
 #[test]
 fn setup_command_preserves_exact_path_detail_selection() {
     let request = WebCommandParser::parse(
-        "clearra setup --remaining TI --mode qb --qb OOSITZ \
-         --paths-for setup-00080719e6 --condition hold-empty",
+        "clearra setup --remaining TI --mode qb --qb OS \
+         --paths-for setup-00080719e6-0003-000000000000000000000000000001 \
+         --condition hold-empty",
     )
     .expect("path detail command")
     .to_app_request()
@@ -217,36 +272,40 @@ fn setup_command_preserves_exact_path_detail_selection() {
     let detail = command.query().path_detail().expect("path detail");
 
     assert_eq!(detail.board_mask(), 0x0008_0719_e6);
+    assert_eq!(detail.deleted_rows(), 3);
+    assert_eq!(detail.placement_rows(), 1);
     assert_eq!(detail.condition_id(), "hold-empty");
 }
 
 #[test]
 fn setup_command_requires_both_path_detail_options() {
-    let error =
-        WebCommandParser::parse("clearra setup --remaining TI --paths-for setup-00080719e6")
-            .expect_err("missing condition must fail");
+    let error = WebCommandParser::parse(
+        "clearra setup --remaining TI \
+         --paths-for setup-00080719e6-0000-000000000000000000000000000001",
+    )
+    .expect_err("missing condition must fail");
 
     assert_eq!(error.code(), WebCommandErrorCode::MissingValue);
 }
 
 #[test]
-fn setup_command_requires_next_cycle_inventory_in_queue_based_mode() {
+fn setup_command_requires_observed_pieces_in_queue_based_mode() {
     let error = WebCommandParser::parse("clearra setup --remaining TI --mode qb")
         .expect("parsed command")
         .to_app_request()
-        .expect_err("QB mode without a next-cycle inventory must fail");
+        .expect_err("QB mode without observations must fail");
 
     assert_eq!(error.code(), WebCommandErrorCode::MissingValue);
 }
 
 #[test]
-fn setup_command_rejects_oracle_mode_with_next_cycle_inventory() {
+fn setup_command_rejects_oracle_mode_with_observed_qb_pieces() {
     for command in [
-        "clearra setup --remaining TI --mode oracle --qb OOSITZ",
-        "clearra setup --remaining TI --qb OOSITZ --mode oracle",
+        "clearra setup --remaining TI --mode oracle --qb OS",
+        "clearra setup --remaining TI --qb OS --mode oracle",
     ] {
-        let error = WebCommandParser::parse(command)
-            .expect_err("oracle and QB next-cycle inventory must conflict");
+        let error =
+            WebCommandParser::parse(command).expect_err("oracle and QB observations must conflict");
         assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
     }
 }

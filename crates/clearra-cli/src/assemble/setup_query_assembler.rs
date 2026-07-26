@@ -49,8 +49,11 @@ impl SetupQueryAssembler {
                 return Err(SetupQueryAssemblyError::QueueBasedPiecesMissing);
             }
             (SetupSearchMode::QueueBased, Some(value)) => {
-                query = query.with_next_cycle_remaining_pieces(parse_remaining(value)?);
+                query = query.with_queue_based_pieces(parse_remaining(value)?);
             }
+        }
+        if let Some(value) = args.next_cycle_remaining_pieces() {
+            query = query.with_next_cycle_remaining_pieces(parse_remaining(value)?);
         }
 
         let mut query = query
@@ -60,9 +63,7 @@ impl SetupQueryAssembler {
             .with_max_setup_pieces(args.max_setup_pieces());
         match (args.path_detail_setup_id(), args.path_detail_condition_id()) {
             (Some(setup_id), Some(condition_id)) => {
-                let board_mask =
-                    parse_setup_id(setup_id).ok_or(SetupQueryAssemblyError::PathDetailInvalid)?;
-                let detail = SetupPathDetail::new(board_mask, condition_id)
+                let detail = SetupPathDetail::from_setup_id(setup_id, condition_id)
                     .ok_or(SetupQueryAssemblyError::PathDetailInvalid)?;
                 query = query.with_path_detail(detail);
             }
@@ -71,13 +72,6 @@ impl SetupQueryAssembler {
         }
         Ok(query)
     }
-}
-
-fn parse_setup_id(value: &str) -> Option<u64> {
-    let digits = value.strip_prefix("setup-")?;
-    u64::from_str_radix(digits, 16)
-        .ok()
-        .filter(|mask| *mask >> 40 == 0)
 }
 
 fn parse_remaining(remaining: &str) -> Result<Vec<PieceKind>, SetupQueryAssemblyError> {

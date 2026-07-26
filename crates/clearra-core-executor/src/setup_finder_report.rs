@@ -9,6 +9,7 @@ pub struct SetupFinderReport {
     cycle: u8,
     remaining_pieces: String,
     queue_based_pieces: String,
+    next_cycle_remaining_pieces: String,
     post_cycle_borrow_enabled: bool,
     geometry_family_count: String,
     partial_build_node_count: usize,
@@ -23,6 +24,7 @@ impl SetupFinderReport {
         cycle: u8,
         remaining_pieces: String,
         queue_based_pieces: String,
+        next_cycle_remaining_pieces: String,
         post_cycle_borrow_enabled: bool,
         geometry_family_count: String,
         partial_build_node_count: usize,
@@ -34,6 +36,7 @@ impl SetupFinderReport {
             cycle,
             remaining_pieces,
             queue_based_pieces,
+            next_cycle_remaining_pieces,
             post_cycle_borrow_enabled,
             geometry_family_count,
             partial_build_node_count,
@@ -56,6 +59,10 @@ impl SetupFinderReport {
 
     pub fn queue_based_pieces(&self) -> &str {
         &self.queue_based_pieces
+    }
+
+    pub fn next_cycle_remaining_pieces(&self) -> &str {
+        &self.next_cycle_remaining_pieces
     }
 
     pub fn post_cycle_borrow_enabled(&self) -> bool {

@@ -8,7 +8,8 @@ post-PC search for every visible candidate.
 empty 10x4 PC geometry family
 -> family quotient partial BuildUp
 -> exact hold/bag product coverage
--> setup-shape coverage union
+-> exact fixed-tiling coverage
+-> one ranked state per visible board
 ```
 
 ## Search Modes
@@ -17,23 +18,42 @@ empty 10x4 PC geometry family
 cycle residue, and coverage may select a different legal path for each complete
 future pattern.
 
-`qb` constrains the exact supply that must remain when the current PC finishes.
-The input is the next PC cycle's complete remaining inventory:
+`qb` conditions the next bag on the piece group currently visible to the
+player. For example, cycle-five residue `TI` with observed next pieces `OS`
+uses:
+
+```text
+clearra setup --remaining TI --mode qb --qb OS
+```
+
+Observed QB pieces are distinct and must fit in the same seven-piece bag as the
+current residue. Their input order does not fix their draw order. They are
+available to partial BuildUp, but a setup does not have to lock every observed
+piece. Clearra represents the example as an exact conditioned pattern language
+equivalent to:
+
+```text
+[IT]![OS]![^OS]!P2
+```
+
+Both `oracle` and `qb` may independently constrain the exact supply left when
+the current PC finishes:
+
+```text
+clearra setup --remaining TI --next-cycle-remaining OOSITZ
+clearra setup --remaining TI --mode qb --qb OS \
+  --next-cycle-remaining OOSITZ
+```
+
+`--next-cycle-remaining` is the complete inventory at the next PC-cycle
+boundary:
 
 ```text
 next-cycle hold, when occupied
 + unconsumed suffix of the active standard bag
 ```
 
-For example, cycle-five residue `TI` reaches a next-cycle inventory of six
-pieces. One duplicated kind is legal because one copy can be in hold:
-
-```text
-clearra setup --remaining TI --mode qb --qb OOSITZ
-```
-
-The order of `--qb` letters is irrelevant. Its exact count is derived from the
-current cycle:
+Its order is irrelevant. The exact count is derived from the current cycle:
 
 | Current PC cycle | Next-cycle remaining pieces |
 | ---: | ---: |
@@ -45,16 +65,15 @@ current cycle:
 | 6 | 3 |
 | 7 | 7 |
 
-Clearra keeps the broad current-cycle bag universe, derives the terminal
-hold-and-suffix inventory for each exact supply state, and retains only the
-compatible patterns. The retained patterns keep their original universe IDs
-and weights, so QB probability is not renormalized into a conditional 100%.
-This reverse terminal filter constrains current-cycle queues without requiring
-the requested inventory to be locked into the setup.
+One duplicated kind is legal in this terminal inventory because one copy can be
+in hold. Clearra derives the terminal hold-and-suffix inventory for each exact
+supply state and retains only compatible patterns. The retained patterns keep
+their original universe IDs and weights, so the result is not renormalized into
+a false conditional 100%.
 
 QB uses the same inverse lock-clear family quotient and partial BuildUp search
-as residue mode. It does not append the QB letters as a mandatory consumed
-prefix.
+as residue mode. Observed QB conditioning and the optional terminal inventory
+filter are separate axes and may be combined.
 
 ## Residue And Hold Contract
 
@@ -121,8 +140,9 @@ before an edge enters the graph.
 
 The root is not a setup. Every PC-live prefix from one through ten placements
 is represented. Placement depth is output metadata, not a pruning proof.
-Visible shapes merge only after the exact product coverage described below has
-been computed.
+States that leave the same occupied board remain separate through coverage when
+their concrete placement-row set or deleted-row state differs. After coverage,
+the requested ranking policy selects one exact state for each visible board.
 
 `--max-setup-pieces N` selects which represented depths may enter the result,
 with `1 <= N <= 10`. The product default is `9`, preserving nine-piece setups
@@ -151,15 +171,21 @@ PcLiveness = patterns with a legal completion
 JointCoverage = BuildCoverage AND PcLiveness
 ```
 
-Only then are exact-state words OR-unioned into a setup shape. Computing
-`OR(BuildCoverage) AND OR(PcLiveness)` after shape grouping is forbidden because
-it can combine incompatible temporal states.
+Only then are supply-state words OR-unioned within one exact partial-build
+state. A candidate identity retains the canonical concrete placement-row set,
+deleted-row state, piece-count state, visible board, and placement count.
+Coverage from a different tiling state or a shorter setup is therefore never
+inherited merely because it leaves the same board after line clears. After all
+exact states have been evaluated, the selected ordering policy chooses one
+state for each visible board card.
+Computing `OR(BuildCoverage) AND OR(PcLiveness)` after grouping is forbidden
+because it can combine incompatible temporal states.
 
 Variant counts are never probabilities. Build and joint probabilities are
 measured from `PatternBitSet` union coverage with the condition's weight model.
 Each candidate reports:
 
-- `Build`: probability that the setup shape is buildable.
+- `Build`: probability that the selected fixed setup tiling is buildable.
 - `Joint`: probability that the setup is buildable and the same exact state can
   complete the PC.
 - `Conditional`: `Joint / Build`.
@@ -202,16 +228,18 @@ partial-graph node count, candidate completeness, and exact representative
 placement/hold paths. Product UI requests contain only the empty-hold
 condition.
 
-The setup card renders the setup mask as the existing field. Opening its
-solution detail materializes only the exact suffixes that continue from that
-field to an accepting perfect clear. These `solution_paths` are PC completion
-placements retained by the canonical partial-build graph, not alternate
-prefixes for constructing the setup and not queue/hold execution histories.
+The setup card renders the selected fixed tiling as the existing field. Its
+opaque setup ID encodes the board, deleted-row state, and canonical placement
+set. Opening solution detail materializes only the exact suffixes that continue
+from that same state to an accepting perfect clear. These `solution_paths` are
+PC completion placements retained by the canonical partial-build graph, not
+alternate prefixes for constructing the setup and not queue/hold execution
+histories.
 The browser reuses both the completed WASM worker and the matching immutable
 partial-build graph for this follow-up request. A different setup query evicts
 that one-entry graph cache before it starts, and terminating the worker releases
 the cache.
 
-Output limits are applied only after all shape coverage has been accumulated.
+Output limits are applied only after all exact-state coverage has been accumulated.
 Allocation failure, cancellation, or incomplete source materialization must not
 produce a complete-looking setup result.

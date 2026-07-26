@@ -344,7 +344,7 @@ fn parses_queue_based_setup_mode() {
         "--mode",
         "qb",
         "--qb",
-        "OOSITZ",
+        "OS",
     ])
     .expect("QB setup command");
 
@@ -356,12 +356,13 @@ fn parses_queue_based_setup_mode() {
         clearra_setup_search::query::SetupSearchMode::QueueBased
     );
     assert_eq!(args.remaining(), "TI");
-    assert_eq!(args.queue_based_pieces(), Some("OOSITZ"));
+    assert_eq!(args.queue_based_pieces(), Some("OS"));
+    assert_eq!(args.next_cycle_remaining_pieces(), None);
 }
 
 #[test]
 fn parses_queue_based_setup_shorthand() {
-    let invocation = CliParser::parse(["clearra", "setup", "--remaining", "TI", "--qb", "OOSITZ"])
+    let invocation = CliParser::parse(["clearra", "setup", "--remaining", "TI", "--qb", "OS"])
         .expect("QB setup command");
 
     let ParsedCliCommand::Setup(args) = invocation.into_command() else {
@@ -371,7 +372,51 @@ fn parses_queue_based_setup_shorthand() {
         args.search_mode(),
         clearra_setup_search::query::SetupSearchMode::QueueBased
     );
-    assert_eq!(args.queue_based_pieces(), Some("OOSITZ"));
+    assert_eq!(args.queue_based_pieces(), Some("OS"));
+}
+
+#[test]
+fn parses_next_cycle_inventory_without_enabling_queue_based_mode() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "TI",
+        "--next-cycle-remaining",
+        "OOSITZ",
+    ])
+    .expect("oracle setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        args.search_mode(),
+        clearra_setup_search::query::SetupSearchMode::ShapeOracle
+    );
+    assert_eq!(args.queue_based_pieces(), None);
+    assert_eq!(args.next_cycle_remaining_pieces(), Some("OOSITZ"));
+}
+
+#[test]
+fn parses_observed_qb_and_next_cycle_inventory_together() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "TI",
+        "--qb",
+        "OS",
+        "--next-cycle-remaining",
+        "OOSITZ",
+    ])
+    .expect("combined setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.queue_based_pieces(), Some("OS"));
+    assert_eq!(args.next_cycle_remaining_pieces(), Some("OOSITZ"));
 }
 
 #[test]
@@ -400,7 +445,7 @@ fn parses_setup_path_detail_as_an_atomic_option_pair() {
         "--remaining",
         "IOTS",
         "--paths-for",
-        "setup-4011c4f9",
+        "setup-004011c4f9-0002-000000000000000000000000000001",
         "--condition",
         "hold-T",
     ])
@@ -409,7 +454,10 @@ fn parses_setup_path_detail_as_an_atomic_option_pair() {
     let ParsedCliCommand::Setup(args) = invocation.into_command() else {
         panic!("expected setup command");
     };
-    assert_eq!(args.path_detail_setup_id(), Some("setup-4011c4f9"));
+    assert_eq!(
+        args.path_detail_setup_id(),
+        Some("setup-004011c4f9-0002-000000000000000000000000000001")
+    );
     assert_eq!(args.path_detail_condition_id(), Some("hold-T"));
 
     assert!(matches!(
@@ -419,7 +467,7 @@ fn parses_setup_path_detail_as_an_atomic_option_pair() {
             "--remaining",
             "IOTS",
             "--paths-for",
-            "setup-4011c4f9",
+            "setup-004011c4f9-0002-000000000000000000000000000001",
         ]),
         Err(CliParseError::InvalidValue {
             option: "--condition",
@@ -429,7 +477,7 @@ fn parses_setup_path_detail_as_an_atomic_option_pair() {
 }
 
 #[test]
-fn rejects_oracle_mode_with_next_cycle_inventory_regardless_of_option_order() {
+fn rejects_oracle_mode_with_observed_qb_regardless_of_option_order() {
     for args in [
         [
             "clearra",
@@ -439,7 +487,7 @@ fn rejects_oracle_mode_with_next_cycle_inventory_regardless_of_option_order() {
             "--mode",
             "oracle",
             "--qb",
-            "OOSITZ",
+            "OS",
         ],
         [
             "clearra",
@@ -447,7 +495,7 @@ fn rejects_oracle_mode_with_next_cycle_inventory_regardless_of_option_order() {
             "--remaining",
             "TI",
             "--qb",
-            "OOSITZ",
+            "OS",
             "--mode",
             "oracle",
         ],

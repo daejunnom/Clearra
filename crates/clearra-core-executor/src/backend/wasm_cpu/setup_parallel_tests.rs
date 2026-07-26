@@ -1,6 +1,6 @@
 use super::*;
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_problem::SetupHoldPolicy;
+use clearra_problem::{SetupHoldPolicy, SetupPathDetail};
 use clearra_rules::profile::builtin_rules::{jstris_180, srs_x};
 
 use super::super::{setup_coverage_graph::SetupCoverageNode, setup_partial_build::SetupShape};
@@ -55,22 +55,19 @@ fn result_wire_preserves_qb_conditioned_setup_depth_range() {
 }
 
 #[test]
-fn initialization_wire_preserves_hold_qb_inventory_and_setup_piece_limit() {
+fn initialization_wire_preserves_observed_qb_terminal_inventory_and_setup_piece_limit() {
     let graph = SetupCoverageGraph::from_wire_parts(
         vec![SetupCoverageNode::from_wire(0, 0, 0, 10, 1).expect("coverage node")],
         Vec::new(),
         0,
     )
     .expect("coverage graph");
-    let shapes = vec![SetupShape {
-        board: 0,
-        min_locks: 10,
-        max_locks: 10,
-    }];
+    let shapes = vec![SetupShape::new(0, 0, 0)];
     let query = SetupSearchQuery::default()
         .with_rule(srs_x())
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
         .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T))
+        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
         .with_next_cycle_remaining_pieces(vec![
             PieceKind::O,
             PieceKind::O,
@@ -79,7 +76,8 @@ fn initialization_wire_preserves_hold_qb_inventory_and_setup_piece_limit() {
             PieceKind::T,
             PieceKind::Z,
         ])
-        .with_max_setup_pieces(10);
+        .with_max_setup_pieces(10)
+        .with_path_detail(SetupPathDetail::new(0, 3, 1, "hold-T").expect("exact path detail"));
 
     let encoded = encode_initialization(&query, &graph, &shapes).expect("encode initialization");
     let decoded = decode_initialization(&encoded).expect("decode initialization");
@@ -87,18 +85,23 @@ fn initialization_wire_preserves_hold_qb_inventory_and_setup_piece_limit() {
     assert_eq!(decoded.query.hold_policy(), query.hold_policy());
     assert_eq!(decoded.query.rule(), srs_x());
     assert_eq!(decoded.query.max_setup_pieces(), 10);
+    assert_eq!(decoded.query.path_detail(), query.path_detail());
     assert_eq!(
         decoded
             .query
             .queue()
             .as_fixed_sequence()
-            .expect("next-cycle inventory")
+            .expect("observed QB queue")
             .pieces(),
         query
             .queue()
             .as_fixed_sequence()
-            .expect("source next-cycle inventory")
+            .expect("source observed QB queue")
             .pieces()
+    );
+    assert_eq!(
+        decoded.query.next_cycle_remaining_pieces(),
+        query.next_cycle_remaining_pieces()
     );
 }
 
@@ -110,11 +113,7 @@ fn setup_parallel_wire_preserves_jstris_180_rule_identity() {
         0,
     )
     .expect("coverage graph");
-    let shapes = vec![SetupShape {
-        board: 0,
-        min_locks: 10,
-        max_locks: 10,
-    }];
+    let shapes = vec![SetupShape::new(0, 0, 0)];
     let query = SetupSearchQuery::default()
         .with_rule(jstris_180())
         .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T]);

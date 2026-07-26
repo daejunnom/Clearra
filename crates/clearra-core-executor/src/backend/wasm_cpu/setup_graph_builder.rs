@@ -323,7 +323,7 @@ fn cached_detail_candidate_exists(
     let Some(detail) = query.path_detail() else {
         return false;
     };
-    let setup_id = format!("setup-{:010x}", detail.board_mask());
+    let setup_id = detail.setup_id();
     coverage.is_some_and(|coverage| {
         coverage.iter().any(|completed| {
             completed.report.condition_id() == detail.condition_id()

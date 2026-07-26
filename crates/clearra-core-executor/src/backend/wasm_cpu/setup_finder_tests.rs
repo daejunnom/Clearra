@@ -10,12 +10,12 @@ use clearra_problem::{
 use super::{
     compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
     merge_exact_state_coverage, piece_index, prefers_setup_representative_depth,
-    terminal_supply_target_word, SetupSupplyStateLayout, WasmSetupSearchAdvance,
-    WasmSetupSearchSession,
+    retain_best_setup_state_per_board, terminal_supply_target_word, SetupShape,
+    SetupSupplyStateLayout, WasmSetupSearchAdvance, WasmSetupSearchSession,
 };
 
 #[test]
-fn queue_based_supply_layout_has_no_terminal_inventory_consumption_dimension() {
+fn queue_based_supply_layout_has_no_observed_piece_consumption_dimension() {
     let layout = SetupSupplyStateLayout::new();
     let state = layout.encode(7, 1, 3);
 
@@ -39,14 +39,28 @@ fn queue_based_setup_depth_keeps_every_partial_path() {
 }
 
 #[test]
-fn queue_based_terminal_inventory_matches_hold_plus_exact_bag_suffix() {
+fn visible_board_uses_only_the_best_independently_measured_exact_state() {
+    let shapes = vec![
+        SetupShape::new(0x3c, 0, 0),
+        SetupShape::new(0x3c, 1, 0),
+        SetupShape::new(0x0f, 2, 0),
+    ];
+    let mut sorted_shape_indexes = vec![1, 2, 0];
+
+    retain_best_setup_state_per_board(&mut sorted_shape_indexes, &shapes).expect("board dedupe");
+
+    assert_eq!(sorted_shape_indexes, vec![1, 2]);
+}
+
+#[test]
+fn next_cycle_terminal_inventory_matches_hold_plus_exact_bag_suffix() {
     let oracle =
         SetupSearchQuery::default().with_remaining_pieces(vec![PieceKind::T, PieceKind::I]);
     let condition = compile_setup_search_conditions(&oracle)
         .expect("oracle condition")
         .remove(0);
     let pattern_index = compile_setup_pattern_index(&condition).expect("pattern index");
-    let queue_based_condition =
+    let terminal_inventory_condition =
         compile_setup_search_conditions(&oracle.with_next_cycle_remaining_pieces(vec![
             PieceKind::O,
             PieceKind::O,
@@ -55,13 +69,13 @@ fn queue_based_terminal_inventory_matches_hold_plus_exact_bag_suffix() {
             PieceKind::T,
             PieceKind::Z,
         ]))
-        .expect("queue-based condition")
+        .expect("terminal inventory condition")
         .remove(0);
-    let target = queue_based_condition
+    let target = terminal_inventory_condition
         .terminal_supply_target()
         .expect("terminal target");
     let filtered_index =
-        compile_setup_pattern_index(&queue_based_condition).expect("filtered pattern index");
+        compile_setup_pattern_index(&terminal_inventory_condition).expect("filtered pattern index");
     assert_eq!(
         filtered_index.global_pattern_count(),
         pattern_index.global_pattern_count()

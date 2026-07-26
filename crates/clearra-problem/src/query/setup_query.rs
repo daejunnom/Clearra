@@ -11,27 +11,89 @@ pub use super::{
     setup_search_mode::SetupSearchMode,
 };
 
-use clearra_core_domain::{board::board_size::BoardSize, pc::pc_target::PcTarget};
+use clearra_core_domain::{
+    board::board_size::BoardSize, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+};
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupPathDetail {
     board_mask: u64,
+    deleted_rows: u16,
+    placement_rows: u128,
     condition_id: String,
 }
 
 impl SetupPathDetail {
-    pub fn new(board_mask: u64, condition_id: impl Into<String>) -> Option<Self> {
+    pub fn new(
+        board_mask: u64,
+        deleted_rows: u16,
+        placement_rows: u128,
+        condition_id: impl Into<String>,
+    ) -> Option<Self> {
         let condition_id = condition_id.into();
-        (board_mask >> 40 == 0 && !condition_id.is_empty()).then_some(Self {
+        (board_mask >> 40 == 0
+            && placement_rows != 0
+            && placement_rows >> 120 == 0
+            && !condition_id.is_empty())
+        .then_some(Self {
             board_mask,
+            deleted_rows,
+            placement_rows,
             condition_id,
         })
     }
 
+    pub fn from_setup_id(setup_id: &str, condition_id: impl Into<String>) -> Option<Self> {
+        let mut components = setup_id.split('-');
+        if components.next()? != "setup" {
+            return None;
+        }
+        let board = components.next()?;
+        let deleted_rows = components.next()?;
+        let placement_rows = components.next()?;
+        if components.next().is_some()
+            || board.len() != 10
+            || deleted_rows.len() != 4
+            || placement_rows.len() != 30
+        {
+            return None;
+        }
+        Self::new(
+            u64::from_str_radix(board, 16).ok()?,
+            u16::from_str_radix(deleted_rows, 16).ok()?,
+            u128::from_str_radix(placement_rows, 16).ok()?,
+            condition_id,
+        )
+    }
+
+    pub fn setup_id_for(
+        board_mask: u64,
+        deleted_rows: u16,
+        placement_rows: u128,
+    ) -> Option<String> {
+        Self::new(board_mask, deleted_rows, placement_rows, "identity")
+            .map(|detail| detail.setup_id())
+    }
+
+    pub fn setup_id(&self) -> String {
+        format!(
+            "setup-{:010x}-{:04x}-{:030x}",
+            self.board_mask, self.deleted_rows, self.placement_rows
+        )
+    }
+
     pub const fn board_mask(&self) -> u64 {
         self.board_mask
+    }
+
+    pub const fn deleted_rows(&self) -> u16 {
+        self.deleted_rows
+    }
+
+    pub const fn placement_rows(&self) -> u128 {
+        self.placement_rows
     }
 
     pub fn condition_id(&self) -> &str {
@@ -56,6 +118,7 @@ pub struct SetupSearchQuery {
     length_preference: SetupLengthPreference,
     max_setup_pieces: u8,
     search_mode: SetupSearchMode,
+    next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
     path_detail: Option<SetupPathDetail>,
 }
 
@@ -87,6 +150,7 @@ impl SetupSearchQuery {
             length_preference: SetupLengthPreference::default(),
             max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
+            next_cycle_remaining_pieces: None,
             path_detail: None,
         }
     }
@@ -159,6 +223,10 @@ impl SetupSearchQuery {
 
     pub fn search_mode(&self) -> SetupSearchMode {
         self.search_mode
+    }
+
+    pub fn next_cycle_remaining_pieces(&self) -> Option<&[PieceKind]> {
+        self.next_cycle_remaining_pieces.as_deref()
     }
 
     pub fn path_detail(&self) -> Option<&SetupPathDetail> {
@@ -251,20 +319,15 @@ impl SetupSearchQuery {
         self
     }
 
-    pub fn with_next_cycle_remaining_pieces(
-        mut self,
-        pieces: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
-    ) -> Self {
-        self.queue = SetupQueueInput::fixed_sequence(FixedSequence::new(pieces));
-        self.search_mode = SetupSearchMode::QueueBased;
+    pub fn with_next_cycle_remaining_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
+        self.next_cycle_remaining_pieces = Some(pieces);
         self
     }
 
-    pub fn with_queue_based_pieces(
-        self,
-        pieces: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
-    ) -> Self {
-        self.with_next_cycle_remaining_pieces(pieces)
+    pub fn with_queue_based_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
+        self.queue = SetupQueueInput::fixed_sequence(FixedSequence::new(pieces));
+        self.search_mode = SetupSearchMode::QueueBased;
+        self
     }
 }
 
@@ -286,6 +349,7 @@ impl Default for SetupSearchQuery {
             length_preference: SetupLengthPreference::default(),
             max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
+            next_cycle_remaining_pieces: None,
             path_detail: None,
         }
     }
@@ -350,16 +414,76 @@ mod tests {
             &[PieceKind::T, PieceKind::O, PieceKind::T]
         );
         assert_eq!(query.residue().pieces(), PieceKind::STANDARD_TETROMINOES);
+        assert!(query.next_cycle_remaining_pieces().is_none());
+    }
+
+    #[test]
+    fn next_cycle_inventory_does_not_change_search_mode_or_observed_queue() {
+        let query = SetupSearchQuery::default()
+            .with_next_cycle_remaining_pieces(vec![PieceKind::O, PieceKind::S]);
+
+        assert_eq!(query.search_mode(), SetupSearchMode::ShapeOracle);
+        assert!(query.queue().as_fixed_sequence().is_none());
+        assert_eq!(
+            query.next_cycle_remaining_pieces(),
+            Some(&[PieceKind::O, PieceKind::S][..])
+        );
+    }
+
+    #[test]
+    fn observed_queue_and_next_cycle_inventory_can_coexist() {
+        let query = SetupSearchQuery::default()
+            .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
+            .with_next_cycle_remaining_pieces(vec![PieceKind::T]);
+
+        assert_eq!(query.search_mode(), SetupSearchMode::QueueBased);
+        assert_eq!(
+            query
+                .queue()
+                .as_fixed_sequence()
+                .expect("observed queue")
+                .pieces(),
+            &[PieceKind::O, PieceKind::S]
+        );
+        assert_eq!(
+            query.next_cycle_remaining_pieces(),
+            Some(&[PieceKind::T][..])
+        );
     }
 
     #[test]
     fn path_detail_can_be_removed_for_graph_cache_identity() {
-        let detail = SetupPathDetail::new(1, "hold-empty").expect("detail");
+        let detail = SetupPathDetail::new(1, 0, 1, "hold-empty").expect("detail");
         let base = SetupSearchQuery::default();
         let detailed = base.clone().with_path_detail(detail);
 
         assert_ne!(detailed, base);
         assert_eq!(detailed.without_path_detail(), base);
+    }
+
+    #[test]
+    fn setup_path_detail_round_trips_exact_partial_state_identity() {
+        let detail = SetupPathDetail::new(
+            0x0008_0719_e6,
+            0x0012,
+            0x0000_0000_0000_0042_1003_2007,
+            "hold-empty",
+        )
+        .expect("detail");
+        let setup_id = detail.setup_id();
+        let parsed =
+            SetupPathDetail::from_setup_id(&setup_id, "hold-empty").expect("parsed detail");
+
+        assert_eq!(parsed, detail);
+        assert_eq!(
+            setup_id,
+            "setup-00080719e6-0012-000000000000000000004210032007"
+        );
+    }
+
+    #[test]
+    fn setup_path_detail_rejects_identity_bits_outside_wire_format() {
+        assert!(SetupPathDetail::new(1, 0, 1_u128 << 120, "hold-empty").is_none());
     }
 
     #[test]

@@ -590,6 +590,10 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
             nested.number("cycle", setup.cycle);
             nested.string("remaining_pieces", &setup.remaining_pieces);
             nested.string("queue_based_pieces", &setup.queue_based_pieces);
+            nested.string(
+                "next_cycle_remaining_pieces",
+                &setup.next_cycle_remaining_pieces,
+            );
             nested.boolean("post_cycle_borrow_enabled", setup.post_cycle_borrow_enabled);
             nested.string("coverage_semantics", &setup.coverage_semantics);
             nested.string("geometry_family_count", &setup.geometry_family_count);

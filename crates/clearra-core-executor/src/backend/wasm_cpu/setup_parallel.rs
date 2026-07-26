@@ -21,8 +21,8 @@ use super::{
     setup_finder::{
         compare_setup_candidates, compile_setup_pattern_index, covered_word_weight,
         finish_setup_result, include_setup_depth_range, probability_string,
-        terminal_supply_target_word, CompletedSetupCoverage, SetupSupplyStateLayout,
-        SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
+        retain_best_setup_state_per_board, terminal_supply_target_word, CompletedSetupCoverage,
+        SetupSupplyStateLayout, SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
     },
     setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
     setup_parallel_segmented::{SegmentedArray, SegmentedGenerationArray},
@@ -113,11 +113,7 @@ impl WasmSetupParallelCoordinator {
                         .query
                         .path_detail()
                         .map(|detail| {
-                            enumerate_setup_completion_paths(
-                                &shared.graph,
-                                detail.board_mask(),
-                                control,
-                            )
+                            enumerate_setup_completion_paths(&shared.graph, detail, control)
                         })
                         .transpose()?
                         .unwrap_or_default();
@@ -255,6 +251,15 @@ impl WasmSetupParallelCoordinator {
                 .map(SetupSolutionPath::into_core_path)
                 .collect::<Vec<_>>(),
         );
+        let path_target_shape_index = shared
+            .query
+            .path_detail()
+            .map(|detail| {
+                shared.graph.shape_index_for_detail(detail).ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_path_detail_shape_not_found"),
+                )
+            })
+            .transpose()?;
         for (condition_index, merge) in condition_merges.into_iter().enumerate() {
             let condition = &shared.conditions[condition_index];
             peak_segment_pages = peak_segment_pages.max(merge.peak_segment_pages);
@@ -263,10 +268,7 @@ impl WasmSetupParallelCoordinator {
                 shared.query.limits().max_results(),
                 shared.query.candidate_priority(),
                 shared.query.length_preference(),
-                shared
-                    .query
-                    .path_detail()
-                    .map(clearra_problem::SetupPathDetail::board_mask),
+                path_target_shape_index,
             )?;
             let resolver = SetupRepresentativeResolver::new(
                 condition,
@@ -288,23 +290,23 @@ impl WasmSetupParallelCoordinator {
                 })
                 .collect::<Vec<_>>();
             let paths = resolver.paths(&targets)?;
-            let path_target_board = shared
-                .query
-                .path_detail()
-                .map(clearra_problem::SetupPathDetail::board_mask);
             let candidates = result
                 .selected_shapes
                 .into_iter()
                 .zip(paths)
                 .map(|(coverage, representative_path)| {
-                    let shape = &shared.graph.shapes[coverage.shape_index as usize];
+                    let shape_index = coverage.shape_index as usize;
+                    let shape = &shared.graph.shapes[shape_index];
                     let conditional = if coverage.build_weight == 0.0 {
                         0.0
                     } else {
                         coverage.joint_weight / coverage.build_weight
                     };
+                    let setup_id = shared.graph.setup_id_for_shape(shape_index).ok_or(
+                        WasmExactSearchError::InvalidProblem("setup_candidate_identity_missing"),
+                    )?;
                     let candidate = SetupCandidateReport::new(
-                        format!("setup-{:010x}", shape.board),
+                        setup_id,
                         shape.board,
                         coverage.min_covered_locks,
                         coverage.max_covered_locks,
@@ -315,13 +317,16 @@ impl WasmSetupParallelCoordinator {
                         probability_string(conditional),
                         representative_path,
                     );
-                    if path_target_board == Some(shape.board) {
-                        candidate.with_solution_paths(solution_paths.take().unwrap_or_default())
+                    if path_target_shape_index == Some(shape_index) {
+                        Ok(
+                            candidate
+                                .with_solution_paths(solution_paths.take().unwrap_or_default()),
+                        )
                     } else {
-                        candidate
+                        Ok(candidate)
                     }
                 })
-                .collect();
+                .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
             completed.push(CompletedSetupCoverage {
                 report: SetupHoldConditionReport::new(
                     condition.condition_id().to_owned(),
@@ -477,7 +482,7 @@ impl SetupConditionMerge {
         max_results: usize,
         candidate_priority: clearra_problem::SetupCandidatePriority,
         length_preference: clearra_problem::SetupLengthPreference,
-        path_target_board: Option<u64>,
+        path_target_shape_index: Option<usize>,
     ) -> Result<CompletedParallelCondition, WasmExactSearchError> {
         if self.received_tasks != self.expected_tasks {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -494,9 +499,9 @@ impl SetupConditionMerge {
                 .get(*shape_index)
                 .is_some_and(|coverage| coverage.joint_covered_patterns != 0)
         });
-        if let Some(target_board) = path_target_board {
+        if let Some(target_shape_index) = path_target_shape_index {
             self.covered_shapes
-                .retain(|shape_index| shapes[*shape_index].board == target_board);
+                .retain(|shape_index| *shape_index == target_shape_index);
         }
         if self.covered_shapes.iter().any(|shape_index| {
             self.accumulators.get(*shape_index).is_none_or(|coverage| {
@@ -528,6 +533,7 @@ impl SetupConditionMerge {
                 right_shape.board,
             )
         });
+        retain_best_setup_state_per_board(&mut self.covered_shapes, shapes)?;
         let candidate_count = self.covered_shapes.len();
         let mut candidate_boards = self
             .covered_shapes

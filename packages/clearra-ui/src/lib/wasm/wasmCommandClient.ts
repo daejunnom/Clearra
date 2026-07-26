@@ -196,6 +196,7 @@ export type ClearraSetupFinderReport = {
   cycle: number;
   remaining_pieces: string;
   queue_based_pieces: string;
+  next_cycle_remaining_pieces: string;
   post_cycle_borrow_enabled: boolean;
   coverage_semantics: 'oracle';
   geometry_family_count: string;

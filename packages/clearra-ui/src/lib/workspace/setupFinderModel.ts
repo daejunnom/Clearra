@@ -10,6 +10,7 @@ export type SetupFinderRequest = {
   rule: RuleProfile;
   remaining: string;
   qbQueue: string;
+  nextCycleRemaining: string;
   allowPostCycleBorrow: boolean;
   candidatePriority: SetupCandidatePriority;
   lengthPreference: SetupLengthPreference;
@@ -24,6 +25,10 @@ export type SetupFinderValidationCode =
   | 'setup_qb_count_invalid'
   | 'setup_qb_piece_invalid'
   | 'setup_qb_duplicate_invalid'
+  | 'setup_qb_combined_count_invalid'
+  | 'setup_next_cycle_count_invalid'
+  | 'setup_next_cycle_piece_invalid'
+  | 'setup_next_cycle_duplicate_invalid'
   | 'setup_max_pieces_invalid';
 
 export type SetupPathDetailRequest = {
@@ -46,6 +51,7 @@ export function createDefaultSetupFinderRequest(): SetupFinderRequest {
     rule: 'srs-plus',
     remaining: PIECES,
     qbQueue: '',
+    nextCycleRemaining: '',
     allowPostCycleBorrow: false,
     candidatePriority: 'all',
     lengthPreference: 'auto',
@@ -92,6 +98,7 @@ export function setupFinderValidationCodes(
 ): SetupFinderValidationCode[] {
   const normalized = normalizedSetupResidue(request.remaining);
   const normalizedQb = normalizedSetupResidue(request.qbQueue);
+  const normalizedNextCycle = normalizedSetupResidue(request.nextCycleRemaining);
   const codes: SetupFinderValidationCode[] = [];
   if ([...normalized].some((piece) => !PIECES.includes(piece))) {
     codes.push('setup_residue_piece_invalid');
@@ -107,18 +114,32 @@ export function setupFinderValidationCodes(
     codes.push('setup_cycle_borrow_invalid');
   }
   if (request.searchMode === 'qb') {
-    if (normalizedQb.length !== nextSetupCycleRemainingCount(normalized)) {
+    if (normalizedQb.length < 1) {
       codes.push('setup_qb_count_invalid');
     }
     if ([...normalizedQb].some((piece) => !PIECES.includes(piece))) {
       codes.push('setup_qb_piece_invalid');
     }
-    const qbCounts = [...PIECES].map(
-      (piece) => normalizedQb.split(piece).length - 1
-    );
-    if (qbCounts.some((count) => count > 2)
-      || qbCounts.filter((count) => count === 2).length > 1) {
+    if ([...new Set(normalizedQb)].length !== normalizedQb.length) {
       codes.push('setup_qb_duplicate_invalid');
+    }
+    if (normalized.length + normalizedQb.length > 7) {
+      codes.push('setup_qb_combined_count_invalid');
+    }
+  }
+  if (normalizedNextCycle.length > 0) {
+    if (normalizedNextCycle.length !== nextSetupCycleRemainingCount(normalized)) {
+      codes.push('setup_next_cycle_count_invalid');
+    }
+    if ([...normalizedNextCycle].some((piece) => !PIECES.includes(piece))) {
+      codes.push('setup_next_cycle_piece_invalid');
+    }
+    const nextCycleCounts = [...PIECES].map(
+      (piece) => normalizedNextCycle.split(piece).length - 1
+    );
+    if (nextCycleCounts.some((count) => count > 2)
+      || nextCycleCounts.filter((count) => count === 2).length > 1) {
+      codes.push('setup_next_cycle_duplicate_invalid');
     }
   }
   if (!Number.isInteger(request.maxSetupPieces)
@@ -136,6 +157,9 @@ export function buildSetupFinderCommand(request: SetupFinderRequest): string {
     `--remaining ${remaining}`,
     request.searchMode === 'qb'
       ? `--mode qb --qb ${normalizedSetupResidue(request.qbQueue)}`
+      : '',
+    normalizedSetupResidue(request.nextCycleRemaining)
+      ? `--next-cycle-remaining ${normalizedSetupResidue(request.nextCycleRemaining)}`
       : '',
     `--rule ${request.rule}`,
     request.candidatePriority === 'all' ? '' : `--priority ${request.candidatePriority}`,

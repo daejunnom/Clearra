@@ -81,6 +81,7 @@ fn parse_setup_command(
     let mut max_setup_pieces = 9_u8;
     let mut explicit_search_mode = None;
     let mut queue_based = None;
+    let mut next_cycle_remaining = None;
     let mut rule = srs_plus();
     let mut path_detail_setup_id = None;
     let mut path_detail_condition_id = None;
@@ -99,6 +100,10 @@ fn parse_setup_command(
             }
             "--qb" => {
                 queue_based = Some(next_value(tokens, &mut cursor, "--qb")?.to_owned());
+            }
+            "--next-cycle-remaining" => {
+                next_cycle_remaining =
+                    Some(next_value(tokens, &mut cursor, "--next-cycle-remaining")?.to_owned());
             }
             "--mode" => {
                 let value = next_value(tokens, &mut cursor, "--mode")?;
@@ -198,6 +203,17 @@ fn parse_setup_command(
                 .map_err(|error| {
                     WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
+                        format!("invalid observed QB pieces: {error:?}"),
+                    )
+                })
+        })
+        .transpose()?;
+    let next_cycle_remaining_pieces = next_cycle_remaining
+        .map(|value| {
+            clearra_supply::queue::queue_parser::parse_piece_sequence(&value.to_ascii_uppercase())
+                .map_err(|error| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
                         format!("invalid next-cycle remaining pieces: {error:?}"),
                     )
                 })
@@ -240,16 +256,18 @@ fn parse_setup_command(
     if let Some(pieces) = queue_based_pieces {
         request = request.with_setup_queue_based_pieces(pieces);
     }
+    if let Some(pieces) = next_cycle_remaining_pieces {
+        request = request.with_setup_next_cycle_remaining_pieces(pieces);
+    }
     match (path_detail_setup_id, path_detail_condition_id) {
         (Some(setup_id), Some(condition_id)) => {
-            let board_mask = parse_setup_detail_id(&setup_id)?;
-            let detail = clearra_problem::SetupPathDetail::new(board_mask, condition_id)
+            let detail = clearra_problem::SetupPathDetail::from_setup_id(&setup_id, condition_id)
                 .ok_or_else(|| {
-                    WebCommandError::new(
-                        WebCommandErrorCode::InvalidValue,
-                        "invalid setup path detail request",
-                    )
-                })?;
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "invalid setup path detail request",
+                )
+            })?;
             request = request.with_setup_path_detail(detail);
         }
         (Some(_), None) => {
@@ -270,24 +288,6 @@ fn parse_setup_command(
         request = request.with_workers(workers);
     }
     Ok(request)
-}
-
-fn parse_setup_detail_id(value: &str) -> Result<u64, WebCommandError> {
-    let digits = value.strip_prefix("setup-").ok_or_else(|| {
-        WebCommandError::new(
-            WebCommandErrorCode::InvalidValue,
-            "setup path detail id must start with 'setup-'",
-        )
-    })?;
-    u64::from_str_radix(digits, 16)
-        .ok()
-        .filter(|mask| *mask != 0 && *mask >> 40 == 0)
-        .ok_or_else(|| {
-            WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                "setup path detail id must contain a nonzero 10x4 board mask",
-            )
-        })
 }
 
 fn parse_forward_command(
