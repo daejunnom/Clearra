@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.2.4 - 2026-07-27
+
+- Restored Queue-Based Setup Finder semantics so observed next-bag pieces are
+  available to a setup without becoming mandatory locks or an exact terminal
+  inventory.
+- Added an independent next-cycle remaining-inventory constraint that can be
+  combined with either shape-oracle or queue-based setup search without
+  renormalizing the original pattern universe.
+- Corrected setup Build, Joint, and Conditional probability aggregation by
+  keeping same-board states with different concrete tilings, deleted rows, or
+  placement depths independent through exact coverage evaluation.
+- Added opaque exact-state setup identities so on-demand PC completion paths
+  continue from the same fixed tiling measured by the selected setup card.
+- Updated CLI, browser WASM, multi-worker transport, validation, documentation,
+  and English/Korean GUI contracts for the corrected setup model.
+
 ## 0.2.3 - 2026-07-26
 
 - Corrected Queue-Based Setup Finder semantics so the requested next-cycle
