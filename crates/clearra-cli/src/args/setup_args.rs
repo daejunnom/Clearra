@@ -7,7 +7,10 @@ pub struct SetupArgs {
     allow_post_cycle_borrow: bool,
     candidate_priority: SetupCandidatePriority,
     length_preference: SetupLengthPreference,
+    max_setup_pieces: u8,
     search_mode: SetupSearchMode,
+    rule: Option<String>,
+    initial_hold: Option<String>,
     path_detail_setup_id: Option<String>,
     path_detail_condition_id: Option<String>,
 }
@@ -20,7 +23,10 @@ impl SetupArgs {
             allow_post_cycle_borrow,
             candidate_priority: SetupCandidatePriority::default(),
             length_preference: SetupLengthPreference::default(),
+            max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
+            rule: None,
+            initial_hold: None,
             path_detail_setup_id: None,
             path_detail_condition_id: None,
         }
@@ -44,12 +50,24 @@ impl SetupArgs {
         self.length_preference
     }
 
+    pub fn max_setup_pieces(&self) -> u8 {
+        self.max_setup_pieces
+    }
+
     pub fn search_mode(&self) -> SetupSearchMode {
         self.search_mode
     }
 
+    pub fn rule(&self) -> Option<&str> {
+        self.rule.as_deref()
+    }
+
     pub fn queue_based_pieces(&self) -> Option<&str> {
         self.queue_based_pieces.as_deref()
+    }
+
+    pub fn initial_hold(&self) -> Option<&str> {
+        self.initial_hold.as_deref()
     }
 
     pub fn path_detail_setup_id(&self) -> Option<&str> {
@@ -70,14 +88,29 @@ impl SetupArgs {
         self
     }
 
+    pub fn with_max_setup_pieces(mut self, max_setup_pieces: u8) -> Self {
+        self.max_setup_pieces = max_setup_pieces;
+        self
+    }
+
     pub fn with_search_mode(mut self, mode: SetupSearchMode) -> Self {
         self.search_mode = mode;
+        self
+    }
+
+    pub fn with_rule(mut self, rule: impl Into<String>) -> Self {
+        self.rule = Some(rule.into());
         self
     }
 
     pub fn with_queue_based_pieces(mut self, pieces: impl Into<String>) -> Self {
         self.queue_based_pieces = Some(pieces.into());
         self.search_mode = SetupSearchMode::QueueBased;
+        self
+    }
+
+    pub fn with_initial_hold(mut self, initial_hold: impl Into<String>) -> Self {
+        self.initial_hold = Some(initial_hold.into());
         self
     }
 

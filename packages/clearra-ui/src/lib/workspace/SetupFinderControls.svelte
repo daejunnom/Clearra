@@ -5,7 +5,7 @@
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import {
-    explicitSetupHold,
+    nextSetupCycleRemainingCount,
     setupCycle,
     type SetupCandidatePriority,
     type SetupFinderRequest,
@@ -13,6 +13,7 @@
     type SetupLengthPreference,
     type SetupSearchMode
   } from './setupFinderModel';
+  import type { RuleProfile } from './solverWorkspaceModel';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -26,7 +27,7 @@
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
   $: cycle = setupCycle(request.remaining);
-  $: explicitHold = explicitSetupHold(request.remaining);
+  $: nextRemainingCount = nextSetupCycleRemainingCount(request.remaining);
 
   function update(change: Partial<SetupFinderRequest>) {
     dispatch('change', { ...request, ...change });
@@ -71,12 +72,12 @@
     </label>
     {#if request.searchMode === 'qb'}
       <label class="workspace-field wide">
-        <span>{label('setupObservedQueue')}</span>
+        <span>{label('setupNextCycleRemaining')}</span>
         <QueueTextInput
           class="workspace-queue-input"
           value={request.qbQueue}
           maxlength="7"
-          placeholder="OS"
+          placeholder="OOSITZ"
           spellcheck="false"
           aria-invalid={validationCodes.length > 0}
           on:value={(event) => update({ qbQueue: event.detail })}
@@ -88,11 +89,9 @@
 
     <div class="residue-facts">
       <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
-      <span>{label('initialHold')}</span>
-      <strong>{explicitHold ?? label('holdConditionsSeparated')}</strong>
       {#if request.searchMode === 'qb'}
-        <span>{label('setupObservedPieces')}</span>
-        <strong>{request.qbQueue.replace(/[\s,]/g, '').length}</strong>
+        <span>{label('setupNextCycleRemainingCount')}</span>
+        <strong>{request.qbQueue.replace(/[\s,]/g, '').length}/{nextRemainingCount ?? '—'}</strong>
       {/if}
     </div>
   </section>
@@ -104,8 +103,22 @@
     <div class="workspace-contract-band">
       <ShieldCheck size={15} strokeWidth={1.8} />
       <span>{label('pcTarget')}</span>
-      <b>10×4 · SRS+</b>
+      <b>10×4</b>
     </div>
+    <label class="workspace-field wide priority-field">
+      <span>{label('rule')}</span>
+      <select
+        value={request.rule}
+        on:change={(event) => update({
+          rule: (event.currentTarget as HTMLSelectElement).value as RuleProfile
+        })}
+      >
+        <option value="srs-plus">SRS+</option>
+        <option value="srs">SRS</option>
+        <option value="srs-x">SRS-X</option>
+        <option value="jstris-180">Jstris 180</option>
+      </select>
+    </label>
     <label class="workspace-field wide priority-field">
       <span>{label('setupCandidatePriority')}</span>
       <select
@@ -133,6 +146,20 @@
         <option value="shorter">{label('setupLengthShorter')}</option>
       </select>
       <small class="workspace-field-help">{label('setupLengthHelp')}</small>
+    </label>
+    <label class="workspace-field wide priority-field">
+      <span>{label('setupMaxPieces')}</span>
+      <input
+        type="number"
+        min="1"
+        max="10"
+        step="1"
+        value={request.maxSetupPieces}
+        on:input={(event) => update({
+          maxSetupPieces: Number((event.currentTarget as HTMLInputElement).value)
+        })}
+      />
+      <small class="workspace-field-help">{label('setupMaxPiecesHelp')}</small>
     </label>
     {#if cycle === 7}
       <div class="workspace-switch-row">

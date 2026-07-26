@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use clearra_problem::{SetupCandidatePriority, SetupLengthPreference, SetupSearchCondition};
+use clearra_problem::{
+    SetupCandidatePriority, SetupLengthPreference, SetupSearchCondition, SetupTerminalSupplyTarget,
+};
 use clearra_supply::pattern_universe::PatternPiecePositionIndex;
 
 use crate::CorePathStep;
@@ -8,8 +10,8 @@ use crate::CorePathStep;
 use super::{
     piece_index,
     setup_finder::{
-        prefers_setup_representative_depth, setup_supply_transitions, SetupHoldAction,
-        SetupSupplyStateLayout,
+        compile_setup_pattern_index, prefers_setup_representative_depth, setup_supply_transitions,
+        terminal_supply_target_word, SetupHoldAction, SetupSupplyStateLayout,
     },
     setup_partial_build::{PartialBuildEdge, PartialBuildGraph, PartialBuildNode},
     WasmExactSearchError,
@@ -159,9 +161,11 @@ pub(super) struct SetupRepresentativeResolver<'a> {
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
     initial_cursor: u16,
+    terminal_supply_target: Option<SetupTerminalSupplyTarget>,
     state_layout: SetupSupplyStateLayout,
     candidate_priority: SetupCandidatePriority,
     length_preference: SetupLengthPreference,
+    max_setup_pieces: u8,
 }
 
 impl<'a> SetupRepresentativeResolver<'a> {
@@ -170,14 +174,10 @@ impl<'a> SetupRepresentativeResolver<'a> {
         graph: &'a PartialBuildGraph,
         candidate_priority: SetupCandidatePriority,
         length_preference: SetupLengthPreference,
+        max_setup_pieces: u8,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
-        let universe = problem.piece_source().materialized_universe().ok_or(
-            WasmExactSearchError::InvalidProblem("setup_pattern_universe_not_materialized"),
-        )?;
-        let pattern_index = PatternPiecePositionIndex::compile(universe).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_pattern_index_compile_failed")
-        })?;
+        let pattern_index = compile_setup_pattern_index(condition)?;
         Ok(Self {
             graph,
             pattern_index,
@@ -186,12 +186,11 @@ impl<'a> SetupRepresentativeResolver<'a> {
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
             projects_standard_bag_lookahead: problem.supply().projects_standard_bag_lookahead(),
             initial_cursor: problem.initial_hold().cursor(),
-            state_layout: SetupSupplyStateLayout::new(
-                condition.queue_based_queue_start(),
-                condition.queue_based_queue_len(),
-            ),
+            terminal_supply_target: condition.terminal_supply_target(),
+            state_layout: SetupSupplyStateLayout::new(),
             candidate_priority,
             length_preference,
+            max_setup_pieces,
         })
     }
 
@@ -235,7 +234,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
             .map_or(0, |piece| piece_index(piece) as u8 + 1);
         let root = self
             .state_layout
-            .encode(self.graph.root as usize, 0, hold_code, false);
+            .encode(self.graph.root as usize, 0, hold_code);
         if self.pattern_index.active_word(word_index) & pattern_bit == 0 {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_witness_pattern_is_not_active",
@@ -249,7 +248,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 let record_index = scratch.depth_records[depth][cursor];
                 cursor += 1;
                 let state_index = scratch.records[record_index as usize].state as usize;
-                let (node_index, extra_draw, state_hold_code, hold_from_qb) =
+                let (node_index, extra_draw, state_hold_code) =
                     self.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() || !node.live() {
@@ -264,12 +263,11 @@ impl<'a> SetupRepresentativeResolver<'a> {
                         edge,
                         extra_draw,
                         state_hold_code,
-                        hold_from_qb,
                         pattern_bit,
                         word_index,
                     );
                     for transition in transitions.iter() {
-                        let (target_node, _, _, _) = self.state_layout.decode(transition.target);
+                        let (target_node, _, _) = self.state_layout.decode(transition.target);
                         scratch.activate(
                             transition.target,
                             self.graph.nodes[target_node].depth,
@@ -287,14 +285,28 @@ impl<'a> SetupRepresentativeResolver<'a> {
         }
 
         for record in &mut scratch.records {
-            let (node_index, _, _, _) = self.state_layout.decode(record.state as usize);
-            record.can_complete = self.graph.nodes[node_index].accepting();
+            let (node_index, extra_draw, hold_code) =
+                self.state_layout.decode(record.state as usize);
+            let node = self.graph.nodes[node_index];
+            record.can_complete = node.accepting()
+                && self.terminal_supply_target.is_none_or(|target| {
+                    terminal_supply_target_word(
+                        &self.pattern_index,
+                        target,
+                        self.initial_cursor,
+                        node.depth,
+                        extra_draw,
+                        hold_code,
+                        word_index,
+                        pattern_bit,
+                    ) != 0
+                });
         }
         for depth in (0..scratch.depth_records.len()).rev() {
             for cursor in 0..scratch.depth_records[depth].len() {
                 let record_index = scratch.depth_records[depth][cursor];
                 let record = scratch.records[record_index as usize];
-                let (node_index, extra_draw, state_hold_code, hold_from_qb) =
+                let (node_index, extra_draw, state_hold_code) =
                     self.state_layout.decode(record.state as usize);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() || !node.live() {
@@ -310,7 +322,6 @@ impl<'a> SetupRepresentativeResolver<'a> {
                         edge,
                         extra_draw,
                         state_hold_code,
-                        hold_from_qb,
                         pattern_bit,
                         word_index,
                     );
@@ -338,16 +349,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
             if !record.can_complete {
                 continue;
             }
-            let (node_index, extra_draw, _, hold_from_qb) =
-                self.state_layout.decode(record.state as usize);
-            if !self.state_layout.accepts_setup_candidate(
-                self.initial_cursor,
-                self.graph.nodes[node_index].depth,
-                extra_draw,
-                hold_from_qb,
-            ) {
-                continue;
-            }
+            let (node_index, _, _) = self.state_layout.decode(record.state as usize);
             let Some(shape_index) = self.graph.nodes[node_index].shape_index() else {
                 continue;
             };
@@ -355,6 +357,9 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 continue;
             }
             let candidate_depth = self.graph.nodes[node_index].depth;
+            if candidate_depth > self.max_setup_pieces {
+                continue;
+            }
             let should_replace =
                 selected_records
                     .get(&shape_index)
@@ -389,7 +394,6 @@ impl<'a> SetupRepresentativeResolver<'a> {
         edge: PartialBuildEdge,
         extra_draw: u8,
         hold_code: u8,
-        hold_from_qb: bool,
         active: u64,
         word_index: usize,
     ) -> CoverageTransitionSet {
@@ -411,19 +415,11 @@ impl<'a> SetupRepresentativeResolver<'a> {
             target_node.accepting(),
         );
         for transition in supply_transitions.iter() {
-            let next_hold_from_qb = self.state_layout.next_hold_provenance(
-                self.initial_cursor,
-                node.depth,
-                extra_draw,
-                hold_from_qb,
-                transition.hold_action,
-            );
             transitions.push(
                 self.state_layout.encode(
                     edge.to as usize,
                     transition.extra_draw,
                     transition.hold_code,
-                    next_hold_from_qb,
                 ),
                 transition.mask,
                 transition.hold_action,

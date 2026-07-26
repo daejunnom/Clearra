@@ -65,7 +65,7 @@ fn wasm_command_compiles_to_app_request() {
 #[test]
 fn wasm_setup_command_preserves_the_exact_residue_contract() {
     let request = WasmCommandRuntime::default()
-        .compile_command_text("clearra setup --remaining SIOS")
+        .compile_command_text("clearra setup --remaining IOTS")
         .expect("setup AppRequest");
 
     let AppCommand::Setup(command) = request.command() else {
@@ -73,9 +73,10 @@ fn wasm_setup_command_preserves_the_exact_residue_contract() {
     };
     assert_eq!(command.query().residue().remaining_count(), 4);
     assert_eq!(command.query().residue().cycle(), Some(2));
+    assert_eq!(command.query().residue().duplicate_piece(), None);
     assert_eq!(
-        command.query().residue().duplicate_piece(),
-        Some(clearra_core_domain::piece::piece_kind::PieceKind::S)
+        command.query().hold_policy(),
+        clearra_problem::SetupHoldPolicy::EnabledEmpty
     );
 
     let cycle_boundary = WasmCommandRuntime::default()
@@ -92,9 +93,9 @@ fn wasm_setup_command_preserves_the_exact_residue_contract() {
 }
 
 #[test]
-fn wasm_setup_command_separates_residue_and_observed_queue_based_pieces() {
+fn wasm_setup_command_separates_residue_and_next_cycle_inventory() {
     let request = WasmCommandRuntime::default()
-        .compile_command_text("clearra setup --remaining TI --mode qb --qb OS")
+        .compile_command_text("clearra setup --remaining TI --mode qb --qb OOSITZ")
         .expect("QB setup AppRequest");
 
     let AppCommand::Setup(command) = request.command() else {
@@ -120,7 +121,11 @@ fn wasm_setup_command_separates_residue_and_observed_queue_based_pieces() {
             .pieces(),
         &[
             clearra_core_domain::piece::piece_kind::PieceKind::O,
+            clearra_core_domain::piece::piece_kind::PieceKind::O,
             clearra_core_domain::piece::piece_kind::PieceKind::S,
+            clearra_core_domain::piece::piece_kind::PieceKind::I,
+            clearra_core_domain::piece::piece_kind::PieceKind::T,
+            clearra_core_domain::piece::piece_kind::PieceKind::Z,
         ]
     );
 }

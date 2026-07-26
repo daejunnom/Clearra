@@ -12,6 +12,7 @@ pub use super::{
 };
 
 use clearra_core_domain::{board::board_size::BoardSize, pc::pc_target::PcTarget};
+use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,7 +24,7 @@ pub struct SetupPathDetail {
 impl SetupPathDetail {
     pub fn new(board_mask: u64, condition_id: impl Into<String>) -> Option<Self> {
         let condition_id = condition_id.into();
-        (board_mask != 0 && board_mask >> 40 == 0 && !condition_id.is_empty()).then_some(Self {
+        (board_mask >> 40 == 0 && !condition_id.is_empty()).then_some(Self {
             board_mask,
             condition_id,
         })
@@ -42,6 +43,7 @@ impl SetupPathDetail {
 pub struct SetupSearchQuery {
     board_size: BoardSize,
     target: PcTarget,
+    rule: RuleProfile,
     queue: SetupQueueInput,
     hold_policy: SetupHoldPolicy,
     piece_budget: PieceBudget,
@@ -52,6 +54,7 @@ pub struct SetupSearchQuery {
     cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy,
     candidate_priority: SetupCandidatePriority,
     length_preference: SetupLengthPreference,
+    max_setup_pieces: u8,
     search_mode: SetupSearchMode,
     path_detail: Option<SetupPathDetail>,
 }
@@ -71,6 +74,7 @@ impl SetupSearchQuery {
         Self {
             board_size,
             target,
+            rule: srs_plus(),
             queue,
             hold_policy,
             piece_budget,
@@ -81,6 +85,7 @@ impl SetupSearchQuery {
             cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
             candidate_priority: SetupCandidatePriority::default(),
             length_preference: SetupLengthPreference::default(),
+            max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
             path_detail: None,
         }
@@ -94,6 +99,11 @@ impl SetupSearchQuery {
 impl SetupSearchQuery {
     pub fn target(&self) -> PcTarget {
         self.target
+    }
+}
+impl SetupSearchQuery {
+    pub fn rule(&self) -> RuleProfile {
+        self.rule
     }
 }
 impl SetupSearchQuery {
@@ -143,12 +153,22 @@ impl SetupSearchQuery {
         self.length_preference
     }
 
+    pub fn max_setup_pieces(&self) -> u8 {
+        self.max_setup_pieces
+    }
+
     pub fn search_mode(&self) -> SetupSearchMode {
         self.search_mode
     }
 
     pub fn path_detail(&self) -> Option<&SetupPathDetail> {
         self.path_detail.as_ref()
+    }
+}
+impl SetupSearchQuery {
+    pub fn with_rule(mut self, rule: RuleProfile) -> Self {
+        self.rule = rule;
+        self
     }
 }
 impl SetupSearchQuery {
@@ -211,6 +231,11 @@ impl SetupSearchQuery {
         self
     }
 
+    pub fn with_max_setup_pieces(mut self, max_setup_pieces: u8) -> Self {
+        self.max_setup_pieces = max_setup_pieces;
+        self
+    }
+
     pub fn with_search_mode(mut self, mode: SetupSearchMode) -> Self {
         self.search_mode = mode;
         self
@@ -221,13 +246,25 @@ impl SetupSearchQuery {
         self
     }
 
-    pub fn with_queue_based_pieces(
+    pub fn without_path_detail(mut self) -> Self {
+        self.path_detail = None;
+        self
+    }
+
+    pub fn with_next_cycle_remaining_pieces(
         mut self,
         pieces: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
     ) -> Self {
         self.queue = SetupQueueInput::fixed_sequence(FixedSequence::new(pieces));
         self.search_mode = SetupSearchMode::QueueBased;
         self
+    }
+
+    pub fn with_queue_based_pieces(
+        self,
+        pieces: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+    ) -> Self {
+        self.with_next_cycle_remaining_pieces(pieces)
     }
 }
 
@@ -236,6 +273,7 @@ impl Default for SetupSearchQuery {
         Self {
             board_size: BoardSize::new(10, 4).expect("fixed setup finder board"),
             target: PcTarget::four_lines(),
+            rule: srs_plus(),
             queue: SetupQueueInput::default(),
             hold_policy: SetupHoldPolicy::default(),
             piece_budget: PieceBudget::default(),
@@ -246,6 +284,7 @@ impl Default for SetupSearchQuery {
             cycle_reset_borrow_policy: SetupCycleResetBorrowPolicy::default(),
             candidate_priority: SetupCandidatePriority::default(),
             length_preference: SetupLengthPreference::default(),
+            max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
             path_detail: None,
         }
@@ -279,6 +318,7 @@ mod tests {
             .with_limits(SetupLimits::new(1, 2, 3, 4, 5, 6).expect("limits"));
 
         assert_eq!(query.target(), PcTarget::four_lines());
+        assert_eq!(query.rule().id().as_str(), "srs-plus");
         assert!(query.queue().fixed_queue().is_some());
         assert_eq!(query.hold_policy().initial_piece(), Some(PieceKind::T));
         assert_eq!(query.probability_filter(), filter);
@@ -310,5 +350,23 @@ mod tests {
             &[PieceKind::T, PieceKind::O, PieceKind::T]
         );
         assert_eq!(query.residue().pieces(), PieceKind::STANDARD_TETROMINOES);
+    }
+
+    #[test]
+    fn path_detail_can_be_removed_for_graph_cache_identity() {
+        let detail = SetupPathDetail::new(1, "hold-empty").expect("detail");
+        let base = SetupSearchQuery::default();
+        let detailed = base.clone().with_path_detail(detail);
+
+        assert_ne!(detailed, base);
+        assert_eq!(detailed.without_path_detail(), base);
+    }
+
+    #[test]
+    fn setup_piece_limit_defaults_to_nine_and_can_include_the_full_pc() {
+        let query = SetupSearchQuery::default();
+
+        assert_eq!(query.max_setup_pieces(), 9);
+        assert_eq!(query.with_max_setup_pieces(10).max_setup_pieces(), 10);
     }
 }

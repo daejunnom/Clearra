@@ -87,6 +87,32 @@ fn verified_kick_table_profile_accepts_complete_profile_contract() {
 }
 
 #[test]
+fn verified_kick_table_profile_accepts_jstris_without_o_rotation_transitions() {
+    let profile = crate::kicks::SrsKicks::jstris_180_profile();
+    let verified =
+        VerifiedKickTableProfile::try_new(profile.clone()).expect("complete Jstris profile");
+
+    assert_eq!(verified.profile(), &profile);
+    assert_eq!(verified.profile().transition_count(), 72);
+    assert_eq!(verified.report().missing_transition_count(), 0);
+}
+
+#[test]
+fn imported_jstris_profile_uses_the_same_non_o_transition_domain() {
+    let profile = crate::kicks::SrsKicks::jstris_180_profile();
+    let imported = KickTableProfile::new(
+        KickTableProfileId::Imported,
+        RuleProfileId::Jstris180,
+        profile.entries().to_vec(),
+    );
+
+    let verified =
+        VerifiedKickTableProfile::try_new(imported).expect("verified imported Jstris profile");
+
+    assert_eq!(verified.report().issue_count(), 0);
+}
+
+#[test]
 fn verified_kick_table_profile_rejects_incomplete_or_duplicate_imports() {
     let transition = KickTransition::new(PieceKind::T, RotationState::Zero, RotationState::Right);
     let profile = KickTableProfile::new(

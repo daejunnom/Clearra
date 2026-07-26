@@ -1,4 +1,6 @@
-use crate::profile::builtin_rules::{ars, asc, custom_rule, no_kick, srs, srs_plus, srs_x};
+use crate::profile::builtin_rules::{
+    ars, asc, custom_rule, jstris_180, no_kick, srs, srs_plus, srs_x,
+};
 
 use super::*;
 
@@ -11,6 +13,17 @@ fn srs_plus_builtin_profile_supports_exact_180() {
     assert!(capability.supports_exact_180());
     assert!(capability.search_backend_supported());
     assert!(!capability.srs_plus_extensions_disabled());
+}
+
+#[test]
+fn jstris_builtin_profile_supports_exact_two_kick_180() {
+    let capability = RuleCapability::from_rule(jstris_180());
+
+    assert_eq!(capability.kick_model(), RuleKickModel::Jstris180);
+    assert!(capability.supports_180());
+    assert!(capability.supports_exact_180());
+    assert!(capability.search_backend_supported());
+    assert!(capability.unsupported_reason().is_none());
 }
 
 #[test]

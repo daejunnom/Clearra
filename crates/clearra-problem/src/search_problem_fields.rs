@@ -101,6 +101,7 @@ mod kick_profile {
                 RuleProfileId::Srs => KickTableProfileId::Srs90,
                 RuleProfileId::SrsPlus => KickTableProfileId::SrsPlus,
                 RuleProfileId::SrsX => KickTableProfileId::SrsX,
+                RuleProfileId::Jstris180 => KickTableProfileId::Jstris180,
                 RuleProfileId::Asc => KickTableProfileId::Asc,
                 RuleProfileId::Ars => KickTableProfileId::Ars,
                 RuleProfileId::NoKick => KickTableProfileId::NoKick,

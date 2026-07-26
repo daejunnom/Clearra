@@ -4,7 +4,6 @@
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let language: WorkspaceLanguage;
-  export let explainInitialHold = false;
   export let mode: 'pattern' | 'setup' | 'setup-qb' = 'pattern';
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -17,12 +16,11 @@
   </summary>
   <dl>
     {#if mode === 'setup-qb'}
-      <div><dt>TI + OS</dt><dd>{label('setupQbQueueLetters')}</dd></div>
-      <div class="wide"><dt>[TI]![OS]!</dt><dd>{label('setupQbAllPieces')}</dd></div>
-      <div class="wide"><dt>≤ 7</dt><dd>{label('setupQbSevenLimit')}</dd></div>
+      <div><dt>TI → OOSITZ</dt><dd>{label('setupQbQueueLetters')}</dd></div>
+      <div class="wide"><dt>hold + bag</dt><dd>{label('setupQbAllPieces')}</dd></div>
+      <div class="wide"><dt>4,1,5,2,6,3,7</dt><dd>{label('setupQbSevenLimit')}</dd></div>
     {:else if mode === 'setup'}
       <div><dt>IOTS</dt><dd>{label('setupQueueLetters')}</dd></div>
-      <div><dt>SIOS</dt><dd>{label('setupQueueInitialHold')}</dd></div>
       <div class="wide"><dt>7,4,1,5,2,6,3</dt><dd>{label('setupQueueCycle')}</dd></div>
       <div class="wide"><dt>P7 / [...] / !</dt><dd>{label('setupQueueNoPattern')}</dd></div>
     {:else}
@@ -30,9 +28,6 @@
       <div><dt>PN / P7P3</dt><dd>{label('queuePatternP4')}</dd></div>
       <div><dt>[OISZ] / [^TIZ]</dt><dd>{label('queuePatternChoice')}</dd></div>
       <div><dt>[...]N / [...]!</dt><dd>{label('queuePatternSuffix')}</dd></div>
-      {#if explainInitialHold}
-        <div class="wide"><dt>{label('holdPiece')}</dt><dd>{label('initialHoldHelp')}</dd></div>
-      {/if}
       <div class="wide reference">
         <dt>{label('queuePatternReferenceLabel')}</dt>
         <dd>

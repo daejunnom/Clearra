@@ -3,6 +3,7 @@ pub enum RuleProfileId {
     SrsPlus,
     Srs,
     SrsX,
+    Jstris180,
     Asc,
     Ars,
     NoKick,
@@ -15,6 +16,7 @@ impl RuleProfileId {
             Self::SrsPlus => "srs-plus",
             Self::Srs => "srs",
             Self::SrsX => "srs-x",
+            Self::Jstris180 => "jstris-180",
             Self::Asc => "asc",
             Self::Ars => "ars",
             Self::NoKick => "no-kick",
@@ -28,6 +30,7 @@ impl RuleProfileId {
             "srs-plus" => Some(Self::SrsPlus),
             "srs" => Some(Self::Srs),
             "srs-x" => Some(Self::SrsX),
+            "jstris-180" | "jstris" => Some(Self::Jstris180),
             "asc" => Some(Self::Asc),
             "ars" => Some(Self::Ars),
             "no-kick" | "nokick" => Some(Self::NoKick),
@@ -59,6 +62,7 @@ impl RuleProfile {
             RuleProfileId::SrsPlus
                 | RuleProfileId::Srs
                 | RuleProfileId::SrsX
+                | RuleProfileId::Jstris180
                 | RuleProfileId::Asc
                 | RuleProfileId::Ars
                 | RuleProfileId::NoKick
@@ -75,10 +79,19 @@ mod tests {
         assert_eq!(RuleProfileId::SrsPlus.as_str(), "srs-plus");
         assert_eq!(RuleProfileId::Srs.as_str(), "srs");
         assert_eq!(RuleProfileId::SrsX.as_str(), "srs-x");
+        assert_eq!(RuleProfileId::Jstris180.as_str(), "jstris-180");
         assert_eq!(RuleProfileId::Asc.as_str(), "asc");
         assert_eq!(RuleProfileId::Ars.as_str(), "ars");
         assert_eq!(RuleProfileId::NoKick.as_str(), "no-kick");
         assert_eq!(RuleProfileId::Custom.as_str(), "custom");
         assert_eq!(RuleProfileId::parse("srs-x"), Some(RuleProfileId::SrsX));
+        assert_eq!(
+            RuleProfileId::parse("jstris-180"),
+            Some(RuleProfileId::Jstris180)
+        );
+        assert_eq!(
+            RuleProfileId::parse("jstris"),
+            Some(RuleProfileId::Jstris180)
+        );
     }
 }

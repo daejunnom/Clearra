@@ -150,6 +150,29 @@ impl SetupHoldConditionReport {
     pub fn candidates(&self) -> &[SetupCandidateReport] {
         &self.candidates
     }
+
+    pub(crate) fn path_detail(
+        &self,
+        setup_id: &str,
+        solution_paths: Vec<Vec<CorePathStep>>,
+    ) -> Option<Self> {
+        let candidate = self
+            .candidates
+            .iter()
+            .find(|candidate| candidate.setup_id() == setup_id)?
+            .clone()
+            .with_solution_paths(solution_paths);
+        Some(Self::new(
+            self.condition_id.clone(),
+            self.initial_hold,
+            self.pattern_expression.clone(),
+            self.pattern_count,
+            1,
+            false,
+            self.complete,
+            vec![candidate],
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

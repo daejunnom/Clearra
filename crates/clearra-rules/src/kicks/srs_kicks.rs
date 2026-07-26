@@ -7,7 +7,7 @@ use super::kick_table::{
     KickTableProfileId, KickTransition,
 };
 use super::srs_offsets::{
-    jlstz_offsets, srs_i_offsets, srs_plus_i_180_offsets, srs_plus_i_offsets,
+    jlstz_offsets, jstris_180_offsets, srs_i_offsets, srs_plus_i_180_offsets, srs_plus_i_offsets,
     srs_plus_jlstz_180_offsets, srs_x_i_180_offsets,
 };
 
@@ -68,6 +68,15 @@ impl SrsKicks {
             KickTableProfileId::SrsX,
             RuleProfileId::SrsX,
             srs_x_profile_entries(),
+        )
+    }
+}
+impl SrsKicks {
+    pub fn jstris_180_profile() -> KickTableProfile {
+        KickTableProfile::new(
+            KickTableProfileId::Jstris180,
+            RuleProfileId::Jstris180,
+            jstris_180_profile_entries(),
         )
     }
 }
@@ -145,6 +154,28 @@ fn srs_x_profile_entries() -> Vec<KickTableEntry> {
             }),
     );
     entries
+}
+
+fn jstris_180_profile_entries() -> Vec<KickTableEntry> {
+    PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .filter(|piece| *piece != PieceKind::O)
+        .flat_map(|piece| {
+            let quarter_turns = eight_direction_transitions()
+                .into_iter()
+                .map(move |(from, to)| {
+                    let transition = KickTransition::new(piece, from, to);
+                    KickTableEntry::new(transition, SrsKicks::sequence(transition))
+                });
+            let half_turns = one_eighty_transitions().into_iter().map(move |(from, to)| {
+                KickTableEntry::new(
+                    KickTransition::new(piece, from, to),
+                    KickOffsetSequence::new(jstris_180_offsets(from, to)),
+                )
+            });
+            quarter_turns.chain(half_turns)
+        })
+        .collect()
 }
 
 #[cfg(test)]

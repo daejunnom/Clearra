@@ -20,12 +20,14 @@ pub struct KickContractReport {
     srs_plus_effective_kick_model: &'static str,
     srs_plus_extension_reason: Option<&'static str>,
     srs_plus_180_transition_count: usize,
+    jstris_180_transition_count: usize,
     profile_registry_count: usize,
     verification_case_count: usize,
     verification_failure_count: usize,
     srs_profile_id: &'static str,
     no_kick_profile_id: &'static str,
     srs_plus_profile_id: &'static str,
+    jstris_profile_id: &'static str,
 }
 
 impl KickContractReport {
@@ -34,6 +36,7 @@ impl KickContractReport {
         let srs_profile = SrsKicks::profile();
         let no_kick_profile = NoKick::profile();
         let srs_plus_profile = SrsKicks::srs_plus_profile();
+        let jstris_profile = SrsKicks::jstris_180_profile();
         let verification_cases = builtin_verification_cases();
         let verification_failure_count = verification_cases
             .iter()
@@ -48,6 +51,11 @@ impl KickContractReport {
             .iter()
             .filter(|case| !case.verify(&srs_plus_profile).is_passed())
             .count();
+        let jstris_cases = jstris_verification_cases();
+        let jstris_failures = jstris_cases
+            .iter()
+            .filter(|case| !case.verify(&jstris_profile).is_passed())
+            .count();
         Self {
             srs_jlstz_transition_count: srs_90_transition_count_for(&srs_profile, PieceKind::T),
             srs_i_transition_count: srs_90_transition_count_for(&srs_profile, PieceKind::I),
@@ -60,16 +68,24 @@ impl KickContractReport {
                 .iter()
                 .filter(|entry| entry.transition().is_180())
                 .count(),
+            jstris_180_transition_count: jstris_profile
+                .entries()
+                .iter()
+                .filter(|entry| entry.transition().is_180())
+                .count(),
             profile_registry_count: KickProfileRegistry::builtin_profiles().len(),
             verification_case_count: verification_cases.len()
                 + no_kick_verification_cases().len()
-                + srs_plus_cases.len(),
+                + srs_plus_cases.len()
+                + jstris_cases.len(),
             verification_failure_count: verification_failure_count
                 + no_kick_failures
-                + srs_plus_failures,
+                + srs_plus_failures
+                + jstris_failures,
             srs_profile_id: srs_profile.id().as_str(),
             no_kick_profile_id: no_kick_profile.id().as_str(),
             srs_plus_profile_id: srs_plus_profile.id().as_str(),
+            jstris_profile_id: jstris_profile.id().as_str(),
         }
     }
 }
@@ -109,6 +125,11 @@ impl KickContractReport {
     }
 }
 impl KickContractReport {
+    pub fn jstris_180_transition_count(&self) -> usize {
+        self.jstris_180_transition_count
+    }
+}
+impl KickContractReport {
     pub fn profile_registry_count(&self) -> usize {
         self.profile_registry_count
     }
@@ -136,6 +157,11 @@ impl KickContractReport {
 impl KickContractReport {
     pub fn srs_plus_profile_id(&self) -> &'static str {
         self.srs_plus_profile_id
+    }
+}
+impl KickContractReport {
+    pub fn jstris_profile_id(&self) -> &'static str {
+        self.jstris_profile_id
     }
 }
 
@@ -437,6 +463,49 @@ fn srs_plus_i_180_expected_sequences() -> Vec<(RotationState, RotationState, Kic
     ]
 }
 
+fn jstris_verification_cases() -> Vec<KickVerificationCase> {
+    let mut cases = Vec::new();
+    for piece in [
+        PieceKind::J,
+        PieceKind::L,
+        PieceKind::S,
+        PieceKind::T,
+        PieceKind::Z,
+    ] {
+        for (from, to, sequence) in jlstz_expected_sequences() {
+            cases.push(KickVerificationCase::new(
+                "jstris-jlstz-90",
+                KickTransition::new(piece, from, to),
+                sequence,
+            ));
+        }
+    }
+    for (from, to, sequence) in i_expected_sequences() {
+        cases.push(KickVerificationCase::new(
+            "jstris-i-90",
+            KickTransition::new(PieceKind::I, from, to),
+            sequence,
+        ));
+    }
+    for piece in [
+        PieceKind::I,
+        PieceKind::J,
+        PieceKind::L,
+        PieceKind::S,
+        PieceKind::T,
+        PieceKind::Z,
+    ] {
+        for (from, to, sequence) in srs_plus_i_180_expected_sequences() {
+            cases.push(KickVerificationCase::new(
+                "jstris-180",
+                KickTransition::new(piece, from, to),
+                sequence,
+            ));
+        }
+    }
+    cases
+}
+
 fn sequence<const N: usize>(values: [(i8, i8); N]) -> KickOffsetSequence {
     KickOffsetSequence::new(
         values
@@ -469,6 +538,10 @@ mod tests {
             report.srs_plus_180_transition_count(),
             (PieceKind::STANDARD_TETROMINOES.len() - 1) * 4
         );
+        assert_eq!(
+            report.jstris_180_transition_count(),
+            (PieceKind::STANDARD_TETROMINOES.len() - 1) * 4
+        );
         assert!(report.profile_registry_count() >= 6);
         assert_eq!(report.srs_profile_id(), KickTableProfileId::Srs90.as_str());
         assert_eq!(
@@ -480,10 +553,15 @@ mod tests {
             KickTableProfileId::SrsPlus.as_str()
         );
         assert_eq!(
+            report.jstris_profile_id(),
+            KickTableProfileId::Jstris180.as_str()
+        );
+        assert_eq!(
             report.verification_case_count(),
             builtin_verification_cases().len()
                 + no_kick_verification_cases().len()
                 + srs_plus_verification_cases().len()
+                + jstris_verification_cases().len()
         );
         assert_eq!(report.verification_failure_count(), 0);
     }

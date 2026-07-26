@@ -12,6 +12,7 @@
 #define CLR_RULE_ASC 4u
 #define CLR_RULE_ARS 5u
 #define CLR_RULE_NO_KICK 6u
+#define CLR_RULE_JSTRIS_180 7u
 #define CLR_RULE_CUSTOM 255u
 
 #define CLR_KICK_SRS_90 1u
@@ -21,6 +22,7 @@
 #define CLR_KICK_ASC 5u
 #define CLR_KICK_ARS 6u
 #define CLR_KICK_IMPORTED 7u
+#define CLR_KICK_JSTRIS_180 8u
 #define CLR_KICK_CUSTOM 255u
 
 #define CLR_SPAWN_STANDARD_10 1u

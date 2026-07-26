@@ -61,6 +61,7 @@ pub(super) fn builtin_kick_profile(profile_id: &str) -> Option<KickTableProfile>
         KickTableProfileId::Srs90 => Some(SrsKicks::profile()),
         KickTableProfileId::SrsPlus => Some(SrsKicks::srs_plus_profile()),
         KickTableProfileId::SrsX => Some(SrsKicks::srs_x_profile()),
+        KickTableProfileId::Jstris180 => Some(SrsKicks::jstris_180_profile()),
         KickTableProfileId::NoKick => Some(NoKick::profile()),
         KickTableProfileId::Asc
         | KickTableProfileId::Ars

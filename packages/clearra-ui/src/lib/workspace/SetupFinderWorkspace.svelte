@@ -40,6 +40,8 @@
   let resultRequest: SetupFinderRequest | null = null;
   let pathDetails: Record<string, SetupPathDetailState> = {};
   let detailWorker: Worker | null = null;
+  let detailWorkerBusy = false;
+  let activeDetailKey: string | null = null;
   let detailGeneration = 0;
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
@@ -112,7 +114,7 @@
     return status === 'completed' || status === 'failed' || status === 'cancelled';
   }
 
-  async function loadSetupPaths(detail: SetupPathDetailRequest) {
+  function loadSetupPaths(detail: SetupPathDetailRequest) {
     const key = setupPathDetailKey(detail);
     const existing = pathDetails[key];
     if (existing?.status === 'loading' || existing?.status === 'complete') return;
@@ -126,9 +128,20 @@
       return;
     }
 
-    disposeDetailWorker();
-    workerController.dispose();
+    if (detailWorkerBusy) {
+      if (activeDetailKey) {
+        updatePathDetail(activeDetailKey, {
+          status: 'failed',
+          paths: [],
+          complete: false,
+          error: label('cancelled')
+        });
+      }
+      disposeDetailWorker();
+    }
     const generation = ++detailGeneration;
+    activeDetailKey = key;
+    detailWorkerBusy = true;
     updatePathDetail(key, {
       status: 'loading',
       paths: [],
@@ -136,12 +149,7 @@
       error: null
     });
 
-    // The completed search worker owns a full catalog. Let it release before
-    // allocating the selected setup's exact path graph.
-    await new Promise((resolve) => setTimeout(resolve, DETAIL_WORKER_RELEASE_MS + 20));
-    if (generation !== detailGeneration || !workerFactory || !resultRequest) return;
-
-    const worker = workerFactory();
+    const worker = detailWorker ?? workerController.takeIdleWorker() ?? workerFactory();
     detailWorker = worker;
     worker.onmessage = (message: MessageEvent<ClearraWasmWorkerEvent>) => {
       if (detailWorker !== worker || generation !== detailGeneration) return;
@@ -164,6 +172,7 @@
             complete: true,
             error: null
           });
+          finishDetailWorkerRequest(worker);
         } else {
           updatePathDetail(key, {
             status: 'failed',
@@ -173,8 +182,8 @@
               event.response.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
               label('pathDetailFailed')
           });
+          releaseDetailWorker(worker);
         }
-        releaseDetailWorker(worker);
       } else if (event.event === 'failed') {
         updatePathDetail(key, {
           status: 'failed',
@@ -216,13 +225,23 @@
       });
       releaseDetailWorker(worker);
     };
-    postRunCommand(
-      worker,
-      buildWasmCommandRequest({
-        commandText: buildSetupPathDetailCommand(resultRequest, detail)
-      }),
-      defaultWorkerCount(navigator.hardwareConcurrency)
-    );
+    try {
+      postRunCommand(
+        worker,
+        buildWasmCommandRequest({
+          commandText: buildSetupPathDetailCommand(resultRequest, detail)
+        }),
+        1
+      );
+    } catch (error) {
+      updatePathDetail(key, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: error instanceof Error ? error.message : label('pathDetailFailed')
+      });
+      releaseDetailWorker(worker);
+    }
   }
 
   function updatePathDetail(key: string, state: SetupPathDetailState) {
@@ -231,6 +250,8 @@
 
   function disposeDetailWorker() {
     detailGeneration += 1;
+    detailWorkerBusy = false;
+    activeDetailKey = null;
     const worker = detailWorker;
     detailWorker = null;
     if (!worker) return;
@@ -242,6 +263,8 @@
 
   function releaseDetailWorker(worker: Worker) {
     if (detailWorker !== worker) return;
+    detailWorkerBusy = false;
+    activeDetailKey = null;
     detailWorker = null;
     worker.onmessage = null;
     worker.onerror = null;
@@ -252,6 +275,12 @@
     } catch {
       worker.terminate();
     }
+  }
+
+  function finishDetailWorkerRequest(worker: Worker) {
+    if (detailWorker !== worker) return;
+    detailWorkerBusy = false;
+    activeDetailKey = null;
   }
 </script>
 

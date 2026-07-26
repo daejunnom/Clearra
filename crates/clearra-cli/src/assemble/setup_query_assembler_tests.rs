@@ -46,8 +46,36 @@ fn preserves_setup_length_preference() {
 }
 
 #[test]
-fn assembles_residue_and_observed_queue_based_pieces_separately() {
-    let args = SetupArgs::new("TI", false).with_queue_based_pieces("OS");
+fn preserves_selected_setup_kick_table() {
+    let args = SetupArgs::new("IOTS", false).with_rule("srs-x");
+    let query = SetupQueryAssembler::assemble(&args).expect("setup query");
+
+    assert_eq!(query.rule().id().as_str(), "srs-x");
+}
+
+#[test]
+fn preserves_selected_jstris_180_setup_kick_table() {
+    let args = SetupArgs::new("IOTS", false).with_rule("jstris-180");
+    let query = SetupQueryAssembler::assemble(&args).expect("setup query");
+
+    assert_eq!(query.rule().id().as_str(), "jstris-180");
+}
+
+#[test]
+fn rejects_unknown_setup_kick_table() {
+    let args = SetupArgs::new("IOTS", false).with_rule("unknown");
+
+    assert!(matches!(
+        SetupQueryAssembler::assemble(&args),
+        Err(SetupQueryAssemblyError::RuleProfile(
+            RuleProfileAssemblyError::UnknownRuleProfile { .. }
+        ))
+    ));
+}
+
+#[test]
+fn assembles_residue_and_next_cycle_inventory_separately() {
+    let args = SetupArgs::new("TI", false).with_queue_based_pieces("OOSITZ");
     let query = SetupQueryAssembler::assemble(&args).expect("QB setup query");
 
     assert_eq!(
@@ -69,13 +97,40 @@ fn assembles_residue_and_observed_queue_based_pieces_separately() {
             .pieces(),
         &[
             clearra_core_domain::piece::piece_kind::PieceKind::O,
+            clearra_core_domain::piece::piece_kind::PieceKind::O,
             clearra_core_domain::piece::piece_kind::PieceKind::S,
+            clearra_core_domain::piece::piece_kind::PieceKind::I,
+            clearra_core_domain::piece::piece_kind::PieceKind::T,
+            clearra_core_domain::piece::piece_kind::PieceKind::Z,
         ]
     );
 }
 
 #[test]
-fn queue_based_mode_requires_observed_pieces() {
+fn assembles_explicit_setup_initial_hold_without_ui_condition_expansion() {
+    let args = SetupArgs::new("IOTS", false).with_initial_hold("s");
+    let query = SetupQueryAssembler::assemble(&args).expect("setup query");
+
+    assert_eq!(
+        query.hold_policy(),
+        clearra_setup_search::query::SetupHoldPolicy::EnabledWithPiece(
+            clearra_core_domain::piece::piece_kind::PieceKind::S
+        )
+    );
+}
+
+#[test]
+fn rejects_multi_piece_initial_hold() {
+    let args = SetupArgs::new("IOTS", false).with_initial_hold("SZ");
+
+    assert_eq!(
+        SetupQueryAssembler::assemble(&args),
+        Err(SetupQueryAssemblyError::InitialHoldInvalid)
+    );
+}
+
+#[test]
+fn queue_based_mode_requires_next_cycle_inventory() {
     let args = SetupArgs::new("TI", false)
         .with_search_mode(clearra_setup_search::query::SetupSearchMode::QueueBased);
 

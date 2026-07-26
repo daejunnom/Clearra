@@ -23,7 +23,13 @@
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: categoryOptions = spinCategoryOptions(request.spinProfile);
   $: selectedRuleLabel =
-    request.rule === 'srs-plus' ? 'SRS+' : request.rule === 'srs-x' ? 'SRS-X' : 'SRS';
+    request.rule === 'srs-plus'
+      ? 'SRS+'
+      : request.rule === 'srs-x'
+        ? 'SRS-X'
+        : request.rule === 'jstris-180'
+          ? 'Jstris 180'
+          : 'SRS';
   $: if (!categoryOptions.includes(request.spinCategory)) update({ spinCategory: 'any' });
 
   function update(change: Partial<ForwardSearchRequest>) {
@@ -94,6 +100,7 @@
         <option value="srs-plus">SRS+</option>
         <option value="srs">SRS</option>
         <option value="srs-x">SRS-X</option>
+        <option value="jstris-180">Jstris 180</option>
       </select>
     </label>
     <label class="workspace-field">

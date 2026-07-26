@@ -2,11 +2,11 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_rules::{kicks::KickTableProfileId, profile::rule_profile::RuleProfileId};
 
 use crate::problem::{
-    C_BAG_STANDARD_7_BAG, C_KICK_ARS, C_KICK_ASC, C_KICK_CUSTOM, C_KICK_IMPORTED, C_KICK_NO_KICK,
-    C_KICK_SRS_90, C_KICK_SRS_PLUS_180, C_KICK_SRS_X, C_PIECE_I, C_PIECE_J, C_PIECE_L, C_PIECE_O,
-    C_PIECE_S, C_PIECE_SET_STANDARD_TETROMINOES, C_PIECE_T, C_PIECE_Z, C_RULE_ARS, C_RULE_ASC,
-    C_RULE_CUSTOM, C_RULE_NO_KICK, C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X, C_SPAWN_ARIKA,
-    C_SPAWN_CUSTOM, C_SPAWN_STANDARD_10,
+    C_BAG_STANDARD_7_BAG, C_KICK_ARS, C_KICK_ASC, C_KICK_CUSTOM, C_KICK_IMPORTED,
+    C_KICK_JSTRIS_180, C_KICK_NO_KICK, C_KICK_SRS_90, C_KICK_SRS_PLUS_180, C_KICK_SRS_X, C_PIECE_I,
+    C_PIECE_J, C_PIECE_L, C_PIECE_O, C_PIECE_S, C_PIECE_SET_STANDARD_TETROMINOES, C_PIECE_T,
+    C_PIECE_Z, C_RULE_ARS, C_RULE_ASC, C_RULE_CUSTOM, C_RULE_JSTRIS_180, C_RULE_NO_KICK,
+    C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X, C_SPAWN_ARIKA, C_SPAWN_CUSTOM, C_SPAWN_STANDARD_10,
 };
 
 pub(crate) fn piece_code(piece: PieceKind) -> u8 {
@@ -30,6 +30,7 @@ pub fn rule_profile_code(id: RuleProfileId) -> u32 {
         RuleProfileId::SrsPlus => C_RULE_SRS_PLUS,
         RuleProfileId::Srs => C_RULE_SRS,
         RuleProfileId::SrsX => C_RULE_SRS_X,
+        RuleProfileId::Jstris180 => C_RULE_JSTRIS_180,
         RuleProfileId::Asc => C_RULE_ASC,
         RuleProfileId::Ars => C_RULE_ARS,
         RuleProfileId::NoKick => C_RULE_NO_KICK,
@@ -43,6 +44,7 @@ pub fn kick_profile_code(id: KickTableProfileId) -> u32 {
         KickTableProfileId::NoKick => C_KICK_NO_KICK,
         KickTableProfileId::SrsPlus => C_KICK_SRS_PLUS_180,
         KickTableProfileId::SrsX => C_KICK_SRS_X,
+        KickTableProfileId::Jstris180 => C_KICK_JSTRIS_180,
         KickTableProfileId::Asc => C_KICK_ASC,
         KickTableProfileId::Ars => C_KICK_ARS,
         KickTableProfileId::Imported => C_KICK_IMPORTED,

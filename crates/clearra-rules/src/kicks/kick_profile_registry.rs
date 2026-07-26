@@ -56,6 +56,7 @@ impl KickProfileCapability {
             RuleProfileId::Srs
             | RuleProfileId::SrsPlus
             | RuleProfileId::SrsX
+            | RuleProfileId::Jstris180
             | RuleProfileId::NoKick => None,
         };
         Self {
@@ -264,6 +265,20 @@ impl KickProfileRegistry {
                 true,
             ),
             KickProfileDescriptor::new(
+                KickTableProfileId::Jstris180,
+                RuleProfileId::Jstris180,
+                "Jstris 180",
+                KickProfileSourceKind::BuiltInExact,
+                "Jstris SRS quarter rotations with transition-specific two-step 180 kicks",
+                KickProfileCapability::new(true, true, true, false, true, None),
+            )
+            .with_profile_contract(
+                72,
+                true,
+                "Jstris SRS quarter rotations with transition-specific two-step 180 kicks; cross-checked against tetra-tools Physics::Jstris",
+                true,
+            ),
+            KickProfileDescriptor::new(
                 KickTableProfileId::Asc,
                 RuleProfileId::Asc,
                 "ASC",
@@ -312,6 +327,8 @@ mod tests {
     fn kick_profile_registry_exposes_mvp2_extension_profile_capabilities() {
         let profiles = KickProfileRegistry::builtin_profiles();
         let srs_x = KickProfileRegistry::descriptor(KickTableProfileId::SrsX).expect("srs-x");
+        let jstris =
+            KickProfileRegistry::descriptor(KickTableProfileId::Jstris180).expect("jstris-180");
         let asc = KickProfileRegistry::descriptor(KickTableProfileId::Asc).expect("asc");
         let ars = KickProfileRegistry::descriptor(KickTableProfileId::Ars).expect("ars");
 
@@ -334,6 +351,10 @@ mod tests {
         assert!(srs_x.capability().supports_exact_180());
         assert!(srs_x.capability().search_backend_supported());
         assert!(srs_x.capability().unsupported_reason().is_none());
+        assert_eq!(jstris.transition_count(), 72);
+        assert!(jstris.first_success_order_preserved());
+        assert!(jstris.capability().supports_exact_180());
+        assert!(jstris.capability().search_backend_supported());
         assert!(asc.capability().requires_spawn_reachability());
         for descriptor in [asc, ars] {
             assert!(!descriptor.capability().search_backend_supported());

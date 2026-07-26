@@ -64,6 +64,23 @@ export class WasmTerminalWorkerController {
     }, COOPERATIVE_CANCEL_GRACE_MS);
   }
 
+  takeIdleWorker(): Worker | null {
+    if (
+      !this.worker ||
+      this.cancellingWorker !== null ||
+      this.prewarmingWorker !== null ||
+      this.cancelFallback !== null
+    ) {
+      return null;
+    }
+    const worker = this.worker;
+    this.worker = null;
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    return worker;
+  }
+
   dispose() {
     const worker = this.worker;
     if (!worker) {

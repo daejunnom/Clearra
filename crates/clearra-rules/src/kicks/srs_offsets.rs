@@ -130,7 +130,7 @@ pub fn srs_plus_jlstz_180_offsets(from: RotationState, to: RotationState) -> Vec
     }
 }
 
-pub fn srs_plus_i_180_offsets(from: RotationState, to: RotationState) -> Vec<KickOffset> {
+pub fn jstris_180_offsets(from: RotationState, to: RotationState) -> Vec<KickOffset> {
     use RotationState::{Left, Right, Two, Zero};
 
     match (from, to) {
@@ -140,6 +140,10 @@ pub fn srs_plus_i_180_offsets(from: RotationState, to: RotationState) -> Vec<Kic
         (Left, Right) => offsets([(0, 0), (-1, 0)]),
         _ => vec![],
     }
+}
+
+pub fn srs_plus_i_180_offsets(from: RotationState, to: RotationState) -> Vec<KickOffset> {
+    jstris_180_offsets(from, to)
 }
 
 pub fn srs_x_i_180_offsets(from: RotationState, to: RotationState) -> Vec<KickOffset> {

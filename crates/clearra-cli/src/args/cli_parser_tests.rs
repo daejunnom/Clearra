@@ -270,6 +270,71 @@ fn parses_setup_length_preference() {
 }
 
 #[test]
+fn parses_setup_kick_table_rule() {
+    let invocation =
+        CliParser::parse(["clearra", "setup", "--remaining", "IOTS", "--rule", "srs-x"])
+            .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.rule(), Some("srs-x"));
+}
+
+#[test]
+fn parses_jstris_180_setup_kick_table_rule() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--rule",
+        "jstris-180",
+    ])
+    .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.rule(), Some("jstris-180"));
+}
+
+#[test]
+fn parses_setup_piece_limit_including_the_complete_pc() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--max-setup-pieces",
+        "10",
+    ])
+    .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.max_setup_pieces(), 10);
+
+    for invalid in ["0", "11"] {
+        assert!(matches!(
+            CliParser::parse([
+                "clearra",
+                "setup",
+                "--remaining",
+                "IOTS",
+                "--max-setup-pieces",
+                invalid,
+            ]),
+            Err(CliParseError::InvalidValue {
+                option: "--max-setup-pieces",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn parses_queue_based_setup_mode() {
     let invocation = CliParser::parse([
         "clearra",
@@ -279,7 +344,7 @@ fn parses_queue_based_setup_mode() {
         "--mode",
         "qb",
         "--qb",
-        "OS",
+        "OOSITZ",
     ])
     .expect("QB setup command");
 
@@ -291,12 +356,12 @@ fn parses_queue_based_setup_mode() {
         clearra_setup_search::query::SetupSearchMode::QueueBased
     );
     assert_eq!(args.remaining(), "TI");
-    assert_eq!(args.queue_based_pieces(), Some("OS"));
+    assert_eq!(args.queue_based_pieces(), Some("OOSITZ"));
 }
 
 #[test]
 fn parses_queue_based_setup_shorthand() {
-    let invocation = CliParser::parse(["clearra", "setup", "--remaining", "TI", "--qb", "OS"])
+    let invocation = CliParser::parse(["clearra", "setup", "--remaining", "TI", "--qb", "OOSITZ"])
         .expect("QB setup command");
 
     let ParsedCliCommand::Setup(args) = invocation.into_command() else {
@@ -306,7 +371,25 @@ fn parses_queue_based_setup_shorthand() {
         args.search_mode(),
         clearra_setup_search::query::SetupSearchMode::QueueBased
     );
-    assert_eq!(args.queue_based_pieces(), Some("OS"));
+    assert_eq!(args.queue_based_pieces(), Some("OOSITZ"));
+}
+
+#[test]
+fn parses_setup_initial_hold_as_an_explicit_cli_only_option() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--initial-hold",
+        "S",
+    ])
+    .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.initial_hold(), Some("S"));
 }
 
 #[test]
@@ -346,7 +429,7 @@ fn parses_setup_path_detail_as_an_atomic_option_pair() {
 }
 
 #[test]
-fn rejects_oracle_mode_with_queue_based_observations_regardless_of_option_order() {
+fn rejects_oracle_mode_with_next_cycle_inventory_regardless_of_option_order() {
     for args in [
         [
             "clearra",
@@ -356,7 +439,7 @@ fn rejects_oracle_mode_with_queue_based_observations_regardless_of_option_order(
             "--mode",
             "oracle",
             "--qb",
-            "OS",
+            "OOSITZ",
         ],
         [
             "clearra",
@@ -364,7 +447,7 @@ fn rejects_oracle_mode_with_queue_based_observations_regardless_of_option_order(
             "--remaining",
             "TI",
             "--qb",
-            "OS",
+            "OOSITZ",
             "--mode",
             "oracle",
         ],

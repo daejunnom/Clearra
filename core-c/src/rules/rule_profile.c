@@ -74,6 +74,10 @@ static ClearraRuleStatus validate_common_descriptor(
         descriptor->kick_profile_id == CLR_KICK_SRS_PLUS_180) {
         return clearra_srs_plus_kick_table(out_table);
     }
+    if (descriptor->rule_profile_id == CLR_RULE_JSTRIS_180 &&
+        descriptor->kick_profile_id == CLR_KICK_JSTRIS_180) {
+        return clearra_jstris_180_kick_table(out_table);
+    }
     if (descriptor->rule_profile_id == CLR_RULE_NO_KICK &&
         descriptor->kick_profile_id == CLR_KICK_NO_KICK) {
         return clearra_no_kick_table(out_table);
@@ -81,6 +85,7 @@ static ClearraRuleStatus validate_common_descriptor(
 
     if (descriptor->rule_profile_id == CLR_RULE_SRS_PLUS ||
         descriptor->rule_profile_id == CLR_RULE_SRS ||
+        descriptor->rule_profile_id == CLR_RULE_JSTRIS_180 ||
         descriptor->rule_profile_id == CLR_RULE_NO_KICK) {
         return CLEARRA_RULE_UNSUPPORTED_KICK_PROFILE;
     }

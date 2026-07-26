@@ -11,7 +11,8 @@ mod search_problem_fields;
 pub use compile::{
     compile_setup_search_condition, compile_setup_search_conditions, setup_search_condition_count,
     PackingProblemCompiler, PackingProblemKind, PackingProblemSpec, ProblemCompileError,
-    ProblemCompiler, SetupConditionCompileError, SetupSearchCondition, SpinTargetCompiler,
+    ProblemCompiler, SetupConditionCompileError, SetupSearchCondition, SetupTerminalSupplyTarget,
+    SpinTargetCompiler,
 };
 pub use extended_pc_search_contract::{ExtendedPcSearchContract, ExtendedPcSearchContractError};
 pub use goal::{

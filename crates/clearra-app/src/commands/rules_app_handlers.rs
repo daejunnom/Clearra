@@ -202,5 +202,9 @@ pub(super) fn verify_rules(input: Option<&str>) -> AppResponse {
             "srs_plus_180_transitions".to_owned(),
             report.srs_plus_180_transition_count().to_string(),
         ),
+        (
+            "jstris_180_transitions".to_owned(),
+            report.jstris_180_transition_count().to_string(),
+        ),
     ])
 }

@@ -58,9 +58,28 @@ export function replaySetupPlacementBoard(
   path: ClearraWasmSearchPathStep[],
   height = 4
 ): SetupPlacementBoard | null {
+  return replayPlacementBoard(0n, parseMask(finalMask), path, height);
+}
+
+export function replaySetupCompletionBoard(
+  setupMask: string,
+  path: ClearraWasmSearchPathStep[],
+  height = 4
+): SetupPlacementBoard | null {
+  return replayPlacementBoard(parseMask(setupMask), 0n, path, height);
+}
+
+function replayPlacementBoard(
+  initialMask: bigint,
+  expectedFinalMask: bigint,
+  path: ClearraWasmSearchPathStep[],
+  height: number
+): SetupPlacementBoard | null {
+  if (initialMask < 0n || expectedFinalMask < 0n) return null;
   const logicalRows = emptyRows(height);
   const displayRows = emptyRows(height);
   const logicalToDisplay = Array.from({ length: height }, (_, row) => row);
+  if (!writeInitialBoard(logicalRows, displayRows, initialMask)) return null;
 
   for (const step of path) {
     const piece = setupPiece(step.piece);
@@ -93,7 +112,13 @@ export function replaySetupPlacementBoard(
     }
   }
 
-  if (occupiedMask(logicalRows) !== parseMask(finalMask)) return null;
+  if (occupiedMask(logicalRows) !== expectedFinalMask) return null;
+  while (
+    displayRows.length > height &&
+    displayRows[displayRows.length - 1].every((cell) => cell === null)
+  ) {
+    displayRows.pop();
+  }
   return {
     cells: displayRows.slice().reverse().flat(),
     height: displayRows.length
@@ -118,6 +143,23 @@ function emptyRows(height: number): SetupBoardCell[][] {
   return Array.from({ length: height }, () =>
     Array<SetupBoardCell>(BOARD_WIDTH).fill(null)
   );
+}
+
+function writeInitialBoard(
+  logicalRows: SetupBoardCell[][],
+  displayRows: SetupBoardCell[][],
+  mask: bigint
+): boolean {
+  const cellCount = logicalRows.length * BOARD_WIDTH;
+  if (mask >> BigInt(cellCount)) return false;
+  for (let bit = 0; bit < cellCount; bit += 1) {
+    if ((mask & (1n << BigInt(bit))) === 0n) continue;
+    const x = bit % BOARD_WIDTH;
+    const y = Math.floor(bit / BOARD_WIDTH);
+    logicalRows[y][x] = 'G';
+    displayRows[y][x] = 'G';
+  }
+  return true;
 }
 
 function setupPiece(value: string): SetupPiece | null {

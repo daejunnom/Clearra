@@ -38,7 +38,7 @@
         on:value={(event) => patch({ queue: event.detail })}
       />
     </label>
-    <QueuePatternHelp {language} explainInitialHold />
+    <QueuePatternHelp {language} />
 
     <div class="workspace-switch-row">
       <label class="workspace-switch-label">
@@ -46,17 +46,6 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('hold')}</span>
       </label>
-      {#if request.holdEnabled}
-        <label class="workspace-field workspace-inline-select">
-          <span>{label('holdPiece')}</span>
-          <select value={request.holdPiece} on:change={(event) => patch({ holdPiece: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['holdPiece'] })}>
-            <option value="empty">{label('empty')}</option>
-            {#each ['I', 'O', 'T', 'S', 'Z', 'J', 'L'] as piece}
-              <option value={piece}>{piece}</option>
-            {/each}
-          </select>
-        </label>
-      {/if}
     </div>
   </section>
 
@@ -77,6 +66,7 @@
           <option value="srs-plus">SRS+</option>
           <option value="srs">SRS</option>
           <option value="srs-x">SRS-X</option>
+          <option value="jstris-180">Jstris 180</option>
         </select>
       </label>
       <label class="workspace-field">

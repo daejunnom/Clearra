@@ -1,9 +1,9 @@
-use super::super::{
-    setup_all_paths::{SetupSolutionPath, SetupSolutionStep},
-    setup_finder::SetupHoldAction,
-};
 use super::*;
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_problem::SetupHoldPolicy;
+use clearra_rules::profile::builtin_rules::{jstris_180, srs_x};
+
+use super::super::{setup_coverage_graph::SetupCoverageNode, setup_partial_build::SetupShape};
 
 #[test]
 fn large_condition_mix_leaves_multiple_tasks_per_verifier() {
@@ -41,7 +41,6 @@ fn result_wire_preserves_qb_conditioned_setup_depth_range() {
             max_covered_locks: 7,
             witness_pattern_id: 13,
         }],
-        solution_paths: Vec::new(),
         peak_segment_pages: 3,
     }])
     .expect("encode result");
@@ -56,41 +55,74 @@ fn result_wire_preserves_qb_conditioned_setup_depth_range() {
 }
 
 #[test]
-fn result_wire_preserves_every_exact_solution_path_step() {
-    let path = SetupSolutionPath {
-        steps: vec![
-            SetupSolutionStep {
-                piece: PieceKind::T,
-                rotation: 3,
-                x: -1,
-                y: 4,
-                hold_action: SetupHoldAction::StoreCurrentUseNext,
-                cleared_lines: 0,
-            },
-            SetupSolutionStep {
-                piece: PieceKind::I,
-                rotation: 1,
-                x: 6,
-                y: -2,
-                hold_action: SetupHoldAction::SwapHeld,
-                cleared_lines: 2,
-            },
-        ],
-    };
-    let encoded = encode_results(&[SetupParallelTaskResult {
-        task_index: 0,
-        condition_index: 0,
-        word_start: 0,
-        word_end: 1,
-        global_pattern_count: 64,
-        covered_shapes: Vec::new(),
-        solution_paths: vec![path.clone()],
-        peak_segment_pages: 1,
-    }])
-    .expect("encode result");
-    let decoded = decode_results(&encoded).expect("decode result");
+fn initialization_wire_preserves_hold_qb_inventory_and_setup_piece_limit() {
+    let graph = SetupCoverageGraph::from_wire_parts(
+        vec![SetupCoverageNode::from_wire(0, 0, 0, 10, 1).expect("coverage node")],
+        Vec::new(),
+        0,
+    )
+    .expect("coverage graph");
+    let shapes = vec![SetupShape {
+        board: 0,
+        min_locks: 10,
+        max_locks: 10,
+    }];
+    let query = SetupSearchQuery::default()
+        .with_rule(srs_x())
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T))
+        .with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+            PieceKind::Z,
+        ])
+        .with_max_setup_pieces(10);
 
-    assert_eq!(decoded[0].solution_paths, vec![path]);
+    let encoded = encode_initialization(&query, &graph, &shapes).expect("encode initialization");
+    let decoded = decode_initialization(&encoded).expect("decode initialization");
+
+    assert_eq!(decoded.query.hold_policy(), query.hold_policy());
+    assert_eq!(decoded.query.rule(), srs_x());
+    assert_eq!(decoded.query.max_setup_pieces(), 10);
+    assert_eq!(
+        decoded
+            .query
+            .queue()
+            .as_fixed_sequence()
+            .expect("next-cycle inventory")
+            .pieces(),
+        query
+            .queue()
+            .as_fixed_sequence()
+            .expect("source next-cycle inventory")
+            .pieces()
+    );
+}
+
+#[test]
+fn setup_parallel_wire_preserves_jstris_180_rule_identity() {
+    let graph = SetupCoverageGraph::from_wire_parts(
+        vec![SetupCoverageNode::from_wire(0, 0, 0, 10, 1).expect("coverage node")],
+        Vec::new(),
+        0,
+    )
+    .expect("coverage graph");
+    let shapes = vec![SetupShape {
+        board: 0,
+        min_locks: 10,
+        max_locks: 10,
+    }];
+    let query = SetupSearchQuery::default()
+        .with_rule(jstris_180())
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T]);
+
+    let encoded = encode_initialization(&query, &graph, &shapes).expect("encode initialization");
+    let decoded = decode_initialization(&encoded).expect("decode initialization");
+
+    assert_eq!(decoded.query.rule(), jstris_180());
 }
 
 fn assert_exact_condition_ranges(condition_words: &[usize], tasks: &[SetupParallelTask]) {

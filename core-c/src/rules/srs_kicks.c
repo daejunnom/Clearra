@@ -3,6 +3,7 @@
 #define SRS_90_KICK_COUNT 5u
 #define SRS_PLUS_180_KICK_COUNT 6u
 #define SRS_PLUS_I_180_KICK_COUNT 6u
+#define JSTRIS_180_KICK_COUNT 2u
 
 static const uint8_t STANDARD_PIECES[CLEARRA_RULE_STANDARD_PIECE_COUNT] = {
     CLR_PIECE_I,
@@ -255,15 +256,50 @@ static ClearraCompactKickSequence srs_plus_180_sequence(
     return clearra_no_kick_sequence();
 }
 
+static ClearraCompactKickSequence jstris_180_sequence(
+    uint8_t from_rotation,
+    uint8_t to_rotation) {
+    static const int8_t zt[JSTRIS_180_KICK_COUNT][2] = {
+        {0, 0}, {0, 1}};
+    static const int8_t rl[JSTRIS_180_KICK_COUNT][2] = {
+        {0, 0}, {1, 0}};
+    static const int8_t tz[JSTRIS_180_KICK_COUNT][2] = {
+        {0, 0}, {0, -1}};
+    static const int8_t lr[JSTRIS_180_KICK_COUNT][2] = {
+        {0, 0}, {-1, 0}};
+
+    if (from_rotation == CLEARRA_RULE_ROTATION_SPAWN &&
+        to_rotation == CLEARRA_RULE_ROTATION_REVERSE) {
+        return sequence_from_values(zt, JSTRIS_180_KICK_COUNT);
+    }
+    if (from_rotation == CLEARRA_RULE_ROTATION_RIGHT &&
+        to_rotation == CLEARRA_RULE_ROTATION_LEFT) {
+        return sequence_from_values(rl, JSTRIS_180_KICK_COUNT);
+    }
+    if (from_rotation == CLEARRA_RULE_ROTATION_REVERSE &&
+        to_rotation == CLEARRA_RULE_ROTATION_SPAWN) {
+        return sequence_from_values(tz, JSTRIS_180_KICK_COUNT);
+    }
+    if (from_rotation == CLEARRA_RULE_ROTATION_LEFT &&
+        to_rotation == CLEARRA_RULE_ROTATION_RIGHT) {
+        return sequence_from_values(lr, JSTRIS_180_KICK_COUNT);
+    }
+    return (ClearraCompactKickSequence){0};
+}
+
 static ClearraRuleStatus append_srs_90_transitions(
     ClearraCompactKickTable *table,
-    bool srs_plus) {
+    bool srs_plus,
+    bool include_o) {
     for (uint8_t piece_index = 0; piece_index < CLEARRA_RULE_STANDARD_PIECE_COUNT;
          piece_index++) {
+        uint8_t piece = STANDARD_PIECES[piece_index];
+        if (!include_o && piece == CLR_PIECE_O) {
+            continue;
+        }
         for (uint8_t transition_index = 0;
              transition_index < CLEARRA_RULE_90_TRANSITION_COUNT;
              transition_index++) {
-            uint8_t piece = STANDARD_PIECES[piece_index];
             uint8_t from_rotation = EIGHT_DIRECTION_TRANSITIONS[transition_index][0];
             uint8_t to_rotation = EIGHT_DIRECTION_TRANSITIONS[transition_index][1];
             ClearraRuleStatus status = clearra_kick_table_push(
@@ -285,7 +321,7 @@ ClearraRuleStatus clearra_srs_kick_table(ClearraCompactKickTable *out_table) {
         return CLEARRA_RULE_INVALID_ARGUMENT;
     }
     clearra_kick_table_clear(out_table, CLR_KICK_SRS_90, CLR_RULE_SRS, false, false);
-    return append_srs_90_transitions(out_table, false);
+    return append_srs_90_transitions(out_table, false, true);
 }
 
 ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table) {
@@ -299,7 +335,7 @@ ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table
         true,
         true);
 
-    ClearraRuleStatus status = append_srs_90_transitions(out_table, true);
+    ClearraRuleStatus status = append_srs_90_transitions(out_table, true, true);
     if (status != CLEARRA_RULE_OK) {
         return status;
     }
@@ -321,6 +357,50 @@ ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table
                 from_rotation,
                 to_rotation,
                 srs_plus_180_sequence(piece, from_rotation, to_rotation));
+            if (status != CLEARRA_RULE_OK) {
+                return status;
+            }
+        }
+    }
+
+    return CLEARRA_RULE_OK;
+}
+
+ClearraRuleStatus clearra_jstris_180_kick_table(
+    ClearraCompactKickTable *out_table) {
+    if (out_table == 0) {
+        return CLEARRA_RULE_INVALID_ARGUMENT;
+    }
+    clearra_kick_table_clear(
+        out_table,
+        CLR_KICK_JSTRIS_180,
+        CLR_RULE_JSTRIS_180,
+        true,
+        false);
+
+    ClearraRuleStatus status =
+        append_srs_90_transitions(out_table, false, false);
+    if (status != CLEARRA_RULE_OK) {
+        return status;
+    }
+
+    for (uint8_t piece_index = 0; piece_index < CLEARRA_RULE_STANDARD_PIECE_COUNT;
+         piece_index++) {
+        uint8_t piece = STANDARD_PIECES[piece_index];
+        if (piece == CLR_PIECE_O) {
+            continue;
+        }
+        for (uint8_t transition_index = 0;
+             transition_index < CLEARRA_RULE_180_TRANSITION_COUNT;
+             transition_index++) {
+            uint8_t from_rotation = ONE_EIGHTY_TRANSITIONS[transition_index][0];
+            uint8_t to_rotation = ONE_EIGHTY_TRANSITIONS[transition_index][1];
+            status = clearra_kick_table_push(
+                out_table,
+                piece,
+                from_rotation,
+                to_rotation,
+                jstris_180_sequence(from_rotation, to_rotation));
             if (status != CLEARRA_RULE_OK) {
                 return status;
             }

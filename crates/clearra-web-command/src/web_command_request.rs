@@ -43,6 +43,7 @@ pub struct WebCommandRequest {
     setup_allow_post_cycle_borrow: bool,
     setup_candidate_priority: SetupCandidatePriority,
     setup_length_preference: SetupLengthPreference,
+    setup_max_pieces: u8,
     setup_search_mode: SetupSearchMode,
     setup_path_detail: Option<SetupPathDetail>,
     max_patterns: Option<usize>,
@@ -84,6 +85,7 @@ impl WebCommandRequest {
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
             setup_length_preference: SetupLengthPreference::default(),
+            setup_max_pieces: 9,
             setup_search_mode: SetupSearchMode::default(),
             setup_path_detail: None,
             max_patterns: None,
@@ -126,6 +128,7 @@ impl WebCommandRequest {
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
             setup_length_preference: SetupLengthPreference::default(),
+            setup_max_pieces: 9,
             setup_search_mode: SetupSearchMode::default(),
             setup_path_detail: None,
             max_patterns: None,
@@ -162,6 +165,11 @@ impl WebCommandRequest {
 
     pub fn with_setup_length_preference(mut self, preference: SetupLengthPreference) -> Self {
         self.setup_length_preference = preference;
+        self
+    }
+
+    pub fn with_setup_max_pieces(mut self, max_pieces: u8) -> Self {
+        self.setup_max_pieces = max_pieces;
         self
     }
 
@@ -377,13 +385,15 @@ impl WebCommandRequest {
             } else {
                 SetupCycleResetBorrowPolicy::ForbidPostCyclePieceUse
             };
-            let mut query = SetupSearchQuery::default().with_remaining_pieces(remaining);
+            let mut query = SetupSearchQuery::default()
+                .with_rule(self.rule)
+                .with_remaining_pieces(remaining);
             match self.setup_search_mode {
                 SetupSearchMode::ShapeOracle => {
                     if self.setup_queue_based_pieces.is_some() {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
-                            "shape-oracle setup search does not accept observed QB pieces",
+                            "shape-oracle setup search does not accept a next-cycle inventory",
                         ));
                     }
                 }
@@ -391,16 +401,17 @@ impl WebCommandRequest {
                     let pieces = self.setup_queue_based_pieces.clone().ok_or_else(|| {
                         WebCommandError::new(
                             WebCommandErrorCode::MissingValue,
-                            "queue-based setup search requires observed next-bag pieces",
+                            "queue-based setup search requires next-cycle remaining pieces",
                         )
                     })?;
-                    query = query.with_queue_based_pieces(pieces);
+                    query = query.with_next_cycle_remaining_pieces(pieces);
                 }
             }
             let mut query = query
                 .with_cycle_reset_borrow_policy(borrow_policy)
                 .with_candidate_priority(self.setup_candidate_priority)
-                .with_length_preference(self.setup_length_preference);
+                .with_length_preference(self.setup_length_preference)
+                .with_max_setup_pieces(self.setup_max_pieces);
             if let Some(detail) = self.setup_path_detail.clone() {
                 query = query.with_path_detail(detail);
             }

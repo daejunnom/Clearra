@@ -8,7 +8,7 @@ use clearra_supply::queue::queue_pattern_expression::{
 
 use crate::{
     compile::{ProblemCompileError, ProblemCompiler},
-    query::{SetupCycleResetBorrowPolicy, SetupSearchMode, SetupSearchQuery},
+    query::{SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupSearchMode, SetupSearchQuery},
     SearchProblem,
 };
 
@@ -17,11 +17,27 @@ pub struct SetupSearchCondition {
     condition_id: String,
     cycle: u8,
     initial_hold: Option<PieceKind>,
-    queue_based_queue_start: u8,
-    queue_based_queue_len: u8,
     queue_remainder: Vec<PieceKind>,
+    terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    max_patterns: usize,
     pattern_expression: String,
     problem: SearchProblem,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetupTerminalSupplyTarget {
+    counts: [u8; 7],
+    first_bag_boundary: u8,
+}
+
+impl SetupTerminalSupplyTarget {
+    pub const fn counts(self) -> [u8; 7] {
+        self.counts
+    }
+
+    pub const fn first_bag_boundary(self) -> u8 {
+        self.first_bag_boundary
+    }
 }
 
 impl SetupSearchCondition {
@@ -37,16 +53,16 @@ impl SetupSearchCondition {
         self.initial_hold
     }
 
-    pub fn queue_based_queue_start(&self) -> u8 {
-        self.queue_based_queue_start
-    }
-
-    pub fn queue_based_queue_len(&self) -> u8 {
-        self.queue_based_queue_len
-    }
-
     pub fn queue_remainder(&self) -> &[PieceKind] {
         &self.queue_remainder
+    }
+
+    pub const fn terminal_supply_target(&self) -> Option<SetupTerminalSupplyTarget> {
+        self.terminal_supply_target
+    }
+
+    pub const fn max_patterns(&self) -> usize {
+        self.max_patterns
     }
 
     pub fn pattern_expression(&self) -> &str {
@@ -61,13 +77,14 @@ impl SetupSearchCondition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SetupConditionCompileError {
     InvalidRemainingPieceCount,
-    MultipleDuplicateKinds,
-    PieceOccursMoreThanTwice,
+    DuplicatePieceRequiresInitialHold,
+    QueueRemainderDuplicatePiece,
     PostCycleBorrowOutsideCycleSeven,
     QueueBasedFixedQueueRequired,
     QueueBasedPieceCountInvalid,
-    QueueBasedObservedPieceCountInvalid,
+    QueueBasedNextCyclePieceCountInvalid,
     QueueBasedDuplicatePiece,
+    InitialHoldPieceMissing,
     Pattern(QueuePatternParseError),
     Problem(ProblemCompileError),
 }
@@ -76,11 +93,11 @@ pub fn compile_setup_search_conditions(
     query: &SetupSearchQuery,
 ) -> Result<Vec<SetupSearchCondition>, SetupConditionCompileError> {
     let (cycle, pieces, hold_conditions) = setup_condition_inputs(query)?;
-    let queue_based_prefix = queue_based_prefix(query)?;
+    let terminal_supply_target = queue_based_target(query, cycle)?;
     let mut conditions = hold_conditions
         .into_iter()
         .map(|initial_hold| {
-            compile_condition(query, cycle, &pieces, queue_based_prefix, initial_hold)
+            compile_condition(query, cycle, &pieces, terminal_supply_target, initial_hold)
         })
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(detail) = query.path_detail() {
@@ -101,11 +118,11 @@ pub fn compile_setup_search_condition(
     condition_index: usize,
 ) -> Result<Option<SetupSearchCondition>, SetupConditionCompileError> {
     let (cycle, pieces, hold_conditions) = setup_condition_inputs(query)?;
-    let queue_based_prefix = queue_based_prefix(query)?;
+    let terminal_supply_target = queue_based_target(query, cycle)?;
     selected_hold_conditions(query, hold_conditions)
         .nth(condition_index)
         .map(|initial_hold| {
-            compile_condition(query, cycle, &pieces, queue_based_prefix, initial_hold)
+            compile_condition(query, cycle, &pieces, terminal_supply_target, initial_hold)
         })
         .transpose()
 }
@@ -121,18 +138,20 @@ fn selected_hold_conditions(
     })
 }
 
-fn queue_based_prefix(
+fn queue_based_target(
     query: &SetupSearchQuery,
-) -> Result<&[PieceKind], SetupConditionCompileError> {
+    cycle: u8,
+) -> Result<Option<[u8; 7]>, SetupConditionCompileError> {
     match query.search_mode() {
-        SetupSearchMode::ShapeOracle => Ok(&[]),
-        SetupSearchMode::QueueBased => queue_based_pieces(query),
+        SetupSearchMode::ShapeOracle => Ok(None),
+        SetupSearchMode::QueueBased => queue_based_pieces(query, cycle).map(Some),
     }
 }
 
 fn queue_based_pieces(
     query: &SetupSearchQuery,
-) -> Result<&[PieceKind], SetupConditionCompileError> {
+    cycle: u8,
+) -> Result<[u8; 7], SetupConditionCompileError> {
     let pieces = query
         .queue()
         .as_fixed_sequence()
@@ -141,92 +160,118 @@ fn queue_based_pieces(
     if pieces.is_empty() {
         return Err(SetupConditionCompileError::QueueBasedPieceCountInvalid);
     }
-    if pieces.len() + query.residue().remaining_count() > 7 {
-        return Err(SetupConditionCompileError::QueueBasedObservedPieceCountInvalid);
+    if pieces.len() != next_cycle_remaining_count(cycle) {
+        return Err(SetupConditionCompileError::QueueBasedNextCyclePieceCountInvalid);
     }
-    if PieceKind::STANDARD_TETROMINOES
-        .into_iter()
-        .any(|piece| pieces.iter().filter(|value| **value == piece).count() > 1)
+    let mut counts = [0_u8; 7];
+    for piece in pieces {
+        counts[piece_index(*piece)] += 1;
+    }
+    if counts.iter().any(|count| *count > 2)
+        || counts.iter().filter(|count| **count == 2).count() > 1
     {
         return Err(SetupConditionCompileError::QueueBasedDuplicatePiece);
     }
-    Ok(pieces)
+    Ok(counts)
+}
+
+const fn next_cycle_remaining_count(cycle: u8) -> usize {
+    match cycle {
+        1 => 4,
+        2 => 1,
+        3 => 5,
+        4 => 2,
+        5 => 6,
+        6 => 3,
+        7 => 7,
+        _ => 0,
+    }
+}
+
+const fn piece_index(piece: PieceKind) -> usize {
+    match piece {
+        PieceKind::I => 0,
+        PieceKind::O => 1,
+        PieceKind::T => 2,
+        PieceKind::S => 3,
+        PieceKind::Z => 4,
+        PieceKind::J => 5,
+        PieceKind::L => 6,
+    }
 }
 
 fn setup_condition_inputs(
     query: &SetupSearchQuery,
 ) -> Result<(u8, Vec<PieceKind>, Vec<Option<PieceKind>>), SetupConditionCompileError> {
-    let cycle = query
-        .residue()
-        .cycle()
-        .ok_or(SetupConditionCompileError::InvalidRemainingPieceCount)?;
+    let cycle = crate::query::setup_residue_input::cycle_for_remaining_count(
+        query.residue().remaining_count(),
+    )
+    .ok_or(SetupConditionCompileError::InvalidRemainingPieceCount)?;
     if query.cycle_reset_borrow_policy() == SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
         && cycle != 7
     {
         return Err(SetupConditionCompileError::PostCycleBorrowOutsideCycleSeven);
     }
 
-    let pieces = canonical_pieces(query.residue().pieces());
-    let duplicate_kinds = PieceKind::STANDARD_TETROMINOES
-        .into_iter()
-        .filter(|piece| pieces.iter().filter(|value| **value == *piece).count() > 1)
-        .collect::<Vec<_>>();
-    if duplicate_kinds.len() > 1 {
-        return Err(SetupConditionCompileError::MultipleDuplicateKinds);
-    }
-    if pieces.iter().any(|piece| {
-        pieces
-            .iter()
-            .filter(|candidate| *candidate == piece)
-            .count()
-            > 2
-    }) {
-        return Err(SetupConditionCompileError::PieceOccursMoreThanTwice);
-    }
-
-    let hold_conditions = if let Some(duplicate) = duplicate_kinds.first().copied() {
-        vec![Some(duplicate)]
-    } else {
-        let mut conditions = Vec::with_capacity(pieces.len() + 1);
-        conditions.push(None);
-        conditions.extend(pieces.iter().copied().map(Some));
-        conditions
+    let mut pieces = canonical_pieces(query.residue().pieces());
+    let initial_hold = match query.hold_policy() {
+        SetupHoldPolicy::Disabled | SetupHoldPolicy::EnabledEmpty => None,
+        SetupHoldPolicy::EnabledWithPiece(piece) => Some(piece),
     };
-    Ok((cycle, pieces, hold_conditions))
+    if let Some(hold) = initial_hold {
+        let index = pieces
+            .iter()
+            .position(|piece| *piece == hold)
+            .ok_or(SetupConditionCompileError::InitialHoldPieceMissing)?;
+        pieces.remove(index);
+    }
+    if PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .any(|piece| pieces.iter().filter(|value| **value == piece).count() > 1)
+    {
+        return Err(if initial_hold.is_some() {
+            SetupConditionCompileError::QueueRemainderDuplicatePiece
+        } else {
+            SetupConditionCompileError::DuplicatePieceRequiresInitialHold
+        });
+    }
+    Ok((cycle, pieces, vec![initial_hold]))
 }
 
 fn compile_condition(
     query: &SetupSearchQuery,
     cycle: u8,
     pieces: &[PieceKind],
-    queue_based_prefix: &[PieceKind],
+    terminal_supply_counts: Option<[u8; 7]>,
     initial_hold: Option<PieceKind>,
 ) -> Result<SetupSearchCondition, SetupConditionCompileError> {
-    let mut queue_remainder = pieces.to_vec();
-    if let Some(hold) = initial_hold {
-        let index = queue_remainder
-            .iter()
-            .position(|piece| *piece == hold)
-            .expect("hold condition comes from the residue multiset");
-        queue_remainder.remove(index);
-    }
+    let queue_remainder = pieces.to_vec();
     let pattern_expression = pattern_expression(
-        queue_based_prefix,
         &queue_remainder,
-        pieces.len(),
+        query.residue().remaining_count(),
         query.cycle_reset_borrow_policy(),
     );
-    let expression =
-        QueuePatternExpression::parse(&pattern_expression, query.limits().max_patterns())
-            .map_err(SetupConditionCompileError::Pattern)?;
+    // Queue-based filtering is applied to the exact terminal supply state.
+    // Keep the broad source factorized here so the compatible subset can retain
+    // the original probability denominator.
+    let expression = QueuePatternExpression::parse(
+        &pattern_expression,
+        if terminal_supply_counts.is_some() {
+            0
+        } else {
+            query.limits().max_patterns()
+        },
+    )
+    .map_err(SetupConditionCompileError::Pattern)?;
     let sequence_len = expression.sequence_len();
     let scenario = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(4, 0),
         PcQueueInput::pattern_expression(expression),
         PieceWindow::new(10),
     )
+    .with_rule(query.rule())
     .with_hold_piece(initial_hold)
-    .with_allow_hold(true)
+    .with_allow_hold(query.hold_policy().is_enabled())
     .with_exact_pieces(Some(10))
     .with_supply_window_size(SupplyWindowSize::new(sequence_len))
     .with_count_policy(PcCountPolicy::CountUnique)
@@ -239,9 +284,12 @@ fn compile_condition(
         condition_id,
         cycle,
         initial_hold,
-        queue_based_queue_start: queue_remainder.len() as u8,
-        queue_based_queue_len: queue_based_prefix.len() as u8,
         queue_remainder,
+        terminal_supply_target: terminal_supply_counts.map(|counts| SetupTerminalSupplyTarget {
+            counts,
+            first_bag_boundary: pieces.len() as u8,
+        }),
+        max_patterns: query.limits().max_patterns(),
         pattern_expression,
         problem,
     })
@@ -267,19 +315,14 @@ fn canonical_pieces(pieces: &[PieceKind]) -> Vec<PieceKind> {
 }
 
 fn pattern_expression(
-    queue_based_prefix: &[PieceKind],
     queue_remainder: &[PieceKind],
     remaining_count: usize,
     borrow_policy: SetupCycleResetBorrowPolicy,
 ) -> String {
-    let known_piece_count = if queue_based_prefix.is_empty() {
-        remaining_count
-    } else {
-        remaining_count + PieceKind::STANDARD_TETROMINOES.len()
-    };
+    let known_piece_count = remaining_count;
     // Before cycle seven, the next bag still belongs to the same PC window.
-    // Materialize one additional draw so Hold may leave any observed piece
-    // unplaced instead of forcing the final held piece to be the leftover.
+    // Materialize one additional draw so Hold may leave the final queue piece
+    // unplaced instead of forcing the held piece to be the leftover.
     // Cycle seven deliberately stops at the reset boundary unless the caller
     // explicitly permits borrowing from the following cycle.
     let materialized_hold_slack = remaining_count != 3
@@ -296,13 +339,6 @@ fn pattern_expression(
             expression.push_str("]!");
         }
     }
-    if !queue_based_prefix.is_empty() {
-        append_unordered_piece_set(&mut expression, queue_based_prefix);
-        expression.push('[');
-        expression.push('^');
-        expression.extend(queue_based_prefix.iter().map(|piece| piece.as_ascii()));
-        expression.push_str("]!");
-    }
     let mut remaining_draws = future_draws;
     while remaining_draws != 0 {
         let draw = remaining_draws.min(7);
@@ -313,24 +349,13 @@ fn pattern_expression(
     expression
 }
 
-fn append_unordered_piece_set(expression: &mut String, pieces: &[PieceKind]) {
-    match pieces {
-        [] => {}
-        [piece] => expression.push(piece.as_ascii()),
-        pieces => {
-            expression.push('[');
-            expression.extend(pieces.iter().map(|piece| piece.as_ascii()));
-            expression.push_str("]!");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clearra_rules::profile::builtin_rules::srs_x;
 
     #[test]
-    fn unique_residue_splits_hold_conditions_without_averaging_them() {
+    fn unique_residue_defaults_to_one_empty_hold_condition() {
         let query = SetupSearchQuery::default().with_remaining_pieces(vec![
             PieceKind::I,
             PieceKind::O,
@@ -339,12 +364,42 @@ mod tests {
 
         let conditions = compile_setup_search_conditions(&query).expect("conditions");
 
-        assert_eq!(conditions.len(), 4);
+        assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].condition_id(), "hold-empty");
         assert_eq!(conditions[0].pattern_expression(), "[IOT]!P7");
-        assert_eq!(conditions[1].condition_id(), "hold-I");
-        assert_eq!(conditions[1].pattern_expression(), "[OT]!P7");
-        assert_eq!(conditions[1].queue_remainder().len(), 2);
+        assert_eq!(conditions[0].queue_remainder().len(), 3);
+    }
+
+    #[test]
+    fn selected_kick_table_reaches_every_compiled_setup_condition() {
+        let query = SetupSearchQuery::default()
+            .with_rule(srs_x())
+            .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S]);
+
+        let conditions = compile_setup_search_conditions(&query).expect("conditions");
+
+        assert!(!conditions.is_empty());
+        assert!(conditions
+            .iter()
+            .all(|condition| condition.problem().rule_profile_value() == srs_x()));
+    }
+
+    #[test]
+    fn explicit_initial_hold_compiles_only_the_selected_condition() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
+            .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::S));
+
+        let conditions = compile_setup_search_conditions(&query).expect("conditions");
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].condition_id(), "hold-S");
+        assert_eq!(conditions[0].initial_hold(), Some(PieceKind::S));
+        assert_eq!(
+            conditions[0].queue_remainder(),
+            &[PieceKind::I, PieceKind::O, PieceKind::T]
+        );
+        assert_eq!(conditions[0].pattern_expression(), "[IOT]!P7");
     }
 
     #[test]
@@ -376,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn one_duplicate_is_the_explicit_initial_hold() {
+    fn duplicate_residue_requires_an_explicit_initial_hold_option() {
         let query = SetupSearchQuery::default().with_remaining_pieces(vec![
             PieceKind::I,
             PieceKind::O,
@@ -384,6 +439,24 @@ mod tests {
             PieceKind::S,
             PieceKind::S,
         ]);
+
+        assert!(matches!(
+            compile_setup_search_conditions(&query),
+            Err(SetupConditionCompileError::DuplicatePieceRequiresInitialHold)
+        ));
+    }
+
+    #[test]
+    fn explicit_initial_hold_may_match_one_queue_remainder_piece() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::S,
+                PieceKind::S,
+            ])
+            .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::S));
 
         let conditions = compile_setup_search_conditions(&query).expect("condition");
 
@@ -396,17 +469,11 @@ mod tests {
     #[test]
     fn cycle_three_and_five_cross_two_future_bags() {
         assert_eq!(
-            pattern_expression(
-                &[],
-                &[PieceKind::T],
-                1,
-                SetupCycleResetBorrowPolicy::default()
-            ),
+            pattern_expression(&[PieceKind::T], 1, SetupCycleResetBorrowPolicy::default()),
             "TP7P3"
         );
         assert_eq!(
             pattern_expression(
-                &[],
                 &[PieceKind::I, PieceKind::O],
                 2,
                 SetupCycleResetBorrowPolicy::default()
@@ -426,8 +493,8 @@ mod tests {
 
         let conditions = compile_setup_search_conditions(&query).expect("conditions");
 
+        assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P7");
-        assert_eq!(conditions[1].pattern_expression(), "[OTS]!P7");
     }
 
     #[test]
@@ -468,6 +535,7 @@ mod tests {
         let detail = crate::query::SetupPathDetail::new(1, "hold-T").expect("path detail");
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
+            .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T))
             .with_path_detail(detail);
 
         assert_eq!(
@@ -494,12 +562,11 @@ mod tests {
     fn cycle_seven_borrow_adds_one_post_reset_draw_only_when_requested() {
         let remainder = [PieceKind::T, PieceKind::S, PieceKind::Z];
         assert_eq!(
-            pattern_expression(&[], &remainder, 3, SetupCycleResetBorrowPolicy::default()),
+            pattern_expression(&remainder, 3, SetupCycleResetBorrowPolicy::default()),
             "[TSZ]!P7"
         );
         assert_eq!(
             pattern_expression(
-                &[],
                 &remainder,
                 3,
                 SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
@@ -509,56 +576,93 @@ mod tests {
     }
 
     #[test]
-    fn queue_based_condition_appends_observed_next_bag_subset_after_residue() {
+    fn queue_based_condition_preserves_the_broad_source_and_stores_terminal_inventory() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::I, PieceKind::I, PieceKind::O, PieceKind::T])
-            .with_queue_based_pieces(vec![PieceKind::S, PieceKind::Z]);
+            .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::I))
+            .with_queue_based_pieces(vec![PieceKind::S]);
 
         let conditions = compile_setup_search_conditions(&query).expect("QB condition");
 
         assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].condition_id(), "hold-I");
         assert_eq!(conditions[0].initial_hold(), Some(PieceKind::I));
-        assert_eq!(conditions[0].queue_based_queue_start(), 3);
-        assert_eq!(conditions[0].queue_based_queue_len(), 2);
         assert_eq!(
             conditions[0].queue_remainder(),
             &[PieceKind::I, PieceKind::O, PieceKind::T]
         );
-        assert_eq!(conditions[0].pattern_expression(), "[IOT]![SZ]![^SZ]!");
+        assert_eq!(conditions[0].pattern_expression(), "[IOT]!P7");
+        assert_eq!(
+            conditions[0]
+                .terminal_supply_target()
+                .expect("terminal target")
+                .counts(),
+            [0, 0, 0, 1, 0, 0, 0]
+        );
     }
 
     #[test]
-    fn cycle_five_qb_condition_matches_observed_next_bag_contract() {
+    fn explicit_initial_hold_must_be_present_in_the_supplied_inventory() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T])
+            .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::S));
+
+        assert!(matches!(
+            compile_setup_search_conditions(&query),
+            Err(SetupConditionCompileError::InitialHoldPieceMissing)
+        ));
+    }
+
+    #[test]
+    fn cycle_five_qb_condition_accepts_hold_duplicate_in_next_cycle_inventory() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
-            .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S]);
+            .with_queue_based_pieces(vec![
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::S,
+                PieceKind::I,
+                PieceKind::T,
+                PieceKind::Z,
+            ]);
 
         let conditions = compile_setup_search_conditions(&query).expect("QB condition");
 
-        assert_eq!(conditions.len(), 3);
-        assert_eq!(conditions[0].queue_based_queue_start(), 2);
-        assert_eq!(conditions[0].queue_based_queue_len(), 2);
-        assert_eq!(conditions[0].pattern_expression(), "[IT]![OS]![^OS]!P2");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].pattern_expression(), "[IT]!P7P2");
+        assert_eq!(
+            conditions[0]
+                .terminal_supply_target()
+                .expect("terminal target")
+                .counts(),
+            [1, 2, 1, 1, 1, 0, 0]
+        );
     }
 
     #[test]
-    fn queue_based_condition_rejects_more_than_seven_observed_pieces() {
+    fn queue_based_condition_requires_the_next_cycle_piece_count() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S])
             .with_queue_based_pieces(vec![PieceKind::Z, PieceKind::J, PieceKind::L, PieceKind::O]);
 
         assert!(matches!(
             compile_setup_search_conditions(&query),
-            Err(SetupConditionCompileError::QueueBasedObservedPieceCountInvalid)
+            Err(SetupConditionCompileError::QueueBasedNextCyclePieceCountInvalid)
         ));
     }
 
     #[test]
-    fn queue_based_condition_rejects_duplicate_next_bag_piece() {
+    fn queue_based_condition_rejects_more_than_one_duplicated_piece_kind() {
         let query = SetupSearchQuery::default()
             .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
-            .with_queue_based_pieces(vec![PieceKind::O, PieceKind::O]);
+            .with_queue_based_pieces(vec![
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::T,
+                PieceKind::S,
+                PieceKind::Z,
+            ]);
 
         assert!(matches!(
             compile_setup_search_conditions(&query),

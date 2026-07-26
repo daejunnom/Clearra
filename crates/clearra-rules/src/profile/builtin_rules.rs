@@ -12,6 +12,10 @@ pub fn srs_x() -> RuleProfile {
     RuleProfile::new(RuleProfileId::SrsX)
 }
 
+pub fn jstris_180() -> RuleProfile {
+    RuleProfile::new(RuleProfileId::Jstris180)
+}
+
 pub fn asc() -> RuleProfile {
     RuleProfile::new(RuleProfileId::Asc)
 }
@@ -37,6 +41,7 @@ mod tests {
         assert!(srs_plus().is_two_line_supported());
         assert!(srs().is_two_line_supported());
         assert!(srs_x().is_two_line_supported());
+        assert!(jstris_180().is_two_line_supported());
         assert!(asc().is_two_line_supported());
         assert!(ars().is_two_line_supported());
         assert!(no_kick().is_two_line_supported());

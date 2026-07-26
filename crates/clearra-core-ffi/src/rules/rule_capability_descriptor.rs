@@ -3,7 +3,7 @@ use clearra_rules::profile::{
     rule_profile::{RuleProfile, RuleProfileId},
 };
 
-use crate::problem::{CRuleProfileDescriptor, FfiProblemError};
+use crate::problem::{CRuleProfileDescriptor, FfiProblemError, C_KICK_JSTRIS_180};
 
 use super::{
     no_kick_descriptor_compiler::no_kick_profile_id, srs_descriptor_compiler::srs_kick_profile_id,
@@ -24,6 +24,7 @@ pub(crate) fn compile_builtin_profile(
     descriptor.kick_profile_id = match rule.id() {
         RuleProfileId::Srs => srs_kick_profile_id(),
         RuleProfileId::SrsPlus => srs_plus_kick_profile_id(),
+        RuleProfileId::Jstris180 => C_KICK_JSTRIS_180,
         RuleProfileId::NoKick => no_kick_profile_id(),
         RuleProfileId::SrsX | RuleProfileId::Asc | RuleProfileId::Ars | RuleProfileId::Custom => {
             return Err(FfiProblemError::UnverifiedRuleProfileRejected {
