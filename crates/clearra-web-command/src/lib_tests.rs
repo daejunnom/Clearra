@@ -76,6 +76,25 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
 }
 
 #[test]
+fn setup_command_preserves_single_remaining_piece_as_a_guaranteed_prefix() {
+    let request = WebCommandParser::parse("clearra setup --remaining I")
+        .expect("setup command")
+        .to_app_request()
+        .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    let conditions =
+        clearra_problem::compile_setup_search_conditions(command.query()).expect("conditions");
+
+    assert_eq!(command.query().residue().pieces(), &[PieceKind::I]);
+    assert_eq!(command.query().residue().cycle(), Some(3));
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0].pattern_expression(), "IP7P3");
+    assert_eq!(conditions[0].queue_remainder(), &[PieceKind::I]);
+}
+
+#[test]
 fn setup_command_preserves_candidate_priority() {
     for (keyword, expected) in [
         ("all", clearra_problem::SetupCandidatePriority::All),

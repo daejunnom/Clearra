@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-07-27
+
+- Preserved a single explicit Setup Finder residue as the guaranteed leading
+  supply prefix, with regression coverage from browser command parsing through
+  the exact pattern transition.
+- Canonicalized on-demand PC completion paths by exact placement set and
+  deleted-row state, removing duplicate solutions that differed only in legal
+  operation order while retaining genuinely distinct clear states.
+- Clarified the probability distinction between a guaranteed one-piece residue
+  and selecting the same piece from an unordered seven-piece residue.
+
 ## 0.2.4 - 2026-07-27
 
 - Restored Queue-Based Setup Finder semantics so observed next-bag pieces are

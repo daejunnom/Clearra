@@ -53,6 +53,10 @@ impl PartialBuildNode {
         }
     }
 
+    pub(super) const fn placement_set_id(self) -> u32 {
+        self.placement_set_id
+    }
+
     fn set_live(&mut self, live: bool) {
         self.flags = (self.flags & !NODE_LIVE) | u8::from(live) * NODE_LIVE;
     }

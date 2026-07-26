@@ -1,18 +1,67 @@
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     piece::piece_kind::PieceKind,
+    probability::probability_value::ProbabilityValue,
+};
+use clearra_coverage::universe::{
+    pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
 };
 use clearra_problem::{
     compile_setup_search_conditions, SetupCandidatePriority, SetupLengthPreference, SetupLimits,
     SetupSearchQuery,
 };
+use clearra_supply::pattern_universe::{
+    MaterializedPatternUniverse, PatternPiecePositionIndex,
+};
 
 use super::{
     compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
     merge_exact_state_coverage, piece_index, prefers_setup_representative_depth,
-    retain_best_setup_state_per_board, terminal_supply_target_word, SetupShape,
-    SetupSupplyStateLayout, WasmSetupSearchAdvance, WasmSetupSearchSession,
+    retain_best_setup_state_per_board, setup_supply_transitions, terminal_supply_target_word,
+    SetupShape, SetupSupplyStateLayout, WasmSetupSearchAdvance, WasmSetupSearchSession,
 };
+
+#[test]
+fn guaranteed_leading_residue_piece_covers_the_entire_pattern_word() {
+    let universe = MaterializedPatternUniverse::from_sequences(
+        PatternUniverseId::new(1),
+        PatternWeightModelId::new(1),
+        vec![
+            vec![PieceKind::I, PieceKind::O],
+            vec![PieceKind::I, PieceKind::T],
+        ],
+        vec![
+            ProbabilityValue::new(0.4).expect("weight"),
+            ProbabilityValue::new(0.6).expect("weight"),
+        ],
+        2,
+        true,
+        None,
+    )
+    .expect("pattern universe");
+    let pattern_index = PatternPiecePositionIndex::compile(&universe).expect("pattern index");
+    let active = pattern_index.active_word(0);
+    let transitions = setup_supply_transitions(
+        &pattern_index,
+        0,
+        true,
+        false,
+        false,
+        0,
+        piece_index(PieceKind::I) as u8 + 1,
+        0,
+        0,
+        active,
+        0,
+        false,
+    );
+    let covered = transitions
+        .iter()
+        .fold(0_u64, |coverage, transition| coverage | transition.mask);
+
+    assert_eq!(active, 0b11);
+    assert_eq!(covered, active);
+}
 
 #[test]
 fn queue_based_supply_layout_has_no_observed_piece_consumption_dimension() {

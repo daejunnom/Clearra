@@ -67,7 +67,7 @@ function Invoke-SetupSearchProductPathValidation() {
         "PartialBuildGraphBuilder",
         "GeometryCompletionOracle",
         "compact_live_graph",
-        "1..=9"
+        "MAX_SETUP_CANDIDATE_LOCKS"
     )) {
         if ($partialBuild -notlike "*$requiredMarker*") {
             Add-ArchitectureError "setup partial BuildUp graph marker is missing: '$requiredMarker'"

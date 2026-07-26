@@ -102,6 +102,13 @@ The residue count determines the PC cycle.
 | 6 | 6 |
 | 3 | 7 |
 
+The residue also determines the probability denominator. For example,
+`--remaining I` means that I is the guaranteed current-cycle residue, so a
+legal one-I setup has 100% Build coverage. With `--remaining IOTSZJL`, a
+one-I-only setup has 2/7 Build coverage from an empty hold: I must be the
+current piece or the next piece after storing the current piece. Future bag
+patterns do not replace or dilute the explicit residue prefix.
+
 Product UI requests always start with an empty initial hold and require each
 residue piece kind to be unique. The CLI alone may request an occupied initial
 hold:

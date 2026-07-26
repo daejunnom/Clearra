@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_problem::SetupPathDetail;
@@ -19,6 +19,12 @@ pub(super) struct SetupSolutionStep {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct SetupSolutionPath {
     pub(super) steps: Vec<SetupSolutionStep>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SetupCompletionIdentity {
+    placement_set_id: u32,
+    deleted_rows: u16,
 }
 
 impl SetupSolutionPath {
@@ -48,7 +54,7 @@ pub(super) fn enumerate_setup_completion_paths(
         WasmExactSearchError::InvalidProblem("setup_path_detail_shape_not_found"),
     )?)
     .map_err(|_| WasmExactSearchError::InvalidProblem("setup_path_detail_shape_index_overflow"))?;
-    let mut paths = HashSet::new();
+    let mut paths = HashMap::new();
     paths.try_reserve(256).map_err(|_| {
         WasmExactSearchError::InvalidProblem("setup_completion_path_storage_unavailable")
     })?;
@@ -70,7 +76,7 @@ pub(super) fn enumerate_setup_completion_paths(
         )?;
     }
 
-    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    let mut paths = paths.into_values().collect::<Vec<_>>();
     paths.sort_unstable();
     Ok(paths)
 }
@@ -79,17 +85,23 @@ fn enumerate_suffixes(
     graph: &PartialBuildGraph,
     node_index: usize,
     path: &mut Vec<SetupSolutionStep>,
-    paths: &mut HashSet<SetupSolutionPath>,
+    paths: &mut HashMap<SetupCompletionIdentity, SetupSolutionPath>,
     control: &ExecutionControl,
     cancellation_work: &mut usize,
 ) -> Result<(), WasmExactSearchError> {
     check_cancel(control, cancellation_work)?;
     let node = graph.nodes[node_index];
     if node.accepting() {
-        reserve_path_slot(paths)?;
-        paths.insert(SetupSolutionPath {
-            steps: path.clone(),
-        });
+        insert_canonical_solution_path(
+            paths,
+            SetupCompletionIdentity {
+                placement_set_id: node.placement_set_id(),
+                deleted_rows: node.deleted_rows,
+            },
+            SetupSolutionPath {
+                steps: path.clone(),
+            },
+        )?;
         return Ok(());
     }
     if !node.live() {
@@ -122,13 +134,94 @@ fn enumerate_suffixes(
     Ok(())
 }
 
-fn reserve_path_slot(paths: &mut HashSet<SetupSolutionPath>) -> Result<(), WasmExactSearchError> {
+fn insert_canonical_solution_path(
+    paths: &mut HashMap<SetupCompletionIdentity, SetupSolutionPath>,
+    identity: SetupCompletionIdentity,
+    candidate: SetupSolutionPath,
+) -> Result<(), WasmExactSearchError> {
+    if let Some(current) = paths.get_mut(&identity) {
+        if candidate < *current {
+            *current = candidate;
+        }
+        return Ok(());
+    }
+    reserve_path_slot(paths)?;
+    paths.insert(identity, candidate);
+    Ok(())
+}
+
+fn reserve_path_slot(
+    paths: &mut HashMap<SetupCompletionIdentity, SetupSolutionPath>,
+) -> Result<(), WasmExactSearchError> {
     if paths.len() == paths.capacity() {
         paths.try_reserve(paths.capacity().max(256)).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_completion_path_storage_unavailable")
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(piece: PieceKind, x: i8) -> SetupSolutionPath {
+        SetupSolutionPath {
+            steps: vec![SetupSolutionStep {
+                piece,
+                rotation: 0,
+                x,
+                y: 0,
+                cleared_lines: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn completion_paths_dedupe_by_final_exact_placement_state() {
+        let identity = SetupCompletionIdentity {
+            placement_set_id: 7,
+            deleted_rows: 3,
+        };
+        let mut paths = HashMap::new();
+
+        insert_canonical_solution_path(&mut paths, identity, path(PieceKind::T, 4))
+            .expect("first path");
+        insert_canonical_solution_path(&mut paths, identity, path(PieceKind::I, 1))
+            .expect("replacement path");
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            paths.get(&identity).expect("canonical path"),
+            &path(PieceKind::I, 1)
+        );
+    }
+
+    #[test]
+    fn completion_paths_retain_distinct_deleted_row_states() {
+        let mut paths = HashMap::new();
+
+        insert_canonical_solution_path(
+            &mut paths,
+            SetupCompletionIdentity {
+                placement_set_id: 7,
+                deleted_rows: 1,
+            },
+            path(PieceKind::I, 1),
+        )
+        .expect("first state");
+        insert_canonical_solution_path(
+            &mut paths,
+            SetupCompletionIdentity {
+                placement_set_id: 7,
+                deleted_rows: 2,
+            },
+            path(PieceKind::I, 1),
+        )
+        .expect("second state");
+
+        assert_eq!(paths.len(), 2);
+    }
 }
 
 #[inline]
