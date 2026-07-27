@@ -31,6 +31,7 @@ mod parallel_search;
 #[cfg(feature = "parallel")]
 mod parallel_worker;
 mod piece_order_language;
+mod queue_observation_policy;
 mod reachability;
 mod realization_feasibility;
 mod result;

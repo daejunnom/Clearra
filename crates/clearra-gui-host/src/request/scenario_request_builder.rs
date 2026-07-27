@@ -116,6 +116,7 @@ impl ScenarioRequestBuilder {
             PieceWindow::new(form.piece_window()),
         )
         .with_rule(parse_rule_profile(form.rule())?)
+        .with_queue_observation_policy(form.queue_observation_policy())
         .with_hold_piece(hold_piece)
         .with_allow_hold(form.allow_hold())
         .with_count_policy(count_policy)

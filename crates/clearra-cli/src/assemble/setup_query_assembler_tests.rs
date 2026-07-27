@@ -13,6 +13,19 @@ fn assembles_residue_and_cycle_boundary_policy() {
 }
 
 #[test]
+fn preserves_visible_seven_policy_in_setup_query() {
+    let args = SetupArgs::new("IOTS", false).with_queue_observation_policy(
+        clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven,
+    );
+    let query = SetupQueryAssembler::assemble(&args).expect("setup query");
+
+    assert_eq!(
+        query.queue_observation_policy(),
+        clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven
+    );
+}
+
+#[test]
 fn rejects_unknown_residue_piece() {
     assert_eq!(
         SetupQueryAssembler::assemble(&SetupArgs::new("IX", false)),

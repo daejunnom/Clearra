@@ -35,7 +35,7 @@ fn continue_command_can_emit_another_continue_hint() {
     assert!(output.stdout().contains("next_pc_available: true"));
     assert!(output.stdout().contains("continuation_token_version: pc2"));
     assert!(output.stdout().contains(
-        "continue_hint: clearra continue pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:oall:e0:hnone:qIIOOO"
+        "continue_hint: clearra continue pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:oall:e0:hnone:qIIOOO:qkoracle"
     ));
 }
 

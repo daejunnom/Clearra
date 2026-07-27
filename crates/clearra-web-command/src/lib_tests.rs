@@ -3,6 +3,7 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_forward_search::{ForwardSearchMode, ForwardSpinCategory};
 use clearra_pc_graph::request::SupplyWindowSize;
 use clearra_scoring::profile::SpinProfileId;
+use clearra_supply::QueueObservationPolicy;
 
 use super::*;
 
@@ -20,6 +21,58 @@ fn wasm_command_compiles_to_app_request() {
         }
         _ => panic!("expected AppCommand::Pc"),
     }
+}
+
+#[test]
+fn pc_queue_knowledge_defaults_to_full_future_oracle() {
+    let request = WebCommandParser::parse("clearra pc --lines 4 --patterns P7P4")
+        .expect("web command")
+        .to_app_request()
+        .expect("AppRequest");
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+
+    assert_eq!(
+        command.query().queue_observation_policy(),
+        QueueObservationPolicy::FullQueueOracle
+    );
+}
+
+#[test]
+fn pc_command_accepts_visible_seven_queue_knowledge() {
+    let request =
+        WebCommandParser::parse("clearra pc --lines 4 --patterns P7P4 --queue-knowledge visible-7")
+            .expect("web command")
+            .to_app_request()
+            .expect("AppRequest");
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+
+    assert_eq!(
+        command.query().queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
+    );
+}
+
+#[test]
+fn scenario_pc_command_accepts_visible_seven_queue_knowledge() {
+    let request = WebCommandParser::parse(
+        "clearra pc --lines 4 --patterns P7P4 --board-mask 0 \
+         --height 4 --pieces 10 --queue-knowledge visible-7",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected AppCommand::Scenario");
+    };
+
+    assert_eq!(
+        command.query().queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
+    );
 }
 
 #[test]
@@ -73,6 +126,34 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
         command.query().cycle_reset_borrow_policy(),
         clearra_problem::SetupCycleResetBorrowPolicy::AllowPostCyclePieceUse
     );
+}
+
+#[test]
+fn setup_command_accepts_visible_seven_queue_knowledge() {
+    let request =
+        WebCommandParser::parse("clearra setup --remaining IOTS --queue-knowledge visible-7")
+            .expect("setup command")
+            .to_app_request()
+            .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+
+    assert_eq!(
+        command.query().queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
+    );
+}
+
+#[test]
+fn queue_knowledge_rejects_unknown_values() {
+    for command in [
+        "clearra pc --lines 4 --queue-knowledge clairvoyant",
+        "clearra setup --remaining IOTS --queue-knowledge clairvoyant",
+    ] {
+        let error = WebCommandParser::parse(command).expect_err("invalid policy must fail");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
 }
 
 #[test]

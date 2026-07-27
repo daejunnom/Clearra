@@ -1,7 +1,7 @@
 use clearra_profiles::{
     bag::bag_profile::BagProfileId, pieces::piece_set_profile::PieceSetProfileId,
 };
-use clearra_supply::queue::fixed_sequence::FixedSequence;
+use clearra_supply::{queue::fixed_sequence::FixedSequence, QueueObservationPolicy};
 
 use super::{
     continuation_kick_profile_codec::{format_kick_profile, parse_kick_profile},
@@ -82,7 +82,7 @@ fn encode_scenario_query_with_kind(
     let prefix = kind.prefix();
     let kick_profile = format_kick_profile(query.verified_kick_profile())?;
     Ok(format!(
-        "{prefix}:w{}:v{}:m0x{:016x}:ps{}:bg{}:r{}:h{}:q{}:p{}:x{}:n{}:a{}:z{}:g{}:c{}:t{}:k{}:u{}",
+        "{prefix}:w{}:v{}:m0x{:016x}:ps{}:bg{}:r{}:h{}:q{}:p{}:x{}:n{}:a{}:z{}:g{}:c{}:t{}:k{}:u{}:o{}",
         query.initial_board().width(),
         query.initial_board().visible_height(),
         query.initial_board().occupied_mask(),
@@ -101,6 +101,7 @@ fn encode_scenario_query_with_kind(
         query.retained_trace_limit(),
         kick_profile,
         bool_digit(query.solution_probability_policy().requested()),
+        query.queue_observation_policy().keyword(),
     ))
 }
 
@@ -109,11 +110,11 @@ fn parse_scenario_v2(
     expected_kind: ScenarioContinuationTokenKind,
 ) -> Result<PcScenarioQuery, PcContinuationTokenError> {
     let parts = token.split(':').collect::<Vec<_>>();
-    if !(parts.len() == 17 || parts.len() == 18 || parts.len() == 19)
+    if !(parts.len() == 17 || parts.len() == 18 || parts.len() == 19 || parts.len() == 20)
         || ScenarioContinuationTokenKind::from_prefix(parts[0]) != Some(expected_kind)
     {
         return Err(PcContinuationTokenError::new(
-            "scenario token must use sc2|sr2:w10:v2:m0x...:psPROFILE:bgPROFILE:rRULE:hnone:qPIECES:pN:xN|none:nN:a0|1:z0|1:gclear-to-empty:cPOLICY:tN:kPROFILE:u0|1 format",
+            "scenario token must use sc2|sr2:w10:v2:m0x...:psPROFILE:bgPROFILE:rRULE:hnone:qPIECES:pN:xN|none:nN:a0|1:z0|1:gclear-to-empty:cPOLICY:tN:kPROFILE:u0|1:ooracle|visible-7 format",
         ));
     }
     require_value(
@@ -151,8 +152,15 @@ fn parse_scenario_v2(
             query = query.with_verified_kick_table_profile(profile);
         }
     }
-    if parts.len() == 19 && parse_bool_digit_prefixed(parts[18], "u")? {
+    if parts.len() >= 19 && parse_bool_digit_prefixed(parts[18], "u")? {
         query = query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+    }
+    if parts.len() == 20 {
+        let value = prefixed_value(parts[19], "o")?;
+        let policy = QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
+            PcContinuationTokenError::new("unsupported scenario queue observation policy")
+        })?;
+        query = query.with_queue_observation_policy(policy);
     }
 
     if completion_goal != PcCompletionGoal::ClearToEmpty {

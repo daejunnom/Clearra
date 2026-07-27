@@ -1072,10 +1072,16 @@ Each visible candidate reports build, joint, and conditional probability plus
 an exact representative placement/hold path. Its placement-count range is
 derived only from PC-live exact states that satisfy the active supply contract.
 Output limits are applied only after all exact-state coverage has been accumulated
-and ranked. The stable coverage semantics are `Oracle`: each complete pattern
-may choose its own legal path.
-Online coverage is not exposed until an observation-class policy engine is
-connected.
+and ranked. Queue knowledge is an explicit product policy:
+
+- `FullQueueOracle` allows each complete pattern to choose its own legal path.
+- `VisibleSeven` groups queues by the current hold and visible seven-piece
+  prefix. Every queue in one observation class must choose the same action,
+  and the policy may branch only after another piece becomes visible.
+
+The visible-seven evaluator runs over the exact placement language and the
+hold/bag automaton. It is not a truncated pattern bitset or a representative
+queue approximation. Oracle remains the default for compatibility.
 
 The only product entry is:
 
@@ -1102,8 +1108,10 @@ color and the completion placements by piece.
 
 The top-level report records the inferred cycle, canonical residue, cycle-reset
 borrow policy, geometry family count, partial graph node count, completeness,
-and `coverage_semantics=oracle`. A resource or allocation failure is an error;
-it must not return a complete-looking partial result.
+`queue_knowledge`, `visible_piece_count`, and one of
+`coverage_semantics=full-future-oracle` or
+`coverage_semantics=visible-seven-policy`. A resource or allocation failure is
+an error; it must not return a complete-looking partial result.
 
 ## M11 / M21 Build Coverage Product Path
 

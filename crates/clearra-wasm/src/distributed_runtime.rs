@@ -147,6 +147,13 @@ impl WasmDistributedCoordinator {
                 }
                 DistributedSetupPreparation::Search(prepared) => prepared,
             };
+            if prepared
+                .query()
+                .queue_observation_policy()
+                .requires_observation_policy()
+            {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
             let producer = WasmSetupParallelCoordinator::new(prepared.query(), requested_workers)
                 .map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_SETUP_START", error.reason())
@@ -232,6 +239,12 @@ impl WasmDistributedCoordinator {
             DistributedSearchPreparation::Search(prepared) => prepared,
         };
         let problem = prepared.problem();
+        if problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        {
+            return Ok(WasmDistributedPreparation::Serial);
+        }
         let build_probability_request = prepared.build_probability_request();
         let worker_count = problem.backend_policy().workers();
         let distributed_worthwhile = build_probability_request.map_or_else(

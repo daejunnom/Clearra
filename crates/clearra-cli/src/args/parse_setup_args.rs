@@ -2,6 +2,7 @@ use super::{
     parse_option_value::{option_value, unknown_option},
     CliHelpTopic, CliParseError, ParsedCliCommand, SetupArgs,
 };
+use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
 
 pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseError> {
     let mut remaining = "IOTSZJL".to_owned();
@@ -16,6 +17,7 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut initial_hold = None;
     let mut path_detail_setup_id = None;
     let mut path_detail_condition_id = None;
+    let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut index = 0;
 
     while index < args.len() {
@@ -98,6 +100,17 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
                     Some(option_value(args, index, "--condition")?.to_owned());
                 index += 2;
             }
+            "--queue-knowledge" => {
+                let value = option_value(args, index, "--queue-knowledge")?;
+                queue_observation_policy =
+                    QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
+                        CliParseError::InvalidValue {
+                            option: "--queue-knowledge",
+                            value: value.to_owned(),
+                        }
+                    })?;
+                index += 2;
+            }
             "--help" | "-h" => return Ok(ParsedCliCommand::Help(CliHelpTopic::Setup)),
             option => return Err(unknown_option("setup", option)),
         }
@@ -118,7 +131,8 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
         .with_candidate_priority(candidate_priority)
         .with_length_preference(length_preference)
         .with_max_setup_pieces(max_setup_pieces)
-        .with_search_mode(search_mode);
+        .with_search_mode(search_mode)
+        .with_queue_observation_policy(queue_observation_policy);
     if let Some(pieces) = queue_based_pieces {
         setup_args = setup_args.with_queue_based_pieces(pieces);
     }

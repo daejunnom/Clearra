@@ -15,7 +15,7 @@ use clearra_core_domain::{
     board::board_size::BoardSize, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
 };
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
-use clearra_supply::queue::fixed_sequence::FixedSequence;
+use clearra_supply::{queue::fixed_sequence::FixedSequence, QueueObservationPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupPathDetail {
@@ -118,6 +118,7 @@ pub struct SetupSearchQuery {
     length_preference: SetupLengthPreference,
     max_setup_pieces: u8,
     search_mode: SetupSearchMode,
+    queue_observation_policy: QueueObservationPolicy,
     next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
     path_detail: Option<SetupPathDetail>,
 }
@@ -150,6 +151,7 @@ impl SetupSearchQuery {
             length_preference: SetupLengthPreference::default(),
             max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
+            queue_observation_policy: QueueObservationPolicy::default(),
             next_cycle_remaining_pieces: None,
             path_detail: None,
         }
@@ -223,6 +225,10 @@ impl SetupSearchQuery {
 
     pub fn search_mode(&self) -> SetupSearchMode {
         self.search_mode
+    }
+
+    pub fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
     }
 
     pub fn next_cycle_remaining_pieces(&self) -> Option<&[PieceKind]> {
@@ -309,6 +315,11 @@ impl SetupSearchQuery {
         self
     }
 
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
+        self
+    }
+
     pub fn with_path_detail(mut self, detail: SetupPathDetail) -> Self {
         self.path_detail = Some(detail);
         self
@@ -349,6 +360,7 @@ impl Default for SetupSearchQuery {
             length_preference: SetupLengthPreference::default(),
             max_setup_pieces: 9,
             search_mode: SetupSearchMode::default(),
+            queue_observation_policy: QueueObservationPolicy::default(),
             next_cycle_remaining_pieces: None,
             path_detail: None,
         }

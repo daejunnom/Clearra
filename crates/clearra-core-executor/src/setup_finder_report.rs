@@ -1,11 +1,13 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_problem::SetupSearchMode;
+use clearra_supply::QueueObservationPolicy;
 
 use crate::CorePathStep;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupFinderReport {
     search_mode: SetupSearchMode,
+    queue_observation_policy: QueueObservationPolicy,
     cycle: u8,
     remaining_pieces: String,
     queue_based_pieces: String,
@@ -21,6 +23,7 @@ impl SetupFinderReport {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         search_mode: SetupSearchMode,
+        queue_observation_policy: QueueObservationPolicy,
         cycle: u8,
         remaining_pieces: String,
         queue_based_pieces: String,
@@ -33,6 +36,7 @@ impl SetupFinderReport {
     ) -> Self {
         Self {
             search_mode,
+            queue_observation_policy,
             cycle,
             remaining_pieces,
             queue_based_pieces,
@@ -47,6 +51,10 @@ impl SetupFinderReport {
 
     pub fn search_mode(&self) -> SetupSearchMode {
         self.search_mode
+    }
+
+    pub fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
     }
 
     pub fn cycle(&self) -> u8 {
@@ -82,7 +90,7 @@ impl SetupFinderReport {
     }
 
     pub fn coverage_semantics(&self) -> &'static str {
-        "oracle"
+        self.queue_observation_policy.coverage_semantics()
     }
 
     pub fn hold_conditions(&self) -> &[SetupHoldConditionReport] {

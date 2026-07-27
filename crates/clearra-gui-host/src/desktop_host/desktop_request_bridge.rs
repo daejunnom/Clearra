@@ -112,6 +112,7 @@ mod error {
     impl std::error::Error for DesktopTauriCommandError {}
 }
 mod form_parser {
+    use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
     use serde_json::Value;
 
     use crate::{GuiAppState, GuiBackendForm, GuiOpeningPcForm, GuiProblemForm};
@@ -154,6 +155,18 @@ mod form_parser {
             .get("hold_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        let queue_observation_policy = value
+            .get("queue_knowledge")
+            .and_then(Value::as_str)
+            .map(|value| {
+                QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "invalid desktop queue_knowledge '{value}'"
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let problem_form = match command {
             "pc" if !patterns.trim().is_empty() => {
@@ -246,6 +259,7 @@ mod form_parser {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let problem_form = problem_form
+            .with_queue_observation_policy(queue_observation_policy)
             .with_score_input(score_mode, initial_b2b)
             .with_score_profiles(score_profile, spin_profile)
             .with_back_to_back_preservation(preserve_b2b)
@@ -606,6 +620,8 @@ pub use error::DesktopTauriCommandError;
 
 #[cfg(test)]
 mod tests {
+    use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
+
     use crate::GuiProblemForm;
 
     use super::form_parser::desktop_form_builds_app_request;
@@ -640,5 +656,43 @@ mod tests {
             panic!("expected opening PC form");
         };
         assert!(!disabled_form.hold_enabled());
+    }
+
+    #[test]
+    fn desktop_request_preserves_visible_seven_queue_knowledge() {
+        let state = desktop_form_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 4,
+                "queue_knowledge": "visible-7",
+                "backend": "cpu"
+            }"#,
+        )
+        .expect("desktop visible-seven request");
+        let GuiProblemForm::OpeningPc(form) = state.problem_form() else {
+            panic!("expected opening PC form");
+        };
+
+        assert_eq!(
+            form.queue_observation_policy(),
+            QueueObservationPolicy::VisibleSeven
+        );
+    }
+
+    #[test]
+    fn desktop_request_rejects_unknown_queue_knowledge() {
+        let error = desktop_form_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 4,
+                "queue_knowledge": "clairvoyant",
+                "backend": "cpu"
+            }"#,
+        )
+        .expect_err("unknown queue knowledge must fail closed");
+
+        assert!(error.to_string().contains("queue_knowledge"));
     }
 }

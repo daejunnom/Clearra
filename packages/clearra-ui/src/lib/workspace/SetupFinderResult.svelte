@@ -170,7 +170,12 @@
           <div><dt>{label('setups')}</dt><dd>{number(totalCandidateCount)}</dd></div>
           <div><dt>{label('countComplete')}</dt><dd>{label(report.complete ? 'complete' : 'incomplete')}</dd></div>
           <div><dt>{label('workersUsed')}</dt><dd>{number(view.searchReport?.workers_used)}</dd></div>
-          <div><dt>{label('coverageSemantics')}</dt><dd>{label('oracleCoverage')}</dd></div>
+          <div>
+            <dt>{label('coverageSemantics')}</dt>
+            <dd>{label(report.coverage_semantics === 'visible-seven-policy'
+              ? 'visibleSevenCoverage'
+              : 'oracleCoverage')}</dd>
+          </div>
           {#if report.next_cycle_remaining_pieces}
             <div>
               <dt>{label('setupNextCycleRemaining')}</dt>
@@ -223,7 +228,9 @@
                 <div class="setup-metrics">
                   <strong>{label('jointProbability')}: {workspaceProbability(language, result.candidate.joint_probability)}</strong>
                   <span>{label('buildProbability')}: {workspaceProbability(language, result.candidate.build_probability)}</span>
-                  <span>{label('conditionalPcProbability')}: {workspaceProbability(language, result.candidate.conditional_pc_probability)}</span>
+                  <span>{label(report?.coverage_semantics === 'visible-seven-policy'
+                    ? 'conditionalCoverageRatio'
+                    : 'conditionalPcProbability')}: {workspaceProbability(language, result.candidate.conditional_pc_probability)}</span>
                   <span>{result.candidate.min_locks === result.candidate.max_locks
                     ? label('lockCount', { count: result.candidate.min_locks })
                     : label('lockRange', { min: result.candidate.min_locks, max: result.candidate.max_locks })}</span>

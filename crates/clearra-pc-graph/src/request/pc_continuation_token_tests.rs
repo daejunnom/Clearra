@@ -9,7 +9,7 @@ use clearra_rules::{
         rule_profile::RuleProfileId,
     },
 };
-use clearra_supply::queue::fixed_sequence::FixedSequence;
+use clearra_supply::{queue::fixed_sequence::FixedSequence, QueueObservationPolicy};
 
 use crate::request::{
     PcCompletionGoal, PcContinuationToken, PcContinuationTokenCodec, PcCountPolicy, PcHoldPolicy,
@@ -27,7 +27,8 @@ fn opening_v2_token_preserves_rule_objective_and_profile_contract() {
         ])))
         .with_hold_policy(PcHoldPolicy::Disabled)
         .with_rule(no_kick())
-        .with_objective(ObjectivePolicy::unique());
+        .with_objective(ObjectivePolicy::unique())
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
 
     let token = PcContinuationTokenCodec::encode_opening_continuation(
         &query,
@@ -49,6 +50,10 @@ fn opening_v2_token_preserves_rule_objective_and_profile_contract() {
     assert_eq!(decoded.objective().kind(), query.objective().kind());
     assert_eq!(decoded.hold_policy(), PcHoldPolicy::Disabled);
     assert_eq!(decoded.queue().len(), 2);
+    assert_eq!(
+        decoded.queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
+    );
 }
 
 #[test]
@@ -69,6 +74,7 @@ fn scenario_v2_token_preserves_full_query_contract() {
     .with_allow_hold(true)
     .with_requires_180(true)
     .with_count_policy(PcCountPolicy::CountUnique)
+    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
     .with_retained_trace_limit(7);
 
     let token = PcContinuationTokenCodec::encode_scenario_continuation(&query).expect("sc2 token");
@@ -97,6 +103,10 @@ fn scenario_v2_token_preserves_full_query_contract() {
     assert_eq!(decoded.count_policy(), query.count_policy());
     assert_eq!(decoded.objective().kind(), query.objective().kind());
     assert_eq!(decoded.retained_trace_limit(), query.retained_trace_limit());
+    assert_eq!(
+        decoded.queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
+    );
     assert!(decoded.verified_kick_profile().is_none());
 }
 
@@ -172,6 +182,14 @@ fn v1_tokens_migrate_to_current_encoding() {
     assert_eq!(opening.objective().kind(), ObjectiveKind::All);
     assert_eq!(scenario.rule().id(), RuleProfileId::SrsPlus);
     assert_eq!(scenario.count_policy(), PcCountPolicy::CountAll);
+    assert_eq!(
+        opening.queue_observation_policy(),
+        QueueObservationPolicy::FullQueueOracle
+    );
+    assert_eq!(
+        scenario.queue_observation_policy(),
+        QueueObservationPolicy::FullQueueOracle
+    );
 
     let current_opening = PcContinuationTokenCodec::encode_opening_continuation(
         &opening,

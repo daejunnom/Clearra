@@ -19,3 +19,4 @@ pub use pattern_universe::{
     PatternPiecePositionIndexError, PatternSequenceReader, PatternUniverseMaterializationError,
     PatternUniverseMaterializer, PieceMultisetKey, ProbabilityWeight,
 };
+pub use queue::queue_observation_policy::QueueObservationPolicy;

@@ -1,5 +1,5 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient';
-import type { RuleProfile } from './solverWorkspaceModel';
+import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel';
 
 export type SetupCandidatePriority = 'all' | 'build' | 'pc';
 export type SetupLengthPreference = 'auto' | 'longer' | 'shorter';
@@ -7,6 +7,7 @@ export type SetupSearchMode = 'oracle' | 'qb';
 
 export type SetupFinderRequest = {
   searchMode: SetupSearchMode;
+  queueKnowledge: QueueKnowledge;
   rule: RuleProfile;
   remaining: string;
   qbQueue: string;
@@ -48,6 +49,7 @@ const PIECES = 'IOTSZJL';
 export function createDefaultSetupFinderRequest(): SetupFinderRequest {
   return {
     searchMode: 'oracle',
+    queueKnowledge: 'oracle',
     rule: 'srs-plus',
     remaining: PIECES,
     qbQueue: '',
@@ -158,6 +160,7 @@ export function buildSetupFinderCommand(request: SetupFinderRequest): string {
     request.searchMode === 'qb'
       ? `--mode qb --qb ${normalizedSetupResidue(request.qbQueue)}`
       : '',
+    `--queue-knowledge ${request.queueKnowledge}`,
     normalizedSetupResidue(request.nextCycleRemaining)
       ? `--next-cycle-remaining ${normalizedSetupResidue(request.nextCycleRemaining)}`
       : '',

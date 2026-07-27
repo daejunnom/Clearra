@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.6 - 2026-07-27
+
+- Added an exact `visible-7` future-queue knowledge policy for PC and Setup
+  search while retaining the full-future Oracle as the compatibility default.
+- Required queues with the same current hold and visible seven-piece prefix to
+  choose one shared placement/hold action, with exact branching only when
+  hidden pieces become visible.
+- Connected queue knowledge through CLI, browser WASM, desktop host, GUI,
+  continuation tokens, reports, documentation, and architecture validation.
+- Kept hidden suffixes in the complete pattern universe, routed limited-
+  observation searches through the required global language finalizer, and
+  reported unsupported per-solution objectives without Oracle substitution.
+
 ## 0.2.5 - 2026-07-27
 
 - Preserved a single explicit Setup Finder residue as the guaranteed leading

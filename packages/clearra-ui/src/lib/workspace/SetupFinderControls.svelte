@@ -99,6 +99,23 @@
       <small class="workspace-field-help">{label('setupNextCycleRemainingHelp')}</small>
     </label>
     <QueuePatternHelp {language} mode={request.searchMode === 'qb' ? 'setup-qb' : 'setup'} />
+    <label class="workspace-field wide queue-knowledge-field">
+      <span>{label('queueKnowledge')}</span>
+      <select
+        value={request.queueKnowledge}
+        on:change={(event) => update({
+          queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SetupFinderRequest['queueKnowledge']
+        })}
+      >
+        <option value="oracle">{label('queueKnowledgeOracle')}</option>
+        <option value="visible-7">{label('queueKnowledgeVisibleSeven')}</option>
+      </select>
+      <small class="workspace-field-help">
+        {label(request.queueKnowledge === 'visible-7'
+          ? 'queueKnowledgeVisibleSevenHelp'
+          : 'queueKnowledgeOracleHelp')}
+      </small>
+    </label>
 
     <div class="residue-facts">
       <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
@@ -220,4 +237,5 @@
   .residue-facts strong { color: #173f3a; text-align: right; }
   .boundary-help { display: block; margin-top: 8px; }
   .priority-field { margin-top: 14px; }
+  .queue-knowledge-field { margin-top: 14px; }
 </style>

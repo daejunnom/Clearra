@@ -135,6 +135,9 @@ pub(crate) struct WasmExactSearchSession {
     coverage_product_words: usize,
     coverage_product_states: usize,
     coverage_product_edge_checks: usize,
+    observation_policy_states: usize,
+    observation_policy_action_checks: usize,
+    observation_trie_nodes: usize,
     realization_feasibility_states: usize,
     realization_feasibility_rejected_candidates: usize,
     peak_reachability_states: usize,
@@ -173,6 +176,7 @@ pub(crate) struct WasmExactSearchSession {
     gpu_shader_hash: Option<String>,
     gpu_shader_version: Option<&'static str>,
     truncated_reason: Option<&'static str>,
+    execution_control: ExecutionControl,
     finished: bool,
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     profile_geometry_advance_calls: usize,
@@ -288,6 +292,9 @@ impl WasmExactSearchSession {
             coverage_product_words: 0,
             coverage_product_states: 0,
             coverage_product_edge_checks: 0,
+            observation_policy_states: 0,
+            observation_policy_action_checks: 0,
+            observation_trie_nodes: 0,
             realization_feasibility_states: 0,
             realization_feasibility_rejected_candidates: 0,
             peak_reachability_states: 0,
@@ -334,6 +341,7 @@ impl WasmExactSearchSession {
             gpu_shader_hash: None,
             gpu_shader_version: None,
             truncated_reason: None,
+            execution_control: ExecutionControl::default(),
             finished: false,
             #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
             profile_geometry_advance_calls: 0,
@@ -398,7 +406,17 @@ impl WasmExactSearchSession {
         worker_count: usize,
         control: &ExecutionControl,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+        self.execution_control = control.clone();
         if worker_count <= 1 {
+            return Ok(None);
+        }
+        if self
+            .problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        {
+            self.parallel_decision_reason =
+                "visible-seven-policy-requires-global-language-finalizer";
             return Ok(None);
         }
         let geometry = std::mem::replace(&mut self.geometry, GeometrySearch::placeholder());
@@ -507,6 +525,7 @@ impl WasmExactSearchSession {
         work_budget: usize,
         control: &ExecutionControl,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+        self.execution_control = control.clone();
         if control.is_cancelled() {
             return Ok(ExactSearchAdvance::Cancelled);
         }
@@ -654,6 +673,7 @@ impl WasmExactSearchSession {
         row_ids: &[u32],
         control: &ExecutionControl,
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        self.execution_control = control.clone();
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_search_session_already_finished",
@@ -677,6 +697,7 @@ impl WasmExactSearchSession {
         ordinal: u64,
         control: &ExecutionControl,
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        self.execution_control = control.clone();
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_search_session_already_finished",
@@ -733,6 +754,10 @@ impl WasmExactSearchSession {
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover
             || self.problem.objective().execution_constraints().requested();
         let coverage_only_needs_witness = !solution_coverage_required
+            && !self
+                .problem
+                .queue_observation_policy()
+                .requires_observation_policy()
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
             && target.single_pattern_witness_is_exact()
             && (self.buildup_workspace.standard_bag_coverage_complete()
@@ -758,6 +783,9 @@ impl WasmExactSearchSession {
             }
             Err(error) => return Err(error),
         };
+        if let Some(root) = result.observation_language_root {
+            self.buildup_workspace.merge_observation_language(root)?;
+        }
         let reduction_span = SearchStageSpan::begin_scaled(
             ExecutorSearchStage::WasmCandidateResultReduce,
             profile_scale,
@@ -1217,6 +1245,58 @@ impl WasmExactSearchSession {
                     )
                 })?;
         }
+        if self
+            .problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        {
+            let control = self.execution_control.clone();
+            match self
+                .buildup_workspace
+                .evaluate_observation_language(&self.problem, &control)
+            {
+                Ok(Some(coverage)) => {
+                    let metrics = coverage.metrics;
+                    self.covered_patterns = coverage.covered_patterns;
+                    self.observation_policy_states = metrics.policy_states;
+                    self.observation_policy_action_checks = metrics.action_checks;
+                    self.observation_trie_nodes = metrics.observation_nodes;
+                    self.peak_cpu_bytes = self.peak_cpu_bytes.max(
+                        self.catalog
+                            .retained_bytes()
+                            .saturating_add(self.geometry.retained_bytes())
+                            .saturating_add(self.coverage_evaluator.retained_bytes())
+                            .saturating_add(self.buildup_workspace.retained_bytes())
+                            .saturating_add(
+                                self.buildable_identities.capacity()
+                                    * core::mem::size_of::<TilingIdentityEntry>(),
+                            )
+                            .saturating_add(self.solution_coverage.as_ref().map_or(
+                                0,
+                                |solution_coverage| {
+                                    solution_coverage.capacity()
+                                        * (core::mem::size_of::<StandardBoard64TilingIdentity>()
+                                            + core::mem::size_of::<PatternBitSet>())
+                                },
+                            ))
+                            .saturating_add(self.solution_coverage_bytes)
+                            .saturating_add(metrics.retained_bytes),
+                    );
+                }
+                Ok(None) => {
+                    let pattern_count = self
+                        .problem
+                        .piece_source()
+                        .materialized_universe()
+                        .map_or(0, |universe| universe.pattern_count());
+                    self.covered_patterns = PatternBitSet::new(pattern_count);
+                }
+                Err(WasmExactSearchError::Cancelled) => {
+                    return Ok(ExactSearchAdvance::Cancelled);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         coverage_span.finish(u64::from(self.covered_patterns.count_ones()));
         self.finished = true;
         let result_span = SearchStageSpan::begin(ExecutorSearchStage::WasmResultCanonicalize);
@@ -1358,9 +1438,12 @@ impl WasmExactSearchSession {
                 )
             })
             .collect();
+        let observation_policy = self.problem.queue_observation_policy();
+        let visible_seven_policy = observation_policy.requires_observation_policy();
         let minimum_cover_requested =
             self.problem.objective().kind() == ObjectiveKind::MinimumCover;
-        let minimum_cover_product_reduction = minimum_cover_requested && include_normalized_keys;
+        let minimum_cover_product_reduction =
+            minimum_cover_requested && include_normalized_keys && !visible_seven_policy;
         let mut minimum_cover_complete = false;
         let mut minimum_cover_proven = false;
         let mut minimum_cover_reason = if minimum_cover_requested {
@@ -1404,7 +1487,11 @@ impl WasmExactSearchSession {
                 }
             }
         } else if minimum_cover_requested {
-            minimum_cover_reason = "deferred-to-coordinator";
+            minimum_cover_reason = if visible_seven_policy {
+                "visible-seven-policy-minimum-cover-not-materialized"
+            } else {
+                "deferred-to-coordinator"
+            };
         }
         let normalized_hash =
             normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
@@ -1423,11 +1510,12 @@ impl WasmExactSearchSession {
         let solution_probabilities_requested =
             self.problem.solution_probability_policy().requested();
         let solution_probability_complete = !solution_probabilities_requested
-            || (probability_complete
+            || (!visible_seven_policy
+                && probability_complete
                 && count_complete
                 && covers_all_identities(&identities, &solution_coverages));
         let solution_probabilities: Vec<SolutionProbabilityReport> =
-            if solution_probabilities_requested {
+            if solution_probabilities_requested && !visible_seven_policy {
                 probability_reports(
                     &identities,
                     &solution_coverages,
@@ -1576,6 +1664,17 @@ impl WasmExactSearchSession {
                 "projects_standard_bag_lookahead",
                 self.problem.supply().projects_standard_bag_lookahead(),
             ),
+            field("queue_knowledge", observation_policy.keyword()),
+            field(
+                "coverage_semantics",
+                observation_policy.coverage_semantics(),
+            ),
+            field(
+                "visible_piece_count",
+                observation_policy
+                    .visible_piece_count()
+                    .map_or_else(|| "all".to_owned(), |count| count.to_string()),
+            ),
             field("source_sequence_length", source_sequence_length),
             field(
                 "total_possible_pattern_count",
@@ -1650,6 +1749,12 @@ impl WasmExactSearchSession {
             field("materialized_pattern_count", universe.pattern_count()),
             field("covered_pattern_count", self.covered_patterns.count_ones()),
             field("coverage_probability", coverage_probability),
+            field("observation_policy_states", self.observation_policy_states),
+            field(
+                "observation_policy_action_checks",
+                self.observation_policy_action_checks,
+            ),
+            field("observation_trie_nodes", self.observation_trie_nodes),
             field(
                 "materialized_probability_mass",
                 universe.materialized_probability_mass().get(),
@@ -1668,7 +1773,9 @@ impl WasmExactSearchSession {
             ),
             field(
                 "solution_probability_basis",
-                if solution_probabilities_requested {
+                if solution_probabilities_requested && visible_seven_policy {
+                    "unsupported-under-visible-seven-policy"
+                } else if solution_probabilities_requested {
                     "normalized-solution-pattern-bitset-or-union"
                 } else {
                     "not-requested"
@@ -1676,7 +1783,9 @@ impl WasmExactSearchSession {
             ),
             field(
                 "solution_probability_incomplete_reason",
-                if solution_probabilities_requested && !solution_probability_complete {
+                if solution_probabilities_requested && visible_seven_policy {
+                    "per-solution-policy-language-not-materialized"
+                } else if solution_probabilities_requested && !solution_probability_complete {
                     "pattern-specific-coverage-incomplete"
                 } else {
                     "none"

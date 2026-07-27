@@ -5,7 +5,9 @@
 use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
-use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
+use clearra_coverage::pattern::{
+    pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet,
+};
 use clearra_problem::{
     SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference,
     SetupSearchCondition, SetupSearchQuery, SetupTerminalSupplyTarget,
@@ -20,8 +22,11 @@ use super::{
     exact_collections::ExactHashMap,
     geometry::add_packed_piece,
     piece_index,
+    queue_observation_policy::QueueObservationPolicyEvaluator,
     setup_all_paths::{enumerate_setup_completion_paths, SetupSolutionPath},
-    setup_coverage_graph::SetupCoverageGraph,
+    setup_coverage_graph::{
+        SetupCoverageGraph, SetupTargetBuildLanguage, SetupTargetJointLanguage,
+    },
     setup_graph_builder::{
         cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
         SetupSharedGraph,
@@ -163,6 +168,7 @@ impl WasmSetupSearchSession {
                         query.candidate_priority(),
                         query.length_preference(),
                         query.max_setup_pieces(),
+                        query.queue_observation_policy(),
                         query.path_detail(),
                         control,
                     )?);
@@ -254,6 +260,7 @@ pub(super) fn finish_setup_result(
         .collect::<String>();
     let report = SetupFinderReport::new(
         query.search_mode(),
+        query.queue_observation_policy(),
         query.residue().cycle().unwrap_or_default(),
         remaining_pieces.clone(),
         queue_based_pieces.clone(),
@@ -280,7 +287,24 @@ pub(super) fn finish_setup_result(
             ("solution_found".to_owned(), solution_found.to_string()),
             ("count_complete".to_owned(), "true".to_owned()),
             ("probability_complete".to_owned(), "true".to_owned()),
-            ("setup_coverage_semantics".to_owned(), "oracle".to_owned()),
+            (
+                "setup_coverage_semantics".to_owned(),
+                query
+                    .queue_observation_policy()
+                    .coverage_semantics()
+                    .to_owned(),
+            ),
+            (
+                "queue_knowledge".to_owned(),
+                query.queue_observation_policy().keyword().to_owned(),
+            ),
+            (
+                "visible_piece_count".to_owned(),
+                query
+                    .queue_observation_policy()
+                    .visible_piece_count()
+                    .map_or_else(|| "all".to_owned(), |count| count.to_string()),
+            ),
             (
                 "setup_search_mode".to_owned(),
                 query.search_mode().keyword().to_owned(),
@@ -1200,6 +1224,7 @@ struct SetupCoverageSession {
     max_setup_pieces: u8,
     path_target_shape_index: Option<usize>,
     solution_paths: Option<Vec<SetupSolutionPath>>,
+    observation_evaluator: Option<QueueObservationPolicyEvaluator>,
 }
 
 impl SetupCoverageSession {
@@ -1211,6 +1236,7 @@ impl SetupCoverageSession {
         candidate_priority: SetupCandidatePriority,
         length_preference: SetupLengthPreference,
         max_setup_pieces: u8,
+        queue_observation_policy: clearra_supply::QueueObservationPolicy,
         path_detail: Option<&clearra_problem::SetupPathDetail>,
         control: &ExecutionControl,
     ) -> Result<Self, WasmExactSearchError> {
@@ -1236,6 +1262,21 @@ impl SetupCoverageSession {
                 .transpose()?;
         let solution_paths = if let Some(detail) = path_detail {
             Some(enumerate_setup_completion_paths(&graph, detail, control)?)
+        } else {
+            None
+        };
+        let observation_evaluator = if queue_observation_policy.requires_observation_policy() {
+            Some(QueueObservationPolicyEvaluator::new(
+                universe,
+                &pattern_index,
+                queue_observation_policy,
+                problem.initial_hold().cursor(),
+                condition.initial_hold(),
+                problem.supply().hold_enabled(),
+                problem.supply().projects_unplaced_lookahead(),
+                problem.supply().projects_standard_bag_lookahead(),
+                None,
+            )?)
         } else {
             None
         };
@@ -1272,6 +1313,7 @@ impl SetupCoverageSession {
             max_setup_pieces,
             path_target_shape_index,
             solution_paths,
+            observation_evaluator,
         })
     }
 
@@ -1284,7 +1326,11 @@ impl SetupCoverageSession {
             return Ok(SetupCoverageAdvance::Cancelled);
         }
         if self.next_word == self.pattern_index.word_count() {
-            return Ok(SetupCoverageAdvance::Complete(self.finish()?));
+            return match self.finish(control) {
+                Ok(result) => Ok(SetupCoverageAdvance::Complete(result)),
+                Err(WasmExactSearchError::Cancelled) => Ok(SetupCoverageAdvance::Cancelled),
+                Err(error) => Err(error),
+            };
         }
         let lane_count =
             (self.pattern_index.word_count() - self.next_word).min(COVERAGE_WORD_LANES);
@@ -1597,7 +1643,67 @@ impl SetupCoverageSession {
         }
     }
 
-    fn finish(&mut self) -> Result<CompletedSetupCoverage, WasmExactSearchError> {
+    fn apply_observation_policy(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.observation_evaluator.is_none() {
+            return Ok(());
+        }
+        let shape_indexes = self
+            .graph
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(shape_index, _)| {
+                let coverage = &self.accumulators[*shape_index];
+                coverage.joint_covered_patterns != 0
+                    && coverage.min_covered_locks <= self.max_setup_pieces
+            })
+            .map(|(shape_index, _)| shape_index)
+            .collect::<Vec<_>>();
+
+        for shape_index in shape_indexes {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            let target_shape = u32::try_from(shape_index).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
+            })?;
+            let (build, joint) = {
+                let evaluator = self.observation_evaluator.as_mut().ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_observation_evaluator_missing"),
+                )?;
+                evaluator.set_terminal_supply_target(None);
+                let build = evaluator.evaluate(
+                    &SetupTargetBuildLanguage::new(&self.coverage_graph, target_shape),
+                    control,
+                )?;
+                evaluator.set_terminal_supply_target(self.terminal_supply_target);
+                let joint = evaluator.evaluate(
+                    &SetupTargetJointLanguage::new(&self.coverage_graph, target_shape),
+                    control,
+                )?;
+                (build, joint)
+            };
+            let witness = setup_witness_for_coverage(&self.pattern_index, &joint.covered_patterns);
+            let accumulator = &mut self.accumulators[shape_index];
+            accumulator.build_covered_patterns = build.covered_pattern_count;
+            accumulator.joint_covered_patterns = joint.covered_pattern_count;
+            accumulator.build_weight = build.covered_weight;
+            accumulator.joint_weight = joint.covered_weight;
+            accumulator.min_covered_locks = build.min_accepted_depth.unwrap_or(u8::MAX);
+            accumulator.max_covered_locks = build.max_accepted_depth.unwrap_or(0);
+            accumulator.witness = witness;
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<CompletedSetupCoverage, WasmExactSearchError> {
+        self.apply_observation_policy(control)?;
         let mut shape_indexes = self
             .graph
             .shapes
@@ -1946,6 +2052,20 @@ impl SetupCoverageSession {
         path.reverse();
         Ok(path)
     }
+}
+
+fn setup_witness_for_coverage(
+    pattern_index: &PatternPiecePositionIndex,
+    coverage: &PatternBitSet,
+) -> Option<SetupWitness> {
+    let global_pattern_index = coverage.first_pattern()?.index();
+    (0..pattern_index.local_pattern_count()).find_map(|local_pattern_index| {
+        (pattern_index.global_pattern_index(local_pattern_index) == Some(global_pattern_index))
+            .then_some(SetupWitness {
+                word_index: local_pattern_index / 64,
+                pattern_bit: 1_u64 << (local_pattern_index % 64),
+            })
+    })
 }
 
 pub(super) fn retain_best_setup_state_per_board(
