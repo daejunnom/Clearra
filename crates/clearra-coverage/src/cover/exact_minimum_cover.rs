@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::pattern::pattern_bitset::PatternBitSet;
+
+const MAX_PAIRWISE_DOMINANCE_COMPARISONS: usize = 16_000_000;
+const SMALL_ROW_DIRECT_DOMINANCE_LIMIT: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactMinimumCoverResult {
@@ -33,9 +36,9 @@ pub enum ExactMinimumCoverError {
 }
 
 #[derive(Clone, Debug)]
-struct DenseRow {
+struct DenseRow<'a> {
     source_index: usize,
-    words: Vec<u64>,
+    words: Cow<'a, [u64]>,
 }
 
 pub fn exact_minimum_cover(
@@ -64,19 +67,29 @@ pub fn exact_minimum_cover(
         .iter()
         .enumerate()
         .filter_map(|(source_index, row)| {
-            let words = row
-                .words()
+            let row_words = row.words();
+            let words = if row_words
                 .iter()
                 .zip(required_words)
-                .map(|(row, required)| row & required)
-                .collect::<Vec<_>>();
+                .all(|(row, required)| row & !required == 0)
+            {
+                Cow::Borrowed(row_words)
+            } else {
+                Cow::Owned(
+                    row_words
+                        .iter()
+                        .zip(required_words)
+                        .map(|(row, required)| row & required)
+                        .collect(),
+                )
+            };
             words.iter().any(|word| *word != 0).then_some(DenseRow {
                 source_index,
                 words,
             })
         })
         .collect::<Vec<_>>();
-    remove_dominated_rows(&mut dense_rows);
+    remove_redundant_rows(&mut dense_rows);
 
     let mut coverable_words = vec![0_u64; required.word_count()];
     for row in &dense_rows {
@@ -112,7 +125,41 @@ pub fn exact_minimum_cover(
     })
 }
 
-fn remove_dominated_rows(rows: &mut Vec<DenseRow>) {
+fn remove_redundant_rows(rows: &mut Vec<DenseRow<'_>>) {
+    if rows.len() <= SMALL_ROW_DIRECT_DOMINANCE_LIMIT {
+        remove_pairwise_dominated_rows(rows);
+        return;
+    }
+
+    rows.sort_unstable_by(|left, right| {
+        left.words
+            .cmp(&right.words)
+            .then_with(|| left.source_index.cmp(&right.source_index))
+    });
+    let mut unique = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        if unique
+            .last()
+            .is_some_and(|previous: &DenseRow<'_>| previous.words == row.words)
+        {
+            continue;
+        }
+        unique.push(row);
+    }
+    *rows = unique;
+
+    if rows
+        .len()
+        .checked_mul(rows.len())
+        .is_none_or(|comparisons| comparisons > MAX_PAIRWISE_DOMINANCE_COMPARISONS)
+    {
+        return;
+    }
+
+    remove_pairwise_dominated_rows(rows);
+}
+
+fn remove_pairwise_dominated_rows(rows: &mut Vec<DenseRow<'_>>) {
     let mut dominated = vec![false; rows.len()];
     for left in 0..rows.len() {
         if dominated[left] {
@@ -138,8 +185,8 @@ fn remove_dominated_rows(rows: &mut Vec<DenseRow>) {
     });
 }
 
-struct MinimumCoverSearch<'a> {
-    rows: &'a [DenseRow],
+struct MinimumCoverSearch<'rows, 'bits> {
+    rows: &'rows [DenseRow<'bits>],
     target_words: Vec<u64>,
     support_by_pattern: Vec<Vec<usize>>,
     selected: Vec<bool>,
@@ -148,8 +195,8 @@ struct MinimumCoverSearch<'a> {
     memo_depth: HashMap<Vec<u64>, usize>,
 }
 
-impl<'a> MinimumCoverSearch<'a> {
-    fn new(rows: &'a [DenseRow], target_words: Vec<u64>) -> Self {
+impl<'rows, 'bits> MinimumCoverSearch<'rows, 'bits> {
+    fn new(rows: &'rows [DenseRow<'bits>], target_words: Vec<u64>) -> Self {
         let pattern_count = target_words.len() * u64::BITS as usize;
         let mut support_by_pattern = vec![Vec::new(); pattern_count];
         for (row_index, row) in rows.iter().enumerate() {
@@ -227,22 +274,22 @@ impl<'a> MinimumCoverSearch<'a> {
             .iter()
             .copied()
             .filter(|index| !self.selected[*index])
+            .map(|index| {
+                (
+                    uncovered_gain(&self.rows[index].words, covered, &self.target_words),
+                    index,
+                )
+            })
             .collect::<Vec<_>>();
-        branches.sort_unstable_by(|left, right| {
-            uncovered_gain(&self.rows[*right].words, covered, &self.target_words)
-                .cmp(&uncovered_gain(
-                    &self.rows[*left].words,
-                    covered,
-                    &self.target_words,
-                ))
-                .then_with(|| {
-                    self.rows[*left]
-                        .source_index
-                        .cmp(&self.rows[*right].source_index)
-                })
+        branches.sort_unstable_by(|(left_gain, left), (right_gain, right)| {
+            right_gain.cmp(left_gain).then_with(|| {
+                self.rows[*left]
+                    .source_index
+                    .cmp(&self.rows[*right].source_index)
+            })
         });
 
-        for row_index in branches {
+        for (_, row_index) in branches {
             self.selected[row_index] = true;
             self.current.push(row_index);
             let mut changed = Vec::new();
@@ -283,7 +330,7 @@ impl<'a> MinimumCoverSearch<'a> {
     }
 }
 
-fn greedy_cover(rows: &[DenseRow], target: &[u64]) -> Option<Vec<usize>> {
+fn greedy_cover(rows: &[DenseRow<'_>], target: &[u64]) -> Option<Vec<usize>> {
     let mut covered = vec![0_u64; target.len()];
     let mut selected = vec![false; rows.len()];
     let mut result = Vec::new();
@@ -334,4 +381,103 @@ fn is_superset(covered: &[u64], required: &[u64]) -> bool {
         .iter()
         .zip(required)
         .all(|(covered, required)| covered & required == *required)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_coverage_keeps_the_lowest_source_index() {
+        let required = bits(4, 0b1111);
+        let rows = vec![bits(4, 0b0011), bits(4, 0b0011), bits(4, 0b1100)];
+
+        let result = exact_minimum_cover(&required, &rows).expect("matching universes");
+
+        assert!(result.complete());
+        assert_eq!(result.row_indices(), &[0, 2]);
+    }
+
+    #[test]
+    fn strict_subset_row_is_removed_without_changing_the_minimum() {
+        let required = bits(4, 0b1111);
+        let rows = vec![bits(4, 0b0001), bits(4, 0b0011), bits(4, 0b1100)];
+
+        let result = exact_minimum_cover(&required, &rows).expect("matching universes");
+
+        assert!(result.complete());
+        assert_eq!(result.row_indices(), &[1, 2]);
+    }
+
+    #[test]
+    fn optimized_solver_matches_brute_force_on_small_matrices() {
+        let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..128 {
+            let pattern_count = 8;
+            let row_count = 9;
+            let mut row_words = vec![0_u64; row_count];
+            for row in &mut row_words {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                *row = random & 0xff;
+            }
+            for pattern in 0..pattern_count {
+                row_words[pattern % row_count] |= 1_u64 << pattern;
+            }
+            let rows = row_words
+                .iter()
+                .copied()
+                .map(|word| bits(pattern_count, word))
+                .collect::<Vec<_>>();
+            let required = PatternBitSet::all(pattern_count);
+
+            let result = exact_minimum_cover(&required, &rows).expect("matching universes");
+
+            assert!(result.complete());
+            assert_eq!(
+                result.row_indices().len(),
+                brute_force_minimum_size(&row_words, 0xff)
+            );
+        }
+    }
+
+    #[test]
+    fn large_unique_matrix_remains_exact_when_pairwise_dominance_is_skipped() {
+        let pattern_count = 13;
+        let required_word = (1_u64 << pattern_count) - 1;
+        let mut rows = Vec::with_capacity(4_097);
+        rows.push(bits(pattern_count, required_word));
+        rows.extend((1_u64..=4_096).map(|word| bits(pattern_count, word)));
+
+        let result = exact_minimum_cover(&PatternBitSet::all(pattern_count), &rows)
+            .expect("matching universes");
+
+        assert!(result.complete());
+        assert_eq!(result.row_indices(), &[0]);
+    }
+
+    fn bits(pattern_count: usize, word: u64) -> PatternBitSet {
+        PatternBitSet::from_words(pattern_count, vec![word]).expect("test bitset is in range")
+    }
+
+    fn brute_force_minimum_size(rows: &[u64], required: u64) -> usize {
+        (0_u64..1_u64 << rows.len())
+            .filter(|selection| {
+                rows.iter()
+                    .enumerate()
+                    .fold(0_u64, |covered, (index, row)| {
+                        if selection & (1_u64 << index) == 0 {
+                            covered
+                        } else {
+                            covered | row
+                        }
+                    })
+                    & required
+                    == required
+            })
+            .map(u64::count_ones)
+            .min()
+            .expect("generated rows cover every pattern") as usize
+    }
 }
