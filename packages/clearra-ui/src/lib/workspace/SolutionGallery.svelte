@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { AlertTriangle, Check, Copy } from '@lucide/svelte';
+  import { AlertTriangle } from '@lucide/svelte';
 
+  import SolutionCopyButton from './SolutionCopyButton.svelte';
+  import {
+    parseSolutionKey,
+    renderSolutionBoard,
+    type SolutionCopyFormat
+  } from './solutionExport';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let solutionKeys: string[] = [];
@@ -14,29 +20,11 @@
   export let solutionSetHash = '';
   export let targetLines = 4;
   export let language: WorkspaceLanguage;
-
-  type Piece = 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
-  type BoardCell = Piece | 'G' | null;
-  type SolutionBoard = {
-    cells: BoardCell[];
-    height: number;
-  };
-  type ParsedSolutionKey = {
-    initialMask: bigint;
-    placements: Array<{ mask: bigint; piece: Piece }>;
-    minimumHeight: number;
-    bitLimit: number;
-  };
+  export let copyFormat: SolutionCopyFormat = 'fumen';
 
   const PAGE_SIZE = 100;
-  const BOARD_WIDTH = 10;
-  const COMPACT_KEY_PATTERN = /^ctk1\|initial=([0-9a-f]{16})\|placements=(.*)$/;
-  const EXTENDED_KEY_PATTERN = /^ctk2\|height=([0-9]{1,2})\|initial=([0-9a-f]{64})\|placements=(.*)$/;
-  const COMPACT_PLACEMENT_PATTERN = /^([IOTSZJL]):([0-9a-f]{16})$/;
-  const EXTENDED_PLACEMENT_PATTERN = /^([IOTSZJL]):([0-9a-f]{64})$/;
 
   let visibleCount = PAGE_SIZE;
-  let copiedIndex = -1;
   let lastSetIdentity = '';
 
   $: label = (
@@ -49,7 +37,7 @@
     visibleCount = PAGE_SIZE;
   }
   $: visibleSolutions = solutionKeys.slice(0, visibleCount).map((key, index) => ({
-    board: parseSolutionBoard(key, targetLines),
+    ...solutionView(key),
     index,
     key,
     probability: solutionProbabilities[key]
@@ -74,92 +62,12 @@
     }).format(probability);
   }
 
-  async function copySolutionKey(key: string, index: number) {
-    await navigator.clipboard.writeText(key);
-    copiedIndex = index;
-    window.setTimeout(() => {
-      if (copiedIndex === index) copiedIndex = -1;
-    }, 1400);
-  }
-
-  function parseSolutionBoard(key: string, minimumHeight: number): SolutionBoard | null {
-    const parsed = parseSolutionKey(key);
-    if (!parsed) return null;
-    let occupied = parsed.initialMask;
-    for (const placement of parsed.placements) occupied |= placement.mask;
-    const requestedHeight = Math.max(1, Math.min(24, Math.trunc(minimumHeight || 1)));
-    const height = Math.max(
-      requestedHeight,
-      parsed.minimumHeight,
-      highestOccupiedRow(occupied, parsed.bitLimit) + 1
-    );
-    const cells = Array<BoardCell>(height * BOARD_WIDTH).fill(null);
-    writeMask(cells, height, parsed.initialMask, 'G');
-    for (const placement of parsed.placements) {
-      writeMask(cells, height, placement.mask, placement.piece);
-    }
-    return { cells, height };
-  }
-
-  function parseSolutionKey(key: string): ParsedSolutionKey | null {
-    const compact = COMPACT_KEY_PATTERN.exec(key);
-    const extended = compact ? null : EXTENDED_KEY_PATTERN.exec(key);
-    if (!compact && !extended) return null;
-
-    const minimumHeight = extended ? Number(extended[1]) : 1;
-    if (!Number.isInteger(minimumHeight) || minimumHeight < 1 || minimumHeight > 24) return null;
-    const initialHex = compact ? compact[1] : extended![2];
-    const encoded = compact ? compact[2] : extended![3];
-    const bitLimit = compact ? 64 : minimumHeight * BOARD_WIDTH;
-    const placementLimit = compact ? 16 : 60;
-    const placementPattern = compact ? COMPACT_PLACEMENT_PATTERN : EXTENDED_PLACEMENT_PATTERN;
-    const initialMask = BigInt(`0x${initialHex}`);
-    if (initialMask >> BigInt(bitLimit)) return null;
-    const encodedPlacements = encoded ? encoded.split(',') : [];
-    if (encodedPlacements.length > placementLimit) return null;
-
-    const placements: Array<{ mask: bigint; piece: Piece }> = [];
-    let occupied = initialMask;
-    for (const value of encodedPlacements) {
-      const placement = placementPattern.exec(value);
-      if (!placement) return null;
-      const mask = BigInt(`0x${placement[2]}`);
-      if (
-        mask === 0n ||
-        mask >> BigInt(bitLimit) ||
-        popcount(mask) !== 4 ||
-        (occupied & mask) !== 0n
-      ) return null;
-      occupied |= mask;
-      placements.push({ mask, piece: placement[1] as Piece });
-    }
-    return { initialMask, placements, minimumHeight, bitLimit };
-  }
-
-  function popcount(value: bigint): number {
-    let count = 0;
-    while (value !== 0n) {
-      value &= value - 1n;
-      count += 1;
-    }
-    return count;
-  }
-
-  function highestOccupiedRow(mask: bigint, bitLimit: number): number {
-    for (let bit = bitLimit - 1; bit >= 0; bit -= 1) {
-      if ((mask & (1n << BigInt(bit))) !== 0n) return Math.floor(bit / BOARD_WIDTH);
-    }
-    return 0;
-  }
-
-  function writeMask(cells: BoardCell[], height: number, mask: bigint, value: Exclude<BoardCell, null>) {
-    for (let bit = 0; bit < height * BOARD_WIDTH; bit += 1) {
-      if ((mask & (1n << BigInt(bit))) === 0n) continue;
-      const x = bit % BOARD_WIDTH;
-      const y = Math.floor(bit / BOARD_WIDTH);
-      const displayIndex = (height - y - 1) * BOARD_WIDTH + x;
-      cells[displayIndex] = value;
-    }
+  function solutionView(key: string) {
+    const page = parseSolutionKey(key);
+    return {
+      board: page ? renderSolutionBoard(page, targetLines) : null,
+      page
+    };
   }
 </script>
 
@@ -183,14 +91,11 @@
               </span>
             {/if}
           </div>
-          <button
-            type="button"
-            title={label('copySolutionKey')}
-            aria-label={label('copySolutionKey')}
-            on:click={() => copySolutionKey(solution.key, solution.index)}
-          >
-            {#if copiedIndex === solution.index}<Check size={14} />{:else}<Copy size={14} />{/if}
-          </button>
+          <SolutionCopyButton
+            page={solution.page}
+            format={copyFormat}
+            {language}
+          />
         </div>
 
         {#if solution.board}
@@ -265,19 +170,6 @@
     font-size: 10px;
     font-weight: 700;
     margin-top: 2px;
-  }
-
-  .solution-heading button {
-    align-items: center;
-    background: transparent;
-    border: 0;
-    color: #50605a;
-    cursor: pointer;
-    display: inline-flex;
-    height: 28px;
-    justify-content: center;
-    padding: 0;
-    width: 28px;
   }
 
   .solution-board {

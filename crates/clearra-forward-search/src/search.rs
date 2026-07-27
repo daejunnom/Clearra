@@ -34,7 +34,6 @@ pub enum ForwardSearchError {
     InvalidHeight,
     BoardOutsideField,
     PatternRequiresSpinFinder,
-    PatternTooLong,
     SpinProfileDisabled,
     UnsupportedRuleProfile(&'static str),
     Cancelled,
@@ -1440,9 +1439,6 @@ pub(crate) fn validate_query(query: &ForwardSearchQuery) -> Result<(), ForwardSe
         if !matches!(query.mode(), ForwardSearchMode::SpinFinder(_)) {
             return Err(ForwardSearchError::PatternRequiresSpinFinder);
         }
-        if query.piece_source().sequence_len() > 8 {
-            return Err(ForwardSearchError::PatternTooLong);
-        }
     }
     if !(1..=24).contains(&query.height()) {
         return Err(ForwardSearchError::InvalidHeight);
@@ -1887,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn pattern_source_is_limited_to_eight_pieces_and_spin_finder_mode() {
+    fn pattern_source_accepts_more_than_the_gui_piece_limit_in_spin_finder_mode() {
         let long_pattern = QueuePatternExpression::parse("IOTSZLJIO", 8).expect("pattern");
         let long_query = ForwardSearchQuery::new_with_source(
             Board256Mask::EMPTY,
@@ -1900,10 +1896,7 @@ mod tests {
             None,
             ForwardSearchMode::SpinFinder(ForwardSpinTarget::default()),
         );
-        assert!(matches!(
-            ForwardSearchSession::new(long_query),
-            Err(ForwardSearchError::PatternTooLong)
-        ));
+        assert!(ForwardSearchSession::new(long_query).is_ok());
 
         let damage_pattern = QueuePatternExpression::parse("[TI]", 8).expect("pattern");
         let damage_query = ForwardSearchQuery::new_with_source(

@@ -715,7 +715,7 @@ fn spin_finder_command_preserves_profile_and_target_group() {
 }
 
 #[test]
-fn spin_finder_accepts_eight_piece_pattern_but_damage_remains_fixed_queue_only() {
+fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
     let request = WebCommandParser::parse(
         "clearra spin-finder --patterns P7P1 --spin-profile t-spins --lines any",
     )
@@ -725,10 +725,17 @@ fn spin_finder_accepts_eight_piece_pattern_but_damage_remains_fixed_queue_only()
     assert!(query.piece_source().is_pattern());
     assert_eq!(query.piece_source().sequence_len(), 8);
 
-    let too_long =
+    let longer =
         WebCommandParser::parse("clearra spin-finder --patterns IOTSZLJIO --spin-profile t-spins")
-            .expect_err("nine-piece pattern must be rejected");
-    assert_eq!(too_long.code(), WebCommandErrorCode::InvalidValue);
+            .expect("CLI pattern length is not a product limit");
+    assert_eq!(
+        longer
+            .forward_search_query()
+            .expect("forward query")
+            .piece_source()
+            .sequence_len(),
+        9
+    );
 
     let damage_pattern = WebCommandParser::parse("clearra damage --patterns [TI]")
         .expect_err("damage pattern must be rejected");

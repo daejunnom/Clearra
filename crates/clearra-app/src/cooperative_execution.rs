@@ -530,9 +530,6 @@ fn forward_error_as_wasm(error: ForwardSearchError) -> WasmCpuSearchError {
         ForwardSearchError::PatternRequiresSpinFinder => WasmCpuSearchError::InvalidProblem {
             reason: "forward_search_pattern_requires_spin_finder",
         },
-        ForwardSearchError::PatternTooLong => WasmCpuSearchError::InvalidProblem {
-            reason: "forward_search_pattern_too_long",
-        },
         ForwardSearchError::SpinProfileDisabled => WasmCpuSearchError::InvalidProblem {
             reason: "forward_search_spin_profile_disabled",
         },

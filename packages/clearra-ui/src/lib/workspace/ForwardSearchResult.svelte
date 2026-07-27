@@ -9,6 +9,9 @@
   } from '../wasm/wasmCommandClient';
   import type { ForwardDamageAggregation } from './forwardSearchModel';
   import { replayForwardPlacementBoard } from './forwardPlacementBoard';
+  import SolutionCopyButton from './SolutionCopyButton.svelte';
+  import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
+  import type { SolutionCopyFormat } from './solutionExport';
   import {
     workspaceMessage,
     workspaceProgressDetail,
@@ -34,6 +37,7 @@
   export let minimumDamage = 0;
 
   let visible = 24;
+  let copyFormat: SolutionCopyFormat = 'fumen';
   $: label = (key: Parameters<typeof workspaceMessage>[1], values: Record<string, string | number> = {}) => workspaceMessage(language, key, values);
   $: outcomes = report?.forward_outcomes ?? [];
   $: shown = outcomes.slice(0, visible);
@@ -124,6 +128,9 @@
         <div><dt>{label('searchedNodes')}</dt><dd>{report.searched_nodes.toLocaleString(language)}</dd></div>
       </dl>
     </header>
+    <div class="copy-format-row">
+      <SolutionCopyFormatControl bind:value={copyFormat} {language} />
+    </div>
 
     {#if outcomes.length === 0}
       <div class="empty"><SearchX size={20} strokeWidth={1.7} /><p>{label('noForwardSolutions')}</p></div>
@@ -133,7 +140,14 @@
           <article>
             <div class="card-heading">
               <strong>{tool === 'damage' ? label('damageRoute', { number: index + 1 }) : label('spinResult', { number: index + 1 })}</strong>
-              {#if tool === 'damage'}<b>{result.outcome.total_damage} {label('damage')}</b>{:else}<b>{groupLabel(result.outcome)} · {result.outcome.spin_lines}L{result.outcome.spin_mini ? ` · ${label('mini')}` : ''}</b>{/if}
+              <div class="card-actions">
+                {#if tool === 'damage'}<b>{result.outcome.total_damage} {label('damage')}</b>{:else}<b>{groupLabel(result.outcome)} · {result.outcome.spin_lines}L{result.outcome.spin_mini ? ` · ${label('mini')}` : ''}</b>{/if}
+                <SolutionCopyButton
+                  page={result.board?.page ?? null}
+                  format={copyFormat}
+                  {language}
+                />
+              </div>
             </div>
             {#if tool === 'spin-finder'}<p class="source-queue">{label('sourceQueue')}: <b>{result.outcome.source_queue}</b></p>{/if}
             {#if result.board}
@@ -177,6 +191,7 @@
   .result-header span { display: grid; gap: 2px; }
   .result-header small, dt { color: #697570; font-size: 10px; }
   .result-header strong { color: #17211e; font-size: 17px; }
+  .copy-format-row { margin-top: 16px; }
   dl { display: flex; gap: 30px; margin: 0; }
   dl div { display: grid; gap: 3px; text-align: right; }
   dd { color: #123f3a; font-size: 17px; font-weight: 800; margin: 0; }
@@ -184,6 +199,7 @@
   article { border: 1px solid #d3dbd6; border-radius: 6px; min-width: 0; padding: 14px; }
   .card-heading { align-items: center; display: flex; font-size: 11px; gap: 12px; justify-content: space-between; margin-bottom: 10px; }
   .card-heading b { color: #086c64; }
+  .card-actions { align-items: center; display: flex; gap: 6px; }
   .source-queue { color: #697570; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; margin: -4px 0 9px; }
   .source-queue b { color: #23433e; }
   .board { background: #111918; display: grid; gap: 0; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-template-rows: repeat(var(--rows), minmax(0, 1fr)); margin: 0 auto; overflow: hidden; width: min(100%, 230px); }

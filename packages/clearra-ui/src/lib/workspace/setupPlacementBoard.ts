@@ -1,10 +1,15 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient';
+import type {
+  SolutionExportPage,
+  SolutionExportPlacement
+} from './solutionExport';
 
 export type SetupPiece = 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
 export type SetupBoardCell = SetupPiece | 'G' | null;
 export type SetupPlacementBoard = {
   cells: SetupBoardCell[];
   height: number;
+  page: SolutionExportPage | null;
 };
 
 const BOARD_WIDTH = 10;
@@ -79,6 +84,7 @@ function replayPlacementBoard(
   const logicalRows = emptyRows(height);
   const displayRows = emptyRows(height);
   const logicalToDisplay = Array.from({ length: height }, (_, row) => row);
+  const placements: SolutionExportPlacement[] = [];
   if (!writeInitialBoard(logicalRows, displayRows, initialMask)) return null;
 
   for (const step of path) {
@@ -86,6 +92,7 @@ function replayPlacementBoard(
     const shape = piece && SHAPES[piece][step.rotation];
     if (!piece || !shape) return null;
 
+    let placementMask = 0n;
     for (const [dx, dy] of shape) {
       const x = step.x + dx;
       const y = step.y + dy;
@@ -94,7 +101,9 @@ function replayPlacementBoard(
       if (logicalRows[y][x] !== null || displayRows[displayY][x] !== null) return null;
       logicalRows[y][x] = piece;
       displayRows[displayY][x] = piece;
+      placementMask |= 1n << BigInt(displayY * BOARD_WIDTH + x);
     }
+    placements.push({ mask: placementMask, piece });
 
     const fullRows = logicalRows
       .map((row, index) => (row.every((cell) => cell !== null) ? index : -1))
@@ -119,16 +128,18 @@ function replayPlacementBoard(
   ) {
     displayRows.pop();
   }
+  const resultHeight = displayRows.length;
   return {
     cells: displayRows.slice().reverse().flat(),
-    height: displayRows.length
+    height: resultHeight,
+    page: { height: resultHeight, initialMask, placements }
   };
 }
 
 export function setupFinalBoard(finalMask: string, height = 4): SetupPlacementBoard {
   const mask = parseMask(finalMask);
   const cells = Array<SetupBoardCell>(height * BOARD_WIDTH).fill(null);
-  if (mask < 0n) return { cells, height };
+  if (mask < 0n) return { cells, height, page: null };
   for (let bit = 0; bit < cells.length; bit += 1) {
     if ((mask & (1n << BigInt(bit))) !== 0n) {
       const x = bit % BOARD_WIDTH;
@@ -136,7 +147,11 @@ export function setupFinalBoard(finalMask: string, height = 4): SetupPlacementBo
       cells[(height - 1 - y) * BOARD_WIDTH + x] = 'G';
     }
   }
-  return { cells, height };
+  return {
+    cells,
+    height,
+    page: { height, initialMask: mask, placements: [] }
+  };
 }
 
 function emptyRows(height: number): SetupBoardCell[][] {

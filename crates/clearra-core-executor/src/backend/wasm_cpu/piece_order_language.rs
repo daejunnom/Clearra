@@ -4,6 +4,7 @@ use super::{buildup::BuildOrderGraph, mix_digest, WasmExactSearchError};
 
 const EMPTY_REFERENCE: u32 = u32::MAX;
 const INITIAL_BUCKET_COUNT: usize = 1024;
+const COMPACT_PIECE_RANGE_EDGE_LIMIT: usize = u8::MAX as usize;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
@@ -215,6 +216,12 @@ impl PieceOrderLanguageCache {
             return None;
         }
         let node = self.nodes.get(reference as usize).copied()?;
+        let edges = self.node_edges(node);
+        if edges.len() > COMPACT_PIECE_RANGE_EDGE_LIMIT {
+            let relative_start = edges.partition_point(|edge| edge.piece_code() < piece_code);
+            let relative_end = edges.partition_point(|edge| edge.piece_code() <= piece_code);
+            return edges.get(relative_start..relative_end);
+        }
         let range_ends = self.piece_range_ends.get(reference as usize)?;
         let relative_start = if piece_index == 0 {
             0
@@ -390,9 +397,6 @@ impl PieceOrderLanguageCache {
         let edge_count = u16::try_from(self.edge_scratch.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_piece_language_edge_count_overflow")
         })?;
-        u8::try_from(self.edge_scratch.len()).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_piece_language_piece_range_overflow")
-        })?;
         self.nodes.try_reserve(1).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_piece_language_node_storage_unavailable")
         })?;
@@ -409,7 +413,11 @@ impl PieceOrderLanguageCache {
         } else {
             self.bucket_heads[hash as usize & (self.bucket_heads.len() - 1)]
         };
-        let piece_range_ends = piece_range_ends(&self.edge_scratch);
+        let piece_range_ends = if self.edge_scratch.len() <= COMPACT_PIECE_RANGE_EDGE_LIMIT {
+            compact_piece_range_ends(&self.edge_scratch)
+        } else {
+            [0; 7]
+        };
         self.edges.extend_from_slice(&self.edge_scratch);
         self.nodes.push(CanonicalPieceNode {
             edge_start,
@@ -476,14 +484,16 @@ impl PieceOrderLanguageCache {
     }
 }
 
-fn piece_range_ends(edges: &[CanonicalPieceEdge]) -> [u8; 7] {
+fn compact_piece_range_ends(edges: &[CanonicalPieceEdge]) -> [u8; 7] {
+    debug_assert!(edges.len() <= COMPACT_PIECE_RANGE_EDGE_LIMIT);
     let mut range_ends = [0_u8; 7];
     let mut cursor = 0usize;
     for piece_code in 1..=7 {
         while cursor < edges.len() && edges[cursor].piece_code() <= piece_code {
             cursor += 1;
         }
-        range_ends[piece_code as usize - 1] = cursor as u8;
+        range_ends[piece_code as usize - 1] =
+            u8::try_from(cursor).expect("compact piece ranges fit in u8");
     }
     range_ends
 }
@@ -510,5 +520,43 @@ const fn piece_code(piece: clearra_core_domain::piece::piece_kind::PieceKind) ->
         PieceKind::Z => 5,
         PieceKind::J => 6,
         PieceKind::L => 7,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CanonicalPieceEdge, PieceOrderLanguageCache};
+
+    #[test]
+    fn piece_ranges_remain_exact_above_the_compact_edge_limit() {
+        let mut cache = PieceOrderLanguageCache::default();
+        cache.ensure_buckets();
+        for piece_code in 1..=3 {
+            for child in 0..128 {
+                cache
+                    .edge_scratch
+                    .push(CanonicalPieceEdge::new(child, piece_code).expect("edge"));
+            }
+        }
+
+        let root = cache.intern_node(false, 1).expect("wide language node");
+
+        assert_eq!(cache.edge_count(root), Some(384));
+        for piece_code in 1..=3 {
+            let edges = cache
+                .edges_for_piece(root, piece_code)
+                .expect("piece range");
+            assert_eq!(edges.len(), 128);
+            assert!(edges.iter().all(|edge| edge.piece_code() == piece_code));
+        }
+        for piece_code in 4..=7 {
+            assert_eq!(
+                cache
+                    .edges_for_piece(root, piece_code)
+                    .expect("empty piece range")
+                    .len(),
+                0
+            );
+        }
     }
 }

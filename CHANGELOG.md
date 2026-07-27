@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.2.7 - 2026-07-27
+
+- Added Fumen as the default solution-copy format across PC, Setup, Build
+  Probability, Maximum Damage, and Spin Finder results while retaining CTK as
+  a user-selectable compact format and preserving piece colors in Fumen output.
+- Removed the GUI's eight-piece pattern length policy from the forward-search
+  CLI and shared execution engine, keeping the limit only in the browser GUI
+  while fixed queues remain unrestricted.
+- Removed the hidden 255-edge piece-language range failure exposed by
+  `visible-7` searches, retaining compact indexing for ordinary nodes and using
+  an exact sorted-edge fallback only for high-fanout nodes.
+- Added regression coverage for long forward-search patterns and high-fanout
+  piece languages, including the eight-piece visible-queue product path.
+
 ## 0.2.6 - 2026-07-27
 
 - Added an exact `visible-7` future-queue knowledge policy for PC and Setup

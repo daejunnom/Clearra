@@ -358,12 +358,6 @@ fn parse_forward_command(
                             format!("invalid spin-finder pattern: {error}"),
                         )
                     })?;
-                if expression.sequence_len() > 8 {
-                    return Err(WebCommandError::new(
-                        WebCommandErrorCode::InvalidValue,
-                        "spin-finder patterns may produce at most 8 pieces; use --queue for longer fixed sequences",
-                    ));
-                }
                 set_forward_piece_source(
                     &mut piece_source,
                     ForwardPieceSource::pattern(expression),

@@ -1,10 +1,15 @@
 import type { ClearraForwardPathStep } from '../wasm/wasmCommandClient';
+import type {
+  SolutionExportPage,
+  SolutionExportPlacement
+} from './solutionExport';
 
 export type ForwardPiece = 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
 export type ForwardBoardCell = ForwardPiece | 'G' | null;
 export type ForwardPlacementBoard = {
   cells: ForwardBoardCell[];
   height: number;
+  page: SolutionExportPage;
 };
 
 const BOARD_WIDTH = 10;
@@ -17,6 +22,7 @@ export function replayForwardPlacementBoard(
   const logicalRows = emptyRows(height);
   const displayRows = emptyRows(height);
   const logicalToDisplay = Array.from({ length: height }, (_, row) => row);
+  const placements: SolutionExportPlacement[] = [];
 
   if (!writeInitialBoard(logicalRows, displayRows, initialMask)) return null;
 
@@ -24,7 +30,15 @@ export function replayForwardPlacementBoard(
     const piece = forwardPiece(step.piece);
     const placement = parseMask(step.placement_mask);
     if (!piece || placement < 0n || popcount(placement) !== 4) return null;
-    if (!writePlacement(logicalRows, displayRows, logicalToDisplay, placement, piece)) return null;
+    const displayPlacement = writePlacement(
+      logicalRows,
+      displayRows,
+      logicalToDisplay,
+      placement,
+      piece
+    );
+    if (displayPlacement === null) return null;
+    placements.push({ mask: displayPlacement, piece });
 
     const fullRows = logicalRows
       .map((row, index) => (row.every((cell) => cell !== null) ? index : -1))
@@ -48,9 +62,11 @@ export function replayForwardPlacementBoard(
     if (occupiedMask(logicalRows) !== parseMask(step.board_after_mask)) return null;
   }
 
+  const resultHeight = displayRows.length;
   return {
     cells: displayRows.slice().reverse().flat(),
-    height: displayRows.length
+    height: resultHeight,
+    page: { height: resultHeight, initialMask, placements }
   };
 }
 
@@ -81,18 +97,20 @@ function writePlacement(
   logicalToDisplay: number[],
   mask: bigint,
   piece: ForwardPiece
-): boolean {
-  if (mask >> BigInt(logicalRows.length * BOARD_WIDTH)) return false;
+): bigint | null {
+  if (mask >> BigInt(logicalRows.length * BOARD_WIDTH)) return null;
+  let displayMask = 0n;
   for (let bit = 0; bit < logicalRows.length * BOARD_WIDTH; bit += 1) {
     if ((mask & (1n << BigInt(bit))) === 0n) continue;
     const y = Math.floor(bit / BOARD_WIDTH);
     const x = bit % BOARD_WIDTH;
     const displayY = logicalToDisplay[y];
-    if (logicalRows[y][x] !== null || displayRows[displayY][x] !== null) return false;
+    if (logicalRows[y][x] !== null || displayRows[displayY][x] !== null) return null;
     logicalRows[y][x] = piece;
     displayRows[displayY][x] = piece;
+    displayMask |= 1n << BigInt(displayY * BOARD_WIDTH + x);
   }
-  return true;
+  return displayMask;
 }
 
 function forwardPiece(value: string): ForwardPiece | null {
