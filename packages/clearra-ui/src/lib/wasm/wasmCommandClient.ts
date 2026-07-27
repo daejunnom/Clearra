@@ -198,7 +198,7 @@ export type ClearraSetupFinderReport = {
   queue_based_pieces: string;
   next_cycle_remaining_pieces: string;
   post_cycle_borrow_enabled: boolean;
-  coverage_semantics: 'oracle';
+  coverage_semantics: 'full-future-oracle' | 'visible-seven-policy';
   geometry_family_count: string;
   partial_build_node_count: number;
   complete: boolean;

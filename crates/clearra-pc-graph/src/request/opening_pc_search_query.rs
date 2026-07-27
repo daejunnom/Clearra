@@ -9,6 +9,7 @@ use clearra_rules::{
     kicks::VerifiedKickTableProfile,
     profile::{builtin_rules::srs_plus, rule_profile::RuleProfile},
 };
+use clearra_supply::QueueObservationPolicy;
 
 use crate::request::{
     pc_execution_policy::PcExecutionPolicy, pc_hold_policy::PcHoldPolicy,
@@ -28,6 +29,7 @@ pub struct OpeningPcSearchQuery {
     verified_kick_profile: Option<VerifiedKickTableProfile>,
     objective: ObjectivePolicy,
     solution_probability_policy: PcSolutionProbabilityPolicy,
+    queue_observation_policy: QueueObservationPolicy,
     execution_policy: PcExecutionPolicy,
 }
 
@@ -51,6 +53,7 @@ impl OpeningPcSearchQuery {
             verified_kick_profile: None,
             objective: ObjectivePolicy::all(),
             solution_probability_policy: PcSolutionProbabilityPolicy::Omit,
+            queue_observation_policy: QueueObservationPolicy::default(),
             execution_policy: PcExecutionPolicy::mvp_default(),
         }
     }
@@ -111,6 +114,11 @@ impl OpeningPcSearchQuery {
     }
 }
 impl OpeningPcSearchQuery {
+    pub const fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
+    }
+}
+impl OpeningPcSearchQuery {
     pub fn execution_policy(&self) -> &PcExecutionPolicy {
         &self.execution_policy
     }
@@ -156,6 +164,12 @@ impl OpeningPcSearchQuery {
 impl OpeningPcSearchQuery {
     pub fn with_solution_probability_policy(mut self, policy: PcSolutionProbabilityPolicy) -> Self {
         self.solution_probability_policy = policy;
+        self
+    }
+}
+impl OpeningPcSearchQuery {
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
         self
     }
 }

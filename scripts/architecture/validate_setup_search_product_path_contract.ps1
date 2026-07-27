@@ -8,6 +8,8 @@ function Invoke-SetupSearchProductPathValidation() {
         "crates/clearra-core-executor/src/backend/wasm_cpu/setup_coverage_graph.rs",
         "crates/clearra-core-executor/src/backend/wasm_cpu/setup_partial_build.rs",
         "crates/clearra-core-executor/src/backend/wasm_cpu/setup_finder.rs",
+        "crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_policy.rs",
+        "crates/clearra-supply/src/queue/queue_observation_policy.rs",
         "crates/clearra-core-executor/src/setup_finder_report.rs",
         "crates/clearra-app/src/commands/setup_app_command.rs",
         "packages/clearra-ui/src/lib/workspace/SetupFinderWorkspace.svelte"
@@ -83,10 +85,31 @@ function Invoke-SetupSearchProductPathValidation() {
         "shape_joint_words",
         "representative_paths",
         '"setup_coverage_semantics"',
-        '"oracle"'
+        "queue_observation_policy"
     )) {
         if ($finder -notlike "*$requiredMarker*") {
             Add-ArchitectureError "exact setup family/product coverage marker is missing: '$requiredMarker'"
+        }
+    }
+    $queuePolicy = Read-Text "crates/clearra-supply/src/queue/queue_observation_policy.rs"
+    foreach ($requiredMarker in @(
+        "FullQueueOracle",
+        "VisibleSeven",
+        "full-future-oracle",
+        "visible-seven-policy"
+    )) {
+        if ($queuePolicy -notlike "*$requiredMarker*") {
+            Add-ArchitectureError "setup queue-knowledge contract marker is missing: '$requiredMarker'"
+        }
+    }
+    $queueEvaluator = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_policy.rs"
+    foreach ($requiredMarker in @(
+        "QueueObservationPolicyEvaluator",
+        "hidden_eighth_piece_cannot_select_a_different_first_action",
+        "policy_can_branch_after_the_eighth_piece_is_revealed"
+    )) {
+        if ($queueEvaluator -notlike "*$requiredMarker*") {
+            Add-ArchitectureError "setup queue-knowledge executable contract marker is missing: '$requiredMarker'"
         }
     }
     foreach ($forbiddenMarker in @(
@@ -127,8 +150,9 @@ function Invoke-SetupSearchProductPathValidation() {
         "M20 Setup Finder Product Path",
         "FamilyQuotient Partial BuildUp",
         "JointCoverage(state) = ForwardCoverage(state) AND BackwardPcLiveness(state)",
-        "Oracle",
-        "Online coverage is not exposed"
+        "FullQueueOracle",
+        "VisibleSeven",
+        "coverage_semantics=visible-seven-policy"
     )) {
         if ($architecture -notlike "*$requiredMarker*") {
             Add-ArchitectureError "architecture setup finder contract marker is missing: '$requiredMarker'"

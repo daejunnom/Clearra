@@ -47,6 +47,23 @@
         <span>{label('hold')}</span>
       </label>
     </div>
+    <label class="workspace-field wide">
+      <span>{label('queueKnowledge')}</span>
+      <select
+        value={request.queueKnowledge}
+        on:change={(event) => patch({
+          queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['queueKnowledge']
+        })}
+      >
+        <option value="oracle">{label('queueKnowledgeOracle')}</option>
+        <option value="visible-7">{label('queueKnowledgeVisibleSeven')}</option>
+      </select>
+      <small class="workspace-field-help">
+        {label(request.queueKnowledge === 'visible-7'
+          ? 'queueKnowledgeVisibleSevenHelp'
+          : 'queueKnowledgeOracleHelp')}
+      </small>
+    </label>
   </section>
 
   <section class="workspace-control-section">

@@ -9,12 +9,14 @@ export type SpinProfile =
   | 'all-mini'
   | 'all-mini-plus';
 export type SearchBackend = 'auto' | 'cpu' | 'gpu' | 'hybrid';
+export type QueueKnowledge = 'oracle' | 'visible-7';
 
 export type SolverWorkspaceRequest = {
   lines: number;
   boardMask: bigint;
   queue: string;
   holdEnabled: boolean;
+  queueKnowledge: QueueKnowledge;
   scoreMode: ScoreMode;
   scoreProfile: ScoreProfile;
   rule: RuleProfile;
@@ -42,6 +44,7 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     boardMask: 0n,
     queue: '',
     holdEnabled: true,
+    queueKnowledge: 'oracle',
     scoreMode: 'off',
     scoreProfile: 'tetrio',
     rule: 'srs-plus',
@@ -305,6 +308,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all', '--backend', request.backend);
   tokens.push('--rule', request.rule);
   if (request.solutionProbabilities) tokens.push('--solution-probabilities');
+  tokens.push('--queue-knowledge', request.queueKnowledge);
   if (request.scoreMode === 'minimum-cover') tokens.push('--objective', 'minimum-cover');
   if (request.scoreMode === 'summary') tokens.push('--score');
   if (request.scoreMode === 'summary') {
@@ -338,6 +342,7 @@ export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, lang
     queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
     patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
     hold_enabled: request.holdEnabled,
+    queue_knowledge: request.queueKnowledge,
     hold_piece: 'empty' as const,
     backend: request.backend,
     rule: request.rule,

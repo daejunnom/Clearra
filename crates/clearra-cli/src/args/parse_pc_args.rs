@@ -6,6 +6,7 @@ use super::{
     },
     CliHelpTopic, CliParseError, ParsedCliCommand, PcArgs,
 };
+use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
 
 pub(crate) fn parse_pc(args: &[String]) -> Result<ParsedCliCommand, CliParseError> {
     if has_help(args) {
@@ -41,6 +42,7 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut gpu_device = None;
     let mut allow_backend_fallback = None;
     let mut solution_probabilities = false;
+    let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut index = 0;
 
     while index < args.len() {
@@ -165,6 +167,17 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 solution_probabilities = true;
                 index += 1;
             }
+            "--queue-knowledge" => {
+                let value = option_value(args, index, "--queue-knowledge")?;
+                queue_observation_policy =
+                    QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
+                        CliParseError::InvalidValue {
+                            option: "--queue-knowledge",
+                            value: value.to_owned(),
+                        }
+                    })?;
+                index += 2;
+            }
             option => return Err(unknown_option("pc", option)),
         }
     }
@@ -199,5 +212,6 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         .with_max_memory_mib(max_memory_mib)
         .with_gpu_device(gpu_device)
         .with_allow_backend_fallback(allow_backend_fallback)
-        .with_solution_probabilities(solution_probabilities))
+        .with_solution_probabilities(solution_probabilities)
+        .with_queue_observation_policy(queue_observation_policy))
 }

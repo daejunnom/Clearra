@@ -9,6 +9,7 @@ use clearra_profiles::{
     pieces::piece_set_profile::PieceSetProfile,
 };
 use clearra_rules::{kicks::VerifiedKickTableProfile, profile::rule_profile::RuleProfile};
+use clearra_supply::QueueObservationPolicy;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcQuery {
@@ -23,6 +24,7 @@ pub struct PcQuery {
     verified_kick_profile: Option<VerifiedKickTableProfile>,
     objective: ObjectivePolicy,
     solution_probability_policy: PcSolutionProbabilityPolicy,
+    queue_observation_policy: QueueObservationPolicy,
     execution_policy: PcExecutionPolicy,
 }
 
@@ -40,6 +42,7 @@ impl PcQuery {
             verified_kick_profile: query.verified_kick_profile().cloned(),
             objective: query.objective(),
             solution_probability_policy: query.solution_probability_policy(),
+            queue_observation_policy: query.queue_observation_policy(),
             execution_policy: query.execution_policy().clone(),
         }
     }
@@ -100,6 +103,11 @@ impl PcQuery {
     }
 }
 impl PcQuery {
+    pub const fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
+    }
+}
+impl PcQuery {
     pub fn execution_policy(&self) -> &PcExecutionPolicy {
         &self.execution_policy
     }
@@ -142,6 +150,7 @@ impl PcQuery {
             .with_rule(self.rule)
             .with_objective(self.objective)
             .with_solution_probability_policy(self.solution_probability_policy)
+            .with_queue_observation_policy(self.queue_observation_policy)
             .with_execution_policy(self.execution_policy.clone());
         if let Some(supply_window_size) = self.supply_window_size {
             query = query.with_supply_window_size(supply_window_size);

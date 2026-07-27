@@ -130,7 +130,10 @@ impl WasmCpuSearchBackend {
     }
 
     pub fn distributed_execution_is_worthwhile(problem: &SearchProblem) -> bool {
-        required_piece_count(problem) >= 7
+        !problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+            && required_piece_count(problem) >= 7
     }
 
     pub fn execute_with_control(

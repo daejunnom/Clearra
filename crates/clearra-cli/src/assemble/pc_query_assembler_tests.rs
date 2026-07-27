@@ -14,6 +14,19 @@ fn assembles_supported_mvp_pc_query() {
 }
 
 #[test]
+fn preserves_visible_seven_policy_in_pc_query() {
+    let args = PcArgs::new(4).with_queue_observation_policy(
+        clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven,
+    );
+    let query = PcQueryAssembler::assemble(&args).expect("query");
+
+    assert_eq!(
+        query.queue_observation_policy(),
+        clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven
+    );
+}
+
+#[test]
 fn rejects_unsupported_even_target() {
     assert_eq!(
         PcQueryAssembler::assemble(&PcArgs::new(8)),

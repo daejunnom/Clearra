@@ -2,6 +2,7 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 
 use super::{
     mix_digest,
+    queue_observation_policy::{ObservationLanguageNode, ObservationPieceLanguage},
     setup_partial_build::{PartialBuildGraph, PartialBuildNode},
     WasmExactSearchError,
 };
@@ -199,6 +200,120 @@ impl SetupCoverageGraph {
             ));
         }
         Ok(Self { nodes, edges, root })
+    }
+}
+
+pub(super) struct SetupTargetBuildLanguage<'a> {
+    graph: &'a SetupCoverageGraph,
+    target_shape: u32,
+}
+
+impl<'a> SetupTargetBuildLanguage<'a> {
+    pub const fn new(graph: &'a SetupCoverageGraph, target_shape: u32) -> Self {
+        Self {
+            graph,
+            target_shape,
+        }
+    }
+
+    fn is_target(&self, node: SetupCoverageNode) -> bool {
+        node.shape_index() == Some(self.target_shape)
+    }
+}
+
+impl ObservationPieceLanguage for SetupTargetBuildLanguage<'_> {
+    fn root(&self) -> u32 {
+        self.graph.root
+    }
+
+    fn node(&self, node: u32) -> Option<ObservationLanguageNode> {
+        self.graph
+            .nodes
+            .get(node as usize)
+            .copied()
+            .map(|node| ObservationLanguageNode {
+                accepting: self.is_target(node),
+                depth: node.depth,
+            })
+    }
+
+    fn edge_count(&self, node: u32) -> Option<usize> {
+        let node = self.graph.nodes.get(node as usize).copied()?;
+        Some(if self.is_target(node) {
+            0
+        } else {
+            usize::from(node.edge_count)
+        })
+    }
+
+    fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)> {
+        let node = self.graph.nodes.get(node as usize).copied()?;
+        if self.is_target(node) || index >= usize::from(node.edge_count) {
+            return None;
+        }
+        let edge = self.graph.edges[node.edge_start as usize + index];
+        Some((edge.piece_code(), edge.child()))
+    }
+}
+
+pub(super) struct SetupTargetJointLanguage<'a> {
+    graph: &'a SetupCoverageGraph,
+    target_shape: u32,
+}
+
+impl<'a> SetupTargetJointLanguage<'a> {
+    pub const fn new(graph: &'a SetupCoverageGraph, target_shape: u32) -> Self {
+        Self {
+            graph,
+            target_shape,
+        }
+    }
+
+    fn encode(&self, node: u32, seen_target: bool) -> Option<u32> {
+        node.checked_mul(2)?.checked_add(u32::from(seen_target))
+    }
+
+    fn decode(&self, state: u32) -> Option<(u32, bool)> {
+        let node = state / 2;
+        ((node as usize) < self.graph.nodes.len()).then_some((node, state & 1 != 0))
+    }
+}
+
+impl ObservationPieceLanguage for SetupTargetJointLanguage<'_> {
+    fn root(&self) -> u32 {
+        let root = self.graph.root;
+        let seen = self.graph.nodes[root as usize].shape_index() == Some(self.target_shape);
+        self.encode(root, seen)
+            .expect("setup coverage graph identity fits u32")
+    }
+
+    fn node(&self, state: u32) -> Option<ObservationLanguageNode> {
+        let (node_index, seen_target) = self.decode(state)?;
+        let node = self.graph.nodes[node_index as usize];
+        Some(ObservationLanguageNode {
+            accepting: node.accepting() && seen_target,
+            depth: node.depth,
+        })
+    }
+
+    fn edge_count(&self, state: u32) -> Option<usize> {
+        let (node_index, _) = self.decode(state)?;
+        Some(usize::from(
+            self.graph.nodes[node_index as usize].edge_count,
+        ))
+    }
+
+    fn edge(&self, state: u32, index: usize) -> Option<(u8, u32)> {
+        let (node_index, seen_target) = self.decode(state)?;
+        let node = self.graph.nodes[node_index as usize];
+        if index >= usize::from(node.edge_count) {
+            return None;
+        }
+        let edge = self.graph.edges[node.edge_start as usize + index];
+        let child = edge.child();
+        let child_seen = seen_target
+            || self.graph.nodes[child as usize].shape_index() == Some(self.target_shape);
+        Some((edge.piece_code(), self.encode(child, child_seen)?))
     }
 }
 

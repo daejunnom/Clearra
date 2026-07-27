@@ -12,11 +12,10 @@ empty 10x4 PC geometry family
 -> one ranked state per visible board
 ```
 
-## Search Modes
+## Setup Search Modes
 
-`oracle` is the default residue mode described below. Its input is an unordered
-cycle residue, and coverage may select a different legal path for each complete
-future pattern.
+`--mode oracle` is the default shape/residue mode described below. Its input is
+an unordered cycle residue.
 
 `qb` conditions the next bag on the piece group currently visible to the
 player. For example, cycle-five residue `TI` with observed next pieces `OS`
@@ -74,6 +73,28 @@ a false conditional 100%.
 QB uses the same inverse lock-clear family quotient and partial BuildUp search
 as residue mode. Observed QB conditioning and the optional terminal inventory
 filter are separate axes and may be combined.
+
+## Queue Knowledge
+
+Setup generation mode and future queue knowledge are independent:
+
+```text
+--mode oracle|qb
+--queue-knowledge oracle|visible-7
+```
+
+`--queue-knowledge oracle` is the compatibility default. It assumes the whole
+materialized future queue is known, so each complete pattern may choose a
+different legal placement path.
+
+`--queue-knowledge visible-7` exposes the current hold and the next seven queue
+pieces. Queues with the same observation must choose the same placement/hold
+action. After a lock consumes source pieces, newly visible pieces create the
+next exact observation class and the policy may branch there.
+
+Visible-seven coverage is evaluated on the complete materialized pattern
+universe. It does not discard hidden suffixes or replace them with one
+representative queue.
 
 ## Residue And Hold Contract
 
@@ -214,8 +235,12 @@ path. Placement count affects ordering and representative selection only. It
 is never a candidate-removal proof, because distinct shapes and coverage sets
 remain semantically relevant.
 
-The stable semantics are Oracle coverage: each concrete pattern may choose its
-own legal path. An online observation-policy result is not exposed.
+The report identifies either `full-future-oracle` or
+`visible-seven-policy`. Build and Joint are each the exact maximum weighted
+coverage for the selected queue-knowledge contract. `Conditional` is the
+reported Joint-to-Build coverage ratio; under visible-seven these two maxima
+may be attained by different policies, so it is an analytical ratio rather
+than a claim that one policy attains both optima.
 
 ## Product Boundary
 

@@ -499,6 +499,19 @@ fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecu
     coordinator.finish(2).expect("distributed exact result")
 }
 
+#[test]
+fn visible_seven_pc_uses_the_global_serial_policy_finalizer() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let preparation = WasmDistributedCoordinator::prepare(
+        &runtime,
+        "clearra pc --lines 4 --count unique --backend cpu --workers 2 --queue-knowledge visible-7",
+    )
+    .expect("visible-seven distributed preparation");
+
+    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+}
+
 #[cfg(feature = "webgpu-search")]
 #[test]
 fn gpu_multi_request_selects_the_webgpu_distributed_product_path() {

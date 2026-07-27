@@ -17,7 +17,9 @@ use clearra_rules::profile::{
     rule_profile::{RuleProfile, RuleProfileId},
 };
 use clearra_scoring::profile::SpinProfileId;
-use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+use clearra_supply::{
+    queue::queue_pattern_expression::QueuePatternExpression, QueueObservationPolicy,
+};
 
 use crate::{
     web_virtual_file::reject_native_path_semantics, WebBuildProbabilityInput, WebCommandError,
@@ -80,6 +82,7 @@ fn parse_setup_command(
     let mut length_preference = clearra_problem::SetupLengthPreference::Auto;
     let mut max_setup_pieces = 9_u8;
     let mut explicit_search_mode = None;
+    let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut queue_based = None;
     let mut next_cycle_remaining = None;
     let mut rule = srs_plus();
@@ -114,6 +117,18 @@ fn parse_setup_command(
                     ));
                 };
                 explicit_search_mode = Some(mode);
+            }
+            "--queue-knowledge" => {
+                let value = next_value(tokens, &mut cursor, "--queue-knowledge")?;
+                queue_observation_policy =
+                    QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!(
+                                "invalid queue knowledge '{value}'; expected oracle or visible-7"
+                            ),
+                        )
+                    })?;
             }
             "--priority" => {
                 let value = next_value(tokens, &mut cursor, "--priority")?;
@@ -251,6 +266,7 @@ fn parse_setup_command(
         .with_setup_length_preference(length_preference)
         .with_setup_max_pieces(max_setup_pieces)
         .with_setup_search_mode(search_mode)
+        .with_queue_observation_policy(queue_observation_policy)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(pieces) = queue_based_pieces {
@@ -831,6 +847,7 @@ fn parse_pc_command(
     let mut cpu_warmup = false;
     let mut gpu_warmup = false;
     let mut solution_probabilities = false;
+    let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
     let mut cursor = 0usize;
 
@@ -997,6 +1014,18 @@ fn parse_pc_command(
                 solution_probabilities = true;
                 cursor += 1;
             }
+            "--queue-knowledge" => {
+                let value = next_value(tokens, &mut cursor, "--queue-knowledge")?;
+                queue_observation_policy =
+                    QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!(
+                                "invalid queue knowledge '{value}'; expected oracle or visible-7"
+                            ),
+                        )
+                    })?;
+            }
             "--allow-backend-fallback" => {
                 allow_backend_fallback = true;
                 cursor += 1;
@@ -1099,6 +1128,7 @@ fn parse_pc_command(
         .with_cpu_warmup(cpu_warmup)
         .with_gpu_warmup(gpu_warmup)
         .with_solution_probabilities(solution_probabilities)
+        .with_queue_observation_policy(queue_observation_policy)
         .with_hold_enabled(hold_enabled)
         .with_count_policy(count_policy)
         .with_objective(objective);

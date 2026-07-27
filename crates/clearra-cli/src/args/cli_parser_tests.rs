@@ -38,6 +38,45 @@ fn parses_pc_args_outside_lib_router() {
 }
 
 #[test]
+fn parses_pc_queue_knowledge_policy() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--queue-knowledge",
+        "visible-7",
+    ])
+    .expect("visible-seven PC command");
+
+    let ParsedCliCommand::Pc(args) = invocation.into_command() else {
+        panic!("expected pc command");
+    };
+    assert_eq!(
+        args.queue_observation_policy(),
+        clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven
+    );
+}
+
+#[test]
+fn rejects_unknown_pc_queue_knowledge_policy() {
+    assert!(matches!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "4",
+            "--queue-knowledge",
+            "clairvoyant",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--queue-knowledge",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn cpu_execution_aliases_select_cpu_and_preserve_thread_count() {
     let invocation = CliParser::parse([
         "clearra",
@@ -358,6 +397,51 @@ fn parses_queue_based_setup_mode() {
     assert_eq!(args.remaining(), "TI");
     assert_eq!(args.queue_based_pieces(), Some("OS"));
     assert_eq!(args.next_cycle_remaining_pieces(), None);
+}
+
+#[test]
+fn parses_setup_queue_knowledge_independently_from_search_mode() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "TI",
+        "--qb",
+        "OS",
+        "--queue-knowledge",
+        "visible-7",
+    ])
+    .expect("visible-seven QB setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        args.search_mode(),
+        clearra_setup_search::query::SetupSearchMode::QueueBased
+    );
+    assert_eq!(
+        args.queue_observation_policy(),
+        clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven
+    );
+}
+
+#[test]
+fn rejects_unknown_setup_queue_knowledge_policy() {
+    assert!(matches!(
+        CliParser::parse([
+            "clearra",
+            "setup",
+            "--remaining",
+            "TI",
+            "--queue-knowledge",
+            "clairvoyant",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--queue-knowledge",
+            ..
+        })
+    ));
 }
 
 #[test]

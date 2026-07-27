@@ -36,6 +36,7 @@ impl SetupQueryAssembler {
 
         let mut query = SetupSearchQuery::default()
             .with_rule(rule)
+            .with_queue_observation_policy(args.queue_observation_policy())
             .with_remaining_pieces(pieces);
         if let Some(value) = args.initial_hold() {
             query = query.with_hold_policy(parse_initial_hold(value)?);

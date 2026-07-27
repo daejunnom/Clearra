@@ -46,6 +46,29 @@ mod case_gui_opening_pc_preserves_hold_selection_without_queue_override {
     }
 }
 
+mod case_gui_pc_request_preserves_visible_seven_queue_knowledge {
+    use clearra_app::AppCommand;
+    use clearra_supply::QueueObservationPolicy;
+
+    use super::*;
+
+    #[test]
+    fn gui_pc_request_preserves_visible_seven_queue_knowledge() {
+        let form = GuiOpeningPcForm::new(4, "srs-plus")
+            .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+        let command = PcRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI PC request");
+        let AppCommand::Pc(command) = command else {
+            panic!("expected PC command");
+        };
+
+        assert_eq!(
+            command.query().queue_observation_policy(),
+            QueueObservationPolicy::VisibleSeven
+        );
+    }
+}
+
 mod case_gui_setup_request_uses_residue_and_cycle_boundary_policy {
     use clearra_app::AppCommand;
     use clearra_problem::SetupCycleResetBorrowPolicy;

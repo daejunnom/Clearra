@@ -8,7 +8,7 @@ use clearra_rules::{
     kicks::VerifiedKickTableProfile,
     profile::{builtin_rules::srs_plus, rule_profile::RuleProfile},
 };
-use clearra_supply::hold::hold_slot::HoldSlot;
+use clearra_supply::{hold::hold_slot::HoldSlot, QueueObservationPolicy};
 
 use crate::request::{
     extended_pc_scenario_board::ExtendedPcScenarioBoard, pc_execution_policy::PcExecutionPolicy,
@@ -125,6 +125,7 @@ pub struct PcScenarioQuery<B = PcScenarioBoard> {
     retained_trace_limit: usize,
     objective: ObjectivePolicy,
     solution_probability_policy: PcSolutionProbabilityPolicy,
+    queue_observation_policy: QueueObservationPolicy,
     execution_policy: PcExecutionPolicy,
 }
 
@@ -176,6 +177,7 @@ impl<B> PcScenarioQuery<B> {
             retained_trace_limit: SearchDefaults::MVP1.scenario_retained_trace_limit(),
             objective: ObjectivePolicy::all(),
             solution_probability_policy: PcSolutionProbabilityPolicy::Omit,
+            queue_observation_policy: QueueObservationPolicy::default(),
             execution_policy: PcExecutionPolicy::mvp_default(),
         }
     }
@@ -256,6 +258,10 @@ impl<B> PcScenarioQuery<B> {
         self.solution_probability_policy
     }
 
+    pub const fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
+    }
+
     pub fn execution_policy(&self) -> &PcExecutionPolicy {
         &self.execution_policy
     }
@@ -324,6 +330,11 @@ impl<B> PcScenarioQuery<B> {
 
     pub fn with_solution_probability_policy(mut self, policy: PcSolutionProbabilityPolicy) -> Self {
         self.solution_probability_policy = policy;
+        self
+    }
+
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
         self
     }
 

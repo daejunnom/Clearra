@@ -104,6 +104,7 @@ impl PcQueryAssembler {
         let mut query = query
             .with_queue(queue)
             .with_hold_policy(hold_policy)
+            .with_queue_observation_policy(args.queue_observation_policy())
             .with_rule(rule)
             .with_objective(objective)
             .with_execution_policy(execution_policy);

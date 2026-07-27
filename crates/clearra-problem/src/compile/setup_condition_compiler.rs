@@ -307,6 +307,7 @@ fn compile_condition(
         PieceWindow::new(10),
     )
     .with_rule(query.rule())
+    .with_queue_observation_policy(query.queue_observation_policy())
     .with_hold_piece(initial_hold)
     .with_allow_hold(query.hold_policy().is_enabled())
     .with_exact_pieces(Some(10))

@@ -227,6 +227,70 @@ impl PieceOrderLanguageCache {
             .get(edge_start + relative_start..edge_start + relative_end)
     }
 
+    pub fn edge_count(&self, reference: u32) -> Option<usize> {
+        self.nodes
+            .get(reference as usize)
+            .map(|node| usize::from(node.edge_count))
+    }
+
+    pub fn edge(&self, reference: u32, index: usize) -> Option<CanonicalPieceEdge> {
+        let node = self.nodes.get(reference as usize).copied()?;
+        (index < usize::from(node.edge_count)).then(|| self.edges[node.edge_start as usize + index])
+    }
+
+    pub fn union_roots(
+        &mut self,
+        left: Option<u32>,
+        right: u32,
+    ) -> Result<u32, WasmExactSearchError> {
+        let Some(left) = left else {
+            return Ok(right);
+        };
+        if left == right {
+            return Ok(left);
+        }
+        let left_node =
+            *self
+                .nodes
+                .get(left as usize)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_union_node_out_of_range",
+                ))?;
+        let right_node =
+            *self
+                .nodes
+                .get(right as usize)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_union_node_out_of_range",
+                ))?;
+        if left_node.remaining_depth != right_node.remaining_depth {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_language_union_depth_mismatch",
+            ));
+        }
+        let left_edges = self.node_edges(left_node).to_vec();
+        let right_edges = self.node_edges(right_node).to_vec();
+        self.edge_scratch.clear();
+        self.edge_scratch
+            .try_reserve(left_edges.len().saturating_add(right_edges.len()))
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_piece_language_edge_scratch_unavailable")
+            })?;
+        self.edge_scratch.extend_from_slice(&left_edges);
+        self.edge_scratch.extend_from_slice(&right_edges);
+        self.edge_scratch.sort_unstable();
+        self.edge_scratch.dedup();
+        self.intern_node(
+            left_node.accepting || right_node.accepting,
+            left_node.remaining_depth,
+        )
+    }
+
+    pub fn clear_coverage_caches(&mut self) {
+        self.coverage.clear();
+        self.seen_once.clear();
+    }
+
     pub fn retained_bytes(&self) -> usize {
         self.nodes.capacity() * core::mem::size_of::<CanonicalPieceNode>()
             + self.edges.capacity() * core::mem::size_of::<CanonicalPieceEdge>()

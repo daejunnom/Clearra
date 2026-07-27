@@ -3,7 +3,7 @@ use clearra_profiles::{
     bag::bag_profile::BagProfileId, board::board_profile::BoardProfileId,
     pieces::piece_set_profile::PieceSetProfileId,
 };
-use clearra_supply::queue::fixed_sequence::FixedSequence;
+use clearra_supply::{queue::fixed_sequence::FixedSequence, QueueObservationPolicy};
 
 use super::{
     continuation_token_error::PcContinuationTokenError,
@@ -22,7 +22,7 @@ pub(crate) fn encode_opening_continuation(
     pieces: &[PieceKind],
 ) -> String {
     format!(
-        "pc2:l{}:bd{}:ps{}:bg{}:r{}:o{}:e{}:h{}:q{}",
+        "pc2:l{}:bd{}:ps{}:bg{}:r{}:o{}:e{}:h{}:q{}:qk{}",
         query.target().lines(),
         query.board().id().as_str(),
         query.piece_set().id().as_str(),
@@ -36,6 +36,7 @@ pub(crate) fn encode_opening_continuation(
         },
         format_hold_piece(hold_piece),
         format_piece_sequence(pieces),
+        query.queue_observation_policy().keyword(),
     )
 }
 
@@ -43,9 +44,9 @@ pub(crate) fn parse_opening_v2(
     token: &str,
 ) -> Result<OpeningPcSearchQuery, PcContinuationTokenError> {
     let parts = token.split(':').collect::<Vec<_>>();
-    if parts.len() != 10 || parts[0] != "pc2" {
+    if !(parts.len() == 10 || parts.len() == 11) || parts[0] != "pc2" {
         return Err(PcContinuationTokenError::new(
-            "continuation token must use pc2:lN:bdPROFILE:psPROFILE:bgPROFILE:rRULE:oOBJECTIVE:e0|1:hX:qPIECES format",
+            "continuation token must use pc2:lN:bdPROFILE:psPROFILE:bgPROFILE:rRULE:oOBJECTIVE:e0|1:hX:qPIECES:qkoracle|visible-7 format",
         ));
     }
     require_value(
@@ -75,9 +76,17 @@ pub(crate) fn parse_opening_v2(
         ));
     }
     let queue = parse_queue(parts[9])?;
+    let queue_observation_policy = if parts.len() == 11 {
+        QueueObservationPolicy::from_keyword(prefixed_value(parts[10], "qk")?).ok_or_else(|| {
+            PcContinuationTokenError::new("unsupported opening queue observation policy")
+        })?
+    } else {
+        QueueObservationPolicy::default()
+    };
     Ok(OpeningPcSearchQuery::new(target)
         .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(queue)))
         .with_hold_policy(opening_hold_policy(hold_enabled, hold_piece))
         .with_rule(rule)
-        .with_objective(objective))
+        .with_objective(objective)
+        .with_queue_observation_policy(queue_observation_policy))
 }

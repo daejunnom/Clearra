@@ -20,6 +20,9 @@ use super::{
     exact_collections::ExactHashSet,
     geometry::{GeometryCandidate, TargetGroup},
     piece_order_language::{CoverageCacheLookup, PieceOrderLanguageCache},
+    queue_observation_policy::{
+        QueueObservationCoverage, QueueObservationPolicyEvaluator, RootedPieceLanguage,
+    },
     reachability::ReachabilityWorkspace,
     realization_feasibility::RealizationFeasibilityWorkspace,
     standard_bag_coverage::{StandardBagCoverage, StandardBagCoverageResult},
@@ -103,6 +106,7 @@ pub(super) struct CandidateBuildResult {
     pub buildable: bool,
     pub covered_patterns: Option<PatternBitSet>,
     pub symbolic_coverage_root: Option<u32>,
+    pub observation_language_root: Option<u32>,
     pub symbolic_covered_pattern_count: usize,
     pub witness_pattern_id: Option<u32>,
     pub build_variant_count: u128,
@@ -140,6 +144,7 @@ pub(super) struct BuildUpWorkspace {
     piece_order_languages: PieceOrderLanguageCache,
     standard_bag_coverage: Option<StandardBagCoverage>,
     standard_bag_coverage_initialized: bool,
+    observation_language_root: Option<u32>,
     reachability: ReachabilityWorkspace,
     graph_nodes: Vec<BuildNode>,
     graph_edges: Vec<BuildEdge>,
@@ -244,6 +249,43 @@ impl BuildUpWorkspace {
             .materialize_root(root)
     }
 
+    pub fn merge_observation_language(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
+        self.observation_language_root = Some(
+            self.piece_order_languages
+                .union_roots(self.observation_language_root, root)?,
+        );
+        Ok(())
+    }
+
+    pub fn evaluate_observation_language(
+        &mut self,
+        problem: &SearchProblem,
+        control: &ExecutionControl,
+    ) -> Result<Option<QueueObservationCoverage>, WasmExactSearchError> {
+        let Some(root) = self.observation_language_root else {
+            return Ok(None);
+        };
+        let universe = problem.piece_source().materialized_universe().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+        )?;
+        let pattern_index = PatternPiecePositionIndex::compile(universe).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_pattern_index_compile_failed")
+        })?;
+        let mut evaluator = QueueObservationPolicyEvaluator::new(
+            universe,
+            &pattern_index,
+            problem.queue_observation_policy(),
+            problem.initial_hold().cursor(),
+            problem.initial_hold().hold_piece(),
+            problem.supply().hold_enabled(),
+            problem.supply().projects_unplaced_lookahead(),
+            problem.supply().projects_standard_bag_lookahead(),
+            None,
+        )?;
+        let language = RootedPieceLanguage::new(&self.piece_order_languages, root)?;
+        evaluator.evaluate(&language, control).map(Some)
+    }
+
     fn cover_standard_bag_language(
         &mut self,
         problem: &SearchProblem,
@@ -283,7 +325,11 @@ impl BuildUpWorkspace {
         if let Some(coverage) = self.standard_bag_coverage.as_mut() {
             coverage.flush_and_recycle_local_cache()?;
         }
-        self.piece_order_languages.clear_retain_capacity();
+        if self.observation_language_root.is_some() {
+            self.piece_order_languages.clear_coverage_caches();
+        } else {
+            self.piece_order_languages.clear_retain_capacity();
+        }
         Ok(())
     }
 
@@ -661,6 +707,7 @@ fn verify_candidate_with_projection(
     graph_span.finish(graph.nodes.len() as u64);
     let mut covered_patterns = None;
     let mut symbolic_coverage_root = None;
+    let mut observation_language_root = None;
     let mut symbolic_covered_pattern_count = 0usize;
     let mut witness_pattern_id = None;
     let mut build_variant_count = 0_u128;
@@ -675,6 +722,21 @@ fn verify_candidate_with_projection(
     );
     if graph.nodes[graph.root as usize].live {
         let count_paths = problem.count_policy() == PcCountPolicy::CountAll;
+        let mut canonical_language_id = None;
+        if problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        {
+            let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
+                Ok(language_id) => language_id,
+                Err(error) => {
+                    workspace.recycle_graph(graph);
+                    return Err(error);
+                }
+            };
+            canonical_language_id = Some(language_id);
+            observation_language_root = Some(language_id);
+        }
         if count_paths {
             let Some(pattern_index) = target.pattern_index.as_deref() else {
                 workspace.recycle_graph(graph);
@@ -708,11 +770,15 @@ fn verify_candidate_with_projection(
             coverage_product_states = product.active_states;
             coverage_product_edge_checks = product.edge_checks;
         } else {
-            let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
-                Ok(language_id) => language_id,
-                Err(error) => {
-                    workspace.recycle_graph(graph);
-                    return Err(error);
+            let language_id = if let Some(language_id) = canonical_language_id {
+                language_id
+            } else {
+                match workspace.piece_order_languages.canonicalize(&graph) {
+                    Ok(language_id) => language_id,
+                    Err(error) => {
+                        workspace.recycle_graph(graph);
+                        return Err(error);
+                    }
                 }
             };
             let symbolic =
@@ -851,6 +917,7 @@ fn verify_candidate_with_projection(
         }),
         covered_patterns,
         symbolic_coverage_root,
+        observation_language_root,
         symbolic_covered_pattern_count,
         build_variant_count,
         count_complete,
@@ -871,6 +938,7 @@ fn infeasible_candidate_result(feasibility_states: usize) -> CandidateBuildResul
         buildable: false,
         covered_patterns: None,
         symbolic_coverage_root: None,
+        observation_language_root: None,
         symbolic_covered_pattern_count: 0,
         witness_pattern_id: None,
         build_variant_count: 0,
@@ -916,6 +984,7 @@ fn verify_first_pattern_witness(
             buildable: false,
             covered_patterns: None,
             symbolic_coverage_root: None,
+            observation_language_root: None,
             symbolic_covered_pattern_count: 0,
             witness_pattern_id: None,
             build_variant_count: 0,
@@ -953,6 +1022,7 @@ fn verify_first_pattern_witness(
         buildable: true,
         covered_patterns: None,
         symbolic_coverage_root: None,
+        observation_language_root: None,
         symbolic_covered_pattern_count: 0,
         witness_pattern_id: Some(witness.global_pattern_index as u32),
         build_variant_count: 0,

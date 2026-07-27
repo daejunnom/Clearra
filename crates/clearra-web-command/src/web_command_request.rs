@@ -16,7 +16,10 @@ use clearra_problem::{
     SetupSearchMode, SetupSearchQuery,
 };
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
-use clearra_supply::queue::{queue_parser, queue_pattern_expression::QueuePatternExpression};
+use clearra_supply::{
+    queue::{queue_parser, queue_pattern_expression::QueuePatternExpression},
+    QueueObservationPolicy,
+};
 
 use crate::{WebBuildProbabilityInput, WebPcScenarioInput};
 use crate::{WebCommandError, WebCommandErrorCode, WebVirtualFileHandle};
@@ -35,6 +38,7 @@ pub struct WebCommandRequest {
     supply_window_size: Option<SupplyWindowSize>,
     count_policy: PcCountPolicy,
     objective: ObjectivePolicy,
+    queue_observation_policy: QueueObservationPolicy,
     scenario: Option<WebPcScenarioInput>,
     build_probability: Option<WebBuildProbabilityInput>,
     forward_search: Option<ForwardSearchQuery>,
@@ -78,6 +82,7 @@ impl WebCommandRequest {
             supply_window_size: None,
             count_policy: PcCountPolicy::CountUnique,
             objective: ObjectivePolicy::unique(),
+            queue_observation_policy: QueueObservationPolicy::default(),
             scenario: None,
             build_probability: None,
             forward_search: None,
@@ -122,6 +127,7 @@ impl WebCommandRequest {
             supply_window_size: None,
             count_policy: PcCountPolicy::CountUnique,
             objective: ObjectivePolicy::unique(),
+            queue_observation_policy: QueueObservationPolicy::default(),
             scenario: None,
             build_probability: None,
             forward_search: None,
@@ -336,6 +342,11 @@ impl WebCommandRequest {
         }
         self
     }
+
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
+        self
+    }
 }
 impl WebCommandRequest {
     pub fn with_virtual_file(mut self, file: WebVirtualFileHandle) -> Self {
@@ -395,7 +406,8 @@ impl WebCommandRequest {
             };
             let mut query = SetupSearchQuery::default()
                 .with_rule(self.rule)
-                .with_remaining_pieces(remaining);
+                .with_remaining_pieces(remaining)
+                .with_queue_observation_policy(self.queue_observation_policy);
             match self.setup_search_mode {
                 SetupSearchMode::ShapeOracle => {
                     if self.setup_queue_based_pieces.is_some() {
@@ -555,7 +567,8 @@ impl WebCommandRequest {
             );
             let mut query = scenario
                 .to_query(queue, policy, finite_standard_bag_len, self.rule)
-                .with_objective(self.objective);
+                .with_objective(self.objective)
+                .with_queue_observation_policy(self.queue_observation_policy);
             if self.solution_probabilities {
                 query =
                     query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
@@ -577,6 +590,7 @@ impl WebCommandRequest {
             .with_queue(queue)
             .with_rule(self.rule)
             .with_objective(self.objective)
+            .with_queue_observation_policy(self.queue_observation_policy)
             .with_hold_policy(if self.hold_enabled {
                 PcHoldPolicy::default()
             } else {

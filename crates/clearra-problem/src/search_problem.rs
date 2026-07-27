@@ -189,6 +189,7 @@ mod execution_accessors {
     use clearra_pc_graph::request::{
         PcCompletionGoal, PcExecutionPolicy, PcSolutionProbabilityPolicy,
     };
+    use clearra_supply::QueueObservationPolicy;
 
     use crate::goal::SearchGoal;
 
@@ -232,6 +233,19 @@ mod execution_accessors {
     impl SearchProblem {
         pub fn solution_probability_policy(&self) -> PcSolutionProbabilityPolicy {
             self.scenario.core_query().solution_probability_policy()
+        }
+    }
+    impl SearchProblem {
+        pub fn queue_observation_policy(&self) -> QueueObservationPolicy {
+            self.scenario
+                .pc_query()
+                .map(crate::query::pc_query::PcQuery::queue_observation_policy)
+                .or_else(|| {
+                    self.scenario
+                        .setup_query()
+                        .map(crate::query::setup_query::SetupSearchQuery::queue_observation_policy)
+                })
+                .unwrap_or_else(|| self.scenario.core_query().queue_observation_policy())
         }
     }
     impl SearchProblem {

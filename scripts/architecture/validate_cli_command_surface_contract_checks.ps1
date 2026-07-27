@@ -37,6 +37,8 @@ $setupCommand = Read-Text "crates/clearra-cli/src/commands/setup_command.rs"
 $setupAppCommand = Read-Text "crates/clearra-app/src/commands/setup_app_command.rs"
 $setupBackend = Read-Text "crates/clearra-core-executor/src/backend/wasm_setup_search_backend.rs"
 $setupFinder = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_finder.rs"
+$queueObservationPolicy = Read-Text "crates/clearra-supply/src/queue/queue_observation_policy.rs"
+$queueObservationEvaluator = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_policy.rs"
 $setupPartialBuild = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_partial_build.rs"
 $setupCoverageGraph = Read-Text "crates/clearra-core-executor/src/backend/wasm_cpu/setup_coverage_graph.rs"
 $cliErrorCode = Read-Text "crates/clearra-cli/src/error/cli_error_code.rs"
@@ -673,9 +675,24 @@ foreach ($requiredMarker in @("WasmSetupSearchBackend", "WasmSetupSearchSession"
         Add-ArchitectureError "setup backend must own cooperative WASM execution marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("SetupCoverageSession", "SetupSupplyTransitionCatalog", "merge_exact_state_coverage", "setup_coverage_semantics", '"oracle"', "representative_paths")) {
+foreach ($requiredMarker in @("SetupCoverageSession", "SetupSupplyTransitionCatalog", "merge_exact_state_coverage", "setup_coverage_semantics", "queue_observation_policy", "representative_paths")) {
     if ($setupFinder -notlike "*$requiredMarker*") {
         Add-ArchitectureError "setup finder must own family-quotient and exact product coverage marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("FullQueueOracle", "VisibleSeven", "full-future-oracle", "visible-seven-policy")) {
+    if ($queueObservationPolicy -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "queue observation policy contract marker is missing: '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("QueueObservationPolicyEvaluator", "hidden_eighth_piece_cannot_select_a_different_first_action", "policy_can_branch_after_the_eighth_piece_is_revealed")) {
+    if ($queueObservationEvaluator -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "queue observation executable contract marker is missing: '$requiredMarker'"
+    }
+}
+foreach ($parserSurface in @($parsePcArgs, $parseSetupArgs)) {
+    if ($parserSurface -notlike "*--queue-knowledge*" -or $parserSurface -notlike "*QueueObservationPolicy::from_keyword*") {
+        Add-ArchitectureError "PC and setup CLI parsers must validate and preserve --queue-knowledge"
     }
 }
 foreach ($requiredMarker in @("PartialBuildGraph", "PartialBuildGraphBuilder", "GeometryCompletionOracle", "compact_live_graph", "1..=9")) {

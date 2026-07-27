@@ -1,4 +1,5 @@
 use clearra_setup_search::query::{SetupCandidatePriority, SetupLengthPreference, SetupSearchMode};
+use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupArgs {
@@ -14,6 +15,7 @@ pub struct SetupArgs {
     initial_hold: Option<String>,
     path_detail_setup_id: Option<String>,
     path_detail_condition_id: Option<String>,
+    queue_observation_policy: QueueObservationPolicy,
 }
 
 impl SetupArgs {
@@ -31,6 +33,7 @@ impl SetupArgs {
             initial_hold: None,
             path_detail_setup_id: None,
             path_detail_condition_id: None,
+            queue_observation_policy: QueueObservationPolicy::default(),
         }
     }
 }
@@ -84,6 +87,10 @@ impl SetupArgs {
         self.path_detail_condition_id.as_deref()
     }
 
+    pub fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
+    }
+
     pub fn with_candidate_priority(mut self, priority: SetupCandidatePriority) -> Self {
         self.candidate_priority = priority;
         self
@@ -132,6 +139,11 @@ impl SetupArgs {
     ) -> Self {
         self.path_detail_setup_id = Some(setup_id.into());
         self.path_detail_condition_id = Some(condition_id.into());
+        self
+    }
+
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
         self
     }
 }

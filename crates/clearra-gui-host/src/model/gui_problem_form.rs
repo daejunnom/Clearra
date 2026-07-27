@@ -1,4 +1,5 @@
 use clearra_app::GuiFormState;
+use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
 
 use crate::model::GuiBackendForm;
 
@@ -8,6 +9,7 @@ pub struct GuiOpeningPcForm {
     rule: String,
     fixed_queue: Option<String>,
     queue_pattern: Option<String>,
+    queue_observation_policy: QueueObservationPolicy,
     hold_enabled: bool,
     score_mode: String,
     score_profile: String,
@@ -24,6 +26,7 @@ impl GuiOpeningPcForm {
             rule: rule.into(),
             fixed_queue: None,
             queue_pattern: None,
+            queue_observation_policy: QueueObservationPolicy::default(),
             hold_enabled: true,
             score_mode: "off".to_owned(),
             score_profile: "tetrio".to_owned(),
@@ -73,6 +76,15 @@ impl GuiOpeningPcForm {
 
     pub const fn hold_enabled(&self) -> bool {
         self.hold_enabled
+    }
+
+    pub const fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
+    }
+
+    pub const fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
+        self
     }
 
     pub fn score_mode(&self) -> &str {
@@ -139,6 +151,7 @@ pub struct GuiScenarioPcForm {
     remaining_queue: String,
     remaining_queue_is_pattern: bool,
     remaining_queue_is_standard_bag: bool,
+    queue_observation_policy: QueueObservationPolicy,
     rule: String,
     piece_window: usize,
     hold_piece: Option<char>,
@@ -170,6 +183,7 @@ impl GuiScenarioPcForm {
             remaining_queue,
             remaining_queue_is_pattern: false,
             remaining_queue_is_standard_bag: false,
+            queue_observation_policy: QueueObservationPolicy::default(),
             rule: rule.into(),
             piece_window,
             hold_piece: None,
@@ -231,6 +245,15 @@ impl GuiScenarioPcForm {
 
     pub const fn remaining_queue_is_standard_bag(&self) -> bool {
         self.remaining_queue_is_standard_bag
+    }
+
+    pub const fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
+    }
+
+    pub const fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
+        self
     }
 }
 impl GuiScenarioPcForm {
@@ -396,6 +419,15 @@ pub enum GuiProblemForm {
     BuildCoverage(GuiBuildCoverageForm),
 }
 
+impl GuiProblemForm {
+    pub fn with_queue_observation_policy(self, policy: QueueObservationPolicy) -> Self {
+        match self {
+            Self::OpeningPc(form) => Self::OpeningPc(form.with_queue_observation_policy(policy)),
+            Self::ScenarioPc(form) => Self::ScenarioPc(form.with_queue_observation_policy(policy)),
+            other => other,
+        }
+    }
+}
 impl GuiProblemForm {
     pub fn with_score_input(self, mode: impl Into<String>, initial_b2b: u32) -> Self {
         let mode = mode.into();

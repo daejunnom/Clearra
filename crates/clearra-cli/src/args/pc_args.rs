@@ -1,3 +1,5 @@
+use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcArgs {
     lines: u8,
@@ -24,6 +26,7 @@ pub struct PcArgs {
     gpu_device: Option<String>,
     allow_backend_fallback: Option<bool>,
     solution_probabilities: bool,
+    queue_observation_policy: QueueObservationPolicy,
 }
 
 impl PcArgs {
@@ -53,6 +56,7 @@ impl PcArgs {
             gpu_device: None,
             allow_backend_fallback: None,
             solution_probabilities: false,
+            queue_observation_policy: QueueObservationPolicy::default(),
         }
     }
 }
@@ -170,6 +174,10 @@ impl PcArgs {
 
     pub fn solution_probabilities(&self) -> bool {
         self.solution_probabilities
+    }
+
+    pub fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.queue_observation_policy
     }
 }
 impl PcArgs {
@@ -314,6 +322,11 @@ impl PcArgs {
 
     pub fn with_solution_probabilities(mut self, value: bool) -> Self {
         self.solution_probabilities = value;
+        self
+    }
+
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.queue_observation_policy = policy;
         self
     }
 }

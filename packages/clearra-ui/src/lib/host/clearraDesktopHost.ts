@@ -9,6 +9,7 @@ export type ClearraDesktopRequest = {
   lines: number;
   queue: string;
   patterns: string;
+  queue_knowledge: 'oracle' | 'visible-7';
   hold_enabled: boolean;
   hold_piece: 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
   backend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
@@ -96,6 +97,7 @@ export function buildDesktopAppRequest(
     lines: input.lines ?? 2,
     queue: input.queue ?? '',
     patterns: input.patterns ?? '',
+    queue_knowledge: input.queue_knowledge ?? 'oracle',
     hold_enabled: input.hold_enabled ?? true,
     hold_piece: input.hold_piece ?? 'empty',
     backend: input.backend ?? 'auto',

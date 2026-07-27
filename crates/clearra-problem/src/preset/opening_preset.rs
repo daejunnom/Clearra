@@ -43,6 +43,7 @@ impl OpeningPreset {
         .with_count_policy(self.query.count_policy())
         .with_objective(self.query.objective())
         .with_solution_probability_policy(self.query.solution_probability_policy())
+        .with_queue_observation_policy(self.query.queue_observation_policy())
         .with_execution_policy(self.query.execution_policy().clone());
 
         if let Some(supply_window_size) = self.query.supply_window_size() {

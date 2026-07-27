@@ -10,9 +10,7 @@ use clearra_problem::{
     compile_setup_search_conditions, SetupCandidatePriority, SetupLengthPreference, SetupLimits,
     SetupSearchQuery,
 };
-use clearra_supply::pattern_universe::{
-    MaterializedPatternUniverse, PatternPiecePositionIndex,
-};
+use clearra_supply::pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex};
 
 use super::{
     compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
@@ -361,7 +359,7 @@ fn setup_finder_returns_exact_joint_witness_paths() {
     let report = result.setup_finder_report().expect("setup report");
 
     assert!(report.complete());
-    assert_eq!(report.coverage_semantics(), "oracle");
+    assert_eq!(report.coverage_semantics(), "full-future-oracle");
     assert_eq!(report.hold_conditions().len(), 1);
     assert!(report
         .hold_conditions()
