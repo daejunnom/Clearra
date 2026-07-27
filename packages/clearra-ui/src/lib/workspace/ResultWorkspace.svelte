@@ -2,7 +2,9 @@
   import { CheckCircle2, Copy, Search } from '@lucide/svelte';
 
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
+  import type { SolutionCopyFormat } from './solutionExport';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -18,6 +20,7 @@
   export let targetLines = 4;
 
   let copied = '';
+  let copyFormat: SolutionCopyFormat = 'fumen';
 
   $: report = view.searchReport;
   $: canonicalSolutionKeys = report?.normalized_solution_keys ?? [];
@@ -143,6 +146,10 @@
         </div>
       {/if}
 
+      <div class="copy-format-row">
+        <SolutionCopyFormatControl bind:value={copyFormat} {language} />
+      </div>
+
       <div class="overview-columns">
         <section>
           <h3>{label('backend')}</h3>
@@ -195,6 +202,7 @@
           solutionSetHash={report?.normalized_solution_set_hash ?? ''}
           {targetLines}
           {language}
+          {copyFormat}
         />
       {:else}
         <div class="empty-state"><Search size={26} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
@@ -276,6 +284,10 @@
     gap: 28px;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     margin-top: 26px;
+  }
+
+  .copy-format-row {
+    margin-top: 20px;
   }
 
   h3 {

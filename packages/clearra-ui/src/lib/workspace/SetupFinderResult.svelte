@@ -7,6 +7,9 @@
     ClearraSetupHoldCondition
   } from '../wasm/wasmCommandClient';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import SolutionCopyButton from './SolutionCopyButton.svelte';
+  import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
+  import type { SolutionCopyFormat } from './solutionExport';
   import {
     replaySetupCompletionBoard,
     replaySetupPlacementBoard,
@@ -37,6 +40,7 @@
   let visibleCount = PAGE_SIZE;
   let visiblePathCounts: Record<string, number> = {};
   let lastIdentity = '';
+  let copyFormat: SolutionCopyFormat = 'fumen';
 
   $: report = view.searchReport?.setup_report ?? null;
   $: identity = report
@@ -195,6 +199,7 @@
             </div>
           {/each}
         </div>
+        <SolutionCopyFormatControl bind:value={copyFormat} {language} />
       </div>
     {/if}
   {:else if activeTab === 'solutions'}
@@ -211,6 +216,13 @@
           <ol class="setup-grid">
             {#each condition.candidates as result}
               <li>
+                <div class="setup-card-actions">
+                  <SolutionCopyButton
+                    page={result.board.page}
+                    format={copyFormat}
+                    {language}
+                  />
+                </div>
                 <div
                   class="setup-board"
                   style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`}
@@ -274,7 +286,14 @@
                             path
                           )}
                           <section class="solution-path">
-                            <h4>{label('buildSolutionNumber', { number: pathIndex + 1 })}</h4>
+                            <div class="solution-path-heading">
+                              <h4>{label('buildSolutionNumber', { number: pathIndex + 1 })}</h4>
+                              <SolutionCopyButton
+                                page={solutionBoard?.page ?? null}
+                                format={copyFormat}
+                                {language}
+                              />
+                            </div>
                             {#if solutionBoard}
                               <div
                                 class="setup-board solution-board"
@@ -373,6 +392,7 @@
   .condition-heading > span { background: #e7eeeb; border-radius: 3px; color: #285049; font-size: 10px; font-weight: 800; padding: 4px 7px; }
   .setup-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); list-style: none; margin: 0; padding: 0; }
   .setup-grid li { background: #f3f5f4; border: 1px solid #d7ded9; border-radius: 6px; min-width: 0; padding: 10px; }
+  .setup-card-actions { display: flex; height: 28px; justify-content: flex-end; margin-bottom: 4px; }
   .setup-board { background: #101817; border: 1px solid #253330; border-radius: 4px; display: grid; gap: 0; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-template-rows: repeat(var(--rows), minmax(0, 1fr)); overflow: hidden; }
   .setup-board span { background: var(--cell-color); box-shadow: 0 0 0 .5px var(--cell-color); min-height: 0; min-width: 0; }
   .setup-board span.empty { --cell-color: #1e2927; box-shadow: inset 0 0 0 1px rgba(216, 226, 222, .18); }
@@ -396,7 +416,8 @@
   .solution-paths { display: grid; gap: 8px; margin-top: 8px; }
   .solution-path { border-top: 1px solid #d8dfdb; padding-top: 6px; }
   .solution-path:first-child { border-top: 0; padding-top: 0; }
-  .solution-path h4 { color: #37534d; font-size: 9px; margin: 0 0 4px; }
+  .solution-path-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .solution-path h4 { color: #37534d; font-size: 9px; margin: 0; }
   .solution-board { width: 100%; }
   .path-more { margin-top: 8px; }
   .load-more-row { display: flex; justify-content: center; padding-top: 18px; }

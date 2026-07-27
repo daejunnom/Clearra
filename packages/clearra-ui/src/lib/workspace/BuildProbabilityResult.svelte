@@ -3,7 +3,9 @@
   import { createEventDispatcher } from 'svelte';
 
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
+  import type { SolutionCopyFormat } from './solutionExport';
   import { boardCellOccupied } from './solverWorkspaceModel';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
@@ -24,6 +26,7 @@
 
   const dispatch = createEventDispatcher<{ continue: { existingMask: bigint; height: number } }>();
   const columns = Array.from({ length: 10 }, (_, index) => index);
+  let copyFormat: SolutionCopyFormat = 'fumen';
 
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: report = view.searchReport;
@@ -153,6 +156,9 @@
           </dl>
         </div>
       </div>
+      <div class="copy-format-row">
+        <SolutionCopyFormatControl bind:value={copyFormat} {language} />
+      </div>
     {:else if activeTab === 'solutions'}
       {#if solutionKeys.length}
         <SolutionGallery
@@ -160,6 +166,7 @@
           solutionSetHash={report?.normalized_solution_set_hash ?? ''}
           targetLines={height}
           {language}
+          {copyFormat}
         />
       {:else}
         <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
@@ -182,6 +189,7 @@
   .empty-state { align-items: center; color: #87918d; display: flex; flex-direction: column; justify-content: center; min-height: 220px; text-align: center; }
   .empty-state p { font-size: 13px; margin: 12px 0 0; }
   .result-grid { display: grid; gap: 28px; grid-template-columns: minmax(260px, 430px) minmax(0, 1fr); }
+  .copy-format-row { margin-top: 20px; }
   h3 { color: #36423e; font-size: 12px; margin: 0 0 10px; }
   .board-frame { background: #101817; border: 1px solid #253330; border-radius: 6px; padding: 12px; }
   .board { aspect-ratio: calc(10 / var(--board-rows)); display: grid; grid-template-columns: repeat(10, 1fr); grid-template-rows: repeat(var(--board-rows), 1fr); margin: 0 auto; max-height: 520px; max-width: 100%; }

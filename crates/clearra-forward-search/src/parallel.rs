@@ -63,7 +63,6 @@ impl ForwardParallelError {
             Self::Search(ForwardSearchError::PatternRequiresSpinFinder) => {
                 "forward_search_pattern_requires_spin_finder"
             }
-            Self::Search(ForwardSearchError::PatternTooLong) => "forward_search_pattern_too_long",
             Self::Search(ForwardSearchError::SpinProfileDisabled) => {
                 "forward_search_spin_profile_disabled"
             }
