@@ -35,9 +35,27 @@ impl SetupResidueInput {
     }
 
     pub fn duplicate_piece(&self) -> Option<PieceKind> {
-        PieceKind::STANDARD_TETROMINOES
-            .into_iter()
-            .find(|piece| self.pieces.iter().filter(|value| **value == *piece).count() == 2)
+        let mut duplicate = None;
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            match self.pieces.iter().filter(|value| **value == piece).count() {
+                0 | 1 => {}
+                2 if duplicate.is_none() => duplicate = Some(piece),
+                _ => return None,
+            }
+        }
+        duplicate
+    }
+
+    pub fn has_valid_piece_multiplicity(&self) -> bool {
+        let mut duplicated_kinds = 0;
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            match self.pieces.iter().filter(|value| **value == piece).count() {
+                0 | 1 => {}
+                2 => duplicated_kinds += 1,
+                _ => return false,
+            }
+        }
+        duplicated_kinds <= 1
     }
 }
 
@@ -77,11 +95,24 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_piece_reports_the_inventory_kind_available_for_explicit_hold() {
+    fn duplicate_piece_reports_the_only_inventory_kind_available_for_automatic_hold() {
         let input =
             SetupResidueInput::new(vec![PieceKind::S, PieceKind::I, PieceKind::O, PieceKind::S]);
 
         assert_eq!(input.duplicate_piece(), Some(PieceKind::S));
+        assert!(input.has_valid_piece_multiplicity());
         assert_eq!(input.cycle(), Some(2));
+    }
+
+    #[test]
+    fn duplicate_piece_rejects_two_repeated_kinds_or_three_copies() {
+        for pieces in [
+            vec![PieceKind::S, PieceKind::S, PieceKind::I, PieceKind::I],
+            vec![PieceKind::S, PieceKind::S, PieceKind::S, PieceKind::I],
+        ] {
+            let input = SetupResidueInput::new(pieces);
+            assert_eq!(input.duplicate_piece(), None);
+            assert!(!input.has_valid_piece_multiplicity());
+        }
     }
 }

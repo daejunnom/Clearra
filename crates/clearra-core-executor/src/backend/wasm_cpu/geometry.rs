@@ -11,6 +11,7 @@ use clearra_supply::pattern_universe::{
 
 use super::{
     catalog::GeometryCatalog,
+    exact_collections::ExactHashMap,
     geometry_component::{compile_component_plan, ComponentFamilyEntry, ComponentPlanResult},
     geometry_domain::{hall_impossible, DomainPropagation, DomainStatus},
     geometry_family::{FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
@@ -23,6 +24,7 @@ use super::{
 const NO_ROW: u32 = u32::MAX;
 const RESIDUAL_ENTRY_CHUNK_CAPACITY: usize = 4096;
 const UNION_LEVEL_COUNT: usize = 32;
+const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GeometryCandidate {
@@ -68,6 +70,25 @@ impl GeometryCandidate {
 struct ResidualKey {
     remaining: u64,
     packed_counts: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct AvailableRowKey {
+    remaining: u64,
+    packed_counts: u32,
+    after_line_clear: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AvailableRowSlice {
+    start: u32,
+    len: u16,
+}
+
+impl AvailableRowSlice {
+    pub(super) const fn len(self) -> usize {
+        self.len as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -343,6 +364,9 @@ pub(super) struct GeometryCompletionOracle {
     row_generation: u32,
     traversal_stack: Vec<u32>,
     candidate_rows: Vec<u32>,
+    available_row_cache: ExactHashMap<AvailableRowKey, AvailableRowSlice>,
+    available_row_arena: Vec<u32>,
+    available_row_cache_enabled: bool,
 }
 
 impl GeometryCompletionOracle {
@@ -384,6 +408,9 @@ impl GeometryCompletionOracle {
             row_generation: 0,
             traversal_stack: Vec::new(),
             candidate_rows: Vec::new(),
+            available_row_cache: ExactHashMap::default(),
+            available_row_arena: Vec::new(),
+            available_row_cache_enabled: true,
         })
     }
 
@@ -396,6 +423,32 @@ impl GeometryCompletionOracle {
         output: &mut Vec<u32>,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        if let Some(cached) = self.collect_available_rows_storage(
+            remaining,
+            packed_counts,
+            after_line_clear,
+            catalog,
+            output,
+            control,
+        )? {
+            let rows = self.available_rows(cached)?;
+            output.try_reserve(rows.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_completion_output_storage_unavailable")
+            })?;
+            output.extend_from_slice(rows);
+        }
+        Ok(())
+    }
+
+    pub(super) fn collect_available_rows_storage(
+        &mut self,
+        remaining: u64,
+        packed_counts: u32,
+        after_line_clear: bool,
+        catalog: &GeometryCatalog,
+        output: &mut Vec<u32>,
+        control: &ExecutionControl,
+    ) -> Result<Option<AvailableRowSlice>, WasmExactSearchError> {
         output.clear();
         if remaining == 0
             || self
@@ -403,7 +456,15 @@ impl GeometryCompletionOracle {
                 .binary_search(&packed_counts)
                 .is_err()
         {
-            return Ok(());
+            return Ok(None);
+        }
+        let cache_key = AvailableRowKey {
+            remaining,
+            packed_counts,
+            after_line_clear,
+        };
+        if let Some(cached) = self.available_row_cache.get(&cache_key).copied() {
+            return Ok(Some(cached));
         }
         let compile_domain = if after_line_clear {
             FamilyCompileDomain::PermutationClosedPostClearResidual
@@ -420,7 +481,7 @@ impl GeometryCompletionOracle {
             control,
         )?;
         if root == FAMILY_INVALID || root == FAMILY_EMPTY {
-            return Ok(());
+            return Ok(None);
         }
         self.ensure_traversal_capacity(compile_domain)?;
         self.collect_family_rows(root, compile_domain)?;
@@ -443,9 +504,49 @@ impl GeometryCompletionOracle {
                 output.push(row_id);
             }
         }
+        self.cache_available_rows(cache_key, output);
         candidates.clear();
         self.candidate_rows = candidates;
-        Ok(())
+        Ok(None)
+    }
+
+    pub(super) fn available_rows(
+        &self,
+        cached: AvailableRowSlice,
+    ) -> Result<&[u32], WasmExactSearchError> {
+        let start = cached.start as usize;
+        let end = start + cached.len();
+        self.available_row_arena
+            .get(start..end)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_completion_available_row_cache_invalid",
+            ))
+    }
+
+    fn cache_available_rows(&mut self, key: AvailableRowKey, rows: &[u32]) {
+        if !self.available_row_cache_enabled
+            || rows.len() > usize::from(u16::MAX)
+            || self.available_row_arena.len().saturating_add(rows.len())
+                > AVAILABLE_ROW_CACHE_MAX_ROWS
+        {
+            return;
+        }
+        let Ok(start) = u32::try_from(self.available_row_arena.len()) else {
+            self.available_row_cache_enabled = false;
+            return;
+        };
+        let Ok(len) = u16::try_from(rows.len()) else {
+            return;
+        };
+        if self.available_row_arena.try_reserve(rows.len()).is_err()
+            || self.available_row_cache.try_reserve(1).is_err()
+        {
+            self.available_row_cache_enabled = false;
+            return;
+        }
+        self.available_row_arena.extend_from_slice(rows);
+        self.available_row_cache
+            .insert(key, AvailableRowSlice { start, len });
     }
 
     fn collect_family_rows(

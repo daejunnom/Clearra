@@ -480,6 +480,30 @@ fn setup_command_requires_observed_pieces_in_queue_based_mode() {
 }
 
 #[test]
+fn setup_command_separates_one_duplicate_as_automatic_initial_hold_without_changing_cycle() {
+    let request = WebCommandParser::parse("clearra setup --remaining IOTSS")
+        .expect("setup command")
+        .to_app_request()
+        .expect("AppRequest");
+
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    let conditions = clearra_problem::compile_setup_search_conditions(command.query())
+        .expect("setup conditions");
+
+    assert_eq!(command.query().residue().remaining_count(), 5);
+    assert_eq!(command.query().residue().cycle(), Some(4));
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0].cycle(), 4);
+    assert_eq!(conditions[0].initial_hold(), Some(PieceKind::S));
+    assert_eq!(
+        conditions[0].queue_remainder(),
+        &[PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S]
+    );
+}
+
+#[test]
 fn setup_command_rejects_oracle_mode_with_observed_qb_pieces() {
     for command in [
         "clearra setup --remaining TI --mode oracle --qb OS",

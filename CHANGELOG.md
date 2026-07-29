@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-30
+
+- Replaced the setup-wide partial BuildUp graph with bounded candidate
+  streaming, shared exact suffix coverage, compact representative solution
+  reconstruction, and balanced multi-worker completion to reduce setup-search
+  peak memory and long-tail execution without weakening exact coverage.
+- Added exact setup residue support for one duplicated piece kind. The duplicate
+  is derived as the initial hold while the bag round remains determined by the
+  residue supply, and invalid duplicate combinations remain rejected.
+- Made tablebase changes during an active browser search apply to the next job,
+  preventing worker teardown and stalled searches when the control is toggled.
+- Published browser WASM artifacts from a completed staging generation, with
+  manifest-last atomic replacement, fresh-response retry, byte-length and
+  SHA-256 verification, and build-time integrity checks to prevent truncated
+  modules from reaching the runtime.
+
 ## 0.3.0 - 2026-07-29
 
 - Added an opt-in compact PC4 tablebase for compatible empty 10x4 searches,

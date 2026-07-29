@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,23 +11,33 @@ const destinationDir = options.destination
   ? resolve(options.destination)
   : resolve(root, 'apps', 'clearra-web', 'static', 'wasm');
 
+await mkdir(dirname(destinationDir), { recursive: true });
 await mkdir(destinationDir, { recursive: true });
-if (options.environment === 'wsl') {
-  if (process.platform !== 'win32') {
-    throw new Error('--environment wsl is available only from a Windows host');
+const stagingDir = await mkdtemp(resolve(dirname(destinationDir), '.clearra-wasm-stage-'));
+try {
+  if (options.environment === 'wsl') {
+    if (process.platform !== 'win32') {
+      throw new Error('--environment wsl is available only from a Windows host');
+    }
+    await buildWithWsl();
+  } else {
+    await buildNative();
   }
-  await buildWithWsl();
-} else {
-  await buildNative();
+  const manifest = await writeManifest(stagingDir);
+  await publishArtifacts();
+  console.log(
+    `staged_wasm=${resolve(destinationDir, manifest.wasm.path)} bytes=${manifest.wasm.bytes} wasm_sha256=${manifest.wasm.sha256} bindings=${resolve(destinationDir, manifest.bindings.path)} bindings_bytes=${manifest.bindings.bytes} manifest=${resolve(destinationDir, 'clearra_wasm.manifest.json')}`
+  );
+} finally {
+  await rm(stagingDir, { recursive: true, force: true });
 }
-await writeManifest();
 
 async function buildWithWsl() {
   const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
   const cargoFeatures = options.stageProfiling ? ' --features stage-profiling' : '';
   const script = `set -euo pipefail
 ROOT=$(wslpath -a ${shellQuote(root)})
-DESTINATION=$(wslpath -a ${shellQuote(destinationDir)})
+DESTINATION=$(wslpath -a ${shellQuote(stagingDir)})
 TARGET_ROOT="\${CLEARRA_WSL_CARGO_TARGET_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build/cargo-target-wasm}"
 mkdir -p "$TARGET_ROOT" "$DESTINATION"
 ${options.verify ? `CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-web-command --lib --tests
@@ -85,7 +95,7 @@ async function buildNative() {
     '--target',
     'web',
     '--out-dir',
-    destinationDir,
+    stagingDir,
     '--out-name',
     'clearra_wasm',
     '--no-typescript'
@@ -131,9 +141,9 @@ function parseArguments(args) {
   return { destination, environment, verify, stageProfiling };
 }
 
-async function writeManifest() {
-  const bindingsPath = resolve(destinationDir, 'clearra_wasm.js');
-  const wasmPath = resolve(destinationDir, 'clearra_wasm_bg.wasm');
+async function writeManifest(outputDir) {
+  const bindingsPath = resolve(outputDir, 'clearra_wasm.js');
+  const wasmPath = resolve(outputDir, 'clearra_wasm_bg.wasm');
   const [bindings, wasm] = await Promise.all([
     readFile(bindingsPath),
     readFile(wasmPath)
@@ -143,12 +153,37 @@ async function writeManifest() {
     bindings: artifact('clearra_wasm.js', bindings),
     wasm: artifact('clearra_wasm_bg.wasm', wasm)
   };
-  const manifestPath = resolve(destinationDir, 'clearra_wasm.manifest.json');
+  const manifestPath = resolve(outputDir, 'clearra_wasm.manifest.json');
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  console.log(
-    `staged_wasm=${wasmPath} bytes=${wasm.byteLength} wasm_sha256=${manifest.wasm.sha256} bindings=${bindingsPath} bindings_bytes=${bindings.byteLength} manifest=${manifestPath}`
+  return manifest;
+}
+
+async function publishArtifacts() {
+  for (const name of ['clearra_wasm.js', 'clearra_wasm_bg.wasm']) {
+    await replaceFileAtomically(resolve(stagingDir, name), resolve(destinationDir, name));
+  }
+  await replaceFileAtomically(
+    resolve(stagingDir, 'clearra_wasm.manifest.json'),
+    resolve(destinationDir, 'clearra_wasm.manifest.json')
   );
+}
+
+async function replaceFileAtomically(source, destination) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      if (
+        attempt >= 9 ||
+        !['EACCES', 'EBUSY', 'EEXIST', 'EPERM'].includes(error?.code)
+      ) {
+        throw error;
+      }
+      await new Promise((resolveRetry) => setTimeout(resolveRetry, 20 * (attempt + 1)));
+    }
+  }
 }
 
 function artifact(path, bytes) {

@@ -108,10 +108,11 @@ export function setupFinderValidationCodes(
     codes.push('setup_residue_piece_invalid');
   }
   if (!setupCycle(normalized)) codes.push('setup_residue_count_invalid');
-  const repeated = [...PIECES]
-    .map((piece) => normalized.split(piece).length - 1)
-    .filter((count) => count > 1);
-  if (repeated.length > 0) {
+  const repeated = [...PIECES].map(
+    (piece) => normalized.split(piece).length - 1
+  );
+  if (repeated.some((count) => count > 2)
+    || repeated.filter((count) => count === 2).length > 1) {
     codes.push('setup_residue_duplicate_invalid');
   }
   if (request.allowPostCycleBorrow && setupCycle(normalized) !== 7) {

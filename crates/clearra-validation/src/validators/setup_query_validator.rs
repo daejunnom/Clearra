@@ -74,8 +74,23 @@ fn validate_residue(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
         return;
     }
 
+    if !residue.has_valid_piece_multiplicity() {
+        report.push(invalid_setup_query(
+            "setup.remaining_pieces",
+            "at most one piece kind may occur twice; no piece kind may occur more than twice",
+            "remaining_piece_duplicate_inventory_invalid",
+        ));
+        return;
+    }
+
+    let automatic_initial_hold = residue.duplicate_piece();
+    let initial_hold = match query.hold_policy() {
+        SetupHoldPolicy::EnabledEmpty => automatic_initial_hold,
+        SetupHoldPolicy::EnabledWithPiece(piece) => Some(piece),
+        SetupHoldPolicy::Disabled => None,
+    };
     let mut queue_remainder = residue.pieces().to_vec();
-    if let SetupHoldPolicy::EnabledWithPiece(piece) = query.hold_policy() {
+    if let Some(piece) = initial_hold {
         let Some(index) = queue_remainder.iter().position(|value| *value == piece) else {
             report.push(invalid_setup_query(
                 "setup.hold_policy",
@@ -98,8 +113,8 @@ fn validate_residue(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
     {
         report.push(invalid_setup_query(
             "setup.remaining_pieces",
-            "queue-remainder pieces must be unique; select one matching piece with --initial-hold when the inventory contains an occupied hold",
-            "remaining_piece_duplicate_requires_explicit_initial_hold",
+            "after the automatic initial-hold piece is separated, queue-remainder pieces must be unique",
+            "remaining_piece_duplicate_inventory_invalid",
         ));
     }
 

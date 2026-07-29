@@ -150,8 +150,14 @@ type ClearraWasmBindings = {
 
 type ClearraWasmArtifactManifest = {
   schema_version: 1;
-  bindings: { path: string; bytes: number; sha256: string };
-  wasm: { path: string; bytes: number; sha256: string };
+  bindings: ClearraWasmArtifact;
+  wasm: ClearraWasmArtifact;
+};
+
+type ClearraWasmArtifact = {
+  path: string;
+  bytes: number;
+  sha256: string;
 };
 
 export class ClearraWasmRuntimeError extends Error {
@@ -177,31 +183,7 @@ export async function loadClearraWasmModule(
   sharedCompiledModule?: WebAssembly.Module
 ): Promise<ClearraWasmModule> {
   if (!wasmModulePromise) {
-    wasmModulePromise = (async () => {
-      const wasmRoot = `${deploymentBaseFromWorkerLocation(self.location.pathname)}/wasm`;
-      const manifestUrl = new URL(`${wasmRoot}/clearra_wasm.manifest.json`, self.location.origin);
-      const manifestResponse = await fetch(manifestUrl, { cache: 'no-store' });
-      if (!manifestResponse.ok) {
-        throw new Error(`Clearra WASM manifest unavailable: ${manifestResponse.status}`);
-      }
-      const manifest = (await manifestResponse.json()) as ClearraWasmArtifactManifest;
-      if (manifest.schema_version !== 1 || !isSha256(manifest.wasm.sha256)) {
-        throw new Error('Clearra WASM manifest is invalid');
-      }
-      const bindingsUrl = new URL(`${wasmRoot}/${manifest.bindings.path}`, self.location.origin);
-      const wasmUrl = new URL(`${wasmRoot}/${manifest.wasm.path}`, self.location.origin);
-      bindingsUrl.searchParams.set('v', manifest.bindings.sha256);
-      wasmUrl.searchParams.set('v', manifest.wasm.sha256);
-      const bindings = (await import(
-        /* @vite-ignore */ bindingsUrl.href
-      )) as ClearraWasmBindings;
-      const compiledModule =
-        sharedCompiledModule ?? (await compileClearraWasmModule(wasmUrl));
-      const raw = await bindings.default({ module_or_path: compiledModule });
-      const module = wrapRawModule(raw, compiledModule);
-      module.configure_host(detectHostCapabilities());
-      return module;
-    })();
+    wasmModulePromise = loadClearraWasmArtifactGeneration(sharedCompiledModule);
   }
   const attempt = wasmModulePromise;
   try {
@@ -212,20 +194,110 @@ export async function loadClearraWasmModule(
   }
 }
 
-async function compileClearraWasmModule(wasmUrl: URL): Promise<WebAssembly.Module> {
-  const response = await fetch(wasmUrl);
+async function loadClearraWasmArtifactGeneration(
+  sharedCompiledModule?: WebAssembly.Module
+): Promise<ClearraWasmModule> {
+  let firstFailure: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const wasmRoot = `${deploymentBaseFromWorkerLocation(self.location.pathname)}/wasm`;
+      const manifestUrl = new URL(`${wasmRoot}/clearra_wasm.manifest.json`, self.location.origin);
+      const manifestResponse = await fetch(manifestUrl, { cache: 'no-store' });
+      if (!manifestResponse.ok) {
+        throw new Error(`Clearra WASM manifest unavailable: ${manifestResponse.status}`);
+      }
+      const manifest = (await manifestResponse.json()) as ClearraWasmArtifactManifest;
+      if (!isArtifactManifest(manifest)) {
+        throw new Error('Clearra WASM manifest is invalid');
+      }
+      const bindingsUrl = new URL(`${wasmRoot}/${manifest.bindings.path}`, self.location.origin);
+      const wasmUrl = new URL(`${wasmRoot}/${manifest.wasm.path}`, self.location.origin);
+      bindingsUrl.searchParams.set('v', manifest.bindings.sha256);
+      wasmUrl.searchParams.set('v', manifest.wasm.sha256);
+      if (attempt !== 0) {
+        bindingsUrl.searchParams.set('retry', String(attempt));
+        wasmUrl.searchParams.set('retry', String(attempt));
+      }
+      const bindings = await importClearraWasmBindings(bindingsUrl, manifest.bindings);
+      const compiledModule =
+        sharedCompiledModule ?? (await compileClearraWasmModule(wasmUrl, manifest.wasm));
+      const raw = await bindings.default({ module_or_path: compiledModule });
+      const module = wrapRawModule(raw, compiledModule);
+      module.configure_host(detectHostCapabilities());
+      return module;
+    } catch (error) {
+      if (attempt !== 0) {
+        throw new Error('Clearra WASM artifact generation could not be loaded after a fresh retry', {
+          cause: error
+        });
+      }
+      firstFailure = error;
+    }
+  }
+  throw firstFailure;
+}
+
+async function importClearraWasmBindings(
+  bindingsUrl: URL,
+  artifact: ClearraWasmArtifact
+): Promise<ClearraWasmBindings> {
+  try {
+    return (await import(
+      /* @vite-ignore */ bindingsUrl.href
+    )) as ClearraWasmBindings;
+  } catch {
+    const bytes = await fetchVerifiedArtifactBytes(bindingsUrl, artifact);
+    const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'text/javascript' }));
+    try {
+      return (await import(
+        /* @vite-ignore */ blobUrl
+      )) as ClearraWasmBindings;
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
+  }
+}
+
+async function compileClearraWasmModule(
+  wasmUrl: URL,
+  artifact: ClearraWasmArtifact
+): Promise<WebAssembly.Module> {
+  const response = await fetch(wasmUrl, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
   }
   if (typeof WebAssembly.compileStreaming === 'function') {
-    const fallbackResponse = response.clone();
     try {
       return await WebAssembly.compileStreaming(response);
     } catch {
-      return WebAssembly.compile(await fallbackResponse.arrayBuffer());
+      return WebAssembly.compile(await fetchVerifiedArtifactBytes(wasmUrl, artifact));
     }
   }
-  return WebAssembly.compile(await response.arrayBuffer());
+  return WebAssembly.compile(await fetchVerifiedArtifactBytes(wasmUrl, artifact));
+}
+
+async function fetchVerifiedArtifactBytes(
+  artifactUrl: URL,
+  artifact: ClearraWasmArtifact
+): Promise<ArrayBuffer> {
+  const response = await fetch(artifactUrl, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
+  }
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength !== artifact.bytes) {
+    throw new Error(
+      `Clearra WASM artifact length mismatch: expected ${artifact.bytes}, received ${bytes.byteLength}`
+    );
+  }
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const actualSha256 = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  if (actualSha256 !== artifact.sha256) {
+    throw new Error('Clearra WASM artifact SHA-256 mismatch');
+  }
+  return bytes;
 }
 
 function deploymentBaseFromWorkerLocation(pathname: string): string {
@@ -236,6 +308,28 @@ function deploymentBaseFromWorkerLocation(pathname: string): string {
 
 function isSha256(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
+}
+
+function isArtifactManifest(manifest: unknown): manifest is ClearraWasmArtifactManifest {
+  if (!manifest || typeof manifest !== 'object') return false;
+  const candidate = manifest as Partial<ClearraWasmArtifactManifest>;
+  return (
+    candidate.schema_version === 1 &&
+    isArtifact(candidate.bindings, 'clearra_wasm.js') &&
+    isArtifact(candidate.wasm, 'clearra_wasm_bg.wasm')
+  );
+}
+
+function isArtifact(value: unknown, expectedPath: string): value is ClearraWasmArtifact {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ClearraWasmArtifact>;
+  return (
+    candidate.path === expectedPath &&
+    Number.isSafeInteger(candidate.bytes) &&
+    Number(candidate.bytes) > 0 &&
+    typeof candidate.sha256 === 'string' &&
+    isSha256(candidate.sha256)
+  );
 }
 
 function wrapRawModule(

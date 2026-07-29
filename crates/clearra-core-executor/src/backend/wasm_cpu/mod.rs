@@ -45,6 +45,7 @@ mod setup_parallel_segmented;
 mod setup_parallel_wire;
 mod setup_partial_build;
 mod setup_representative;
+mod setup_suffix_coverage;
 mod standard_bag_coverage;
 #[cfg(feature = "webgpu-search")]
 mod webgpu_distributed;

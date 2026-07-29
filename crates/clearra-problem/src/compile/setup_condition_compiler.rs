@@ -77,7 +77,7 @@ impl SetupSearchCondition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SetupConditionCompileError {
     InvalidRemainingPieceCount,
-    DuplicatePieceRequiresInitialHold,
+    InvalidRemainingPieceMultiplicity,
     QueueRemainderDuplicatePiece,
     PostCycleBorrowOutsideCycleSeven,
     QueueBasedFixedQueueRequired,
@@ -248,9 +248,14 @@ fn setup_condition_inputs(
         return Err(SetupConditionCompileError::PostCycleBorrowOutsideCycleSeven);
     }
 
+    if !query.residue().has_valid_piece_multiplicity() {
+        return Err(SetupConditionCompileError::InvalidRemainingPieceMultiplicity);
+    }
     let mut pieces = canonical_pieces(query.residue().pieces());
+    let automatic_initial_hold = query.residue().duplicate_piece();
     let initial_hold = match query.hold_policy() {
-        SetupHoldPolicy::Disabled | SetupHoldPolicy::EnabledEmpty => None,
+        SetupHoldPolicy::Disabled => None,
+        SetupHoldPolicy::EnabledEmpty => automatic_initial_hold,
         SetupHoldPolicy::EnabledWithPiece(piece) => Some(piece),
     };
     if let Some(hold) = initial_hold {
@@ -264,11 +269,7 @@ fn setup_condition_inputs(
         .into_iter()
         .any(|piece| pieces.iter().filter(|value| **value == piece).count() > 1)
     {
-        return Err(if initial_hold.is_some() {
-            SetupConditionCompileError::QueueRemainderDuplicatePiece
-        } else {
-            SetupConditionCompileError::DuplicatePieceRequiresInitialHold
-        });
+        return Err(SetupConditionCompileError::QueueRemainderDuplicatePiece);
     }
     Ok((cycle, pieces, vec![initial_hold]))
 }
@@ -493,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_residue_requires_an_explicit_initial_hold_option() {
+    fn one_duplicate_residue_piece_becomes_the_automatic_initial_hold() {
         let query = SetupSearchQuery::default().with_remaining_pieces(vec![
             PieceKind::I,
             PieceKind::O,
@@ -502,10 +503,17 @@ mod tests {
             PieceKind::S,
         ]);
 
-        assert!(matches!(
-            compile_setup_search_conditions(&query),
-            Err(SetupConditionCompileError::DuplicatePieceRequiresInitialHold)
-        ));
+        let conditions = compile_setup_search_conditions(&query).expect("condition");
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].initial_hold(), Some(PieceKind::S));
+        assert_eq!(conditions[0].condition_id(), "hold-S");
+        assert_eq!(
+            conditions[0].queue_remainder(),
+            &[PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S]
+        );
+        assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P6");
+        assert_eq!(conditions[0].cycle(), 4);
     }
 
     #[test]
@@ -526,6 +534,21 @@ mod tests {
         assert_eq!(conditions[0].initial_hold(), Some(PieceKind::S));
         assert_eq!(conditions[0].pattern_expression(), "[IOTS]!P6");
         assert_eq!(conditions[0].cycle(), 4);
+    }
+
+    #[test]
+    fn automatic_initial_hold_rejects_two_duplicated_piece_kinds() {
+        let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+        ]);
+
+        assert!(matches!(
+            compile_setup_search_conditions(&query),
+            Err(SetupConditionCompileError::InvalidRemainingPieceMultiplicity)
+        ));
     }
 
     #[test]

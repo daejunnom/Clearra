@@ -23,6 +23,8 @@ export class WasmTerminalWorkerController {
   private prewarmingWorker: Worker | null = null;
   private prewarmWorkerCount = 1;
   private tablebaseRequested = false;
+  private runInFlight = false;
+  private prewarmDeferred = false;
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private workerFactory: (() => Worker) | null) {}
@@ -42,8 +44,10 @@ export class WasmTerminalWorkerController {
     const worker = this.ensureWorker();
     if (!worker) return;
     try {
+      this.runInFlight = true;
       runWasmCommand(worker, this.prewarmWorkerCount, this.tablebaseRequested);
     } catch (error) {
+      this.runInFlight = false;
       this.failClosedWorker(worker, 'E_WASM_WORKER_MESSAGE_FAILED', errorMessage(error));
     }
   }
@@ -60,6 +64,11 @@ export class WasmTerminalWorkerController {
       });
     }
     this.tablebaseRequested = tablebaseRequested;
+    if (this.runInFlight) {
+      this.prewarmDeferred = true;
+      return;
+    }
+    this.prewarmDeferred = false;
     if (tablebaseChanged && this.worker && this.prewarmingWorker === this.worker) {
       this.disposeOwnedWorker(this.worker);
     }
@@ -89,6 +98,7 @@ export class WasmTerminalWorkerController {
       !this.worker ||
       this.cancellingWorker !== null ||
       this.prewarmingWorker !== null ||
+      this.runInFlight ||
       this.cancelFallback !== null
     ) {
       return null;
@@ -102,6 +112,8 @@ export class WasmTerminalWorkerController {
   }
 
   dispose() {
+    this.runInFlight = false;
+    this.prewarmDeferred = false;
     const worker = this.worker;
     if (!worker) {
       this.clearCancelFallback();
@@ -137,14 +149,21 @@ export class WasmTerminalWorkerController {
         }
         if (this.cancellingWorker === worker) {
           if (message.data.event === 'cancelled') {
+            this.runInFlight = false;
             applyWasmWorkerEvent(message.data);
             this.releaseWorker(worker);
+            this.flushDeferredPrewarm();
             return;
           } else if (message.data.event === 'final_response' || message.data.event === 'failed') {
             this.terminateCancelledWorker(worker, message.data.job_id);
             return;
           }
         }
+        const terminal =
+          message.data.event === 'failed' ||
+          message.data.event === 'cancelled' ||
+          message.data.event === 'final_response';
+        if (terminal) this.runInFlight = false;
         applyWasmWorkerEvent(message.data);
         if (
           message.data.event === 'failed' ||
@@ -153,6 +172,7 @@ export class WasmTerminalWorkerController {
         ) {
           this.releaseWorker(worker);
         }
+        if (terminal) this.flushDeferredPrewarm();
       };
       worker.onerror = (event) => {
         event.preventDefault();
@@ -175,12 +195,15 @@ export class WasmTerminalWorkerController {
 
   private terminateCancelledWorker(worker: Worker, jobId: number | null) {
     if (this.worker !== worker || this.cancellingWorker !== worker) return;
+    this.runInFlight = false;
     this.releaseWorker(worker);
     this.emitReleasedCancellation(jobId ?? 0);
+    this.flushDeferredPrewarm();
   }
 
   private failClosedWorker(worker: Worker, code: string, message: string) {
     if (this.worker !== worker) return;
+    this.runInFlight = false;
     this.releaseWorker(worker);
     applyWasmWorkerEvent({
       schema_version: 1,
@@ -191,6 +214,7 @@ export class WasmTerminalWorkerController {
         diagnostics: [{ code, severity: 'error', message }]
       }
     });
+    this.flushDeferredPrewarm();
   }
 
   private emitReleasedCancellation(jobId: number) {
@@ -210,6 +234,13 @@ export class WasmTerminalWorkerController {
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_PREWARM_FAILED', errorMessage(error));
     }
+  }
+
+  private flushDeferredPrewarm() {
+    if (!this.prewarmDeferred || this.runInFlight) return;
+    this.prewarmDeferred = false;
+    const worker = this.ensureWorker();
+    if (worker) this.prewarmWorker(worker, this.prewarmWorkerCount);
   }
 
   private releaseWorker(worker: Worker) {

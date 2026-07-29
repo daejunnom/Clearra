@@ -436,6 +436,7 @@ fn mirrored_one_lock_setups_have_identical_coverage_and_tiling_counts() {
 
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::S, PieceKind::Z])
+        .with_max_setup_pieces(1)
         .with_tablebase_requested(false);
     let control = ExecutionControl::new(ExecutionCancellationToken::new());
     let result = run(&query, &control);
@@ -480,4 +481,39 @@ fn mirrored_one_lock_setups_have_identical_coverage_and_tiling_counts() {
     assert!(z_paths.solution_paths_complete());
     assert!(s_paths.solution_paths_complete());
     assert_eq!(z_paths.solution_path_count(), s_paths.solution_path_count());
+}
+
+#[test]
+#[ignore = "selected setup detail acceptance; run in the release acceptance suite"]
+fn selected_one_lock_detail_enumerates_complete_pc_suffixes() {
+    let detail = SetupPathDetail::from_setup_id(
+        "setup-000000c060-0000-00000000000000000000000000015d",
+        "hold-empty",
+    )
+    .expect("known Z setup detail");
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::S, PieceKind::Z])
+        .with_max_setup_pieces(1)
+        .with_tablebase_requested(false)
+        .with_path_detail(detail);
+    let control = ExecutionControl::new(ExecutionCancellationToken::new());
+    let mut session = WasmSetupSearchSession::new(&query).expect("setup detail session");
+    let result = loop {
+        match session
+            .advance(8_192, &control)
+            .expect("setup detail advance")
+        {
+            WasmSetupSearchAdvance::Pending => {}
+            WasmSetupSearchAdvance::Completed(result) => break result,
+            WasmSetupSearchAdvance::Cancelled => panic!("setup detail search was not cancelled"),
+        }
+    };
+    let candidate = &result
+        .setup_finder_report()
+        .expect("setup detail report")
+        .hold_conditions()[0]
+        .candidates()[0];
+
+    assert!(candidate.solution_paths_complete());
+    assert!(candidate.solution_path_count() > 1);
 }

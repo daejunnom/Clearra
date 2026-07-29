@@ -77,10 +77,18 @@ pub(super) fn enumerate_setup_completion_paths(
     detail: &SetupPathDetail,
     control: &ExecutionControl,
 ) -> Result<Vec<SetupSolutionPath>, WasmExactSearchError> {
-    let target_shape_index = u32::try_from(graph.shape_index_for_detail(detail).ok_or(
-        WasmExactSearchError::InvalidProblem("setup_path_detail_shape_not_found"),
-    )?)
-    .map_err(|_| WasmExactSearchError::InvalidProblem("setup_path_detail_shape_index_overflow"))?;
+    let target_shape_index =
+        graph
+            .shape_index_for_detail(detail)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_path_detail_shape_not_found",
+            ))?;
+    let target_node =
+        graph
+            .shape_target_node(target_shape_index)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_path_detail_target_node_missing",
+            ))?;
     let mut paths = HashMap::new();
     paths.try_reserve(256).map_err(|_| {
         WasmExactSearchError::InvalidProblem("setup_completion_path_storage_unavailable")
@@ -88,14 +96,13 @@ pub(super) fn enumerate_setup_completion_paths(
     let mut path = Vec::with_capacity(10);
     let mut cancellation_work = 0_usize;
 
-    for (node_index, node) in graph.nodes.iter().copied().enumerate() {
-        let matches_target = node.shape_index() == Some(target_shape_index);
-        if !node.live() || !matches_target {
-            continue;
-        }
+    let node = graph.nodes.get(target_node as usize).copied().ok_or(
+        WasmExactSearchError::InvalidProblem("setup_path_detail_target_node_invalid"),
+    )?;
+    if node.live() {
         enumerate_suffixes(
             graph,
-            node_index,
+            target_node as usize,
             &mut path,
             &mut paths,
             control,

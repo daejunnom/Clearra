@@ -30,7 +30,23 @@ fn setup_query_validator_accepts_one_explicitly_selected_hold_duplicate() {
 }
 
 #[test]
-fn setup_query_validator_rejects_an_unselected_duplicate() {
+fn setup_query_validator_accepts_one_automatic_hold_duplicate() {
+    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+        PieceKind::I,
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::S,
+    ]);
+
+    let report = SetupQueryValidator::validate(&query);
+
+    assert!(!report.has_errors());
+    assert!(report.contains_code(DiagnosticCode::ISetupQueryMvpSupported));
+}
+
+#[test]
+fn setup_query_validator_rejects_two_duplicated_kinds() {
     let query = SetupSearchQuery::default().with_remaining_pieces(vec![
         PieceKind::I,
         PieceKind::I,

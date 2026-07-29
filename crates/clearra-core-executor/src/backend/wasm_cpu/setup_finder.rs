@@ -2,7 +2,7 @@
 // It spans residue-aware coverage traversal through canonical setup result
 // assembly; shared graph construction and parallel transport remain separate
 // owners.
-use std::{cmp::Ordering, collections::HashMap, sync::Arc};
+use std::{cmp::Ordering, sync::Arc};
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::{
@@ -31,7 +31,8 @@ use super::{
         cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
         SetupSharedGraph,
     },
-    setup_partial_build::{PartialBuildEdge, PartialBuildGraph, PartialBuildNode, SetupShape},
+    setup_partial_build::{PartialBuildGraph, SetupShape},
+    setup_representative::{SetupRepresentativeResolver, SetupWitness as RepresentativeWitness},
     WasmExactSearchError,
 };
 
@@ -477,101 +478,6 @@ impl Default for ShapeCoverageAccumulator {
 struct SetupWitness {
     word_index: usize,
     pattern_bit: u64,
-}
-
-const NO_REPRESENTATIVE_RECORD: u32 = u32::MAX;
-
-#[derive(Clone, Copy)]
-struct RepresentativeRecord {
-    state: u32,
-    previous: u32,
-    edge_index: u32,
-    hold_action: SetupHoldAction,
-    can_complete: bool,
-}
-
-struct RepresentativeScratch {
-    state_records: Vec<u32>,
-    records: Vec<RepresentativeRecord>,
-    depth_records: Vec<Vec<u32>>,
-}
-
-impl RepresentativeScratch {
-    fn new(state_capacity: usize) -> Result<Self, WasmExactSearchError> {
-        let mut state_records = Vec::new();
-        state_records
-            .try_reserve_exact(state_capacity)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "setup_witness_state_index_storage_unavailable",
-                )
-            })?;
-        state_records.resize(state_capacity, NO_REPRESENTATIVE_RECORD);
-        Ok(Self {
-            state_records,
-            records: Vec::new(),
-            depth_records: (0..=10).map(|_| Vec::new()).collect(),
-        })
-    }
-
-    fn clear(&mut self) {
-        for record in &self.records {
-            self.state_records[record.state as usize] = NO_REPRESENTATIVE_RECORD;
-        }
-        self.records.clear();
-        for depth in &mut self.depth_records {
-            depth.clear();
-        }
-    }
-
-    fn activate(
-        &mut self,
-        state: usize,
-        depth: u8,
-        previous: u32,
-        edge_index: u32,
-        hold_action: SetupHoldAction,
-    ) -> Result<u32, WasmExactSearchError> {
-        let slot =
-            self.state_records
-                .get_mut(state)
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "setup_witness_state_out_of_range",
-                ))?;
-        if *slot != NO_REPRESENTATIVE_RECORD {
-            return Ok(*slot);
-        }
-        let record = u32::try_from(self.records.len()).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_witness_record_index_overflow")
-        })?;
-        self.records.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_witness_record_storage_unavailable")
-        })?;
-        self.depth_records[depth as usize]
-            .try_reserve(1)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_witness_queue_storage_unavailable")
-            })?;
-        self.records.push(RepresentativeRecord {
-            state: u32::try_from(state).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_witness_state_index_overflow")
-            })?,
-            previous,
-            edge_index,
-            hold_action,
-            can_complete: false,
-        });
-        self.depth_records[depth as usize].push(record);
-        *slot = record;
-        Ok(record)
-    }
-
-    fn record_for_state(&self, state: usize) -> Option<u32> {
-        self.state_records
-            .get(state)
-            .copied()
-            .filter(|record| *record != NO_REPRESENTATIVE_RECORD)
-    }
 }
 
 enum SetupCoverageAdvance {
@@ -1198,43 +1104,8 @@ pub(super) fn compile_setup_admissible_prefixes_with_word_counts(
     Ok((prefixes, word_counts))
 }
 
-#[derive(Clone, Copy, Default)]
-struct CoverageTransition {
-    target: usize,
-    hold_action: SetupHoldAction,
-}
-
-struct CoverageTransitionSet {
-    entries: [CoverageTransition; 9],
-    len: u8,
-}
-
-impl CoverageTransitionSet {
-    fn new() -> Self {
-        Self {
-            entries: [CoverageTransition::default(); 9],
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, target: usize, mask: u64, hold_action: SetupHoldAction) {
-        if mask == 0 {
-            return;
-        }
-        debug_assert!((self.len as usize) < self.entries.len());
-        self.entries[self.len as usize] = CoverageTransition {
-            target,
-            hold_action,
-        };
-        self.len += 1;
-    }
-
-    fn iter(&self) -> impl Iterator<Item = CoverageTransition> + '_ {
-        self.entries[..self.len as usize].iter().copied()
-    }
-}
-
 struct SetupCoverageSession {
+    condition: SetupSearchCondition,
     condition_id: String,
     initial_hold: Option<PieceKind>,
     pattern_expression: String,
@@ -1322,6 +1193,7 @@ impl SetupCoverageSession {
             None
         };
         Ok(Self {
+            condition: condition.clone(),
             condition_id: condition.condition_id().to_owned(),
             initial_hold: condition.initial_hold(),
             pattern_expression: condition.pattern_expression().to_owned(),
@@ -1595,47 +1467,6 @@ impl SetupCoverageSession {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn original_transitions(
-        &self,
-        node: PartialBuildNode,
-        edge: PartialBuildEdge,
-        extra_draw: u8,
-        hold_code: u8,
-        active: u64,
-        word_index: usize,
-    ) -> CoverageTransitionSet {
-        let mut transitions = CoverageTransitionSet::new();
-        let desired_piece = piece_index(edge.piece) as u8 + 1;
-        let target_node = self.graph.nodes[edge.to as usize];
-        let supply_transitions = setup_supply_transitions(
-            &self.pattern_index,
-            self.initial_cursor,
-            self.hold_enabled,
-            self.projects_unplaced_lookahead,
-            self.projects_standard_bag_lookahead,
-            node.depth,
-            desired_piece,
-            extra_draw,
-            hold_code,
-            active,
-            word_index,
-            target_node.accepting(),
-        );
-        for transition in supply_transitions.iter() {
-            transitions.push(
-                self.state_layout.encode(
-                    edge.to as usize,
-                    transition.extra_draw,
-                    transition.hold_code,
-                ),
-                transition.mask,
-                transition.hold_action,
-            );
-        }
-        transitions
-    }
-
     fn activate_alpha(
         &mut self,
         node: usize,
@@ -1855,243 +1686,35 @@ impl SetupCoverageSession {
         &self,
         shape_indexes: &[usize],
     ) -> Result<Vec<Vec<crate::CorePathStep>>, WasmExactSearchError> {
-        let mut paths = vec![Vec::new(); shape_indexes.len()];
-        let mut groups = HashMap::<(usize, u64), Vec<(usize, usize)>>::new();
-        for (output_index, shape_index) in shape_indexes.iter().copied().enumerate() {
-            let witness = self.accumulators[shape_index].witness.ok_or(
-                WasmExactSearchError::InvalidProblem("setup_joint_coverage_missing_witness"),
-            )?;
-            groups
-                .entry((witness.word_index, witness.pattern_bit))
-                .or_default()
-                .push((output_index, shape_index));
-        }
-        let state_capacity = self
-            .state_layout
-            .state_capacity(self.graph.nodes.len())
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "setup_witness_state_capacity_overflow",
-            ))?;
-        let mut scratch = RepresentativeScratch::new(state_capacity)?;
-        for ((word_index, pattern_bit), targets) in groups {
-            self.representative_paths_for_pattern(
-                word_index,
-                pattern_bit,
-                &targets,
-                &mut paths,
-                &mut scratch,
-            )?;
-        }
-        Ok(paths)
-    }
-
-    fn representative_paths_for_pattern(
-        &self,
-        word_index: usize,
-        pattern_bit: u64,
-        targets: &[(usize, usize)],
-        paths: &mut [Vec<crate::CorePathStep>],
-        scratch: &mut RepresentativeScratch,
-    ) -> Result<(), WasmExactSearchError> {
-        scratch.clear();
-        let hold_code = self
-            .initial_hold
-            .map_or(0, |piece| piece_index(piece) as u8 + 1);
-        let root = self
-            .state_layout
-            .encode(self.graph.root as usize, 0, hold_code);
-        if self.pattern_index.active_word(word_index) & pattern_bit == 0 {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_witness_pattern_is_not_active",
-            ));
-        }
-        scratch.activate(
-            root,
-            0,
-            NO_REPRESENTATIVE_RECORD,
-            NO_REPRESENTATIVE_RECORD,
-            SetupHoldAction::UseCurrent,
+        let resolver = SetupRepresentativeResolver::new(
+            &self.condition,
+            &self.graph,
+            &self.coverage_graph,
+            self.candidate_priority,
+            self.length_preference,
+            self.max_setup_pieces,
         )?;
-
-        for depth in 0..scratch.depth_records.len() {
-            let mut cursor = 0;
-            while cursor < scratch.depth_records[depth].len() {
-                let record_index = scratch.depth_records[depth][cursor];
-                cursor += 1;
-                let state_index = scratch.records[record_index as usize].state as usize;
-                let (node_index, extra_draw, state_hold_code) =
-                    self.state_layout.decode(state_index);
-                let node = self.graph.nodes[node_index];
-                if node.accepting() || !node.live() {
-                    continue;
-                }
-                let edge_start = node.edge_start as usize;
-                let edge_end = edge_start + node.edge_count as usize;
-                for edge_index in edge_start..edge_end {
-                    let edge = self.graph.edges[edge_index];
-                    let transitions = self.original_transitions(
-                        node,
-                        edge,
-                        extra_draw,
-                        state_hold_code,
-                        pattern_bit,
-                        word_index,
-                    );
-                    for transition in transitions.iter() {
-                        let (target_node, _, _) = self.state_layout.decode(transition.target);
-                        scratch.activate(
-                            transition.target,
-                            self.graph.nodes[target_node].depth,
-                            record_index,
-                            u32::try_from(edge_index).map_err(|_| {
-                                WasmExactSearchError::InvalidProblem(
-                                    "setup_witness_edge_index_overflow",
-                                )
-                            })?,
-                            transition.hold_action,
-                        )?;
-                    }
-                }
-            }
-        }
-
-        for record in &mut scratch.records {
-            let (node_index, extra_draw, hold_code) =
-                self.state_layout.decode(record.state as usize);
-            let node = self.graph.nodes[node_index];
-            record.can_complete = node.accepting()
-                && self.terminal_supply_target.is_none_or(|target| {
-                    terminal_supply_target_word(
-                        &self.pattern_index,
-                        target,
-                        self.initial_cursor,
-                        node.depth,
-                        extra_draw,
-                        hold_code,
-                        word_index,
-                        pattern_bit,
-                    ) != 0
-                });
-        }
-        for depth in (0..scratch.depth_records.len()).rev() {
-            for cursor in 0..scratch.depth_records[depth].len() {
-                let record_index = scratch.depth_records[depth][cursor];
-                let record = scratch.records[record_index as usize];
-                let (node_index, extra_draw, state_hold_code) =
-                    self.state_layout.decode(record.state as usize);
-                let node = self.graph.nodes[node_index];
-                if node.accepting() || !node.live() {
-                    continue;
-                }
-                let edge_start = node.edge_start as usize;
-                let edge_end = edge_start + node.edge_count as usize;
-                let mut can_complete = false;
-                'edges: for edge_index in edge_start..edge_end {
-                    let edge = self.graph.edges[edge_index];
-                    let transitions = self.original_transitions(
-                        node,
-                        edge,
-                        extra_draw,
-                        state_hold_code,
-                        pattern_bit,
-                        word_index,
-                    );
-                    for transition in transitions.iter() {
-                        let Some(target_record) = scratch.record_for_state(transition.target)
-                        else {
-                            continue;
-                        };
-                        if scratch.records[target_record as usize].can_complete {
-                            can_complete = true;
-                            break 'edges;
-                        }
-                    }
-                }
-                scratch.records[record_index as usize].can_complete = can_complete;
-            }
-        }
-
-        let target_outputs = targets
+        let targets = shape_indexes
             .iter()
-            .map(|(output_index, shape_index)| (*shape_index as u32, *output_index))
-            .collect::<HashMap<_, _>>();
-        let mut selected_records = HashMap::<u32, (u32, u8)>::new();
-        for record_index in 0..scratch.records.len() {
-            let record = scratch.records[record_index];
-            if !record.can_complete {
-                continue;
-            }
-            let (node_index, _, _) = self.state_layout.decode(record.state as usize);
-            let Some(shape_index) = self.graph.nodes[node_index].shape_index() else {
-                continue;
-            };
-            if !target_outputs.contains_key(&shape_index) {
-                continue;
-            }
-            let candidate_depth = self.graph.nodes[node_index].depth;
-            if candidate_depth > self.max_setup_pieces {
-                continue;
-            }
-            let should_replace =
-                selected_records
-                    .get(&shape_index)
-                    .is_none_or(|(_, selected_depth)| {
-                        prefers_setup_representative_depth(
-                            self.candidate_priority,
-                            self.length_preference,
-                            candidate_depth,
-                            *selected_depth,
-                        )
-                    });
-            if should_replace {
-                selected_records.insert(shape_index, (record_index as u32, candidate_depth));
-            }
-        }
-        if selected_records.len() != target_outputs.len() {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_witness_path_reconstruction_failed",
-            ));
-        }
-        for (shape_index, output_index) in target_outputs {
-            let (record_index, _) = selected_records[&shape_index];
-            paths[output_index] = self.reconstruct_representative_path(record_index, scratch)?;
-        }
-        Ok(())
-    }
-
-    fn reconstruct_representative_path(
-        &self,
-        mut record_index: u32,
-        scratch: &RepresentativeScratch,
-    ) -> Result<Vec<crate::CorePathStep>, WasmExactSearchError> {
-        let mut path = Vec::new();
-        loop {
-            let record = scratch.records.get(record_index as usize).copied().ok_or(
-                WasmExactSearchError::InvalidProblem("setup_witness_record_out_of_range"),
-            )?;
-            if record.previous == NO_REPRESENTATIVE_RECORD {
-                break;
-            }
-            let edge = self
-                .graph
-                .edges
-                .get(record.edge_index as usize)
-                .copied()
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "setup_witness_edge_out_of_range",
-                ))?;
-            path.push(crate::CorePathStep::new(
-                edge.piece,
-                edge.rotation(),
-                i32::from(edge.x),
-                i32::from(edge.y),
-                record.hold_action.label(),
-                edge.cleared_lines(),
-            ));
-            record_index = record.previous;
-        }
-        path.reverse();
-        Ok(path)
+            .copied()
+            .map(|shape_index| {
+                let witness = self.accumulators[shape_index].witness.ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_joint_coverage_missing_witness"),
+                )?;
+                let pattern_id = witness
+                    .word_index
+                    .checked_mul(u64::BITS as usize)
+                    .and_then(|base| {
+                        base.checked_add(witness.pattern_bit.trailing_zeros() as usize)
+                    })
+                    .and_then(|pattern| u32::try_from(pattern).ok())
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_witness_pattern_id_overflow",
+                    ))?;
+                Ok((shape_index, RepresentativeWitness { pattern_id }))
+            })
+            .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
+        resolver.paths(&targets)
     }
 }
 

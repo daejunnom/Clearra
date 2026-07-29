@@ -24,7 +24,10 @@ use super::{
         retain_best_setup_state_per_board, terminal_supply_target_word, CompletedSetupCoverage,
         SetupSupplyStateLayout, SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
     },
-    setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
+    setup_graph_builder::{
+        cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
+        SetupSharedGraph,
+    },
     setup_parallel_segmented::{SegmentedArray, SegmentedGenerationArray},
     setup_parallel_wire::{
         decode_initialization, decode_results, decode_tasks, encode_initialization, encode_results,
@@ -65,7 +68,7 @@ impl WasmSetupParallelCoordinator {
         query: &SetupSearchQuery,
         worker_count: usize,
     ) -> Result<Self, WasmExactSearchError> {
-        let builder = SetupGraphBuildSession::new(query)?;
+        let builder = SetupGraphBuildSession::new_parallel(query)?;
         let condition_word_counts = builder.condition_pattern_word_counts()?;
         let tasks = plan_parallel_tasks(&condition_word_counts, worker_count)?;
         let task_count = tasks.len();
@@ -295,6 +298,7 @@ impl WasmSetupParallelCoordinator {
             let resolver = SetupRepresentativeResolver::new(
                 condition,
                 &shared.graph,
+                &shared.coverage_graph,
                 shared.query.candidate_priority(),
                 shared.query.length_preference(),
                 shared.query.max_setup_pieces(),
@@ -363,6 +367,7 @@ impl WasmSetupParallelCoordinator {
                 candidate_boards: result.candidate_boards,
             });
         }
+        cache_setup_coverage_result(&shared.query, &completed);
         Ok(finish_setup_result(
             &shared.query,
             &shared.graph,
@@ -606,7 +611,7 @@ struct CompletedParallelCondition {
 }
 
 const TARGET_TASKS_PER_VERIFIER: usize = 4;
-const MIN_WORDS_PER_TASK: usize = 128;
+const MIN_WORDS_PER_TASK: usize = COVERAGE_WORD_LANES;
 
 fn plan_parallel_tasks(
     condition_word_counts: &[usize],

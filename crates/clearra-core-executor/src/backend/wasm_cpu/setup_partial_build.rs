@@ -139,6 +139,8 @@ pub(super) struct PartialBuildGraph {
     edge_rows: Vec<u16>,
     pub(super) shapes: Vec<SetupShape>,
     placement_sets: Vec<u128>,
+    shape_target_nodes: Vec<u32>,
+    compact_continuation: bool,
     pub(super) root: u32,
     pub(super) resource_truncated: bool,
 }
@@ -164,12 +166,26 @@ impl PartialBuildGraph {
     pub(super) fn edge_row_id(&self, edge_index: usize) -> Option<u16> {
         self.edge_rows.get(edge_index).copied()
     }
+
+    pub(super) fn shape_target_node(&self, shape_index: usize) -> Option<u32> {
+        self.shape_target_nodes.get(shape_index).copied()
+    }
+
+    pub(super) const fn uses_compact_continuation(&self) -> bool {
+        self.compact_continuation
+    }
 }
 
 pub(super) enum PartialBuildAdvance {
     Pending,
     Complete {
         graph: PartialBuildGraph,
+        geometry_family_count: String,
+        geometry_expanded_nodes: usize,
+        tablebase_pruned_states: usize,
+    },
+    PrefixComplete {
+        prefix: SetupPartialBuildPrefix,
         geometry_family_count: String,
         geometry_expanded_nodes: usize,
         tablebase_pruned_states: usize,
@@ -191,10 +207,105 @@ struct ActivePartialState {
     packed_counts: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct PartialBuildResidual {
+    pub(super) remaining: u64,
+    pub(super) packed_counts: u32,
+}
+
+pub(super) struct SetupPartialBuildPrefix {
+    pub(super) nodes: Vec<PartialBuildNode>,
+    pub(super) edges: Vec<PartialBuildEdge>,
+    pub(super) edge_rows: Vec<u16>,
+    pub(super) residuals: Vec<PartialBuildResidual>,
+    pub(super) completion_oracle: Option<GeometryCompletionOracle>,
+    placement_sets: Vec<u128>,
+    candidate_depth: u8,
+    resource_truncated: bool,
+}
+
+impl SetupPartialBuildPrefix {
+    pub(super) const fn candidate_depth(&self) -> u8 {
+        self.candidate_depth
+    }
+
+    pub(super) fn finalize(
+        mut self,
+        mut terminal_classes: Vec<u32>,
+    ) -> Result<(PartialBuildGraph, Vec<u32>), WasmExactSearchError> {
+        if terminal_classes.len() != self.nodes.len()
+            || self.residuals.len() != self.nodes.len()
+            || self.edges.len() != self.edge_rows.len()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_partial_build_prefix_finalize_mismatch",
+            ));
+        }
+        for index in 0..self.nodes.len() {
+            if self.nodes[index].depth != self.candidate_depth {
+                terminal_classes[index] = u32::MAX;
+                continue;
+            }
+            if self.candidate_depth == MAX_SETUP_CANDIDATE_LOCKS {
+                let accepting =
+                    self.nodes[index].board == 0 && self.residuals[index].remaining == 0;
+                self.nodes[index].set_accepting(accepting);
+                if !accepting {
+                    terminal_classes[index] = u32::MAX;
+                }
+            }
+            self.nodes[index].set_live(terminal_classes[index] != u32::MAX);
+        }
+        for index in (0..self.nodes.len()).rev() {
+            if self.nodes[index].live() || self.nodes[index].depth == self.candidate_depth {
+                continue;
+            }
+            let start = self.nodes[index].edge_start as usize;
+            let end = start + self.nodes[index].edge_count as usize;
+            let live = self.edges[start..end]
+                .iter()
+                .any(|edge| self.nodes[edge.to as usize].live());
+            self.nodes[index].set_live(live);
+        }
+        compact_prefix_graph(
+            &mut self.nodes,
+            &mut self.edges,
+            &mut self.edge_rows,
+            &mut self.residuals,
+            &mut terminal_classes,
+        )?;
+        let (shapes, shape_target_nodes) =
+            index_setup_shapes(&mut self.nodes, self.candidate_depth)?;
+        Ok((
+            PartialBuildGraph {
+                nodes: self.nodes,
+                edges: self.edges,
+                edge_rows: self.edge_rows,
+                shapes,
+                placement_sets: std::mem::take(&mut self.placement_sets),
+                shape_target_nodes,
+                compact_continuation: true,
+                root: 0,
+                resource_truncated: self.resource_truncated,
+            },
+            terminal_classes,
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingPartialBuildEdge {
     edge: PartialBuildEdge,
     row_id: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SelectedSetupDetail {
+    board: u64,
+    placement_rows: u128,
+    rows: [u16; MAX_SETUP_CANDIDATE_LOCKS as usize],
+    deleted_rows: u16,
+    depth: u8,
 }
 
 const SETUP_ROW_BITS: usize = 12;
@@ -202,7 +313,7 @@ const SETUP_ROW_MASK: u128 = (1_u128 << SETUP_ROW_BITS) - 1;
 const MAX_SETUP_ROW_ID: u32 = SETUP_ROW_MASK as u32 - 1;
 
 pub(super) struct PartialBuildGraphBuilder {
-    completion_oracle: GeometryCompletionOracle,
+    completion_oracle: Option<GeometryCompletionOracle>,
     reachability: ReachabilityWorkspace,
     nodes: Vec<PartialBuildNode>,
     edges: Vec<PartialBuildEdge>,
@@ -223,15 +334,62 @@ pub(super) struct PartialBuildGraphBuilder {
     geometry_expanded_nodes: usize,
     tablebase_pruned_states: usize,
     placement_identity_depth: u8,
+    preserve_edge_row_identity_depth: u8,
+    residuals: Vec<PartialBuildResidual>,
+    selected_detail: Option<SelectedSetupDetail>,
+    prefix_only: bool,
     resource_truncated: bool,
 }
 
 impl PartialBuildGraphBuilder {
+    #[cfg(test)]
     pub(super) fn new(
         compiled: CompiledGeometryFamily,
         catalog: &GeometryCatalog,
         problem: &SearchProblem,
         placement_identity_depth: u8,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_mode(compiled, catalog, problem, placement_identity_depth, false)
+    }
+
+    pub(super) fn new_candidate_prefix(
+        compiled: CompiledGeometryFamily,
+        catalog: &GeometryCatalog,
+        problem: &SearchProblem,
+        candidate_depth: u8,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_mode(compiled, catalog, problem, candidate_depth, true)
+    }
+
+    pub(super) fn new_selected_detail(
+        compiled: CompiledGeometryFamily,
+        catalog: &GeometryCatalog,
+        problem: &SearchProblem,
+        detail: &SetupPathDetail,
+    ) -> Result<Self, WasmExactSearchError> {
+        let depth = packed_setup_row_count(detail.placement_rows(), MAX_SETUP_CANDIDATE_LOCKS)?;
+        let depth = u8::try_from(depth).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_path_detail_depth_overflow")
+        })?;
+        let rows = decode_placement_rows(detail.placement_rows(), usize::from(depth))?;
+        let mut builder = Self::new_with_mode(compiled, catalog, problem, depth, false)?;
+        builder.selected_detail = Some(SelectedSetupDetail {
+            board: detail.board_mask(),
+            placement_rows: detail.placement_rows(),
+            rows,
+            deleted_rows: detail.deleted_rows(),
+            depth,
+        });
+        builder.preserve_edge_row_identity_depth = 10;
+        Ok(builder)
+    }
+
+    fn new_with_mode(
+        compiled: CompiledGeometryFamily,
+        catalog: &GeometryCatalog,
+        problem: &SearchProblem,
+        placement_identity_depth: u8,
+        prefix_only: bool,
     ) -> Result<Self, WasmExactSearchError> {
         if placement_identity_depth > MAX_SETUP_CANDIDATE_LOCKS {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -261,7 +419,7 @@ impl PartialBuildGraphBuilder {
             packed_counts: 0,
         }];
         Ok(Self {
-            completion_oracle: compiled.completion_oracle,
+            completion_oracle: Some(compiled.completion_oracle),
             reachability,
             nodes,
             edges: Vec::new(),
@@ -282,6 +440,13 @@ impl PartialBuildGraphBuilder {
             geometry_expanded_nodes: compiled.expanded_nodes,
             tablebase_pruned_states: compiled.tablebase_pruned_states,
             placement_identity_depth,
+            preserve_edge_row_identity_depth: 0,
+            residuals: vec![PartialBuildResidual {
+                remaining: catalog.required_cells(),
+                packed_counts: 0,
+            }],
+            selected_detail: None,
+            prefix_only,
             resource_truncated: false,
         })
     }
@@ -323,10 +488,20 @@ impl PartialBuildGraphBuilder {
         catalog: &GeometryCatalog,
         control: &ExecutionControl,
     ) -> Result<Option<PartialBuildAdvance>, WasmExactSearchError> {
+        if self.prefix_only && self.current_depth == self.candidate_depth() {
+            let prefix = self.finish_prefix()?;
+            return Ok(Some(PartialBuildAdvance::PrefixComplete {
+                prefix,
+                geometry_family_count: self.geometry_family_count.clone(),
+                geometry_expanded_nodes: self.geometry_expanded_nodes,
+                tablebase_pruned_states: self.tablebase_pruned_states,
+            }));
+        }
         if self.current_cursor == self.current_states.len() {
             if self.current_depth == 10 || self.next_states.is_empty() {
+                let graph = self.finish()?;
                 return Ok(Some(PartialBuildAdvance::Complete {
-                    graph: self.finish()?,
+                    graph,
                     geometry_family_count: self.geometry_family_count.clone(),
                     geometry_expanded_nodes: self.geometry_expanded_nodes,
                     tablebase_pruned_states: self.tablebase_pruned_states,
@@ -343,6 +518,29 @@ impl PartialBuildGraphBuilder {
 
         let source = self.current_states[self.current_cursor];
         self.current_cursor += 1;
+        if let Some(detail) = self.selected_detail {
+            if source.node >= self.nodes.len() as u32 {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "setup_path_detail_source_node_invalid",
+                ));
+            }
+            let source_node = self.nodes[source.node as usize];
+            if source_node.depth == detail.depth {
+                let placement_rows = self
+                    .placement_sets
+                    .get(source.placement_set_id as usize)
+                    .copied()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_path_detail_placement_set_missing",
+                    ))?;
+                if source_node.board != detail.board
+                    || source_node.deleted_rows != detail.deleted_rows
+                    || placement_rows != detail.placement_rows
+                {
+                    return Ok(None);
+                }
+            }
+        }
         if self.current_depth == 10 {
             let node = &mut self.nodes[source.node as usize];
             let accepting = node.board == 0 && source.remaining == 0;
@@ -350,14 +548,29 @@ impl PartialBuildGraphBuilder {
             node.set_live(accepting);
             return Ok(None);
         }
-        self.completion_oracle.collect_available_rows(
-            source.remaining,
-            source.packed_counts,
-            self.nodes[source.node as usize].deleted_rows != 0,
-            catalog,
-            &mut self.available_rows,
-            control,
-        )?;
+        self.completion_oracle
+            .as_mut()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_partial_build_completion_oracle_missing",
+            ))?
+            .collect_available_rows(
+                source.remaining,
+                source.packed_counts,
+                self.nodes[source.node as usize].deleted_rows != 0,
+                catalog,
+                &mut self.available_rows,
+                control,
+            )?;
+        if let Some(detail) = self.selected_detail {
+            if self.nodes[source.node as usize].depth < detail.depth {
+                let selected_rows = &detail.rows[..usize::from(detail.depth)];
+                self.available_rows.retain(|row_id| {
+                    u16::try_from(*row_id)
+                        .ok()
+                        .is_some_and(|row_id| selected_rows.binary_search(&row_id).is_ok())
+                });
+            }
+        }
         self.available_row_cursor = 0;
         self.edge_source = Some(source);
         self.source_edges.clear();
@@ -460,6 +673,10 @@ impl PartialBuildGraphBuilder {
                     depth: source.depth + 1,
                     flags: 0,
                 });
+                self.residuals.push(PartialBuildResidual {
+                    remaining,
+                    packed_counts,
+                });
                 self.next_layer.insert(key, target);
                 self.next_states.push(ActivePartialState {
                     remaining,
@@ -536,8 +753,22 @@ impl PartialBuildGraphBuilder {
                 edge.cleared_lines(),
             )
         });
-        self.source_edges
-            .dedup_by_key(|pending| (pending.edge.to, pending.edge.piece));
+        if self.nodes[source.node as usize].depth < self.preserve_edge_row_identity_depth {
+            self.source_edges.dedup_by_key(|pending| {
+                (
+                    pending.edge.to,
+                    pending.edge.piece,
+                    pending.row_id,
+                    pending.edge.rotation(),
+                    pending.edge.x,
+                    pending.edge.y,
+                    pending.edge.cleared_lines(),
+                )
+            });
+        } else {
+            self.source_edges
+                .dedup_by_key(|pending| (pending.edge.to, pending.edge.piece));
+        }
         self.edges
             .try_reserve(self.source_edges.len())
             .map_err(|_| {
@@ -573,17 +804,45 @@ impl PartialBuildGraphBuilder {
             self.nodes[index].set_live(live);
         }
         self.compact_live_graph()?;
-
-        let shapes = index_setup_shapes(&mut self.nodes, self.placement_identity_depth)?;
+        let (shapes, shape_target_nodes) =
+            index_setup_shapes(&mut self.nodes, self.placement_identity_depth)?;
         Ok(PartialBuildGraph {
             nodes: std::mem::take(&mut self.nodes),
             edges: std::mem::take(&mut self.edges),
             edge_rows: std::mem::take(&mut self.edge_rows),
             shapes,
             placement_sets: std::mem::take(&mut self.placement_sets),
+            shape_target_nodes,
+            compact_continuation: false,
             root: 0,
             resource_truncated: self.resource_truncated,
         })
+    }
+
+    fn finish_prefix(&mut self) -> Result<SetupPartialBuildPrefix, WasmExactSearchError> {
+        let candidate_depth = self.candidate_depth();
+        if candidate_depth == 0
+            || self.current_depth != candidate_depth
+            || self.nodes.len() != self.residuals.len()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_partial_build_prefix_state_invalid",
+            ));
+        }
+        Ok(SetupPartialBuildPrefix {
+            nodes: std::mem::take(&mut self.nodes),
+            edges: std::mem::take(&mut self.edges),
+            edge_rows: std::mem::take(&mut self.edge_rows),
+            residuals: std::mem::take(&mut self.residuals),
+            completion_oracle: self.completion_oracle.take(),
+            placement_sets: std::mem::take(&mut self.placement_sets),
+            candidate_depth,
+            resource_truncated: self.resource_truncated,
+        })
+    }
+
+    const fn candidate_depth(&self) -> u8 {
+        self.placement_identity_depth
     }
 
     fn compact_live_graph(&mut self) -> Result<(), WasmExactSearchError> {
@@ -646,12 +905,114 @@ impl PartialBuildGraphBuilder {
     }
 }
 
+fn compact_prefix_graph(
+    nodes: &mut Vec<PartialBuildNode>,
+    edges: &mut Vec<PartialBuildEdge>,
+    edge_rows: &mut Vec<u16>,
+    residuals: &mut Vec<PartialBuildResidual>,
+    terminal_classes: &mut Vec<u32>,
+) -> Result<(), WasmExactSearchError> {
+    let original_node_count = nodes.len();
+    if residuals.len() != original_node_count || terminal_classes.len() != original_node_count {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_partial_build_prefix_compaction_state_mismatch",
+        ));
+    }
+    let mut node_remap = Vec::<u32>::new();
+    node_remap
+        .try_reserve_exact(original_node_count)
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "setup_partial_build_prefix_compaction_storage_unavailable",
+            )
+        })?;
+    node_remap.resize(original_node_count, u32::MAX);
+
+    let mut node_write = 0_usize;
+    for node_read in 0..original_node_count {
+        if node_read != 0 && !nodes[node_read].live() {
+            continue;
+        }
+        node_remap[node_read] = u32::try_from(node_write).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_node_index_overflow")
+        })?;
+        if node_write != node_read {
+            nodes[node_write] = nodes[node_read];
+            residuals[node_write] = residuals[node_read];
+            terminal_classes[node_write] = terminal_classes[node_read];
+        }
+        node_write += 1;
+    }
+    nodes.truncate(node_write);
+    residuals.truncate(node_write);
+    terminal_classes.truncate(node_write);
+
+    let mut edge_write = 0_usize;
+    for node in nodes {
+        let old_start = node.edge_start as usize;
+        let old_end = old_start + node.edge_count as usize;
+        let new_start = edge_write;
+        for edge_read in old_start..old_end {
+            let mut edge = edges[edge_read];
+            let target = node_remap[edge.to as usize];
+            if target == u32::MAX {
+                continue;
+            }
+            edge.to = target;
+            edges[edge_write] = edge;
+            edge_rows[edge_write] = edge_rows[edge_read];
+            edge_write += 1;
+        }
+        node.edge_start = u32::try_from(new_start).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_edge_index_overflow")
+        })?;
+        node.edge_count = u32::try_from(edge_write - new_start).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_edge_count_overflow")
+        })?;
+    }
+    edges.truncate(edge_write);
+    edge_rows.truncate(edge_write);
+    Ok(())
+}
+
+fn packed_setup_row_count(
+    placement_rows: u128,
+    max_depth: u8,
+) -> Result<usize, WasmExactSearchError> {
+    let mut count = 0_usize;
+    while count < usize::from(max_depth) {
+        let encoded = (placement_rows >> (count * SETUP_ROW_BITS)) & SETUP_ROW_MASK;
+        if encoded == 0 {
+            break;
+        }
+        count += 1;
+    }
+    if count == 0
+        || placement_rows >> (count * SETUP_ROW_BITS) != 0
+        || count > usize::from(candidate_depth_limit(max_depth))
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_path_detail_depth_invalid",
+        ));
+    }
+    Ok(count)
+}
+
+const fn candidate_depth_limit(max_depth: u8) -> u8 {
+    if max_depth < MAX_SETUP_CANDIDATE_LOCKS {
+        max_depth
+    } else {
+        MAX_SETUP_CANDIDATE_LOCKS
+    }
+}
+
 fn index_setup_shapes(
     nodes: &mut [PartialBuildNode],
     placement_identity_depth: u8,
-) -> Result<Vec<SetupShape>, WasmExactSearchError> {
+) -> Result<(Vec<SetupShape>, Vec<u32>), WasmExactSearchError> {
     let mut shapes = Vec::<SetupShape>::new();
-    for node in nodes {
+    let mut target_nodes = Vec::<u32>::new();
+    for (node_index, node) in nodes.iter_mut().enumerate() {
         if !node.live() || !(1..=placement_identity_depth).contains(&node.depth) {
             continue;
         }
@@ -667,11 +1028,14 @@ fn index_setup_shapes(
             node.placement_set_id,
             node.deleted_rows,
         ));
+        target_nodes.push(u32::try_from(node_index).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_node_index_overflow")
+        })?);
     }
-    Ok(shapes)
+    Ok((shapes, target_nodes))
 }
 
-fn insert_setup_placement_row(
+pub(super) fn insert_setup_placement_row(
     packed: u128,
     depth: u8,
     row_id: u32,
@@ -699,6 +1063,30 @@ fn insert_setup_placement_row(
         output |= encoded << (output_index * SETUP_ROW_BITS);
     }
     Ok(output)
+}
+
+pub(super) fn decode_placement_rows(
+    packed: u128,
+    row_count: usize,
+) -> Result<[u16; MAX_SETUP_CANDIDATE_LOCKS as usize], WasmExactSearchError> {
+    if row_count > MAX_SETUP_CANDIDATE_LOCKS as usize {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_candidate_catalog_row_count_overflow",
+        ));
+    }
+    let mut rows = [0_u16; MAX_SETUP_CANDIDATE_LOCKS as usize];
+    for (index, output) in rows.iter_mut().enumerate().take(row_count) {
+        let encoded = (packed >> (index * SETUP_ROW_BITS)) & SETUP_ROW_MASK;
+        if encoded == 0 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_candidate_catalog_row_identity_missing",
+            ));
+        }
+        *output = u16::try_from(encoded - 1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_candidate_catalog_row_identity_overflow")
+        })?;
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -775,7 +1163,7 @@ mod tests {
     fn setup_candidate_identity_keeps_exact_partial_states_separate() {
         let mut nodes = [live_node(0x3c, 2), live_node(0x3c, 9), live_node(0x3c, 2)];
 
-        let shapes =
+        let (shapes, _) =
             index_setup_shapes(&mut nodes, MAX_SETUP_CANDIDATE_LOCKS).expect("shape index");
 
         assert_eq!(shapes.len(), 3);
@@ -785,6 +1173,55 @@ mod tests {
             shapes.iter().map(|shape| shape.board).collect::<Vec<_>>(),
             vec![0x3c, 0x3c, 0x3c]
         );
+    }
+
+    #[test]
+    fn setup_prefix_compaction_keeps_residuals_aligned() {
+        let mut root = live_node(0, 0);
+        root.edge_count = 2;
+        let mut dead = live_node(0x0f, 1);
+        dead.set_live(false);
+        let live = live_node(0xf0, 1);
+        let mut nodes = vec![root, dead, live];
+        let mut edges = vec![
+            PartialBuildEdge::new(1, PieceKind::I, 0, 0, 0, 0).expect("dead edge"),
+            PartialBuildEdge::new(2, PieceKind::O, 0, 1, 0, 0).expect("live edge"),
+        ];
+        let mut edge_rows = vec![11, 22];
+        let mut residuals = vec![
+            PartialBuildResidual {
+                remaining: 1,
+                packed_counts: 10,
+            },
+            PartialBuildResidual {
+                remaining: 2,
+                packed_counts: 20,
+            },
+            PartialBuildResidual {
+                remaining: 3,
+                packed_counts: 30,
+            },
+        ];
+        let mut terminal_classes = vec![100, 101, 102];
+
+        compact_prefix_graph(
+            &mut nodes,
+            &mut edges,
+            &mut edge_rows,
+            &mut residuals,
+            &mut terminal_classes,
+        )
+        .expect("compact prefix");
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].edge_count, 1);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to, 1);
+        assert_eq!(edges[0].piece, PieceKind::O);
+        assert_eq!(edge_rows, vec![22]);
+        assert_eq!(residuals[1].remaining, 3);
+        assert_eq!(residuals[1].packed_counts, 30);
+        assert_eq!(terminal_classes, vec![100, 102]);
     }
 
     #[test]
@@ -813,6 +1250,14 @@ mod tests {
     }
 
     #[test]
+    fn setup_placement_rows_decode_exact_row_ids() {
+        let packed = 4_u128 | (8_u128 << 12) | (13_u128 << 24);
+        let rows = decode_placement_rows(packed, 3).expect("rows");
+
+        assert_eq!(&rows[..3], &[3, 7, 12]);
+    }
+
+    #[test]
     fn setup_id_selects_one_exact_tiling_even_when_boards_match() {
         let rows_a = insert_setup_placement_row(0, 0, 3).expect("rows a");
         let rows_b = insert_setup_placement_row(0, 0, 12).expect("rows b");
@@ -822,6 +1267,8 @@ mod tests {
             edge_rows: Vec::new(),
             shapes: vec![SetupShape::new(0x3c, 1, 0), SetupShape::new(0x3c, 2, 0)],
             placement_sets: vec![0, rows_a, rows_b],
+            shape_target_nodes: vec![0, 1],
+            compact_continuation: false,
             root: 0,
             resource_truncated: false,
         };
@@ -963,6 +1410,9 @@ mod tests {
             {
                 PartialBuildAdvance::Pending => {}
                 PartialBuildAdvance::Complete { graph, .. } => break graph,
+                PartialBuildAdvance::PrefixComplete { .. } => {
+                    panic!("complete graph builder returned a setup prefix")
+                }
                 PartialBuildAdvance::Cancelled => panic!("partial graph was not cancelled"),
             }
         };
@@ -1154,6 +1604,9 @@ mod tests {
             {
                 PartialBuildAdvance::Pending => {}
                 PartialBuildAdvance::Complete { graph, .. } => break graph,
+                PartialBuildAdvance::PrefixComplete { .. } => {
+                    panic!("complete graph builder returned a setup prefix")
+                }
                 PartialBuildAdvance::Cancelled => panic!("partial graph was not cancelled"),
             }
         };

@@ -18,6 +18,7 @@ use super::{
         CompletedSetupCoverage,
     },
     setup_partial_build::{PartialBuildAdvance, PartialBuildGraph, PartialBuildGraphBuilder},
+    setup_suffix_coverage::{SetupSuffixCoverageAdvance, SetupSuffixCoverageSession},
     WasmExactSearchError,
 };
 
@@ -43,6 +44,12 @@ enum SetupGraphBuildStage {
     Cached(Option<CachedSetupGraph>),
     Geometry(GeometryFamilyCompileSession),
     PartialBuild(PartialBuildGraphBuilder),
+    SuffixCoverage {
+        session: SetupSuffixCoverageSession,
+        geometry_family_count: String,
+        geometry_expanded_nodes: usize,
+        tablebase_pruned_states: usize,
+    },
     Finished,
 }
 
@@ -51,13 +58,15 @@ pub(super) struct SetupGraphBuildSession {
     conditions: Vec<SetupSearchCondition>,
     condition_pattern_word_counts: Option<Vec<usize>>,
     catalog: Option<Arc<GeometryCatalog>>,
+    cached_detail_coverage: Option<Arc<[CompletedSetupCoverage]>>,
     tablebase_status: &'static str,
     stage: SetupGraphBuildStage,
 }
 
 struct CachedSetupGraph {
-    graph: Arc<PartialBuildGraph>,
-    coverage_graph: Arc<SetupCoverageGraph>,
+    graph: Option<Arc<PartialBuildGraph>>,
+    coverage_graph: Option<Arc<SetupCoverageGraph>>,
+    compact_continuation: bool,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
     tablebase_status: &'static str,
@@ -67,8 +76,9 @@ struct CachedSetupGraph {
 
 struct SetupGraphCacheEntry {
     query: SetupSearchQuery,
-    graph: Arc<PartialBuildGraph>,
-    coverage_graph: Arc<SetupCoverageGraph>,
+    graph: Option<Arc<PartialBuildGraph>>,
+    coverage_graph: Option<Arc<SetupCoverageGraph>>,
+    compact_continuation: bool,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
     tablebase_status: &'static str,
@@ -84,6 +94,14 @@ thread_local! {
 
 impl SetupGraphBuildSession {
     pub(super) fn new(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
+        Self::new_internal(query)
+    }
+
+    pub(super) fn new_parallel(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
+        Self::new_internal(query)
+    }
+
+    fn new_internal(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
         let mut conditions = compile_setup_search_conditions(query).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_residue_condition_compile_failed")
         })?;
@@ -101,17 +119,54 @@ impl SetupGraphBuildSession {
                 "setup_residue_has_no_hold_condition",
             ))?;
         super::ensure_connected_kick_profile(first.problem())?;
-        if let Some(cached) = cached_setup_graph(query) {
-            let tablebase_status = cached.tablebase_status;
-            return Ok(Self {
-                query: query.clone(),
-                conditions,
-                condition_pattern_word_counts: None,
-                catalog: None,
-                tablebase_status,
-                stage: SetupGraphBuildStage::Cached(Some(cached)),
-            });
+        let cached = cached_setup_graph(query);
+        if let Some(cached) = cached {
+            if !cached.compact_continuation {
+                let graph = cached.graph.ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_cached_graph_missing",
+                ))?;
+                let coverage_graph =
+                    cached
+                        .coverage_graph
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "setup_cached_coverage_graph_missing",
+                        ))?;
+                let tablebase_status = cached.tablebase_status;
+                return Ok(Self {
+                    query: query.clone(),
+                    conditions,
+                    condition_pattern_word_counts: None,
+                    catalog: None,
+                    cached_detail_coverage: None,
+                    tablebase_status,
+                    stage: SetupGraphBuildStage::Cached(Some(CachedSetupGraph {
+                        graph: Some(graph),
+                        coverage_graph: Some(coverage_graph),
+                        compact_continuation: false,
+                        geometry_family_count: cached.geometry_family_count,
+                        geometry_expanded_nodes: cached.geometry_expanded_nodes,
+                        tablebase_status: cached.tablebase_status,
+                        tablebase_pruned_states: cached.tablebase_pruned_states,
+                        coverage: cached.coverage,
+                    })),
+                });
+            }
+            let cached_detail_coverage = cached.coverage;
+            return Self::new_uncached(query, conditions, cached_detail_coverage);
         }
+        Self::new_uncached(query, conditions, None)
+    }
+
+    fn new_uncached(
+        query: &SetupSearchQuery,
+        conditions: Vec<SetupSearchCondition>,
+        cached_detail_coverage: Option<Arc<[CompletedSetupCoverage]>>,
+    ) -> Result<Self, WasmExactSearchError> {
+        let first = conditions
+            .first()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_residue_has_no_hold_condition",
+            ))?;
         let catalog = Arc::new(GeometryCatalog::compile(first.problem())?);
         if catalog.width() != 10 || catalog.height() != 4 || catalog.initial_board() != 0 {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -172,6 +227,7 @@ impl SetupGraphBuildSession {
             conditions,
             condition_pattern_word_counts: Some(condition_pattern_word_counts),
             catalog: Some(catalog),
+            cached_detail_coverage,
             tablebase_status,
             stage: SetupGraphBuildStage::Geometry(geometry),
         })
@@ -183,8 +239,12 @@ impl SetupGraphBuildSession {
 
     pub(super) fn geometry_nodes(&self) -> usize {
         match &self.stage {
-            SetupGraphBuildStage::Geometry(geometry) => geometry.progress_nodes(),
+            SetupGraphBuildStage::Geometry(session) => session.progress_nodes(),
             SetupGraphBuildStage::PartialBuild(builder) => builder.geometry_expanded_nodes(),
+            SetupGraphBuildStage::SuffixCoverage {
+                geometry_expanded_nodes,
+                ..
+            } => *geometry_expanded_nodes,
             SetupGraphBuildStage::Cached(Some(cached)) => cached.geometry_expanded_nodes,
             SetupGraphBuildStage::Cached(None) | SetupGraphBuildStage::Finished => 0,
         }
@@ -193,7 +253,10 @@ impl SetupGraphBuildSession {
     pub(super) fn partial_build_nodes(&self) -> usize {
         match &self.stage {
             SetupGraphBuildStage::PartialBuild(builder) => builder.node_count(),
-            SetupGraphBuildStage::Cached(Some(cached)) => cached.graph.nodes.len(),
+            SetupGraphBuildStage::SuffixCoverage { session, .. } => session.prefix_node_count(),
+            SetupGraphBuildStage::Cached(Some(cached)) => {
+                cached.graph.as_ref().map_or(0, |graph| graph.nodes.len())
+            }
             SetupGraphBuildStage::Cached(None)
             | SetupGraphBuildStage::Geometry(_)
             | SetupGraphBuildStage::Finished => 0,
@@ -234,8 +297,12 @@ impl SetupGraphBuildSession {
                 Ok(SetupGraphBuildAdvance::Complete(SetupSharedGraph {
                     query: self.query.clone(),
                     conditions: std::mem::take(&mut self.conditions),
-                    graph: cached.graph,
-                    coverage_graph: cached.coverage_graph,
+                    graph: cached.graph.ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_cached_graph_missing",
+                    ))?,
+                    coverage_graph: cached.coverage_graph.ok_or(
+                        WasmExactSearchError::InvalidProblem("setup_cached_coverage_graph_missing"),
+                    )?,
                     geometry_family_count: cached.geometry_family_count,
                     geometry_expanded_nodes: cached.geometry_expanded_nodes,
                     tablebase_status: cached.tablebase_status,
@@ -243,7 +310,7 @@ impl SetupGraphBuildSession {
                     cached_coverage: cached.coverage,
                 }))
             }
-            SetupGraphBuildStage::Geometry(mut geometry) => {
+            SetupGraphBuildStage::Geometry(mut session) => {
                 let catalog = self
                     .catalog
                     .as_ref()
@@ -251,11 +318,11 @@ impl SetupGraphBuildSession {
                         "setup_geometry_catalog_missing",
                     ))?;
                 let span = SearchStageSpan::begin(ExecutorSearchStage::WasmSetupGeometryCompile);
-                let advance = geometry.advance(catalog, budget, control);
+                let advance = session.advance(catalog, budget, control);
                 span.finish(budget as u64);
                 match advance {
                     GeometryFamilyCompileAdvance::Pending => {
-                        self.stage = SetupGraphBuildStage::Geometry(geometry);
+                        self.stage = SetupGraphBuildStage::Geometry(session);
                         Ok(SetupGraphBuildAdvance::Pending)
                     }
                     GeometryFamilyCompileAdvance::Cancelled => {
@@ -265,12 +332,21 @@ impl SetupGraphBuildSession {
                         Err(WasmExactSearchError::InvalidProblem(reason))
                     }
                     GeometryFamilyCompileAdvance::Complete(compiled) => {
-                        let builder = PartialBuildGraphBuilder::new(
-                            compiled,
-                            catalog,
-                            self.conditions[0].problem(),
-                            self.query.max_setup_pieces(),
-                        )?;
+                        let builder = if let Some(detail) = self.query.path_detail() {
+                            PartialBuildGraphBuilder::new_selected_detail(
+                                compiled,
+                                catalog,
+                                self.conditions[0].problem(),
+                                detail,
+                            )?
+                        } else {
+                            PartialBuildGraphBuilder::new_candidate_prefix(
+                                compiled,
+                                catalog,
+                                self.conditions[0].problem(),
+                                self.query.max_setup_pieces(),
+                            )?
+                        };
                         self.stage = SetupGraphBuildStage::PartialBuild(builder);
                         Ok(SetupGraphBuildAdvance::Pending)
                     }
@@ -292,6 +368,25 @@ impl SetupGraphBuildSession {
                         Ok(SetupGraphBuildAdvance::Pending)
                     }
                     PartialBuildAdvance::Cancelled => Ok(SetupGraphBuildAdvance::Cancelled),
+                    PartialBuildAdvance::PrefixComplete {
+                        prefix,
+                        geometry_family_count,
+                        geometry_expanded_nodes,
+                        tablebase_pruned_states,
+                    } => {
+                        let session = SetupSuffixCoverageSession::new(
+                            prefix,
+                            Arc::clone(catalog),
+                            self.conditions[0].problem(),
+                        )?;
+                        self.stage = SetupGraphBuildStage::SuffixCoverage {
+                            session,
+                            geometry_family_count,
+                            geometry_expanded_nodes,
+                            tablebase_pruned_states,
+                        };
+                        Ok(SetupGraphBuildAdvance::Pending)
+                    }
                     PartialBuildAdvance::Complete {
                         graph,
                         geometry_family_count,
@@ -305,6 +400,50 @@ impl SetupGraphBuildSession {
                         let coverage_graph = SetupCoverageGraph::compile(&graph);
                         span.finish(graph.nodes.len() as u64);
                         let coverage_graph = Arc::new(coverage_graph?);
+                        let shared = SetupSharedGraph {
+                            query: self.query.clone(),
+                            conditions: std::mem::take(&mut self.conditions),
+                            graph,
+                            coverage_graph,
+                            geometry_family_count,
+                            geometry_expanded_nodes,
+                            tablebase_status: self.tablebase_status,
+                            tablebase_pruned_states,
+                            cached_coverage: self.cached_detail_coverage.take(),
+                        };
+                        cache_setup_graph(&shared);
+                        Ok(SetupGraphBuildAdvance::Complete(shared))
+                    }
+                }
+            }
+            SetupGraphBuildStage::SuffixCoverage {
+                mut session,
+                geometry_family_count,
+                geometry_expanded_nodes,
+                tablebase_pruned_states,
+            } => {
+                let span =
+                    SearchStageSpan::begin(ExecutorSearchStage::WasmSetupCoverageGraphCompile);
+                let expanded_before = session.expanded_states();
+                let advance = session.advance(budget, control);
+                span.finish(session.expanded_states().saturating_sub(expanded_before) as u64);
+                match advance? {
+                    SetupSuffixCoverageAdvance::Pending => {
+                        self.stage = SetupGraphBuildStage::SuffixCoverage {
+                            session,
+                            geometry_family_count,
+                            geometry_expanded_nodes,
+                            tablebase_pruned_states,
+                        };
+                        Ok(SetupGraphBuildAdvance::Pending)
+                    }
+                    SetupSuffixCoverageAdvance::Cancelled => Ok(SetupGraphBuildAdvance::Cancelled),
+                    SetupSuffixCoverageAdvance::Complete {
+                        graph,
+                        coverage_graph,
+                    } => {
+                        let graph = Arc::new(graph);
+                        let coverage_graph = Arc::new(coverage_graph);
                         let shared = SetupSharedGraph {
                             query: self.query.clone(),
                             conditions: std::mem::take(&mut self.conditions),
@@ -364,8 +503,9 @@ fn cached_setup_graph(query: &SetupSearchQuery) -> Option<CachedSetupGraph> {
             return None;
         }
         Some(CachedSetupGraph {
-            graph: Arc::clone(&entry.graph),
-            coverage_graph: Arc::clone(&entry.coverage_graph),
+            graph: entry.graph.as_ref().map(Arc::clone),
+            coverage_graph: entry.coverage_graph.as_ref().map(Arc::clone),
+            compact_continuation: entry.compact_continuation,
             geometry_family_count: entry.geometry_family_count.clone(),
             geometry_expanded_nodes: entry.geometry_expanded_nodes,
             tablebase_status: entry.tablebase_status,
@@ -380,10 +520,12 @@ fn cache_setup_graph(shared: &SetupSharedGraph) {
         return;
     }
     SETUP_GRAPH_CACHE.with(|cache| {
+        let compact_continuation = shared.graph.uses_compact_continuation();
         *cache.borrow_mut() = Some(SetupGraphCacheEntry {
             query: shared.query.clone().without_path_detail(),
-            graph: Arc::clone(&shared.graph),
-            coverage_graph: Arc::clone(&shared.coverage_graph),
+            graph: (!compact_continuation).then(|| Arc::clone(&shared.graph)),
+            coverage_graph: (!compact_continuation).then(|| Arc::clone(&shared.coverage_graph)),
+            compact_continuation,
             geometry_family_count: shared.geometry_family_count.clone(),
             geometry_expanded_nodes: shared.geometry_expanded_nodes,
             tablebase_status: shared.tablebase_status,

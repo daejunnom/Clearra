@@ -15,11 +15,23 @@ fn large_condition_mix_leaves_multiple_tasks_per_verifier() {
 }
 
 #[test]
-fn small_conditions_keep_one_task_each() {
+fn small_conditions_are_overdecomposed_for_dynamic_tail_stealing() {
     let condition_words = [4, 32, 127];
     let tasks = plan_parallel_tasks(&condition_words, 12).expect("task plan");
 
-    assert_eq!(tasks.len(), condition_words.len());
+    assert!(tasks.len() >= 33);
+    assert_exact_condition_ranges(&condition_words, &tasks);
+}
+
+#[test]
+fn standard_bag_condition_keeps_every_verifier_busy_until_the_tail() {
+    let condition_words = [79];
+    let tasks = plan_parallel_tasks(&condition_words, 11).expect("task plan");
+
+    assert_eq!(tasks.len(), 40);
+    assert!(tasks
+        .iter()
+        .all(|task| task.word_end.saturating_sub(task.word_start) <= 2));
     assert_exact_condition_ranges(&condition_words, &tasks);
 }
 

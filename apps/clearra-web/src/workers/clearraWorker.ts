@@ -43,6 +43,7 @@ let requestedPrewarmWorkerCount = 1;
 let completedPrewarmWorkerCount = 0;
 let loadedWasm: ClearraWasmModule | null = null;
 let tablebaseRequested = false;
+let deferredTablebaseRequested = false;
 let tablebaseWarmup: Promise<void> | null = null;
 let tablebaseWarmupGeneration = 0;
 let tablebaseWarmupAttempted = false;
@@ -91,6 +92,7 @@ async function runCommandText(
     return;
   }
   requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
+  deferredTablebaseRequested = requestedTablebase;
   setTablebaseRequested(requestedTablebase);
   const jobId = nextJobId++;
   const job: ActiveJob = {
@@ -141,7 +143,7 @@ async function runCommandText(
   } finally {
     if (active === job) active = null;
     if (!failClosed) {
-      startRuntimePrewarm(requestedPrewarmWorkerCount, tablebaseRequested);
+      startRuntimePrewarm(requestedPrewarmWorkerCount, deferredTablebaseRequested);
     }
   }
 }
@@ -149,6 +151,8 @@ async function runCommandText(
 function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebaseRequested) {
   const boundedWorkerCount = Math.max(1, Math.floor(workerCount));
   requestedPrewarmWorkerCount = boundedWorkerCount;
+  deferredTablebaseRequested = requestedTablebase;
+  if (active) return;
   setTablebaseRequested(requestedTablebase);
   if (runtimePrewarm || completedPrewarmWorkerCount >= boundedWorkerCount) {
     if (loadedWasm) void startTablebaseWarmupAfterWasm(loadedWasm);
@@ -251,6 +255,7 @@ function disposeRuntime() {
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
   tablebaseRequested = false;
+  deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;
   tablebaseWarmupAttempted = false;
@@ -331,6 +336,7 @@ function closeFailClosedWorker() {
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;
   try {
