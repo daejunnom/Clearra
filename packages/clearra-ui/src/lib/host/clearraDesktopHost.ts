@@ -24,6 +24,7 @@ export type ClearraDesktopRequest = {
     | 'all-mini'
     | 'all-mini-plus';
   preserve_b2b: boolean;
+  precompute_build_dependencies: boolean;
   initial_b2b: number;
   board_mask: string;
   visible_height: number;
@@ -106,6 +107,7 @@ export function buildDesktopAppRequest(
     score_profile: input.score_profile ?? 'tetrio',
     spin_profile: input.spin_profile ?? 't-spins',
     preserve_b2b: input.preserve_b2b ?? false,
+    precompute_build_dependencies: input.precompute_build_dependencies ?? false,
     initial_b2b: input.initial_b2b ?? 0,
     board_mask: input.board_mask ?? '0x0000000000000000',
     visible_height: input.visible_height ?? input.lines ?? 2,

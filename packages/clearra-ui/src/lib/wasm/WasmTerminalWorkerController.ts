@@ -1,6 +1,12 @@
 import type { ClearraWasmWorkerEvent } from './wasmCommandClient';
 import { postPrewarmRuntime } from './wasmCommandClient';
-import { applyWasmWorkerEvent, cancelWasmCommand, runWasmCommand } from './wasmWorkerStore';
+import {
+  applyTablebaseWarmupEvent,
+  applyWasmWorkerEvent,
+  cancelWasmCommand,
+  runWasmCommand,
+  type TablebaseWarmupWorkerEvent
+} from './wasmWorkerStore';
 
 const COOPERATIVE_CANCEL_GRACE_MS = 100;
 const OWNER_DISPOSE_GRACE_MS = 100;
@@ -16,6 +22,7 @@ export class WasmTerminalWorkerController {
   private cancellingWorker: Worker | null = null;
   private prewarmingWorker: Worker | null = null;
   private prewarmWorkerCount = 1;
+  private tablebaseRequested = false;
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private workerFactory: (() => Worker) | null) {}
@@ -35,14 +42,27 @@ export class WasmTerminalWorkerController {
     const worker = this.ensureWorker();
     if (!worker) return;
     try {
-      runWasmCommand(worker, this.prewarmWorkerCount);
+      runWasmCommand(worker, this.prewarmWorkerCount, this.tablebaseRequested);
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_MESSAGE_FAILED', errorMessage(error));
     }
   }
 
-  prewarm(workerCount: number) {
+  prewarm(workerCount: number, tablebaseRequested = false) {
     this.prewarmWorkerCount = Math.max(1, Math.floor(workerCount));
+    const tablebaseChanged = this.tablebaseRequested !== tablebaseRequested;
+    if (tablebaseChanged) {
+      applyTablebaseWarmupEvent({
+        type: 'tablebase_warmup',
+        phase: tablebaseRequested ? 'loading' : 'disabled',
+        artifactSha256: '',
+        byteLength: 0
+      });
+    }
+    this.tablebaseRequested = tablebaseRequested;
+    if (tablebaseChanged && this.worker && this.prewarmingWorker === this.worker) {
+      this.disposeOwnedWorker(this.worker);
+    }
     const worker = this.ensureWorker();
     if (worker) this.prewarmWorker(worker, this.prewarmWorkerCount);
   }
@@ -102,11 +122,17 @@ export class WasmTerminalWorkerController {
       const worker = this.workerFactory();
       this.worker = worker;
       worker.onmessage = (
-        message: MessageEvent<ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent>
+        message: MessageEvent<
+          ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent | TablebaseWarmupWorkerEvent
+        >
       ) => {
         if (this.worker !== worker) return;
         if (isRuntimePrewarmWorkerEvent(message.data)) {
           this.prewarmingWorker = message.data.phase === 'started' ? worker : null;
+          return;
+        }
+        if (isTablebaseWarmupWorkerEvent(message.data)) {
+          applyTablebaseWarmupEvent(message.data);
           return;
         }
         if (this.cancellingWorker === worker) {
@@ -180,7 +206,7 @@ export class WasmTerminalWorkerController {
   private prewarmWorker(worker: Worker, workerCount: number) {
     try {
       this.prewarmingWorker = worker;
-      postPrewarmRuntime(worker, workerCount);
+      postPrewarmRuntime(worker, workerCount, this.tablebaseRequested);
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_PREWARM_FAILED', errorMessage(error));
     }
@@ -221,9 +247,15 @@ export class WasmTerminalWorkerController {
 }
 
 function isRuntimePrewarmWorkerEvent(
-  event: ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent
+  event: ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent | TablebaseWarmupWorkerEvent
 ): event is RuntimePrewarmWorkerEvent {
   return 'type' in event && event.type === 'runtime_prewarm';
+}
+
+function isTablebaseWarmupWorkerEvent(
+  event: ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent | TablebaseWarmupWorkerEvent
+): event is TablebaseWarmupWorkerEvent {
+  return 'type' in event && event.type === 'tablebase_warmup';
 }
 
 function errorMessage(error: unknown): string {

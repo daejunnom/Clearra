@@ -45,6 +45,8 @@ pub(super) fn query_from_fixture(fixture: &PcScenarioFixture) -> Result<PcScenar
             use_all_logical_processors: None,
             cpu_warmup: None,
             gpu_warmup: None,
+            tablebase_requested: None,
+            precompute_build_dependencies: None,
             deterministic: scenario.deterministic(),
             max_frontier_states: scenario.max_frontier_states(),
             max_candidates: scenario.max_candidates(),

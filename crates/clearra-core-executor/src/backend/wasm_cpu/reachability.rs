@@ -1285,4 +1285,74 @@ fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8,
         _ => JLSTZ[index],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        best_scoring_lock_evidence, reverse_lock_reachable, ReachabilityScratch,
+        ReachabilityTemplate,
+    };
+    use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+    use clearra_rules::kicks::KickTableProfileId;
+
+    #[test]
+    fn srs_plus_triple_kick_dependency_changes_t_lock_reachability() {
+        const WIDTH: u8 = 5;
+        const HEIGHT: u8 = 6;
+
+        let template =
+            ReachabilityTemplate::compile(WIDTH, HEIGHT, PieceKind::T, KickTableProfileId::SrsPlus);
+        let mut scratch = ReachabilityScratch::default();
+
+        // L and the two Z placements form the lower TST cavity. The two gray
+        // cells are fixed field cells. J supplies the upper-left kick surface.
+        let without_j = board_mask(
+            WIDTH,
+            &[
+                (0, 0),
+                (1, 0),
+                (0, 1),
+                (0, 2),
+                (3, 0),
+                (4, 0),
+                (2, 1),
+                (3, 1),
+                (3, 2),
+                (4, 2),
+                (2, 3),
+                (3, 3),
+                (4, 1),
+                (4, 3),
+            ],
+        );
+        let with_j = without_j | board_mask(WIDTH, &[(0, 3), (0, 4), (0, 5), (1, 5)]);
+
+        assert!(
+            !reverse_lock_reachable(
+                &template,
+                without_j,
+                RotationState::Right,
+                1,
+                1,
+                &mut scratch,
+            )
+            .reachable
+        );
+        assert!(
+            reverse_lock_reachable(&template, with_j, RotationState::Right, 1, 1, &mut scratch,)
+                .reachable
+        );
+        let evidence =
+            best_scoring_lock_evidence(&template, with_j, RotationState::Right, 1, 1, &mut scratch)
+                .expect("J must enable the final T rotation");
+        assert!(evidence.last_action_was_rotation());
+        assert!(evidence.used_kick());
+    }
+
+    fn board_mask(width: u8, cells: &[(u8, u8)]) -> u64 {
+        cells.iter().fold(0_u64, |mask, &(x, y)| {
+            mask | (1_u64 << (usize::from(y) * usize::from(width) + usize::from(x)))
+        })
+    }
+}
 // SRP rationale: this module has one behavior-level change reason: exhaustive SRS+ lock reachability over compact WASM boards.

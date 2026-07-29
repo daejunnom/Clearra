@@ -1,6 +1,8 @@
 export type ClearraWasmModule = {
   compiled_module: () => WebAssembly.Module;
   configure_host: (capabilities: ClearraWasmHostCapabilities) => void;
+  install_tablebase: (artifact: ArrayBuffer) => ClearraTablebaseInstallReport;
+  release_tablebase: () => boolean;
   start_job: (commandText: string) => number;
   advance_job: (
     jobId: number,
@@ -26,6 +28,15 @@ export type ClearraWasmModule = {
   profile_start?: () => void;
   profile_finish?: () => unknown;
   failure_diagnostics: () => ClearraWasmFailureDiagnostics;
+};
+
+export type ClearraTablebaseInstallReport = {
+  schema_version: 12;
+  tier: 'compact-exact';
+  artifact_bytes: number;
+  certified_states: number;
+  certified_targets: number;
+  payload_sha256: string;
 };
 
 export type ClearraWasmFailureDiagnostics = {
@@ -87,6 +98,8 @@ type ClearraRawWasmExports = {
   clearra_wasm_input_ptr: () => number;
   clearra_wasm_transfer_resize: (byteLen: number) => number;
   clearra_wasm_transfer_ptr: () => number;
+  clearra_wasm_tablebase_install: () => number;
+  clearra_wasm_tablebase_release: () => number;
   clearra_wasm_distributed_prepare: () => number;
   clearra_wasm_distributed_worker_initialization: () => number;
   clearra_wasm_distributed_worker_initialization_deferred: () => number;
@@ -283,6 +296,29 @@ function wrapRawModule(
           flags
         )
       );
+    },
+    install_tablebase(artifact) {
+      setTransfer(artifact);
+      requireOk(raw.clearra_wasm_tablebase_install());
+      const report = JSON.parse(outputText()) as ClearraTablebaseInstallReport;
+      if (
+        report.schema_version !== 12 ||
+        report.tier !== 'compact-exact' ||
+        report.artifact_bytes !== artifact.byteLength ||
+        report.certified_targets !== 4_795 ||
+        !isSha256(report.payload_sha256)
+      ) {
+        throw new ClearraWasmRuntimeError(
+          'E_WASM_TABLEBASE_INSTALL',
+          'installed tablebase metadata is invalid'
+        );
+      }
+      return report;
+    },
+    release_tablebase() {
+      const status = raw.clearra_wasm_tablebase_release();
+      requireOk(status);
+      return status === 1;
     },
     start_job(commandText) {
       setCommand(commandText);

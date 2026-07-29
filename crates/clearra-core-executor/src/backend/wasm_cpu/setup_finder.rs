@@ -59,6 +59,8 @@ enum SetupSearchStage {
         completed: Vec<CompletedSetupCoverage>,
         geometry_family_count: String,
         geometry_expanded_nodes: usize,
+        tablebase_status: &'static str,
+        tablebase_pruned_states: usize,
     },
     Finished,
 }
@@ -99,6 +101,8 @@ impl WasmSetupSearchSession {
                     coverage_graph,
                     geometry_family_count,
                     geometry_expanded_nodes,
+                    tablebase_status,
+                    tablebase_pruned_states,
                     cached_coverage,
                 }) => {
                     if let Some(completed) = cached_path_detail_result(
@@ -113,6 +117,8 @@ impl WasmSetupSearchSession {
                             completed,
                             geometry_family_count,
                             geometry_expanded_nodes,
+                            tablebase_status,
+                            tablebase_pruned_states,
                             1,
                             false,
                             "setup-path-detail-graph-cache",
@@ -130,6 +136,8 @@ impl WasmSetupSearchSession {
                         completed: Vec::new(),
                         geometry_family_count,
                         geometry_expanded_nodes,
+                        tablebase_status,
+                        tablebase_pruned_states,
                     };
                     Ok(WasmSetupSearchAdvance::Pending)
                 }
@@ -144,6 +152,8 @@ impl WasmSetupSearchSession {
                 mut completed,
                 geometry_family_count,
                 geometry_expanded_nodes,
+                tablebase_status,
+                tablebase_pruned_states,
             } => {
                 if active.is_none() {
                     if next_condition == conditions.len() {
@@ -153,6 +163,8 @@ impl WasmSetupSearchSession {
                             completed,
                             geometry_family_count,
                             geometry_expanded_nodes,
+                            tablebase_status,
+                            tablebase_pruned_states,
                             1,
                             false,
                             "setup-family-quotient-serial",
@@ -186,6 +198,8 @@ impl WasmSetupSearchSession {
                             completed,
                             geometry_family_count,
                             geometry_expanded_nodes,
+                            tablebase_status,
+                            tablebase_pruned_states,
                         };
                         Ok(WasmSetupSearchAdvance::Pending)
                     }
@@ -203,6 +217,8 @@ impl WasmSetupSearchSession {
                             completed,
                             geometry_family_count,
                             geometry_expanded_nodes,
+                            tablebase_status,
+                            tablebase_pruned_states,
                         };
                         Ok(WasmSetupSearchAdvance::Pending)
                     }
@@ -221,6 +237,8 @@ pub(super) fn finish_setup_result(
     completed: Vec<CompletedSetupCoverage>,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
+    tablebase_status: &'static str,
+    tablebase_pruned_states: usize,
     workers_used: usize,
     parallel: bool,
     parallel_decision_reason: &'static str,
@@ -334,6 +352,15 @@ pub(super) fn finish_setup_result(
             (
                 "searched_nodes".to_owned(),
                 geometry_expanded_nodes.to_string(),
+            ),
+            (
+                "tablebase_requested".to_owned(),
+                query.tablebase_requested().to_string(),
+            ),
+            ("tablebase_status".to_owned(), tablebase_status.to_owned()),
+            (
+                "tablebase_pruned_states".to_owned(),
+                tablebase_pruned_states.to_string(),
             ),
             (
                 "partial_build_node_count".to_owned(),
@@ -1057,13 +1084,27 @@ fn unordered_positions_word(
     active
 }
 
+#[cfg(test)]
 pub(super) fn compile_setup_admissible_prefixes(
     conditions: &[SetupSearchCondition],
 ) -> Result<Vec<u32>, WasmExactSearchError> {
+    compile_setup_admissible_prefixes_with_word_counts(conditions).map(|(prefixes, _)| prefixes)
+}
+
+pub(super) fn compile_setup_admissible_prefixes_with_word_counts(
+    conditions: &[SetupSearchCondition],
+) -> Result<(Vec<u32>, Vec<usize>), WasmExactSearchError> {
     let mut prefixes = vec![0_u32];
+    let mut word_counts = Vec::new();
+    word_counts
+        .try_reserve_exact(conditions.len())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_pattern_word_count_storage_unavailable")
+        })?;
     for condition in conditions {
         let problem = condition.problem();
         let pattern_index = compile_setup_pattern_index(condition)?;
+        word_counts.push(pattern_index.word_count());
         let hold_enabled = problem.supply().hold_enabled();
         let projects_unplaced_lookahead = problem.supply().projects_unplaced_lookahead();
         let projects_standard_bag_lookahead = problem.supply().projects_standard_bag_lookahead();
@@ -1154,7 +1195,7 @@ pub(super) fn compile_setup_admissible_prefixes(
     }
     prefixes.sort_unstable();
     prefixes.dedup();
-    Ok(prefixes)
+    Ok((prefixes, word_counts))
 }
 
 #[derive(Clone, Copy, Default)]

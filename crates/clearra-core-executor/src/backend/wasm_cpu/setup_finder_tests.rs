@@ -8,7 +8,7 @@ use clearra_coverage::universe::{
 };
 use clearra_problem::{
     compile_setup_search_conditions, SetupCandidatePriority, SetupLengthPreference, SetupLimits,
-    SetupSearchQuery,
+    SetupPathDetail, SetupSearchQuery,
 };
 use clearra_supply::pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex};
 
@@ -415,4 +415,69 @@ fn iots_three_lock_setup_matches_fresh_pc_continuation_coverage() {
         candidate.build_covered_patterns()
     );
     assert_eq!(candidate.conditional_pc_probability(), "1.0");
+}
+
+#[test]
+#[ignore = "full SZ empty-4L symmetry acceptance; run in the release acceptance suite"]
+fn mirrored_one_lock_setups_have_identical_coverage_and_tiling_counts() {
+    const Z_SETUP_BOARD: u64 = 0xc060;
+    const S_SETUP_BOARD: u64 = 0xc018;
+
+    fn run(query: &SetupSearchQuery, control: &ExecutionControl) -> crate::CoreExecutionResult {
+        let mut session = WasmSetupSearchSession::new(query).expect("setup session");
+        loop {
+            match session.advance(8_192, control).expect("setup advance") {
+                WasmSetupSearchAdvance::Pending => {}
+                WasmSetupSearchAdvance::Completed(result) => break result,
+                WasmSetupSearchAdvance::Cancelled => panic!("setup search was not cancelled"),
+            }
+        }
+    }
+
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::S, PieceKind::Z])
+        .with_tablebase_requested(false);
+    let control = ExecutionControl::new(ExecutionCancellationToken::new());
+    let result = run(&query, &control);
+    let report = result.setup_finder_report().expect("setup report");
+    let condition = report
+        .hold_conditions()
+        .iter()
+        .find(|condition| condition.initial_hold().is_none())
+        .expect("empty-hold condition");
+    let z = condition
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.board_mask() == Z_SETUP_BOARD)
+        .expect("Z setup");
+    let s = condition
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.board_mask() == S_SETUP_BOARD)
+        .expect("S setup");
+
+    assert_eq!(z.build_covered_patterns(), s.build_covered_patterns());
+    assert_eq!(z.joint_covered_patterns(), s.joint_covered_patterns());
+    assert_eq!(z.joint_probability(), s.joint_probability());
+
+    let z_detail =
+        SetupPathDetail::from_setup_id(z.setup_id(), condition.condition_id()).expect("Z detail");
+    let s_detail =
+        SetupPathDetail::from_setup_id(s.setup_id(), condition.condition_id()).expect("S detail");
+    let z_detail_result = run(&query.clone().with_path_detail(z_detail), &control);
+    let s_detail_result = run(&query.clone().with_path_detail(s_detail), &control);
+    let z_paths = &z_detail_result
+        .setup_finder_report()
+        .expect("Z detail report")
+        .hold_conditions()[0]
+        .candidates()[0];
+    let s_paths = &s_detail_result
+        .setup_finder_report()
+        .expect("S detail report")
+        .hold_conditions()[0]
+        .candidates()[0];
+
+    assert!(z_paths.solution_paths_complete());
+    assert!(s_paths.solution_paths_complete());
+    assert_eq!(z_paths.solution_path_count(), s_paths.solution_path_count());
 }

@@ -516,7 +516,10 @@ pub(super) fn build_extended_order_graph(
         .reachability
         .visited_state_count()
         .saturating_sub(reachability_before);
-    let graph = BuildOrderGraph::from_topological_parts(specs, edges, 0, reachability_states)?;
+    // build_edge_added emits at most one edge per operation, and each
+    // operation advances to a distinct child subset.
+    let graph =
+        BuildOrderGraph::from_topological_parts(specs, edges, 0, reachability_states, true)?;
     let spin_graph = spin_candidate.map(|(candidate_id, candidate_key)| {
         let mut live_nodes = Vec::with_capacity(graph.nodes.len());
         let mut live_edges = Vec::new();

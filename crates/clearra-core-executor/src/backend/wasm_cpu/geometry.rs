@@ -15,7 +15,9 @@ use super::{
     geometry_domain::{hall_impossible, DomainPropagation, DomainStatus},
     geometry_family::{FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
     geometry_projection::ProjectionReachabilityCache,
-    mix_digest, piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
+    mix_digest,
+    pc4_tablebase::{Pc4CompactTablebase, Pc4TablebaseLookup},
+    piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
 const NO_ROW: u32 = u32::MAX;
@@ -62,7 +64,7 @@ impl GeometryCandidate {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ResidualKey {
     remaining: u64,
     packed_counts: u32,
@@ -130,10 +132,13 @@ impl ResidualMemo {
         None
     }
 
-    fn insert(&mut self, key: ResidualKey, suffix_family: u32) {
-        if self.insertion_disabled || self.lookup(key).is_some() {
+    // Every caller has just observed a miss. Residual recursion strictly removes cells,
+    // so the same key cannot be inserted by a descendant while it is being evaluated.
+    fn insert_after_miss(&mut self, key: ResidualKey, suffix_family: u32) {
+        if self.insertion_disabled {
             return;
         }
+        debug_assert!(self.lookup(key).is_none());
         if self.entry_count == u32::MAX {
             self.insertion_disabled = true;
             return;
@@ -146,6 +151,7 @@ impl ResidualMemo {
             self.insertion_disabled = true;
             return;
         }
+        self.grow_buckets_if_needed();
         let bucket = residual_hash(key) as usize & (self.bucket_heads.len() - 1);
         let previous = self.bucket_heads[bucket];
         let Some(chunk) = self.chunks.last_mut() else {
@@ -160,6 +166,39 @@ impl ResidualMemo {
         chunk.next.push(previous);
         self.entry_count += 1;
         self.bucket_heads[bucket] = self.entry_count;
+    }
+
+    fn grow_buckets_if_needed(&mut self) {
+        const MAX_BUCKET_COUNT: usize = 1 << 24;
+        if self.bucket_heads.len() >= MAX_BUCKET_COUNT
+            || (self.entry_count as usize) < self.bucket_heads.len().saturating_mul(2)
+        {
+            return;
+        }
+        let new_len = self
+            .bucket_heads
+            .len()
+            .saturating_mul(2)
+            .min(MAX_BUCKET_COUNT);
+        let mut new_heads = Vec::new();
+        if new_heads.try_reserve_exact(new_len).is_err() {
+            return;
+        }
+        new_heads.resize(new_len, 0_u32);
+        for index in 0..self.entry_count {
+            let entry = self
+                .entry(index)
+                .expect("residual memo entry index is valid");
+            let bucket = residual_hash(ResidualKey {
+                remaining: entry.remaining,
+                packed_counts: entry.packed_counts,
+            }) as usize
+                & (new_len - 1);
+            let previous = new_heads[bucket];
+            self.set_next(index, previous);
+            new_heads[bucket] = index + 1;
+        }
+        self.bucket_heads = new_heads;
     }
 
     fn push_chunk(&mut self) -> bool {
@@ -197,6 +236,16 @@ impl ResidualMemo {
             .copied()
     }
 
+    fn set_next(&mut self, index: u32, next: u32) {
+        let index = index as usize;
+        let slot = self
+            .chunks
+            .get_mut(index / RESIDUAL_ENTRY_CHUNK_CAPACITY)
+            .and_then(|chunk| chunk.next.get_mut(index % RESIDUAL_ENTRY_CHUNK_CAPACITY))
+            .expect("residual memo link index is valid");
+        *slot = next;
+    }
+
     fn retained_bytes(&self) -> usize {
         self.bucket_heads.capacity() * core::mem::size_of::<u32>()
             + self.chunks.capacity() * core::mem::size_of::<ResidualChunk>()
@@ -215,16 +264,78 @@ fn residual_hash(key: ResidualKey) -> u64 {
     mix_digest(mix_digest(0, key.remaining), u64::from(key.packed_counts))
 }
 
+#[cfg(test)]
+mod residual_memo_tests {
+    use super::{ResidualKey, ResidualMemo};
+
+    #[test]
+    fn growing_residual_memo_preserves_every_exact_entry() {
+        let mut memo = ResidualMemo::new(0);
+        let initial_bucket_count = memo.bucket_heads.len();
+        let entry_count = initial_bucket_count * 2 + 1;
+
+        for index in 0..entry_count {
+            let key = ResidualKey {
+                remaining: index as u64,
+                packed_counts: (index as u32).rotate_left(11),
+            };
+            assert_eq!(memo.lookup(key), None);
+            memo.insert_after_miss(key, index as u32);
+        }
+
+        assert!(memo.bucket_heads.len() > initial_bucket_count);
+        for index in 0..entry_count {
+            let key = ResidualKey {
+                remaining: index as u64,
+                packed_counts: (index as u32).rotate_left(11),
+            };
+            assert_eq!(memo.lookup(key), Some(index as u32));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FamilyCompileDomain {
+    PermutationClosedGeometry,
+    PermutationClosedPostClearResidual,
+}
+
+impl FamilyCompileDomain {
+    pub(super) const fn allows_component_composition(self) -> bool {
+        matches!(
+            self,
+            Self::PermutationClosedGeometry | Self::PermutationClosedPostClearResidual
+        )
+    }
+}
+
 struct GeometryCompilerState {
     family: GeometrySolutionFamily,
     residual_memo: ResidualMemo,
-    admissible_prefixes: Vec<u32>,
+    geometry_prefixes: Vec<u32>,
     projection_cache: ProjectionReachabilityCache,
+    tablebase: Option<Arc<Pc4CompactTablebase>>,
+    compile_domain: FamilyCompileDomain,
+}
+
+impl GeometryCompilerState {
+    fn empty_post_clear_permutation_closed(target_depth: u8, geometry_prefixes: Vec<u32>) -> Self {
+        Self {
+            family: GeometrySolutionFamily::new(),
+            residual_memo: ResidualMemo::new(target_depth),
+            geometry_prefixes,
+            projection_cache: ProjectionReachabilityCache::default(),
+            tablebase: None,
+            compile_domain: FamilyCompileDomain::PermutationClosedPostClearResidual,
+        }
+    }
 }
 
 pub(super) struct GeometryCompletionOracle {
-    state: Option<GeometryCompilerState>,
+    permutation_closed_state: Option<GeometryCompilerState>,
+    post_clear_state: Option<GeometryCompilerState>,
     targets: Arc<[TargetGroup]>,
+    execution_prefixes: Vec<u32>,
     target_depth: u8,
     traversal_marks: Vec<u32>,
     row_marks: Vec<u32>,
@@ -238,6 +349,7 @@ impl GeometryCompletionOracle {
     fn new(
         state: GeometryCompilerState,
         targets: Arc<[TargetGroup]>,
+        execution_prefixes: Vec<u32>,
         target_depth: u8,
         skeleton_count: usize,
     ) -> Result<Self, WasmExactSearchError> {
@@ -256,9 +368,15 @@ impl GeometryCompletionOracle {
             WasmExactSearchError::InvalidProblem("setup_completion_row_storage_unavailable")
         })?;
         row_marks.resize(skeleton_count, 0);
+        let post_clear_state = GeometryCompilerState::empty_post_clear_permutation_closed(
+            target_depth,
+            state.geometry_prefixes.clone(),
+        );
         Ok(Self {
-            state: Some(state),
+            permutation_closed_state: Some(state),
+            post_clear_state: Some(post_clear_state),
             targets,
+            execution_prefixes,
             target_depth,
             traversal_marks,
             row_marks,
@@ -273,26 +391,39 @@ impl GeometryCompletionOracle {
         &mut self,
         remaining: u64,
         packed_counts: u32,
+        after_line_clear: bool,
         catalog: &GeometryCatalog,
         output: &mut Vec<u32>,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
         output.clear();
-        if remaining == 0 {
+        if remaining == 0
+            || self
+                .execution_prefixes
+                .binary_search(&packed_counts)
+                .is_err()
+        {
             return Ok(());
         }
-        let root = self.ensure_family_root(
+        let compile_domain = if after_line_clear {
+            FamilyCompileDomain::PermutationClosedPostClearResidual
+        } else {
+            FamilyCompileDomain::PermutationClosedGeometry
+        };
+        let (root, _) = self.ensure_family_root(
             ResidualKey {
                 remaining,
                 packed_counts,
             },
+            compile_domain,
             catalog,
             control,
         )?;
         if root == FAMILY_INVALID || root == FAMILY_EMPTY {
             return Ok(());
         }
-        self.collect_family_rows(root)?;
+        self.ensure_traversal_capacity(compile_domain)?;
+        self.collect_family_rows(root, compile_domain)?;
 
         let mut candidates = std::mem::take(&mut self.candidate_rows);
         candidates.sort_unstable();
@@ -300,10 +431,6 @@ impl GeometryCompletionOracle {
         output.try_reserve(candidates.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_completion_output_storage_unavailable")
         })?;
-        let state = self
-            .state
-            .as_ref()
-            .expect("setup completion compiler state exists");
         for row_id in candidates.iter().copied() {
             let row = catalog.skeleton(row_id);
             if row.cells & remaining != row.cells {
@@ -312,11 +439,7 @@ impl GeometryCompletionOracle {
             let Some(next_counts) = add_packed_piece(packed_counts, piece_index(row.piece)) else {
                 continue;
             };
-            if state
-                .admissible_prefixes
-                .binary_search(&next_counts)
-                .is_ok()
-            {
+            if self.execution_prefixes.binary_search(&next_counts).is_ok() {
                 output.push(row_id);
             }
         }
@@ -325,7 +448,11 @@ impl GeometryCompletionOracle {
         Ok(())
     }
 
-    fn collect_family_rows(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
+    fn collect_family_rows(
+        &mut self,
+        root: u32,
+        compile_domain: FamilyCompileDomain,
+    ) -> Result<(), WasmExactSearchError> {
         self.candidate_rows.clear();
         self.advance_traversal_generation();
         self.advance_row_generation();
@@ -350,9 +477,7 @@ impl GeometryCompletionOracle {
             }
             *mark = self.traversal_generation;
             let node = self
-                .state
-                .as_ref()
-                .expect("setup completion compiler state exists")
+                .compiler_state(compile_domain)
                 .family
                 .node(reference)
                 .ok_or(WasmExactSearchError::InvalidProblem(
@@ -382,43 +507,37 @@ impl GeometryCompletionOracle {
     fn ensure_family_root(
         &mut self,
         key: ResidualKey,
+        compile_domain: FamilyCompileDomain,
         catalog: &GeometryCatalog,
         control: &ExecutionControl,
-    ) -> Result<u32, WasmExactSearchError> {
+    ) -> Result<(u32, bool), WasmExactSearchError> {
         if let Some(root) = self
-            .state
-            .as_ref()
-            .expect("setup completion compiler state exists")
+            .compiler_state(compile_domain)
             .residual_memo
             .lookup(key)
         {
-            return Ok(root);
+            return Ok((root, true));
         }
 
         let used_counts = unpack_piece_counts(key.packed_counts);
         let used_total = used_counts.iter().copied().sum::<u8>();
-        let state = self
-            .state
-            .as_ref()
-            .expect("setup completion compiler state exists");
+        let state = self.compiler_state(compile_domain);
         let valid = used_total <= self.target_depth
             && key.remaining.count_ones() as usize
                 == usize::from(self.target_depth - used_total) * 4
             && state
-                .admissible_prefixes
+                .geometry_prefixes
                 .binary_search(&key.packed_counts)
                 .is_ok();
         if !valid {
-            self.state
-                .as_mut()
-                .expect("setup completion compiler state exists")
+            self.compiler_state_mut(compile_domain)
                 .residual_memo
-                .insert(key, FAMILY_INVALID);
-            return Ok(FAMILY_INVALID);
+                .insert_after_miss(key, FAMILY_INVALID);
+            return Ok((FAMILY_INVALID, false));
         }
 
         let state = self
-            .state
+            .compiler_state_slot(compile_domain)
             .take()
             .expect("setup completion compiler state exists");
         let mut compiler = FamilyCompiler::from_residual(
@@ -430,7 +549,7 @@ impl GeometryCompletionOracle {
         let mut work = 0_usize;
         loop {
             if work & 1023 == 0 && control.is_cancelled() {
-                self.state = Some(compiler.into_completion_state());
+                *self.compiler_state_slot(compile_domain) = Some(compiler.into_completion_state());
                 return Err(WasmExactSearchError::Cancelled);
             }
             work = work.saturating_add(1);
@@ -438,12 +557,13 @@ impl GeometryCompletionOracle {
                 CompileAdvance::Pending => {}
                 CompileAdvance::Complete => {
                     let root = compiler.root_family;
-                    self.state = Some(compiler.into_completion_state());
-                    self.ensure_traversal_capacity()?;
-                    return Ok(root);
+                    *self.compiler_state_slot(compile_domain) =
+                        Some(compiler.into_completion_state());
+                    return Ok((root, false));
                 }
                 CompileAdvance::ResourceIncomplete => {
-                    self.state = Some(compiler.into_completion_state());
+                    *self.compiler_state_slot(compile_domain) =
+                        Some(compiler.into_completion_state());
                     return Err(WasmExactSearchError::InvalidProblem(
                         "setup_completion_family_storage_unavailable",
                     ));
@@ -452,14 +572,11 @@ impl GeometryCompletionOracle {
         }
     }
 
-    fn ensure_traversal_capacity(&mut self) -> Result<(), WasmExactSearchError> {
-        let required = self
-            .state
-            .as_ref()
-            .expect("setup completion compiler state exists")
-            .family
-            .node_count() as usize
-            + 2;
+    fn ensure_traversal_capacity(
+        &mut self,
+        compile_domain: FamilyCompileDomain,
+    ) -> Result<(), WasmExactSearchError> {
+        let required = self.compiler_state(compile_domain).family.node_count() as usize + 2;
         if required <= self.traversal_marks.len() {
             return Ok(());
         }
@@ -487,6 +604,41 @@ impl GeometryCompletionOracle {
         if self.row_generation == 0 {
             self.row_marks.fill(0);
             self.row_generation = 1;
+        }
+    }
+
+    fn compiler_state(&self, compile_domain: FamilyCompileDomain) -> &GeometryCompilerState {
+        self.compiler_state_slot_ref(compile_domain)
+            .as_ref()
+            .expect("setup completion compiler state exists")
+    }
+
+    fn compiler_state_mut(
+        &mut self,
+        compile_domain: FamilyCompileDomain,
+    ) -> &mut GeometryCompilerState {
+        self.compiler_state_slot(compile_domain)
+            .as_mut()
+            .expect("setup completion compiler state exists")
+    }
+
+    fn compiler_state_slot_ref(
+        &self,
+        compile_domain: FamilyCompileDomain,
+    ) -> &Option<GeometryCompilerState> {
+        match compile_domain {
+            FamilyCompileDomain::PermutationClosedGeometry => &self.permutation_closed_state,
+            FamilyCompileDomain::PermutationClosedPostClearResidual => &self.post_clear_state,
+        }
+    }
+
+    fn compiler_state_slot(
+        &mut self,
+        compile_domain: FamilyCompileDomain,
+    ) -> &mut Option<GeometryCompilerState> {
+        match compile_domain {
+            FamilyCompileDomain::PermutationClosedGeometry => &mut self.permutation_closed_state,
+            FamilyCompileDomain::PermutationClosedPostClearResidual => &mut self.post_clear_state,
         }
     }
 }
@@ -525,13 +677,14 @@ struct CompileFrame {
     component_entry_cursor: usize,
     component_entry_end: usize,
     component_scratch_checkpoint: usize,
+    tablebase_eligible: bool,
     domain: DomainPropagation,
     union_levels: [u32; UNION_LEVEL_COUNT],
 }
 
 impl CompileFrame {
     fn root(remaining: u64) -> Self {
-        Self::child(remaining, 0, NO_ROW, 0)
+        Self::child(remaining, 0, NO_ROW, 0, true)
     }
 
     fn child(
@@ -539,6 +692,7 @@ impl CompileFrame {
         depth: u8,
         chosen_row: u32,
         component_scratch_checkpoint: usize,
+        tablebase_eligible: bool,
     ) -> Self {
         Self {
             remaining,
@@ -560,6 +714,7 @@ impl CompileFrame {
             component_entry_cursor: 0,
             component_entry_end: 0,
             component_scratch_checkpoint,
+            tablebase_eligible,
             domain: DomainPropagation::empty(),
             union_levels: [FAMILY_INVALID; UNION_LEVEL_COUNT],
         }
@@ -575,7 +730,9 @@ enum CompileAdvance {
 #[derive(Debug)]
 struct FamilyCompiler {
     targets: Arc<[TargetGroup]>,
+    tablebase: Option<Arc<Pc4CompactTablebase>>,
     admissible_prefixes: Vec<u32>,
+    compile_domain: FamilyCompileDomain,
     used_counts: [u8; 7],
     stack: Vec<CompileFrame>,
     residual_memo: ResidualMemo,
@@ -590,23 +747,31 @@ struct FamilyCompiler {
     hall_pruned_states: usize,
     column_pruned_states: usize,
     component_compositions: usize,
+    tablebase_pruned_states: usize,
 }
 
 impl FamilyCompiler {
-    fn new(required_cells: u64, targets: Arc<[TargetGroup]>) -> Self {
+    fn new(
+        required_cells: u64,
+        targets: Arc<[TargetGroup]>,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
+    ) -> Self {
         let admissible_prefixes = compile_admissible_prefixes(&targets);
-        Self::new_with_admissible_prefixes(required_cells, targets, admissible_prefixes)
+        Self::new_with_admissible_prefixes(required_cells, targets, admissible_prefixes, tablebase)
     }
 
     fn new_with_admissible_prefixes(
         required_cells: u64,
         targets: Arc<[TargetGroup]>,
         admissible_prefixes: Vec<u32>,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Self {
         let target_depth = targets.first().map_or(0, |target| target.key.total_count());
         Self {
             targets,
+            tablebase,
             admissible_prefixes,
+            compile_domain: FamilyCompileDomain::PermutationClosedGeometry,
             used_counts: [0; 7],
             stack: vec![CompileFrame::root(required_cells)],
             residual_memo: ResidualMemo::new(target_depth),
@@ -621,6 +786,7 @@ impl FamilyCompiler {
             hall_pruned_states: 0,
             column_pruned_states: 0,
             component_compositions: 0,
+            tablebase_pruned_states: 0,
         }
     }
 
@@ -634,9 +800,11 @@ impl FamilyCompiler {
         let depth = used_counts.iter().copied().sum();
         Self {
             targets,
-            admissible_prefixes: state.admissible_prefixes,
+            tablebase: state.tablebase,
+            admissible_prefixes: state.geometry_prefixes,
+            compile_domain: state.compile_domain,
             used_counts,
-            stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0)],
+            stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0, true)],
             residual_memo: state.residual_memo,
             projection_cache: state.projection_cache,
             family: state.family,
@@ -649,6 +817,7 @@ impl FamilyCompiler {
             hall_pruned_states: 0,
             column_pruned_states: 0,
             component_compositions: 0,
+            tablebase_pruned_states: 0,
         }
     }
 
@@ -656,8 +825,10 @@ impl FamilyCompiler {
         GeometryCompilerState {
             family: self.family,
             residual_memo: self.residual_memo,
-            admissible_prefixes: self.admissible_prefixes,
+            geometry_prefixes: self.admissible_prefixes,
             projection_cache: self.projection_cache,
+            tablebase: self.tablebase,
+            compile_domain: self.compile_domain,
         }
     }
 
@@ -675,6 +846,15 @@ impl FamilyCompiler {
             self.stack[top_index].key = key;
             if let Some(family) = self.residual_memo.lookup(key) {
                 return self.finish_top(catalog, family, false);
+            }
+            if self.stack[top_index].tablebase_eligible
+                && self.tablebase.as_ref().is_some_and(|tablebase| {
+                    tablebase.lookup_placed_field(catalog.required_cells() ^ remaining)
+                        == Pc4TablebaseLookup::ExactDead
+                })
+            {
+                self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
+                return self.finish_top(catalog, FAMILY_INVALID, true);
             }
 
             self.expanded_nodes = self.expanded_nodes.saturating_add(1);
@@ -695,8 +875,32 @@ impl FamilyCompiler {
             }
 
             let feasible_piece_mask = self.feasible_piece_mask();
-            let component_analysis_enabled = self.target_depth >= 7;
-            let advanced_domain = component_analysis_enabled && catalog.initial_board() != 0;
+            if self.stack[top_index].tablebase_eligible
+                && self.tablebase.as_ref().is_some_and(|tablebase| {
+                    tablebase.lookup_placed_field_with_piece_mask(
+                        catalog.required_cells() ^ remaining,
+                        feasible_piece_mask,
+                    ) == Pc4TablebaseLookup::ExactDead
+                })
+            {
+                self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
+                return self.finish_top(catalog, FAMILY_INVALID, true);
+            }
+            if self.stack[top_index].tablebase_eligible
+                && self.tablebase.as_ref().is_some_and(|tablebase| {
+                    self.all_admissible_target_counts_are_dead(
+                        tablebase,
+                        catalog.required_cells() ^ remaining,
+                    )
+                })
+            {
+                self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
+                return self.finish_top(catalog, FAMILY_INVALID, true);
+            }
+            let advanced_analysis_enabled = self.target_depth >= 7;
+            let component_composition_enabled =
+                advanced_analysis_enabled && self.compile_domain.allows_component_composition();
+            let advanced_domain = advanced_analysis_enabled && catalog.initial_board() != 0;
             let (domain_status, domain, cell_piece_masks) = if advanced_domain {
                 let compilation =
                     DomainPropagation::compile(catalog, remaining, feasible_piece_mask);
@@ -741,7 +945,7 @@ impl FamilyCompiler {
                 self.column_pruned_states = self.column_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
-            if component_analysis_enabled {
+            if component_composition_enabled {
                 match compile_component_plan(
                     catalog,
                     remaining,
@@ -816,6 +1020,7 @@ impl FamilyCompiler {
                 frame.depth + component_piece_count,
                 NO_ROW,
                 self.component_entries.len(),
+                false,
             );
             child.chosen_component_family = entry.family;
             child.chosen_component_signature = entry.piece_signature;
@@ -825,6 +1030,7 @@ impl FamilyCompiler {
         if frame.support_cursor < frame.support_end {
             self.stack[top_index].support_cursor += 1;
             let row_id = catalog.support(frame.support_cell)[frame.support_cursor];
+            let row = catalog.skeleton(row_id);
             if !frame.domain.row_allowed(
                 catalog,
                 row_id,
@@ -833,7 +1039,6 @@ impl FamilyCompiler {
             ) {
                 return CompileAdvance::Pending;
             }
-            let row = catalog.skeleton(row_id);
             self.used_counts[piece_index(row.piece)] += 1;
             if self.stack.try_reserve(1).is_err() {
                 self.used_counts[piece_index(row.piece)] -= 1;
@@ -844,6 +1049,7 @@ impl FamilyCompiler {
                 frame.depth + 1,
                 row_id,
                 self.component_entries.len(),
+                frame.tablebase_eligible,
             ));
             return CompileAdvance::Pending;
         }
@@ -864,7 +1070,8 @@ impl FamilyCompiler {
         self.component_entries
             .truncate(frame.component_scratch_checkpoint);
         if memoize {
-            self.residual_memo.insert(frame.key, suffix_family);
+            self.residual_memo
+                .insert_after_miss(frame.key, suffix_family);
         }
         if frame.chosen_row == NO_ROW && frame.chosen_component_family == FAMILY_INVALID {
             self.root_family = suffix_family;
@@ -938,6 +1145,33 @@ impl FamilyCompiler {
         feasible_piece_mask_for(&self.admissible_prefixes, self.used_counts)
     }
 
+    fn all_admissible_target_counts_are_dead(
+        &self,
+        tablebase: &Pc4CompactTablebase,
+        placed_field: u64,
+    ) -> bool {
+        let mut found_admissible_target = false;
+        for target in self.targets.iter() {
+            let target_counts = target.key.counts();
+            if target_counts
+                .iter()
+                .zip(self.used_counts)
+                .any(|(target, used)| *target < used)
+            {
+                continue;
+            }
+            found_admissible_target = true;
+            let remaining_counts =
+                std::array::from_fn(|piece| target_counts[piece] - self.used_counts[piece]);
+            if tablebase.lookup_placed_field_with_remaining_counts(placed_field, remaining_counts)
+                != Pc4TablebaseLookup::ExactDead
+            {
+                return false;
+            }
+        }
+        found_admissible_target
+    }
+
     fn completed_target(&self) -> Option<&TargetGroup> {
         let key = PieceMultisetKey::from_counts(self.used_counts);
         self.targets
@@ -987,19 +1221,22 @@ pub(super) enum GeometryFamilyCompileAdvance {
 
 pub(super) struct GeometryFamilyCompileSession {
     compiler: Option<FamilyCompiler>,
+    execution_prefixes: Vec<u32>,
 }
 
 pub(super) struct CompiledGeometryFamily {
     pub completion_oracle: GeometryCompletionOracle,
     pub candidate_family_count: Option<u128>,
     pub expanded_nodes: usize,
+    pub tablebase_pruned_states: usize,
 }
 
 impl GeometryFamilyCompileSession {
-    pub fn new(
+    pub fn new_with_tablebase(
         required_cells: u64,
         mut target_keys: Vec<PieceMultisetKey>,
-        mut admissible_prefixes: Vec<u32>,
+        mut execution_prefixes: Vec<u32>,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Result<Self, WasmExactSearchError> {
         target_keys.sort_unstable();
         target_keys.dedup();
@@ -1017,11 +1254,11 @@ impl GeometryFamilyCompileSession {
                 "setup_geometry_target_depth_mismatch",
             ));
         }
-        admissible_prefixes.sort_unstable();
-        admissible_prefixes.dedup();
-        if admissible_prefixes.binary_search(&0).is_err()
+        execution_prefixes.sort_unstable();
+        execution_prefixes.dedup();
+        if execution_prefixes.binary_search(&0).is_err()
             || target_keys.iter().any(|target| {
-                admissible_prefixes
+                execution_prefixes
                     .binary_search(&pack_piece_counts(target.counts()))
                     .is_err()
             })
@@ -1030,6 +1267,7 @@ impl GeometryFamilyCompileSession {
                 "setup_geometry_admissible_prefix_domain_incomplete",
             ));
         }
+
         let possible_patterns = Arc::new(PatternBitSet::all(1));
         let targets = target_keys
             .into_iter()
@@ -1041,12 +1279,15 @@ impl GeometryFamilyCompileSession {
                 pattern_index: None,
             })
             .collect::<Vec<_>>();
+        let compiler_prefixes = compile_admissible_prefixes(&targets);
         Ok(Self {
             compiler: Some(FamilyCompiler::new_with_admissible_prefixes(
                 required_cells,
                 targets.into(),
-                admissible_prefixes,
+                compiler_prefixes,
+                tablebase,
             )),
+            execution_prefixes,
         })
     }
 
@@ -1061,8 +1302,8 @@ impl GeometryFamilyCompileSession {
                 "setup_geometry_compile_session_already_finished",
             );
         };
-        for _ in 0..work_budget.max(1) {
-            if control.is_cancelled() {
+        for work in 0..work_budget.max(1) {
+            if work & 1023 == 0 && control.is_cancelled() {
                 return GeometryFamilyCompileAdvance::Cancelled;
             }
             match compiler.advance(catalog) {
@@ -1078,10 +1319,13 @@ impl GeometryFamilyCompileSession {
                     let targets = Arc::clone(&compiler.targets);
                     let target_depth = compiler.target_depth;
                     let expanded_nodes = compiler.expanded_nodes;
+                    let tablebase_pruned_states = compiler.tablebase_pruned_states;
                     let state = compiler.into_completion_state();
+                    let execution_prefixes = std::mem::take(&mut self.execution_prefixes);
                     let completion_oracle = match GeometryCompletionOracle::new(
                         state,
                         targets,
+                        execution_prefixes,
                         target_depth,
                         catalog.skeleton_count(),
                     ) {
@@ -1097,11 +1341,20 @@ impl GeometryFamilyCompileSession {
                         completion_oracle,
                         candidate_family_count,
                         expanded_nodes,
+                        tablebase_pruned_states,
                     });
                 }
             }
         }
         GeometryFamilyCompileAdvance::Pending
+    }
+
+    pub(super) fn progress_nodes(&self) -> usize {
+        self.compiler.as_ref().map_or(0, |compiler| {
+            compiler
+                .expanded_nodes
+                .saturating_add(compiler.family.node_count() as usize)
+        })
     }
 }
 
@@ -1464,6 +1717,7 @@ pub(super) struct GeometrySearch {
     hall_pruned_states: usize,
     column_pruned_states: usize,
     component_compositions: usize,
+    tablebase_pruned_states: usize,
     external_targets: Option<Arc<[TargetGroup]>>,
 }
 
@@ -1564,6 +1818,7 @@ impl GeometrySearch {
             hall_pruned_states: 0,
             column_pruned_states: 0,
             component_compositions: 0,
+            tablebase_pruned_states: 0,
             external_targets: None,
         }
     }
@@ -1578,13 +1833,37 @@ impl GeometrySearch {
         Ok(Self::new_shared(required_cells, &shared))
     }
 
+    pub fn new_with_tablebase(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        required_cells: u64,
+        compile_pattern_indexes: bool,
+        tablebase: Arc<Pc4CompactTablebase>,
+    ) -> Result<Self, WasmExactSearchError> {
+        let shared = SharedTargetGroups::compile(universe, family, compile_pattern_indexes)?;
+        Ok(Self::new_shared_with_tablebase(
+            required_cells,
+            &shared,
+            Some(tablebase),
+        ))
+    }
+
     pub fn new_shared(required_cells: u64, shared: &SharedTargetGroups) -> Self {
+        Self::new_shared_with_tablebase(required_cells, shared, None)
+    }
+
+    fn new_shared_with_tablebase(
+        required_cells: u64,
+        shared: &SharedTargetGroups,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
+    ) -> Self {
         Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
             shared_family_bytes: 0,
             compiler: Some(FamilyCompiler::new(
                 required_cells,
                 Arc::clone(&shared.targets),
+                tablebase,
             )),
             enumerator: None,
             expanded_nodes: 0,
@@ -1594,6 +1873,7 @@ impl GeometrySearch {
             hall_pruned_states: 0,
             column_pruned_states: 0,
             component_compositions: 0,
+            tablebase_pruned_states: 0,
             external_targets: None,
         }
     }
@@ -1619,6 +1899,7 @@ impl GeometrySearch {
             hall_pruned_states: 0,
             column_pruned_states: 0,
             component_compositions: 0,
+            tablebase_pruned_states: 0,
             external_targets: Some(Arc::clone(&shared.targets)),
         }
     }
@@ -1728,6 +2009,7 @@ impl GeometrySearch {
                 hall_pruned_states: usize::from(index == 0) * self.hall_pruned_states,
                 column_pruned_states: usize::from(index == 0) * self.column_pruned_states,
                 component_compositions: usize::from(index == 0) * self.component_compositions,
+                tablebase_pruned_states: usize::from(index == 0) * self.tablebase_pruned_states,
                 external_targets: None,
             });
         }
@@ -1780,6 +2062,9 @@ impl GeometrySearch {
             geometry.component_compositions = geometry
                 .component_compositions
                 .saturating_add(search.component_compositions);
+            geometry.tablebase_pruned_states = geometry
+                .tablebase_pruned_states
+                .saturating_add(search.tablebase_pruned_states);
             geometry.candidate_family_count = geometry
                 .candidate_family_count
                 .and_then(|total| search.candidate_family_count?.checked_add(total));
@@ -1795,6 +2080,7 @@ impl GeometrySearch {
             self.hall_pruned_states = compiler.hall_pruned_states;
             self.column_pruned_states = compiler.column_pruned_states;
             self.component_compositions = compiler.component_compositions;
+            self.tablebase_pruned_states = compiler.tablebase_pruned_states;
         }
     }
 
@@ -1824,6 +2110,10 @@ impl GeometrySearch {
 
     pub const fn component_compositions(&self) -> usize {
         self.component_compositions
+    }
+
+    pub const fn tablebase_pruned_states(&self) -> usize {
+        self.tablebase_pruned_states
     }
 
     pub fn target(&self, target_index: u32) -> Option<&TargetGroup> {

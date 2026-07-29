@@ -24,6 +24,87 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn browser_tablebase_is_opt_in_for_pc_and_setup() {
+    let default_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu")
+        .expect("default PC command")
+        .to_app_request()
+        .expect("default PC request");
+    let AppCommand::Pc(command) = default_pc.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert!(!command.query().execution_policy().tablebase_requested());
+
+    let enabled_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu --tb")
+        .expect("TB PC command")
+        .to_app_request()
+        .expect("TB PC request");
+    let AppCommand::Pc(command) = enabled_pc.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert!(command.query().execution_policy().tablebase_requested());
+
+    let enabled_setup = WebCommandParser::parse("clearra setup --remaining IOTSZJL --tablebase")
+        .expect("TB setup command")
+        .to_app_request()
+        .expect("TB setup request");
+    let AppCommand::Setup(command) = enabled_setup.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    assert!(command.query().tablebase_requested());
+
+    let disabled_setup =
+        WebCommandParser::parse("clearra setup --remaining IOTSZJL --no-tablebase")
+            .expect("disabled TB setup command")
+            .to_app_request()
+            .expect("disabled TB setup request");
+    let AppCommand::Setup(command) = disabled_setup.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    assert!(!command.query().tablebase_requested());
+}
+
+#[test]
+fn browser_build_dependency_dag_is_opt_in_for_pc() {
+    let default_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu")
+        .expect("default PC command")
+        .to_app_request()
+        .expect("default PC request");
+    let AppCommand::Pc(command) = default_pc.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert!(!command
+        .query()
+        .execution_policy()
+        .precompute_build_dependencies());
+
+    let enabled_pc =
+        WebCommandParser::parse("clearra pc --lines 4 --backend cpu --build-dependency-dag")
+            .expect("dependency DAG PC command")
+            .to_app_request()
+            .expect("dependency DAG PC request");
+    let AppCommand::Pc(command) = enabled_pc.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert!(command
+        .query()
+        .execution_policy()
+        .precompute_build_dependencies());
+
+    let disabled_pc =
+        WebCommandParser::parse("clearra pc --lines 4 --backend cpu --no-build-dependency-dag")
+            .expect("disabled dependency DAG PC command")
+            .to_app_request()
+            .expect("disabled dependency DAG PC request");
+    let AppCommand::Pc(command) = disabled_pc.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert!(!command
+        .query()
+        .execution_policy()
+        .precompute_build_dependencies());
+}
+
+#[test]
 fn pc_queue_knowledge_defaults_to_full_future_oracle() {
     let request = WebCommandParser::parse("clearra pc --lines 4 --patterns P7P4")
         .expect("web command")
@@ -495,6 +576,39 @@ fn build_probability_back_to_back_preservation_reaches_the_core_query() {
         objective.execution_constraints().spin_profile().as_str(),
         "t-spins-plus"
     );
+}
+
+#[test]
+fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
+    let enabled = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --build-dependency-dag",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+    let AppCommand::BuildProbability(enabled) = enabled.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert!(enabled
+        .query()
+        .core_query()
+        .execution_policy()
+        .precompute_build_dependencies());
+
+    let disabled = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+    let AppCommand::BuildProbability(disabled) = disabled.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert!(!disabled
+        .query()
+        .core_query()
+        .execution_policy()
+        .precompute_build_dependencies());
 }
 
 #[test]

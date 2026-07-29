@@ -1,3 +1,5 @@
+#[cfg(feature = "wasm-cpu-runtime")]
+use crate::error::CliErrorCode;
 use crate::{
     args::{ParsedCliCommand, ParsedCliInvocation},
     assemble::CliAppRequestAssembler,
@@ -6,7 +8,11 @@ use crate::{
 };
 use clearra_app::{io::AppFilePolicy, AppContext};
 #[cfg(feature = "wasm-cpu-runtime")]
-use clearra_app::{AppCoreExecutorService, AppServices};
+use clearra_app::{AppCoreExecutorService, AppServices, AppTablebaseSession};
+
+#[cfg(feature = "wasm-cpu-runtime")]
+const PC4_COMPACT_TABLEBASE: &[u8] =
+    include_bytes!("../../../apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin");
 
 pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     let format = invocation
@@ -19,6 +25,11 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
         if let ParsedCliCommand::Help(topic) = command {
             return topic.into_output(language);
         }
+        #[cfg(feature = "wasm-cpu-runtime")]
+        let _tablebase_session = match tablebase_session_for_command(&command) {
+            Ok(session) => session,
+            Err(output) => return output,
+        };
 
         let assembly = match CliAppRequestAssembler::assemble(command, format) {
             Ok(assembly) => assembly,
@@ -38,6 +49,37 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     })
 }
 
+#[cfg(feature = "wasm-cpu-runtime")]
+fn tablebase_session_for_command(
+    command: &ParsedCliCommand,
+) -> Result<Option<AppTablebaseSession>, CliOutput> {
+    let requested = match command {
+        ParsedCliCommand::Pc(args) => args.tablebase_requested() == Some(true),
+        ParsedCliCommand::Setup(args) => args.tablebase_requested() == Some(true),
+        _ => false,
+    };
+    install_requested_tablebase(requested, PC4_COMPACT_TABLEBASE)
+}
+
+#[cfg(feature = "wasm-cpu-runtime")]
+fn install_requested_tablebase(
+    requested: bool,
+    artifact: &[u8],
+) -> Result<Option<AppTablebaseSession>, CliOutput> {
+    if !requested {
+        return Ok(None);
+    }
+
+    AppTablebaseSession::install_pc4_compact(artifact)
+        .map(Some)
+        .map_err(|error| {
+            CliOutput::error(
+                CliErrorCode::TablebaseInstallFailed,
+                format!("PC4 tablebase installation failed: {}", error.reason()),
+            )
+        })
+}
+
 fn product_app_context() -> AppContext {
     #[cfg(feature = "wasm-cpu-runtime")]
     {
@@ -48,4 +90,29 @@ fn product_app_context() -> AppContext {
 
     #[cfg(not(feature = "wasm-cpu-runtime"))]
     AppContext::default()
+}
+
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
+mod tests {
+    use super::install_requested_tablebase;
+    use crate::{error::CliErrorCode, exit::ExitCode};
+
+    #[test]
+    fn explicit_tablebase_request_fails_closed_when_installation_fails() {
+        let output = install_requested_tablebase(true, b"not-a-tablebase")
+            .expect_err("an explicit request must not silently fall back");
+
+        assert_eq!(output.exit_code(), ExitCode::InternalError);
+        assert!(output
+            .stderr()
+            .contains(CliErrorCode::TablebaseInstallFailed.as_str()));
+        assert!(output.stderr().contains("pc4_tablebase_header_invalid"));
+    }
+
+    #[test]
+    fn unrequested_tablebase_does_not_touch_the_artifact() {
+        assert!(install_requested_tablebase(false, b"not-a-tablebase")
+            .expect("disabled tablebase must not be installed")
+            .is_none());
+    }
 }

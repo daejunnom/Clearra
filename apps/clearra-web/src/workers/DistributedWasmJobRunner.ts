@@ -48,6 +48,12 @@ export class DistributedWasmJobRunner {
   ): Promise<ClearraWasmWorkerEvent> {
     this.cancelled = false;
     this.released = false;
+    let profilingActive = false;
+    let searchProfile: unknown = null;
+    if (this.wasm.profile_start) {
+      this.wasm.profile_start();
+      profilingActive = true;
+    }
     const verifierCount = Math.max(1, plan.workerCount - 1);
     let lastHostYield = performance.now();
     let progressPhase: ClearraSearchProgressTelemetry['phase'] = 'initializing';
@@ -176,10 +182,19 @@ export class DistributedWasmJobRunner {
       const events = JSON.parse(
         this.wasm.distributed_finish(this.jobId, plan.workerCount)
       ) as ClearraWasmWorkerEvent[];
+      if (profilingActive && this.wasm.profile_finish) {
+        searchProfile = this.wasm.profile_finish();
+        profilingActive = false;
+      }
       let terminal: ClearraWasmWorkerEvent | null = null;
       for (const event of events) {
-        onEvent(event);
-        if (event.event === 'final_response' || event.event === 'failed') terminal = event;
+        const emittedEvent =
+          (event.event === 'final_response' || event.event === 'failed') &&
+          searchProfile !== null
+            ? ({ ...event, search_profile: searchProfile } as ClearraWasmWorkerEvent)
+            : event;
+        onEvent(emittedEvent);
+        if (event.event === 'final_response' || event.event === 'failed') terminal = emittedEvent;
       }
       if (!terminal) throw new Error('distributed search completed without a terminal event');
       return terminal;
@@ -187,6 +202,13 @@ export class DistributedWasmJobRunner {
       this.releaseFailedRun();
       throw error;
     } finally {
+      if (profilingActive && this.wasm.profile_finish) {
+        try {
+          this.wasm.profile_finish();
+        } catch {
+          // Coordinator reset remains the final ownership boundary after failure.
+        }
+      }
       clearInterval(progressTimer);
       this.resetCoordinator();
     }

@@ -29,6 +29,7 @@ node_modules/
 /blob-report/
 /output/
 /apps/clearra-web/static/wasm/
+/scripts/benchmark/wasm-product-browser/dist/
 
 # Local credentials and machine configuration
 .env

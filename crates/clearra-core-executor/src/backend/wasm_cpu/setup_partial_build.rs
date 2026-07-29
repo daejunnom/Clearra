@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_problem::{SearchProblem, SetupPathDetail};
 
@@ -10,13 +12,24 @@ use super::{
     WasmExactSearchError,
 };
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PartialStateKey {
     board: u64,
     remaining: u64,
     placement_set_id: u32,
     packed_counts: u32,
     deleted_rows: u16,
+}
+
+impl Hash for PartialStateKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut digest = self.board ^ self.remaining.rotate_left(23);
+        digest ^= u64::from(self.placement_set_id).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        digest ^= u64::from(self.packed_counts).rotate_left(37);
+        digest ^= u64::from(self.deleted_rows).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        state.write_u64(digest);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -51,10 +64,6 @@ impl PartialBuildNode {
         } else {
             Some(self.shape_index)
         }
-    }
-
-    pub(super) const fn placement_set_id(self) -> u32 {
-        self.placement_set_id
     }
 
     fn set_live(&mut self, live: bool) {
@@ -127,6 +136,7 @@ impl SetupShape {
 pub(super) struct PartialBuildGraph {
     pub(super) nodes: Vec<PartialBuildNode>,
     pub(super) edges: Vec<PartialBuildEdge>,
+    edge_rows: Vec<u16>,
     pub(super) shapes: Vec<SetupShape>,
     placement_sets: Vec<u128>,
     pub(super) root: u32,
@@ -150,6 +160,10 @@ impl PartialBuildGraph {
                     .is_some_and(|rows| *rows == detail.placement_rows())
         })
     }
+
+    pub(super) fn edge_row_id(&self, edge_index: usize) -> Option<u16> {
+        self.edge_rows.get(edge_index).copied()
+    }
 }
 
 pub(super) enum PartialBuildAdvance {
@@ -158,6 +172,7 @@ pub(super) enum PartialBuildAdvance {
         graph: PartialBuildGraph,
         geometry_family_count: String,
         geometry_expanded_nodes: usize,
+        tablebase_pruned_states: usize,
     },
     Cancelled,
 }
@@ -176,6 +191,12 @@ struct ActivePartialState {
     packed_counts: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingPartialBuildEdge {
+    edge: PartialBuildEdge,
+    row_id: u16,
+}
+
 const SETUP_ROW_BITS: usize = 12;
 const SETUP_ROW_MASK: u128 = (1_u128 << SETUP_ROW_BITS) - 1;
 const MAX_SETUP_ROW_ID: u32 = SETUP_ROW_MASK as u32 - 1;
@@ -185,6 +206,7 @@ pub(super) struct PartialBuildGraphBuilder {
     reachability: ReachabilityWorkspace,
     nodes: Vec<PartialBuildNode>,
     edges: Vec<PartialBuildEdge>,
+    edge_rows: Vec<u16>,
     current_states: Vec<ActivePartialState>,
     next_states: Vec<ActivePartialState>,
     current_cursor: usize,
@@ -192,13 +214,15 @@ pub(super) struct PartialBuildGraphBuilder {
     phase: PartialBuildPhase,
     available_row_cursor: usize,
     edge_source: Option<ActivePartialState>,
-    source_edges: Vec<PartialBuildEdge>,
+    source_edges: Vec<PendingPartialBuildEdge>,
     available_rows: Vec<u32>,
     next_layer: ExactHashMap<PartialStateKey, u32>,
     placement_sets: Vec<u128>,
     next_placement_sets: ExactHashMap<u128, u32>,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
+    tablebase_pruned_states: usize,
+    placement_identity_depth: u8,
     resource_truncated: bool,
 }
 
@@ -207,7 +231,13 @@ impl PartialBuildGraphBuilder {
         compiled: CompiledGeometryFamily,
         catalog: &GeometryCatalog,
         problem: &SearchProblem,
+        placement_identity_depth: u8,
     ) -> Result<Self, WasmExactSearchError> {
+        if placement_identity_depth > MAX_SETUP_CANDIDATE_LOCKS {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_partial_build_identity_depth_invalid",
+            ));
+        }
         let mut reachability = ReachabilityWorkspace::default();
         reachability.configure(catalog.skeleton_count());
         reachability.configure_kick_profile(problem.kick_profile().profile_id());
@@ -235,6 +265,7 @@ impl PartialBuildGraphBuilder {
             reachability,
             nodes,
             edges: Vec::new(),
+            edge_rows: Vec::new(),
             current_states,
             next_states: Vec::new(),
             current_cursor: 0,
@@ -249,6 +280,8 @@ impl PartialBuildGraphBuilder {
             next_placement_sets: ExactHashMap::default(),
             geometry_family_count,
             geometry_expanded_nodes: compiled.expanded_nodes,
+            tablebase_pruned_states: compiled.tablebase_pruned_states,
+            placement_identity_depth,
             resource_truncated: false,
         })
     }
@@ -277,6 +310,14 @@ impl PartialBuildGraphBuilder {
         Ok(PartialBuildAdvance::Pending)
     }
 
+    pub(super) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub(super) fn geometry_expanded_nodes(&self) -> usize {
+        self.geometry_expanded_nodes
+    }
+
     fn collect_rows(
         &mut self,
         catalog: &GeometryCatalog,
@@ -288,6 +329,7 @@ impl PartialBuildGraphBuilder {
                     graph: self.finish()?,
                     geometry_family_count: self.geometry_family_count.clone(),
                     geometry_expanded_nodes: self.geometry_expanded_nodes,
+                    tablebase_pruned_states: self.tablebase_pruned_states,
                 }));
             }
             std::mem::swap(&mut self.current_states, &mut self.next_states);
@@ -311,6 +353,7 @@ impl PartialBuildGraphBuilder {
         self.completion_oracle.collect_available_rows(
             source.remaining,
             source.packed_counts,
+            self.nodes[source.node as usize].deleted_rows != 0,
             catalog,
             &mut self.available_rows,
             control,
@@ -352,8 +395,11 @@ impl PartialBuildGraphBuilder {
             add_packed_piece(source_state.packed_counts, super::piece_index(row.piece)).ok_or(
                 WasmExactSearchError::InvalidProblem("setup_partial_build_piece_count_overflow"),
             )?;
-        let placement_set_id =
-            self.extend_placement_set(source_state.placement_set_id, source.depth, row_id)?;
+        let placement_set_id = if source.depth < self.placement_identity_depth {
+            self.extend_placement_set(source_state.placement_set_id, source.depth, row_id)?
+        } else {
+            0
+        };
         let remaining = source_state.remaining ^ row.cells;
         for realization in catalog.instantiations(row_id, source.deleted_rows) {
             if source.board & realization.lock_mask != 0
@@ -423,14 +469,22 @@ impl PartialBuildGraphBuilder {
                 });
                 target
             };
-            self.source_edges.push(PartialBuildEdge::new(
-                target,
-                row.piece,
-                realization.rotation.quarter_turns(),
-                realization.x,
-                realization.lock_y,
-                cleared_current.count_ones() as u8,
-            )?);
+            let row_id = u16::try_from(row_id).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_partial_build_edge_row_identity_overflow",
+                )
+            })?;
+            self.source_edges.push(PendingPartialBuildEdge {
+                edge: PartialBuildEdge::new(
+                    target,
+                    row.piece,
+                    realization.rotation.quarter_turns(),
+                    realization.x,
+                    realization.lock_y,
+                    cleared_current.count_ones() as u8,
+                )?,
+                row_id,
+            });
         }
         Ok(())
     }
@@ -470,24 +524,37 @@ impl PartialBuildGraphBuilder {
         let Some(source) = self.edge_source else {
             return Ok(());
         };
-        self.source_edges.sort_unstable_by_key(|edge| {
+        self.source_edges.sort_unstable_by_key(|pending| {
+            let edge = pending.edge;
             (
                 edge.to,
                 edge.piece,
+                pending.row_id,
                 edge.rotation(),
                 edge.x,
                 edge.y,
                 edge.cleared_lines(),
             )
         });
-        self.source_edges.dedup_by_key(|edge| (edge.to, edge.piece));
+        self.source_edges
+            .dedup_by_key(|pending| (pending.edge.to, pending.edge.piece));
         self.edges
             .try_reserve(self.source_edges.len())
             .map_err(|_| {
                 WasmExactSearchError::InvalidProblem("setup_partial_build_edge_storage_unavailable")
             })?;
+        self.edge_rows
+            .try_reserve(self.source_edges.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_partial_build_edge_row_storage_unavailable",
+                )
+            })?;
         let edge_start = self.edges.len();
-        self.edges.extend(self.source_edges.drain(..));
+        for pending in self.source_edges.drain(..) {
+            self.edges.push(pending.edge);
+            self.edge_rows.push(pending.row_id);
+        }
         self.nodes[source.node as usize].edge_start = edge_start as u32;
         self.nodes[source.node as usize].edge_count = (self.edges.len() - edge_start) as u32;
         Ok(())
@@ -507,10 +574,11 @@ impl PartialBuildGraphBuilder {
         }
         self.compact_live_graph()?;
 
-        let shapes = index_setup_shapes(&mut self.nodes)?;
+        let shapes = index_setup_shapes(&mut self.nodes, self.placement_identity_depth)?;
         Ok(PartialBuildGraph {
             nodes: std::mem::take(&mut self.nodes),
             edges: std::mem::take(&mut self.edges),
+            edge_rows: std::mem::take(&mut self.edge_rows),
             shapes,
             placement_sets: std::mem::take(&mut self.placement_sets),
             root: 0,
@@ -558,6 +626,7 @@ impl PartialBuildGraphBuilder {
                 }
                 edge.to = target;
                 self.edges[edge_write] = edge;
+                self.edge_rows[edge_write] = self.edge_rows[edge_read];
                 edge_write += 1;
             }
             node.edge_start = u32::try_from(new_start).map_err(|_| {
@@ -568,6 +637,7 @@ impl PartialBuildGraphBuilder {
             })?;
         }
         self.edges.truncate(edge_write);
+        self.edge_rows.truncate(edge_write);
         Ok(())
     }
 
@@ -578,10 +648,11 @@ impl PartialBuildGraphBuilder {
 
 fn index_setup_shapes(
     nodes: &mut [PartialBuildNode],
+    placement_identity_depth: u8,
 ) -> Result<Vec<SetupShape>, WasmExactSearchError> {
     let mut shapes = Vec::<SetupShape>::new();
     for node in nodes {
-        if !node.live() || !(1..=MAX_SETUP_CANDIDATE_LOCKS).contains(&node.depth) {
+        if !node.live() || !(1..=placement_identity_depth).contains(&node.depth) {
             continue;
         }
         let shape_index = u32::try_from(shapes.len()).map_err(|_| {
@@ -633,6 +704,14 @@ fn insert_setup_placement_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::wasm_cpu::{
+        geometry::{pack_piece_counts, GeometryFamilyCompileAdvance, GeometryFamilyCompileSession},
+        packing_projection_hold_enabled,
+        setup_finder::compile_setup_admissible_prefixes,
+    };
+    use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
+    use clearra_problem::{compile_setup_search_conditions, SetupSearchQuery};
+    use clearra_supply::pattern_universe::PieceMultisetKey;
 
     fn live_node(board: u64, depth: u8) -> PartialBuildNode {
         PartialBuildNode {
@@ -647,11 +726,57 @@ mod tests {
         }
     }
 
+    fn mirror_piece_language(language: &[u8]) -> Vec<u8> {
+        language
+            .iter()
+            .map(|piece| match piece {
+                3 => 4,
+                4 => 3,
+                5 => 6,
+                6 => 5,
+                piece => *piece,
+            })
+            .collect()
+    }
+
+    fn piece_language_frontier_counts(
+        graph: &PartialBuildGraph,
+        shape_index: usize,
+        language: &[u8],
+    ) -> Vec<usize> {
+        let start = graph
+            .nodes
+            .iter()
+            .position(|node| node.shape_index() == Some(shape_index as u32))
+            .expect("shape node") as u32;
+        let mut frontier = vec![start];
+        let mut counts = vec![frontier.len()];
+        for piece in language {
+            let mut next = Vec::new();
+            for node_index in frontier {
+                let node = graph.nodes[node_index as usize];
+                let start = node.edge_start as usize;
+                let end = start + node.edge_count as usize;
+                for edge in &graph.edges[start..end] {
+                    if super::super::piece_index(edge.piece) as u8 == *piece {
+                        next.push(edge.to);
+                    }
+                }
+            }
+            next.sort_unstable();
+            next.dedup();
+            counts.push(next.len());
+            frontier = next;
+        }
+        counts
+    }
+
     #[test]
     fn setup_candidate_identity_keeps_exact_partial_states_separate() {
         let mut nodes = [live_node(0x3c, 2), live_node(0x3c, 9), live_node(0x3c, 2)];
 
-        let shapes = index_setup_shapes(&mut nodes).expect("shape index");
+        let shapes =
+            index_setup_shapes(&mut nodes, MAX_SETUP_CANDIDATE_LOCKS).expect("shape index");
 
         assert_eq!(shapes.len(), 3);
         assert_ne!(nodes[0].shape_index(), nodes[2].shape_index());
@@ -694,6 +819,7 @@ mod tests {
         let graph = PartialBuildGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
+            edge_rows: Vec::new(),
             shapes: vec![SetupShape::new(0x3c, 1, 0), SetupShape::new(0x3c, 2, 0)],
             placement_sets: vec![0, rows_a, rows_b],
             root: 0,
@@ -704,5 +830,399 @@ mod tests {
 
         assert_eq!(graph.shape_index_for_detail(&detail), Some(1));
         assert_ne!(graph.setup_id_for_shape(0), graph.setup_id_for_shape(1));
+    }
+
+    #[test]
+    #[ignore = "full empty-4L setup graph acceptance"]
+    fn line_clear_prefix_retains_its_exact_pc_completion_family() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::S, PieceKind::Z])
+            .with_tablebase_requested(false);
+        let conditions = compile_setup_search_conditions(&query).expect("setup conditions");
+        let catalog = GeometryCatalog::compile(conditions[0].problem()).expect("geometry catalog");
+        let rows = [
+            (PieceKind::S, 0x0000_0000_0001_8030),
+            (PieceKind::J, 0x0000_0000_000e_0200),
+            (PieceKind::L, 0x0000_0000_0010_0403),
+            (PieceKind::I, 0x0000_0000_0000_7800),
+            (PieceKind::O, 0x0000_00c0_3000_0000),
+            (PieceKind::T, 0x0000_0004_0380_0000),
+            (PieceKind::Z, 0x0000_0000_0060_000c),
+            (PieceKind::Z, 0x0000_0000_0c00_0180),
+            (PieceKind::I, 0x0000_0003_c000_0000),
+            (PieceKind::T, 0x0000_0038_0000_0040),
+        ]
+        .map(|(piece, cells)| {
+            catalog
+                .skeleton_id(piece, cells)
+                .expect("known inverse-lock-clear row")
+        });
+        let prefix_before_clear = rows[..3]
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(Ok(0_u128), |packed, (depth, row)| {
+                insert_setup_placement_row(packed?, depth as u8, row)
+            })
+            .expect("three-row prefix");
+        let prefix_after_clear = rows[..4]
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(Ok(0_u128), |packed, (depth, row)| {
+                insert_setup_placement_row(packed?, depth as u8, row)
+            })
+            .expect("four-row prefix");
+        let complete = rows
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(Ok(0_u128), |packed, (depth, row)| {
+                insert_setup_placement_row(packed?, depth as u8, row)
+            })
+            .expect("complete row set");
+
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let admissible_prefixes =
+            compile_setup_admissible_prefixes(&conditions).expect("admissible prefixes");
+        let mut target_keys = Vec::<PieceMultisetKey>::new();
+        for condition in &conditions {
+            let problem = condition.problem();
+            let universe = problem
+                .piece_source()
+                .materialized_universe()
+                .expect("materialized universe");
+            let family = universe.packing_multiset_family(
+                10,
+                problem.initial_hold(),
+                packing_projection_hold_enabled(problem),
+            );
+            target_keys.extend(family.groups().iter().map(|group| group.key()));
+        }
+        let target_counts = rows.iter().fold([0_u8; 7], |mut counts, row_id| {
+            counts[super::super::piece_index(catalog.skeleton(*row_id).piece)] += 1;
+            counts
+        });
+        assert!(target_keys.contains(&PieceMultisetKey::from_counts(target_counts)));
+        assert!(admissible_prefixes
+            .binary_search(&pack_piece_counts(target_counts))
+            .is_ok());
+
+        let mut geometry = GeometryFamilyCompileSession::new_with_tablebase(
+            catalog.required_cells(),
+            target_keys,
+            admissible_prefixes,
+            None,
+        )
+        .expect("geometry session");
+        let mut compiled = loop {
+            match geometry.advance(&catalog, 65_536, &control) {
+                GeometryFamilyCompileAdvance::Pending => {}
+                GeometryFamilyCompileAdvance::Complete(compiled) => break compiled,
+                GeometryFamilyCompileAdvance::ResourceIncomplete(reason) => panic!("{reason}"),
+                GeometryFamilyCompileAdvance::Cancelled => panic!("geometry was not cancelled"),
+            }
+        };
+        let mut remaining = catalog.required_cells();
+        let mut packed_counts = 0_u32;
+        let mut available = Vec::new();
+        for (index, row_id) in rows.into_iter().enumerate() {
+            compiled
+                .completion_oracle
+                .collect_available_rows(
+                    remaining,
+                    packed_counts,
+                    index >= 4,
+                    &catalog,
+                    &mut available,
+                    &control,
+                )
+                .expect("completion rows");
+            assert!(
+                available.contains(&row_id),
+                "geometry family lost row {row_id} from residual {remaining:010x}"
+            );
+            let row = catalog.skeleton(row_id);
+            remaining ^= row.cells;
+            packed_counts = add_packed_piece(packed_counts, super::super::piece_index(row.piece))
+                .expect("packed count");
+        }
+        assert_eq!(remaining, 0);
+
+        let mut builder = PartialBuildGraphBuilder::new(
+            compiled,
+            &catalog,
+            conditions[0].problem(),
+            MAX_SETUP_CANDIDATE_LOCKS,
+        )
+        .expect("partial graph builder");
+        let graph = loop {
+            match builder
+                .advance(&catalog, 65_536, &control)
+                .expect("partial graph advance")
+            {
+                PartialBuildAdvance::Pending => {}
+                PartialBuildAdvance::Complete { graph, .. } => break graph,
+                PartialBuildAdvance::Cancelled => panic!("partial graph was not cancelled"),
+            }
+        };
+        let before_clear = graph
+            .nodes
+            .iter()
+            .position(|node| {
+                node.board == 0x001f_8633
+                    && node.deleted_rows == 0
+                    && graph.placement_sets[node.placement_set_id as usize] == prefix_before_clear
+            })
+            .expect("line-clear predecessor");
+        let after_clear = graph
+            .nodes
+            .iter()
+            .position(|node| {
+                node.board == 0x633
+                    && node.deleted_rows == 0b10
+                    && graph.placement_sets[node.placement_set_id as usize] == prefix_after_clear
+            })
+            .expect("line-clear prefix");
+        let accepting = graph
+            .nodes
+            .iter()
+            .position(|node| {
+                node.accepting() && graph.placement_sets[node.placement_set_id as usize] == complete
+            })
+            .expect("exact completion family");
+
+        assert!(graph.nodes[before_clear].edge_count > 0);
+        assert!(graph.nodes[after_clear].edge_count > 0);
+        assert!(accepting > after_clear);
+    }
+
+    #[test]
+    #[ignore = "full empty-4L setup geometry acceptance"]
+    fn mirrored_s_setup_retains_known_exact_pc_suffix() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::S, PieceKind::Z])
+            .with_tablebase_requested(false);
+        let conditions = compile_setup_search_conditions(&query).expect("setup conditions");
+        let catalog = GeometryCatalog::compile(conditions[0].problem()).expect("geometry catalog");
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let admissible_prefixes =
+            compile_setup_admissible_prefixes(&conditions).expect("admissible prefixes");
+        let expected_execution_prefixes = admissible_prefixes.clone();
+        let mut target_keys = Vec::<PieceMultisetKey>::new();
+        for condition in &conditions {
+            let problem = condition.problem();
+            let universe = problem
+                .piece_source()
+                .materialized_universe()
+                .expect("materialized universe");
+            let family = universe.packing_multiset_family(
+                10,
+                problem.initial_hold(),
+                packing_projection_hold_enabled(problem),
+            );
+            target_keys.extend(family.groups().iter().map(|group| group.key()));
+        }
+        let expected_target = PieceMultisetKey::from_counts([1, 2, 2, 2, 2, 0, 1]);
+        assert!(
+            target_keys.contains(&expected_target),
+            "known completion target is absent from setup geometry targets"
+        );
+        let mut geometry = GeometryFamilyCompileSession::new_with_tablebase(
+            catalog.required_cells(),
+            target_keys,
+            admissible_prefixes,
+            None,
+        )
+        .expect("geometry session");
+        let mut compiled = loop {
+            match geometry.advance(&catalog, 65_536, &control) {
+                GeometryFamilyCompileAdvance::Pending => {}
+                GeometryFamilyCompileAdvance::Complete(compiled) => break compiled,
+                GeometryFamilyCompileAdvance::ResourceIncomplete(reason) => panic!("{reason}"),
+                GeometryFamilyCompileAdvance::Cancelled => panic!("geometry was not cancelled"),
+            }
+        };
+
+        let operations = [
+            (PieceKind::S, 0, 3, 0),
+            (PieceKind::I, 1, 0, 0),
+            (PieceKind::O, 0, 1, 0),
+            (PieceKind::T, 0, 7, 0),
+            (PieceKind::S, 0, 5, 0),
+            (PieceKind::Z, 0, 4, 1),
+            (PieceKind::Z, 0, 6, 1),
+            (PieceKind::L, 3, 8, 0),
+            (PieceKind::T, 1, 3, 0),
+            (PieceKind::O, 0, 1, 0),
+        ];
+        let mut board = 0_u64;
+        let mut remaining = catalog.required_cells();
+        let mut packed_counts = 0_u32;
+        let mut deleted_rows = 0_u16;
+        let mut available = Vec::new();
+        let mut reachability = ReachabilityWorkspace::default();
+        let mut expected_states = Vec::new();
+        let mut expected_row_ids = Vec::new();
+        let mut placement_rows = 0_u128;
+        reachability.configure(catalog.skeleton_count());
+        reachability.configure_kick_profile(conditions[0].problem().kick_profile().profile_id());
+
+        for (depth, (piece, rotation, x, y)) in operations.into_iter().enumerate() {
+            compiled
+                .completion_oracle
+                .collect_available_rows(
+                    remaining,
+                    packed_counts,
+                    deleted_rows != 0,
+                    &catalog,
+                    &mut available,
+                    &control,
+                )
+                .expect("completion rows");
+            let (row_id, realization) = (0..catalog.skeleton_count() as u32)
+                .filter(|row_id| {
+                    let row = catalog.skeleton(*row_id);
+                    row.piece == piece && row.cells & remaining == row.cells
+                })
+                .find_map(|row_id| {
+                    catalog
+                        .instantiations(row_id, deleted_rows)
+                        .find(|realization| {
+                            realization.rotation.quarter_turns() == rotation
+                                && realization.x == x
+                                && realization.lock_y == y
+                        })
+                        .map(|realization| (row_id, realization))
+                })
+                .unwrap_or_else(|| panic!("operation {depth} has no inverse-lock row"));
+            let expected_next_counts =
+                add_packed_piece(packed_counts, super::super::piece_index(piece))
+                    .expect("expected packed count");
+            assert!(
+                expected_execution_prefixes
+                    .binary_search(&expected_next_counts)
+                    .is_ok(),
+                "supply prefix rejected operation {depth}: {piece:?}, counts={expected_next_counts:07x}"
+            );
+            assert!(
+                available.contains(&row_id),
+                "completion oracle lost operation {depth}: {piece:?}, row={row_id}, \
+                 remaining={remaining:010x}, counts={packed_counts:07x}, \
+                 deleted={deleted_rows:04x}"
+            );
+            assert_eq!(
+                board & realization.lock_mask,
+                0,
+                "operation {depth} overlaps"
+            );
+            assert!(
+                reachability.lock_reachable_instantiated(&catalog, board, piece, realization,),
+                "operation {depth} is not reachable"
+            );
+            let row = catalog.skeleton(row_id);
+            expected_row_ids.push(row_id);
+            remaining ^= row.cells;
+            packed_counts = add_packed_piece(packed_counts, super::super::piece_index(piece))
+                .expect("packed count");
+            let (next_board, cleared_current, _) = place_and_clear(
+                catalog.width(),
+                catalog.height(),
+                board | realization.lock_mask,
+            );
+            board = next_board;
+            deleted_rows = merge_deleted_rows(catalog.height(), deleted_rows, cleared_current)
+                .expect("deleted row merge");
+            if depth < 4 {
+                placement_rows = insert_setup_placement_row(placement_rows, depth as u8, row_id)
+                    .expect("placement row identity");
+            }
+            expected_states.push((piece, board, deleted_rows, placement_rows));
+        }
+
+        assert_eq!(remaining, 0);
+        assert_eq!(board, 0);
+        assert_eq!(expected_row_ids.len(), operations.len());
+
+        let mut builder =
+            PartialBuildGraphBuilder::new(compiled, &catalog, conditions[0].problem(), 4)
+                .expect("partial graph builder");
+        let graph = loop {
+            match builder
+                .advance(&catalog, 65_536, &control)
+                .expect("partial graph advance")
+            {
+                PartialBuildAdvance::Pending => {}
+                PartialBuildAdvance::Complete { graph, .. } => break graph,
+                PartialBuildAdvance::Cancelled => panic!("partial graph was not cancelled"),
+            }
+        };
+        let mut frontier = vec![graph.root];
+        for (depth, (piece, expected_board, expected_deleted, expected_rows)) in
+            expected_states.into_iter().enumerate()
+        {
+            let mut next = Vec::new();
+            for source in frontier {
+                let node = graph.nodes[source as usize];
+                let start = node.edge_start as usize;
+                let end = start + node.edge_count as usize;
+                for edge in &graph.edges[start..end] {
+                    let target = graph.nodes[edge.to as usize];
+                    if edge.piece != piece
+                        || target.board != expected_board
+                        || target.deleted_rows != expected_deleted
+                        || (depth < 4
+                            && graph.placement_sets[target.placement_set_id as usize]
+                                != expected_rows)
+                    {
+                        continue;
+                    }
+                    next.push(edge.to);
+                }
+            }
+            next.sort_unstable();
+            next.dedup();
+            assert!(
+                !next.is_empty(),
+                "partial graph lost known completion at operation {depth}: {piece:?}, \
+                 board={expected_board:010x}, deleted={expected_deleted:04x}"
+            );
+            frontier = next;
+        }
+        assert!(frontier
+            .iter()
+            .any(|node| graph.nodes[*node as usize].accepting()));
+
+        let z_detail = SetupPathDetail::from_setup_id(
+            "setup-000000c060-0000-00000000000000000000000000015d",
+            "hold-empty",
+        )
+        .expect("Z setup detail");
+        let s_detail = SetupPathDetail::from_setup_id(
+            "setup-000000c018-0000-000000000000000000000000000108",
+            "hold-empty",
+        )
+        .expect("S setup detail");
+        let z_shape = graph
+            .shape_index_for_detail(&z_detail)
+            .expect("Z setup shape");
+        let s_shape = graph
+            .shape_index_for_detail(&s_detail)
+            .expect("S setup shape");
+        let z_only_on_s = [0, 1, 2, 3, 4, 4, 6, 2, 1];
+        let z_original = mirror_piece_language(&z_only_on_s);
+        let s_only = [0, 1, 2, 4, 3, 6, 5, 6, 5];
+        let s_only_on_z = mirror_piece_language(&s_only);
+        let z_original_counts = piece_language_frontier_counts(&graph, z_shape, &z_original);
+        let z_only_s_counts = piece_language_frontier_counts(&graph, s_shape, &z_only_on_s);
+        let s_only_counts = piece_language_frontier_counts(&graph, s_shape, &s_only);
+        let s_only_z_counts = piece_language_frontier_counts(&graph, z_shape, &s_only_on_z);
+        assert!(
+            z_only_s_counts.last().copied().unwrap_or(0) > 0
+                && s_only_z_counts.last().copied().unwrap_or(0) > 0,
+            "mirrored one-piece setup lost a valid piece language: \
+             z_original={z_original_counts:?}, mirrored_on_s={z_only_s_counts:?}, \
+             s_original={s_only_counts:?}, mirrored_on_z={s_only_z_counts:?}"
+        );
     }
 }

@@ -32,8 +32,6 @@
   .control-panel :global(.workspace-switch-label input:disabled + .workspace-switch), .control-panel :global(.workspace-switch-label input:disabled ~ span) { cursor: default; opacity: .45; }
   .control-panel :global(.workspace-inline-select) { align-items: center; display: flex; gap: 8px; }
   .control-panel :global(.workspace-inline-select select) { width: 122px; }
-  .control-panel :global(.workspace-contract-band) { align-items: center; background: #eef2ef; color: #5e6a65; display: grid; font-size: 11px; gap: 8px; grid-template-columns: auto 1fr auto; margin: 14px 0 0; padding: 10px; }
-  .control-panel :global(.workspace-contract-band b) { color: #173f3a; }
   .control-panel :global(.workspace-validation) { background: #fff2ed; border: 1px solid #ecc8ba; border-radius: 5px; color: #8d3d24; display: grid; font-size: 11px; gap: 5px; list-style: none; margin: 16px 0 0; padding: 10px 12px; }
   .control-panel :global(.workspace-validation p), .control-panel :global(.workspace-validation li) { margin: 0; }
   .control-panel :global(.workspace-segmented) { background: #e9eeeb; border-radius: 6px; display: grid; gap: 2px; padding: 3px; }

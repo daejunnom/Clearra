@@ -432,6 +432,7 @@ dependencies = [
  "clearra-supply",
  "clearra-webgpu",
  "pollster",
+ "sha2",
  "wasm-bindgen",
 ]
 

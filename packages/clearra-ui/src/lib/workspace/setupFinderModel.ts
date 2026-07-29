@@ -16,6 +16,7 @@ export type SetupFinderRequest = {
   candidatePriority: SetupCandidatePriority;
   lengthPreference: SetupLengthPreference;
   maxSetupPieces: number;
+  tablebaseEnabled: boolean;
 };
 
 export type SetupFinderValidationCode =
@@ -57,7 +58,8 @@ export function createDefaultSetupFinderRequest(): SetupFinderRequest {
     allowPostCycleBorrow: false,
     candidatePriority: 'all',
     lengthPreference: 'auto',
-    maxSetupPieces: 9
+    maxSetupPieces: 9,
+    tablebaseEnabled: false
   };
 }
 
@@ -165,6 +167,7 @@ export function buildSetupFinderCommand(request: SetupFinderRequest): string {
       ? `--next-cycle-remaining ${normalizedSetupResidue(request.nextCycleRemaining)}`
       : '',
     `--rule ${request.rule}`,
+    request.tablebaseEnabled ? '--tablebase' : '--no-tablebase',
     request.candidatePriority === 'all' ? '' : `--priority ${request.candidatePriority}`,
     request.lengthPreference === 'auto' ? '' : `--setup-length ${request.lengthPreference}`,
     `--max-setup-pieces ${request.maxSetupPieces}`,

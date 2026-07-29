@@ -77,6 +77,7 @@ fn initialization_wire_preserves_observed_qb_terminal_inventory_and_setup_piece_
             PieceKind::Z,
         ])
         .with_max_setup_pieces(10)
+        .with_tablebase_requested(true)
         .with_path_detail(SetupPathDetail::new(0, 3, 1, "hold-T").expect("exact path detail"));
 
     let encoded = encode_initialization(&query, &graph, &shapes).expect("encode initialization");
@@ -85,6 +86,7 @@ fn initialization_wire_preserves_observed_qb_terminal_inventory_and_setup_piece_
     assert_eq!(decoded.query.hold_policy(), query.hold_policy());
     assert_eq!(decoded.query.rule(), srs_x());
     assert_eq!(decoded.query.max_setup_pieces(), 10);
+    assert!(decoded.query.tablebase_requested());
     assert_eq!(decoded.query.path_detail(), query.path_detail());
     assert_eq!(
         decoded

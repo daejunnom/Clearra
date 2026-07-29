@@ -139,12 +139,6 @@ impl GeometrySolutionFamily {
         self.node_count
     }
 
-    pub fn seal_for_reading(&mut self) {
-        self.intern_slots = Vec::new();
-        self.intern_count = 0;
-        self.interning_disabled = true;
-    }
-
     pub fn path_count(&self, root: u32) -> Option<u128> {
         self.path_count_table()?.get(root as usize).copied()
     }

@@ -16,6 +16,7 @@ pub struct SetupArgs {
     path_detail_setup_id: Option<String>,
     path_detail_condition_id: Option<String>,
     queue_observation_policy: QueueObservationPolicy,
+    tablebase_requested: Option<bool>,
 }
 
 impl SetupArgs {
@@ -34,6 +35,7 @@ impl SetupArgs {
             path_detail_setup_id: None,
             path_detail_condition_id: None,
             queue_observation_policy: QueueObservationPolicy::default(),
+            tablebase_requested: None,
         }
     }
 }
@@ -91,6 +93,10 @@ impl SetupArgs {
         self.queue_observation_policy
     }
 
+    pub fn tablebase_requested(&self) -> Option<bool> {
+        self.tablebase_requested
+    }
+
     pub fn with_candidate_priority(mut self, priority: SetupCandidatePriority) -> Self {
         self.candidate_priority = priority;
         self
@@ -144,6 +150,11 @@ impl SetupArgs {
 
     pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
         self.queue_observation_policy = policy;
+        self
+    }
+
+    pub fn with_tablebase_requested(mut self, requested: Option<bool>) -> Self {
+        self.tablebase_requested = requested;
         self
     }
 }

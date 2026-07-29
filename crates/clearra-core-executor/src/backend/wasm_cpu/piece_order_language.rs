@@ -234,63 +234,11 @@ impl PieceOrderLanguageCache {
             .get(edge_start + relative_start..edge_start + relative_end)
     }
 
+    #[cfg(test)]
     pub fn edge_count(&self, reference: u32) -> Option<usize> {
         self.nodes
             .get(reference as usize)
             .map(|node| usize::from(node.edge_count))
-    }
-
-    pub fn edge(&self, reference: u32, index: usize) -> Option<CanonicalPieceEdge> {
-        let node = self.nodes.get(reference as usize).copied()?;
-        (index < usize::from(node.edge_count)).then(|| self.edges[node.edge_start as usize + index])
-    }
-
-    pub fn union_roots(
-        &mut self,
-        left: Option<u32>,
-        right: u32,
-    ) -> Result<u32, WasmExactSearchError> {
-        let Some(left) = left else {
-            return Ok(right);
-        };
-        if left == right {
-            return Ok(left);
-        }
-        let left_node =
-            *self
-                .nodes
-                .get(left as usize)
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_piece_language_union_node_out_of_range",
-                ))?;
-        let right_node =
-            *self
-                .nodes
-                .get(right as usize)
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_piece_language_union_node_out_of_range",
-                ))?;
-        if left_node.remaining_depth != right_node.remaining_depth {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_piece_language_union_depth_mismatch",
-            ));
-        }
-        let left_edges = self.node_edges(left_node).to_vec();
-        let right_edges = self.node_edges(right_node).to_vec();
-        self.edge_scratch.clear();
-        self.edge_scratch
-            .try_reserve(left_edges.len().saturating_add(right_edges.len()))
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_piece_language_edge_scratch_unavailable")
-            })?;
-        self.edge_scratch.extend_from_slice(&left_edges);
-        self.edge_scratch.extend_from_slice(&right_edges);
-        self.edge_scratch.sort_unstable();
-        self.edge_scratch.dedup();
-        self.intern_node(
-            left_node.accepting || right_node.accepting,
-            left_node.remaining_depth,
-        )
     }
 
     pub fn clear_coverage_caches(&mut self) {
@@ -526,6 +474,87 @@ const fn piece_code(piece: clearra_core_domain::piece::piece_kind::PieceKind) ->
 #[cfg(test)]
 mod tests {
     use super::{CanonicalPieceEdge, PieceOrderLanguageCache};
+    use crate::backend::wasm_cpu::queue_observation_policy::{
+        ObservationPieceLanguage, RootedPieceLanguageUnion,
+    };
+
+    #[test]
+    fn determinized_union_preserves_all_distinct_piece_branches_once() {
+        let mut cache = PieceOrderLanguageCache::default();
+        cache.ensure_buckets();
+        let terminal = cache.intern_node(true, 0).expect("terminal");
+
+        cache
+            .edge_scratch
+            .push(CanonicalPieceEdge::new(terminal, 1).expect("I edge"));
+        let i_root = cache.intern_node(false, 1).expect("I language");
+        cache.edge_scratch.clear();
+        cache
+            .edge_scratch
+            .push(CanonicalPieceEdge::new(terminal, 2).expect("O edge"));
+        let o_root = cache.intern_node(false, 1).expect("O language");
+        cache.edge_scratch.clear();
+
+        let language =
+            RootedPieceLanguageUnion::new(&cache, &[i_root, o_root, i_root]).expect("union");
+        let root = language.root();
+        assert_eq!(language.edge_count(root), Some(2));
+        let i_child = language.edge(root, 0).expect("I union edge");
+        let o_child = language.edge(root, 1).expect("O union edge");
+        assert_eq!(i_child.0, 1);
+        assert_eq!(o_child.0, 2);
+        assert_eq!(i_child.1, o_child.1);
+        assert!(language
+            .node(i_child.1)
+            .is_some_and(|node| node.accepting && node.depth == 1));
+        assert_eq!(
+            language.node(root),
+            Some(
+                crate::backend::wasm_cpu::queue_observation_policy::ObservationLanguageNode {
+                    accepting: false,
+                    depth: 0,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn determinized_union_preserves_shared_prefix_continuations() {
+        let mut cache = PieceOrderLanguageCache::default();
+        cache.ensure_buckets();
+        let terminal = cache.intern_node(true, 0).expect("terminal");
+
+        cache
+            .edge_scratch
+            .push(CanonicalPieceEdge::new(terminal, 2).expect("O edge"));
+        let o_suffix = cache.intern_node(false, 1).expect("O suffix");
+        cache.edge_scratch.clear();
+        cache
+            .edge_scratch
+            .push(CanonicalPieceEdge::new(terminal, 3).expect("T edge"));
+        let t_suffix = cache.intern_node(false, 1).expect("T suffix");
+        cache.edge_scratch.clear();
+
+        cache
+            .edge_scratch
+            .push(CanonicalPieceEdge::new(o_suffix, 1).expect("IO root"));
+        let io_root = cache.intern_node(false, 2).expect("IO language");
+        cache.edge_scratch.clear();
+        cache
+            .edge_scratch
+            .push(CanonicalPieceEdge::new(t_suffix, 1).expect("IT root"));
+        let it_root = cache.intern_node(false, 2).expect("IT language");
+        cache.edge_scratch.clear();
+
+        let language = RootedPieceLanguageUnion::new(&cache, &[io_root, it_root]).expect("union");
+        let root = language.root();
+        assert_eq!(language.edge_count(root), Some(1));
+        let (piece, shared_prefix) = language.edge(root, 0).expect("shared I edge");
+        assert_eq!(piece, 1);
+        assert_eq!(language.edge_count(shared_prefix), Some(2));
+        assert_eq!(language.edge(shared_prefix, 0).map(|edge| edge.0), Some(2));
+        assert_eq!(language.edge(shared_prefix, 1).map(|edge| edge.0), Some(3));
+    }
 
     #[test]
     fn piece_ranges_remain_exact_above_the_compact_edge_limit() {

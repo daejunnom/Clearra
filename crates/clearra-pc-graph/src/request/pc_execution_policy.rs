@@ -65,6 +65,8 @@ mod policy {
         use_all_logical_processors: bool,
         cpu_warmup: bool,
         gpu_warmup: bool,
+        tablebase_requested: bool,
+        precompute_build_dependencies: bool,
         deterministic: bool,
         max_nodes: usize,
         max_frontier_states: usize,
@@ -126,6 +128,16 @@ mod policy {
     impl PcExecutionPolicy {
         pub fn gpu_warmup(&self) -> bool {
             self.gpu_warmup
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn tablebase_requested(&self) -> bool {
+            self.tablebase_requested
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn precompute_build_dependencies(&self) -> bool {
+            self.precompute_build_dependencies
         }
     }
     impl PcExecutionPolicy {
@@ -237,6 +249,18 @@ mod policy {
         }
     }
     impl PcExecutionPolicy {
+        pub fn with_tablebase_requested(mut self, value: bool) -> Self {
+            self.tablebase_requested = value;
+            self
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn with_precompute_build_dependencies(mut self, value: bool) -> Self {
+            self.precompute_build_dependencies = value;
+            self
+        }
+    }
+    impl PcExecutionPolicy {
         pub fn with_deterministic(mut self, deterministic: bool) -> Self {
             self.deterministic = deterministic;
             self
@@ -305,6 +329,8 @@ mod policy {
                 use_all_logical_processors: false,
                 cpu_warmup: false,
                 gpu_warmup: false,
+                tablebase_requested: false,
+                precompute_build_dependencies: false,
                 deterministic: defaults.execution_deterministic(),
                 max_nodes: defaults.max_nodes(),
                 max_frontier_states: defaults.execution_max_frontier_states(),

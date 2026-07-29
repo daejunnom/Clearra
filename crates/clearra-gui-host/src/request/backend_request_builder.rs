@@ -46,6 +46,7 @@ impl BackendRequestBuilder {
             .with_max_frontier_states(form.candidate_budget() as usize)
             .with_max_patterns(form.pattern_budget() as usize)
             .with_max_memory_mib(Some(u64::from(form.memory_budget_mb())))
+            .with_precompute_build_dependencies(form.precompute_build_dependencies())
             .with_allow_backend_fallback(form.allow_fallback());
 
         if let Some(device) = form.gpu_device() {

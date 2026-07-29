@@ -276,6 +276,12 @@ mod form_parser {
                 backend_form = backend_form.with_workers(workers);
             }
         }
+        backend_form = backend_form.with_precompute_build_dependencies(
+            value
+                .get("precompute_build_dependencies")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
         if let Some(device) = value.get("gpu_device").and_then(Value::as_str) {
             backend_form = backend_form.with_gpu_device(device);
         }
@@ -678,6 +684,32 @@ mod tests {
             form.queue_observation_policy(),
             QueueObservationPolicy::VisibleSeven
         );
+    }
+
+    #[test]
+    fn desktop_request_preserves_dependency_dag_opt_in_and_default_off() {
+        let default_state = desktop_form_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 4,
+                "backend": "cpu"
+            }"#,
+        )
+        .expect("desktop default request");
+        assert!(!default_state.backend_form().precompute_build_dependencies());
+
+        let enabled_state = desktop_form_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 4,
+                "backend": "cpu",
+                "precompute_build_dependencies": true
+            }"#,
+        )
+        .expect("desktop dependency DAG request");
+        assert!(enabled_state.backend_form().precompute_build_dependencies());
     }
 
     #[test]

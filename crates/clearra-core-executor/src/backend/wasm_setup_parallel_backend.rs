@@ -39,6 +39,14 @@ impl WasmSetupParallelCoordinator {
         self.inner.task_count()
     }
 
+    pub fn geometry_nodes(&self) -> usize {
+        self.inner.geometry_nodes()
+    }
+
+    pub fn partial_build_nodes(&self) -> usize {
+        self.inner.partial_build_nodes()
+    }
+
     pub fn advance(
         &mut self,
         work_budget: usize,

@@ -199,6 +199,7 @@ export type ClearraSetupFinderReport = {
   next_cycle_remaining_pieces: string;
   post_cycle_borrow_enabled: boolean;
   coverage_semantics: 'full-future-oracle' | 'visible-seven-policy';
+  continuation_supply_semantics: 'exact-post-setup-hold-queue-state';
   geometry_family_count: string;
   partial_build_node_count: number;
   complete: boolean;
@@ -310,18 +311,24 @@ export function createBrowserVirtualFileHandle(file: File): ClearraVirtualFileHa
 export function postRunCommand(
   worker: Worker,
   request: ClearraWasmCommandRequest,
-  prewarmWorkerCount = 1
+  prewarmWorkerCount = 1,
+  tablebaseRequested = false
 ) {
   worker.postMessage({
     type: 'run_command_text',
     commandText: request.commandText,
     prewarmWorkerCount,
+    tablebaseRequested,
     virtualFiles: request.virtualFiles ?? []
   });
 }
 
-export function postPrewarmRuntime(worker: Worker, workerCount: number) {
-  worker.postMessage({ type: 'prewarm_runtime', workerCount });
+export function postPrewarmRuntime(
+  worker: Worker,
+  workerCount: number,
+  tablebaseRequested = false
+) {
+  worker.postMessage({ type: 'prewarm_runtime', workerCount, tablebaseRequested });
 }
 
 export function postCancelJob(worker: Worker, jobId?: number) {

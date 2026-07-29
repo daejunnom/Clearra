@@ -24,6 +24,7 @@ mod resource_contract;
 pub mod response;
 pub mod run_request;
 pub mod search_backend_warmup;
+pub mod tablebase_runtime;
 
 pub use app_command::{AppCommand, RunnableAppCommand};
 pub use app_context::{AppContext, AppExecutionContext};
@@ -67,3 +68,4 @@ pub use gui_bridge::{
 };
 pub use render::{AppMessage, AppRenderModel, AppResultKind};
 pub use search_backend_warmup::{prewarm_search_backend, GpuSearchWarmupReport};
+pub use tablebase_runtime::{AppTablebaseInstallError, AppTablebaseSession};

@@ -95,7 +95,20 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('preserveB2B')}</span>
       </label>
-      <small class="workspace-field-help">{label('preserveB2BHelp')}</small>
+    </div>
+    <div class="dependency-analysis-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.precomputeBuildDependencies}
+          on:change={(event) => patch({
+            precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('precomputeBuildDependencies')}</span>
+      </label>
+      <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
     </div>
   </section>
 
@@ -108,4 +121,5 @@
 
 <style>
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
+  .dependency-analysis-control { display: grid; gap: 5px; margin-top: 14px; }
 </style>

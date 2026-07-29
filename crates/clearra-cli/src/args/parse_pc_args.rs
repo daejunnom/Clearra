@@ -32,6 +32,8 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut use_all_logical_processors = None;
     let mut cpu_warmup = None;
     let mut gpu_warmup = None;
+    let mut tablebase_requested = None;
+    let mut precompute_build_dependencies = None;
     let mut cpu_threads = None;
     let mut no_gpu = false;
     let mut deterministic = None;
@@ -126,6 +128,22 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 gpu_warmup = Some(true);
                 index += 1;
             }
+            "--tablebase" | "--tb" => {
+                tablebase_requested = Some(true);
+                index += 1;
+            }
+            "--no-tablebase" | "--no-tb" => {
+                tablebase_requested = Some(false);
+                index += 1;
+            }
+            "--build-dependency-dag" => {
+                precompute_build_dependencies = Some(true);
+                index += 1;
+            }
+            "--no-build-dependency-dag" => {
+                precompute_build_dependencies = Some(false);
+                index += 1;
+            }
             "--no-gpu" => {
                 no_gpu = true;
                 index += 1;
@@ -205,6 +223,8 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
         .with_gpu_warmup(gpu_warmup)
+        .with_tablebase_requested(tablebase_requested)
+        .with_precompute_build_dependencies(precompute_build_dependencies)
         .with_deterministic(deterministic)
         .with_max_frontier_states(max_frontier_states)
         .with_max_candidates(max_candidates)

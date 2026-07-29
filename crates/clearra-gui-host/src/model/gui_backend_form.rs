@@ -40,6 +40,7 @@ pub struct GuiBackendForm {
     allow_fallback: bool,
     workers: u16,
     deterministic: bool,
+    precompute_build_dependencies: bool,
     memory_budget_mb: u32,
     candidate_budget: u32,
     pattern_budget: u32,
@@ -96,6 +97,12 @@ impl GuiBackendForm {
     }
 }
 impl GuiBackendForm {
+    pub const fn with_precompute_build_dependencies(mut self, value: bool) -> Self {
+        self.precompute_build_dependencies = value;
+        self
+    }
+}
+impl GuiBackendForm {
     pub const fn with_memory_budget_mb(mut self, memory_budget_mb: u32) -> Self {
         self.memory_budget_mb = memory_budget_mb;
         self
@@ -144,6 +151,11 @@ impl GuiBackendForm {
     }
 }
 impl GuiBackendForm {
+    pub const fn precompute_build_dependencies(&self) -> bool {
+        self.precompute_build_dependencies
+    }
+}
+impl GuiBackendForm {
     pub const fn memory_budget_mb(&self) -> u32 {
         self.memory_budget_mb
     }
@@ -168,6 +180,7 @@ impl Default for GuiBackendForm {
             allow_fallback: true,
             workers: 1,
             deterministic: true,
+            precompute_build_dependencies: false,
             memory_budget_mb: 256,
             candidate_budget: 4096,
             pattern_budget: 1024,

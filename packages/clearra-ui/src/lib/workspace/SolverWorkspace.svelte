@@ -73,7 +73,7 @@
       ...request,
       workers
     };
-    if (runtime === 'web') workerController.prewarm(workers);
+    if (runtime === 'web') workerController.prewarm(workers, request.tablebaseEnabled);
     if (runtime === 'desktop') resumeDesktopJobPolling();
   });
 
@@ -89,7 +89,12 @@
   }
 
   function updateRequest(next: SolverWorkspaceRequest) {
+    const workersChanged = next.workers !== request.workers;
+    const tablebaseChanged = next.tablebaseEnabled !== request.tablebaseEnabled;
     request = next;
+    if (runtime === 'web' && (workersChanged || tablebaseChanged)) {
+      workerController.prewarm(next.workers, next.tablebaseEnabled);
+    }
   }
 
   function setLines(lines: number) {
@@ -204,7 +209,17 @@
     {/if}
   </svelte:fragment>
   <BoardEditor slot="editor" {request} {language} on:change={(event) => setBoardMask(event.detail)} on:import={importBoard} />
-  <SearchControls slot="controls" {request} {language} {validationCodes} on:change={(event) => updateRequest(event.detail)} />
+  <SearchControls
+    slot="controls"
+    {request}
+    {language}
+    {validationCodes}
+    tablebaseControlAvailable={runtime === 'web'}
+    dependencyDagControlAvailable
+    tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
+    tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
+    on:change={(event) => updateRequest(event.detail)}
+  />
   <ResultWorkspace slot="result" view={runtimeView} {language} {elapsedMs} targetLines={resultTargetLines} />
 </WorkspaceShell>
 

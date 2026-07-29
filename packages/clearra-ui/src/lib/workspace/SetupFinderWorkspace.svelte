@@ -47,6 +47,7 @@
   let elapsedMs = 0;
   let runStartedAt = 0;
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let prewarmWorkerCount = 1;
 
   $: workerController.setWorkerFactory(workerFactory);
   $: runtimeView = workspaceViewFromWasm($wasmWorkerState);
@@ -59,7 +60,8 @@
     language = preferredWorkspaceLanguage(
       localStorage.getItem('clearra-language') ?? navigator.language
     );
-    workerController.prewarm(defaultWorkerCount(navigator.hardwareConcurrency));
+    prewarmWorkerCount = defaultWorkerCount(navigator.hardwareConcurrency);
+    workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
   });
 
   onDestroy(() => {
@@ -74,9 +76,13 @@
   }
 
   function updateRequest(next: SetupFinderRequest) {
+    const tablebaseChanged = next.tablebaseEnabled !== request.tablebaseEnabled;
     request = setupCycle(next.remaining) === 7
       ? next
       : { ...next, allowPostCycleBorrow: false };
+    if (tablebaseChanged) {
+      workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
+    }
   }
 
   function run() {
@@ -231,7 +237,8 @@
         buildWasmCommandRequest({
           commandText: buildSetupPathDetailCommand(resultRequest, detail)
         }),
-        1
+        1,
+        resultRequest.tablebaseEnabled
       );
     } catch (error) {
       updatePathDetail(key, {
@@ -320,7 +327,6 @@
       <div><dt>{label('fieldState')}</dt><dd>{label('empty')}</dd></div>
       <div><dt>{label('targetCells')}</dt><dd>40</dd></div>
       <div><dt>{label('completionPieces')}</dt><dd>10</dd></div>
-      <div><dt>{label('lineClearPolicy')}</dt><dd>{label('lineClearInverseExact')}</dd></div>
     </dl>
   </section>
   <SetupFinderControls
@@ -328,6 +334,8 @@
     {request}
     {language}
     {validationCodes}
+    tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
+    tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
     on:change={(event) => updateRequest(event.detail)}
   />
   <SetupFinderResult

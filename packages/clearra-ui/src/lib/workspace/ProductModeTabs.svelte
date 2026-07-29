@@ -7,6 +7,10 @@
   export let language: WorkspaceLanguage;
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+
+  function changeMode(event: Event) {
+    window.location.assign((event.currentTarget as HTMLSelectElement).value);
+  }
 </script>
 
 <nav class="product-tabs" aria-label={label('workspaceMode')}>
@@ -30,6 +34,19 @@
     <RotateCw size={16} strokeWidth={1.8} />{label('spinFinder')}
   </a>
 </nav>
+
+<div class="product-mode-select">
+  <label>
+    <span>{label('workspaceMode')}</span>
+    <select aria-label={label('workspaceMode')} value={`?tool=${active}`} on:change={changeMode}>
+      <option value="?tool=pc">{label('pcSearch')}</option>
+      <option value="?tool=setup">{label('setupFinder')}</option>
+      <option value="?tool=build-probability">{label('buildProbability')}</option>
+      <option value="?tool=damage">{label('maximumDamage')}</option>
+      <option value="?tool=spin-finder">{label('spinFinder')}</option>
+    </select>
+  </label>
+</div>
 
 <style>
   .product-tabs {
@@ -62,5 +79,54 @@
   a.active {
     border-bottom-color: #16877d;
     color: #075f58;
+  }
+
+  .product-mode-select {
+    background: #fff;
+    border-bottom: 1px solid #d7ded9;
+    display: none;
+    padding: 10px 16px;
+  }
+
+  .product-mode-select label {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .product-mode-select span {
+    color: #65716c;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .product-mode-select select {
+    appearance: auto;
+    background: #fff;
+    border: 1px solid #cbd3ce;
+    border-radius: 5px;
+    color: #26322e;
+    font-size: 13px;
+    font-weight: 720;
+    height: 40px;
+    min-width: 0;
+    padding: 0 10px;
+    width: 100%;
+  }
+
+  .product-mode-select select:focus {
+    border-color: #16877d;
+    box-shadow: 0 0 0 3px #16877d1f;
+    outline: 0;
+  }
+
+  @media (max-width: 720px) {
+    .product-tabs {
+      display: none;
+    }
+
+    .product-mode-select {
+      display: block;
+    }
   }
 </style>

@@ -38,6 +38,7 @@ use super::{
     geometry::{compile_target_groups, GeometryAdvance, GeometryCandidate, GeometrySearch},
     kick_profiles::replay_profile_ids,
     mix_digest,
+    pc4_tablebase::{loaded_pc4_compact_tablebase, pc4_tablebase_profile_identity},
     reachability::ReachabilityMetrics,
     standard_bag_coverage::StandardBagCoverage,
     WasmExactSearchError, MAX_BOARD64_PIECES,
@@ -175,6 +176,11 @@ pub(crate) struct WasmExactSearchSession {
     gpu_peak_bytes: u64,
     gpu_shader_hash: Option<String>,
     gpu_shader_version: Option<&'static str>,
+    tablebase_requested: bool,
+    tablebase_status: &'static str,
+    tablebase_artifact_bytes: usize,
+    tablebase_retained_bytes: usize,
+    tablebase_payload_sha256: Option<String>,
     truncated_reason: Option<&'static str>,
     execution_control: ExecutionControl,
     finished: bool,
@@ -215,6 +221,19 @@ impl WasmExactSearchSession {
         let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
         let catalog = Arc::new(GeometryCatalog::compile(problem)?);
         catalog_span.finish(catalog.skeleton_count() as u64);
+        let tablebase_requested = problem.backend_policy().tablebase_requested();
+        let loaded_tablebase = tablebase_requested
+            .then(loaded_pc4_compact_tablebase)
+            .flatten();
+        let tablebase_artifact_bytes = loaded_tablebase
+            .as_ref()
+            .map_or(0, |loaded| loaded.artifact_bytes());
+        let tablebase_retained_bytes = loaded_tablebase
+            .as_ref()
+            .map_or(0, |loaded| loaded.retained_bytes());
+        let tablebase_payload_sha256 = loaded_tablebase
+            .as_ref()
+            .map(|loaded| loaded.payload_sha256_hex());
         let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
         if target_piece_count > MAX_BOARD64_PIECES {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -243,6 +262,28 @@ impl WasmExactSearchSession {
                 "wasm_supply_has_no_reachable_piece_multiset",
             ));
         }
+        let expected_tablebase_profile =
+            pc4_tablebase_profile_identity(problem, catalog.identity_digest());
+        let (tablebase, tablebase_status) = match loaded_tablebase.as_ref() {
+            None if tablebase_requested => (None, "unavailable"),
+            None => (None, "disabled"),
+            Some(_) if external_geometry => (None, "unsupported-backend"),
+            Some(_)
+                if catalog.width() != 10
+                    || catalog.height() != 4
+                    || catalog.initial_board() != 0
+                    || catalog.required_cells() != (1_u64 << 40) - 1 =>
+            {
+                (None, "unsupported-request")
+            }
+            Some(loaded)
+                if loaded.catalog_identity() != catalog.identity_digest()
+                    || loaded.compiler_identity() != expected_tablebase_profile =>
+            {
+                (None, "profile-mismatch")
+            }
+            Some(loaded) => (Some(Arc::clone(loaded)), "connected-exact-dead-index"),
+        };
         supply_span.finish(universe.pattern_count() as u64);
         let covered_patterns = PatternBitSet::new(universe.pattern_count());
         let uses_symbolic_standard_bag = problem.count_policy()
@@ -253,6 +294,14 @@ impl WasmExactSearchSession {
             let (targets, pattern_index_bytes) =
                 compile_target_groups(universe, &multiset_family, !uses_symbolic_standard_bag)?;
             GeometrySearch::external(targets, pattern_index_bytes)
+        } else if let Some(tablebase) = tablebase {
+            GeometrySearch::new_with_tablebase(
+                universe,
+                &multiset_family,
+                catalog.required_cells(),
+                !uses_symbolic_standard_bag,
+                tablebase,
+            )?
         } else {
             GeometrySearch::new(
                 universe,
@@ -262,7 +311,10 @@ impl WasmExactSearchSession {
             )?
         };
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
-        let peak_cpu_bytes = catalog.retained_bytes() + geometry.retained_bytes();
+        let peak_cpu_bytes = catalog
+            .retained_bytes()
+            .saturating_add(geometry.retained_bytes())
+            .saturating_add(tablebase_retained_bytes);
         Ok(Self {
             problem: Arc::new(problem.clone()),
             catalog,
@@ -340,6 +392,11 @@ impl WasmExactSearchSession {
             gpu_peak_bytes: 0,
             gpu_shader_hash: None,
             gpu_shader_version: None,
+            tablebase_requested,
+            tablebase_status,
+            tablebase_artifact_bytes,
+            tablebase_retained_bytes,
+            tablebase_payload_sha256,
             truncated_reason: None,
             execution_control: ExecutionControl::default(),
             finished: false,
@@ -505,6 +562,7 @@ impl WasmExactSearchSession {
             self.catalog
                 .retained_bytes()
                 .saturating_add(self.geometry.retained_bytes())
+                .saturating_add(self.tablebase_retained_bytes)
                 .saturating_add(self.parallel_worker_retained_bytes)
                 .saturating_add(
                     self.buildable_identities.capacity()
@@ -815,6 +873,7 @@ impl WasmExactSearchSession {
         self.peak_cpu_bytes = self.peak_cpu_bytes.max(
             self.catalog.retained_bytes()
                 + self.geometry.retained_bytes()
+                + self.tablebase_retained_bytes
                 + result.retained_bytes
                 + self.coverage_evaluator.retained_bytes()
                 + self.buildup_workspace.retained_bytes()
@@ -1196,6 +1255,7 @@ impl WasmExactSearchSession {
             self.catalog
                 .retained_bytes()
                 .saturating_add(self.geometry.retained_bytes())
+                .saturating_add(self.tablebase_retained_bytes)
                 .saturating_add(self.parallel_worker_retained_bytes),
         );
         if let Some(reason) = summary.truncated_reason {
@@ -1265,6 +1325,7 @@ impl WasmExactSearchSession {
                         self.catalog
                             .retained_bytes()
                             .saturating_add(self.geometry.retained_bytes())
+                            .saturating_add(self.tablebase_retained_bytes)
                             .saturating_add(self.coverage_evaluator.retained_bytes())
                             .saturating_add(self.buildup_workspace.retained_bytes())
                             .saturating_add(
@@ -1652,6 +1713,33 @@ impl WasmExactSearchSession {
             ),
             field("gpu_cpu_duplicate_search", false),
             field("search_traversal", "canonical-skeleton-exact-cover"),
+            field("tablebase_requested", self.tablebase_requested),
+            field("tablebase_status", self.tablebase_status),
+            field(
+                "tablebase_tier",
+                if self.tablebase_status == "connected-exact-dead-index" {
+                    "pc4-compact-exact"
+                } else {
+                    "none"
+                },
+            ),
+            field(
+                "tablebase_semantics",
+                if self.tablebase_status == "connected-exact-dead-index" {
+                    "exact-dead-hit-or-unknown-with-generic-exact-fallback"
+                } else {
+                    "generic-exact"
+                },
+            ),
+            field("tablebase_artifact_bytes", self.tablebase_artifact_bytes),
+            field(
+                "tablebase_payload_sha256",
+                self.tablebase_payload_sha256.as_deref().unwrap_or("none"),
+            ),
+            field(
+                "tablebase_pruned_states",
+                self.geometry.tablebase_pruned_states(),
+            ),
             field(
                 "supply_window_resolution",
                 self.problem.supply().supply_window_resolution(),

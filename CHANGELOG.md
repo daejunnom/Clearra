@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-29
+
+- Added an opt-in compact PC4 tablebase for compatible empty 10x4 searches,
+  with bounded artifact size, schema and digest validation, lazy browser
+  loading, explicit CLI installation, exact-dead-only pruning, and exact-search
+  fallback for every unknown or unsupported state.
+- Corrected Setup Finder continuation coverage so each candidate retains its
+  exact post-setup hold, queue, bag-boundary provenance, line-clear state, and
+  complete PC solution family rather than substituting a fresh supply.
+- Shared exact suffix and observation-language results across Setup candidates,
+  preserved symmetric and multi-parent solution families, and connected the
+  corrected path through single-worker, multi-worker, browser WASM, CLI,
+  desktop host, reports, and on-demand PC solution rendering.
+- Added an opt-in piece-dependency DAG for PC and Build Probability BuildUp.
+  The beta path preserves every canonical multi-parent convergence, fails open
+  to the baseline search when unavailable, and leaves kick-sensitive
+  dependencies to the exact selected-rule reachability engine.
+- Added SRS+ regression coverage for a T lock whose legal kick path depends on
+  a previously placed J piece, preventing geometry-only dependency analysis
+  from replacing exact kick-table reachability.
+- Refined English and Korean product controls, responsive product-mode
+  navigation, progress reporting, tablebase readiness, queue-visibility
+  wording, and Setup result semantics without exposing implementation details.
+
 ## 0.2.7 - 2026-07-27
 
 - Added Fumen as the default solution-copy format across PC, Setup, Build

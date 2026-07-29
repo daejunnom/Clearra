@@ -11,6 +11,7 @@ pub enum CliErrorCode {
     ProductRuntimeUnsupported,
     NativeCoreUnavailable,
     BackendGpuUnavailable,
+    TablebaseInstallFailed,
     PcTargetInvalid,
     PcTargetUnsupportedMvp,
     PcQueryInvalid,
@@ -54,6 +55,7 @@ impl CliErrorCode {
             Self::ProductRuntimeUnsupported => "E_PRODUCT_RUNTIME_UNSUPPORTED",
             Self::NativeCoreUnavailable => "E_NATIVE_CORE_UNAVAILABLE",
             Self::BackendGpuUnavailable => "E_BACKEND_GPU_UNAVAILABLE",
+            Self::TablebaseInstallFailed => "E_TABLEBASE_INSTALL_FAILED",
             Self::PcTargetInvalid => "E_PC_TARGET_INVALID",
             Self::PcTargetUnsupportedMvp => "E_PC_TARGET_UNSUPPORTED_MVP",
             Self::PcQueryInvalid => "E_PC_QUERY_INVALID",
@@ -98,6 +100,7 @@ impl CliErrorCode {
             | Self::PathSearchInternal
             | Self::PcScenarioSearchInternal
             | Self::ContinueSearchInternal
+            | Self::TablebaseInstallFailed
             | Self::VerifyKicksFailed => ExitCode::InternalError,
             Self::CliMissingValue
             | Self::CliInvalidValue

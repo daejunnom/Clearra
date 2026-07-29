@@ -15,6 +15,9 @@ pub use clearra_app::{
 pub use clearra_core_executor::backend::{
     prewarm_gpu_search, prewarm_gpu_search_async, GpuSearchWarmupReport,
 };
+pub use clearra_core_executor::{
+    install_pc4_compact_tablebase, release_pc4_compact_tablebase, Pc4TablebaseError,
+};
 pub use distributed_runtime::{
     serialize_distributed_final_events, WasmDistributedCoordinator, WasmDistributedFallbackReason,
     WasmDistributedMode, WasmDistributedPreparation, WasmDistributedProducerAdvance,

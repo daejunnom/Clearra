@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CircleHelp, Database, Flame, RotateCw, ShieldCheck } from '@lucide/svelte';
+  import { Database, Flame, RotateCw } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
   import {
@@ -22,14 +22,6 @@
   const dispatch = createEventDispatcher<{ change: ForwardSearchRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: categoryOptions = spinCategoryOptions(request.spinProfile);
-  $: selectedRuleLabel =
-    request.rule === 'srs-plus'
-      ? 'SRS+'
-      : request.rule === 'srs-x'
-        ? 'SRS-X'
-        : request.rule === 'jstris-180'
-          ? 'Jstris 180'
-          : 'SRS';
   $: if (!categoryOptions.includes(request.spinCategory)) update({ spinCategory: 'any' });
 
   function update(change: Partial<ForwardSearchRequest>) {
@@ -37,35 +29,20 @@
   }
 </script>
 
-<WorkspaceControlPanel ariaLabel={label('forwardContract')}>
+<WorkspaceControlPanel ariaLabel={label(request.tool === 'damage' ? 'maximumDamage' : 'spinFinder')}>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{label('source')}</h2>
     <div class="workspace-field queue-field">
-    <div class="queue-label">
-      <label class="workspace-field-label" for="forward-queue-input">{label(request.tool === 'damage' ? 'fixedQueue' : 'queuePattern')}</label>
-      {#if request.tool === 'spin-finder'}
-        <button
-          type="button"
-          class="tooltip-trigger"
-          aria-label={label('queuePatternHelp')}
-          aria-describedby="spin-queue-tooltip"
-        >
-          <CircleHelp size={14} strokeWidth={1.8} />
-          <span id="spin-queue-tooltip" role="tooltip">{label('spinQueueTooltip')}</span>
-        </button>
-      {/if}
-    </div>
+    <label class="workspace-field-label" for="forward-queue-input">{label(request.tool === 'damage' ? 'fixedQueue' : 'queuePattern')}</label>
     <QueueTextInput
       class="workspace-queue-input"
       id="forward-queue-input"
       value={request.queue}
       placeholder={request.tool === 'damage' ? 'TZOISLJ' : 'P4 / [^T]4'}
       spellcheck="false"
-      aria-describedby="forward-queue-help"
       aria-invalid={validationCodes.includes('forward_queue_invalid')}
       on:value={(event) => update({ queue: event.detail })}
     />
-    <small class="workspace-field-help" id="forward-queue-help">{label(request.tool === 'damage' ? 'fixedQueueHelp' : 'spinPatternHelp')}</small>
   </div>
   {#if request.tool === 'spin-finder'}<QueuePatternHelp {language} />{/if}
 
@@ -87,12 +64,6 @@
       {#if request.tool === 'damage'}<Flame size={16} strokeWidth={1.8} />{:else}<RotateCw size={16} strokeWidth={1.8} />{/if}
       {label(request.tool === 'damage' ? 'maximumDamage' : 'spinFinder')}
     </h2>
-    <div class="workspace-contract-band">
-      <ShieldCheck size={15} strokeWidth={1.8} />
-      <span>{label('forwardSearchContract')}</span>
-      <b>{selectedRuleLabel} · {label('forwardDirection')}</b>
-    </div>
-
     <div class="workspace-field-grid">
     <label class="workspace-field">
       <span>{label('rule')}</span>
@@ -126,7 +97,6 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('preserveB2B')}</span>
       </label>
-      <small class="workspace-field-help">{label('preserveB2BHelp')}</small>
     </div>
 
   {#if request.tool === 'damage'}
@@ -153,7 +123,6 @@
           value={request.minimumDamage}
           on:input={(event) => update({ minimumDamage: Number((event.currentTarget as HTMLInputElement).value) })}
         />
-        <small class="workspace-field-help">{label('minimumDamageHelp')}</small>
       </label>
     {/if}
     <div class="workspace-field-grid">
@@ -204,13 +173,7 @@
 </WorkspaceControlPanel>
 
 <style>
-  .queue-label { align-items: center; color: #66716d; display: flex; font-size: 11px; font-weight: 700; gap: 6px; }
-  .queue-label label { display: inline; }
   .damage-mode { margin-top: 12px; }
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
-  .tooltip-trigger { background: transparent; border: 0; color: #52605b; cursor: help; display: inline-flex; outline: none; padding: 0; position: relative; }
-  .tooltip-trigger:focus-visible { border-radius: 2px; outline: 2px solid #16877d; outline-offset: 2px; }
-  .tooltip-trigger [role='tooltip'] { background: #17211e; border-radius: 4px; color: #fff; font-size: 10px; font-weight: 500; left: -8px; line-height: 1.5; max-width: min(300px, calc(100vw - 48px)); opacity: 0; padding: 8px 9px; pointer-events: none; position: absolute; top: calc(100% + 7px); transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; visibility: hidden; width: max-content; z-index: 20; }
-  .tooltip-trigger:hover [role='tooltip'], .tooltip-trigger:focus [role='tooltip'] { opacity: 1; transform: translateY(0); visibility: visible; }
   .queue-field :global(input[aria-invalid='true']) { border-color: #bd5a3d; }
 </style>

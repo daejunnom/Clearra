@@ -99,10 +99,13 @@ pub use wasm_build_probability_backend::{
 #[cfg(feature = "webgpu-search")]
 pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
+    compile_pc4_compact_tablebase, install_pc4_compact_tablebase, release_pc4_compact_tablebase,
+    Pc4CompactTablebase, Pc4CompactTablebaseArtifact, Pc4TablebaseError, Pc4TablebaseLookup,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
     WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
     WasmCpuCandidateProducer, WasmDistributedBackendExecution, WasmDistributedGeometrySummary,
     WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
+    PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub use wasm_cpu_search_backend::{
     WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,

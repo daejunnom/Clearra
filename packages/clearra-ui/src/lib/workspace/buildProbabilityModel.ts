@@ -19,6 +19,7 @@ export type BuildProbabilityRequest = {
   rule: RuleProfile;
   spinProfile: SpinProfile;
   preserveB2B: boolean;
+  precomputeBuildDependencies: boolean;
   workers: number;
 };
 
@@ -41,6 +42,7 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     rule: 'srs-plus',
     spinProfile: 't-spins',
     preserveB2B: false,
+    precomputeBuildDependencies: false,
     workers: defaultWorkerCount()
   };
 }
@@ -98,6 +100,11 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
     tokens.push('--spin-profile', request.spinProfile);
   }
   if (request.preserveB2B) tokens.push('--preserve-b2b');
+  tokens.push(
+    request.precomputeBuildDependencies
+      ? '--build-dependency-dag'
+      : '--no-build-dependency-dag'
+  );
   tokens.push(
     mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
   );

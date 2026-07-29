@@ -27,7 +27,23 @@ export type WasmWorkerState = {
   response: ClearraHostAppResponse | null;
   searchReport: ClearraWasmSearchReport | null;
   webgpuBackend: ClearraWebGpuBackendReport | null;
+  tablebaseWarmup: WasmTablebaseWarmupState;
   error: string | null;
+};
+
+export type WasmTablebaseWarmupState = {
+  status: 'disabled' | 'loading' | 'ready' | 'unavailable';
+  artifactSha256: string;
+  byteLength: number;
+  message: string | null;
+};
+
+export type TablebaseWarmupWorkerEvent = {
+  type: 'tablebase_warmup';
+  phase: WasmTablebaseWarmupState['status'];
+  artifactSha256: string;
+  byteLength: number;
+  message?: string;
 };
 
 const wasmWorkerInitialState: WasmWorkerState = {
@@ -45,6 +61,12 @@ const wasmWorkerInitialState: WasmWorkerState = {
   response: null,
   searchReport: null,
   webgpuBackend: null,
+  tablebaseWarmup: {
+    status: 'disabled',
+    artifactSha256: '',
+    byteLength: 0,
+    message: null
+  },
   error: null
 };
 
@@ -57,7 +79,11 @@ export function updateWasmCommandText(commandText: string) {
   }));
 }
 
-export function runWasmCommand(worker: Worker, prewarmWorkerCount = 1) {
+export function runWasmCommand(
+  worker: Worker,
+  prewarmWorkerCount = 1,
+  tablebaseRequested = false
+) {
   const request = get(wasmWorkerState).request;
   wasmWorkerState.update((state) => ({
     ...state,
@@ -76,7 +102,7 @@ export function runWasmCommand(worker: Worker, prewarmWorkerCount = 1) {
     error: null,
     terminalLines: [...state.terminalLines, `$ ${displayCommandText(request.commandText)}`]
   }));
-  postRunCommand(worker, request, prewarmWorkerCount);
+  postRunCommand(worker, request, prewarmWorkerCount, tablebaseRequested);
 }
 
 function displayCommandText(commandText: string): string {
@@ -96,6 +122,18 @@ export function cancelWasmCommand(worker: Worker): number | null | undefined {
 
 export function applyWasmWorkerEvent(event: ClearraWasmWorkerEvent) {
   wasmWorkerState.update((state) => reduceWasmWorkerEvent(state, event));
+}
+
+export function applyTablebaseWarmupEvent(event: TablebaseWarmupWorkerEvent) {
+  wasmWorkerState.update((state) => ({
+    ...state,
+    tablebaseWarmup: {
+      status: event.phase,
+      artifactSha256: event.artifactSha256,
+      byteLength: event.byteLength,
+      message: event.message ?? null
+    }
+  }));
 }
 
 function reduceWasmWorkerEvent(

@@ -596,6 +596,10 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
             );
             nested.boolean("post_cycle_borrow_enabled", setup.post_cycle_borrow_enabled);
             nested.string("coverage_semantics", &setup.coverage_semantics);
+            nested.string(
+                "continuation_supply_semantics",
+                &setup.continuation_supply_semantics,
+            );
             nested.string("geometry_family_count", &setup.geometry_family_count);
             nested.number("partial_build_node_count", setup.partial_build_node_count);
             nested.boolean("complete", setup.complete);

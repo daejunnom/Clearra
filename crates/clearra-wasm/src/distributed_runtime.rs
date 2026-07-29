@@ -694,8 +694,10 @@ impl DistributedCandidateProducer {
                 }
             }
             Self::Setup(producer) => WasmDistributedProgress {
+                geometry_nodes: producer.geometry_nodes(),
                 candidates: producer.dispatched_conditions(),
                 candidate_family_count: Some(producer.task_count() as u128),
+                build_nodes: producer.partial_build_nodes(),
                 coverage_checks: producer.received_conditions(),
                 ..WasmDistributedProgress::default()
             },

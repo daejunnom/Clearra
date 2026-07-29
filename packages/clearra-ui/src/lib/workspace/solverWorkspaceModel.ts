@@ -27,6 +27,8 @@ export type SolverWorkspaceRequest = {
   backend: SearchBackend;
   gpuDevice: string;
   workers: number;
+  tablebaseEnabled: boolean;
+  precomputeBuildDependencies: boolean;
 };
 
 export type WorkspaceValidationCode =
@@ -54,7 +56,9 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     solutionProbabilities: false,
     backend: 'auto',
     gpuDevice: 'auto',
-    workers: defaultWorkerCount()
+    workers: defaultWorkerCount(),
+    tablebaseEnabled: false,
+    precomputeBuildDependencies: false
   };
 }
 
@@ -307,6 +311,12 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   }
   tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all', '--backend', request.backend);
   tokens.push('--rule', request.rule);
+  tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
+  tokens.push(
+    request.precomputeBuildDependencies
+      ? '--build-dependency-dag'
+      : '--no-build-dependency-dag'
+  );
   if (request.solutionProbabilities) tokens.push('--solution-probabilities');
   tokens.push('--queue-knowledge', request.queueKnowledge);
   if (request.scoreMode === 'minimum-cover') tokens.push('--objective', 'minimum-cover');
@@ -354,6 +364,7 @@ export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, lang
     score_profile: request.scoreProfile,
     spin_profile: request.spinProfile,
     preserve_b2b: request.preserveB2B,
+    precompute_build_dependencies: request.precomputeBuildDependencies,
     initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
     solution_probabilities: request.solutionProbabilities,
     workers: Math.max(1, Math.trunc(request.workers)),

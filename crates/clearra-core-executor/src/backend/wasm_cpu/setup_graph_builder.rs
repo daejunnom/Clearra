@@ -4,12 +4,18 @@ use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::{compile_setup_search_conditions, SetupSearchCondition, SetupSearchQuery};
 use clearra_supply::pattern_universe::PieceMultisetKey;
 
+use crate::performance::{ExecutorSearchStage, SearchStageSpan};
+
 use super::{
     catalog::GeometryCatalog,
     geometry::{pack_piece_counts, GeometryFamilyCompileAdvance, GeometryFamilyCompileSession},
+    pc4_tablebase::{
+        loaded_pc4_compact_tablebase, pc4_tablebase_profile_identity, Pc4CompactTablebase,
+    },
     setup_coverage_graph::SetupCoverageGraph,
     setup_finder::{
-        compile_setup_admissible_prefixes, compile_setup_pattern_index, CompletedSetupCoverage,
+        compile_setup_admissible_prefixes_with_word_counts, compile_setup_pattern_index,
+        CompletedSetupCoverage,
     },
     setup_partial_build::{PartialBuildAdvance, PartialBuildGraph, PartialBuildGraphBuilder},
     WasmExactSearchError,
@@ -28,6 +34,8 @@ pub(super) struct SetupSharedGraph {
     pub(super) coverage_graph: Arc<SetupCoverageGraph>,
     pub(super) geometry_family_count: String,
     pub(super) geometry_expanded_nodes: usize,
+    pub(super) tablebase_status: &'static str,
+    pub(super) tablebase_pruned_states: usize,
     pub(super) cached_coverage: Option<Arc<[CompletedSetupCoverage]>>,
 }
 
@@ -41,7 +49,9 @@ enum SetupGraphBuildStage {
 pub(super) struct SetupGraphBuildSession {
     query: SetupSearchQuery,
     conditions: Vec<SetupSearchCondition>,
+    condition_pattern_word_counts: Option<Vec<usize>>,
     catalog: Option<Arc<GeometryCatalog>>,
+    tablebase_status: &'static str,
     stage: SetupGraphBuildStage,
 }
 
@@ -50,6 +60,8 @@ struct CachedSetupGraph {
     coverage_graph: Arc<SetupCoverageGraph>,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
+    tablebase_status: &'static str,
+    tablebase_pruned_states: usize,
     coverage: Option<Arc<[CompletedSetupCoverage]>>,
 }
 
@@ -59,6 +71,8 @@ struct SetupGraphCacheEntry {
     coverage_graph: Arc<SetupCoverageGraph>,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
+    tablebase_status: &'static str,
+    tablebase_pruned_states: usize,
     coverage: Option<Arc<[CompletedSetupCoverage]>>,
 }
 
@@ -88,10 +102,13 @@ impl SetupGraphBuildSession {
             ))?;
         super::ensure_connected_kick_profile(first.problem())?;
         if let Some(cached) = cached_setup_graph(query) {
+            let tablebase_status = cached.tablebase_status;
             return Ok(Self {
                 query: query.clone(),
                 conditions,
+                condition_pattern_word_counts: None,
                 catalog: None,
+                tablebase_status,
                 stage: SetupGraphBuildStage::Cached(Some(cached)),
             });
         }
@@ -101,8 +118,21 @@ impl SetupGraphBuildSession {
                 "setup_finder_requires_empty_10x4_target",
             ));
         }
+        let loaded_tablebase = query
+            .tablebase_requested()
+            .then(loaded_pc4_compact_tablebase)
+            .flatten();
+        let expected_tablebase_profile =
+            pc4_tablebase_profile_identity(first.problem(), catalog.identity_digest());
+        let (tablebase, tablebase_status) = select_setup_tablebase(
+            query.tablebase_requested(),
+            loaded_tablebase,
+            catalog.identity_digest(),
+            expected_tablebase_profile,
+        );
 
-        let mut admissible_prefixes = compile_setup_admissible_prefixes(&conditions)?;
+        let (mut admissible_prefixes, condition_pattern_word_counts) =
+            compile_setup_admissible_prefixes_with_word_counts(&conditions)?;
         let mut target_keys = Vec::<PieceMultisetKey>::new();
         for condition in &conditions {
             let problem = condition.problem();
@@ -131,15 +161,18 @@ impl SetupGraphBuildSession {
                 .iter()
                 .map(|target| pack_piece_counts(target.counts())),
         );
-        let geometry = GeometryFamilyCompileSession::new(
+        let geometry = GeometryFamilyCompileSession::new_with_tablebase(
             catalog.required_cells(),
             target_keys,
             admissible_prefixes,
+            tablebase,
         )?;
         Ok(Self {
             query: query.clone(),
             conditions,
+            condition_pattern_word_counts: Some(condition_pattern_word_counts),
             catalog: Some(catalog),
+            tablebase_status,
             stage: SetupGraphBuildStage::Geometry(geometry),
         })
     }
@@ -148,7 +181,29 @@ impl SetupGraphBuildSession {
         self.conditions.len()
     }
 
+    pub(super) fn geometry_nodes(&self) -> usize {
+        match &self.stage {
+            SetupGraphBuildStage::Geometry(geometry) => geometry.progress_nodes(),
+            SetupGraphBuildStage::PartialBuild(builder) => builder.geometry_expanded_nodes(),
+            SetupGraphBuildStage::Cached(Some(cached)) => cached.geometry_expanded_nodes,
+            SetupGraphBuildStage::Cached(None) | SetupGraphBuildStage::Finished => 0,
+        }
+    }
+
+    pub(super) fn partial_build_nodes(&self) -> usize {
+        match &self.stage {
+            SetupGraphBuildStage::PartialBuild(builder) => builder.node_count(),
+            SetupGraphBuildStage::Cached(Some(cached)) => cached.graph.nodes.len(),
+            SetupGraphBuildStage::Cached(None)
+            | SetupGraphBuildStage::Geometry(_)
+            | SetupGraphBuildStage::Finished => 0,
+        }
+    }
+
     pub(super) fn condition_pattern_word_counts(&self) -> Result<Vec<usize>, WasmExactSearchError> {
+        if let Some(word_counts) = self.condition_pattern_word_counts.as_ref() {
+            return Ok(word_counts.clone());
+        }
         if let SetupGraphBuildStage::Cached(Some(cached)) = &self.stage {
             if cached_detail_candidate_exists(&self.query, cached.coverage.as_deref()) {
                 return Ok(vec![0; self.conditions.len()]);
@@ -183,6 +238,8 @@ impl SetupGraphBuildSession {
                     coverage_graph: cached.coverage_graph,
                     geometry_family_count: cached.geometry_family_count,
                     geometry_expanded_nodes: cached.geometry_expanded_nodes,
+                    tablebase_status: cached.tablebase_status,
+                    tablebase_pruned_states: cached.tablebase_pruned_states,
                     cached_coverage: cached.coverage,
                 }))
             }
@@ -193,7 +250,10 @@ impl SetupGraphBuildSession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "setup_geometry_catalog_missing",
                     ))?;
-                match geometry.advance(catalog, budget, control) {
+                let span = SearchStageSpan::begin(ExecutorSearchStage::WasmSetupGeometryCompile);
+                let advance = geometry.advance(catalog, budget, control);
+                span.finish(budget as u64);
+                match advance {
                     GeometryFamilyCompileAdvance::Pending => {
                         self.stage = SetupGraphBuildStage::Geometry(geometry);
                         Ok(SetupGraphBuildAdvance::Pending)
@@ -209,6 +269,7 @@ impl SetupGraphBuildSession {
                             compiled,
                             catalog,
                             self.conditions[0].problem(),
+                            self.query.max_setup_pieces(),
                         )?;
                         self.stage = SetupGraphBuildStage::PartialBuild(builder);
                         Ok(SetupGraphBuildAdvance::Pending)
@@ -222,7 +283,10 @@ impl SetupGraphBuildSession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "setup_geometry_catalog_missing",
                     ))?;
-                match builder.advance(catalog, budget, control)? {
+                let span = SearchStageSpan::begin(ExecutorSearchStage::WasmSetupPartialBuild);
+                let advance = builder.advance(catalog, budget, control);
+                span.finish(budget as u64);
+                match advance? {
                     PartialBuildAdvance::Pending => {
                         self.stage = SetupGraphBuildStage::PartialBuild(builder);
                         Ok(SetupGraphBuildAdvance::Pending)
@@ -232,9 +296,15 @@ impl SetupGraphBuildSession {
                         graph,
                         geometry_family_count,
                         geometry_expanded_nodes,
+                        tablebase_pruned_states,
                     } => {
                         let graph = Arc::new(graph);
-                        let coverage_graph = Arc::new(SetupCoverageGraph::compile(&graph)?);
+                        let span = SearchStageSpan::begin(
+                            ExecutorSearchStage::WasmSetupCoverageGraphCompile,
+                        );
+                        let coverage_graph = SetupCoverageGraph::compile(&graph);
+                        span.finish(graph.nodes.len() as u64);
+                        let coverage_graph = Arc::new(coverage_graph?);
                         let shared = SetupSharedGraph {
                             query: self.query.clone(),
                             conditions: std::mem::take(&mut self.conditions),
@@ -242,6 +312,8 @@ impl SetupGraphBuildSession {
                             coverage_graph,
                             geometry_family_count,
                             geometry_expanded_nodes,
+                            tablebase_status: self.tablebase_status,
+                            tablebase_pruned_states,
                             cached_coverage: None,
                         };
                         cache_setup_graph(&shared);
@@ -253,6 +325,26 @@ impl SetupGraphBuildSession {
                 "setup_graph_build_session_already_finished",
             )),
         }
+    }
+}
+
+fn select_setup_tablebase(
+    requested: bool,
+    loaded: Option<Arc<Pc4CompactTablebase>>,
+    catalog_identity: u64,
+    compiler_identity: u64,
+) -> (Option<Arc<Pc4CompactTablebase>>, &'static str) {
+    match loaded {
+        None if requested => (None, "unavailable"),
+        None => (None, "disabled"),
+        Some(_) if !requested => (None, "disabled"),
+        Some(loaded)
+            if loaded.catalog_identity() != catalog_identity
+                || loaded.compiler_identity() != compiler_identity =>
+        {
+            (None, "profile-mismatch")
+        }
+        Some(loaded) => (Some(loaded), "connected-exact-dead-index"),
     }
 }
 
@@ -276,6 +368,8 @@ fn cached_setup_graph(query: &SetupSearchQuery) -> Option<CachedSetupGraph> {
             coverage_graph: Arc::clone(&entry.coverage_graph),
             geometry_family_count: entry.geometry_family_count.clone(),
             geometry_expanded_nodes: entry.geometry_expanded_nodes,
+            tablebase_status: entry.tablebase_status,
+            tablebase_pruned_states: entry.tablebase_pruned_states,
             coverage: entry.coverage.as_ref().map(Arc::clone),
         })
     })
@@ -292,6 +386,8 @@ fn cache_setup_graph(shared: &SetupSharedGraph) {
             coverage_graph: Arc::clone(&shared.coverage_graph),
             geometry_family_count: shared.geometry_family_count.clone(),
             geometry_expanded_nodes: shared.geometry_expanded_nodes,
+            tablebase_status: shared.tablebase_status,
+            tablebase_pruned_states: shared.tablebase_pruned_states,
             coverage: None,
         });
     });
@@ -334,4 +430,52 @@ fn cached_detail_candidate_exists(
                     .any(|candidate| candidate.setup_id() == setup_id)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::select_setup_tablebase;
+    use crate::backend::wasm_cpu::pc4_tablebase::Pc4CompactTablebase;
+
+    const PRODUCT_ARTIFACT: &[u8] = include_bytes!(
+        "../../../../../apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin"
+    );
+
+    #[test]
+    fn setup_tablebase_selection_is_opt_in_and_profile_exact() {
+        let tablebase =
+            Arc::new(Pc4CompactTablebase::from_bytes(PRODUCT_ARTIFACT).expect("product tablebase"));
+        let catalog_identity = tablebase.catalog_identity();
+        let compiler_identity = tablebase.compiler_identity();
+
+        let (selected, status) = select_setup_tablebase(
+            false,
+            Some(Arc::clone(&tablebase)),
+            catalog_identity,
+            compiler_identity,
+        );
+        assert!(selected.is_none());
+        assert_eq!(status, "disabled");
+
+        let (selected, status) =
+            select_setup_tablebase(true, None, catalog_identity, compiler_identity);
+        assert!(selected.is_none());
+        assert_eq!(status, "unavailable");
+
+        let (selected, status) = select_setup_tablebase(
+            true,
+            Some(Arc::clone(&tablebase)),
+            catalog_identity ^ 1,
+            compiler_identity,
+        );
+        assert!(selected.is_none());
+        assert_eq!(status, "profile-mismatch");
+
+        let (selected, status) =
+            select_setup_tablebase(true, Some(tablebase), catalog_identity, compiler_identity);
+        assert!(selected.is_some());
+        assert_eq!(status, "connected-exact-dead-index");
+    }
 }

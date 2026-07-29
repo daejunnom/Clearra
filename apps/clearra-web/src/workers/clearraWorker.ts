@@ -11,10 +11,20 @@ import {
   type ClearraWasmFailureDiagnostics,
   type ClearraWasmModule
 } from './clearraWasmRuntime';
+import {
+  pc4TablebaseArtifactSha256,
+  prewarmPc4TablebaseAssets,
+  releasePc4TablebaseAssets
+} from './pc4TablebaseAssets';
 
 type ClearraWorkerMessage =
-  | { type: 'prewarm_runtime'; workerCount: number }
-  | { type: 'run_command_text'; commandText?: string; prewarmWorkerCount?: number }
+  | { type: 'prewarm_runtime'; workerCount: number; tablebaseRequested?: boolean }
+  | {
+      type: 'run_command_text';
+      commandText?: string;
+      prewarmWorkerCount?: number;
+      tablebaseRequested?: boolean;
+    }
   | { type: 'cancel_job'; jobId?: number }
   | { type: 'dispose_runtime' };
 
@@ -32,6 +42,10 @@ let runtimePrewarmGeneration = 0;
 let requestedPrewarmWorkerCount = 1;
 let completedPrewarmWorkerCount = 0;
 let loadedWasm: ClearraWasmModule | null = null;
+let tablebaseRequested = false;
+let tablebaseWarmup: Promise<void> | null = null;
+let tablebaseWarmupGeneration = 0;
+let tablebaseWarmupAttempted = false;
 let failClosed = false;
 
 self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
@@ -40,7 +54,10 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
     return;
   }
   if (message.data.type === 'prewarm_runtime') {
-    startRuntimePrewarm(message.data.workerCount);
+    startRuntimePrewarm(
+      message.data.workerCount,
+      message.data.tablebaseRequested ?? false
+    );
     return;
   }
   if (message.data.type === 'cancel_job') {
@@ -49,7 +66,8 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
   }
   void runCommandText(
     message.data.commandText ?? '',
-    message.data.prewarmWorkerCount ?? requestedPrewarmWorkerCount
+    message.data.prewarmWorkerCount ?? requestedPrewarmWorkerCount,
+    message.data.tablebaseRequested ?? false
   );
 };
 
@@ -63,12 +81,17 @@ self.addEventListener('unhandledrejection', (event) => {
   failCloseUnhandled(event.reason);
 });
 
-async function runCommandText(commandText: string, prewarmWorkerCount: number) {
+async function runCommandText(
+  commandText: string,
+  prewarmWorkerCount: number,
+  requestedTablebase: boolean
+) {
   if (active) {
     postRuntimeFailure(active.id, 'E_WASM_JOB_ALREADY_RUNNING', 'a WASM job is already active');
     return;
   }
   requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
+  setTablebaseRequested(requestedTablebase);
   const jobId = nextJobId++;
   const job: ActiveJob = {
     id: jobId,
@@ -86,6 +109,7 @@ async function runCommandText(commandText: string, prewarmWorkerCount: number) {
     await runtimePrewarm;
     wasm = loadedWasm ?? (await loadClearraWasmModule());
     loadedWasm = wasm;
+    await startTablebaseWarmupAfterWasm(wasm);
     if (job.cancelled) {
       releaseJobResources(job, wasm);
       emitCancelled(job);
@@ -116,14 +140,20 @@ async function runCommandText(commandText: string, prewarmWorkerCount: number) {
     closeFailClosedWorker();
   } finally {
     if (active === job) active = null;
-    if (!failClosed) startRuntimePrewarm(requestedPrewarmWorkerCount);
+    if (!failClosed) {
+      startRuntimePrewarm(requestedPrewarmWorkerCount, tablebaseRequested);
+    }
   }
 }
 
-function startRuntimePrewarm(workerCount: number) {
+function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebaseRequested) {
   const boundedWorkerCount = Math.max(1, Math.floor(workerCount));
   requestedPrewarmWorkerCount = boundedWorkerCount;
-  if (runtimePrewarm || completedPrewarmWorkerCount >= boundedWorkerCount) return;
+  setTablebaseRequested(requestedTablebase);
+  if (runtimePrewarm || completedPrewarmWorkerCount >= boundedWorkerCount) {
+    if (loadedWasm) void startTablebaseWarmupAfterWasm(loadedWasm);
+    return;
+  }
   const generation = ++runtimePrewarmGeneration;
   postRuntimePrewarmPhase('started', boundedWorkerCount);
   runtimePrewarm = loadClearraWasmModule()
@@ -136,7 +166,8 @@ function startRuntimePrewarm(workerCount: number) {
       });
       await Promise.all([
         gpuWarmup,
-        prewarmDistributedWorkers(boundedWorkerCount, wasm.compiled_module())
+        prewarmDistributedWorkers(boundedWorkerCount, wasm.compiled_module()),
+        startTablebaseWarmupAfterWasm(wasm)
       ]);
       if (generation === runtimePrewarmGeneration) {
         completedPrewarmWorkerCount = boundedWorkerCount;
@@ -154,6 +185,51 @@ function startRuntimePrewarm(workerCount: number) {
         postRuntimePrewarmPhase('finished', boundedWorkerCount);
       }
     });
+}
+
+function setTablebaseRequested(requested: boolean) {
+  if (tablebaseRequested === requested) return;
+  tablebaseRequested = requested;
+  tablebaseWarmupGeneration += 1;
+  tablebaseWarmup = null;
+  tablebaseWarmupAttempted = false;
+  if (requested) return;
+  try {
+    loadedWasm?.release_tablebase();
+  } catch (error) {
+    console.warn('Clearra tablebase release was incomplete', error);
+  }
+  releasePc4TablebaseAssets();
+  postTablebaseWarmupPhase('disabled', 0);
+}
+
+function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
+  if (!tablebaseRequested) return Promise.resolve();
+  if (tablebaseWarmup) return tablebaseWarmup;
+  if (tablebaseWarmupAttempted) return Promise.resolve();
+  tablebaseWarmupAttempted = true;
+  const generation = ++tablebaseWarmupGeneration;
+  postTablebaseWarmupPhase('loading', 0);
+  tablebaseWarmup = prewarmPc4TablebaseAssets()
+    .then((bundle) => {
+      if (generation !== tablebaseWarmupGeneration || !tablebaseRequested) return;
+      postTablebaseWarmupPhase('loading', bundle.byteLength);
+      const report = wasm.install_tablebase(bundle.artifact);
+      if (report.artifact_bytes !== bundle.byteLength) {
+        throw new Error('WASM tablebase install reported an unexpected artifact size');
+      }
+      postTablebaseWarmupPhase('ready', bundle.byteLength);
+    })
+    .catch((error) => {
+      if (generation !== tablebaseWarmupGeneration || !tablebaseRequested) return;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('Clearra tablebase data warmup was unavailable', error);
+      postTablebaseWarmupPhase('unavailable', 0, message);
+    })
+    .finally(() => {
+      if (generation === tablebaseWarmupGeneration) tablebaseWarmup = null;
+    });
+  return tablebaseWarmup;
 }
 
 function cancelActiveJob(jobId: number | undefined) {
@@ -174,6 +250,16 @@ function disposeRuntime() {
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  tablebaseRequested = false;
+  tablebaseWarmupGeneration += 1;
+  tablebaseWarmup = null;
+  tablebaseWarmupAttempted = false;
+  try {
+    loadedWasm?.release_tablebase();
+  } catch {
+    // Closing the worker releases a trapped runtime's tablebase memory.
+  }
+  releasePc4TablebaseAssets();
   const job = active;
   if (job) releaseJobResources(job, loadedWasm);
   else {
@@ -245,6 +331,14 @@ function closeFailClosedWorker() {
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  tablebaseWarmupGeneration += 1;
+  tablebaseWarmup = null;
+  try {
+    loadedWasm?.release_tablebase();
+  } catch {
+    // Worker termination is the final fail-closed release boundary.
+  }
+  releasePc4TablebaseAssets();
   loadedWasm = null;
   self.close();
 }
@@ -332,5 +426,19 @@ function postRuntimePrewarmPhase(phase: 'started' | 'finished', workerCount: num
     type: 'runtime_prewarm',
     phase,
     workerCount
+  });
+}
+
+function postTablebaseWarmupPhase(
+  phase: 'disabled' | 'loading' | 'ready' | 'unavailable',
+  byteLength: number,
+  message?: string
+) {
+  self.postMessage({
+    type: 'tablebase_warmup',
+    phase,
+    artifactSha256: pc4TablebaseArtifactSha256(),
+    byteLength,
+    ...(message ? { message } : {})
   });
 }

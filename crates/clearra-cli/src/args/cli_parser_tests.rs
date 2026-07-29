@@ -3,6 +3,77 @@ use clearra_i18n::LanguageId;
 use super::*;
 
 #[test]
+fn tablebase_use_is_explicit_for_pc_and_setup() {
+    let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc", "--lines", "4"])
+        .expect("default PC invocation")
+        .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(default_pc.tablebase_requested(), None);
+
+    let ParsedCliCommand::Pc(enabled_pc) =
+        CliParser::parse(["clearra", "pc", "--lines", "4", "--tablebase"])
+            .expect("tablebase PC invocation")
+            .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(enabled_pc.tablebase_requested(), Some(true));
+
+    let ParsedCliCommand::Setup(enabled_setup) =
+        CliParser::parse(["clearra", "setup", "--remaining", "IOTSZJL", "--tb"])
+            .expect("tablebase setup invocation")
+            .into_command()
+    else {
+        panic!("expected setup command");
+    };
+    assert_eq!(enabled_setup.tablebase_requested(), Some(true));
+
+    let ParsedCliCommand::Setup(disabled_setup) = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTSZJL",
+        "--no-tablebase",
+    ])
+    .expect("disabled tablebase setup invocation")
+    .into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(disabled_setup.tablebase_requested(), Some(false));
+}
+
+#[test]
+fn build_dependency_dag_is_explicit_for_pc() {
+    let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc", "--lines", "4"])
+        .expect("default PC invocation")
+        .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(default_pc.precompute_build_dependencies(), None);
+
+    let ParsedCliCommand::Pc(enabled_pc) =
+        CliParser::parse(["clearra", "pc", "--lines", "4", "--build-dependency-dag"])
+            .expect("dependency DAG PC invocation")
+            .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(enabled_pc.precompute_build_dependencies(), Some(true));
+
+    let ParsedCliCommand::Pc(disabled_pc) =
+        CliParser::parse(["clearra", "pc", "--lines", "4", "--no-build-dependency-dag"])
+            .expect("disabled dependency DAG PC invocation")
+            .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(disabled_pc.precompute_build_dependencies(), Some(false));
+}
+
+#[test]
 fn parses_pc_args_outside_lib_router() {
     let invocation = CliParser::parse([
         "clearra",

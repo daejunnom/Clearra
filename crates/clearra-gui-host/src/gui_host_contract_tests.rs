@@ -28,6 +28,40 @@ mod case_gui_pc_request_preserves_back_to_back_constraint {
     }
 }
 
+mod case_gui_pc_request_preserves_dependency_dag_policy {
+    use clearra_app::AppCommand;
+
+    use super::*;
+
+    #[test]
+    fn gui_pc_request_preserves_dependency_dag_policy() {
+        let backend = GuiBackendForm::default().with_precompute_build_dependencies(true);
+        let command =
+            PcRequestBuilder::build_command(&GuiOpeningPcForm::new(2, "srs-plus"), &backend)
+                .expect("GUI PC request");
+        let AppCommand::Pc(command) = command else {
+            panic!("expected PC command");
+        };
+
+        assert!(command
+            .query()
+            .execution_policy()
+            .precompute_build_dependencies());
+        let default_command = PcRequestBuilder::build_command(
+            &GuiOpeningPcForm::new(2, "srs-plus"),
+            &GuiBackendForm::default(),
+        )
+        .expect("default GUI PC request");
+        let AppCommand::Pc(default_command) = default_command else {
+            panic!("expected default PC command");
+        };
+        assert!(!default_command
+            .query()
+            .execution_policy()
+            .precompute_build_dependencies());
+    }
+}
+
 mod case_gui_opening_pc_preserves_hold_selection_without_queue_override {
     use clearra_app::AppCommand;
 

@@ -180,6 +180,12 @@
               ? 'visibleSevenCoverage'
               : 'oracleCoverage')}</dd>
           </div>
+          {#if report.continuation_supply_semantics === 'exact-post-setup-hold-queue-state'}
+            <div>
+              <dt>{label('continuationSupply')}</dt>
+              <dd>{label('exactPostSetupSupply')}</dd>
+            </div>
+          {/if}
           {#if report.next_cycle_remaining_pieces}
             <div>
               <dt>{label('setupNextCycleRemaining')}</dt>

@@ -90,6 +90,7 @@ fn parse_setup_command(
     let mut path_detail_condition_id = None;
     let mut workers = None;
     let mut use_all_logical_processors = false;
+    let mut tablebase_requested = false;
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
         match tokens[cursor].as_str() {
@@ -190,6 +191,14 @@ fn parse_setup_command(
                 use_all_logical_processors = true;
                 cursor += 1;
             }
+            "--tablebase" | "--tb" => {
+                tablebase_requested = true;
+                cursor += 1;
+            }
+            "--no-tablebase" | "--no-tb" => {
+                tablebase_requested = false;
+                cursor += 1;
+            }
             flag if flag.starts_with("--") => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::UnsupportedCommand,
@@ -268,7 +277,8 @@ fn parse_setup_command(
         .with_setup_search_mode(search_mode)
         .with_queue_observation_policy(queue_observation_policy)
         .with_worker_hardware_limit(worker_hardware_limit)
-        .with_use_all_logical_processors(use_all_logical_processors);
+        .with_use_all_logical_processors(use_all_logical_processors)
+        .with_tablebase_requested(tablebase_requested);
     if let Some(pieces) = queue_based_pieces {
         request = request.with_setup_queue_based_pieces(pieces);
     }
@@ -579,6 +589,7 @@ fn parse_build_probability_command(
     let mut aggregation = BuildProbabilityAggregation::Buildability;
     let mut spin_profile = None;
     let mut preserve_back_to_back = false;
+    let mut precompute_build_dependencies = false;
     let mut rule = srs_plus();
     let mut cursor = 0usize;
 
@@ -690,6 +701,14 @@ fn parse_build_probability_command(
                 preserve_back_to_back = true;
                 cursor += 1;
             }
+            "--build-dependency-dag" => {
+                precompute_build_dependencies = true;
+                cursor += 1;
+            }
+            "--no-build-dependency-dag" => {
+                precompute_build_dependencies = false;
+                cursor += 1;
+            }
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
             }
@@ -759,7 +778,8 @@ fn parse_build_probability_command(
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_hold_enabled(hold_enabled)
         .with_use_all_logical_processors(use_all_logical_processors)
-        .with_cpu_warmup(cpu_warmup);
+        .with_cpu_warmup(cpu_warmup)
+        .with_precompute_build_dependencies(precompute_build_dependencies);
     if preserve_back_to_back {
         request = request.with_objective(
             ObjectivePolicy::unique().with_back_to_back_preservation(constraint_profile),
@@ -840,6 +860,8 @@ fn parse_pc_command(
     let mut use_all_logical_processors = false;
     let mut cpu_warmup = false;
     let mut gpu_warmup = false;
+    let mut tablebase_requested = false;
+    let mut precompute_build_dependencies = false;
     let mut solution_probabilities = false;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
@@ -1004,6 +1026,22 @@ fn parse_pc_command(
                 gpu_warmup = true;
                 cursor += 1;
             }
+            "--tablebase" | "--tb" => {
+                tablebase_requested = true;
+                cursor += 1;
+            }
+            "--no-tablebase" | "--no-tb" => {
+                tablebase_requested = false;
+                cursor += 1;
+            }
+            "--build-dependency-dag" => {
+                precompute_build_dependencies = true;
+                cursor += 1;
+            }
+            "--no-build-dependency-dag" => {
+                precompute_build_dependencies = false;
+                cursor += 1;
+            }
             "--solution-probabilities" => {
                 solution_probabilities = true;
                 cursor += 1;
@@ -1121,6 +1159,8 @@ fn parse_pc_command(
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
         .with_gpu_warmup(gpu_warmup)
+        .with_tablebase_requested(tablebase_requested)
+        .with_precompute_build_dependencies(precompute_build_dependencies)
         .with_solution_probabilities(solution_probabilities)
         .with_queue_observation_policy(queue_observation_policy)
         .with_hold_enabled(hold_enabled)

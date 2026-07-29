@@ -121,6 +121,7 @@ pub struct SetupSearchQuery {
     queue_observation_policy: QueueObservationPolicy,
     next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
     path_detail: Option<SetupPathDetail>,
+    tablebase_requested: bool,
 }
 
 impl SetupSearchQuery {
@@ -154,6 +155,7 @@ impl SetupSearchQuery {
             queue_observation_policy: QueueObservationPolicy::default(),
             next_cycle_remaining_pieces: None,
             path_detail: None,
+            tablebase_requested: false,
         }
     }
 }
@@ -237,6 +239,10 @@ impl SetupSearchQuery {
 
     pub fn path_detail(&self) -> Option<&SetupPathDetail> {
         self.path_detail.as_ref()
+    }
+
+    pub const fn tablebase_requested(&self) -> bool {
+        self.tablebase_requested
     }
 }
 impl SetupSearchQuery {
@@ -330,6 +336,11 @@ impl SetupSearchQuery {
         self
     }
 
+    pub fn with_tablebase_requested(mut self, requested: bool) -> Self {
+        self.tablebase_requested = requested;
+        self
+    }
+
     pub fn with_next_cycle_remaining_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
         self.next_cycle_remaining_pieces = Some(pieces);
         self
@@ -363,6 +374,7 @@ impl Default for SetupSearchQuery {
             queue_observation_policy: QueueObservationPolicy::default(),
             next_cycle_remaining_pieces: None,
             path_detail: None,
+            tablebase_requested: false,
         }
     }
 }

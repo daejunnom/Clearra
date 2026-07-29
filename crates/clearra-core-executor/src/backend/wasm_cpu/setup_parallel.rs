@@ -95,6 +95,28 @@ impl WasmSetupParallelCoordinator {
         self.tasks.len()
     }
 
+    pub fn geometry_nodes(&self) -> usize {
+        self.builder.as_ref().map_or_else(
+            || {
+                self.shared
+                    .as_ref()
+                    .map_or(0, |shared| shared.geometry_expanded_nodes)
+            },
+            SetupGraphBuildSession::geometry_nodes,
+        )
+    }
+
+    pub fn partial_build_nodes(&self) -> usize {
+        self.builder.as_ref().map_or_else(
+            || {
+                self.shared
+                    .as_ref()
+                    .map_or(0, |shared| shared.graph.nodes.len())
+            },
+            SetupGraphBuildSession::partial_build_nodes,
+        )
+    }
+
     pub(crate) fn advance(
         &mut self,
         work_budget: usize,
@@ -347,6 +369,8 @@ impl WasmSetupParallelCoordinator {
             completed,
             shared.geometry_family_count,
             shared.geometry_expanded_nodes,
+            shared.tablebase_status,
+            shared.tablebase_pruned_states,
             workers_used.min(self.worker_count).max(1),
             true,
             "setup-family-quotient-segmented-task-multiworker",

@@ -29,6 +29,15 @@ fn mvp_execution_policy_comes_from_profile_defaults() {
     assert_eq!(policy.gpu_device(), &GpuDeviceSelection::Auto);
     assert_eq!(policy.backend_fallback(), BackendFallbackPolicy::Allow);
     assert!(policy.allow_backend_fallback());
+    assert!(!policy.precompute_build_dependencies());
+}
+
+#[test]
+fn build_dependency_precomputation_requires_explicit_opt_in() {
+    let enabled = PcExecutionPolicy::mvp_default().with_precompute_build_dependencies(true);
+
+    assert!(enabled.precompute_build_dependencies());
+    assert!(!PcExecutionPolicy::mvp_default().precompute_build_dependencies());
 }
 
 #[test]

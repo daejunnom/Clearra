@@ -13,7 +13,7 @@ use super::{
     WasmExactSearchError,
 };
 
-const INITIALIZATION_MAGIC: [u8; 4] = *b"CSPB";
+const INITIALIZATION_MAGIC: [u8; 4] = *b"CSPC";
 const TASK_MAGIC: [u8; 4] = *b"CST2";
 const RESULT_MAGIC: [u8; 4] = *b"CSR5";
 const NO_WITNESS: u32 = u32::MAX;
@@ -155,6 +155,7 @@ pub(super) fn encode_initialization(
         SetupLengthPreference::Shorter => 2,
     });
     output.push(query.max_setup_pieces());
+    output.push(u8::from(query.tablebase_requested()));
     if let Some(detail) = query.path_detail() {
         output.push(1);
         push_u64(&mut output, detail.board_mask());
@@ -355,6 +356,15 @@ pub(super) fn decode_initialization(
             "setup_parallel_max_setup_pieces_invalid",
         ));
     }
+    let tablebase_requested = match reader.u8()? {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_tablebase_requested_invalid",
+            ));
+        }
+    };
     let path_detail = match reader.u8()? {
         0 => None,
         1 => {
@@ -398,6 +408,7 @@ pub(super) fn decode_initialization(
         .with_candidate_priority(candidate_priority)
         .with_length_preference(length_preference)
         .with_max_setup_pieces(max_setup_pieces)
+        .with_tablebase_requested(tablebase_requested)
         .with_limits(limits);
     if let Some(detail) = path_detail {
         query = query.with_path_detail(detail);

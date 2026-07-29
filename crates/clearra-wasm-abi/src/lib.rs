@@ -6,6 +6,7 @@ use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]
 use clearra_wasm::ExecutorSearchProfileSession;
 use clearra_wasm::{
+    install_pc4_compact_tablebase, release_pc4_compact_tablebase,
     serialize_distributed_final_events, GpuSearchWarmupReport, WasmDistributedCoordinator,
     WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
     WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
@@ -240,6 +241,41 @@ pub extern "C" fn clearra_wasm_transfer_resize(byte_len: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_transfer_ptr() -> u32 {
     ABI_STATE.with(|state| state.borrow().transfer_input.as_ptr() as usize as u32)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tablebase_install() -> i32 {
+    clear_panic_diagnostics();
+    let input = ABI_STATE.with(|state| std::mem::take(&mut state.borrow_mut().transfer_input));
+    let result = install_pc4_compact_tablebase(&input);
+    drop(input);
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        match result {
+            Ok(tablebase) => {
+                state.set_output(format!(
+                    "{{\"schema_version\":12,\"tier\":\"compact-exact\",\"artifact_bytes\":{},\"certified_states\":{},\"certified_targets\":{},\"payload_sha256\":\"{}\"}}",
+                    tablebase.artifact_bytes(),
+                    tablebase.certified_state_count(),
+                    tablebase.certified_target_count(),
+                    tablebase.payload_sha256_hex()
+                ));
+                ABI_OK
+            }
+            Err(error) => {
+                state.set_error("E_WASM_TABLEBASE_INSTALL", error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tablebase_release() -> i32 {
+    clear_panic_diagnostics();
+    let released = release_pc4_compact_tablebase();
+    ABI_STATE.with(|state| state.borrow_mut().output.clear());
+    i32::from(released)
 }
 
 #[no_mangle]

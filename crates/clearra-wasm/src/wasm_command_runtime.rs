@@ -95,6 +95,7 @@ pub struct WasmSetupFinderReport {
     pub next_cycle_remaining_pieces: String,
     pub post_cycle_borrow_enabled: bool,
     pub coverage_semantics: String,
+    pub continuation_supply_semantics: String,
     pub geometry_family_count: String,
     pub partial_build_node_count: usize,
     pub complete: bool,
@@ -435,6 +436,9 @@ impl WasmSearchReport {
                     next_cycle_remaining_pieces: report.next_cycle_remaining_pieces().to_owned(),
                     post_cycle_borrow_enabled: report.post_cycle_borrow_enabled(),
                     coverage_semantics: report.coverage_semantics().to_owned(),
+                    continuation_supply_semantics: report
+                        .continuation_supply_semantics()
+                        .to_owned(),
                     geometry_family_count: report.geometry_family_count().to_owned(),
                     partial_build_node_count: report.partial_build_node_count(),
                     complete: report.complete(),

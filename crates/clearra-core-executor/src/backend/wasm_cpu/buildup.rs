@@ -21,10 +21,10 @@ use super::{
     geometry::{GeometryCandidate, TargetGroup},
     piece_order_language::{CoverageCacheLookup, PieceOrderLanguageCache},
     queue_observation_policy::{
-        QueueObservationCoverage, QueueObservationPolicyEvaluator, RootedPieceLanguage,
+        QueueObservationCoverage, QueueObservationPolicyEvaluator, RootedPieceLanguageUnion,
     },
     reachability::ReachabilityWorkspace,
-    realization_feasibility::RealizationFeasibilityWorkspace,
+    realization_feasibility::{RealizationFeasibility, RealizationFeasibilityWorkspace},
     standard_bag_coverage::{StandardBagCoverage, StandardBagCoverageResult},
     WasmExactSearchError,
 };
@@ -90,6 +90,7 @@ pub(super) struct BuildOrderGraph {
     pub nodes: Vec<BuildNode>,
     edges: Vec<BuildEdge>,
     piece_edges: Vec<BuildEdge>,
+    piece_edges_share_operation_edges: bool,
     pub root: u32,
     reachability_states: usize,
 }
@@ -144,7 +145,7 @@ pub(super) struct BuildUpWorkspace {
     piece_order_languages: PieceOrderLanguageCache,
     standard_bag_coverage: Option<StandardBagCoverage>,
     standard_bag_coverage_initialized: bool,
-    observation_language_root: Option<u32>,
+    observation_language_roots: Vec<u32>,
     reachability: ReachabilityWorkspace,
     graph_nodes: Vec<BuildNode>,
     graph_edges: Vec<BuildEdge>,
@@ -180,6 +181,7 @@ impl BuildUpWorkspace {
             + self.graph_reachable_generations.capacity() * core::mem::size_of::<u32>()
             + self.graph_subset_node_ids.capacity() * core::mem::size_of::<u32>()
             + self.graph_subset_queue.capacity() * core::mem::size_of::<u16>()
+            + self.observation_language_roots.capacity() * core::mem::size_of::<u32>()
     }
 
     pub const fn piece_language_coverage_hits(&self) -> usize {
@@ -250,10 +252,14 @@ impl BuildUpWorkspace {
     }
 
     pub fn merge_observation_language(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
-        self.observation_language_root = Some(
-            self.piece_order_languages
-                .union_roots(self.observation_language_root, root)?,
-        );
+        self.observation_language_roots
+            .try_reserve(1)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_language_root_storage_unavailable",
+                )
+            })?;
+        self.observation_language_roots.push(root);
         Ok(())
     }
 
@@ -262,9 +268,11 @@ impl BuildUpWorkspace {
         problem: &SearchProblem,
         control: &ExecutionControl,
     ) -> Result<Option<QueueObservationCoverage>, WasmExactSearchError> {
-        let Some(root) = self.observation_language_root else {
+        if self.observation_language_roots.is_empty() {
             return Ok(None);
-        };
+        }
+        self.observation_language_roots.sort_unstable();
+        self.observation_language_roots.dedup();
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -282,8 +290,16 @@ impl BuildUpWorkspace {
             problem.supply().projects_standard_bag_lookahead(),
             None,
         )?;
-        let language = RootedPieceLanguage::new(&self.piece_order_languages, root)?;
-        evaluator.evaluate(&language, control).map(Some)
+        let language = RootedPieceLanguageUnion::new(
+            &self.piece_order_languages,
+            &self.observation_language_roots,
+        )?;
+        let mut result = evaluator.evaluate(&language, control)?;
+        result.metrics.retained_bytes = result
+            .metrics
+            .retained_bytes
+            .saturating_add(language.retained_bytes());
+        Ok(Some(result))
     }
 
     fn cover_standard_bag_language(
@@ -325,7 +341,7 @@ impl BuildUpWorkspace {
         if let Some(coverage) = self.standard_bag_coverage.as_mut() {
             coverage.flush_and_recycle_local_cache()?;
         }
-        if self.observation_language_root.is_some() {
+        if !self.observation_language_roots.is_empty() {
             self.piece_order_languages.clear_coverage_caches();
         } else {
             self.piece_order_languages.clear_retain_capacity();
@@ -665,9 +681,14 @@ fn verify_candidate_with_projection(
     )?;
     let feasibility_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateFeasibility, profile_scale);
-    let feasibility = workspace
-        .realization_feasibility
-        .analyze(catalog, candidate, projection, completion, control)?;
+    let feasibility = workspace.realization_feasibility.analyze(
+        catalog,
+        candidate,
+        projection,
+        completion,
+        problem.backend_policy().precompute_build_dependencies(),
+        control,
+    )?;
     let feasibility_states = feasibility.explored_states();
     feasibility_span.finish(feasibility_states as u64);
     if feasibility.is_infeasible() {
@@ -688,6 +709,7 @@ fn verify_candidate_with_projection(
             feasibility_states,
             profile_scale,
             completion,
+            feasibility,
             control,
         );
     }
@@ -703,6 +725,7 @@ fn verify_candidate_with_projection(
         workspace,
         problem.count_policy() == PcCountPolicy::CountUnique,
         completion,
+        Some(feasibility),
     )?;
     graph_span.finish(graph.nodes.len() as u64);
     let mut covered_patterns = None;
@@ -966,13 +989,22 @@ fn verify_first_pattern_witness(
     feasibility_states: usize,
     profile_scale: u64,
     completion: BuildCompletion,
+    feasibility: RealizationFeasibility,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
     let reachability_states_before = workspace.reachability.generated_state_count();
     let witness_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmWitnessSearch, profile_scale);
     let witness = find_first_pattern_witness(
-        problem, catalog, candidate, target, projection, workspace, completion, control,
+        problem,
+        catalog,
+        candidate,
+        target,
+        projection,
+        workspace,
+        completion,
+        feasibility,
+        control,
     )?;
     let reachability_states = workspace
         .reachability
@@ -1047,6 +1079,7 @@ fn find_first_pattern_witness(
     projection: &mut CandidateProjection,
     workspace: &mut BuildUpWorkspace,
     completion: BuildCompletion,
+    feasibility: RealizationFeasibility,
     control: &ExecutionControl,
 ) -> Result<Option<CandidateWitness>, WasmExactSearchError> {
     let pattern_index =
@@ -1109,6 +1142,7 @@ fn find_first_pattern_witness(
             &mut path,
             &mut visited_product_states,
             completion,
+            feasibility,
             control,
         )? {
             let local_pattern_index =
@@ -1146,6 +1180,7 @@ fn visit_witness_state(
     path: &mut Vec<WitnessStep>,
     visited_product_states: &mut usize,
     completion: BuildCompletion,
+    feasibility: RealizationFeasibility,
     control: &ExecutionControl,
 ) -> Result<Option<u64>, WasmExactSearchError> {
     if control.is_cancelled() {
@@ -1171,11 +1206,12 @@ fn visit_witness_state(
         .ok_or(WasmExactSearchError::InvalidProblem(
             "wasm_witness_queue_position_overflow",
         ))?;
-    for operation_index in 0..projection.operation_count() {
-        let operation_bit = 1_usize << operation_index;
-        if subset & operation_bit != 0 {
-            continue;
-        }
+    let mut permitted_operations = workspace
+        .realization_feasibility
+        .permitted_operation_mask(feasibility, subset);
+    while permitted_operations != 0 {
+        let operation_index = permitted_operations.trailing_zeros() as usize;
+        permitted_operations &= permitted_operations - 1;
         let Some(edge) = witness_transition(
             problem,
             catalog,
@@ -1220,6 +1256,7 @@ fn visit_witness_state(
                 path,
                 visited_product_states,
                 completion,
+                feasibility,
                 control,
             )? {
                 return Ok(Some(accepted));
@@ -1265,6 +1302,7 @@ fn visit_witness_state(
                     path,
                     visited_product_states,
                     completion,
+                    feasibility,
                     control,
                 )? {
                     return Ok(Some(accepted));
@@ -1314,6 +1352,7 @@ fn visit_witness_state(
                     path,
                     visited_product_states,
                     completion,
+                    feasibility,
                     control,
                 )? {
                     return Ok(Some(accepted));
@@ -1328,7 +1367,7 @@ fn visit_witness_state(
 
 #[allow(clippy::too_many_arguments)]
 fn witness_transition(
-    problem: &SearchProblem,
+    _problem: &SearchProblem,
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
     projection: &mut CandidateProjection,
@@ -1403,6 +1442,7 @@ impl BuildOrderGraph {
         edges: Vec<BuildEdge>,
         root: u32,
         reachability_states: usize,
+        piece_transitions_are_unique: bool,
     ) -> Result<Self, WasmExactSearchError> {
         if specs.is_empty() || root as usize >= specs.len() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1415,9 +1455,11 @@ impl BuildOrderGraph {
             WasmExactSearchError::InvalidProblem("wasm_build_order_node_storage_unavailable")
         })?;
         let mut piece_edges = Vec::new();
-        piece_edges.try_reserve(edges.len()).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_build_order_edge_storage_unavailable")
-        })?;
+        if !piece_transitions_are_unique {
+            piece_edges.try_reserve(edges.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_build_order_edge_storage_unavailable")
+            })?;
+        }
 
         for (node_index, spec) in specs.iter().copied().enumerate() {
             let start = spec.edge_start as usize;
@@ -1448,21 +1490,36 @@ impl BuildOrderGraph {
                 }
             }
 
-            let piece_edge_start = piece_edges.len() as u32;
+            let piece_edge_start = if piece_transitions_are_unique {
+                spec.edge_start
+            } else {
+                piece_edges.len() as u32
+            };
             let mut previous = None;
             for edge in source_edges {
                 let key = (edge.to, edge.piece);
                 if previous == Some(key) {
+                    if piece_transitions_are_unique {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "wasm_build_order_piece_transition_not_unique",
+                        ));
+                    }
                     continue;
                 }
-                piece_edges.push(*edge);
+                if !piece_transitions_are_unique {
+                    piece_edges.push(*edge);
+                }
                 previous = Some(key);
             }
             nodes.push(BuildNode {
                 edge_start: spec.edge_start,
                 edge_count: spec.edge_count,
                 piece_edge_start,
-                piece_edge_count: piece_edges.len() as u32 - piece_edge_start,
+                piece_edge_count: if piece_transitions_are_unique {
+                    spec.edge_count
+                } else {
+                    piece_edges.len() as u32 - piece_edge_start
+                },
                 depth: spec.depth,
                 live: spec.accepting,
                 accepting: spec.accepting,
@@ -1484,6 +1541,7 @@ impl BuildOrderGraph {
             nodes,
             edges,
             piece_edges,
+            piece_edges_share_operation_edges: piece_transitions_are_unique,
             root,
             reachability_states,
         })
@@ -1520,13 +1578,14 @@ impl BuildOrderGraph {
     }
 
     fn build(
-        problem: &SearchProblem,
+        _problem: &SearchProblem,
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
         projection: &mut CandidateProjection,
         workspace: &mut BuildUpWorkspace,
         piece_language_projection_only: bool,
         completion: BuildCompletion,
+        feasibility: Option<RealizationFeasibility>,
     ) -> Result<Self, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1540,6 +1599,8 @@ impl BuildOrderGraph {
         let operation_count = projection.operation_count();
         let state_count = projection.state_count();
         let all_placed = projection.all_placed;
+        let share_piece_edges =
+            piece_language_projection_only && matches!(completion, BuildCompletion::ClearToEmpty);
         let graph_generation = workspace.begin_graph_generation(state_count)?;
         workspace.graph_reachable_generations[0] = graph_generation;
         workspace.graph_subset_node_ids[0] = 0;
@@ -1564,13 +1625,23 @@ impl BuildOrderGraph {
         let mut edge_scratch = core::mem::take(&mut workspace.graph_edge_scratch);
         edge_scratch.clear();
         let reachability_states_before = workspace.reachability.generated_state_count();
+        let all_operations = (1_u16 << operation_count) - 1;
+        let partial_dependency_graph_active = feasibility.is_some_and(|proof| {
+            workspace
+                .realization_feasibility
+                .has_current_partial_dependency_graph(proof)
+        });
         let mut subset_cursor = 0usize;
         while subset_cursor < subset_queue.len() {
             let subset = usize::from(subset_queue[subset_cursor]);
             subset_cursor += 1;
             let node_index = workspace.graph_subset_node_ids[subset] as usize;
             nodes[node_index].edge_start = edges.len() as u32;
-            nodes[node_index].piece_edge_start = piece_edges.len() as u32;
+            nodes[node_index].piece_edge_start = if share_piece_edges {
+                edges.len() as u32
+            } else {
+                piece_edges.len() as u32
+            };
             if subset == all_placed {
                 nodes[node_index].accepting = completion.accepts(projection, subset);
                 nodes[node_index].live = nodes[node_index].accepting;
@@ -1578,12 +1649,26 @@ impl BuildOrderGraph {
             }
             edge_scratch.clear();
             let (board, deleted_rows) = projection.state(subset);
-            for operation_index in 0..operation_count {
+            let mut permitted_operations =
+                feasibility.map_or(all_operations & !(subset as u16), |proof| {
+                    workspace
+                        .realization_feasibility
+                        .permitted_operation_mask(proof, subset)
+                });
+            while permitted_operations != 0 {
+                let operation_index = permitted_operations.trailing_zeros() as usize;
+                permitted_operations &= permitted_operations - 1;
                 let operation_bit = 1_usize << operation_index;
-                if subset & operation_bit != 0 {
+                let child = subset | operation_bit;
+                if !partial_dependency_graph_active
+                    && feasibility.is_some_and(|proof| {
+                        workspace
+                            .realization_feasibility
+                            .proves_subset_infeasible(proof, child)
+                    })
+                {
                     continue;
                 }
-                let child = subset | operation_bit;
                 let row_id = candidate.row_ids()[operation_index];
                 let row = catalog.skeleton(row_id);
                 if piece_language_projection_only {
@@ -1704,18 +1789,23 @@ impl BuildOrderGraph {
                 }
                 edge.to = workspace.graph_subset_node_ids[child_subset];
             }
-            let mut previous_piece_transition = None;
-            for edge in &edge_scratch {
-                let key = (edge.to, edge.piece);
-                if previous_piece_transition != Some(key) {
-                    piece_edges.push(*edge);
-                    previous_piece_transition = Some(key);
+            if !share_piece_edges {
+                let mut previous_piece_transition = None;
+                for edge in &edge_scratch {
+                    let key = (edge.to, edge.piece);
+                    if previous_piece_transition != Some(key) {
+                        piece_edges.push(*edge);
+                        previous_piece_transition = Some(key);
+                    }
                 }
             }
             edges.extend_from_slice(&edge_scratch);
             nodes[node_index].edge_count = edge_scratch.len() as u32;
-            nodes[node_index].piece_edge_count =
-                piece_edges.len() as u32 - nodes[node_index].piece_edge_start;
+            nodes[node_index].piece_edge_count = if share_piece_edges {
+                nodes[node_index].edge_count
+            } else {
+                piece_edges.len() as u32 - nodes[node_index].piece_edge_start
+            };
         }
         for index in (0..nodes.len()).rev() {
             if nodes[index].live {
@@ -1735,6 +1825,7 @@ impl BuildOrderGraph {
             nodes,
             edges,
             piece_edges,
+            piece_edges_share_operation_edges: share_piece_edges,
             root: 0,
             reachability_states: workspace
                 .reachability
@@ -1760,7 +1851,12 @@ impl BuildOrderGraph {
     pub fn piece_edges(&self, node_index: usize) -> &[BuildEdge] {
         let node = &self.nodes[node_index];
         let start = node.piece_edge_start as usize;
-        &self.piece_edges[start..start + node.piece_edge_count as usize]
+        let edges = if self.piece_edges_share_operation_edges {
+            &self.edges
+        } else {
+            &self.piece_edges
+        };
+        &edges[start..start + node.piece_edge_count as usize]
     }
 }
 
@@ -1825,6 +1921,7 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         workspace,
         false,
         completion,
+        None,
     ) {
         Ok(graph) => graph,
         Err(error) => {

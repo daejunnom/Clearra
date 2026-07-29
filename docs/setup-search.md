@@ -130,6 +130,13 @@ one-I-only setup has 2/7 Build coverage from an empty hold: I must be the
 current piece or the next piece after storing the current piece. Future bag
 patterns do not replace or dilute the explicit residue prefix.
 
+Continuation coverage never resets the supply after a setup. For example,
+cycle-five residue `SZ` compiles to `[SZ]!P7P2`. After a four-lock setup, the
+remaining hold and queue span the current residue and two bag boundaries; they
+are not a fresh `P7`. Running the visible board again with `P7` therefore
+answers a different question and its probability must not replace the setup
+candidate's Conditional value.
+
 Product UI requests always start with an empty initial hold and require each
 residue piece kind to be unique. The CLI alone may request an occupied initial
 hold:
@@ -216,7 +223,9 @@ Each candidate reports:
 - `Build`: probability that the selected fixed setup tiling is buildable.
 - `Joint`: probability that the setup is buildable and the same exact state can
   complete the PC.
-- `Conditional`: `Joint / Build`.
+- `Conditional`: `Joint / Build` using that exact post-setup hold and queue
+  state, identified in the product response as
+  `exact-post-setup-hold-queue-state`.
 
 Candidate ordering has two independent axes and never changes coverage:
 

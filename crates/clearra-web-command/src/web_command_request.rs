@@ -62,6 +62,8 @@ pub struct WebCommandRequest {
     use_all_logical_processors: bool,
     cpu_warmup: bool,
     gpu_warmup: bool,
+    tablebase_requested: bool,
+    precompute_build_dependencies: bool,
     solution_probabilities: bool,
     verify_scope: Option<String>,
     virtual_files: Vec<WebVirtualFileHandle>,
@@ -106,6 +108,8 @@ impl WebCommandRequest {
             use_all_logical_processors: false,
             cpu_warmup: false,
             gpu_warmup: false,
+            tablebase_requested: false,
+            precompute_build_dependencies: false,
             solution_probabilities: false,
             verify_scope: None,
             virtual_files: Vec::new(),
@@ -151,6 +155,8 @@ impl WebCommandRequest {
             use_all_logical_processors: false,
             cpu_warmup: false,
             gpu_warmup: false,
+            tablebase_requested: false,
+            precompute_build_dependencies: false,
             solution_probabilities: false,
             verify_scope: scope,
             virtual_files: Vec::new(),
@@ -304,6 +310,16 @@ impl WebCommandRequest {
         self
     }
 
+    pub fn with_tablebase_requested(mut self, value: bool) -> Self {
+        self.tablebase_requested = value;
+        self
+    }
+
+    pub fn with_precompute_build_dependencies(mut self, value: bool) -> Self {
+        self.precompute_build_dependencies = value;
+        self
+    }
+
     pub fn with_solution_probabilities(mut self, value: bool) -> Self {
         self.solution_probabilities = value;
         self
@@ -407,7 +423,8 @@ impl WebCommandRequest {
             let mut query = SetupSearchQuery::default()
                 .with_rule(self.rule)
                 .with_remaining_pieces(remaining)
-                .with_queue_observation_policy(self.queue_observation_policy);
+                .with_queue_observation_policy(self.queue_observation_policy)
+                .with_tablebase_requested(self.tablebase_requested);
             match self.setup_search_mode {
                 SetupSearchMode::ShapeOracle => {
                     if self.setup_queue_based_pieces.is_some() {
@@ -464,7 +481,9 @@ impl WebCommandRequest {
             .with_allow_backend_fallback(self.allow_backend_fallback)
             .with_use_all_logical_processors(self.use_all_logical_processors)
             .with_cpu_warmup(self.cpu_warmup)
-            .with_gpu_warmup(self.gpu_warmup);
+            .with_gpu_warmup(self.gpu_warmup)
+            .with_tablebase_requested(self.tablebase_requested)
+            .with_precompute_build_dependencies(self.precompute_build_dependencies);
         if matches!(self.backend, RequestedSearchBackend::Auto) {
             policy = policy.with_allow_backend_fallback(true);
         }

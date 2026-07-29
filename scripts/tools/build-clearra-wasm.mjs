@@ -24,6 +24,7 @@ await writeManifest();
 
 async function buildWithWsl() {
   const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
+  const cargoFeatures = options.stageProfiling ? ' --features stage-profiling' : '';
   const script = `set -euo pipefail
 ROOT=$(wslpath -a ${shellQuote(root)})
 DESTINATION=$(wslpath -a ${shellQuote(destinationDir)})
@@ -32,7 +33,7 @@ mkdir -p "$TARGET_ROOT" "$DESTINATION"
 ${options.verify ? `CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-web-command --lib --tests
 CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
 CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
-CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi
+CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
 wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" --target web --out-dir "$DESTINATION" --out-name clearra_wasm --no-typescript
 `;
   const encoded = Buffer.from(script, 'utf8').toString('base64');
@@ -67,7 +68,7 @@ async function buildNative() {
       '--package', 'clearra-wasm', '--test', 'wasm_host_contract'
     ], { CARGO_TARGET_DIR: targetRoot });
   }
-  await run('cargo', [
+  const cargoArgs = [
     'build',
     '--manifest-path',
     resolve(root, 'Cargo.toml'),
@@ -76,7 +77,9 @@ async function buildNative() {
     '--release',
     '-p',
     'clearra-wasm-abi'
-  ], { CARGO_TARGET_DIR: targetRoot });
+  ];
+  if (options.stageProfiling) cargoArgs.push('--features', 'stage-profiling');
+  await run('cargo', cargoArgs, { CARGO_TARGET_DIR: targetRoot });
   await run(process.env.WASM_BINDGEN || 'wasm-bindgen', [
     resolve(targetRoot, 'wasm32-unknown-unknown', 'release', 'clearra_wasm.wasm'),
     '--target',
@@ -93,10 +96,15 @@ function parseArguments(args) {
   let destination = null;
   let environment = process.env.CLEARRA_WASM_BUILD_ENVIRONMENT || 'native';
   let verify = false;
+  let stageProfiling = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === '--verify') {
       verify = true;
+      continue;
+    }
+    if (argument === '--stage-profiling') {
+      stageProfiling = true;
       continue;
     }
     if (argument === '--destination') {
@@ -120,7 +128,7 @@ function parseArguments(args) {
   if (!['native', 'wsl'].includes(environment)) {
     throw new Error(`unsupported WASM build environment: ${environment}`);
   }
-  return { destination, environment, verify };
+  return { destination, environment, verify, stageProfiling };
 }
 
 async function writeManifest() {

@@ -540,13 +540,15 @@ mod tests {
             "TP7P3"
         );
         assert_eq!(
+            // The post-setup continuation retains this cross-bag source; it is
+            // not replaced by a fresh P7 when a partial setup is selected.
             pattern_expression(
                 &[],
-                &[PieceKind::I, PieceKind::O],
+                &[PieceKind::S, PieceKind::Z],
                 2,
                 SetupCycleResetBorrowPolicy::default()
             ),
-            "[IO]!P7P2"
+            "[SZ]!P7P2"
         );
     }
 

@@ -93,6 +93,10 @@ impl SetupFinderReport {
         self.queue_observation_policy.coverage_semantics()
     }
 
+    pub const fn continuation_supply_semantics(&self) -> &'static str {
+        "exact-post-setup-hold-queue-state"
+    }
+
     pub fn hold_conditions(&self) -> &[SetupHoldConditionReport] {
         &self.hold_conditions
     }
@@ -292,5 +296,35 @@ impl SetupCandidateReport {
 
     pub fn solution_paths_complete(&self) -> bool {
         self.solution_paths_complete
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_problem::SetupSearchMode;
+    use clearra_supply::QueueObservationPolicy;
+
+    use super::SetupFinderReport;
+
+    #[test]
+    fn setup_report_declares_that_continuation_keeps_the_exact_supply_state() {
+        let report = SetupFinderReport::new(
+            SetupSearchMode::ShapeOracle,
+            QueueObservationPolicy::FullQueueOracle,
+            5,
+            "SZ".to_owned(),
+            String::new(),
+            String::new(),
+            false,
+            "0".to_owned(),
+            0,
+            true,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            report.continuation_supply_semantics(),
+            "exact-post-setup-hold-queue-state"
+        );
     }
 }

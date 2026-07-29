@@ -18,6 +18,8 @@ pub struct PcArgs {
     use_all_logical_processors: Option<bool>,
     cpu_warmup: Option<bool>,
     gpu_warmup: Option<bool>,
+    tablebase_requested: Option<bool>,
+    precompute_build_dependencies: Option<bool>,
     deterministic: Option<bool>,
     max_frontier_states: Option<usize>,
     max_candidates: Option<usize>,
@@ -48,6 +50,8 @@ impl PcArgs {
             use_all_logical_processors: None,
             cpu_warmup: None,
             gpu_warmup: None,
+            tablebase_requested: None,
+            precompute_build_dependencies: None,
             deterministic: None,
             max_frontier_states: None,
             max_candidates: None,
@@ -136,6 +140,14 @@ impl PcArgs {
     pub fn gpu_warmup(&self) -> Option<bool> {
         self.gpu_warmup
     }
+
+    pub fn tablebase_requested(&self) -> Option<bool> {
+        self.tablebase_requested
+    }
+
+    pub fn precompute_build_dependencies(&self) -> Option<bool> {
+        self.precompute_build_dependencies
+    }
 }
 impl PcArgs {
     pub fn deterministic(&self) -> Option<bool> {
@@ -187,6 +199,8 @@ impl PcArgs {
             || self.use_all_logical_processors.is_some()
             || self.cpu_warmup.is_some()
             || self.gpu_warmup.is_some()
+            || self.tablebase_requested.is_some()
+            || self.precompute_build_dependencies.is_some()
             || self.deterministic.is_some()
             || self.max_frontier_states.is_some()
             || self.max_candidates.is_some()
@@ -275,6 +289,16 @@ impl PcArgs {
 impl PcArgs {
     pub fn with_gpu_warmup(mut self, value: Option<bool>) -> Self {
         self.gpu_warmup = value;
+        self
+    }
+
+    pub fn with_tablebase_requested(mut self, value: Option<bool>) -> Self {
+        self.tablebase_requested = value;
+        self
+    }
+
+    pub fn with_precompute_build_dependencies(mut self, value: Option<bool>) -> Self {
+        self.precompute_build_dependencies = value;
         self
     }
 }

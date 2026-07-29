@@ -14,12 +14,48 @@
   export let request: SolverWorkspaceRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: WorkspaceValidationCode[] = [];
+  export let tablebaseControlAvailable = false;
+  export let dependencyDagControlAvailable = false;
+  export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
+  export let tablebaseByteLength = 0;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     dispatch('change', { ...request, ...change });
+  }
+
+  $: tablebaseStatusLabel = tablebaseMessage(
+    tablebaseStatus,
+    tablebaseByteLength,
+    language
+  );
+
+  function tablebaseMessage(
+    status: typeof tablebaseStatus,
+    byteLength: number,
+    currentLanguage: WorkspaceLanguage
+  ): string {
+    if (status === 'ready') {
+      return workspaceMessage(currentLanguage, 'tablebaseReady', {
+        size: tablebaseSize(byteLength)
+      });
+    }
+    if (status === 'loading') {
+      const loading = workspaceMessage(currentLanguage, 'tablebaseLoading');
+      return byteLength === 0 ? loading : `${loading} · ${tablebaseSize(byteLength)}`;
+    }
+    if (status === 'unavailable') {
+      return workspaceMessage(currentLanguage, 'tablebaseUnavailable');
+    }
+    return workspaceMessage(currentLanguage, 'tablebaseDisabled');
+  }
+
+  function tablebaseSize(byteLength: number): string {
+    return byteLength < 1024 * 1024
+      ? `${(byteLength / 1024).toFixed(1)} KiB`
+      : `${(byteLength / (1024 * 1024)).toFixed(1)} MiB`;
   }
 
 </script>
@@ -58,11 +94,6 @@
         <option value="oracle">{label('queueKnowledgeOracle')}</option>
         <option value="visible-7">{label('queueKnowledgeVisibleSeven')}</option>
       </select>
-      <small class="workspace-field-help">
-        {label(request.queueKnowledge === 'visible-7'
-          ? 'queueKnowledgeVisibleSevenHelp'
-          : 'queueKnowledgeOracleHelp')}
-      </small>
     </label>
   </section>
 
@@ -136,7 +167,6 @@
           <span class="workspace-switch" aria-hidden="true"></span>
           <span>{label('preserveB2B')}</span>
         </label>
-        <small class="workspace-field-help">{label('preserveB2BHelp')}</small>
       </div>
       <label class="workspace-switch-label">
         <input
@@ -169,6 +199,39 @@
     <div class="workspace-toggle-grid policy-toggle">
       <label class="workspace-switch-label"><input type="checkbox" checked={false} disabled /><span class="workspace-switch" aria-hidden="true"></span><span>{label('useAllThreads')}</span></label>
     </div>
+    {#if tablebaseControlAvailable}
+      <div class="tablebase-control">
+        <label class="workspace-switch-label">
+          <input
+            type="checkbox"
+            checked={request.tablebaseEnabled}
+            on:change={(event) => patch({
+              tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
+            })}
+          />
+          <span class="workspace-switch" aria-hidden="true"></span>
+          <span>{label('tablebase')}</span>
+        </label>
+        <small class="workspace-field-help">{label('tablebaseHelp')}</small>
+        <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
+      </div>
+    {/if}
+    {#if dependencyDagControlAvailable}
+      <div class="dependency-dag-control">
+        <label class="workspace-switch-label">
+          <input
+            type="checkbox"
+            checked={request.precomputeBuildDependencies}
+            on:change={(event) => patch({
+              precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
+            })}
+          />
+          <span class="workspace-switch" aria-hidden="true"></span>
+          <span>{label('precomputeBuildDependencies')}</span>
+        </label>
+        <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
+      </div>
+    {/if}
   </section>
 
   {#if validationCodes.length}
@@ -183,4 +246,18 @@
 <style>
   .policy-toggle { grid-template-columns: 1fr; }
   .b2b-preservation-control { display: grid; gap: 5px; }
+  .tablebase-control, .dependency-dag-control {
+    align-content: start;
+    display: grid;
+    gap: 5px;
+    margin-top: 14px;
+    min-width: 0;
+  }
+  .tablebase-control + .dependency-dag-control { margin-top: 18px; }
+  .tablebase-control :global(.workspace-field-help),
+  .dependency-dag-control :global(.workspace-field-help) {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+  .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
 </style>

@@ -58,6 +58,8 @@ impl ExecutionPolicyAssembler {
             use_all_logical_processors: args.use_all_logical_processors(),
             cpu_warmup: args.cpu_warmup(),
             gpu_warmup: args.gpu_warmup(),
+            tablebase_requested: args.tablebase_requested(),
+            precompute_build_dependencies: args.precompute_build_dependencies(),
             deterministic: args.deterministic(),
             max_frontier_states: args.max_frontier_states(),
             max_candidates: args.max_candidates(),
@@ -78,6 +80,8 @@ impl ExecutionPolicyAssembler {
             use_all_logical_processors: args.use_all_logical_processors(),
             cpu_warmup: args.cpu_warmup(),
             gpu_warmup: args.gpu_warmup(),
+            tablebase_requested: None,
+            precompute_build_dependencies: None,
             deterministic: args.deterministic(),
             max_frontier_states: args.max_frontier_states(),
             max_candidates: args.max_candidates(),
@@ -100,6 +104,8 @@ impl ExecutionPolicyAssembler {
                 use_all_logical_processors: args.use_all_logical_processors(),
                 cpu_warmup: args.cpu_warmup(),
                 gpu_warmup: args.gpu_warmup(),
+                tablebase_requested: None,
+                precompute_build_dependencies: None,
                 deterministic: args.deterministic(),
                 max_frontier_states: args.max_frontier_states(),
                 max_candidates: args.max_candidates(),
@@ -119,6 +125,8 @@ pub struct ExecutionPolicyInput<'a> {
     pub use_all_logical_processors: Option<bool>,
     pub cpu_warmup: Option<bool>,
     pub gpu_warmup: Option<bool>,
+    pub tablebase_requested: Option<bool>,
+    pub precompute_build_dependencies: Option<bool>,
     pub deterministic: Option<bool>,
     pub max_frontier_states: Option<usize>,
     pub max_candidates: Option<usize>,
@@ -186,6 +194,12 @@ fn assemble_policy_on(
     }
     if let Some(gpu_warmup) = input.gpu_warmup {
         policy = policy.with_gpu_warmup(gpu_warmup);
+    }
+    if let Some(tablebase_requested) = input.tablebase_requested {
+        policy = policy.with_tablebase_requested(tablebase_requested);
+    }
+    if let Some(precompute_build_dependencies) = input.precompute_build_dependencies {
+        policy = policy.with_precompute_build_dependencies(precompute_build_dependencies);
     }
     if let Some(deterministic) = input.deterministic {
         policy = policy.with_deterministic(deterministic);

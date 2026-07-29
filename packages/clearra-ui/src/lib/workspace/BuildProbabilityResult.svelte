@@ -111,7 +111,6 @@
               {/each}
             </div>
           </div>
-          {#if canContinue}<p class="continue-help">{label('clearedBuildResultHelp')}</p>{/if}
           <button class="continue-button" type="button" disabled={!canContinue} on:click={continueFromResult}>
             <ArrowDownToLine size={15} strokeWidth={1.8} />{label('useAsNextBase')}
           </button>
@@ -152,7 +151,6 @@
             {#if aggregation === 'spin'}
               <div><dt>{label('executionDistribution')}</dt><dd>{summary.spin_coverage_execution_distribution ?? '—'}</dd></div>
             {/if}
-            <div><dt>{label('lineClearPolicy')}</dt><dd>{summary.build_probability_completion ?? '—'}</dd></div>
           </dl>
         </div>
       </div>
@@ -198,7 +196,6 @@
   .board span.target { background: #d8e2de; box-shadow: inset 2px 2px 0 rgba(255,255,255,.16), inset -2px -2px 0 rgba(41,56,51,.18); }
   .continue-button { align-items: center; background: #fff; border: 1px solid #aebbb5; border-radius: 5px; color: #27403a; cursor: pointer; display: inline-flex; font-size: 11px; font-weight: 700; gap: 7px; margin-top: 10px; min-height: 34px; padding: 7px 10px; }
   .continue-button:disabled { cursor: default; opacity: .4; }
-  .continue-help { color: #68736f; font-size: 11px; line-height: 1.5; margin: 9px 0 0; }
   .metrics-panel { min-width: 0; }
   .hero-metric { border-bottom: 1px solid #dce2de; display: grid; gap: 4px; padding: 2px 0 18px; }
   .hero-metric > span { color: #68736f; font-size: 11px; font-weight: 700; text-transform: uppercase; }

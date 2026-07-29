@@ -33,53 +33,178 @@ pub(super) trait ObservationPieceLanguage {
     fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)>;
 }
 
-pub(super) struct RootedPieceLanguage<'a> {
-    language: &'a PieceOrderLanguageCache,
-    root: u32,
-    total_depth: u8,
+#[derive(Clone, Copy, Debug)]
+struct UnionLanguageNode {
+    children: [u32; 7],
+    accepting: bool,
+    depth: u8,
 }
 
-impl<'a> RootedPieceLanguage<'a> {
+pub(super) struct RootedPieceLanguageUnion {
+    nodes: Vec<UnionLanguageNode>,
+    root: u32,
+}
+
+impl RootedPieceLanguageUnion {
     pub fn new(
-        language: &'a PieceOrderLanguageCache,
-        root: u32,
+        language: &PieceOrderLanguageCache,
+        roots: &[u32],
     ) -> Result<Self, WasmExactSearchError> {
-        let total_depth = language
-            .node(root)
+        let total_depth = roots
+            .first()
+            .and_then(|root| language.node(*root))
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_observation_language_root_out_of_range",
             ))?
             .remaining_depth;
-        Ok(Self {
-            language,
-            root,
+        let mut root_set = Vec::new();
+        root_set.try_reserve_exact(roots.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_observation_language_union_storage_unavailable",
+            )
+        })?;
+        root_set.extend_from_slice(roots);
+        let mut builder = PieceLanguageUnionBuilder {
+            source: language,
+            nodes: Vec::new(),
+            interned: HashMap::new(),
             total_depth,
+        };
+        let root = builder.intern_set(root_set)?;
+        Ok(Self {
+            nodes: builder.nodes,
+            root,
         })
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.nodes.capacity() * core::mem::size_of::<UnionLanguageNode>()
     }
 }
 
-impl ObservationPieceLanguage for RootedPieceLanguage<'_> {
+struct PieceLanguageUnionBuilder<'a> {
+    source: &'a PieceOrderLanguageCache,
+    nodes: Vec<UnionLanguageNode>,
+    interned: HashMap<Vec<u32>, u32>,
+    total_depth: u8,
+}
+
+impl PieceLanguageUnionBuilder<'_> {
+    fn intern_set(&mut self, mut source_nodes: Vec<u32>) -> Result<u32, WasmExactSearchError> {
+        source_nodes.sort_unstable();
+        source_nodes.dedup();
+        if let Some(reference) = self.interned.get(source_nodes.as_slice()).copied() {
+            return Ok(reference);
+        }
+        let first = source_nodes
+            .first()
+            .and_then(|node| self.source.node(*node))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_language_root_out_of_range",
+            ))?;
+        let remaining_depth = first.remaining_depth;
+        let mut accepting = false;
+        let mut child_sets: [Vec<u32>; 7] = std::array::from_fn(|_| Vec::new());
+        for source_node in source_nodes.iter().copied() {
+            let node =
+                self.source
+                    .node(source_node)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_language_node_out_of_range",
+                    ))?;
+            if node.remaining_depth != remaining_depth {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_language_union_depth_mismatch",
+                ));
+            }
+            accepting |= node.accepting;
+            for (piece_index, child_set) in child_sets.iter_mut().enumerate() {
+                let edges = self
+                    .source
+                    .edges_for_piece(source_node, piece_index as u8 + 1)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_language_edge_out_of_range",
+                    ))?;
+                child_set.try_reserve(edges.len()).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_language_union_storage_unavailable",
+                    )
+                })?;
+                child_set.extend(edges.iter().map(|edge| edge.child()));
+            }
+        }
+
+        let mut children = [NO_NODE; 7];
+        for (piece_index, mut child_set) in child_sets.into_iter().enumerate() {
+            if child_set.is_empty() {
+                continue;
+            }
+            child_set.sort_unstable();
+            child_set.dedup();
+            children[piece_index] = self.intern_set(child_set)?;
+        }
+        let reference = u32::try_from(self.nodes.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_observation_language_union_node_index_overflow",
+            )
+        })?;
+        self.nodes.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_observation_language_union_storage_unavailable",
+            )
+        })?;
+        self.interned.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_observation_language_union_storage_unavailable",
+            )
+        })?;
+        self.nodes.push(UnionLanguageNode {
+            children,
+            accepting,
+            depth: self.total_depth.checked_sub(remaining_depth).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_language_union_depth_mismatch",
+                ),
+            )?,
+        });
+        self.interned.insert(source_nodes, reference);
+        Ok(reference)
+    }
+}
+
+impl ObservationPieceLanguage for RootedPieceLanguageUnion {
     fn root(&self) -> u32 {
         self.root
     }
 
     fn node(&self, node: u32) -> Option<ObservationLanguageNode> {
-        self.language
-            .node(node)
-            .map(|view| ObservationLanguageNode {
-                accepting: view.accepting,
-                depth: self.total_depth.saturating_sub(view.remaining_depth),
+        self.nodes
+            .get(node as usize)
+            .map(|node| ObservationLanguageNode {
+                accepting: node.accepting,
+                depth: node.depth,
             })
     }
 
     fn edge_count(&self, node: u32) -> Option<usize> {
-        self.language.edge_count(node)
+        self.nodes.get(node as usize).map(|node| {
+            node.children
+                .iter()
+                .filter(|child| **child != NO_NODE)
+                .count()
+        })
     }
 
     fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)> {
-        self.language
-            .edge(node, index)
-            .map(|edge| (edge.piece_code(), edge.child()))
+        self.nodes
+            .get(node as usize)?
+            .children
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, child)| *child != NO_NODE)
+            .nth(index)
+            .map(|(piece_index, child)| (piece_index as u8 + 1, child))
     }
 }
 

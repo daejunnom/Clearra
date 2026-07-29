@@ -33,6 +33,7 @@ clearra-rules = { path = "../clearra-rules" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-webgpu = { path = "../clearra-webgpu", optional = true }
 pollster = { version = "0.4", optional = true }
+sha2 = "0.10.9"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2.126", optional = true }

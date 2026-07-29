@@ -30,6 +30,8 @@ pub mod spin;
 #[cfg(feature = "webgpu-search")]
 pub use backend::WasmWebGpuCandidateProducer;
 pub use backend::{
+    compile_pc4_compact_tablebase, install_pc4_compact_tablebase, release_pc4_compact_tablebase,
+    Pc4CompactTablebase, Pc4CompactTablebaseArtifact, Pc4TablebaseError, Pc4TablebaseLookup,
     WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
     WasmBuildProbabilityDistributedVerifier, WasmBuildProbabilitySession, WasmCandidatePacket,
@@ -39,6 +41,7 @@ pub use backend::{
     WasmDistributedResultMerger, WasmDistributedVerifier, WasmProductSearchBackend,
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
     WasmSetupSearchAdvance, WasmSetupSearchBackend, WasmSetupSearchSession,
+    PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,

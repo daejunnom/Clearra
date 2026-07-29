@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Database, Layers3, ShieldCheck } from '@lucide/svelte';
+  import { Database, Layers3 } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
   import QueueTextInput from '../components/QueueTextInput.svelte';
@@ -20,6 +20,8 @@
   export let request: SetupFinderRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: SetupFinderValidationCode[] = [];
+  export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
+  export let tablebaseByteLength = 0;
 
   const dispatch = createEventDispatcher<{ change: SetupFinderRequest }>();
   $: label = (
@@ -28,9 +30,27 @@
   ) => workspaceMessage(language, key, values);
   $: cycle = setupCycle(request.remaining);
   $: nextRemainingCount = nextSetupCycleRemainingCount(request.remaining);
+  $: tablebaseStatusLabel = tablebaseMessage(tablebaseStatus, tablebaseByteLength);
 
   function update(change: Partial<SetupFinderRequest>) {
     dispatch('change', { ...request, ...change });
+  }
+
+  function tablebaseMessage(status: typeof tablebaseStatus, byteLength: number): string {
+    if (status === 'ready') {
+      return label('tablebaseReady', { size: tablebaseSize(byteLength) });
+    }
+    if (status === 'loading') {
+      const loading = label('tablebaseLoading');
+      return byteLength === 0 ? loading : `${loading} · ${tablebaseSize(byteLength)}`;
+    }
+    return label(status === 'unavailable' ? 'tablebaseUnavailable' : 'tablebaseDisabled');
+  }
+
+  function tablebaseSize(byteLength: number): string {
+    return byteLength < 1024 * 1024
+      ? `${(byteLength / 1024).toFixed(1)} KiB`
+      : `${(byteLength / (1024 * 1024)).toFixed(1)} MiB`;
   }
 </script>
 
@@ -110,11 +130,6 @@
         <option value="oracle">{label('queueKnowledgeOracle')}</option>
         <option value="visible-7">{label('queueKnowledgeVisibleSeven')}</option>
       </select>
-      <small class="workspace-field-help">
-        {label(request.queueKnowledge === 'visible-7'
-          ? 'queueKnowledgeVisibleSevenHelp'
-          : 'queueKnowledgeOracleHelp')}
-      </small>
     </label>
 
     <div class="residue-facts">
@@ -134,12 +149,22 @@
 
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading">
-      <Layers3 size={16} strokeWidth={1.8} />{label('setupSearchContract')}
+      <Layers3 size={16} strokeWidth={1.8} />{label('search')}
     </h2>
-    <div class="workspace-contract-band">
-      <ShieldCheck size={15} strokeWidth={1.8} />
-      <span>{label('pcTarget')}</span>
-      <b>10×4</b>
+    <div class="tablebase-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.tablebaseEnabled}
+          on:change={(event) => update({
+            tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('tablebase')}</span>
+      </label>
+      <small class="workspace-field-help">{label('tablebaseHelp')}</small>
+      <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
     </div>
     <label class="workspace-field wide priority-field">
       <span>{label('rule')}</span>
@@ -211,7 +236,6 @@
           <span>{label('allowPostCycleBorrow')}</span>
         </label>
       </div>
-      <small class="workspace-field-help boundary-help">{label('postCycleBorrowHelp')}</small>
     {/if}
   </section>
 
@@ -235,7 +259,8 @@
   .residue-facts strong { padding: 9px 10px; }
   .residue-facts span { color: #68736f; }
   .residue-facts strong { color: #173f3a; text-align: right; }
-  .boundary-help { display: block; margin-top: 8px; }
   .priority-field { margin-top: 14px; }
   .queue-knowledge-field { margin-top: 14px; }
+  .tablebase-control { display: grid; gap: 5px; margin-top: 14px; }
+  .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
 </style>

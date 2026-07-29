@@ -30,6 +30,7 @@ mod parallel_coverage;
 mod parallel_search;
 #[cfg(feature = "parallel")]
 mod parallel_worker;
+mod pc4_tablebase;
 mod piece_order_language;
 mod queue_observation_policy;
 mod reachability;
@@ -59,6 +60,11 @@ pub use distributed::{
     WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier,
+};
+pub use pc4_tablebase::{
+    compile_pc4_compact_tablebase, install_pc4_compact_tablebase, release_pc4_compact_tablebase,
+    Pc4CompactTablebase, Pc4CompactTablebaseArtifact, Pc4TablebaseError, Pc4TablebaseLookup,
+    PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
