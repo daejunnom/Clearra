@@ -1,15 +1,15 @@
 <script lang="ts">
-  import { Languages, Zap } from '@lucide/svelte';
+  import { Languages } from '@lucide/svelte';
   import { createEventDispatcher, onMount } from 'svelte';
 
   import ProductModeTabs from './ProductModeTabs.svelte';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import type { WorkspaceMode } from './workspaceMode';
 
-  export let activeMode: 'pc' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
+  export let activeMode: WorkspaceMode;
   export let language: WorkspaceLanguage;
   export let active = false;
   export let statusLabel: string;
-  export let runtimeLabel: string;
 
   const dispatch = createEventDispatcher<{ language: WorkspaceLanguage }>();
   let hidden = false;
@@ -46,7 +46,6 @@
     </div>
     <div class="header-status">
       <span class:running={active}><i></i>{statusLabel}</span>
-      <span class="runtime-chip"><Zap size={13} strokeWidth={2} />{runtimeLabel}</span>
     </div>
     <div class="language-control" aria-label={label('language')}>
       <Languages size={16} strokeWidth={1.8} />
@@ -93,7 +92,6 @@
   .header-status > span { background: #f0f3f1; border: 1px solid #d5ddd8; border-radius: 4px; color: #52605a; font-size: 11px; font-weight: 700; gap: 6px; min-height: 29px; padding: 0 9px; }
   .header-status i { background: #7b8782; border-radius: 50%; height: 7px; width: 7px; }
   .header-status span.running i { animation: pulse 1.2s ease-in-out infinite; background: #d47a2e; }
-  .runtime-chip { color: #214d49 !important; }
   .language-control { border: 1px solid #cfd7d2; border-radius: 5px; gap: 2px; height: 34px; padding: 0 3px 0 8px; }
   .language-control > :global(svg) { color: #68736f; margin-right: 3px; }
   .language-control button { background: transparent; border: 0; border-radius: 3px; color: #6d7873; cursor: pointer; font-size: 10px; font-weight: 800; height: 26px; padding: 0 7px; }

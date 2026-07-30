@@ -36,6 +36,7 @@ export type ClearraVerifierPoolProgress = {
   candidatesVerified: number;
   buildNodes: number;
   coverageChecks: number;
+  readyWorkers: number;
   activeWorkers: number;
   workerCount: number;
   oldestBatchMs: number;
@@ -52,13 +53,24 @@ class VerifierClient {
   private candidatesVerified = 0;
   private progress: ClearraDistributedVerifierProgress = emptyVerifierProgress();
   private batchStartedAt: number | null = null;
+  private initialized = false;
+  private lifecycleOwnerId = '';
   busy = false;
 
   constructor() {
     this.worker = this.createWorker();
   }
 
-  prewarm(compiledModule?: WebAssembly.Module): Promise<void> {
+  prewarm(compiledModule?: WebAssembly.Module, lifecycleOwnerId = ''): Promise<void> {
+    if (
+      lifecycleOwnerId &&
+      this.lifecycleOwnerId &&
+      lifecycleOwnerId !== this.lifecycleOwnerId
+    ) {
+      this.release(new Error('distributed verifier owner changed'));
+      this.worker = this.createWorker();
+    }
+    if (lifecycleOwnerId) this.lifecycleOwnerId = lifecycleOwnerId;
     if (this.prewarmed) return this.prewarmed;
     this.worker ??= this.createWorker();
     const worker = this.worker;
@@ -87,11 +99,18 @@ class VerifierClient {
       worker.addEventListener('message', onMessage);
       worker.addEventListener('error', onError);
       try {
-        worker.postMessage({ type: 'prewarm', compiledModule });
+        worker.postMessage({
+          type: 'prewarm',
+          compiledModule,
+          lifecycleOwnerId: this.lifecycleOwnerId
+        });
       } catch (error) {
         if (compiledModule) {
           try {
-            worker.postMessage({ type: 'prewarm' });
+            worker.postMessage({
+              type: 'prewarm',
+              lifecycleOwnerId: this.lifecycleOwnerId
+            });
             return;
           } catch {
             // Report the original structured-clone failure below.
@@ -108,9 +127,11 @@ class VerifierClient {
 
   async initialize(
     initialization: string | ArrayBuffer,
-    compiledModule?: WebAssembly.Module
+    compiledModule?: WebAssembly.Module,
+    lifecycleOwnerId = ''
   ): Promise<void> {
-    await this.prewarm(compiledModule);
+    this.initialized = false;
+    await this.prewarm(compiledModule, lifecycleOwnerId);
     this.worker ??= this.createWorker();
     const worker = this.worker;
     this.candidatesVerified = 0;
@@ -128,6 +149,7 @@ class VerifierClient {
       };
       const onMessage = (event: MessageEvent<VerifierResponse>) => {
         if (event.data.type === 'ready') {
+          this.initialized = true;
           cleanup();
           resolve();
         } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
@@ -144,7 +166,11 @@ class VerifierClient {
         typeof initialization === 'string' ? initialization : initialization.slice(0);
       try {
         worker.postMessage(
-          { type: 'initialize', initialization: workerInitialization },
+          {
+            type: 'initialize',
+            initialization: workerInitialization,
+            lifecycleOwnerId: this.lifecycleOwnerId
+          },
           workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
         );
       } catch (error) {
@@ -175,6 +201,7 @@ class VerifierClient {
       candidatesVerified: this.candidatesVerified,
       buildNodes: this.progress.buildNodes,
       coverageChecks: this.progress.coverageChecks,
+      ready: this.initialized,
       active: this.busy,
       batchAgeMs: this.batchStartedAt === null ? 0 : Math.max(0, now - this.batchStartedAt)
     };
@@ -223,6 +250,7 @@ class VerifierClient {
     worker.onmessage = (event: MessageEvent<VerifierResponse>) => {
       const response = event.data;
       if (response.type === 'ready') return;
+      if (!('requestId' in response)) return;
       const requestId = response.requestId;
       if (requestId === undefined) return;
       const pending = this.pending.get(requestId);
@@ -266,6 +294,8 @@ class VerifierClient {
     this.candidatesVerified = 0;
     this.progress = emptyVerifierProgress();
     this.batchStartedAt = null;
+    this.initialized = false;
+    this.lifecycleOwnerId = '';
     this.busy = false;
   }
 }
@@ -278,12 +308,18 @@ export class ClearraVerifierPool {
   private active = false;
   private failure: Error | null = null;
 
-  async prewarm(size: number, compiledModule?: WebAssembly.Module) {
+  async prewarm(
+    size: number,
+    compiledModule?: WebAssembly.Module,
+    lifecycleOwnerId = ''
+  ) {
     const generation = ++this.generation;
     try {
       while (this.clients.length < size) this.clients.push(new VerifierClient());
       while (this.clients.length > size) this.clients.pop()?.dispose();
-      await Promise.all(this.clients.map((client) => client.prewarm(compiledModule)));
+      await Promise.all(
+        this.clients.map((client) => client.prewarm(compiledModule, lifecycleOwnerId))
+      );
       if (generation !== this.generation) return;
     } catch (error) {
       if (generation !== this.generation) return;
@@ -295,7 +331,8 @@ export class ClearraVerifierPool {
   async initialize(
     initialization: string | ArrayBuffer,
     size: number,
-    compiledModule?: WebAssembly.Module
+    compiledModule?: WebAssembly.Module,
+    lifecycleOwnerId = ''
   ) {
     const generation = ++this.generation;
     this.active = true;
@@ -304,7 +341,9 @@ export class ClearraVerifierPool {
       while (this.clients.length < size) this.clients.push(new VerifierClient());
       while (this.clients.length > size) this.clients.pop()?.dispose();
       await Promise.all(
-        this.clients.map((client) => client.initialize(initialization, compiledModule))
+        this.clients.map((client) =>
+          client.initialize(initialization, compiledModule, lifecycleOwnerId)
+        )
       );
       this.assertActive(generation);
     } catch (error) {
@@ -371,6 +410,7 @@ export class ClearraVerifierPool {
         (total, snapshot) => total + snapshot.coverageChecks,
         0
       ),
+      readyWorkers: snapshots.filter((snapshot) => snapshot.ready).length,
       activeWorkers: snapshots.filter((snapshot) => snapshot.active).length,
       workerCount: snapshots.length,
       oldestBatchMs: snapshots.reduce(

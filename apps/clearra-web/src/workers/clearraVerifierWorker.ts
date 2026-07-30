@@ -5,12 +5,22 @@ import {
   type ClearraDistributedVerifierProgress,
   type ClearraWasmModule
 } from './clearraWasmRuntime';
+import { listenForWasmOwnerTermination } from '@clearra/ui/wasm-lifecycle';
 
 type VerifierRequest =
-  | { type: 'prewarm'; compiledModule?: WebAssembly.Module }
-  | { type: 'initialize'; initialization: string | ArrayBuffer }
+  | {
+      type: 'prewarm';
+      compiledModule?: WebAssembly.Module;
+      lifecycleOwnerId?: string;
+    }
+  | {
+      type: 'initialize';
+      initialization: string | ArrayBuffer;
+      lifecycleOwnerId?: string;
+    }
   | { type: 'consume'; requestId: number; batch: ArrayBuffer }
-  | { type: 'finish'; requestId: number };
+  | { type: 'finish'; requestId: number }
+  | { type: 'dispose' };
 
 type VerifierResponse =
   | { type: 'prewarmed' }
@@ -27,6 +37,8 @@ type VerifierResponse =
 
 let wasm: ClearraWasmModule | null = null;
 let initialized = false;
+let lifecycleOwnerId = '';
+let closeLifecycleListener: (() => void) | null = null;
 
 self.onmessage = (event: MessageEvent<VerifierRequest>) => {
   void handleRequest(event.data);
@@ -34,6 +46,13 @@ self.onmessage = (event: MessageEvent<VerifierRequest>) => {
 
 async function handleRequest(request: VerifierRequest) {
   try {
+    if ('lifecycleOwnerId' in request && request.lifecycleOwnerId) {
+      bindLifecycleOwner(request.lifecycleOwnerId);
+    }
+    if (request.type === 'dispose') {
+      disposeVerifierRuntime();
+      return;
+    }
     if (request.type === 'prewarm') {
       wasm ??= await loadClearraWasmModule(request.compiledModule);
       post({ type: 'prewarmed' });
@@ -80,6 +99,29 @@ async function handleRequest(request: VerifierRequest) {
   }
 }
 
+function bindLifecycleOwner(ownerId: string) {
+  if (lifecycleOwnerId === ownerId) return;
+  closeLifecycleListener?.();
+  lifecycleOwnerId = ownerId;
+  closeLifecycleListener = listenForWasmOwnerTermination(ownerId, () => {
+    disposeVerifierRuntime();
+  });
+}
+
+function disposeVerifierRuntime() {
+  initialized = false;
+  try {
+    wasm?.distributed_reset();
+  } catch {
+    // Closing this worker releases a trapped verifier's complete WASM instance.
+  }
+  wasm = null;
+  closeLifecycleListener?.();
+  closeLifecycleListener = null;
+  lifecycleOwnerId = '';
+  self.close();
+}
+
 function verifierFailure(error: unknown, wasm: ClearraWasmModule | null) {
   const diagnostics = wasm?.failure_diagnostics();
   const baseMessage = error instanceof Error ? error.message : String(error);
@@ -112,5 +154,9 @@ function formatByteCount(bytes: number) {
 }
 
 function post(response: VerifierResponse, transfer: Transferable[] = []) {
-  self.postMessage(response, transfer);
+  (
+    self as unknown as {
+      postMessage(message: unknown, transfer: Transferable[]): void;
+    }
+  ).postMessage(response, transfer);
 }

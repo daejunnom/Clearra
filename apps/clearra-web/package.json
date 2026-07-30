@@ -8,8 +8,8 @@
     "wasm:build": "node ../../scripts/tools/build-clearra-wasm.mjs --environment native",
     "wasm:build:wsl": "node ../../scripts/tools/build-clearra-wasm.mjs --environment wsl",
     "predev": "npm run sync && npm run wasm:build",
-    "dev": "vite --host 127.0.0.1",
-    "dev:wsl": "npm run sync && npm run wasm:build:wsl && vite --host 127.0.0.1",
+    "dev": "vite --host 127.0.0.1 --port 4194 --strictPort",
+    "dev:wsl": "npm run sync && npm run wasm:build:wsl && vite --host 127.0.0.1 --port 4194 --strictPort",
     "prebuild": "npm run sync && npm run wasm:build",
     "build": "vite build",
     "build:wsl": "npm run sync && npm run wasm:build:wsl && vite build"

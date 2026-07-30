@@ -4,6 +4,7 @@ import {
   buildWasmCommandRequest,
   postCancelJob,
   postRunCommand,
+  type ClearraDiagnostic,
   type ClearraHostAppResponse,
   type ClearraSearchProgressTelemetry,
   type ClearraWebGpuBackendReport,
@@ -11,11 +12,20 @@ import {
   type ClearraWasmSearchReport,
   type ClearraWasmWorkerEvent
 } from './wasmCommandClient';
+import type { ClearraWasmForcedTerminationReason } from './wasmWorkerLifecycle';
 
 export type WasmWorkerState = {
   request: ClearraWasmCommandRequest;
   jobId: number | null;
-  status: 'idle' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
+  status:
+    | 'idle'
+    | 'running'
+    | 'cancelling'
+    | 'completed'
+    | 'cancelled'
+    | 'terminated'
+    | 'failed';
+  terminationReason: ClearraWasmForcedTerminationReason | null;
   progressLabel: string;
   progressDone: number;
   progressTotal: number;
@@ -50,6 +60,7 @@ const wasmWorkerInitialState: WasmWorkerState = {
   request: buildWasmCommandRequest({}),
   jobId: null,
   status: 'idle',
+  terminationReason: null,
   progressLabel: '',
   progressDone: 0,
   progressTotal: 0,
@@ -82,13 +93,15 @@ export function updateWasmCommandText(commandText: string) {
 export function runWasmCommand(
   worker: Worker,
   prewarmWorkerCount = 1,
-  tablebaseRequested = false
+  tablebaseRequested = false,
+  lifecycleOwnerId?: string
 ) {
   const request = get(wasmWorkerState).request;
   wasmWorkerState.update((state) => ({
     ...state,
     jobId: null,
     status: 'running',
+    terminationReason: null,
     progressLabel: '',
     progressDone: 0,
     progressTotal: 0,
@@ -102,7 +115,13 @@ export function runWasmCommand(
     error: null,
     terminalLines: [...state.terminalLines, `$ ${displayCommandText(request.commandText)}`]
   }));
-  postRunCommand(worker, request, prewarmWorkerCount, tablebaseRequested);
+  postRunCommand(
+    worker,
+    request,
+    prewarmWorkerCount,
+    tablebaseRequested,
+    lifecycleOwnerId
+  );
 }
 
 function displayCommandText(commandText: string): string {
@@ -146,6 +165,7 @@ function reduceWasmWorkerEvent(
         ...state,
         jobId: event.job_id,
         status: state.status === 'cancelling' ? 'cancelling' : 'running',
+        terminationReason: null,
         terminalLines: [...state.terminalLines, `job ${event.job_id} started`]
       };
     case 'progress':
@@ -187,6 +207,7 @@ function reduceWasmWorkerEvent(
         ...state,
         jobId: null,
         status: 'completed',
+        terminationReason: null,
         response: event.response,
         searchReport: event.search_report,
         webgpuBackend: event.webgpu_backend,
@@ -199,12 +220,29 @@ function reduceWasmWorkerEvent(
         ...state,
         jobId: null,
         status: 'cancelled',
+        terminationReason: null,
         progressTelemetry: null,
         terminalLines: [
           ...state.terminalLines,
           event.scope_released ? 'job cancelled; computation scope released' : 'job cancelled'
         ]
       };
+    case 'terminated': {
+      const error =
+        event.diagnostics.diagnostics
+          .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+          .join('\n') || 'WASM execution was force-terminated';
+      return {
+        ...state,
+        jobId: null,
+        status: 'terminated',
+        terminationReason: event.reason,
+        progressTelemetry: null,
+        error,
+        diagnostics: event.diagnostics.diagnostics,
+        terminalLines: [...state.terminalLines, error]
+      };
+    }
     case 'failed': {
       const error =
         event.diagnostics.diagnostics
@@ -214,6 +252,7 @@ function reduceWasmWorkerEvent(
         ...state,
         jobId: null,
         status: 'failed',
+        terminationReason: null,
         progressTelemetry: null,
         error,
         diagnostics: event.diagnostics.diagnostics,

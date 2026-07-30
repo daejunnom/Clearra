@@ -1,25 +1,29 @@
 <script lang="ts">
-  import { CheckCircle2, Search } from '@lucide/svelte';
+  import { Search } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
   import type {
+    ClearraSetupCandidate,
     ClearraSetupFinderReport,
     ClearraSetupHoldCondition
   } from '../wasm/wasmCommandClient';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
-  import type { SolutionCopyFormat } from './solutionExport';
+  import type {
+    SolutionCopyFormat,
+    SolutionExportPage
+  } from './solutionExport';
   import {
     replaySetupCompletionBoard,
     replaySetupPlacementBoard,
-    setupFinalBoard
+    setupFinalBoard,
+    type SetupPlacementBoard
   } from './setupPlacementBoard';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
     workspaceProbability,
-    workspaceProgressDetail,
     workspaceProgressLabel,
     type WorkspaceLanguage
   } from './workspaceI18n';
@@ -35,51 +39,48 @@
   export let pathDetails: Record<string, SetupPathDetailState> = {};
 
   const PAGE_SIZE = 100;
-  const PATH_PAGE_SIZE = 100;
   const dispatch = createEventDispatcher<{ loadPaths: SetupPathDetailRequest }>();
-  let visibleCount = PAGE_SIZE;
+  let visibleCandidateCount = PAGE_SIZE;
   let visiblePathCounts: Record<string, number> = {};
-  let lastIdentity = '';
+  let lastReport: ClearraSetupFinderReport | null = null;
   let copyFormat: SolutionCopyFormat = 'fumen';
+  const setupBoardCache = new Map<string, {
+    candidate: ClearraSetupCandidate;
+    board: SetupPlacementBoard;
+  }>();
+  const pathBoardCache = new Map<string, {
+    paths: SetupPathDetailState['paths'];
+    setupMask: string;
+    boards: Array<SetupPlacementBoard | null>;
+  }>();
 
   $: report = view.searchReport?.setup_report ?? null;
-  $: identity = report
-    ? `${report.search_mode}:${report.remaining_pieces}:${report.queue_based_pieces}:${report.next_cycle_remaining_pieces}:${report.cycle}:${report.hold_conditions.map((value) => value.candidate_count).join(',')}`
-    : '';
-  $: if (identity !== lastIdentity) {
-    lastIdentity = identity;
-    visibleCount = PAGE_SIZE;
+  $: if (report !== lastReport) {
+    lastReport = report;
+    visibleCandidateCount = PAGE_SIZE;
     visiblePathCounts = {};
+    setupBoardCache.clear();
+    pathBoardCache.clear();
   }
-  $: retainedCandidateCount = report?.hold_conditions.reduce(
-    (total, condition) => total + condition.candidates.length,
-    0
-  ) ?? 0;
+  $: candidateEntries = setupCandidateEntries(report);
+  $: retainedCandidateCount = candidateEntries.length;
   $: totalCandidateCount = report?.hold_conditions.reduce(
     (total, condition) => total + condition.candidate_count,
     0
   ) ?? 0;
-  $: visibleGroups = visibleSetupGroups(report, visibleCount);
-  $: renderedGroups = visibleGroups.map((condition) => ({
-    ...condition,
-    candidates: condition.candidates.map((candidate) => ({
-      candidate,
-      pathKey: setupPathDetailKey({
-        conditionId: condition.condition_id,
-        setupId: candidate.setup_id
-      }),
-      board: replaySetupPlacementBoard(
-        candidate.board_mask,
-        candidate.representative_path
-      ) ?? setupFinalBoard(candidate.board_mask)
-    }))
-  }));
-  $: visibleCandidateCount = visibleGroups.reduce(
-    (total, group) => total + group.candidates.length,
-    0
+  $: visibleCandidateCount = Math.min(visibleCandidateCount, retainedCandidateCount);
+  $: preparedCandidateCount = Math.min(
+    retainedCandidateCount,
+    visibleCandidateCount + PAGE_SIZE
   );
-  $: remainingCandidates = Math.max(0, retainedCandidateCount - visibleCandidateCount);
-  $: hasOutput = Boolean(view.response || report || view.diagnostics.length || view.error);
+  $: preparedCandidates = prepareSetupCandidates(
+    candidateEntries,
+    0,
+    preparedCandidateCount
+  );
+  $: renderedGroups = groupSetupCandidates(
+    preparedCandidates.slice(0, visibleCandidateCount)
+  );
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
@@ -89,20 +90,92 @@
     return value === undefined ? '—' : new Intl.NumberFormat(language).format(value);
   }
 
-  function visibleSetupGroups(
-    setup: ClearraSetupFinderReport | null,
-    limit: number
-  ): ClearraSetupHoldCondition[] {
+  type SetupCandidateEntry = {
+    condition: ClearraSetupHoldCondition;
+    candidate: ClearraSetupCandidate;
+    pathKey: string;
+  };
+
+  type PreparedSetupCandidate = SetupCandidateEntry & {
+    board: SetupPlacementBoard;
+  };
+
+  type PreparedSetupGroup = Omit<ClearraSetupHoldCondition, 'candidates'> & {
+    candidates: PreparedSetupCandidate[];
+  };
+
+  type PreparedPathItem = {
+    index: number;
+    board: SetupPlacementBoard | null;
+  };
+
+  type PreparedPathWindow = {
+    visible: number;
+    total: number;
+    items: PreparedPathItem[];
+  };
+
+  function setupCandidateEntries(
+    setup: ClearraSetupFinderReport | null
+  ): SetupCandidateEntry[] {
     if (!setup) return [];
-    let remaining = limit;
-    const groups: ClearraSetupHoldCondition[] = [];
+    const entries: SetupCandidateEntry[] = [];
     for (const condition of setup.hold_conditions) {
-      if (remaining <= 0) break;
-      const candidates = condition.candidates.slice(0, remaining);
-      if (candidates.length) groups.push({ ...condition, candidates });
-      remaining -= candidates.length;
+      for (const candidate of condition.candidates) {
+        entries.push({
+          condition,
+          candidate,
+          pathKey: setupPathDetailKey({
+            conditionId: condition.condition_id,
+            setupId: candidate.setup_id
+          })
+        });
+      }
+    }
+    return entries;
+  }
+
+  function prepareSetupCandidates(
+    entries: SetupCandidateEntry[],
+    start: number,
+    end: number
+  ): PreparedSetupCandidate[] {
+    return entries.slice(start, end).map((entry) => {
+      const cached = setupBoardCache.get(entry.pathKey);
+      if (cached?.candidate === entry.candidate) {
+        return { ...entry, board: cached.board };
+      }
+      const board = replaySetupPlacementBoard(
+        entry.candidate.board_mask,
+        entry.candidate.representative_path
+      ) ?? setupFinalBoard(entry.candidate.board_mask);
+      setupBoardCache.set(entry.pathKey, { candidate: entry.candidate, board });
+      return { ...entry, board };
+    });
+  }
+
+  function groupSetupCandidates(
+    entries: PreparedSetupCandidate[]
+  ): PreparedSetupGroup[] {
+    const groups: PreparedSetupGroup[] = [];
+    const byCondition = new Map<string, PreparedSetupGroup>();
+    for (const entry of entries) {
+      let group = byCondition.get(entry.condition.condition_id);
+      if (!group) {
+        group = { ...entry.condition, candidates: [] };
+        byCondition.set(entry.condition.condition_id, group);
+        groups.push(group);
+      }
+      group.candidates.push(entry);
     }
     return groups;
+  }
+
+  function showMoreCandidates() {
+    visibleCandidateCount = Math.min(
+      retainedCandidateCount,
+      visibleCandidateCount + PAGE_SIZE
+    );
   }
 
   function requestPaths(
@@ -122,15 +195,68 @@
     dispatch('loadPaths', { conditionId, setupId });
   }
 
-  function visiblePathCount(key: string): number {
-    return visiblePathCounts[key] ?? PATH_PAGE_SIZE;
+  function preparePathWindow(key: string, setupMask: string): PreparedPathWindow {
+    const paths = pathDetails[key]?.paths ?? [];
+    const total = paths.length;
+    const visible = Math.min(total, visiblePathCounts[key] ?? PAGE_SIZE);
+    const preparedEnd = Math.min(total, visible + PAGE_SIZE);
+    let cache = pathBoardCache.get(key);
+    if (!cache || cache.paths !== paths || cache.setupMask !== setupMask) {
+      cache = { paths, setupMask, boards: [] };
+      pathBoardCache.set(key, cache);
+    }
+    for (let index = 0; index < preparedEnd; index += 1) {
+      if (!(index in cache.boards)) {
+        cache.boards[index] = replaySetupCompletionBoard(setupMask, paths[index]);
+      }
+    }
+    const items: PreparedPathItem[] = [];
+    for (let index = 0; index < visible; index += 1) {
+      items.push({ index, board: cache.boards[index] ?? null });
+    }
+    return { visible, total, items };
   }
 
-  function showMorePaths(key: string) {
+  function showMorePaths(key: string, total: number) {
     visiblePathCounts = {
       ...visiblePathCounts,
-      [key]: visiblePathCount(key) + PATH_PAGE_SIZE
+      [key]: Math.min(total, (visiblePathCounts[key] ?? PAGE_SIZE) + PAGE_SIZE)
     };
+  }
+
+  async function loadAllSetupPages(
+    signal?: AbortSignal
+  ): Promise<SolutionExportPage[]> {
+    const pages: SolutionExportPage[] = [];
+    for (let offset = 0; offset < candidateEntries.length; offset += PAGE_SIZE) {
+      throwIfAborted(signal);
+      const end = Math.min(candidateEntries.length, offset + PAGE_SIZE);
+      for (let index = offset; index < end; index += 1) {
+        const entry = candidateEntries[index];
+        const board =
+          replaySetupPlacementBoard(
+            entry.candidate.board_mask,
+            entry.candidate.representative_path
+          ) ?? setupFinalBoard(entry.candidate.board_mask);
+        if (!board.page) throw new Error('Setup page could not be reconstructed.');
+        pages.push(board.page);
+      }
+      if (end < candidateEntries.length) await nextPaint();
+    }
+    throwIfAborted(signal);
+    return pages;
+  }
+
+  function nextPaint(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  function throwIfAborted(signal: AbortSignal | undefined) {
+    if (!signal?.aborted) return;
+    if (signal.reason instanceof Error) throw signal.reason;
+    const error = new Error('Solution copy was aborted.');
+    error.name = 'AbortError';
+    throw error;
   }
 </script>
 
@@ -140,27 +266,21 @@
   statusLabel={label(view.status)}
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
-  runtimeTitle={label('runtime')}
-  runtimeLabel={label('runtimeWeb')}
-  progressAriaLabel={label('progress')}
+  progressProfile="setup"
+  {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
-  progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}
+  progressDetail=""
   progressDone={view.progressDone}
   progressTotal={view.progressTotal}
-  progressDoneText={number(view.progressDone)}
-  progressTotalText={number(view.progressTotal)}
-  overviewLabel={label('overview')}
-  solutionsLabel={label('setups')}
-  solutionCountText={number(totalCandidateCount)}
-  diagnosticsLabel={label('diagnostics')}
-  diagnosticCountText={number(view.diagnostics.length)}
-  let:activeTab
+  progressTelemetry={view.progressTelemetry}
+  failureDiagnostics={view.diagnostics}
+  failureMessage={view.error ?? ''}
 >
-  {#if !hasOutput && view.status === 'idle'}
+  {#if view.status === 'idle' && !report}
     <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSetupResult')}</p></div>
-  {:else if activeTab === 'overview'}
-    {#if report}
-      <div class="setup-overview">
+  {:else if report && view.status !== 'failed' && view.status !== 'terminated'}
+    <div class="setup-content">
+      <section class="setup-overview" aria-label={label('overview')}>
         <div class="overview-lead">
           <span>{label(report.search_mode === 'qb' ? 'setupModeQb' : 'pcCycle')}</span>
           <strong>{report.search_mode === 'qb'
@@ -169,23 +289,7 @@
           <small>{report.remaining_pieces}</small>
         </div>
         <dl>
-          <div><dt>{label('geometryFamilies')}</dt><dd>{report.geometry_family_count}</dd></div>
-          <div><dt>{label('partialBuildStates')}</dt><dd>{number(report.partial_build_node_count)}</dd></div>
           <div><dt>{label('setups')}</dt><dd>{number(totalCandidateCount)}</dd></div>
-          <div><dt>{label('countComplete')}</dt><dd>{label(report.complete ? 'complete' : 'incomplete')}</dd></div>
-          <div><dt>{label('workersUsed')}</dt><dd>{number(view.searchReport?.workers_used)}</dd></div>
-          <div>
-            <dt>{label('coverageSemantics')}</dt>
-            <dd>{label(report.coverage_semantics === 'visible-seven-policy'
-              ? 'visibleSevenCoverage'
-              : 'oracleCoverage')}</dd>
-          </div>
-          {#if report.continuation_supply_semantics === 'exact-post-setup-hold-queue-state'}
-            <div>
-              <dt>{label('continuationSupply')}</dt>
-              <dd>{label('exactPostSetupSupply')}</dd>
-            </div>
-          {/if}
           {#if report.next_cycle_remaining_pieces}
             <div>
               <dt>{label('setupNextCycleRemaining')}</dt>
@@ -205,182 +309,175 @@
             </div>
           {/each}
         </div>
-        <SolutionCopyFormatControl bind:value={copyFormat} {language} />
-      </div>
-    {/if}
-  {:else if activeTab === 'solutions'}
-    {#if renderedGroups.length}
-      {#each renderedGroups as condition}
-        <section class="condition-group">
-          <div class="condition-heading">
-            <div>
-              <h3>{condition.pattern_expression}</h3>
-              <p>{number(condition.pattern_count)} {label('patterns')}</p>
-            </div>
-            <span>{number(condition.candidate_count)}</span>
-          </div>
-          <ol class="setup-grid">
-            {#each condition.candidates as result}
-              <li>
-                <div class="setup-card-actions">
-                  <SolutionCopyButton
-                    page={result.board.page}
-                    format={copyFormat}
-                    {language}
-                  />
-                </div>
-                <div
-                  class="setup-board"
-                  style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`}
-                  role="img"
-                  aria-label={result.candidate.setup_id}
-                >
-                  {#each result.board.cells as cell}
-                    <span
-                      class:empty={cell === null}
-                      class:existing={cell === 'G'}
-                      class={`piece-${cell ?? 'empty'}`}
-                    ></span>
-                  {/each}
-                </div>
-                <div class="setup-metrics">
-                  <strong>{label('jointProbability')}: {workspaceProbability(language, result.candidate.joint_probability)}</strong>
-                  <span>{label('buildProbability')}: {workspaceProbability(language, result.candidate.build_probability)}</span>
-                  <span>{label(report?.coverage_semantics === 'visible-seven-policy'
-                    ? 'conditionalCoverageRatio'
-                    : 'conditionalPcProbability')}: {workspaceProbability(language, result.candidate.conditional_pc_probability)}</span>
-                  <span>{result.candidate.min_locks === result.candidate.max_locks
-                    ? label('lockCount', { count: result.candidate.min_locks })
-                    : label('lockRange', { min: result.candidate.min_locks, max: result.candidate.max_locks })}</span>
-                </div>
-                <details
-                  class="setup-path"
-                  on:toggle={(event) => requestPaths(
-                    event,
-                    condition.condition_id,
-                    result.candidate.setup_id
-                  )}
-                >
-                  <summary>
-                    {#if pathDetails[result.pathKey]?.status === 'loading'}
-                      {label('loadingBuildSolutions')}
-                    {:else if pathDetails[result.pathKey]?.status === 'complete'}
-                      {label('allBuildSolutions')} · {number(pathDetails[result.pathKey].paths.length)}
-                    {:else}
-                      {label('allBuildSolutions')}
-                    {/if}
-                  </summary>
-                  {#if pathDetails[result.pathKey]?.status === 'loading'}
-                    <p class="path-status">{label('loadingExactBuildSolutions')}</p>
-                  {:else if pathDetails[result.pathKey]?.status === 'failed'}
-                    <div class="path-error">
-                      <p>{pathDetails[result.pathKey].error ?? label('pathDetailFailed')}</p>
-                      <button
-                        type="button"
-                        on:click|stopPropagation={() => retryPaths(
-                          condition.condition_id,
-                          result.candidate.setup_id
-                        )}
-                      >{label('retry')}</button>
-                    </div>
-                  {:else if pathDetails[result.pathKey]?.status === 'complete'}
-                    {#if pathDetails[result.pathKey].paths.length}
-                      <div class="solution-paths">
-                        {#each pathDetails[result.pathKey].paths.slice(0, visiblePathCount(result.pathKey)) as path, pathIndex}
-                          {@const solutionBoard = replaySetupCompletionBoard(
-                            result.candidate.board_mask,
-                            path
-                          )}
-                          <section class="solution-path">
-                            <div class="solution-path-heading">
-                              <h4>{label('buildSolutionNumber', { number: pathIndex + 1 })}</h4>
-                              <SolutionCopyButton
-                                page={solutionBoard?.page ?? null}
-                                format={copyFormat}
-                                {language}
-                              />
-                            </div>
-                            {#if solutionBoard}
-                              <div
-                                class="setup-board solution-board"
-                                style={`--rows:${solutionBoard.height};aspect-ratio:${10 / solutionBoard.height}`}
-                                role="img"
-                                aria-label={label('buildSolutionNumber', { number: pathIndex + 1 })}
-                              >
-                                {#each solutionBoard.cells as cell}
-                                  <span
-                                    class:empty={cell === null}
-                                    class:existing={cell === 'G'}
-                                    class={`piece-${cell ?? 'empty'}`}
-                                  ></span>
-                                {/each}
-                              </div>
-                            {/if}
-                          </section>
-                        {/each}
-                      </div>
-                      {#if visiblePathCount(result.pathKey) < pathDetails[result.pathKey].paths.length}
-                        <button
-                          class="path-more"
-                          type="button"
-                          on:click={() => showMorePaths(result.pathKey)}
-                        >
-                          {label('showMore', {
-                            count: Math.min(
-                              PATH_PAGE_SIZE,
-                              pathDetails[result.pathKey].paths.length - visiblePathCount(result.pathKey)
-                            )
-                          })}
-                        </button>
-                      {/if}
-                    {:else}
-                      <p class="path-status">{label('noBuildSolutions')}</p>
-                    {/if}
-                  {:else}
-                    <p class="path-status">{label('loadExactBuildSolutions')}</p>
-                  {/if}
-                </details>
-              </li>
-            {/each}
-          </ol>
-        </section>
-      {/each}
-      {#if remainingCandidates > 0}
-        <div class="load-more-row">
-          <button type="button" on:click={() => (visibleCount += PAGE_SIZE)}>
-            {label('showMore', { count: Math.min(PAGE_SIZE, remainingCandidates) })}
-          </button>
+        <SolutionCopyFormatControl
+          bind:value={copyFormat}
+          {language}
+          loadPages={candidateEntries.length ? loadAllSetupPages : null}
+        />
+      </section>
+
+      <section
+        class="setup-solutions"
+        aria-label={label('setups')}
+      >
+        <div class="solutions-heading">
+          <h2>{label('setups')}</h2>
+          <span>{number(retainedCandidateCount)}</span>
         </div>
-      {/if}
-    {:else}
-      <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSetups')}</p></div>
-    {/if}
-  {:else}
-    {#if view.diagnostics.length || view.error}
-      <ul class="diagnostic-list">
-        {#each view.diagnostics as diagnostic}
-          <li class:error={diagnostic.severity === 'error'}>
-            <span>{diagnostic.severity}</span>
-            <div><strong>{diagnostic.code}</strong><p>{diagnostic.message}</p></div>
-          </li>
-        {/each}
-        {#if view.error}
-          <li class="error"><span>error</span><div><strong>{label('failed')}</strong><p>{view.error}</p></div></li>
+        {#if renderedGroups.length}
+          {#each renderedGroups as condition}
+            <section class="condition-group">
+              <div class="condition-heading">
+                <div>
+                  <h3>{condition.pattern_expression}</h3>
+                  <p>{number(condition.pattern_count)} {label('patterns')}</p>
+                </div>
+                <span>{number(condition.candidate_count)}</span>
+              </div>
+              <ol class="setup-grid">
+                {#each condition.candidates as result}
+                  <li>
+                    <div class="setup-card-actions">
+                      <SolutionCopyButton
+                        page={result.board.page}
+                        format={copyFormat}
+                        {language}
+                      />
+                    </div>
+                    <div
+                      class="setup-board"
+                      style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`}
+                      role="img"
+                      aria-label={result.candidate.setup_id}
+                    >
+                      {#each result.board.cells as cell}
+                        <span
+                          class:empty={cell === null}
+                          class:existing={cell === 'G'}
+                          class={`piece-${cell ?? 'empty'}`}
+                        ></span>
+                      {/each}
+                    </div>
+                    <div class="setup-metrics">
+                      <strong>{label('jointProbability')}: {workspaceProbability(language, result.candidate.joint_probability)}</strong>
+                      <span>{label('buildProbability')}: {workspaceProbability(language, result.candidate.build_probability)}</span>
+                      <span>{label(report.coverage_semantics === 'visible-seven-policy'
+                        ? 'conditionalCoverageRatio'
+                        : 'conditionalPcProbability')}: {workspaceProbability(language, result.candidate.conditional_pc_probability)}</span>
+                      <span>{result.candidate.min_locks === result.candidate.max_locks
+                        ? label('lockCount', { count: result.candidate.min_locks })
+                        : label('lockRange', { min: result.candidate.min_locks, max: result.candidate.max_locks })}</span>
+                    </div>
+                    <details
+                      class="setup-path"
+                      on:toggle={(event) => requestPaths(
+                        event,
+                        condition.condition_id,
+                        result.candidate.setup_id
+                      )}
+                    >
+                      <summary>
+                        {#if pathDetails[result.pathKey]?.status === 'loading'}
+                          {label('loadingBuildSolutions')}
+                        {:else if pathDetails[result.pathKey]?.status === 'complete'}
+                          {label('allBuildSolutions')} · {number(pathDetails[result.pathKey].paths.length)}
+                        {:else}
+                          {label('allBuildSolutions')}
+                        {/if}
+                      </summary>
+                      {#if pathDetails[result.pathKey]?.status === 'loading'}
+                        <p class="path-status">{label('loadingExactBuildSolutions')}</p>
+                      {:else if pathDetails[result.pathKey]?.status === 'failed'}
+                        <div class="path-error">
+                          <p>{pathDetails[result.pathKey].error ?? label('pathDetailFailed')}</p>
+                          <button
+                            type="button"
+                            on:click|stopPropagation={() => retryPaths(
+                              condition.condition_id,
+                              result.candidate.setup_id
+                            )}
+                          >{label('retry')}</button>
+                        </div>
+                      {:else if pathDetails[result.pathKey]?.status === 'complete'}
+                        {@const pathWindow = preparePathWindow(
+                          result.pathKey,
+                          result.candidate.board_mask
+                        )}
+                        {#if pathWindow.items.length}
+                          <div class="solution-paths">
+                            {#each pathWindow.items as solution}
+                              <section class="solution-path">
+                                <div class="solution-path-heading">
+                                  <h4>{label('buildSolutionNumber', { number: solution.index + 1 })}</h4>
+                                  <SolutionCopyButton
+                                    page={solution.board?.page ?? null}
+                                    format={copyFormat}
+                                    {language}
+                                  />
+                                </div>
+                                {#if solution.board}
+                                  <div
+                                    class="setup-board solution-board"
+                                    style={`--rows:${solution.board.height};aspect-ratio:${10 / solution.board.height}`}
+                                    role="img"
+                                    aria-label={label('buildSolutionNumber', { number: solution.index + 1 })}
+                                  >
+                                    {#each solution.board.cells as cell}
+                                      <span
+                                        class:empty={cell === null}
+                                        class:existing={cell === 'G'}
+                                        class={`piece-${cell ?? 'empty'}`}
+                                      ></span>
+                                    {/each}
+                                  </div>
+                                {/if}
+                              </section>
+                            {/each}
+                          </div>
+                          {#if pathWindow.visible < pathWindow.total}
+                            <button
+                              class="more"
+                              type="button"
+                              on:click={() => showMorePaths(result.pathKey, pathWindow.total)}
+                            >{label('showMore', {
+                              count: Math.min(PAGE_SIZE, pathWindow.total - pathWindow.visible)
+                            })}</button>
+                          {/if}
+                        {:else}
+                          <p class="path-status">{label('noBuildSolutions')}</p>
+                        {/if}
+                      {:else}
+                        <p class="path-status">{label('loadExactBuildSolutions')}</p>
+                      {/if}
+                    </details>
+                  </li>
+                {/each}
+              </ol>
+            </section>
+          {/each}
+          {#if visibleCandidateCount < retainedCandidateCount}
+            <button class="more" type="button" on:click={showMoreCandidates}>
+              {label('showMore', {
+                count: Math.min(PAGE_SIZE, retainedCandidateCount - visibleCandidateCount)
+              })}
+            </button>
+          {/if}
+        {:else}
+          <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSetups')}</p></div>
         {/if}
-      </ul>
-    {:else}
-      <div class="empty-state"><CheckCircle2 size={28} strokeWidth={1.5} /><p>{label('noDiagnostics')}</p></div>
-    {/if}
+      </section>
+    </div>
   {/if}
 </ResultWorkspaceFrame>
 
 <style>
   .empty-state { align-items: center; color: #87918d; display: flex; flex-direction: column; justify-content: center; min-height: 220px; text-align: center; }
   .empty-state p { font-size: 13px; margin: 12px 0 0; }
-  .setup-overview { display: grid; gap: 18px; }
+  .setup-content { display: grid; gap: 32px; }
+  .setup-overview { border-bottom: 1px solid #dce2de; display: grid; gap: 18px; padding-bottom: 28px; }
   .overview-lead { border-bottom: 1px solid #dce2de; display: grid; gap: 4px; padding-bottom: 16px; }
   .overview-lead > span { color: #68736f; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-  .overview-lead strong { color: #075f58; font-size: 30px; }
+  .overview-lead strong { color: #075f58; font-size: 24px; }
   .overview-lead small { color: #6b7671; font-size: 11px; }
   dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
   dl div { align-items: baseline; border-bottom: 1px solid #e5e9e6; display: flex; gap: 12px; justify-content: space-between; padding: 10px; }
@@ -391,6 +488,10 @@
   .condition-table b { color: #29413b; }
   .condition-table span { color: #68736f; overflow-wrap: anywhere; }
   .condition-table b { text-align: right; }
+  .setup-solutions { scroll-margin-top: 18px; }
+  .solutions-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 18px; }
+  .solutions-heading h2 { color: #26322e; font-size: 15px; margin: 0; }
+  .solutions-heading span { background: #e7eeeb; border-radius: 3px; color: #285049; font-size: 11px; font-weight: 800; padding: 5px 8px; }
   .condition-group + .condition-group { border-top: 1px solid #dce2de; margin-top: 24px; padding-top: 20px; }
   .condition-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 10px; }
   .condition-heading h3 { color: #26322e; font-size: 13px; margin: 0; }
@@ -418,22 +519,15 @@
   .path-status { color: #68736f; font-size: 10px; margin: 8px 0 0; }
   .path-error { align-items: start; border-left: 2px solid #b95449; display: grid; gap: 7px; margin-top: 8px; padding-left: 8px; }
   .path-error p { color: #8b3e36; font-size: 10px; margin: 0; overflow-wrap: anywhere; }
-  .path-error button, .path-more { background: #fff; border: 1px solid #aebbb6; border-radius: 4px; color: #174a45; cursor: pointer; font-size: 10px; font-weight: 750; min-height: 28px; padding: 0 9px; width: fit-content; }
+  .path-error button { background: #fff; border: 1px solid #aebbb6; border-radius: 4px; color: #174a45; cursor: pointer; font-size: 10px; font-weight: 750; min-height: 28px; padding: 0 9px; width: fit-content; }
   .solution-paths { display: grid; gap: 8px; margin-top: 8px; }
   .solution-path { border-top: 1px solid #d8dfdb; padding-top: 6px; }
   .solution-path:first-child { border-top: 0; padding-top: 0; }
   .solution-path-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 4px; }
   .solution-path h4 { color: #37534d; font-size: 9px; margin: 0; }
   .solution-board { width: 100%; }
-  .path-more { margin-top: 8px; }
-  .load-more-row { display: flex; justify-content: center; padding-top: 18px; }
-  .load-more-row button { background: #fff; border: 1px solid #aebbb6; border-radius: 5px; color: #174a45; cursor: pointer; font-size: 12px; font-weight: 750; min-height: 36px; padding: 0 16px; }
-  .diagnostic-list { display: grid; gap: 1px; list-style: none; margin: 0; padding: 0; }
-  .diagnostic-list li { align-items: start; background: #f4f6f5; display: grid; gap: 14px; grid-template-columns: 72px minmax(0, 1fr); padding: 12px; }
-  .diagnostic-list li > span { color: #8b5c19; font-size: 10px; font-weight: 800; text-transform: uppercase; }
-  .diagnostic-list li.error > span { color: #a63d32; }
-  .diagnostic-list strong, .diagnostic-list p { font-size: 12px; margin: 0; }
-  .diagnostic-list p { color: #68736f; margin-top: 4px; }
+  .more { background: #fff; border: 1px solid #aebbb6; border-radius: 5px; color: #174a45; cursor: pointer; display: block; font-size: 11px; font-weight: 750; margin: 18px auto 0; min-height: 34px; padding: 0 14px; }
+  .setup-path .more { margin-top: 9px; min-height: 30px; }
   @media (max-width: 700px) {
     dl, .condition-table > div { grid-template-columns: 1fr; }
     .condition-table b { text-align: left; }

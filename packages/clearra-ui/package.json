@@ -10,6 +10,7 @@
     "./host": "./src/lib/host/index.ts",
     "./render": "./src/lib/render/index.ts",
     "./wasm": "./src/lib/wasm/index.ts",
+    "./wasm-lifecycle": "./src/lib/wasm/wasmWorkerLifecycle.ts",
     "./workspace": "./src/lib/workspace/index.ts"
   },
   "peerDependencies": {

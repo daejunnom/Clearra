@@ -43,6 +43,12 @@ pub struct ForwardParallelProgress {
     pub tasks_dispatched: u64,
     pub tasks_completed: u64,
     pub outstanding_tasks: usize,
+    pub layer_index: usize,
+    pub layer_count: usize,
+    pub layer_done: usize,
+    pub layer_total: usize,
+    pub patterns_completed: usize,
+    pub pattern_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,8 +230,39 @@ impl ForwardParallelCoordinator {
         encode_worker_initialization(self.config, fixed_queue, &pattern_queues)
     }
 
-    pub const fn progress(&self) -> ForwardParallelProgress {
-        self.progress
+    pub fn progress(&self) -> ForwardParallelProgress {
+        let mut progress = self.progress;
+        match &self.state {
+            CoordinatorState::Fixed(fixed) => {
+                apply_session_progress(
+                    &mut progress,
+                    &fixed.session,
+                    fixed.pending.len(),
+                    usize::from(fixed.session.completed),
+                    1,
+                );
+            }
+            CoordinatorState::Pattern(pattern) if pattern.layered => {
+                let pattern_count = pattern.query.piece_source().pattern_count();
+                progress.patterns_completed = pattern.reports.len();
+                progress.pattern_count = pattern_count;
+                if let Some(session) = pattern.active_session.as_ref() {
+                    apply_session_progress(
+                        &mut progress,
+                        session,
+                        pattern.pending.len(),
+                        pattern.reports.len(),
+                        pattern_count,
+                    );
+                }
+            }
+            CoordinatorState::Pattern(pattern) => {
+                progress.patterns_completed = pattern.reports.len();
+                progress.pattern_count = pattern.query.piece_source().pattern_count();
+                progress.layer_count = pattern.query.piece_source().sequence_len();
+            }
+        }
+        progress
     }
 
     pub fn produce(
@@ -685,15 +722,39 @@ impl ForwardParallelWorker {
         Ok((count, output))
     }
 
-    pub const fn progress(&self) -> ForwardParallelProgress {
+    pub fn progress(&self) -> ForwardParallelProgress {
         ForwardParallelProgress {
             visited_states: self.visited_states,
             generated_locks: self.generated_locks,
             tasks_dispatched: 0,
             tasks_completed: self.visited_states,
             outstanding_tasks: 0,
+            layer_index: 0,
+            layer_count: self.fixed_queue.as_ref().map_or(0, Vec::len),
+            layer_done: 0,
+            layer_total: 0,
+            patterns_completed: 0,
+            pattern_count: self.pattern_queues.len(),
         }
     }
+}
+
+fn apply_session_progress(
+    progress: &mut ForwardParallelProgress,
+    session: &ForwardQueueSession,
+    pending: usize,
+    patterns_completed: usize,
+    pattern_count: usize,
+) {
+    progress.layer_index = session.layer_index;
+    progress.layer_count = session.queue.len();
+    progress.layer_total = session.current.len();
+    progress.layer_done = session
+        .current_cursor
+        .saturating_sub(pending)
+        .min(progress.layer_total);
+    progress.patterns_completed = patterns_completed;
+    progress.pattern_count = pattern_count;
 }
 
 fn seal_fixed_layer(fixed: &mut FixedCoordinator) {
@@ -705,6 +766,7 @@ fn seal_fixed_layer(fixed: &mut FixedCoordinator) {
         std::mem::swap(&mut fixed.session.current, &mut fixed.session.next);
         fixed.session.next.clear();
         fixed.session.current_cursor = 0;
+        fixed.session.layer_index = fixed.session.layer_index.saturating_add(1);
         fixed.session.next_index.clear();
         fixed.session.peak_frontier = fixed.session.peak_frontier.max(fixed.session.current.len());
     }
@@ -739,6 +801,7 @@ fn seal_layered_pattern(pattern: &mut PatternCoordinator, config: ForwardSearchC
             std::mem::swap(&mut session.current, &mut session.next);
             session.next.clear();
             session.current_cursor = 0;
+            session.layer_index = session.layer_index.saturating_add(1);
             session.next_index.clear();
             session.peak_frontier = session.peak_frontier.max(session.current.len());
         }

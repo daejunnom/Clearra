@@ -610,6 +610,7 @@ pub(crate) struct ForwardQueueSession {
     pub(crate) source_pattern_index: u32,
     pub(crate) current: SearchNodeArena,
     pub(crate) current_cursor: usize,
+    pub(crate) layer_index: usize,
     pub(crate) next: SearchNodeArena,
     pub(crate) next_index: StateIndexTable,
     boards: ForwardBoardCatalog,
@@ -655,6 +656,7 @@ impl ForwardQueueSession {
             source_pattern_index: u32::try_from(pattern_index).unwrap_or(u32::MAX),
             current: SearchNodeArena::from_node(initial),
             current_cursor: 0,
+            layer_index: 0,
             next: SearchNodeArena::default(),
             next_index: StateIndexTable::new(config.mode),
             boards,
@@ -695,6 +697,7 @@ impl ForwardQueueSession {
                 std::mem::swap(&mut self.current, &mut self.next);
                 self.next.clear();
                 self.current_cursor = 0;
+                self.layer_index = self.layer_index.saturating_add(1);
                 self.next_index.clear();
                 self.peak_frontier = self.peak_frontier.max(self.current.len());
             }

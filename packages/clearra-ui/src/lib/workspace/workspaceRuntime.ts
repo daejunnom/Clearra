@@ -22,6 +22,7 @@ export type WorkspaceRuntimeStatus =
   | 'cancelling'
   | 'completed'
   | 'cancelled'
+  | 'terminated'
   | 'failed';
 
 export type WorkspaceRuntimeDiagnostic = {
@@ -33,6 +34,7 @@ export type WorkspaceRuntimeDiagnostic = {
 export type WorkspaceRuntimeView = {
   kind: WorkspaceRuntimeKind;
   status: WorkspaceRuntimeStatus;
+  terminationReason: WasmWorkerState['terminationReason'];
   jobId: number | null;
   progressLabel: string;
   progressDone: number;
@@ -54,6 +56,7 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
   return {
     kind: 'web',
     status: state.status,
+    terminationReason: state.terminationReason,
     jobId: state.jobId,
     progressLabel: state.progressLabel,
     progressDone: state.progressDone,
@@ -76,6 +79,7 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
   return {
     kind: 'desktop',
     status: state.status,
+    terminationReason: null,
     jobId: state.jobId,
     progressLabel: state.progressLabel,
     progressDone: state.progressDone,

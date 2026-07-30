@@ -3,7 +3,9 @@
 
   import {
     buildWasmCommandRequest,
+    ensureWasmWorkerOwnerId,
     postRunCommand,
+    terminateOwnedWasmWorker,
     updateWasmCommandText,
     wasmWorkerState,
     WasmTerminalWorkerController,
@@ -34,8 +36,6 @@
   export let workerFactory: (() => Worker) | null = null;
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
-  const DETAIL_WORKER_RELEASE_MS = 100;
-  const boardCells = Array.from({ length: 40 }, (_, index) => index);
   let request = createDefaultSetupFinderRequest();
   let resultRequest: SetupFinderRequest | null = null;
   let pathDetails: Record<string, SetupPathDetailState> = {};
@@ -62,13 +62,18 @@
     );
     prewarmWorkerCount = defaultWorkerCount(navigator.hardwareConcurrency);
     workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
+    const handlePageHide = () => disposeWorkspace();
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
   });
 
-  onDestroy(() => {
+  onDestroy(disposeWorkspace);
+
+  function disposeWorkspace() {
     stopElapsedTimer();
     disposeDetailWorker();
     workerController.dispose();
-  });
+  }
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
@@ -117,7 +122,12 @@
   }
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {
-    return status === 'completed' || status === 'failed' || status === 'cancelled';
+    return (
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'terminated'
+    );
   }
 
   function loadSetupPaths(detail: SetupPathDetailRequest) {
@@ -207,7 +217,17 @@
           complete: false,
           error: label('cancelled')
         });
-        releaseDetailWorker(worker);
+        releaseDetailWorker(worker, 'owner-disposed');
+      } else if (event.event === 'terminated') {
+        updatePathDetail(key, {
+          status: 'failed',
+          paths: [],
+          complete: false,
+          error:
+            event.diagnostics.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
+            label('pathDetailFailed')
+        });
+        releaseDetailWorker(worker, 'worker-failure');
       }
     };
     worker.onerror = (event) => {
@@ -238,7 +258,8 @@
           commandText: buildSetupPathDetailCommand(resultRequest, detail)
         }),
         1,
-        resultRequest.tablebaseEnabled
+        resultRequest.tablebaseEnabled,
+        ensureWasmWorkerOwnerId(worker)
       );
     } catch (error) {
       updatePathDetail(key, {
@@ -265,10 +286,13 @@
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
-    worker.terminate();
+    terminateOwnedWasmWorker(worker, 'owner-disposed');
   }
 
-  function releaseDetailWorker(worker: Worker) {
+  function releaseDetailWorker(
+    worker: Worker,
+    reason: 'owner-disposed' | 'worker-failure' = 'worker-failure'
+  ) {
     if (detailWorker !== worker) return;
     detailWorkerBusy = false;
     activeDetailKey = null;
@@ -278,10 +302,8 @@
     worker.onmessageerror = null;
     try {
       worker.postMessage({ type: 'dispose_runtime' });
-      setTimeout(() => worker.terminate(), DETAIL_WORKER_RELEASE_MS);
-    } catch {
-      worker.terminate();
-    }
+    } catch {}
+    terminateOwnedWasmWorker(worker, reason);
   }
 
   function finishDetailWorkerRequest(worker: Worker) {
@@ -298,10 +320,10 @@
 
 <WorkspaceShell
   activeMode="setup"
+  singlePanel
   {language}
   {active}
   statusLabel={label(runtimeView.status)}
-  runtimeLabel={label('runtimeWeb')}
   workspaceLabel={label('setupFinder')}
   dimensionLabel={label('targetLines')}
   dimensionValue={4}
@@ -313,22 +335,6 @@
   on:cancel={cancel}
   on:run={run}
 >
-  <section slot="editor" class="fixed-target" aria-label={label('pcTarget')}>
-    <header>
-      <span>{label('pcTarget')}</span>
-      <strong>4L · 10×4</strong>
-    </header>
-    <div class="target-frame">
-      <div class="target-board" role="img" aria-label={label('emptyFourLineField')}>
-        {#each boardCells as _}<span></span>{/each}
-      </div>
-    </div>
-    <dl>
-      <div><dt>{label('fieldState')}</dt><dd>{label('empty')}</dd></div>
-      <div><dt>{label('targetCells')}</dt><dd>40</dd></div>
-      <div><dt>{label('completionPieces')}</dt><dd>10</dd></div>
-    </dl>
-  </section>
   <SetupFinderControls
     slot="controls"
     {request}
@@ -347,17 +353,3 @@
     on:loadPaths={(event) => loadSetupPaths(event.detail)}
   />
 </WorkspaceShell>
-
-<style>
-  .fixed-target header { display: grid; gap: 4px; margin-bottom: 14px; }
-  .fixed-target header span { color: #68736f; font-size: 11px; font-weight: 700; }
-  .fixed-target header strong { color: #17211e; font-size: 16px; }
-  .target-frame { background: #101817; border: 1px solid #253330; border-radius: 6px; margin: 0 auto; max-width: 650px; padding: 16px; }
-  .target-board { aspect-ratio: 2.5; display: grid; grid-template-columns: repeat(10, 1fr); grid-template-rows: repeat(4, 1fr); }
-  .target-board span { background: #1e2927; box-shadow: inset 0 0 0 1px rgba(216, 226, 222, .2); }
-  dl { background: #eef2ef; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 12px 0 0; }
-  dl div { align-items: center; border-bottom: 1px solid #dce3df; display: flex; justify-content: space-between; padding: 9px 11px; }
-  dt { color: #6b7672; font-size: 10px; }
-  dd { color: #263b35; font-size: 11px; font-weight: 750; margin: 0; text-align: right; }
-  @media (max-width: 560px) { dl { grid-template-columns: 1fr; } }
-</style>

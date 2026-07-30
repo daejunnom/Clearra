@@ -1,0 +1,64 @@
+{
+  "name": "ctk3",
+  "version": "0.1.0",
+  "description": "Compact, lossless Tetris field interchange with a tetris-fumen-compatible API",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
+    "build:js": "node ./scripts/build.mjs",
+    "build:types": "tsc -p ./tsconfig.json",
+    "build": "npm run clean && npm run build:js && npm run build:types",
+    "test": "npm run build && node --test ./test/*.test.mjs",
+    "benchmark": "npm run build && node ./test/benchmark.mjs",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "tetris",
+    "fumen",
+    "ctk3",
+    "field",
+    "codec",
+    "base64url"
+  ],
+  "author": "Clearra contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daejunnom/Clearra.git",
+    "directory": "packages/ctk3"
+  },
+  "homepage": "https://github.com/daejunnom/Clearra/tree/main/packages/ctk3#readme",
+  "bugs": {
+    "url": "https://github.com/daejunnom/Clearra/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "tetris-fumen": "^1.1.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
+  }
+}

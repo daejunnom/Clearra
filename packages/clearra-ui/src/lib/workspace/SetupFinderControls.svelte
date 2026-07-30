@@ -55,189 +55,191 @@
 </script>
 
 <WorkspaceControlPanel ariaLabel={label('setupFinder')}>
-  <section class="workspace-control-section">
-    <h2 class="workspace-control-heading">
-      <Database size={16} strokeWidth={1.8} />{label('setupResidue')}
-    </h2>
-    <label class="workspace-field wide">
-      <span>{label('setupSearchMode')}</span>
-      <select
-        value={request.searchMode}
-        on:change={(event) => {
-          const searchMode = (event.currentTarget as HTMLSelectElement).value as SetupSearchMode;
-          update({
-            searchMode
-          });
-        }}
-      >
-        <option value="oracle">{label('setupModeOracle')}</option>
-        <option value="qb">{label('setupModeQb')}</option>
-      </select>
-      <small class="workspace-field-help">
-        {label(request.searchMode === 'qb' ? 'setupModeQbHelp' : 'setupModeOracleHelp')}
-      </small>
-    </label>
-    <label class="workspace-field wide">
-      <span>{label('remainingPieces')}</span>
-      <QueueTextInput
-        class="workspace-queue-input"
-        value={request.remaining}
-        maxlength="16"
-        placeholder="IOTSZJL"
-        spellcheck="false"
-        aria-invalid={validationCodes.length > 0}
-        on:value={(event) => update({ remaining: event.detail })}
-      />
-      <small class="workspace-field-help">{label('setupResidueHelp')}</small>
-    </label>
-    {#if request.searchMode === 'qb'}
+  <div class="setup-control-grid">
+    <section class="workspace-control-section setup-finder-section">
+      <h2 class="workspace-control-heading">
+        <Database size={16} strokeWidth={1.8} />{label('setupResidue')}
+      </h2>
       <label class="workspace-field wide">
-        <span>{label('setupObservedQueue')}</span>
+        <span>{label('setupSearchMode')}</span>
+        <select
+          value={request.searchMode}
+          on:change={(event) => {
+            const searchMode = (event.currentTarget as HTMLSelectElement).value as SetupSearchMode;
+            update({
+              searchMode
+            });
+          }}
+        >
+          <option value="oracle">{label('setupModeOracle')}</option>
+          <option value="qb">{label('setupModeQb')}</option>
+        </select>
+        <small class="workspace-field-help">
+          {label(request.searchMode === 'qb' ? 'setupModeQbHelp' : 'setupModeOracleHelp')}
+        </small>
+      </label>
+      <label class="workspace-field wide">
+        <span>{label('remainingPieces')}</span>
         <QueueTextInput
           class="workspace-queue-input"
-          value={request.qbQueue}
-          maxlength="7"
-          placeholder="OS"
+          value={request.remaining}
+          maxlength="16"
+          placeholder="IOTSZJL"
           spellcheck="false"
           aria-invalid={validationCodes.length > 0}
-          on:value={(event) => update({ qbQueue: event.detail })}
+          on:value={(event) => update({ remaining: event.detail })}
         />
-        <small class="workspace-field-help">{label('setupQbInputHelp')}</small>
+        <small class="workspace-field-help">{label('setupResidueHelp')}</small>
       </label>
-    {/if}
-    <label class="workspace-field wide">
-      <span>{label('setupNextCycleRemaining')}</span>
-      <QueueTextInput
-        class="workspace-queue-input"
-        value={request.nextCycleRemaining}
-        maxlength="7"
-        placeholder={label('setupNextCycleOptionalPlaceholder')}
-        spellcheck="false"
-        aria-invalid={validationCodes.length > 0}
-        on:value={(event) => update({ nextCycleRemaining: event.detail })}
-      />
-      <small class="workspace-field-help">{label('setupNextCycleRemainingHelp')}</small>
-    </label>
-    <QueuePatternHelp {language} mode={request.searchMode === 'qb' ? 'setup-qb' : 'setup'} />
-    <label class="workspace-field wide queue-knowledge-field">
-      <span>{label('queueKnowledge')}</span>
-      <select
-        value={request.queueKnowledge}
-        on:change={(event) => update({
-          queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SetupFinderRequest['queueKnowledge']
-        })}
-      >
-        <option value="oracle">{label('queueKnowledgeOracle')}</option>
-        <option value="visible-7">{label('queueKnowledgeVisibleSeven')}</option>
-      </select>
-    </label>
-
-    <div class="residue-facts">
-      <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
       {#if request.searchMode === 'qb'}
-        <span>{label('setupObservedPieces')}</span>
-        <strong>{request.qbQueue.replace(/[\s,]/g, '').length}</strong>
+        <label class="workspace-field wide">
+          <span>{label('setupObservedQueue')}</span>
+          <QueueTextInput
+            class="workspace-queue-input"
+            value={request.qbQueue}
+            maxlength="7"
+            placeholder="OS"
+            spellcheck="false"
+            aria-invalid={validationCodes.length > 0}
+            on:value={(event) => update({ qbQueue: event.detail })}
+          />
+          <small class="workspace-field-help">{label('setupQbInputHelp')}</small>
+        </label>
       {/if}
-      <span>{label('setupNextCycleRemainingCount')}</span>
-      <strong>
-        {request.nextCycleRemaining
-          ? request.nextCycleRemaining.replace(/[\s,]/g, '').length
-          : '—'}/{nextRemainingCount ?? '—'}
-      </strong>
-    </div>
-  </section>
-
-  <section class="workspace-control-section">
-    <h2 class="workspace-control-heading">
-      <Layers3 size={16} strokeWidth={1.8} />{label('search')}
-    </h2>
-    <div class="tablebase-control">
-      <label class="workspace-switch-label">
-        <input
-          type="checkbox"
-          checked={request.tablebaseEnabled}
-          on:change={(event) => update({
-            tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
-          })}
+      <label class="workspace-field wide">
+        <span>{label('setupNextCycleRemaining')}</span>
+        <QueueTextInput
+          class="workspace-queue-input"
+          value={request.nextCycleRemaining}
+          maxlength="7"
+          placeholder={label('setupNextCycleOptionalPlaceholder')}
+          spellcheck="false"
+          aria-invalid={validationCodes.length > 0}
+          on:value={(event) => update({ nextCycleRemaining: event.detail })}
         />
-        <span class="workspace-switch" aria-hidden="true"></span>
-        <span>{label('tablebase')}</span>
+        <small class="workspace-field-help">{label('setupNextCycleRemainingHelp')}</small>
       </label>
-      <small class="workspace-field-help">{label('tablebaseHelp')}</small>
-      <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
-    </div>
-    <label class="workspace-field wide priority-field">
-      <span>{label('rule')}</span>
-      <select
-        value={request.rule}
-        on:change={(event) => update({
-          rule: (event.currentTarget as HTMLSelectElement).value as RuleProfile
-        })}
-      >
-        <option value="srs-plus">SRS+</option>
-        <option value="srs">SRS</option>
-        <option value="srs-x">SRS-X</option>
-        <option value="jstris-180">Jstris 180</option>
-      </select>
-    </label>
-    <label class="workspace-field wide priority-field">
-      <span>{label('setupCandidatePriority')}</span>
-      <select
-        value={request.candidatePriority}
-        on:change={(event) => update({
-          candidatePriority: (event.currentTarget as HTMLSelectElement).value as SetupCandidatePriority
-        })}
-      >
-        <option value="all">{label('setupPriorityAll')}</option>
-        <option value="build">{label('setupPriorityBuild')}</option>
-        <option value="pc">{label('setupPriorityPc')}</option>
-      </select>
-      <small class="workspace-field-help">{label('setupPriorityHelp')}</small>
-    </label>
-    <label class="workspace-field wide priority-field">
-      <span>{label('setupLengthPreference')}</span>
-      <select
-        value={request.lengthPreference}
-        on:change={(event) => update({
-          lengthPreference: (event.currentTarget as HTMLSelectElement).value as SetupLengthPreference
-        })}
-      >
-        <option value="auto">{label('setupLengthAuto')}</option>
-        <option value="longer">{label('setupLengthLonger')}</option>
-        <option value="shorter">{label('setupLengthShorter')}</option>
-      </select>
-      <small class="workspace-field-help">{label('setupLengthHelp')}</small>
-    </label>
-    <label class="workspace-field wide priority-field">
-      <span>{label('setupMaxPieces')}</span>
-      <input
-        type="number"
-        min="1"
-        max="10"
-        step="1"
-        value={request.maxSetupPieces}
-        on:input={(event) => update({
-          maxSetupPieces: Number((event.currentTarget as HTMLInputElement).value)
-        })}
-      />
-      <small class="workspace-field-help">{label('setupMaxPiecesHelp')}</small>
-    </label>
-    {#if cycle === 7}
-      <div class="workspace-switch-row">
+      <QueuePatternHelp {language} mode={request.searchMode === 'qb' ? 'setup-qb' : 'setup'} />
+      <label class="workspace-field wide queue-knowledge-field">
+        <span>{label('queueKnowledge')}</span>
+        <select
+          value={request.queueKnowledge}
+          on:change={(event) => update({
+            queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SetupFinderRequest['queueKnowledge']
+          })}
+        >
+          <option value="oracle">{label('queueKnowledgeOracle')}</option>
+          <option value="visible-7">{label('queueKnowledgeVisibleSeven')}</option>
+        </select>
+      </label>
+
+      <div class="residue-facts">
+        <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
+        {#if request.searchMode === 'qb'}
+          <span>{label('setupObservedPieces')}</span>
+          <strong>{request.qbQueue.replace(/[\s,]/g, '').length}</strong>
+        {/if}
+        <span>{label('setupNextCycleRemainingCount')}</span>
+        <strong>
+          {request.nextCycleRemaining
+            ? request.nextCycleRemaining.replace(/[\s,]/g, '').length
+            : '—'}/{nextRemainingCount ?? '—'}
+        </strong>
+      </div>
+    </section>
+
+    <section class="workspace-control-section setup-finder-section">
+      <h2 class="workspace-control-heading">
+        <Layers3 size={16} strokeWidth={1.8} />{label('search')}
+      </h2>
+      <div class="tablebase-control">
         <label class="workspace-switch-label">
           <input
             type="checkbox"
-            checked={request.allowPostCycleBorrow}
+            checked={request.tablebaseEnabled}
             on:change={(event) => update({
-              allowPostCycleBorrow: (event.currentTarget as HTMLInputElement).checked
+              tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}
           />
           <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('allowPostCycleBorrow')}</span>
+          <span>{label('tablebase')}</span>
         </label>
+        <small class="workspace-field-help">{label('tablebaseHelp')}</small>
+        <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
       </div>
-    {/if}
-  </section>
+      <label class="workspace-field wide priority-field">
+        <span>{label('rule')}</span>
+        <select
+          value={request.rule}
+          on:change={(event) => update({
+            rule: (event.currentTarget as HTMLSelectElement).value as RuleProfile
+          })}
+        >
+          <option value="srs-plus">SRS+</option>
+          <option value="srs">SRS</option>
+          <option value="srs-x">SRS-X</option>
+          <option value="jstris-180">Jstris 180</option>
+        </select>
+      </label>
+      <label class="workspace-field wide priority-field">
+        <span>{label('setupCandidatePriority')}</span>
+        <select
+          value={request.candidatePriority}
+          on:change={(event) => update({
+            candidatePriority: (event.currentTarget as HTMLSelectElement).value as SetupCandidatePriority
+          })}
+        >
+          <option value="all">{label('setupPriorityAll')}</option>
+          <option value="build">{label('setupPriorityBuild')}</option>
+          <option value="pc">{label('setupPriorityPc')}</option>
+        </select>
+        <small class="workspace-field-help">{label('setupPriorityHelp')}</small>
+      </label>
+      <label class="workspace-field wide priority-field">
+        <span>{label('setupLengthPreference')}</span>
+        <select
+          value={request.lengthPreference}
+          on:change={(event) => update({
+            lengthPreference: (event.currentTarget as HTMLSelectElement).value as SetupLengthPreference
+          })}
+        >
+          <option value="auto">{label('setupLengthAuto')}</option>
+          <option value="longer">{label('setupLengthLonger')}</option>
+          <option value="shorter">{label('setupLengthShorter')}</option>
+        </select>
+        <small class="workspace-field-help">{label('setupLengthHelp')}</small>
+      </label>
+      <label class="workspace-field wide priority-field">
+        <span>{label('setupMaxPieces')}</span>
+        <input
+          type="number"
+          min="1"
+          max="10"
+          step="1"
+          value={request.maxSetupPieces}
+          on:input={(event) => update({
+            maxSetupPieces: Number((event.currentTarget as HTMLInputElement).value)
+          })}
+        />
+        <small class="workspace-field-help">{label('setupMaxPiecesHelp')}</small>
+      </label>
+      {#if cycle === 7}
+        <div class="workspace-switch-row">
+          <label class="workspace-switch-label">
+            <input
+              type="checkbox"
+              checked={request.allowPostCycleBorrow}
+              on:change={(event) => update({
+                allowPostCycleBorrow: (event.currentTarget as HTMLInputElement).checked
+              })}
+            />
+            <span class="workspace-switch" aria-hidden="true"></span>
+            <span>{label('allowPostCycleBorrow')}</span>
+          </label>
+        </div>
+      {/if}
+    </section>
+  </div>
 
   {#if validationCodes.length}
     <ul class="workspace-validation">
@@ -247,6 +249,17 @@
 </WorkspaceControlPanel>
 
 <style>
+  .setup-control-grid {
+    display: grid;
+    gap: 24px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .setup-control-grid .setup-finder-section { border-bottom: 0; min-width: 0; padding: 0; }
+  .setup-control-grid .setup-finder-section + .setup-finder-section {
+    border-left: 1px solid #dfe4e1;
+    padding-left: 24px;
+    padding-top: 0;
+  }
   .residue-facts {
     background: #f0f3f1;
     display: grid;
@@ -263,4 +276,13 @@
   .queue-knowledge-field { margin-top: 14px; }
   .tablebase-control { display: grid; gap: 5px; margin-top: 14px; }
   .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
+  @media (max-width: 820px) {
+    .setup-control-grid { gap: 20px; grid-template-columns: 1fr; }
+    .setup-control-grid .setup-finder-section + .setup-finder-section {
+      border-left: 0;
+      border-top: 1px solid #dfe4e1;
+      padding-left: 0;
+      padding-top: 20px;
+    }
+  }
 </style>

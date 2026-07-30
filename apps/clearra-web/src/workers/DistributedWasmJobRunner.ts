@@ -15,11 +15,13 @@ const sharedVerifierPool = new ClearraVerifierPool();
 
 export function prewarmDistributedWorkers(
   totalWorkerCount: number,
-  compiledModule: WebAssembly.Module
+  compiledModule: WebAssembly.Module,
+  lifecycleOwnerId = ''
 ): Promise<void> {
   return sharedVerifierPool.prewarm(
     Math.max(0, Math.floor(totalWorkerCount) - 1),
-    compiledModule
+    compiledModule,
+    lifecycleOwnerId
   );
 }
 
@@ -34,7 +36,8 @@ export class DistributedWasmJobRunner {
 
   constructor(
     private readonly wasm: ClearraWasmModule,
-    private readonly jobId: number
+    private readonly jobId: number,
+    private readonly lifecycleOwnerId: string
   ) {}
 
   prepare(commandText: string): ClearraDistributedPlan {
@@ -67,6 +70,7 @@ export class DistributedWasmJobRunner {
               candidatesVerified: 0,
               buildNodes: 0,
               coverageChecks: 0,
+              readyWorkers: 0,
               activeWorkers: 0,
               workerCount: verifierCount,
               oldestBatchMs: 0
@@ -86,13 +90,20 @@ export class DistributedWasmJobRunner {
             candidates_emitted: producer.candidateCount,
             geometry_family_count: producer.candidateFamilyCount,
             candidates_verified: verifier.candidatesVerified,
+            producer_build_nodes: producer.buildNodes,
+            producer_coverage_checks: producer.coverageChecks,
             build_nodes: verifier.buildNodes,
             coverage_checks: verifier.coverageChecks,
+            ready_workers: verifier.readyWorkers,
             active_workers: verifier.activeWorkers,
             worker_count: verifier.workerCount,
             oldest_batch_ms: Math.floor(verifier.oldestBatchMs),
             pass_index: producer.passIndex,
-            pass_count: producer.passCount
+            pass_count: producer.passCount,
+            layer_index: producer.layerIndex,
+            layer_count: producer.layerCount,
+            layer_done: producer.layerDone,
+            layer_total: producer.layerTotal
           }
         )
       );
@@ -111,7 +122,8 @@ export class DistributedWasmJobRunner {
         verifierInitialization = this.pool.initialize(
           plan.workerInitialization ?? commandText,
           verifierCount,
-          this.wasm.compiled_module()
+          this.wasm.compiled_module(),
+          this.lifecycleOwnerId
         );
         void verifierInitialization.catch(() => undefined);
       }
@@ -133,7 +145,8 @@ export class DistributedWasmJobRunner {
           verifierInitialization = this.pool.initialize(
             produced.initialization,
             verifierCount,
-            this.wasm.compiled_module()
+            this.wasm.compiled_module(),
+            this.lifecycleOwnerId
           );
           void verifierInitialization.catch(() => undefined);
           await yieldToWorkerHost();
@@ -188,11 +201,7 @@ export class DistributedWasmJobRunner {
       }
       let terminal: ClearraWasmWorkerEvent | null = null;
       for (const event of events) {
-        const emittedEvent =
-          (event.event === 'final_response' || event.event === 'failed') &&
-          searchProfile !== null
-            ? ({ ...event, search_profile: searchProfile } as ClearraWasmWorkerEvent)
-            : event;
+        const emittedEvent = withSearchProfile(event, searchProfile);
         onEvent(emittedEvent);
         if (event.event === 'final_response' || event.event === 'failed') terminal = emittedEvent;
       }
@@ -248,6 +257,19 @@ export class DistributedWasmJobRunner {
       // The main worker is terminated after failure or cancellation.
     }
   }
+}
+
+function withSearchProfile(
+  event: ClearraWasmWorkerEvent,
+  searchProfile: unknown
+): ClearraWasmWorkerEvent {
+  if (
+    searchProfile === null ||
+    (event.event !== 'final_response' && event.event !== 'failed')
+  ) {
+    return event;
+  }
+  return { ...event, search_profile: searchProfile } as unknown as ClearraWasmWorkerEvent;
 }
 
 function progressEvent(

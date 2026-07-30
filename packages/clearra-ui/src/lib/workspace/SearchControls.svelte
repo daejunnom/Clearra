@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Database, Gauge, Zap } from '@lucide/svelte';
+  import { Database, Gauge } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
   import {
@@ -177,27 +177,6 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('solutionProbabilities')}</span>
       </label>
-    </div>
-  </section>
-
-  <section class="workspace-control-section">
-    <h2 class="workspace-control-heading"><Zap size={16} strokeWidth={1.8} />{label('backend')}</h2>
-    <div class="workspace-segmented four" role="group" aria-label={label('backend')}>
-      {#each ['auto', 'cpu', 'gpu', 'hybrid'] as backend}
-        <button type="button" class:active={request.backend === backend} on:click={() => patch({ backend: backend as SolverWorkspaceRequest['backend'] })}>{backend.toUpperCase()}</button>
-      {/each}
-    </div>
-    <label class="workspace-field wide">
-      <span>{label('gpuDevice')}</span>
-      <input
-        value={request.gpuDevice}
-        disabled={request.backend === 'cpu'}
-        inputmode="numeric"
-        on:input={(event) => patch({ gpuDevice: (event.currentTarget as HTMLInputElement).value.trim() || 'auto' })}
-      />
-    </label>
-    <div class="workspace-toggle-grid policy-toggle">
-      <label class="workspace-switch-label"><input type="checkbox" checked={false} disabled /><span class="workspace-switch" aria-hidden="true"></span><span>{label('useAllThreads')}</span></label>
     </div>
     {#if tablebaseControlAvailable}
       <div class="tablebase-control">

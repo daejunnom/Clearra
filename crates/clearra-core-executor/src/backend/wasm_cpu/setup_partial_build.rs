@@ -15,19 +15,40 @@ use super::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PartialStateKey {
     board: u64,
-    remaining: u64,
+    remaining_and_deleted_rows: u64,
     placement_set_id: u32,
     packed_counts: u32,
-    deleted_rows: u16,
+}
+
+impl PartialStateKey {
+    fn new(
+        board: u64,
+        remaining: u64,
+        placement_set_id: u32,
+        packed_counts: u32,
+        deleted_rows: u16,
+    ) -> Result<Self, WasmExactSearchError> {
+        if remaining >> PARTIAL_STATE_REMAINING_BITS != 0 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_partial_build_remaining_key_overflow",
+            ));
+        }
+        Ok(Self {
+            board,
+            remaining_and_deleted_rows: remaining
+                | (u64::from(deleted_rows) << PARTIAL_STATE_REMAINING_BITS),
+            placement_set_id,
+            packed_counts,
+        })
+    }
 }
 
 impl Hash for PartialStateKey {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let mut digest = self.board ^ self.remaining.rotate_left(23);
+        let mut digest = self.board ^ self.remaining_and_deleted_rows.rotate_left(23);
         digest ^= u64::from(self.placement_set_id).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         digest ^= u64::from(self.packed_counts).rotate_left(37);
-        digest ^= u64::from(self.deleted_rows).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         state.write_u64(digest);
     }
 }
@@ -37,8 +58,7 @@ pub(super) struct PartialBuildNode {
     pub(super) board: u64,
     pub(super) edge_start: u32,
     pub(super) edge_count: u32,
-    shape_index: u32,
-    placement_set_id: u32,
+    placement_set_or_shape_index: u32,
     pub(super) deleted_rows: u16,
     pub(super) depth: u8,
     flags: u8,
@@ -46,7 +66,7 @@ pub(super) struct PartialBuildNode {
 
 const NODE_LIVE: u8 = 1 << 0;
 const NODE_ACCEPTING: u8 = 1 << 1;
-const NO_SHAPE_INDEX: u32 = u32::MAX;
+const NODE_HAS_SHAPE: u8 = 1 << 2;
 const MAX_SETUP_CANDIDATE_LOCKS: u8 = 10;
 
 impl PartialBuildNode {
@@ -59,11 +79,20 @@ impl PartialBuildNode {
     }
 
     pub(super) const fn shape_index(self) -> Option<u32> {
-        if self.shape_index == NO_SHAPE_INDEX {
-            None
+        if self.flags & NODE_HAS_SHAPE != 0 {
+            Some(self.placement_set_or_shape_index)
         } else {
-            Some(self.shape_index)
+            None
         }
+    }
+
+    const fn placement_set_id(self) -> u32 {
+        self.placement_set_or_shape_index
+    }
+
+    fn set_shape_index(&mut self, shape_index: u32) {
+        self.placement_set_or_shape_index = shape_index;
+        self.flags |= NODE_HAS_SHAPE;
     }
 
     fn set_live(&mut self, live: bool) {
@@ -138,7 +167,7 @@ pub(super) struct PartialBuildGraph {
     pub(super) edges: Vec<PartialBuildEdge>,
     edge_rows: Vec<u16>,
     pub(super) shapes: Vec<SetupShape>,
-    placement_sets: Vec<u128>,
+    placement_sets: PlacementSetStorage,
     shape_target_nodes: Vec<u32>,
     compact_continuation: bool,
     pub(super) root: u32,
@@ -148,7 +177,7 @@ pub(super) struct PartialBuildGraph {
 impl PartialBuildGraph {
     pub(super) fn setup_id_for_shape(&self, shape_index: usize) -> Option<String> {
         let shape = self.shapes.get(shape_index)?;
-        let placement_rows = *self.placement_sets.get(shape.placement_set_id as usize)?;
+        let placement_rows = self.placement_sets.get(shape.placement_set_id)?;
         SetupPathDetail::setup_id_for(shape.board, shape.deleted_rows, placement_rows)
     }
 
@@ -158,8 +187,8 @@ impl PartialBuildGraph {
                 && shape.deleted_rows == detail.deleted_rows()
                 && self
                     .placement_sets
-                    .get(shape.placement_set_id as usize)
-                    .is_some_and(|rows| *rows == detail.placement_rows())
+                    .get(shape.placement_set_id)
+                    .is_some_and(|rows| rows == detail.placement_rows())
         })
     }
 
@@ -173,6 +202,12 @@ impl PartialBuildGraph {
 
     pub(super) const fn uses_compact_continuation(&self) -> bool {
         self.compact_continuation
+    }
+
+    #[cfg(test)]
+    fn placement_rows_for_node(&self, node: PartialBuildNode) -> Option<u128> {
+        let shape = self.shapes.get(node.shape_index()? as usize)?;
+        self.placement_sets.get(shape.placement_set_id)
     }
 }
 
@@ -201,10 +236,7 @@ enum PartialBuildPhase {
 
 #[derive(Clone, Copy, Debug)]
 struct ActivePartialState {
-    remaining: u64,
-    placement_set_id: u32,
     node: u32,
-    packed_counts: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -219,7 +251,7 @@ pub(super) struct SetupPartialBuildPrefix {
     pub(super) edge_rows: Vec<u16>,
     pub(super) residuals: Vec<PartialBuildResidual>,
     pub(super) completion_oracle: Option<GeometryCompletionOracle>,
-    placement_sets: Vec<u128>,
+    placement_sets: PlacementSetStorage,
     candidate_depth: u8,
     resource_truncated: bool,
 }
@@ -311,6 +343,105 @@ struct SelectedSetupDetail {
 const SETUP_ROW_BITS: usize = 12;
 const SETUP_ROW_MASK: u128 = (1_u128 << SETUP_ROW_BITS) - 1;
 const MAX_SETUP_ROW_ID: u32 = SETUP_ROW_MASK as u32 - 1;
+const COMPACT_PLACEMENT_SET_MAX_DEPTH: u8 = u64::BITS as u8 / SETUP_ROW_BITS as u8;
+const PARTIAL_STATE_REMAINING_BITS: u32 = 48;
+
+enum PlacementSetStorage {
+    Compact(Vec<u64>),
+    Full(Vec<u128>),
+}
+
+impl PlacementSetStorage {
+    fn new(max_depth: u8) -> Self {
+        if max_depth <= COMPACT_PLACEMENT_SET_MAX_DEPTH {
+            Self::Compact(vec![0])
+        } else {
+            Self::Full(vec![0])
+        }
+    }
+
+    fn get(&self, id: u32) -> Option<u128> {
+        let index = id as usize;
+        match self {
+            Self::Compact(values) => values.get(index).copied().map(u128::from),
+            Self::Full(values) => values.get(index).copied(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Compact(values) => values.len(),
+            Self::Full(values) => values.len(),
+        }
+    }
+
+    fn try_push(&mut self, value: u128) -> Result<(), ()> {
+        match self {
+            Self::Compact(values) => {
+                let value = u64::try_from(value).map_err(|_| ())?;
+                values.try_reserve(1).map_err(|_| ())?;
+                values.push(value);
+            }
+            Self::Full(values) => {
+                values.try_reserve(1).map_err(|_| ())?;
+                values.push(value);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for PlacementSetStorage {
+    fn default() -> Self {
+        Self::Full(Vec::new())
+    }
+}
+
+enum PlacementSetIndex {
+    Compact(ExactHashMap<u64, u32>),
+    Full(ExactHashMap<u128, u32>),
+}
+
+impl PlacementSetIndex {
+    fn new(max_depth: u8) -> Self {
+        if max_depth <= COMPACT_PLACEMENT_SET_MAX_DEPTH {
+            Self::Compact(ExactHashMap::default())
+        } else {
+            Self::Full(ExactHashMap::default())
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Compact(index) => index.clear(),
+            Self::Full(index) => index.clear(),
+        }
+    }
+
+    fn get(&self, value: u128) -> Option<u32> {
+        match self {
+            Self::Compact(index) => u64::try_from(value)
+                .ok()
+                .and_then(|value| index.get(&value).copied()),
+            Self::Full(index) => index.get(&value).copied(),
+        }
+    }
+
+    fn try_insert(&mut self, value: u128, id: u32) -> Result<(), ()> {
+        match self {
+            Self::Compact(index) => {
+                let value = u64::try_from(value).map_err(|_| ())?;
+                index.try_reserve(1).map_err(|_| ())?;
+                index.insert(value, id);
+            }
+            Self::Full(index) => {
+                index.try_reserve(1).map_err(|_| ())?;
+                index.insert(value, id);
+            }
+        }
+        Ok(())
+    }
+}
 
 pub(super) struct PartialBuildGraphBuilder {
     completion_oracle: Option<GeometryCompletionOracle>,
@@ -328,8 +459,8 @@ pub(super) struct PartialBuildGraphBuilder {
     source_edges: Vec<PendingPartialBuildEdge>,
     available_rows: Vec<u32>,
     next_layer: ExactHashMap<PartialStateKey, u32>,
-    placement_sets: Vec<u128>,
-    next_placement_sets: ExactHashMap<u128, u32>,
+    placement_sets: PlacementSetStorage,
+    next_placement_sets: PlacementSetIndex,
     geometry_family_count: String,
     geometry_expanded_nodes: usize,
     tablebase_pruned_states: usize,
@@ -406,18 +537,12 @@ impl PartialBuildGraphBuilder {
             board: catalog.initial_board(),
             edge_start: 0,
             edge_count: 0,
-            shape_index: NO_SHAPE_INDEX,
-            placement_set_id: 0,
+            placement_set_or_shape_index: 0,
             deleted_rows: 0,
             depth: 0,
             flags: 0,
         }];
-        let current_states = vec![ActivePartialState {
-            remaining: catalog.required_cells(),
-            placement_set_id: 0,
-            node: 0,
-            packed_counts: 0,
-        }];
+        let current_states = vec![ActivePartialState { node: 0 }];
         Ok(Self {
             completion_oracle: Some(compiled.completion_oracle),
             reachability,
@@ -434,8 +559,8 @@ impl PartialBuildGraphBuilder {
             source_edges: Vec::new(),
             available_rows: Vec::new(),
             next_layer: ExactHashMap::default(),
-            placement_sets: vec![0],
-            next_placement_sets: ExactHashMap::default(),
+            placement_sets: PlacementSetStorage::new(placement_identity_depth),
+            next_placement_sets: PlacementSetIndex::new(placement_identity_depth),
             geometry_family_count,
             geometry_expanded_nodes: compiled.expanded_nodes,
             tablebase_pruned_states: compiled.tablebase_pruned_states,
@@ -528,8 +653,7 @@ impl PartialBuildGraphBuilder {
             if source_node.depth == detail.depth {
                 let placement_rows = self
                     .placement_sets
-                    .get(source.placement_set_id as usize)
-                    .copied()
+                    .get(source_node.placement_set_id())
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "setup_path_detail_placement_set_missing",
                     ))?;
@@ -543,19 +667,20 @@ impl PartialBuildGraphBuilder {
         }
         if self.current_depth == 10 {
             let node = &mut self.nodes[source.node as usize];
-            let accepting = node.board == 0 && source.remaining == 0;
+            let accepting = node.board == 0 && self.residuals[source.node as usize].remaining == 0;
             node.set_accepting(accepting);
             node.set_live(accepting);
             return Ok(None);
         }
+        let residual = self.residuals[source.node as usize];
         self.completion_oracle
             .as_mut()
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "setup_partial_build_completion_oracle_missing",
             ))?
             .collect_available_rows(
-                source.remaining,
-                source.packed_counts,
+                residual.remaining,
+                residual.packed_counts,
                 self.nodes[source.node as usize].deleted_rows != 0,
                 catalog,
                 &mut self.available_rows,
@@ -603,17 +728,18 @@ impl PartialBuildGraphBuilder {
         let row_id = self.available_rows[self.available_row_cursor];
         self.available_row_cursor += 1;
         let source = self.nodes[source_state.node as usize];
+        let source_residual = self.residuals[source_state.node as usize];
         let row = catalog.skeleton(row_id);
         let packed_counts =
-            add_packed_piece(source_state.packed_counts, super::piece_index(row.piece)).ok_or(
+            add_packed_piece(source_residual.packed_counts, super::piece_index(row.piece)).ok_or(
                 WasmExactSearchError::InvalidProblem("setup_partial_build_piece_count_overflow"),
             )?;
         let placement_set_id = if source.depth < self.placement_identity_depth {
-            self.extend_placement_set(source_state.placement_set_id, source.depth, row_id)?
+            self.extend_placement_set(source.placement_set_id(), source.depth, row_id)?
         } else {
             0
         };
-        let remaining = source_state.remaining ^ row.cells;
+        let remaining = source_residual.remaining ^ row.cells;
         for realization in catalog.instantiations(row_id, source.deleted_rows) {
             if source.board & realization.lock_mask != 0
                 || !self.reachability.lock_reachable_instantiated(
@@ -635,13 +761,13 @@ impl PartialBuildGraphBuilder {
             else {
                 continue;
             };
-            let key = PartialStateKey {
+            let key = PartialStateKey::new(
                 board,
                 remaining,
                 placement_set_id,
                 packed_counts,
                 deleted_rows,
-            };
+            )?;
             let target = if let Some(target) = self.next_layer.get(&key).copied() {
                 target
             } else {
@@ -667,8 +793,7 @@ impl PartialBuildGraphBuilder {
                     board,
                     edge_start: 0,
                     edge_count: 0,
-                    shape_index: NO_SHAPE_INDEX,
-                    placement_set_id,
+                    placement_set_or_shape_index: placement_set_id,
                     deleted_rows,
                     depth: source.depth + 1,
                     flags: 0,
@@ -678,12 +803,7 @@ impl PartialBuildGraphBuilder {
                     packed_counts,
                 });
                 self.next_layer.insert(key, target);
-                self.next_states.push(ActivePartialState {
-                    remaining,
-                    placement_set_id,
-                    node: target,
-                    packed_counts,
-                });
+                self.next_states.push(ActivePartialState { node: target });
                 target
             };
             let row_id = u16::try_from(row_id).map_err(|_| {
@@ -712,28 +832,31 @@ impl PartialBuildGraphBuilder {
         depth: u8,
         row_id: u32,
     ) -> Result<u32, WasmExactSearchError> {
-        let parent = *self.placement_sets.get(parent_id as usize).ok_or(
-            WasmExactSearchError::InvalidProblem("setup_partial_build_placement_set_missing"),
-        )?;
+        let parent =
+            self.placement_sets
+                .get(parent_id)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_partial_build_placement_set_missing",
+                ))?;
         let placement_rows = insert_setup_placement_row(parent, depth, row_id)?;
-        if let Some(id) = self.next_placement_sets.get(&placement_rows) {
-            return Ok(*id);
+        if let Some(id) = self.next_placement_sets.get(placement_rows) {
+            return Ok(id);
         }
         let id = u32::try_from(self.placement_sets.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_partial_build_placement_set_index_overflow")
         })?;
-        self.placement_sets.try_reserve(1).map_err(|_| {
+        self.placement_sets.try_push(placement_rows).map_err(|_| {
             WasmExactSearchError::InvalidProblem(
                 "setup_partial_build_placement_set_storage_unavailable",
             )
         })?;
-        self.next_placement_sets.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem(
-                "setup_partial_build_placement_set_index_storage_unavailable",
-            )
-        })?;
-        self.placement_sets.push(placement_rows);
-        self.next_placement_sets.insert(placement_rows, id);
+        self.next_placement_sets
+            .try_insert(placement_rows, id)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_partial_build_placement_set_index_storage_unavailable",
+                )
+            })?;
         Ok(id)
     }
 
@@ -1022,10 +1145,11 @@ fn index_setup_shapes(
         shapes.try_reserve(1).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_partial_build_shape_storage_unavailable")
         })?;
-        node.shape_index = shape_index;
+        let placement_set_id = node.placement_set_id();
+        node.set_shape_index(shape_index);
         shapes.push(SetupShape::new(
             node.board,
-            node.placement_set_id,
+            placement_set_id,
             node.deleted_rows,
         ));
         target_nodes.push(u32::try_from(node_index).map_err(|_| {
@@ -1101,13 +1225,38 @@ mod tests {
     use clearra_problem::{compile_setup_search_conditions, SetupSearchQuery};
     use clearra_supply::pattern_universe::PieceMultisetKey;
 
+    #[test]
+    fn setup_partial_build_hot_state_stays_compact() {
+        assert_eq!(std::mem::size_of::<PartialBuildNode>(), 24);
+        assert_eq!(std::mem::size_of::<PartialStateKey>(), 24);
+        assert_eq!(std::mem::size_of::<ActivePartialState>(), 4);
+    }
+
+    #[test]
+    fn placement_set_storage_keeps_the_exact_depth_range() {
+        let compact_rows = (1_u128 << 59) | 0x123;
+        let mut compact = PlacementSetStorage::new(5);
+        compact.try_push(compact_rows).expect("compact rows");
+        assert_eq!(compact.get(1), Some(compact_rows));
+
+        let full_rows = (1_u128 << 71) | compact_rows;
+        let mut full = PlacementSetStorage::new(6);
+        full.try_push(full_rows).expect("full rows");
+        assert_eq!(full.get(1), Some(full_rows));
+    }
+
+    #[test]
+    fn partial_state_key_rejects_cells_outside_the_setup_board_domain() {
+        assert!(PartialStateKey::new(0, 1_u64 << 47, 0, 0, u16::MAX).is_ok());
+        assert!(PartialStateKey::new(0, 1_u64 << 48, 0, 0, 0).is_err());
+    }
+
     fn live_node(board: u64, depth: u8) -> PartialBuildNode {
         PartialBuildNode {
             board,
             edge_start: 0,
             edge_count: 0,
-            shape_index: NO_SHAPE_INDEX,
-            placement_set_id: u32::from(depth),
+            placement_set_or_shape_index: u32::from(depth),
             deleted_rows: 0,
             depth,
             flags: NODE_LIVE,
@@ -1266,7 +1415,7 @@ mod tests {
             edges: Vec::new(),
             edge_rows: Vec::new(),
             shapes: vec![SetupShape::new(0x3c, 1, 0), SetupShape::new(0x3c, 2, 0)],
-            placement_sets: vec![0, rows_a, rows_b],
+            placement_sets: PlacementSetStorage::Full(vec![0, rows_a, rows_b]),
             shape_target_nodes: vec![0, 1],
             compact_continuation: false,
             root: 0,
@@ -1422,7 +1571,7 @@ mod tests {
             .position(|node| {
                 node.board == 0x001f_8633
                     && node.deleted_rows == 0
-                    && graph.placement_sets[node.placement_set_id as usize] == prefix_before_clear
+                    && graph.placement_rows_for_node(*node) == Some(prefix_before_clear)
             })
             .expect("line-clear predecessor");
         let after_clear = graph
@@ -1431,14 +1580,14 @@ mod tests {
             .position(|node| {
                 node.board == 0x633
                     && node.deleted_rows == 0b10
-                    && graph.placement_sets[node.placement_set_id as usize] == prefix_after_clear
+                    && graph.placement_rows_for_node(*node) == Some(prefix_after_clear)
             })
             .expect("line-clear prefix");
         let accepting = graph
             .nodes
             .iter()
             .position(|node| {
-                node.accepting() && graph.placement_sets[node.placement_set_id as usize] == complete
+                node.accepting() && graph.placement_rows_for_node(*node) == Some(complete)
             })
             .expect("exact completion family");
 
@@ -1625,8 +1774,7 @@ mod tests {
                         || target.board != expected_board
                         || target.deleted_rows != expected_deleted
                         || (depth < 4
-                            && graph.placement_sets[target.placement_set_id as usize]
-                                != expected_rows)
+                            && graph.placement_rows_for_node(target) != Some(expected_rows))
                     {
                         continue;
                     }

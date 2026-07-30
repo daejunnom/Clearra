@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BuildProbabilityWorkspace, ForwardSearchWorkspace, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
+  import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
   import { onMount } from 'svelte';
 
   function workerFactory() {
@@ -14,7 +14,7 @@
   $: selectedTool = $page.url.searchParams.get('tool');
 
   onMount(() => {
-    if (!['pc', 'setup', 'build-probability', 'damage', 'spin-finder'].includes(selectedTool ?? '')) {
+    if (!['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk'].includes(selectedTool ?? '')) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
   });
@@ -24,6 +24,8 @@
   <BuildProbabilityWorkspace {workerFactory} />
 {:else if selectedTool === 'setup'}
   <SetupFinderWorkspace {workerFactory} />
+{:else if selectedTool === 'ctk'}
+  <CtkDrawerWorkspace />
 {:else if selectedTool === 'damage' || selectedTool === 'spin-finder'}
   <ForwardSearchWorkspace tool={selectedTool} {workerFactory} />
 {:else}

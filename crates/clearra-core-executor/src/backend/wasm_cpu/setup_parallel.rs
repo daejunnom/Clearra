@@ -290,7 +290,6 @@ impl WasmSetupParallelCoordinator {
             peak_segment_pages = peak_segment_pages.max(merge.peak_segment_pages);
             let result = merge.finish(
                 &shared.graph.shapes,
-                shared.query.limits().max_results(),
                 shared.query.candidate_priority(),
                 shared.query.length_preference(),
                 path_target_shape_index,
@@ -360,7 +359,7 @@ impl WasmSetupParallelCoordinator {
                     condition.pattern_expression().to_owned(),
                     result.global_pattern_count as usize,
                     result.candidate_count as usize,
-                    result.candidate_count as usize > shared.query.limits().max_results(),
+                    false,
                     true,
                     candidates,
                 ),
@@ -508,7 +507,6 @@ impl SetupConditionMerge {
     fn finish(
         mut self,
         shapes: &[super::setup_partial_build::SetupShape],
-        max_results: usize,
         candidate_priority: clearra_problem::SetupCandidatePriority,
         length_preference: clearra_problem::SetupLengthPreference,
         path_target_shape_index: Option<usize>,
@@ -570,7 +568,6 @@ impl SetupConditionMerge {
             .map(|shape_index| shapes[*shape_index].board)
             .collect::<Vec<_>>();
         candidate_boards.sort_unstable();
-        self.covered_shapes.truncate(max_results);
         let selected_shapes = self
             .covered_shapes
             .into_iter()
@@ -779,9 +776,10 @@ impl SetupParallelConditionRuntime {
 
 #[derive(Clone, Copy, Default)]
 struct StateCoverage {
-    alpha: [u64; COVERAGE_WORD_LANES],
-    beta: [u64; COVERAGE_WORD_LANES],
+    words: [u64; COVERAGE_WORD_LANES],
 }
+
+const _: () = assert!(core::mem::size_of::<StateCoverage>() == 16);
 
 #[derive(Clone, Copy)]
 struct ShapeWords {
@@ -938,7 +936,7 @@ impl SegmentedCoverageWorkspace {
                 let active = self
                     .state_values
                     .get(state_index)
-                    .map_or(EMPTY_WORDS, |state| state.alpha);
+                    .map_or(EMPTY_WORDS, |state| state.words);
                 let (node_index, extra_draw, hold_code) = runtime.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() {
@@ -981,13 +979,14 @@ impl SegmentedCoverageWorkspace {
             let state_index = self.touched_states[cursor];
             let (node_index, extra_draw, hold_code) = runtime.state_layout.decode(state_index);
             if self.graph.nodes[node_index].accepting() {
-                let mut alpha = self
+                let alpha = self
                     .state_values
                     .get(state_index)
-                    .map_or(EMPTY_WORDS, |state| state.alpha);
+                    .map_or(EMPTY_WORDS, |state| state.words);
+                let mut beta = alpha;
                 if let Some(target) = runtime.terminal_supply_target {
                     for lane in 0..lane_count {
-                        alpha[lane] &= terminal_supply_target_word(
+                        beta[lane] &= terminal_supply_target_word(
                             &runtime.pattern_index,
                             target,
                             runtime.initial_cursor,
@@ -999,7 +998,15 @@ impl SegmentedCoverageWorkspace {
                         );
                     }
                 }
-                self.activate_beta(state_index, alpha)?;
+                self.accumulate_shape_state(
+                    state_index,
+                    alpha,
+                    beta,
+                    root_bits,
+                    lane_count,
+                    runtime.max_setup_pieces,
+                )?;
+                self.replace_with_beta(state_index, beta)?;
             }
         }
         for depth in (0..self.depth_states.len()).rev() {
@@ -1009,7 +1016,7 @@ impl SegmentedCoverageWorkspace {
                 let active = self
                     .state_values
                     .get(state_index)
-                    .map_or(EMPTY_WORDS, |state| state.alpha);
+                    .map_or(EMPTY_WORDS, |state| state.words);
                 let (node_index, extra_draw, hold_code) = runtime.state_layout.decode(state_index);
                 let node = self.graph.nodes[node_index];
                 if node.accepting() {
@@ -1042,46 +1049,20 @@ impl SegmentedCoverageWorkspace {
                             let backward = self
                                 .state_values
                                 .get(target)
-                                .map_or(0, |state| state.beta[lane]);
+                                .map_or(0, |state| state.words[lane]);
                             successful[lane] |= active[lane] & transition.mask & backward;
                         }
                     }
                 }
-                self.activate_beta(state_index, successful)?;
-            }
-        }
-
-        for cursor in 0..self.touched_states.len() {
-            let state_index = self.touched_states[cursor];
-            let (node_index, _, _) = runtime.state_layout.decode(state_index);
-            let node = self.graph.nodes[node_index];
-            if node.depth > runtime.max_setup_pieces {
-                continue;
-            }
-            let Some(shape_index) = node.shape_index().map(|index| index as usize) else {
-                continue;
-            };
-            let state = self
-                .state_values
-                .get(state_index)
-                .copied()
-                .unwrap_or_default();
-            let (words, first) = self.shape_words.get_mut_or_default(shape_index)?;
-            if first {
-                self.touched_shapes.push(shape_index);
-            }
-            for lane in 0..lane_count {
-                let build = state.alpha[lane] & root_bits[lane];
-                let joint = build & state.beta[lane];
-                words.build[lane] |= build;
-                words.joint[lane] |= joint;
-                if joint != 0 {
-                    include_setup_depth_range(
-                        &mut words.min_covered_locks,
-                        &mut words.max_covered_locks,
-                        node.depth,
-                    );
-                }
+                self.accumulate_shape_state(
+                    state_index,
+                    active,
+                    successful,
+                    root_bits,
+                    lane_count,
+                    runtime.max_setup_pieces,
+                )?;
+                self.replace_with_beta(state_index, successful)?;
             }
         }
         for cursor in 0..self.touched_shapes.len() {
@@ -1162,9 +1143,9 @@ impl SegmentedCoverageWorkspace {
             return Ok(());
         }
         let (state, first) = self.state_values.get_mut_or_default(state_index)?;
-        let was_empty = first || state.alpha == EMPTY_WORDS;
+        let was_empty = first || state.words == EMPTY_WORDS;
         for lane in 0..COVERAGE_WORD_LANES {
-            state.alpha[lane] |= mask[lane];
+            state.words[lane] |= mask[lane];
         }
         if was_empty {
             let (node, _, _) = self.state_layout.decode(state_index);
@@ -1184,8 +1165,8 @@ impl SegmentedCoverageWorkspace {
             return Ok(());
         }
         let (state, first) = self.state_values.get_mut_or_default(state_index)?;
-        let was_empty = first || state.alpha == EMPTY_WORDS;
-        state.alpha[lane] |= mask;
+        let was_empty = first || state.words == EMPTY_WORDS;
+        state.words[lane] |= mask;
         if was_empty {
             let (node, _, _) = self.state_layout.decode(state_index);
             self.depth_states[self.graph.nodes[node].depth as usize].push(state_index);
@@ -1194,17 +1175,49 @@ impl SegmentedCoverageWorkspace {
         Ok(())
     }
 
-    fn activate_beta(
+    fn replace_with_beta(
         &mut self,
         state_index: usize,
         mask: [u64; COVERAGE_WORD_LANES],
     ) -> Result<(), WasmExactSearchError> {
-        if mask == EMPTY_WORDS {
+        let (state, _) = self.state_values.get_mut_or_default(state_index)?;
+        state.words = mask;
+        Ok(())
+    }
+
+    fn accumulate_shape_state(
+        &mut self,
+        state_index: usize,
+        alpha: [u64; COVERAGE_WORD_LANES],
+        beta: [u64; COVERAGE_WORD_LANES],
+        root_bits: [u64; COVERAGE_WORD_LANES],
+        lane_count: usize,
+        max_setup_pieces: u8,
+    ) -> Result<(), WasmExactSearchError> {
+        let (node_index, _, _) = self.state_layout.decode(state_index);
+        let node = self.graph.nodes[node_index];
+        if node.depth > max_setup_pieces {
             return Ok(());
         }
-        let (state, _) = self.state_values.get_mut_or_default(state_index)?;
-        for lane in 0..COVERAGE_WORD_LANES {
-            state.beta[lane] |= mask[lane];
+        let Some(shape_index) = node.shape_index().map(|index| index as usize) else {
+            return Ok(());
+        };
+        let (words, first) = self.shape_words.get_mut_or_default(shape_index)?;
+        if first {
+            self.touched_shapes.push(shape_index);
+        }
+        for lane in 0..lane_count {
+            let build = alpha[lane] & root_bits[lane];
+            let joint = build & beta[lane];
+            words.build[lane] |= build;
+            words.joint[lane] |= joint;
+            if joint != 0 {
+                include_setup_depth_range(
+                    &mut words.min_covered_locks,
+                    &mut words.max_covered_locks,
+                    node.depth,
+                );
+            }
         }
         Ok(())
     }

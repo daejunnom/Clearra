@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { Blocks, Flame, Grid3X3, Layers3, RotateCw } from '@lucide/svelte';
+  import { Blocks, Flame, Grid3X3, Layers3, Palette, RotateCw } from '@lucide/svelte';
 
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import type { WorkspaceMode } from './workspaceMode';
 
-  export let active: 'pc' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
+  export let active: WorkspaceMode;
   export let language: WorkspaceLanguage;
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -33,6 +34,9 @@
   <a href="?tool=spin-finder" class:active={active === 'spin-finder'} aria-current={active === 'spin-finder' ? 'page' : undefined}>
     <RotateCw size={16} strokeWidth={1.8} />{label('spinFinder')}
   </a>
+  <a href="?tool=ctk" class:active={active === 'ctk'} aria-current={active === 'ctk' ? 'page' : undefined}>
+    <Palette size={16} strokeWidth={1.8} />{label('ctkDrawer')}
+  </a>
 </nav>
 
 <div class="product-mode-select">
@@ -44,6 +48,7 @@
       <option value="?tool=build-probability">{label('buildProbability')}</option>
       <option value="?tool=damage">{label('maximumDamage')}</option>
       <option value="?tool=spin-finder">{label('spinFinder')}</option>
+      <option value="?tool=ctk">{label('ctkDrawer')}</option>
     </select>
   </label>
 </div>

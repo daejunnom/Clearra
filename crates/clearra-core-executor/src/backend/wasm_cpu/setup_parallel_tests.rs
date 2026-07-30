@@ -1,6 +1,8 @@
 use super::*;
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_problem::{SetupHoldPolicy, SetupPathDetail};
+use clearra_problem::{
+    SetupCandidatePriority, SetupHoldPolicy, SetupLengthPreference, SetupPathDetail,
+};
 use clearra_rules::profile::builtin_rules::{jstris_180, srs_x};
 
 use super::super::{setup_coverage_graph::SetupCoverageNode, setup_partial_build::SetupShape};
@@ -136,6 +138,55 @@ fn setup_parallel_wire_preserves_jstris_180_rule_identity() {
     let decoded = decode_initialization(&encoded).expect("decode initialization");
 
     assert_eq!(decoded.query.rule(), jstris_180());
+}
+
+#[test]
+fn completed_condition_keeps_more_than_the_legacy_result_page() {
+    const SHAPE_COUNT: usize = 300;
+
+    let shapes = (0..SHAPE_COUNT)
+        .map(|index| SetupShape::new(index as u64 + 1, index as u32, 0))
+        .collect::<Vec<_>>();
+    let covered_shapes = (0..SHAPE_COUNT)
+        .map(|index| SetupParallelShapeResult {
+            shape_index: index as u32,
+            build_covered_patterns: 1,
+            joint_covered_patterns: 1,
+            build_weight: 1.0,
+            joint_weight: 1.0,
+            min_covered_locks: 1,
+            max_covered_locks: 1,
+            witness_pattern_id: 0,
+        })
+        .collect();
+    let mut merge = SetupConditionMerge::new(SHAPE_COUNT, 1).expect("condition merge");
+    merge
+        .absorb(
+            SetupParallelTaskResult {
+                task_index: 0,
+                condition_index: 0,
+                word_start: 0,
+                word_end: 1,
+                global_pattern_count: 1,
+                covered_shapes,
+                peak_segment_pages: 1,
+            },
+            SHAPE_COUNT,
+        )
+        .expect("condition result");
+
+    let completed = merge
+        .finish(
+            &shapes,
+            SetupCandidatePriority::All,
+            SetupLengthPreference::Auto,
+            None,
+        )
+        .expect("completed condition");
+
+    assert_eq!(completed.candidate_count, SHAPE_COUNT);
+    assert_eq!(completed.selected_shapes.len(), SHAPE_COUNT);
+    assert_eq!(completed.candidate_boards.len(), SHAPE_COUNT);
 }
 
 fn assert_exact_condition_ranges(condition_words: &[usize], tasks: &[SetupParallelTask]) {

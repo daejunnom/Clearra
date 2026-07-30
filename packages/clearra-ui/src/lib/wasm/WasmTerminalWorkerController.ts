@@ -1,6 +1,11 @@
 import type { ClearraWasmWorkerEvent } from './wasmCommandClient';
 import { postPrewarmRuntime } from './wasmCommandClient';
 import {
+  ensureWasmWorkerOwnerId,
+  terminateOwnedWasmWorker,
+  type ClearraWasmForcedTerminationReason
+} from './wasmWorkerLifecycle';
+import {
   applyTablebaseWarmupEvent,
   applyWasmWorkerEvent,
   cancelWasmCommand,
@@ -9,7 +14,6 @@ import {
 } from './wasmWorkerStore';
 
 const COOPERATIVE_CANCEL_GRACE_MS = 100;
-const OWNER_DISPOSE_GRACE_MS = 100;
 
 type RuntimePrewarmWorkerEvent = {
   type: 'runtime_prewarm';
@@ -26,6 +30,7 @@ export class WasmTerminalWorkerController {
   private runInFlight = false;
   private prewarmDeferred = false;
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
+  private cancellingJobId: number | null = null;
 
   constructor(private workerFactory: (() => Worker) | null) {}
 
@@ -45,7 +50,12 @@ export class WasmTerminalWorkerController {
     if (!worker) return;
     try {
       this.runInFlight = true;
-      runWasmCommand(worker, this.prewarmWorkerCount, this.tablebaseRequested);
+      runWasmCommand(
+        worker,
+        this.prewarmWorkerCount,
+        this.tablebaseRequested,
+        ensureWasmWorkerOwnerId(worker)
+      );
     } catch (error) {
       this.runInFlight = false;
       this.failClosedWorker(worker, 'E_WASM_WORKER_MESSAGE_FAILED', errorMessage(error));
@@ -88,8 +98,9 @@ export class WasmTerminalWorkerController {
     }
     if (jobId === undefined) return;
     this.cancellingWorker = worker;
+    this.cancellingJobId = jobId ?? null;
     this.cancelFallback = setTimeout(() => {
-      this.terminateCancelledWorker(worker, jobId);
+      this.terminateCancelledWorker(worker, this.cancellingJobId ?? jobId ?? 0);
     }, COOPERATIVE_CANCEL_GRACE_MS);
   }
 
@@ -126,7 +137,14 @@ export class WasmTerminalWorkerController {
       jobId = 0;
     }
     this.disposeOwnedWorker(worker);
-    if (jobId !== undefined) this.emitReleasedCancellation(jobId ?? 0);
+    if (jobId !== undefined) {
+      this.emitForcedTermination(
+        jobId ?? 0,
+        'owner-disposed',
+        'E_WASM_OWNER_DISPOSED',
+        'The WASM runtime owner was disposed while a search was active; the worker tree was force-terminated.'
+      );
+    }
   }
 
   private ensureWorker() {
@@ -148,29 +166,48 @@ export class WasmTerminalWorkerController {
           return;
         }
         if (this.cancellingWorker === worker) {
+          if (message.data.event === 'started') {
+            this.cancellingJobId = message.data.job_id;
+          }
           if (message.data.event === 'cancelled') {
             this.runInFlight = false;
             applyWasmWorkerEvent(message.data);
-            this.releaseWorker(worker);
+            this.releaseWorker(worker, 'owner-disposed');
             this.flushDeferredPrewarm();
             return;
-          } else if (message.data.event === 'final_response' || message.data.event === 'failed') {
-            this.terminateCancelledWorker(worker, message.data.job_id);
+          }
+          if (isTerminalWorkerEvent(message.data)) {
+            this.runInFlight = false;
+            applyWasmWorkerEvent(message.data);
+            if (
+              message.data.event === 'failed' ||
+              message.data.event === 'terminated' ||
+              (message.data.event === 'final_response' &&
+                message.data.response.status !== 'success')
+            ) {
+              this.releaseWorker(worker, 'worker-failure');
+            } else {
+              this.clearCancelFallback();
+            }
+            this.flushDeferredPrewarm();
             return;
           }
         }
-        const terminal =
-          message.data.event === 'failed' ||
-          message.data.event === 'cancelled' ||
-          message.data.event === 'final_response';
+        const terminal = isTerminalWorkerEvent(message.data);
         if (terminal) this.runInFlight = false;
         applyWasmWorkerEvent(message.data);
         if (
           message.data.event === 'failed' ||
           message.data.event === 'cancelled' ||
+          message.data.event === 'terminated' ||
           (message.data.event === 'final_response' && message.data.response.status !== 'success')
         ) {
-          this.releaseWorker(worker);
+          this.releaseWorker(
+            worker,
+            message.data.event === 'failed' || message.data.event === 'terminated'
+              ? 'worker-failure'
+              : 'owner-disposed'
+          );
         }
         if (terminal) this.flushDeferredPrewarm();
       };
@@ -196,15 +233,20 @@ export class WasmTerminalWorkerController {
   private terminateCancelledWorker(worker: Worker, jobId: number | null) {
     if (this.worker !== worker || this.cancellingWorker !== worker) return;
     this.runInFlight = false;
-    this.releaseWorker(worker);
-    this.emitReleasedCancellation(jobId ?? 0);
+    this.releaseWorker(worker, 'cancel-timeout');
+    this.emitForcedTermination(
+      jobId ?? 0,
+      'cancel-timeout',
+      'E_WASM_FORCED_TERMINATION',
+      'The search did not acknowledge cooperative cancellation before the deadline; the worker tree was force-terminated.'
+    );
     this.flushDeferredPrewarm();
   }
 
   private failClosedWorker(worker: Worker, code: string, message: string) {
     if (this.worker !== worker) return;
     this.runInFlight = false;
-    this.releaseWorker(worker);
+    this.releaseWorker(worker, 'worker-failure');
     applyWasmWorkerEvent({
       schema_version: 1,
       runtime: 'clearra-wasm',
@@ -217,20 +259,34 @@ export class WasmTerminalWorkerController {
     this.flushDeferredPrewarm();
   }
 
-  private emitReleasedCancellation(jobId: number) {
+  private emitForcedTermination(
+    jobId: number,
+    reason: ClearraWasmForcedTerminationReason,
+    code: string,
+    message: string
+  ) {
     applyWasmWorkerEvent({
       schema_version: 1,
       runtime: 'clearra-wasm',
-      event: 'cancelled',
+      event: 'terminated',
       job_id: jobId,
-      scope_released: true
+      reason,
+      scope_released: true,
+      diagnostics: {
+        diagnostics: [{ code, severity: 'error', message }]
+      }
     });
   }
 
   private prewarmWorker(worker: Worker, workerCount: number) {
     try {
       this.prewarmingWorker = worker;
-      postPrewarmRuntime(worker, workerCount, this.tablebaseRequested);
+      postPrewarmRuntime(
+        worker,
+        workerCount,
+        this.tablebaseRequested,
+        ensureWasmWorkerOwnerId(worker)
+      );
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_PREWARM_FAILED', errorMessage(error));
     }
@@ -243,14 +299,14 @@ export class WasmTerminalWorkerController {
     if (worker) this.prewarmWorker(worker, this.prewarmWorkerCount);
   }
 
-  private releaseWorker(worker: Worker) {
+  private releaseWorker(worker: Worker, reason: ClearraWasmForcedTerminationReason) {
     if (this.worker !== worker) return;
     this.clearCancelFallback();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
-    worker.terminate();
+    terminateOwnedWasmWorker(worker, reason);
     this.worker = null;
   }
 
@@ -264,17 +320,25 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     try {
       worker.postMessage({ type: 'dispose_runtime' });
-      setTimeout(() => worker.terminate(), OWNER_DISPOSE_GRACE_MS);
-    } catch {
-      worker.terminate();
-    }
+    } catch {}
+    terminateOwnedWasmWorker(worker, 'owner-disposed');
   }
 
   private clearCancelFallback() {
     if (this.cancelFallback !== null) clearTimeout(this.cancelFallback);
     this.cancelFallback = null;
     this.cancellingWorker = null;
+    this.cancellingJobId = null;
   }
+}
+
+function isTerminalWorkerEvent(event: ClearraWasmWorkerEvent): boolean {
+  return (
+    event.event === 'failed' ||
+    event.event === 'cancelled' ||
+    event.event === 'terminated' ||
+    event.event === 'final_response'
+  );
 }
 
 function isRuntimePrewarmWorkerEvent(

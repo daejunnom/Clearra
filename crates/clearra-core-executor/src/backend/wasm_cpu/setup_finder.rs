@@ -177,7 +177,6 @@ impl WasmSetupSearchSession {
                         &conditions[next_condition],
                         Arc::clone(&graph),
                         Arc::clone(&coverage_graph),
-                        query.limits().max_results(),
                         query.candidate_priority(),
                         query.length_preference(),
                         query.max_setup_pieces(),
@@ -1130,7 +1129,6 @@ struct SetupCoverageSession {
     touched_shapes: Vec<usize>,
     shape_touched: Vec<bool>,
     accumulators: Vec<ShapeCoverageAccumulator>,
-    max_results: usize,
     candidate_priority: SetupCandidatePriority,
     length_preference: SetupLengthPreference,
     max_setup_pieces: u8,
@@ -1144,7 +1142,6 @@ impl SetupCoverageSession {
         condition: &SetupSearchCondition,
         graph: Arc<PartialBuildGraph>,
         coverage_graph: Arc<SetupCoverageGraph>,
-        max_results: usize,
         candidate_priority: SetupCandidatePriority,
         length_preference: SetupLengthPreference,
         max_setup_pieces: u8,
@@ -1220,7 +1217,6 @@ impl SetupCoverageSession {
             accumulators: (0..shape_count)
                 .map(|_| ShapeCoverageAccumulator::default())
                 .collect(),
-            max_results,
             candidate_priority,
             length_preference,
             max_setup_pieces,
@@ -1623,8 +1619,6 @@ impl SetupCoverageSession {
             .map(|shape_index| self.graph.shapes[*shape_index].board)
             .collect::<Vec<_>>();
         candidate_boards.sort_unstable();
-        let result_truncated = shape_indexes.len() > self.max_results;
-        shape_indexes.truncate(self.max_results);
         let representative_paths = self.representative_paths(&shape_indexes)?;
         let mut all_solution_paths = self
             .solution_paths
@@ -1674,7 +1668,7 @@ impl SetupCoverageSession {
                 self.pattern_expression.clone(),
                 self.pattern_index.global_pattern_count(),
                 candidate_count,
-                result_truncated,
+                false,
                 true,
                 candidates,
             ),

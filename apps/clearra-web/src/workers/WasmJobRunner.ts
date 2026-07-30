@@ -113,11 +113,9 @@ export class WasmJobRunner {
       const terminal =
         event.event === 'final_response' ||
         event.event === 'failed' ||
-        event.event === 'cancelled';
-      const emittedEvent =
-        terminal && searchProfile !== null
-          ? ({ ...event, search_profile: searchProfile } as ClearraWasmWorkerEvent)
-          : event;
+        event.event === 'cancelled' ||
+        event.event === 'terminated';
+      const emittedEvent = terminal ? withSearchProfile(event, searchProfile) : event;
       onEvent(emittedEvent);
       if (terminal) {
         onTerminal(emittedEvent);
@@ -142,6 +140,19 @@ export class WasmJobRunner {
       // Worker termination remains the final ownership boundary after a trap.
     }
   }
+}
+
+function withSearchProfile(
+  event: ClearraWasmWorkerEvent,
+  searchProfile: unknown
+): ClearraWasmWorkerEvent {
+  if (
+    searchProfile === null ||
+    (event.event !== 'final_response' && event.event !== 'failed')
+  ) {
+    return event;
+  }
+  return { ...event, search_profile: searchProfile } as unknown as ClearraWasmWorkerEvent;
 }
 
 function createWorkerHostYield(): () => Promise<void> {

@@ -1,11 +1,14 @@
 <script lang="ts">
   import { AlertTriangle } from '@lucide/svelte';
+  import { tick } from 'svelte';
 
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import {
     parseSolutionKey,
     renderSolutionBoard,
-    type SolutionCopyFormat
+    type SolutionCopyFormat,
+    type SolutionExportBoard,
+    type SolutionExportPage
   } from './solutionExport';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -24,23 +27,47 @@
 
   const PAGE_SIZE = 100;
 
+  type SolutionView = {
+    board: SolutionExportBoard | null;
+    page: SolutionExportPage | null;
+  };
+
+  type PreparedSolution = SolutionView & {
+    index: number;
+    key: string;
+  };
+
   let visibleCount = PAGE_SIZE;
+  let preparedCount = PAGE_SIZE * 2;
+  let preparedSolutions: PreparedSolution[] = [];
   let lastSetIdentity = '';
+  let solutionViewCache = new Map<string, SolutionView>();
 
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
-  $: setIdentity = solutionSetHash || fallbackSetIdentity(solutionKeys);
+  $: setIdentity = `${solutionSetHash || 'unhashed'}:${fallbackSetIdentity(solutionKeys)}:${targetLines}`;
   $: if (setIdentity !== lastSetIdentity) {
     lastSetIdentity = setIdentity;
     visibleCount = PAGE_SIZE;
+    preparedCount = Math.min(solutionKeys.length, PAGE_SIZE * 2);
+    solutionViewCache = new Map<string, SolutionView>();
   }
-  $: visibleSolutions = solutionKeys.slice(0, visibleCount).map((key, index) => ({
-    ...solutionView(key),
+  $: minimumPreparedCount = Math.min(
+    solutionKeys.length,
+    Math.max(PAGE_SIZE * 2, visibleCount)
+  );
+  $: if (preparedCount < minimumPreparedCount) preparedCount = minimumPreparedCount;
+  $: if (preparedCount > solutionKeys.length) preparedCount = solutionKeys.length;
+  $: preparedSolutions = solutionKeys.slice(0, preparedCount).map((key, index) => ({
+    ...solutionView(key, targetLines, solutionViewCache),
     index,
-    key,
-    probability: solutionProbabilities[key]
+    key
+  }));
+  $: visibleSolutions = preparedSolutions.slice(0, visibleCount).map((solution) => ({
+    ...solution,
+    probability: solutionProbabilities[solution.key]
   }));
   $: remainingCount = Math.max(0, solutionKeys.length - visibleSolutions.length);
   $: nextPageCount = Math.min(PAGE_SIZE, remainingCount);
@@ -49,8 +76,12 @@
     return `${keys.length}:${keys[0] ?? ''}:${keys[keys.length - 1] ?? ''}`;
   }
 
-  function showMore() {
+  async function showMore() {
+    const identity = setIdentity;
     visibleCount = Math.min(solutionKeys.length, visibleCount + PAGE_SIZE);
+    await tick();
+    if (identity !== setIdentity) return;
+    preparedCount = Math.min(solutionKeys.length, visibleCount + PAGE_SIZE);
   }
 
   function probabilityLabel(value: string): string {
@@ -62,12 +93,20 @@
     }).format(probability);
   }
 
-  function solutionView(key: string) {
+  function solutionView(
+    key: string,
+    lines: number,
+    cache: Map<string, SolutionView>
+  ): SolutionView {
+    const cached = cache.get(key);
+    if (cached) return cached;
     const page = parseSolutionKey(key);
-    return {
-      board: page ? renderSolutionBoard(page, targetLines) : null,
+    const view = {
+      board: page ? renderSolutionBoard(page, lines) : null,
       page
     };
+    cache.set(key, view);
+    return view;
   }
 </script>
 
@@ -79,7 +118,7 @@
   {/if}
 
   <ol class="solution-gallery">
-    {#each visibleSolutions as solution}
+    {#each visibleSolutions as solution (`${solution.index}:${solution.key}`)}
       <li>
         <div class="solution-heading">
           <div>
@@ -237,6 +276,12 @@
   @media (max-width: 520px) {
     .solution-gallery {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 390px) {
+    .solution-gallery {
+      grid-template-columns: 1fr;
     }
   }
 </style>

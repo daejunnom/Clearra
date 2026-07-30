@@ -3,27 +3,36 @@ use super::WasmExactSearchError;
 const PAGE_SHIFT: usize = 8;
 const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
+const PAGE_WORD_COUNT: usize = PAGE_SIZE / u64::BITS as usize;
 const NO_PAGE: u32 = u32::MAX;
 
-#[derive(Clone)]
-struct GenerationSlot<T> {
-    generation: u32,
-    value: T,
+struct GenerationPage<T> {
+    initialized: [u64; PAGE_WORD_COUNT],
+    values: Box<[T]>,
 }
 
-impl<T: Default> Default for GenerationSlot<T> {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            value: T::default(),
-        }
+impl<T> GenerationPage<T> {
+    fn clear(&mut self) {
+        self.initialized.fill(0);
+    }
+
+    fn contains(&self, slot: usize) -> bool {
+        self.initialized[slot / u64::BITS as usize] & (1_u64 << (slot % u64::BITS as usize)) != 0
+    }
+
+    fn insert(&mut self, slot: usize) -> bool {
+        let word = &mut self.initialized[slot / u64::BITS as usize];
+        let bit = 1_u64 << (slot % u64::BITS as usize);
+        let first = *word & bit == 0;
+        *word |= bit;
+        first
     }
 }
 
 pub(super) struct SegmentedGenerationArray<T> {
     capacity: usize,
     directory: Vec<u64>,
-    pages: Vec<Box<[GenerationSlot<T>]>>,
+    pages: Vec<GenerationPage<T>>,
     generation: u32,
     next_page: usize,
 }
@@ -51,11 +60,6 @@ impl<T: Clone + Default> SegmentedGenerationArray<T> {
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
             self.directory.fill(0);
-            for page in &mut self.pages {
-                for slot in page.iter_mut() {
-                    slot.generation = 0;
-                }
-            }
             self.generation = 1;
         }
         self.next_page = 0;
@@ -70,8 +74,9 @@ impl<T: Clone + Default> SegmentedGenerationArray<T> {
             return None;
         }
         let page_index = (encoded as u32).wrapping_sub(1) as usize;
-        let slot = &self.pages[page_index][index & PAGE_MASK];
-        (slot.generation == self.generation).then_some(&slot.value)
+        let slot = index & PAGE_MASK;
+        let page = &self.pages[page_index];
+        page.contains(slot).then_some(&page.values[slot])
     }
 
     pub(super) fn get_mut_or_default(
@@ -91,17 +96,18 @@ impl<T: Clone + Default> SegmentedGenerationArray<T> {
             let page_index = self.next_page;
             self.next_page += 1;
             self.ensure_page(page_index)?;
+            self.pages[page_index].clear();
             self.directory[logical_page] =
                 (u64::from(self.generation) << 32) | (page_index as u64 + 1);
             page_index
         };
-        let slot = &mut self.pages[page_index][index & PAGE_MASK];
-        let first = slot.generation != self.generation;
+        let slot = index & PAGE_MASK;
+        let page = &mut self.pages[page_index];
+        let first = page.insert(slot);
         if first {
-            slot.generation = self.generation;
-            slot.value = T::default();
+            page.values[slot] = T::default();
         }
-        Ok((&mut slot.value, first))
+        Ok((&mut page.values[slot], first))
     }
 
     pub(super) fn active_page_count(&self) -> usize {
@@ -119,8 +125,11 @@ impl<T: Clone + Default> SegmentedGenerationArray<T> {
         page.try_reserve_exact(PAGE_SIZE).map_err(|_| {
             WasmExactSearchError::InvalidProblem("setup_parallel_segment_page_unavailable")
         })?;
-        page.resize_with(PAGE_SIZE, GenerationSlot::default);
-        self.pages.push(page.into_boxed_slice());
+        page.resize_with(PAGE_SIZE, T::default);
+        self.pages.push(GenerationPage {
+            initialized: [0; PAGE_WORD_COUNT],
+            values: page.into_boxed_slice(),
+        });
         Ok(())
     }
 }

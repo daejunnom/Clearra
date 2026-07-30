@@ -1,3 +1,5 @@
+import type { ClearraDesktopRequest } from '../host';
+
 export type ScoreMode = 'off' | 'minimum-cover' | 'summary';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
@@ -342,7 +344,10 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   return tokens.join(' ');
 }
 
-export function workspaceRequestForDesktop(request: SolverWorkspaceRequest, language: 'en' | 'ko') {
+export function workspaceRequestForDesktop(
+  request: SolverWorkspaceRequest,
+  language: 'en' | 'ko'
+): ClearraDesktopRequest {
   const parsedQueue = parseBrowserQueueInput(request.queue);
   return {
     app_request_model: 'clearra-app/AppRequest' as const,

@@ -690,6 +690,12 @@ impl DistributedCandidateProducer {
                 WasmDistributedProgress {
                     geometry_nodes: usize::try_from(progress.visited_states).unwrap_or(usize::MAX),
                     candidates: usize::try_from(progress.tasks_dispatched).unwrap_or(usize::MAX),
+                    pass_index: progress.patterns_completed,
+                    pass_count: progress.pattern_count.max(1),
+                    layer_index: progress.layer_index,
+                    layer_count: progress.layer_count,
+                    layer_done: progress.layer_done,
+                    layer_total: progress.layer_total,
                     ..WasmDistributedProgress::default()
                 }
             }

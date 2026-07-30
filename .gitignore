@@ -69,6 +69,7 @@ Thumbs.db
 /research-data/
 /*.local
 /*.local.*
+/packages/ctk3/dist/
 
 # Root handoff/design notes
 /Clearra 핸드오프.md

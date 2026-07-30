@@ -18,12 +18,18 @@ import {
 } from './pc4TablebaseAssets';
 
 type ClearraWorkerMessage =
-  | { type: 'prewarm_runtime'; workerCount: number; tablebaseRequested?: boolean }
+  | {
+      type: 'prewarm_runtime';
+      workerCount: number;
+      tablebaseRequested?: boolean;
+      lifecycleOwnerId?: string;
+    }
   | {
       type: 'run_command_text';
       commandText?: string;
       prewarmWorkerCount?: number;
       tablebaseRequested?: boolean;
+      lifecycleOwnerId?: string;
     }
   | { type: 'cancel_job'; jobId?: number }
   | { type: 'dispose_runtime' };
@@ -48,6 +54,7 @@ let tablebaseWarmup: Promise<void> | null = null;
 let tablebaseWarmupGeneration = 0;
 let tablebaseWarmupAttempted = false;
 let failClosed = false;
+let lifecycleOwnerId = '';
 
 self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
   if (message.data.type === 'dispose_runtime') {
@@ -55,6 +62,7 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
     return;
   }
   if (message.data.type === 'prewarm_runtime') {
+    updateLifecycleOwner(message.data.lifecycleOwnerId);
     startRuntimePrewarm(
       message.data.workerCount,
       message.data.tablebaseRequested ?? false
@@ -65,6 +73,7 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
     cancelActiveJob(message.data.jobId);
     return;
   }
+  updateLifecycleOwner(message.data.lifecycleOwnerId);
   void runCommandText(
     message.data.commandText ?? '',
     message.data.prewarmWorkerCount ?? requestedPrewarmWorkerCount,
@@ -119,7 +128,7 @@ async function runCommandText(
       return;
     }
     failureCode = 'E_WASM_EXECUTION_FAILED';
-    job.runner = new ClearraProductJobRunner(wasm, jobId);
+    job.runner = new ClearraProductJobRunner(wasm, jobId, lifecycleOwnerId);
     const terminal = await job.runner.run(commandText, (event) => {
       if (event.event === 'started') return;
       const emitted = withJobId(event, job.id);
@@ -170,7 +179,11 @@ function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebase
       });
       await Promise.all([
         gpuWarmup,
-        prewarmDistributedWorkers(boundedWorkerCount, wasm.compiled_module()),
+        prewarmDistributedWorkers(
+          boundedWorkerCount,
+          wasm.compiled_module(),
+          lifecycleOwnerId
+        ),
         startTablebaseWarmupAfterWasm(wasm)
       ]);
       if (generation === runtimePrewarmGeneration) {
@@ -205,6 +218,10 @@ function setTablebaseRequested(requested: boolean) {
   }
   releasePc4TablebaseAssets();
   postTablebaseWarmupPhase('disabled', 0);
+}
+
+function updateLifecycleOwner(ownerId: string | undefined) {
+  if (ownerId) lifecycleOwnerId = ownerId;
 }
 
 function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
@@ -350,13 +367,19 @@ function closeFailClosedWorker() {
 }
 
 function isTerminal(event: ClearraWasmWorkerEvent) {
-  return event.event === 'final_response' || event.event === 'failed' || event.event === 'cancelled';
+  return (
+    event.event === 'final_response' ||
+    event.event === 'failed' ||
+    event.event === 'cancelled' ||
+    event.event === 'terminated'
+  );
 }
 
 function requiresFailClosedRelease(event: ClearraWasmWorkerEvent) {
   return (
     event.event === 'failed' ||
     event.event === 'cancelled' ||
+    event.event === 'terminated' ||
     (event.event === 'final_response' && event.response.status !== 'success')
   );
 }

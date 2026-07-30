@@ -75,13 +75,18 @@
     };
     if (runtime === 'web') workerController.prewarm(workers, request.tablebaseEnabled);
     if (runtime === 'desktop') resumeDesktopJobPolling();
+    const handlePageHide = () => disposeWorkspace();
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
   });
 
-  onDestroy(() => {
+  onDestroy(disposeWorkspace);
+
+  function disposeWorkspace() {
     stopElapsedTimer();
     workerController.dispose();
     if (runtime === 'desktop') disposeDesktopJobPolling();
-  });
+  }
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
@@ -89,12 +94,22 @@
   }
 
   function updateRequest(next: SolverWorkspaceRequest) {
-    const workersChanged = next.workers !== request.workers;
-    const tablebaseChanged = next.tablebaseEnabled !== request.tablebaseEnabled;
-    request = next;
+    const automaticRequest = withAutomaticBackend(next);
+    const workersChanged = automaticRequest.workers !== request.workers;
+    const tablebaseChanged = automaticRequest.tablebaseEnabled !== request.tablebaseEnabled;
+    request = automaticRequest;
     if (runtime === 'web' && (workersChanged || tablebaseChanged)) {
-      workerController.prewarm(next.workers, next.tablebaseEnabled);
+      workerController.prewarm(automaticRequest.workers, automaticRequest.tablebaseEnabled);
     }
+  }
+
+  function withAutomaticBackend(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
+    if (next.backend === 'auto' && next.gpuDevice === 'auto') return next;
+    return {
+      ...next,
+      backend: 'auto',
+      gpuDevice: 'auto'
+    };
   }
 
   function setLines(lines: number) {
@@ -117,15 +132,16 @@
 
   async function run() {
     if (active || validationCodes.length) return;
-    const normalized = clearCompletedRows(request.boardMask, request.lines);
+    const automaticRequest = withAutomaticBackend(request);
+    const normalized = clearCompletedRows(automaticRequest.boardMask, automaticRequest.lines);
     const executionRequest = normalized.clearedRows > 0
       ? {
-          ...request,
+          ...automaticRequest,
           lines: normalized.remainingLines,
           boardMask: normalized.boardMask
         }
-      : request;
-    if (normalized.clearedRows > 0) request = executionRequest;
+      : automaticRequest;
+    if (executionRequest !== request) request = executionRequest;
     clearedRowsWarning = normalized.clearedRows;
     resultTargetLines = executionRequest.lines;
     startElapsedTimer();
@@ -162,7 +178,12 @@
   }
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {
-    return status === 'completed' || status === 'failed' || status === 'cancelled';
+    return (
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'terminated'
+    );
   }
 
   function importBoard(event: CustomEvent<{ boardMask: bigint; lines: number }>) {
@@ -183,11 +204,10 @@
 
 <WorkspaceShell
     activeMode="pc"
-    {language}
-    {active}
-    statusLabel={label(runtimeView.status)}
-    runtimeLabel={label(runtime === 'web' ? 'runtimeWeb' : 'runtimeDesktop')}
-    workspaceLabel={label('workspace')}
+  {language}
+  {active}
+  statusLabel={label(runtimeView.status)}
+  workspaceLabel={label('workspace')}
     dimensionLabel={label('targetLines')}
     dimensionValue={request.lines}
     dimensionMin={1}

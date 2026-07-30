@@ -1,9 +1,17 @@
 <script lang="ts">
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
-  import type { SolutionCopyFormat } from './solutionExport';
+  import SolutionCopyAllButton from './SolutionCopyAllButton.svelte';
+  import type {
+    SolutionCopyFormat,
+    SolutionExportPage
+  } from './solutionExport';
 
   export let value: SolutionCopyFormat = 'fumen';
   export let language: WorkspaceLanguage;
+  export let solutionKeys: string[] = [];
+  export let loadPages:
+    | ((signal?: AbortSignal) => Promise<SolutionExportPage[]> | SolutionExportPage[])
+    | null = null;
 
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
@@ -16,19 +24,27 @@
     <strong>{label('solutionCopyFormat')}</strong>
     <span>{label('solutionCopyFormatHelp')}</span>
   </div>
-  <div class="segments" role="group" aria-label={label('solutionCopyFormat')}>
-    <button
-      type="button"
-      class:active={value === 'fumen'}
-      aria-pressed={value === 'fumen'}
-      on:click={() => (value = 'fumen')}
-    >Fumen</button>
-    <button
-      type="button"
-      class:active={value === 'ctk'}
-      aria-pressed={value === 'ctk'}
-      on:click={() => (value = 'ctk')}
-    >CTK</button>
+  <div class="copy-actions">
+    <div class="segments" role="group" aria-label={label('solutionCopyFormat')}>
+      <button
+        type="button"
+        class:active={value === 'fumen'}
+        aria-pressed={value === 'fumen'}
+        on:click={() => (value = 'fumen')}
+      >Fumen</button>
+      <button
+        type="button"
+        class:active={value === 'ctk'}
+        aria-pressed={value === 'ctk'}
+        on:click={() => (value = 'ctk')}
+      >CTK3</button>
+    </div>
+    <SolutionCopyAllButton
+      format={value}
+      {language}
+      {solutionKeys}
+      {loadPages}
+    />
   </div>
 </div>
 
@@ -69,6 +85,13 @@
     overflow: hidden;
   }
 
+  .copy-actions {
+    align-items: center;
+    display: flex;
+    flex: 0 0 auto;
+    gap: 7px;
+  }
+
   button {
     background: #fff;
     border: 0;
@@ -95,6 +118,12 @@
       align-items: stretch;
       flex-direction: column;
       gap: 8px;
+    }
+
+    .copy-actions {
+      align-items: stretch;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
     }
   }
 </style>

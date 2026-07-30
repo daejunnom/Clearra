@@ -9,14 +9,19 @@ export class ClearraProductJobRunner {
 
   constructor(
     private readonly wasm: ClearraWasmModule,
-    private readonly jobId: number
+    private readonly jobId: number,
+    private readonly lifecycleOwnerId: string
   ) {}
 
   async run(
     commandText: string,
     onEvent: (event: ClearraWasmWorkerEvent) => void
   ): Promise<ClearraWasmWorkerEvent> {
-    const distributed = new DistributedWasmJobRunner(this.wasm, this.jobId);
+    const distributed = new DistributedWasmJobRunner(
+      this.wasm,
+      this.jobId,
+      this.lifecycleOwnerId
+    );
     try {
       onEvent(preparationProgressEvent(this.jobId));
       const plan = distributed.prepare(commandText);
@@ -80,13 +85,20 @@ function preparationProgressEvent(jobId: number): ClearraWasmWorkerEvent {
         candidates_emitted: 0,
         geometry_family_count: null,
         candidates_verified: 0,
+        producer_build_nodes: 0,
+        producer_coverage_checks: 0,
         build_nodes: 0,
         coverage_checks: 0,
+        ready_workers: 0,
         active_workers: 0,
         worker_count: 0,
         oldest_batch_ms: 0,
         pass_index: 0,
-        pass_count: 1
+        pass_count: 1,
+        layer_index: 0,
+        layer_count: 0,
+        layer_done: 0,
+        layer_total: 0
       }
     }
   };

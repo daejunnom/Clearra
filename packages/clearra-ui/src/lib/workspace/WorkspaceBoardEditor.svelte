@@ -11,16 +11,20 @@
   } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
-  import { decodeFumenField } from './fumenFieldImport';
+  import { decodeInterchangeField } from './fumenFieldImport';
   import {
     boardCellMask,
     boardCellOccupied,
     mirrorBoardMask,
     occupiedCellCount
   } from './solverWorkspaceModel';
-  import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import {
+    workspaceMessage,
+    type WorkspaceLanguage,
+    type WorkspaceMessageKey
+  } from './workspaceI18n';
 
-  export type BoardEditorMode = 'pc' | 'build-probability' | 'forward';
+  type BoardEditorMode = 'pc' | 'build-probability' | 'forward';
   type Layer = 'existing' | 'target';
   type Snapshot = { existingMask: bigint; targetMask: bigint };
 
@@ -45,16 +49,22 @@
   let dragExisting = existingMask;
   let dragTarget = targetMask;
   let boardElement: HTMLDivElement | null = null;
-  let fumenInput = '';
-  let fumenError = false;
+  let importInput = '';
+  let importError = false;
   let lastExisting = existingMask;
   let lastTarget = targetMask;
+  let boardLabel: WorkspaceMessageKey = 'field';
 
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: existingCells = occupiedCellCount(trimMask(existingMask));
   $: targetCells = occupiedCellCount(trimMask(targetMask));
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
-  $: boardLabel = mode === 'build-probability' ? 'buildField' : mode === 'forward' ? 'existingField' : 'field';
+  $: boardLabel =
+    mode === 'build-probability'
+      ? 'buildField'
+      : mode === 'forward'
+        ? 'existingField'
+        : 'field';
   $: if (existingMask !== lastExisting || targetMask !== lastTarget) {
     undoStack = [];
     redoStack = [];
@@ -213,16 +223,16 @@
     return trimMask(compacted);
   }
 
-  function importFumen() {
+  function importField() {
     try {
-      const imported = decodeFumenField(fumenInput, mode === 'pc' ? 6 : 24);
-      fumenError = false;
+      const imported = decodeInterchangeField(importInput, mode === 'pc' ? 6 : 24);
+      importError = false;
       dispatch('import', {
         existingMask: imported.boardMask,
         height: Math.max(height, imported.occupiedHeight || 1)
       });
     } catch {
-      fumenError = true;
+      importError = true;
     }
   }
 
@@ -288,24 +298,24 @@
 
   <div class="fumen-import">
     <label>
-      <span>{label(mode === 'pc' ? 'fumenInput' : 'fumenExistingField')}</span>
+      <span>{label(mode === 'pc' ? 'fieldImport' : 'existingFieldImport')}</span>
       <input
-        value={fumenInput}
-        placeholder="v115@..."
+        value={importInput}
+        placeholder="v115@... / ctk3_..."
         spellcheck="false"
-        aria-invalid={fumenError}
+        aria-invalid={importError}
         on:input={(event) => {
-          fumenInput = (event.currentTarget as HTMLInputElement).value;
-          fumenError = false;
+          importInput = (event.currentTarget as HTMLInputElement).value;
+          importError = false;
         }}
-        on:keydown={(event) => event.key === 'Enter' && importFumen()}
+        on:keydown={(event) => event.key === 'Enter' && importField()}
       />
     </label>
-    <button type="button" disabled={!fumenInput.trim()} on:click={importFumen}>
+    <button type="button" disabled={!importInput.trim()} on:click={importField}>
       <Upload size={15} strokeWidth={1.8} />{label('loadField')}
     </button>
   </div>
-  {#if fumenError}<p class="fumen-error" role="alert">{label('fumenInvalid')}</p>{/if}
+  {#if importError}<p class="fumen-error" role="alert">{label('fieldImportInvalid')}</p>{/if}
 
   {#if mode === 'build-probability'}
     <div class="layer-help">

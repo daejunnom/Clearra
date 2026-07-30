@@ -82,6 +82,10 @@ pub struct WasmDistributedProgress {
     pub coverage_checks: usize,
     pub pass_index: usize,
     pub pass_count: usize,
+    pub layer_index: usize,
+    pub layer_count: usize,
+    pub layer_done: usize,
+    pub layer_total: usize,
 }
 
 impl WasmDistributedProgress {
@@ -203,12 +207,9 @@ impl WasmCpuCandidateProducer {
     }
 
     pub fn progress(&self) -> WasmDistributedProgress {
-        WasmDistributedProgress {
-            geometry_nodes: self.session.geometry_expanded_nodes(),
-            candidates: self.candidate_count,
-            pass_count: 1,
-            ..WasmDistributedProgress::default()
-        }
+        let mut progress = self.session.distributed_progress();
+        progress.candidates = self.candidate_count;
+        progress
     }
 }
 

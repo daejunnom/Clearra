@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowDownToLine, CheckCircle2, Search } from '@lucide/svelte';
+  import { ArrowDownToLine, Search } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
@@ -44,11 +44,6 @@
     return value === undefined ? '—' : new Intl.NumberFormat(language).format(value);
   }
 
-  function bytes(value: number | undefined): string {
-    if (value === undefined) return '—';
-    return `${(value / 1_048_576).toFixed(value >= 104_857_600 ? 0 : 1)} MiB`;
-  }
-
   function summaryNumber(value: string | undefined): number | undefined {
     if (value === undefined) return undefined;
     const parsed = Number(value);
@@ -76,25 +71,19 @@
   statusLabel={label(view.status)}
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
-  runtimeTitle={label('runtime')}
-  runtimeLabel={label(view.kind === 'web' ? 'runtimeWeb' : 'runtimeDesktop')}
-  progressAriaLabel={label('progress')}
+  progressProfile="build"
+  {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}
   progressDone={view.progressDone}
   progressTotal={view.progressTotal}
-  progressDoneText={number(view.progressDone)}
-  progressTotalText={number(view.progressTotal)}
-  overviewLabel={label('overview')}
-  solutionsLabel={label('solutions')}
-  solutionCountText={number(solutionKeys.length)}
-  diagnosticsLabel={label('diagnostics')}
-  diagnosticCountText={number(view.diagnostics.length)}
-  let:activeTab
+  progressTelemetry={view.progressTelemetry}
+  failureDiagnostics={view.diagnostics}
+  failureMessage={view.error ?? ''}
 >
     {#if !hasOutput && view.status === 'idle'}
       <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noBuildProbabilityResult')}</p></div>
-    {:else if activeTab === 'overview'}
+    {:else if view.status !== 'failed' && view.status !== 'terminated'}
       <div class="result-grid">
         <div class="preview-panel">
           <h3>{label(canContinue ? 'clearedBuildResult' : 'requestedBuild')}</h3>
@@ -142,44 +131,33 @@
               <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber(summary.mirror_union_added_pattern_count))}</dd></div>
             {/if}
             <div><dt>{label('candidateTilings')}</dt><dd>{number(report?.packing_candidate_count)}</dd></div>
-            <div><dt>{label('searchedNodes')}</dt><dd>{number(report?.searched_nodes)}</dd></div>
-            <div><dt>{label('memory')}</dt><dd>{bytes(report?.peak_cpu_bytes)}</dd></div>
-            <div><dt>{label('probabilityComplete')}</dt><dd>{label(report?.probability_complete ? 'complete' : 'incomplete')}</dd></div>
-            <div><dt>{label('countComplete')}</dt><dd>{label(report?.count_complete ? 'complete' : 'incomplete')}</dd></div>
-            <div><dt>{label('actualBackend')}</dt><dd>{report?.backend_selected ?? '—'}</dd></div>
-            <div><dt>{label('workersUsed')}</dt><dd>{number(report?.workers_used)}</dd></div>
-            {#if aggregation === 'spin'}
-              <div><dt>{label('executionDistribution')}</dt><dd>{summary.spin_coverage_execution_distribution ?? '—'}</dd></div>
-            {/if}
           </dl>
         </div>
       </div>
-      <div class="copy-format-row">
-        <SolutionCopyFormatControl bind:value={copyFormat} {language} />
-      </div>
-    {:else if activeTab === 'solutions'}
-      {#if solutionKeys.length}
-        <SolutionGallery
-          {solutionKeys}
-          solutionSetHash={report?.normalized_solution_set_hash ?? ''}
-          targetLines={height}
-          {language}
-          {copyFormat}
-        />
-      {:else}
-        <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
-      {/if}
-    {:else}
-      {#if view.diagnostics.length || view.error}
-        <ul class="diagnostic-list">
-          {#each view.diagnostics as diagnostic}
-            <li class:error={diagnostic.severity === 'error'}><span>{diagnostic.severity}</span><div><strong>{diagnostic.code}</strong><p>{diagnostic.message}</p></div></li>
-          {/each}
-          {#if view.error}<li class="error"><span>error</span><div><strong>{label('failed')}</strong><p>{view.error}</p></div></li>{/if}
-        </ul>
-      {:else}
-        <div class="empty-state"><CheckCircle2 size={28} strokeWidth={1.5} /><p>{label('noDiagnostics')}</p></div>
-      {/if}
+
+      <section class="solutions-section" aria-label={label('solutions')}>
+        <div class="solutions-heading">
+          <h3>{label('solutions')}</h3>
+          {#if solutionKeys.length}
+            <SolutionCopyFormatControl
+              bind:value={copyFormat}
+              {language}
+              {solutionKeys}
+            />
+          {/if}
+        </div>
+        {#if solutionKeys.length}
+          <SolutionGallery
+            {solutionKeys}
+            solutionSetHash={report?.normalized_solution_set_hash ?? ''}
+            targetLines={height}
+            {language}
+            {copyFormat}
+          />
+        {:else}
+          <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
+        {/if}
+      </section>
     {/if}
   </ResultWorkspaceFrame>
 
@@ -187,7 +165,6 @@
   .empty-state { align-items: center; color: #87918d; display: flex; flex-direction: column; justify-content: center; min-height: 220px; text-align: center; }
   .empty-state p { font-size: 13px; margin: 12px 0 0; }
   .result-grid { display: grid; gap: 28px; grid-template-columns: minmax(260px, 430px) minmax(0, 1fr); }
-  .copy-format-row { margin-top: 20px; }
   h3 { color: #36423e; font-size: 12px; margin: 0 0 10px; }
   .board-frame { background: #101817; border: 1px solid #253330; border-radius: 6px; padding: 12px; }
   .board { aspect-ratio: calc(10 / var(--board-rows)); display: grid; grid-template-columns: repeat(10, 1fr); grid-template-rows: repeat(var(--board-rows), 1fr); margin: 0 auto; max-height: 520px; max-width: 100%; }
@@ -209,11 +186,8 @@
   dl div { align-items: baseline; border-bottom: 1px solid #e5e9e6; display: flex; gap: 12px; justify-content: space-between; padding: 10px; }
   dt { color: #68736f; font-size: 11px; }
   dd { color: #24312d; font-size: 12px; font-weight: 700; margin: 0; overflow-wrap: anywhere; text-align: right; }
-  .diagnostic-list { display: grid; gap: 1px; list-style: none; margin: 0; padding: 0; }
-  .diagnostic-list li { align-items: start; background: #f4f6f5; display: grid; gap: 14px; grid-template-columns: 72px minmax(0, 1fr); padding: 12px; }
-  .diagnostic-list li > span { color: #8b5c19; font-size: 10px; font-weight: 800; text-transform: uppercase; }
-  .diagnostic-list li.error > span { color: #a63d32; }
-  .diagnostic-list strong, .diagnostic-list p { font-size: 12px; margin: 0; }
-  .diagnostic-list p { color: #68736f; margin-top: 4px; }
+  .solutions-section { border-top: 1px solid #dce2de; margin-top: 24px; padding-top: 20px; }
+  .solutions-heading { align-items: center; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 12px; }
+  .solutions-heading h3 { margin: 0; }
   @media (max-width: 780px) { .result-grid { grid-template-columns: 1fr; } dl { grid-template-columns: 1fr; } }
 </style>

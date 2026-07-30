@@ -45,12 +45,17 @@
     const workers = defaultWorkerCount(navigator.hardwareConcurrency);
     request = { ...request, workers };
     workerController.prewarm(workers);
+    const handlePageHide = () => disposeWorkspace();
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
   });
 
-  onDestroy(() => {
+  onDestroy(disposeWorkspace);
+
+  function disposeWorkspace() {
     stopElapsedTimer();
     workerController.dispose();
-  });
+  }
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
@@ -125,7 +130,12 @@
   }
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {
-    return status === 'completed' || status === 'failed' || status === 'cancelled';
+    return (
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'terminated'
+    );
   }
 </script>
 
@@ -140,7 +150,6 @@
     {language}
     {active}
     statusLabel={label(runtimeView.status)}
-    runtimeLabel={label('runtimeWeb')}
     workspaceLabel={label('buildProbability')}
     dimensionLabel={label('fieldHeight')}
     dimensionValue={request.height}

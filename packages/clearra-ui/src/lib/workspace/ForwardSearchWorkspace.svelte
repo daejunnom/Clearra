@@ -18,7 +18,7 @@
   } from './forwardSearchModel';
   import { defaultWorkerCount } from './solverWorkspaceModel';
   import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
-  import { workspaceViewFromWasm } from './workspaceRuntime';
+  import { workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let tool: ForwardTool;
   export let workerFactory: (() => Worker) | null = null;
@@ -26,6 +26,9 @@
   const workerController = new WasmTerminalWorkerController(workerFactory);
   let request = createDefaultForwardSearchRequest(tool);
   let language: WorkspaceLanguage = 'en';
+  let elapsedMs = 0;
+  let runStartedAt = 0;
+  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
   let resultHeight = request.height;
   let resultInitialBoardMask = request.boardMask;
   let resultDamageAggregation: ForwardDamageAggregation = request.damageAggregation;
@@ -37,15 +40,22 @@
   $: validationCodes = forwardSearchValidationCodes(request);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
     language = preferredWorkspaceLanguage(localStorage.getItem('clearra-language') ?? navigator.language);
     workerController.prewarm(defaultWorkerCount(navigator.hardwareConcurrency));
+    const handlePageHide = () => disposeWorkspace();
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
   });
 
-  onDestroy(() => {
+  onDestroy(disposeWorkspace);
+
+  function disposeWorkspace() {
+    stopElapsedTimer();
     workerController.dispose();
-  });
+  }
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
@@ -84,12 +94,39 @@
     resultInitialBoardMask = request.boardMask;
     resultDamageAggregation = request.damageAggregation;
     resultMinimumDamage = request.minimumDamage;
+    startElapsedTimer();
     updateWasmCommandText(buildForwardSearchCommand(request));
     workerController.run();
   }
 
   function cancel() {
     if (active) workerController.cancel();
+  }
+
+  function startElapsedTimer() {
+    stopElapsedTimer();
+    elapsedMs = 0;
+    runStartedAt = performance.now();
+    elapsedTimer = setInterval(() => {
+      elapsedMs = performance.now() - runStartedAt;
+    }, 100);
+  }
+
+  function stopElapsedTimer() {
+    if (elapsedTimer !== null) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = null;
+    }
+    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
+  }
+
+  function isTerminal(status: WorkspaceRuntimeStatus): boolean {
+    return (
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'terminated'
+    );
   }
 
 </script>
@@ -104,7 +141,6 @@
     {language}
     {active}
     statusLabel={label(runtimeView.status)}
-    runtimeLabel={label('runtimeWeb')}
     workspaceLabel={label(tool === 'damage' ? 'maximumDamage' : 'spinFinder')}
     dimensionLabel={label('fieldHeight')}
     dimensionValue={request.height}
@@ -135,6 +171,8 @@
     report={runtimeView.searchReport}
     diagnostics={runtimeView.diagnostics}
     status={runtimeView.status}
+    error={runtimeView.error ?? ''}
+    {elapsedMs}
     progressLabel={runtimeView.progressLabel}
     progressDone={runtimeView.progressDone}
     progressTotal={runtimeView.progressTotal}

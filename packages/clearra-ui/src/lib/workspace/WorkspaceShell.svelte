@@ -4,12 +4,12 @@
 
   import WorkspaceHeader from './WorkspaceHeader.svelte';
   import type { WorkspaceLanguage } from './workspaceI18n';
+  import type { WorkspaceMode } from './workspaceMode';
 
-  export let activeMode: 'pc' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
+  export let activeMode: WorkspaceMode;
   export let language: WorkspaceLanguage;
   export let active = false;
   export let statusLabel: string;
-  export let runtimeLabel: string;
   export let workspaceLabel: string;
   export let dimensionLabel: string;
   export let dimensionValue: number;
@@ -19,6 +19,8 @@
   export let cancelLabel: string;
   export let runLabel: string;
   export let runDisabled = false;
+  export let singlePanel = false;
+  export let showActions = true;
 
   const dispatch = createEventDispatcher<{
     language: WorkspaceLanguage;
@@ -39,7 +41,6 @@
     {language}
     {active}
     {statusLabel}
-    {runtimeLabel}
     on:language={(event) => dispatch('language', event.detail)}
   />
 
@@ -59,19 +60,21 @@
     {:else}
       <div class="nav-spacer"></div>
     {/if}
-    <div class="run-actions">
-      <button class="cancel" type="button" disabled={!active} on:click={() => dispatch('cancel')}>
-        <Square size={14} fill="currentColor" />{cancelLabel}
-      </button>
-      <button class="run" type="button" disabled={active || runDisabled} on:click={() => dispatch('run')}>
-        <Play size={16} fill="currentColor" />{runLabel}
-      </button>
-    </div>
+    {#if showActions}
+      <div class="run-actions">
+        <button class="cancel" type="button" disabled={!active} on:click={() => dispatch('cancel')}>
+          <Square size={14} fill="currentColor" />{cancelLabel}
+        </button>
+        <button class="run" type="button" disabled={active || runDisabled} on:click={() => dispatch('run')}>
+          <Play size={16} fill="currentColor" />{runLabel}
+        </button>
+      </div>
+    {/if}
   </section>
 
   <section class="workspace-band" bind:this={workspaceRegion}>
     <slot name="notice" />
-    <div class="workspace-grid">
+    <div class="workspace-grid" class:single-panel={singlePanel}>
       <div class="workspace-editor"><slot name="editor" /></div>
       <div class="workspace-controls"><slot name="controls" /></div>
     </div>
@@ -109,11 +112,22 @@
   .workspace-editor, .workspace-controls { min-width: 0; }
   .workspace-editor { padding-right: 24px; }
   .workspace-controls { border-left: 1px solid #d9dfdb; padding-left: 24px; }
+  .workspace-grid.single-panel { grid-template-columns: minmax(0, 1fr); }
+  .workspace-grid.single-panel .workspace-editor { display: none; }
+  .workspace-grid.single-panel .workspace-controls {
+    border-left: 0;
+    padding-left: 0;
+  }
 
   @media (max-width: 980px) {
     .workspace-grid { grid-template-columns: 1fr; }
     .workspace-editor { padding-right: 0; }
     .workspace-controls { border-left: 0; border-top: 1px solid #d9dfdb; margin-top: 24px; padding-left: 0; padding-top: 24px; }
+    .workspace-grid.single-panel .workspace-controls {
+      border-top: 0;
+      margin-top: 0;
+      padding-top: 0;
+    }
   }
   @media (max-width: 560px) {
     .workspace-nav { align-items: stretch; flex-wrap: wrap; padding: 16px 16px 2px; }

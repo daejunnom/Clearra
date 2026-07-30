@@ -69,8 +69,14 @@ export type ClearraDistributedCoreProgress = {
   geometryNodes: number;
   candidateCount: number;
   candidateFamilyCount: string | null;
+  buildNodes: number;
+  coverageChecks: number;
   passIndex: number;
   passCount: number;
+  layerIndex: number;
+  layerCount: number;
+  layerDone: number;
+  layerTotal: number;
 };
 
 export type ClearraDistributedVerifierProgress = {
@@ -112,10 +118,16 @@ type ClearraRawWasmExports = {
   ) => number;
   clearra_wasm_distributed_progress_geometry_nodes: () => number;
   clearra_wasm_distributed_progress_candidate_count: () => number;
+  clearra_wasm_distributed_progress_build_nodes: () => number;
+  clearra_wasm_distributed_progress_coverage_checks: () => number;
   clearra_wasm_distributed_progress_candidate_family_count_available: () => number;
   clearra_wasm_distributed_progress_candidate_family_count_word: (wordIndex: number) => number;
   clearra_wasm_distributed_progress_pass_index: () => number;
   clearra_wasm_distributed_progress_pass_count: () => number;
+  clearra_wasm_distributed_progress_layer_index: () => number;
+  clearra_wasm_distributed_progress_layer_count: () => number;
+  clearra_wasm_distributed_progress_layer_done: () => number;
+  clearra_wasm_distributed_progress_layer_total: () => number;
   clearra_wasm_distributed_merge_partial: () => number;
   clearra_wasm_distributed_finish: (jobId: number, workersUsed: number) => number;
   clearra_wasm_distributed_cancel: () => number;
@@ -341,18 +353,18 @@ function wrapRawModule(
   }
 
   const outputText = () => {
-    const ptr = raw.clearra_wasm_output_ptr();
-    const len = raw.clearra_wasm_output_len();
+    const ptr = raw.clearra_wasm_output_ptr() >>> 0;
+    const len = raw.clearra_wasm_output_len() >>> 0;
     return decoder.decode(new Uint8Array(raw.memory.buffer, ptr, len));
   };
   const outputBytes = () => {
-    const ptr = raw.clearra_wasm_output_ptr();
-    const len = raw.clearra_wasm_output_len();
+    const ptr = raw.clearra_wasm_output_ptr() >>> 0;
+    const len = raw.clearra_wasm_output_len() >>> 0;
     return new Uint8Array(raw.memory.buffer, ptr, len).slice().buffer;
   };
   const lastPanic = () => {
-    const ptr = raw.clearra_wasm_last_panic_ptr();
-    const len = raw.clearra_wasm_last_panic_len();
+    const ptr = raw.clearra_wasm_last_panic_ptr() >>> 0;
+    const len = raw.clearra_wasm_last_panic_len() >>> 0;
     return len === 0 ? null : decoder.decode(new Uint8Array(raw.memory.buffer, ptr, len));
   };
   const requireOk = (status: number) => {
@@ -361,12 +373,12 @@ function wrapRawModule(
   const setCommand = (commandText: string) => {
     const bytes = encoder.encode(commandText);
     requireOk(raw.clearra_wasm_input_resize(bytes.byteLength));
-    const ptr = raw.clearra_wasm_input_ptr();
+    const ptr = raw.clearra_wasm_input_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, bytes.byteLength).set(bytes);
   };
   const setTransfer = (input: ArrayBuffer) => {
     requireOk(raw.clearra_wasm_transfer_resize(input.byteLength));
-    const ptr = raw.clearra_wasm_transfer_ptr();
+    const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
   };
 
@@ -475,8 +487,14 @@ function wrapRawModule(
         geometryNodes: raw.clearra_wasm_distributed_progress_geometry_nodes(),
         candidateCount: raw.clearra_wasm_distributed_progress_candidate_count(),
         candidateFamilyCount: readCandidateFamilyCount(raw),
+        buildNodes: raw.clearra_wasm_distributed_progress_build_nodes(),
+        coverageChecks: raw.clearra_wasm_distributed_progress_coverage_checks(),
         passIndex: raw.clearra_wasm_distributed_progress_pass_index(),
-        passCount: Math.max(1, raw.clearra_wasm_distributed_progress_pass_count())
+        passCount: Math.max(1, raw.clearra_wasm_distributed_progress_pass_count()),
+        layerIndex: raw.clearra_wasm_distributed_progress_layer_index(),
+        layerCount: raw.clearra_wasm_distributed_progress_layer_count(),
+        layerDone: raw.clearra_wasm_distributed_progress_layer_done(),
+        layerTotal: raw.clearra_wasm_distributed_progress_layer_total()
       };
     },
     distributed_merge_partial(partial) {

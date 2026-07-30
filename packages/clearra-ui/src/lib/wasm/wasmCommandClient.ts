@@ -1,4 +1,5 @@
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
+import type { ClearraWasmForcedTerminationReason } from './wasmWorkerLifecycle';
 
 export type ClearraVirtualFileHandle = {
   handle_id: string;
@@ -253,13 +254,20 @@ export type ClearraSearchProgressTelemetry = {
   candidates_emitted: number;
   geometry_family_count: string | null;
   candidates_verified: number;
+  producer_build_nodes: number;
+  producer_coverage_checks: number;
   build_nodes: number;
   coverage_checks: number;
+  ready_workers: number;
   active_workers: number;
   worker_count: number;
   oldest_batch_ms: number;
   pass_index: number;
   pass_count: number;
+  layer_index: number;
+  layer_count: number;
+  layer_done: number;
+  layer_total: number;
 };
 
 export type ClearraWasmWorkerEvent = ClearraWasmWorkerEventBase &
@@ -287,6 +295,12 @@ export type ClearraWasmWorkerEvent = ClearraWasmWorkerEventBase &
       }
     | { event: 'failed'; diagnostics: ClearraDiagnosticReport }
     | { event: 'cancelled'; scope_released: boolean }
+    | {
+        event: 'terminated';
+        reason: ClearraWasmForcedTerminationReason;
+        scope_released: true;
+        diagnostics: ClearraDiagnosticReport;
+      }
   );
 
 export function buildWasmCommandRequest(
@@ -312,13 +326,15 @@ export function postRunCommand(
   worker: Worker,
   request: ClearraWasmCommandRequest,
   prewarmWorkerCount = 1,
-  tablebaseRequested = false
+  tablebaseRequested = false,
+  lifecycleOwnerId?: string
 ) {
   worker.postMessage({
     type: 'run_command_text',
     commandText: request.commandText,
     prewarmWorkerCount,
     tablebaseRequested,
+    lifecycleOwnerId,
     virtualFiles: request.virtualFiles ?? []
   });
 }
@@ -326,9 +342,15 @@ export function postRunCommand(
 export function postPrewarmRuntime(
   worker: Worker,
   workerCount: number,
-  tablebaseRequested = false
+  tablebaseRequested = false,
+  lifecycleOwnerId?: string
 ) {
-  worker.postMessage({ type: 'prewarm_runtime', workerCount, tablebaseRequested });
+  worker.postMessage({
+    type: 'prewarm_runtime',
+    workerCount,
+    tablebaseRequested,
+    lifecycleOwnerId
+  });
 }
 
 export function postCancelJob(worker: Worker, jobId?: number) {

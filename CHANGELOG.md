@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-07-31
+
+- Added the compact, lossless CTK3 field-document format, CTK workspace,
+  Fumen-compatible conversion API, comments, operations, multi-page documents,
+  lazy decoding, and asynchronous large-result export.
+- Prepared the public `ctk3` package with ESM, CommonJS, and TypeScript entry
+  points plus compatibility tests and package documentation.
+- Unified product progress and result surfaces, removed developer-only report
+  details from the normal GUI, and added incremental solution loading and
+  full-result copy controls.
+- Improved setup candidate streaming, segmented worker completion, and
+  forward-search parallel execution while retaining exact result identities.
+- Distinguished user cancellation, forced termination, and runtime failure in
+  browser WASM workers, and made every product search and export path release
+  owned workers and buffers on terminal exit.
+
 ## 0.3.1 - 2026-07-30
 
 - Replaced the setup-wide partial BuildUp graph with bounded candidate

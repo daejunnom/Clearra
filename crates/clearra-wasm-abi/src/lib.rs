@@ -399,6 +399,32 @@ pub extern "C" fn clearra_wasm_distributed_progress_candidate_count() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_build_nodes() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map_or(0, |coordinator| {
+                progress_u32(coordinator.progress().build_nodes)
+            })
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_coverage_checks() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map_or(0, |coordinator| {
+                progress_u32(coordinator.progress().coverage_checks)
+            })
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_candidate_family_count_available() -> u32 {
     ABI_STATE.with(|state| {
         state
@@ -446,6 +472,58 @@ pub extern "C" fn clearra_wasm_distributed_progress_pass_count() -> u32 {
             .as_ref()
             .map_or(1, |coordinator| {
                 progress_u32(coordinator.progress().pass_count.max(1))
+            })
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_index() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map_or(0, |coordinator| {
+                progress_u32(coordinator.progress().layer_index)
+            })
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_count() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map_or(0, |coordinator| {
+                progress_u32(coordinator.progress().layer_count)
+            })
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_done() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map_or(0, |coordinator| {
+                progress_u32(coordinator.progress().layer_done)
+            })
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_total() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map_or(0, |coordinator| {
+                progress_u32(coordinator.progress().layer_total)
             })
     })
 }
