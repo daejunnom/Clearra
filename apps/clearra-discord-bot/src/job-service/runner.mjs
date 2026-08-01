@@ -28,82 +28,102 @@ export class ClearraCommandRunner {
     });
 
     return new Promise((resolve, reject) => {
-      const child = this.spawn(this.config.executable, arguments_, {
-        shell: false,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      let stderr = "";
+      let child;
+      try {
+        child = this.spawn(this.config.executable, arguments_, {
+          shell: false,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        reject(clearraStartError(error));
+        return;
+      }
+      const stdout = [];
+      const stderr = [];
       let outputBytes = 0;
       let settled = false;
-      let timedOut = false;
+      let pendingFailure = null;
       let forceKillTimer = null;
+      let timeout = null;
 
       const terminate = () => {
         if (child.exitCode !== null || child.signalCode !== null) return;
-        child.kill("SIGTERM");
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // A concurrent process exit is confirmed by the close event below.
+        }
         forceKillTimer = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) {
-            child.kill("SIGKILL");
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Keep the slot owned until close confirms process termination.
+            }
           }
         }, this.config.terminationGraceMs);
         forceKillTimer.unref?.();
       };
-      const finish = (callback, keepForceKillTimer = false) => {
+      const finish = (callback) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
-        if (forceKillTimer && !keepForceKillTimer) clearTimeout(forceKillTimer);
+        if (timeout) clearTimeout(timeout);
+        if (forceKillTimer) clearTimeout(forceKillTimer);
         options.signal?.removeEventListener("abort", abort);
         callback();
       };
       const fail = (error) => {
+        if (settled || pendingFailure) return;
+        pendingFailure = error;
+        if (timeout) clearTimeout(timeout);
+        options.signal?.removeEventListener("abort", abort);
         terminate();
-        finish(() => reject(error), true);
       };
-      const append = (current, chunk) => {
-        outputBytes += chunk.length;
-        if (outputBytes > maxOutputBytes) {
+      const append = (chunks, chunk) => {
+        if (settled || pendingFailure) return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (outputBytes + bytes.length > maxOutputBytes) {
           fail(new Error("Clearra produced more output than the job allows."));
-          return current;
+          return;
         }
-        return current + chunk.toString("utf8");
+        outputBytes += bytes.length;
+        chunks.push(bytes);
       };
       const abort = () => fail(abortError("Clearra job was cancelled."));
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        fail(deadlineError());
-      }, timeoutMs);
+      timeout = setTimeout(() => fail(deadlineError()), timeoutMs);
       timeout.unref?.();
 
       options.signal?.addEventListener("abort", abort, { once: true });
-      if (options.signal?.aborted) {
-        abort();
-        return;
-      }
       child.stdout?.on("data", (chunk) => {
-        stdout = append(stdout, chunk);
+        append(stdout, chunk);
       });
       child.stderr?.on("data", (chunk) => {
-        stderr = append(stderr, chunk);
+        append(stderr, chunk);
       });
       child.on("error", (error) => {
-        fail(new Error(`Clearra could not start: ${error.message}`));
+        fail(clearraStartError(error));
       });
       child.on("close", (code, signal) => {
-        if (timedOut || settled) return;
-        finish(() =>
-          resolve({
-            exitCode: code ?? -1,
-            signal: signal ?? null,
-            stdout: stdout.trim(),
-            stderr: stderr.trim(),
-          }),
-        );
+        if (pendingFailure) {
+          finish(() => reject(pendingFailure));
+          return;
+        }
+        finish(() => resolve({
+          exitCode: code ?? -1,
+          signal: signal ?? null,
+          stdout: Buffer.concat(stdout).toString("utf8").trim(),
+          stderr: Buffer.concat(stderr).toString("utf8").trim(),
+        }));
       });
+      if (options.signal?.aborted) abort();
     });
   }
+}
+
+function clearraStartError(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`Clearra could not start: ${detail}`);
 }
 
 function abortError(message) {

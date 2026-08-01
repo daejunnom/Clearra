@@ -6,6 +6,8 @@ steps:
       - apps/clearra-discord-bot/Dockerfile.job-service
       - --build-arg
       - CLEARRA_VERSION=${_CLEARRA_VERSION}
+      - --build-arg
+      - CLEARRA_CLI_SHA256=${_CLEARRA_CLI_SHA256}
       - -t
       - ${_IMAGE}
       - .
@@ -13,5 +15,6 @@ images:
   - ${_IMAGE}
 substitutions:
   _CLEARRA_VERSION: 0.5.1
+  _CLEARRA_CLI_SHA256: ""
 options:
   logging: CLOUD_LOGGING_ONLY

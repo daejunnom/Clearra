@@ -20,8 +20,17 @@ Required in every mode:
 
 ```text
 DISCORD_TOKEN=...
-CLEARRA_JOB_URL=https://jobs.example.test/jobs
 ```
+
+For a remote job service, also configure:
+
+```text
+CLEARRA_JOB_URL=https://jobs.example.test/jobs
+CLEARRA_JOB_TOKEN=...
+```
+
+When `CLEARRA_JOB_URL` is omitted, Clearrabot uses the local
+`http://127.0.0.1:8787/jobs` endpoint.
 
 Cloud Run HTTP interaction mode also requires:
 
@@ -43,9 +52,8 @@ Optional settings:
 
 ```text
 CLEARRA_REGISTER_COMMANDS=1
-CLEARRA_MAX_CONCURRENT_SEARCHES=1
-CLEARRA_SEARCH_WORKERS_PER_SESSION=auto
-CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0
+CLEARRA_WORKER_AUTHORITY=remote
+CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=4
 CLEARRA_SEARCH_TIMEOUT_MS=180000
 CLEARRA_JOB_TOKEN=...
 CLEARRA_JOB_POLL_INTERVAL_MS=250
@@ -120,12 +128,17 @@ expanding the direct Cloud Run endpoint or changing slash-command execution.
 
 ## Search resources
 
-Each search is stopped after three minutes by default. Clearrabot runs one
-search session at a time unless `CLEARRA_MAX_CONCURRENT_SEARCHES` is raised.
-At startup it reads the logical processors visible to its process, reserves one
-by default, and divides the remaining capacity between concurrent sessions.
-Discord users cannot override this allocation with `--workers` or
-`--cpu-threads`.
+Each search is stopped after three minutes by default. When
+`CLEARRA_JOB_URL` is configured, remote worker authority is the default:
+Clearrabot limits outstanding requests with
+`CLEARRA_MAX_CONCURRENT_REMOTE_JOBS`, while each job-service instance derives
+its workers from the CPU limit visible inside that instance.
+
+Set `CLEARRA_WORKER_AUTHORITY=gateway` only for a job service that shares the
+Gateway's CPU allocation. In that mode, `CLEARRA_MAX_CONCURRENT_SEARCHES`,
+`CLEARRA_SEARCH_WORKERS_PER_SESSION`, and
+`CLEARRA_USE_ALL_LOGICAL_PROCESSORS` control the host-local budget. Discord
+users cannot override either policy with `--workers` or `--cpu-threads`.
 
 ## Job service protocol
 
@@ -143,13 +156,28 @@ posts one JSON document to `CLEARRA_JOB_URL`:
 }
 ```
 
-The service may complete immediately or return HTTP 202 with state `accepted`
-or `running`. Clearrabot polls `GET {CLEARRA_JOB_URL}/{id}`. Cancellation and
-timeout send `DELETE {CLEARRA_JOB_URL}/{id}`. Repeated POSTs with the same ID
-must refer to the same job, and the service must enforce `deadlineUnixMs` even
-if the bot disconnects.
+The bundled Cloud Run job service keeps the POST request open and returns a
+terminal result. Compatible external services may instead return state
+`accepted` or `running`, in which case Clearrabot polls
+`GET {CLEARRA_JOB_URL}/{id}`. Cancellation and timeout send
+`DELETE {CLEARRA_JOB_URL}/{id}`. Repeated POSTs with the same ID must refer to
+the same job, and the service must enforce `deadlineUnixMs` even if the bot
+disconnects.
 
-Build CTK3 once, then start a local Gateway instance:
+See [CLOUD_RUN_JOB_SERVICE.md](./CLOUD_RUN_JOB_SERVICE.md) for the bundled
+service's container, authentication, and deployment settings.
+
+For a local smoke test, start the job service on its loopback-only default
+port in one terminal. Point `CLEARRA_EXECUTABLE` at the local Clearra CLI:
+
+```powershell
+$env:CLEARRA_LISTEN_HOST = "127.0.0.1"
+$env:CLEARRA_JOB_SERVICE_ALLOW_UNAUTHENTICATED = "1"
+$env:CLEARRA_EXECUTABLE = "C:\path\to\clearra.exe"
+npm run start:job-service --workspace @clearra/discord-bot
+```
+
+Build CTK3 once, then start the local Gateway in another terminal:
 
 ```powershell
 npm run build --workspace ctk3

@@ -33,7 +33,7 @@ Recommended beta settings:
 CPU:                    6 vCPU
 Memory:                 24 GiB
 Request concurrency:    1
-Minimum instances:      0
+Minimum instances:      1
 Maximum instances:      4
 Request timeout:        240 seconds
 Startup CPU boost:      enabled
@@ -55,9 +55,15 @@ CLEARRA_JOB_TOKEN=<shared opaque bearer token>
 CLEARRA_SEARCH_TIMEOUT_MS=170000
 CLEARRA_SEARCH_WORKERS_PER_SESSION=auto
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0
-CLEARRA_MAX_CONCURRENT_SEARCHES=1
+CLEARRA_MAX_CONCURRENT_JOBS=1
 CLEARRA_MAX_OUTPUT_BYTES=4194304
 ```
+
+Keeping one minimum instance avoids a job-service cold start. Set the minimum
+to zero only when the lower idle cost is more important than first-request
+latency. If an instance is configured to accept more than one concurrent job,
+the service partitions its visible CPU capacity across those jobs and rejects
+worker settings that would oversubscribe the container.
 
 The public Cloud Run URL must still require the application bearer token at the
 job-service layer. `/healthz` is the only unauthenticated endpoint. For local
