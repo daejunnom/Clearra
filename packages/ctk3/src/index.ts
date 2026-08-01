@@ -59,6 +59,21 @@ export {
   type PageRefs,
   type Pages,
 } from "./fumenCompatibility.js";
+export {
+  CTK3_FILE_EXTENSION,
+  CTK3_FILE_MIME_TYPE,
+  createCtk3Blob,
+  ctk3FileSource,
+  decodeCtk3File,
+  encodeCtk3File,
+  isCtk3File,
+  parseCtk3File,
+  readCtk3File,
+  readCtk3FileSource,
+  type Ctk3FileData,
+  type Ctk3FileLike,
+  type ParsedCtk3File,
+} from "./file.js";
 export { Field, Mino, type EncodePage, type EncodePages } from "tetris-fumen";
 
 export const documentDecoder = {

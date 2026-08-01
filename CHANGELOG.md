@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-08-01
+
+- Added native Sfinder-compatible command roles and a compact standalone PC
+  solver page while retaining Clearra's exact search, queue grammar, and CTK3
+  or Fumen result export.
+- Added first-class `.ctk3` file encoding, decoding, downloading, attachment
+  handling, and page-wide document paste routing across the npm package,
+  browser GUI, and Clearrabot.
+- Strengthened exact tiling identity, colored Fumen reconstruction, setup and
+  BuildUp dependency handling, and worker execution contracts without enabling
+  the optional tablebase or dependency analysis in bot searches.
+- Added a slash-command-only Google Cloud Run adapter for Clearrabot with raw
+  Discord Ed25519 request verification, immediate deferred responses, intent-0
+  Gateway fallback, idempotent HTTP jobs, and a disabled-by-default relay
+  boundary for future ordinary-message handling.
+
 ## 0.5.0 - 2026-08-01
 
 - Added Clearrabot with native Clearra command execution, bounded per-session

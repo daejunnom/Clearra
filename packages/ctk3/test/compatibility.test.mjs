@@ -4,22 +4,28 @@ import test from "node:test";
 
 import {
   Ctk3FumenCompatibilityError,
+  CTK3_FILE_EXTENSION,
+  CTK3_FILE_MIME_TYPE,
   Field,
   Mino,
   decodeCtk3,
   decodeCtk3Async,
+  decodeCtk3File,
   decoder,
   documentDecoder,
   documentEncoder,
   encodeCtk3Bundle,
   encodeCtk3Async,
   encodeCtk3Compact,
+  encodeCtk3File,
   encodeCtk3PageSourceAsync,
   encoder,
   inspectCtk3,
+  isCtk3File,
   isCtk3,
   openCtk3Document,
   openCtk3DocumentAsync,
+  parseCtk3File,
 } from "../dist/index.js";
 import {
   decoder as fumenDecoder,
@@ -125,6 +131,31 @@ test("native document API preserves CTK3-only row 23", () => {
   const document = documentDecoder.decode(value);
   assert.equal(document.pages[0].cells[23 * 10 + 4], "T");
   assert.throws(() => decoder.decode(value), Ctk3FumenCompatibilityError);
+});
+
+test(".ctk3 files use the exact UTF-8 document contract", () => {
+  const document = {
+    width: 10,
+    pages: [
+      {
+        height: 2,
+        cells: ["T", "T", "T", ...Array(7).fill(null), null, "T", ...Array(8).fill(null)],
+        comment: "file roundtrip",
+      },
+    ],
+  };
+  const bytes = encodeCtk3File(document);
+  const source = new TextDecoder().decode(bytes);
+  const canonical = decodeCtk3(source);
+  assert.match(source, /^ctk3_/);
+  assert.deepEqual(decodeCtk3File(bytes), canonical);
+  assert.deepEqual(parseCtk3File(bytes), { source, document: canonical });
+  assert.deepEqual(decodeCtk3File(`\ufeff${source}\n`), canonical);
+  assert.equal(CTK3_FILE_EXTENSION, ".ctk3");
+  assert.equal(CTK3_FILE_MIME_TYPE, "application/vnd.clearra.ctk3");
+  assert.equal(isCtk3File("opening.CTK3"), true);
+  assert.equal(isCtk3File({ name: "opening.txt", type: CTK3_FILE_MIME_TYPE }), true);
+  assert.equal(isCtk3File("opening.txt"), false);
 });
 
 test("legacy CTK85 remains readable and CommonJS exposes the same API", () => {

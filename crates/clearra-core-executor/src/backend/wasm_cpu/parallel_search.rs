@@ -13,7 +13,7 @@ use clearra_problem::SearchProblem;
 use crate::{cpu_worker_pool, solution_probability::SolutionCoverage, CorePathStep};
 
 use super::{
-    buildup::{verify_candidate, BuildUpWorkspace},
+    buildup::{verify_candidate, BuildUpWorkspace, CandidateWitnessMode},
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
     geometry::{GeometrySearch, ParallelGeometryPlan, TargetGroup},
@@ -106,6 +106,11 @@ pub(super) fn execute_if_worthwhile(
         return Ok(ParallelSearchDecision::Serial { geometry, reason });
     }
 
+    if !cpu_warmup_requested {
+        cpu_worker_pool::ensure_cpu_workers(requested_workers).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_cpu_worker_pool_unavailable")
+        })?;
+    }
     let mut geometry = geometry;
     geometry.compile_for_parallel(&catalog, &control)?;
     let plan = match geometry.into_parallel_plan(requested_workers) {
@@ -371,8 +376,8 @@ fn candidate_identity_summary(branches: &[BranchSearchOutcome]) -> (usize, u64) 
     let mut count = 0usize;
     let mut digest = 0u64;
     for branch in branches {
+        count = count.saturating_add(branch.candidate_count);
         for candidate_hash in &branch.candidate_hashes {
-            count = count.saturating_add(1);
             digest = mix_digest(digest, *candidate_hash);
         }
     }
@@ -399,7 +404,7 @@ fn reverify_representative(
         target,
         &mut workspace,
         &mut evaluator,
-        false,
+        CandidateWitnessMode::Disabled,
         true,
         0,
         control,

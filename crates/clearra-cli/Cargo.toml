@@ -40,5 +40,6 @@ clearra-scoring = { path = "../clearra-scoring" }
 clearra-setup-search = { path = "../clearra-setup-search" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-validation = { path = "../clearra-validation" }
+clearra-web-command = { path = "../clearra-web-command" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

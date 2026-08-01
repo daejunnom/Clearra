@@ -158,7 +158,7 @@ export function setupFinderValidationCodes(
 export function buildSetupFinderCommand(request: SetupFinderRequest): string {
   const remaining = normalizedSetupResidue(request.remaining);
   return [
-    'clearra setup',
+    'clearra setup-finder',
     `--remaining ${remaining}`,
     request.searchMode === 'qb'
       ? `--mode qb --qb ${normalizedSetupResidue(request.qbQueue)}`

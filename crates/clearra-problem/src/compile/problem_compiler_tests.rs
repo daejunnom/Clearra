@@ -1,5 +1,10 @@
 use clearra_core_domain::{
-    board::board_size::BoardSize, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+    board::board_size::BoardSize,
+    pc::pc_target::PcTarget,
+    piece::piece_kind::PieceKind,
+    solution::{
+        PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
+    },
 };
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCompletionGoal, PcContinuationToken, PcContinuationTokenCodec,
@@ -176,6 +181,59 @@ mod case_scenario_compiles_to_search_problem {
         assert_eq!(problem.exact_pieces(), Some(2));
         assert_eq!(problem.goal(), PcCompletionGoal::ClearToEmpty);
         assert_eq!(problem.exact_target_policy(), ExactTargetPolicy::None);
+    }
+
+    #[test]
+    fn colored_solution_allow_list_preserves_repeated_piece_ambiguity() {
+        let horizontal = StandardBoard64TilingIdentity::from_placements(
+            0,
+            (0..4).map(|y| PiecePlacementMask::new(PieceKind::I, 0b1111u64 << (y * 10))),
+        )
+        .expect("horizontal I tiling");
+        let vertical = StandardBoard64TilingIdentity::from_placements(
+            0,
+            (0..4).map(|x| {
+                PiecePlacementMask::new(
+                    PieceKind::I,
+                    (0..4).fold(0u64, |mask, y| mask | (1u64 << (y * 10 + x))),
+                )
+            }),
+        )
+        .expect("vertical I tiling");
+        assert_ne!(horizontal, vertical);
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 4])),
+            PieceWindow::new(4),
+        )
+        .with_allowed_colored_solution_identities([
+            StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(horizontal),
+        ]);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("scenario problem");
+
+        assert!(problem.allows_solution_identity(&horizontal));
+        assert!(problem.allows_solution_identity(&vertical));
+    }
+}
+
+mod case_percent_compiles_to_coverage_summary {
+    use super::*;
+
+    #[test]
+    fn percent_does_not_request_solution_set_or_trace_evidence() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        );
+
+        let problem = ProblemCompiler::compile_scenario_percent(&query).expect("percent problem");
+
+        assert_eq!(problem.output_policy(), SearchOutputPolicy::CoverageSummary);
+        assert!(!problem.output_policy().retains_solution_set());
+        assert!(!problem.output_policy().retains_representative_trace());
+        assert!(!problem.output_policy().retains_candidate_digest());
     }
 }
 

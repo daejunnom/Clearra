@@ -55,6 +55,7 @@ impl ExecutionPolicyAssembler {
         assemble_policy(ExecutionPolicyInput {
             backend: args.backend(),
             workers: args.workers(),
+            automatic_worker_limit: args.automatic_worker_limit(),
             use_all_logical_processors: args.use_all_logical_processors(),
             cpu_warmup: args.cpu_warmup(),
             gpu_warmup: args.gpu_warmup(),
@@ -77,6 +78,7 @@ impl ExecutionPolicyAssembler {
         assemble_policy(ExecutionPolicyInput {
             backend: args.backend(),
             workers: args.workers(),
+            automatic_worker_limit: None,
             use_all_logical_processors: args.use_all_logical_processors(),
             cpu_warmup: args.cpu_warmup(),
             gpu_warmup: args.gpu_warmup(),
@@ -101,6 +103,7 @@ impl ExecutionPolicyAssembler {
             ExecutionPolicyInput {
                 backend: args.backend(),
                 workers: args.workers(),
+                automatic_worker_limit: None,
                 use_all_logical_processors: args.use_all_logical_processors(),
                 cpu_warmup: args.cpu_warmup(),
                 gpu_warmup: args.gpu_warmup(),
@@ -122,6 +125,7 @@ impl ExecutionPolicyAssembler {
 pub struct ExecutionPolicyInput<'a> {
     pub backend: Option<&'a str>,
     pub workers: Option<usize>,
+    pub automatic_worker_limit: Option<usize>,
     pub use_all_logical_processors: Option<bool>,
     pub cpu_warmup: Option<bool>,
     pub gpu_warmup: Option<bool>,
@@ -187,6 +191,26 @@ fn assemble_policy_on(
             );
         }
         policy = policy.with_workers(workers);
+    }
+    if let Some(workers) = input.automatic_worker_limit {
+        let available = clearra_pc_graph::request::WorkerPolicy::hardware_worker_limit();
+        let default_limit = clearra_pc_graph::request::WorkerPolicy::default_worker_limit();
+        if workers > available {
+            return Err(ExecutionPolicyAssemblyError::WorkerCountExceedsHardware {
+                requested: workers,
+                available,
+            });
+        }
+        if workers > default_limit && !use_all_logical_processors {
+            return Err(
+                ExecutionPolicyAssemblyError::WorkerCountRequiresAllLogicalProcessorsOptIn {
+                    requested: workers,
+                    default_limit,
+                    available,
+                },
+            );
+        }
+        policy = policy.with_automatic_worker_limit(workers);
     }
     policy = policy.with_use_all_logical_processors(use_all_logical_processors);
     if let Some(cpu_warmup) = input.cpu_warmup {

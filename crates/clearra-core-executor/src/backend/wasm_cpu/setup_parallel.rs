@@ -10,7 +10,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         mpsc::{self, SyncSender, TryRecvError},
-        Mutex,
+        Condvar, Mutex,
     },
 };
 
@@ -449,39 +449,77 @@ enum NativeSetupWorkerMessage {
 }
 
 #[cfg(not(target_family = "wasm"))]
+struct NativeSetupWorkerStart {
+    initialization: NativeSetupWorkerInitialization,
+    tasks: Arc<[SetupParallelTask]>,
+    task_queue: Arc<Mutex<VecDeque<NativeSetupTaskLease>>>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+enum NativeSetupWorkerGateState {
+    Preparing,
+    Ready(Arc<NativeSetupWorkerStart>),
+    Aborted,
+}
+
+#[cfg(not(target_family = "wasm"))]
+struct NativeSetupWorkerGate {
+    state: Mutex<NativeSetupWorkerGateState>,
+    ready: Condvar,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl NativeSetupWorkerGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(NativeSetupWorkerGateState::Preparing),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn publish(&self, start: Arc<NativeSetupWorkerStart>) -> Result<(), WasmExactSearchError> {
+        let mut state = self.state.lock().map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_parallel_worker_gate_poisoned")
+        })?;
+        *state = NativeSetupWorkerGateState::Ready(start);
+        self.ready.notify_all();
+        Ok(())
+    }
+
+    fn abort(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            *state = NativeSetupWorkerGateState::Aborted;
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait(&self) -> Result<Option<Arc<NativeSetupWorkerStart>>, WasmExactSearchError> {
+        let mut state = self.state.lock().map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_parallel_worker_gate_poisoned")
+        })?;
+        loop {
+            match &*state {
+                NativeSetupWorkerGateState::Preparing => {
+                    state = self.ready.wait(state).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem("setup_parallel_worker_gate_poisoned")
+                    })?;
+                }
+                NativeSetupWorkerGateState::Ready(start) => {
+                    return Ok(Some(Arc::clone(start)));
+                }
+                NativeSetupWorkerGateState::Aborted => return Ok(None),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn execute_setup_parallel_native(
     query: &SetupSearchQuery,
     worker_count: usize,
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
     let mut coordinator = WasmSetupParallelCoordinator::new(query, worker_count)?;
-    prepare_native_setup_graph(&mut coordinator, control)?;
-
-    let shared = coordinator
-        .shared
-        .as_ref()
-        .ok_or(WasmExactSearchError::InvalidProblem(
-            "setup_parallel_graph_not_ready",
-        ))?;
-    let runtimes: Arc<[SetupParallelConditionRuntime]> = shared
-        .conditions
-        .iter()
-        .enumerate()
-        .map(|(condition_index, condition)| {
-            SetupParallelConditionRuntime::compile(
-                condition_index,
-                condition,
-                shared.query.max_setup_pieces(),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into();
-    let initialization = NativeSetupWorkerInitialization {
-        query: shared.query.clone(),
-        graph: Arc::clone(&shared.coverage_graph),
-        shape_count: shared.graph.shapes.len(),
-        runtimes,
-    };
     let tasks: Arc<[SetupParallelTask]> = Arc::from(coordinator.tasks.clone());
     let workers_used = worker_count.max(1).min(tasks.len().max(1));
     let task_queue = Arc::new(Mutex::new(
@@ -495,20 +533,22 @@ pub(crate) fn execute_setup_parallel_native(
     let background_workers = workers_used.saturating_sub(1);
     let channel_capacity = workers_used.saturating_mul(2).max(1);
     let (sender, receiver) = mpsc::sync_channel(channel_capacity);
+    let worker_gate = Arc::new(NativeSetupWorkerGate::new());
     let mut first_error = None;
     std::thread::scope(|scope| {
         for _ in 0..background_workers {
-            let worker_initialization = initialization.clone();
-            let worker_tasks = Arc::clone(&tasks);
-            let worker_task_queue = Arc::clone(&task_queue);
+            let worker_gate = Arc::clone(&worker_gate);
             let worker_control = control.clone();
             let worker_sender = sender.clone();
             scope.spawn(move || {
-                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<_, _> {
+                    let Some(start) = worker_gate.wait()? else {
+                        return Ok(());
+                    };
                     run_native_setup_worker(
-                        worker_initialization,
-                        worker_tasks,
-                        worker_task_queue,
+                        start.initialization.clone(),
+                        Arc::clone(&start.tasks),
+                        Arc::clone(&start.task_queue),
                         &worker_control,
                         &worker_sender,
                     )
@@ -526,6 +566,13 @@ pub(crate) fn execute_setup_parallel_native(
         let mut completed_background_workers = 0;
         let main_outcome =
             catch_unwind(AssertUnwindSafe(|| -> Result<(), WasmExactSearchError> {
+                prepare_native_setup_graph(&mut coordinator, control)?;
+                let initialization = native_setup_worker_initialization(&coordinator)?;
+                worker_gate.publish(Arc::new(NativeSetupWorkerStart {
+                    initialization: initialization.clone(),
+                    tasks: Arc::clone(&tasks),
+                    task_queue: Arc::clone(&task_queue),
+                }))?;
                 let mut main_worker = create_native_setup_worker(&initialization)?;
                 while first_error.is_none() {
                     let Some(lease) = take_native_setup_task(&task_queue)? else {
@@ -557,6 +604,7 @@ pub(crate) fn execute_setup_parallel_native(
                 ))
             });
         if let Err(error) = main_outcome {
+            worker_gate.abort();
             first_error.get_or_insert(error);
         }
 
@@ -614,6 +662,37 @@ fn prepare_native_setup_graph(
         }
     }
     Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn native_setup_worker_initialization(
+    coordinator: &WasmSetupParallelCoordinator,
+) -> Result<NativeSetupWorkerInitialization, WasmExactSearchError> {
+    let shared = coordinator
+        .shared
+        .as_ref()
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_graph_not_ready",
+        ))?;
+    let runtimes = shared
+        .conditions
+        .iter()
+        .enumerate()
+        .map(|(condition_index, condition)| {
+            SetupParallelConditionRuntime::compile(
+                condition_index,
+                condition,
+                shared.query.max_setup_pieces(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into();
+    Ok(NativeSetupWorkerInitialization {
+        query: shared.query.clone(),
+        graph: Arc::clone(&shared.coverage_graph),
+        shape_count: shared.graph.shapes.len(),
+        runtimes,
+    })
 }
 
 #[cfg(not(target_family = "wasm"))]

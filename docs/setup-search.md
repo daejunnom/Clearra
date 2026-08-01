@@ -22,7 +22,7 @@ player. For example, cycle-five residue `TI` with observed next pieces `OS`
 uses:
 
 ```text
-clearra setup --remaining TI --mode qb --qb OS
+clearra setup-finder --remaining TI --mode qb --qb OS
 ```
 
 Observed QB pieces are distinct and must fit in the same seven-piece bag as the
@@ -39,8 +39,8 @@ Both `oracle` and `qb` may independently constrain the exact supply left when
 the current PC finishes:
 
 ```text
-clearra setup --remaining TI --next-cycle-remaining OOSITZ
-clearra setup --remaining TI --mode qb --qb OS \
+clearra setup-finder --remaining TI --next-cycle-remaining OOSITZ
+clearra setup-finder --remaining TI --mode qb --qb OS \
   --next-cycle-remaining OOSITZ
 ```
 
@@ -142,7 +142,7 @@ residue piece kind to be unique. The CLI alone may request an occupied initial
 hold:
 
 ```text
-clearra setup --remaining SIOS --initial-hold S
+clearra setup-finder --remaining SIOS --initial-hold S
 ```
 
 The selected piece must occur in `--remaining`; Clearra removes one matching

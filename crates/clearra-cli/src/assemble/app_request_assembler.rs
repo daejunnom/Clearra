@@ -93,9 +93,10 @@ impl CliAppRequestAssembler {
                 let assembly =
                     PercentQueryAssembler::assemble(&args).map_err(percent_assembly_error)?;
                 Ok(CliAppRequestAssembly::new(
-                    AppRequest::new(AppCommand::Percent(PercentAppCommand::new(
-                        assembly.query().clone(),
-                    ))),
+                    AppRequest::new(AppCommand::Percent(
+                        PercentAppCommand::new(assembly.query().clone())
+                            .with_failed_pattern_limit(assembly.failed_pattern_limit()),
+                    )),
                     default_format,
                     CliErrorCode::PercentQueryInvalid,
                 ))
@@ -169,6 +170,21 @@ impl CliAppRequestAssembler {
                     AppRequest::new(command),
                     default_format,
                     CliErrorCode::VerifyKicksFailed,
+                ))
+            }
+            ParsedCliCommand::Product(tokens) => {
+                let request = clearra_web_command::WebCommandParser::parse_tokens(&tokens)
+                    .and_then(|request| request.to_app_request())
+                    .map_err(|error| {
+                        CliOutput::error(
+                            CliErrorCode::CliInvalidValue,
+                            format!("{}: {}", error.code().as_diagnostic_code(), error.message()),
+                        )
+                    })?;
+                Ok(CliAppRequestAssembly::new(
+                    request,
+                    default_format,
+                    CliErrorCode::ProductRuntimeUnsupported,
                 ))
             }
             ParsedCliCommand::Unsupported(command) => Ok(CliAppRequestAssembly::new(

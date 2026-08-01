@@ -24,6 +24,24 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn percent_command_compiles_to_coverage_summary_request() {
+    let request = WebCommandParser::parse(
+        "clearra percent I --fixed --min-len 1 --max-patterns 8 --failed-count 3",
+    )
+    .expect("web percent command")
+    .to_app_request()
+    .expect("percent AppRequest");
+
+    let AppCommand::Percent(command) = request.command() else {
+        panic!("expected AppCommand::Percent");
+    };
+    assert_eq!(command.failed_pattern_limit(), 3);
+    assert_eq!(command.query().initial_board().visible_height(), 1);
+    assert_eq!(command.query().piece_window().max_pieces(), 1);
+    assert_eq!(command.query().execution_policy().max_patterns(), 8);
+}
+
+#[test]
 fn tiling_only_preserves_hold_supply_projection() {
     let request = WebCommandParser::parse(
         "clearra pc --lines 2 --board-mask 0 --height 2 --pieces 5 \
@@ -706,6 +724,15 @@ fn build_probability_preserves_rule_spin_profile_and_initial_hold() {
 }
 
 #[test]
+fn canonical_setup_finder_matches_legacy_web_alias() {
+    let canonical = WebCommandParser::parse("clearra setup-finder --remaining IOTS --workers 1")
+        .expect("canonical setup finder command");
+    let legacy = WebCommandParser::parse("clearra setup --remaining IOTS --workers 1")
+        .expect("legacy setup alias");
+    assert_eq!(canonical, legacy);
+}
+
+#[test]
 fn build_probability_tiling_only_preserves_hold_supply_and_sets_tiling_objective() {
     let request = WebCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue IO --hold T --no-mirror --tiling-only",
@@ -793,6 +820,58 @@ fn web_command_preserves_cpu_pool_options_in_the_typed_request() {
     assert_eq!(policy.workers(), 1);
     assert!(policy.use_all_logical_processors());
     assert!(policy.cpu_warmup());
+}
+
+#[test]
+fn sfinder_percent_preserves_adaptive_workers_without_forcing_parallel_search() {
+    let request = WebCommandParser::parse_with_worker_limit(
+        "clearra sfinder percent v115@vhAAgH P7P3 4 --auto-workers 3",
+        8,
+    )
+    .expect("Sfinder percent command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected AppCommand::Scenario");
+    };
+    let policy = command.query().execution_policy();
+    assert_eq!(policy.workers(), 3);
+    assert_eq!(policy.workers_requested(), None);
+}
+
+#[test]
+fn sfinder_forward_and_setup_commands_reach_the_shared_worker_budget() {
+    let spin = WebCommandParser::parse_with_worker_limit(
+        "clearra sfinder spin-cover v115@vhAAgH TI TSS --auto-workers 2",
+        8,
+    )
+    .expect("Sfinder spin-cover command")
+    .to_app_request()
+    .expect("spin AppRequest");
+    assert!(matches!(spin.command(), AppCommand::SpinFinder(_)));
+    assert_eq!(spin.resource_budget().workers(), 2);
+
+    let setup = WebCommandParser::parse_with_worker_limit(
+        "clearra sfinder pc-setup IOTS --auto-workers 2",
+        8,
+    )
+    .expect("Sfinder setup command")
+    .to_app_request()
+    .expect("setup AppRequest");
+    assert!(matches!(setup.command(), AppCommand::Setup(_)));
+    assert_eq!(setup.resource_budget().workers(), 2);
+}
+
+#[test]
+fn product_worker_modes_are_mutually_exclusive() {
+    let error = WebCommandParser::parse_with_worker_limit(
+        "clearra pc --lines 4 --workers 2 --auto-workers 3",
+        8,
+    )
+    .expect_err("fixed and adaptive workers conflict");
+
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
 }
 
 #[test]

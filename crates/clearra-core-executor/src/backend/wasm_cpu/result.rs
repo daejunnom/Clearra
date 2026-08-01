@@ -34,7 +34,9 @@ use crate::{
 #[cfg(feature = "parallel")]
 use super::parallel_search::{self, ParallelSearchDecision, ParallelSearchOutcome};
 use super::{
-    buildup::{exact_scoring_execution_graph, verify_candidate, BuildUpWorkspace},
+    buildup::{
+        exact_scoring_execution_graph, verify_candidate, BuildUpWorkspace, CandidateWitnessMode,
+    },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
     distributed::{
@@ -1350,6 +1352,9 @@ impl WasmExactSearchSession {
         external_ordinal: Option<u64>,
         control: &ExecutionControl,
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        if !self.problem.allows_solution_identity(&candidate.identity) {
+            return Ok(None);
+        }
         let candidate_ordinal = external_ordinal.unwrap_or(self.packing_candidate_count as u64);
         self.packing_candidate_count += 1;
         self.packing_candidate_digest = mix_digest(
@@ -1371,18 +1376,17 @@ impl WasmExactSearchSession {
         let solution_coverage_required = solution_probabilities_requested
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover
             || self.problem.objective().execution_constraints().requested();
-        let coverage_only_needs_witness = !solution_coverage_required
-            && !self
-                .problem
-                .queue_observation_policy()
-                .requires_observation_policy()
-            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
-            && target.single_pattern_witness_is_exact()
-            && (self.buildup_workspace.standard_bag_coverage_complete()
-                || self
-                    .covered_patterns
-                    .is_superset(target.possible_patterns.as_ref())
-                    .expect("candidate pattern group belongs to the session universe"));
+        let coverage_already_known = self.buildup_workspace.standard_bag_coverage_complete()
+            || self
+                .covered_patterns
+                .is_superset(target.possible_patterns.as_ref())
+                .expect("candidate pattern group belongs to the session universe");
+        let witness_mode = CandidateWitnessMode::for_candidate(
+            &self.problem,
+            target,
+            coverage_already_known,
+            solution_coverage_required,
+        );
         let result = match verify_candidate(
             &self.problem,
             &self.catalog,
@@ -1390,8 +1394,9 @@ impl WasmExactSearchSession {
             target,
             &mut self.buildup_workspace,
             &mut self.coverage_evaluator,
-            coverage_only_needs_witness,
-            self.representative_path.is_empty(),
+            witness_mode,
+            self.problem.output_policy().retains_representative_trace()
+                && self.representative_path.is_empty(),
             profile_scale,
             control,
         ) {
@@ -1483,22 +1488,25 @@ impl WasmExactSearchSession {
             if let Some(solution_coverage) = solution_coverage {
                 self.merge_solution_coverage(candidate.identity, &solution_coverage)?;
             }
-            let identity = TilingIdentityEntry::new(candidate.identity);
-            if !self.buildable_identities.contains(&identity)
-                && self.buildable_identities.try_reserve(1).is_err()
-            {
-                self.mark_truncated("solution_identity_storage_unavailable");
-                return self.complete().map(Some);
+            if self.problem.output_policy().retains_solution_set() {
+                let identity = TilingIdentityEntry::new(candidate.identity);
+                if !self.buildable_identities.contains(&identity)
+                    && self.buildable_identities.try_reserve(1).is_err()
+                {
+                    self.mark_truncated("solution_identity_storage_unavailable");
+                    return self.complete().map(Some);
+                }
+                self.buildable_identities.insert(identity);
             }
-            self.buildable_identities.insert(identity);
             let next = self
                 .build_variant_count
                 .checked_add(result.build_variant_count);
             self.build_variant_count = next.unwrap_or(u128::MAX);
             self.count_complete &= next.is_some() && result.count_complete;
-            if self
-                .representative_rank
-                .is_none_or(|rank| candidate_ordinal < rank)
+            if self.problem.output_policy().retains_representative_trace()
+                && self
+                    .representative_rank
+                    .is_none_or(|rank| candidate_ordinal < rank)
             {
                 self.representative_path = result.representative_path;
                 self.representative_rank = Some(candidate_ordinal);
@@ -1594,6 +1602,9 @@ impl WasmExactSearchSession {
         })?;
 
         for identity in result.normalized_solution_identities() {
+            if !self.problem.output_policy().retains_solution_set() {
+                break;
+            }
             if self.problem.objective().kind() == ObjectiveKind::Tiling {
                 self.insert_tiling_result_identity(*identity)
                     .map_err(|error| match error {
@@ -1781,23 +1792,25 @@ impl WasmExactSearchSession {
                     .unwrap_or(0),
             );
 
-        if let Some(rank) = result
-            .field("representative_candidate_ordinal")
-            .and_then(|value| value.parse::<u64>().ok())
-        {
-            if self
-                .representative_rank
-                .is_none_or(|current| rank < current)
+        if self.problem.output_policy().retains_representative_trace() {
+            if let Some(rank) = result
+                .field("representative_candidate_ordinal")
+                .and_then(|value| value.parse::<u64>().ok())
             {
-                self.representative_rank = Some(rank);
-                self.representative_identity = result.representative_solution_identity();
-                self.representative_candidate_id = result
-                    .field("representative_candidate_id")
-                    .and_then(|value| value.parse::<u64>().ok());
-                self.representative_pattern_id = result
-                    .field("representative_pattern_id")
-                    .and_then(|value| value.parse::<u32>().ok());
-                self.representative_path = result.path_steps().to_vec();
+                if self
+                    .representative_rank
+                    .is_none_or(|current| rank < current)
+                {
+                    self.representative_rank = Some(rank);
+                    self.representative_identity = result.representative_solution_identity();
+                    self.representative_candidate_id = result
+                        .field("representative_candidate_id")
+                        .and_then(|value| value.parse::<u64>().ok());
+                    self.representative_pattern_id = result
+                        .field("representative_pattern_id")
+                        .and_then(|value| value.parse::<u32>().ok());
+                    self.representative_path = result.path_steps().to_vec();
+                }
             }
         }
         if result.bool_field("resource_truncated").unwrap_or(true) {
@@ -2059,12 +2072,15 @@ impl WasmExactSearchSession {
         scoring_batch: Option<ExactScoringExecutionBatch>,
     ) -> Result<CoreExecutionResult, WasmExactSearchError> {
         let tiling_only = self.problem.objective().kind() == ObjectiveKind::Tiling;
+        let solution_set_materialized = self.problem.output_policy().retains_solution_set();
         let tiling_solution_store = if tiling_only {
             self.take_tiling_solution_page_store()?
         } else {
             None
         };
-        let mut identities = if let Some(store) = &tiling_solution_store {
+        let mut identities = if !solution_set_materialized {
+            Vec::new()
+        } else if let Some(store) = &tiling_solution_store {
             store
                 .page_identities(0, TILING_SOLUTION_INITIAL_PAGE_SIZE)
                 .map_err(WasmExactSearchError::InvalidProblem)?
@@ -2178,15 +2194,19 @@ impl WasmExactSearchSession {
                 "deferred-to-coordinator"
             };
         }
-        let normalized_hash = tiling_solution_store.as_ref().map_or_else(
-            || {
-                normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-                    &identities,
-                )
-            },
-            |store| store.normalized_hash().to_owned(),
-        );
-        let normalized_keys = if include_normalized_keys {
+        let normalized_hash = if !solution_set_materialized {
+            "not-calculated".to_owned()
+        } else {
+            tiling_solution_store.as_ref().map_or_else(
+                || {
+                    normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+                        &identities,
+                    )
+                },
+                |store| store.normalized_hash().to_owned(),
+            )
+        };
+        let normalized_keys = if solution_set_materialized && include_normalized_keys {
             identities
                 .iter()
                 .copied()
@@ -2232,12 +2252,18 @@ impl WasmExactSearchSession {
         let score_objective_requested = score_policy.requested();
         let non_score_objective_complete = count_complete
             && (!minimum_cover_requested || (minimum_cover_complete && minimum_cover_proven));
-        let solution_count = if minimum_cover_requested {
+        let solution_count = if !solution_set_materialized {
+            0
+        } else if minimum_cover_requested {
             identities.len()
         } else {
             source_solution_count
         };
-        let solution_found = solution_count != 0;
+        let solution_found = if solution_set_materialized {
+            solution_count != 0
+        } else {
+            !self.covered_patterns.is_empty()
+        };
         let mut reachability_metrics = self.buildup_workspace.reachability_metrics();
         add_reachability_metrics(
             &mut reachability_metrics,
@@ -2346,6 +2372,10 @@ impl WasmExactSearchSession {
                 self.gpu_shader_version.unwrap_or("none"),
             ),
             field("gpu_cpu_duplicate_search", false),
+            field(
+                "search_output_policy",
+                self.problem.output_policy().as_str(),
+            ),
             field("search_traversal", "canonical-skeleton-exact-cover"),
             field("tablebase_requested", self.tablebase_requested),
             field("tablebase_status", self.tablebase_status),
@@ -2434,7 +2464,15 @@ impl WasmExactSearchSession {
             ),
             field(
                 "packing_candidate_set_digest",
-                format!("{:016x}", self.packing_candidate_digest),
+                if self.problem.output_policy().retains_candidate_digest() {
+                    format!("{:016x}", self.packing_candidate_digest)
+                } else {
+                    "not-calculated".to_owned()
+                },
+            ),
+            field(
+                "packing_candidate_set_digest_calculated",
+                self.problem.output_policy().retains_candidate_digest(),
             ),
             field("packing_count_complete", count_complete),
             field(
@@ -2442,14 +2480,27 @@ impl WasmExactSearchSession {
                 self.truncated_reason.unwrap_or("none"),
             ),
             field("solution_found", solution_found),
-            field("unique_solution_count", solution_count),
-            field("normalized_unique_solution_count", solution_count),
+            field(
+                "unique_solution_count",
+                solution_set_materialized
+                    .then(|| solution_count.to_string())
+                    .unwrap_or_else(|| "not-calculated".to_owned()),
+            ),
+            field(
+                "normalized_unique_solution_count",
+                solution_set_materialized
+                    .then(|| solution_count.to_string())
+                    .unwrap_or_else(|| "not-calculated".to_owned()),
+            ),
+            field("solution_count_calculated", solution_set_materialized),
+            field("solution_set_materialized", solution_set_materialized),
             field("solution_keys_materialized_count", normalized_keys.len()),
             field(
                 "solution_keys_complete",
-                tiling_solution_store
-                    .as_ref()
-                    .is_none_or(|store| store.len() == normalized_keys.len()),
+                solution_set_materialized
+                    && tiling_solution_store
+                        .as_ref()
+                        .is_none_or(|store| store.len() == normalized_keys.len()),
             ),
             field(
                 "solution_page_available",

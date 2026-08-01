@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ClearraProcessExecutor,
+  ClearraJobExecutor,
   parseClearraMessage,
   prepareClearraArguments,
   tilingOnlyRequested,
@@ -14,9 +14,55 @@ import {
 } from "../src/config.mjs";
 
 test("Clearrabot defaults each search session to a three-minute timeout", () => {
-  assert.equal(
-    loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" }).searchTimeoutMs,
-    180_000,
+  const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
+  assert.equal(config.ingressMode, "gateway");
+  assert.equal(config.searchTimeoutMs, 180_000);
+  assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
+  assert.equal(config.jobPollIntervalMs, 250);
+  assert.equal(config.jobCancelTimeoutMs, 2_000);
+});
+
+test("Cloud Run ingress requires the Discord application public key", () => {
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_DISCORD_INGRESS: "cloud-run",
+      }),
+    /DISCORD_PUBLIC_KEY is required/,
+  );
+  const config = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    DISCORD_PUBLIC_KEY: "01".repeat(32),
+    DISCORD_APPLICATION_ID: "application-id",
+    CLEARRA_DISCORD_INGRESS: "cloud-run",
+    CLEARRA_DISCORD_INTERACTION_PATH: "/discord/interactions",
+    PORT: "9090",
+  });
+  assert.equal(config.ingressMode, "cloud-run");
+  assert.equal(config.registerCommands, false);
+  assert.equal(config.applicationId, "application-id");
+  assert.equal(config.port, 9090);
+  assert.equal(config.interactionPath, "/discord/interactions");
+});
+
+test("Clearrabot validates and configures the HTTP job service", () => {
+  const config = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_JOB_URL: "https://jobs.example.test/clearra/jobs",
+    CLEARRA_JOB_TOKEN: "opaque-test-token",
+    CLEARRA_JOB_POLL_INTERVAL_MS: "40",
+  });
+  assert.equal(config.jobEndpoint, "https://jobs.example.test/clearra/jobs");
+  assert.equal(config.jobToken, "opaque-test-token");
+  assert.equal(config.jobPollIntervalMs, 40);
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "file:///tmp/clearra.sock",
+      }),
+    /must use HTTP or HTTPS/,
   );
 });
 
@@ -115,7 +161,7 @@ test("Discord commands always use the Clearra exact product path", () => {
   );
 });
 
-test("Discord owns the worker allocation instead of accepting a user override", () => {
+test("Discord owns an adaptive worker ceiling instead of accepting a user override", () => {
   assert.deepEqual(
     prepareClearraArguments(
       [
@@ -134,7 +180,7 @@ test("Discord owns the worker allocation instead of accepting a user override", 
       "4",
       "--no-tablebase",
       "--no-build-dependency-dag",
-      "--workers",
+      "--auto-workers",
       "3",
       "--format",
       "text",
@@ -157,7 +203,7 @@ test("Discord owns the worker allocation instead of accepting a user override", 
       "--remaining",
       "SZ",
       "--no-tablebase",
-      "--workers",
+      "--auto-workers",
       "3",
       "--format",
       "text",
@@ -197,33 +243,144 @@ test("file-backed and unrelated commands are rejected", () => {
   );
 });
 
-test("Clearra executor passes arguments without shell interpretation", async () => {
-  const executor = new ClearraProcessExecutor({
-    executable: process.execPath,
+test("Clearra executor submits an idempotent POST job without shell interpretation", async () => {
+  const requests = [];
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/v1/jobs",
     timeoutMs: 5_000,
+    createJobId: () => "job-literal-1",
+    fetch: async (url, request) => {
+      requests.push({ url: String(url), request });
+      return jobResponse({
+        id: "job-literal-1",
+        state: "completed",
+        result: {
+          exitCode: 0,
+          signal: null,
+          stdout: "done",
+          stderr: "",
+        },
+      });
+    },
   });
   const result = await executor.execute([
-    "-e",
-    "process.stdout.write(JSON.stringify(process.argv.slice(1)))",
+    "pc",
     "queue with spaces",
     "literal;&|$()",
   ]);
 
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(JSON.parse(result.stdout), [
+  assert.equal(result.stdout, "done");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://jobs.example.test/v1/jobs");
+  assert.equal(requests[0].request.method, "POST");
+  assert.equal(requests[0].request.headers["idempotency-key"], "job-literal-1");
+  const job = JSON.parse(requests[0].request.body);
+  assert.equal(job.protocol, "clearra.job.v1");
+  assert.equal(job.id, "job-literal-1");
+  assert.equal(job.kind, "clearra.command");
+  assert.deepEqual(job.arguments, [
+    "pc",
     "queue with spaces",
     "literal;&|$()",
   ]);
+  assert.equal(job.deadlineUnixMs > Date.now(), true);
 });
 
-test("Clearra executor terminates a search when the Clearrabot timeout expires", async () => {
-  const executor = new ClearraProcessExecutor({
-    executable: process.execPath,
+test("Clearra executor polls an accepted POST job to its terminal result", async () => {
+  const requests = [];
+  const responses = [
+    jobResponse({ id: "job-poll-1", state: "accepted" }, 202),
+    jobResponse({ id: "job-poll-1", state: "running" }, 200),
+    jobResponse({
+      id: "job-poll-1",
+      state: "completed",
+      result: { exitCode: 2, signal: null, stdout: "", stderr: "invalid queue" },
+    }),
+  ];
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    pollIntervalMs: 1,
+    createJobId: () => "job-poll-1",
+    fetch: async (url, request) => {
+      requests.push([String(url), request.method]);
+      return responses.shift();
+    },
+  });
+
+  const result = await executor.execute(["pc", "--lines", "4"]);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.stderr, "invalid queue");
+  assert.deepEqual(requests, [
+    ["https://jobs.example.test/jobs", "POST"],
+    ["https://jobs.example.test/jobs/job-poll-1", "GET"],
+    ["https://jobs.example.test/jobs/job-poll-1", "GET"],
+  ]);
+});
+
+test("Clearra executor cancels the remote job when the Clearrabot timeout expires", async () => {
+  const requests = [];
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
     timeoutMs: 50,
+    cancelTimeoutMs: 100,
+    createJobId: () => "job-timeout-1",
+    fetch: async (url, request) => {
+      requests.push([String(url), request.method]);
+      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      return await pendingUntilAbort(request.signal);
+    },
   });
 
   await assert.rejects(
-    executor.execute(["-e", "setInterval(() => {}, 1000)"]),
+    executor.execute(["pc", "--lines", "4"]),
     /Clearrabot search exceeded the 50-millisecond time limit/,
   );
+  assert.deepEqual(requests.at(-1), [
+    "https://jobs.example.test/jobs/job-timeout-1",
+    "DELETE",
+  ]);
 });
+
+test("Clearra executor forwards caller cancellation to the remote job", async () => {
+  const controller = new AbortController();
+  const requests = [];
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    timeoutMs: 5_000,
+    createJobId: () => "job-cancel-1",
+    fetch: async (url, request) => {
+      requests.push([String(url), request.method]);
+      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      return await pendingUntilAbort(request.signal);
+    },
+  });
+
+  const execution = executor.execute(["setup", "--remaining", "SZ"], {
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(execution, { name: "AbortError" });
+  assert.deepEqual(requests.at(-1), [
+    "https://jobs.example.test/jobs/job-cancel-1",
+    "DELETE",
+  ]);
+});
+
+function jobResponse(job, status = 200) {
+  return new Response(
+    JSON.stringify({ protocol: "clearra.job.v1", ...job }),
+    {
+      status,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+function pendingUntilAbort(signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new Error("aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
+}

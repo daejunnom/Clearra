@@ -27,6 +27,73 @@ impl PiecePlacementMask {
     }
 }
 
+/// Exact colored-field identity used by static Fumen solution sets.
+///
+/// A colored Fumen records the union of every placement of the same tetromino
+/// kind. It cannot distinguish two touching copies of that kind, so this key
+/// preserves the observable color contract instead of inventing boundaries.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StandardBoard64ColoredTilingIdentity {
+    initial_board_mask: u64,
+    piece_masks: [u64; 7],
+}
+
+impl StandardBoard64ColoredTilingIdentity {
+    pub fn from_piece_masks(
+        initial_board_mask: u64,
+        piece_masks: [u64; 7],
+    ) -> Result<Self, NormalizedTilingSolutionError> {
+        let mut occupied = initial_board_mask;
+        for (piece, mask) in PieceKind::STANDARD_TETROMINOES
+            .iter()
+            .copied()
+            .zip(piece_masks)
+        {
+            let area = mask.count_ones();
+            if area % 4 != 0 {
+                return Err(NormalizedTilingSolutionError::PlacementAreaNotFour { piece, area });
+            }
+            if occupied & mask != 0 {
+                return Err(NormalizedTilingSolutionError::OverlappingPlacement { piece });
+            }
+            occupied |= mask;
+        }
+        Ok(Self {
+            initial_board_mask,
+            piece_masks,
+        })
+    }
+
+    pub fn from_standard_board64_identity(identity: StandardBoard64TilingIdentity) -> Self {
+        let mut piece_masks = [0u64; 7];
+        for index in 0..identity.placement_count() {
+            let placement = identity
+                .placement(index)
+                .expect("placement count bounds every identity placement");
+            piece_masks[piece_sort_key(placement.piece()) as usize] |= placement.cells_mask();
+        }
+        Self {
+            initial_board_mask: identity.initial_board_mask(),
+            piece_masks,
+        }
+    }
+
+    pub const fn initial_board_mask(self) -> u64 {
+        self.initial_board_mask
+    }
+
+    pub const fn piece_masks(self) -> [u64; 7] {
+        self.piece_masks
+    }
+
+    pub fn placement_count(self) -> usize {
+        self.piece_masks
+            .iter()
+            .map(|mask| mask.count_ones() as usize / 4)
+            .sum()
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NormalizedTilingSolutionKey(String);
 

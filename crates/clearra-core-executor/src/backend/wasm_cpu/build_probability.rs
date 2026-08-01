@@ -28,7 +28,7 @@ use crate::{
 use super::{
     buildup::{
         exact_scoring_execution_graph_for_completion, verify_candidate_for_completion,
-        BuildCompletion, BuildUpWorkspace,
+        BuildCompletion, BuildUpWorkspace, CandidateWitnessMode,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
@@ -917,14 +917,17 @@ impl CompactBuildProbabilitySession {
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
         )?;
         let solution_coverage_required = self.solution_coverage.is_some();
-        let coverage_only_needs_witness = !solution_coverage_required
-            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
-            && target.single_pattern_witness_is_exact()
-            && (self.buildup.standard_bag_coverage_complete()
-                || self
-                    .covered_patterns
-                    .is_superset(target.possible_patterns.as_ref())
-                    .expect("candidate pattern group belongs to the build probability universe"));
+        let coverage_already_known = self.buildup.standard_bag_coverage_complete()
+            || self
+                .covered_patterns
+                .is_superset(target.possible_patterns.as_ref())
+                .expect("candidate pattern group belongs to the build probability universe");
+        let witness_mode = CandidateWitnessMode::for_candidate(
+            &self.problem,
+            target,
+            coverage_already_known,
+            solution_coverage_required,
+        );
         let result = verify_candidate_for_completion(
             &self.problem,
             &self.catalog,
@@ -932,7 +935,7 @@ impl CompactBuildProbabilitySession {
             target,
             &mut self.buildup,
             &mut self.coverage_evaluator,
-            coverage_only_needs_witness,
+            witness_mode,
             self.representative_path.is_empty(),
             0,
             BuildCompletion::ExactBoardAfterLineClears(self.target_board),

@@ -4,6 +4,7 @@ pub struct PercentArgs {
     mode: PercentQueueMode,
     minimum_len: Option<usize>,
     max_patterns: usize,
+    failed_pattern_limit: usize,
 }
 
 impl PercentArgs {
@@ -13,6 +14,7 @@ impl PercentArgs {
             mode: PercentQueueMode::Observed,
             minimum_len: None,
             max_patterns: 0,
+            failed_pattern_limit: 100,
         }
     }
 }
@@ -31,6 +33,11 @@ impl PercentArgs {
 impl PercentArgs {
     pub fn with_max_patterns(mut self, max_patterns: usize) -> Self {
         self.max_patterns = max_patterns;
+        self
+    }
+
+    pub fn with_failed_pattern_limit(mut self, failed_pattern_limit: usize) -> Self {
+        self.failed_pattern_limit = failed_pattern_limit;
         self
     }
 }
@@ -52,6 +59,10 @@ impl PercentArgs {
 impl PercentArgs {
     pub fn max_patterns(&self) -> usize {
         self.max_patterns
+    }
+
+    pub fn failed_pattern_limit(&self) -> usize {
+        self.failed_pattern_limit
     }
 }
 

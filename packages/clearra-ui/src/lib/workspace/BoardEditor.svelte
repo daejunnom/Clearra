@@ -7,6 +7,12 @@
 
   export let request: SolverWorkspaceRequest;
   export let language: WorkspaceLanguage;
+  export let showImport = true;
+  export let showStats = true;
+  export let showToolbar = true;
+  export let displayHeight: number | null = null;
+
+  $: editorHeight = displayHeight ?? request.lines;
 
   const dispatch = createEventDispatcher<{
     change: bigint;
@@ -16,11 +22,14 @@
 
 <WorkspaceBoardEditor
   mode="pc"
-  height={request.lines}
+  height={editorHeight}
   existingMask={request.boardMask}
   targetMask={0n}
   piecesNeeded={scenarioPieceWindow(request)}
   {language}
+  {showImport}
+  {showStats}
+  {showToolbar}
   on:change={(event) => dispatch('change', event.detail.existingMask)}
   on:import={(event) => dispatch('import', { boardMask: event.detail.existingMask, lines: event.detail.height })}
 />

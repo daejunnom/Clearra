@@ -26,6 +26,9 @@ impl SetupCommand {
             None if args.use_all_logical_processors() => WorkerPolicy::hardware_worker_limit(),
             None => WorkerPolicy::default_worker_limit(),
         };
+        let workers = args
+            .automatic_worker_limit()
+            .map_or(workers, |limit| workers.min(limit.max(1)));
         let request =
             AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query))).with_resource_budget(
                 ResourceBudget::new(u16::try_from(workers).unwrap_or(u16::MAX), None, None),

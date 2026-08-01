@@ -26,10 +26,10 @@ are never summed because multiple variants may cover the same queue pattern.
 
 ```text
 clearra pc
-clearra path
+clearra pc-replay
 clearra percent
-clearra cover
-clearra setup
+clearra build-coverage
+clearra setup-finder
 clearra continue
 clearra rules
 clearra scoring
@@ -38,6 +38,24 @@ clearra inspect
 clearra verify
 clearra verify kicks
 ```
+
+The historical `path`, `cover`, and `setup` spellings remain compatibility
+aliases. Their canonical Clearra names avoid implying Sfinder command semantics.
+
+Sfinder-style invocations use a separate namespace so those three names cannot
+silently change meaning:
+
+```text
+clearra sfinder path <fumen> <pattern> [lines]
+clearra sfinder cover <solution-fumen> <pattern> [lines]
+clearra sfinder setup <colored-target-fumen> <pattern>
+clearra sfinder --help
+```
+
+The same product capabilities remain available in the six GUI tools: PC search,
+setup finder, build probability, maximum damage, spin finder, and CTK. The
+compatibility boundary translates input and output contracts; it does not run a
+Java process or bundle another solver.
 
 Global options such as `--format text|json|fumen-like`, `--lang en|ko`,
 `--verbose`, `--diagnostics`, and `--verbose-paths` may appear before or after
@@ -135,13 +153,13 @@ review or release source.
 
 ## Clearrabot
 
-`apps/clearra-discord-bot` exposes Clearra searches through `/clearra`,
-`!clearra`, and short product commands. It launches only the configured
-Clearra executable with an argument array; no shell or external solver is part
-of the command path.
+`apps/clearra-discord-bot` exposes Clearra searches through the `/clearra` and
+`/view` slash commands. Ordinary messages and prefix commands are disabled.
+Commands are submitted to the configured idempotent HTTP job service; no shell
+or external solver is part of the bot command path.
 
-Fumen and CTK3 documents can be passed to `/view` or posted in a normal
-message. Clearrabot decodes them through the Clearra document contract and
+Fumen and CTK3 documents can be passed to `/view` as text or `.ctk3` files.
+Clearrabot decodes them through the Clearra document contract and
 uses its own indexed-pixel GIF89a/LZW renderer. Search text and image previews
 are separate replies. Clearrabot links directly to the loaded CTK workspace
 when the reply fits Discord's 2,000-character limit; otherwise it attaches a
@@ -152,8 +170,11 @@ https://daejunnom.github.io/Clearra/?tool=ctk&ctk=ctk3_...&viewer=1
 https://daejunnom.github.io/Clearra/?tool=ctk&fumen=v115@...&viewer=1
 ```
 
-See [apps/clearra-discord-bot/README.md](apps/clearra-discord-bot/README.md)
-for Discord application settings and startup commands.
+The bot supports a signed Discord Interaction HTTP adapter for Google Cloud Run
+and an intent-free local Gateway fallback. See
+[apps/clearra-discord-bot/README.md](apps/clearra-discord-bot/README.md) for
+Discord application settings, Cloud Run requirements, and the future relay
+protocol boundary.
 
 ## Published Products
 

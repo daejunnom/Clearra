@@ -1,4 +1,6 @@
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{
+    piece::piece_kind::PieceKind, solution::StandardBoard64ColoredTilingIdentity,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_profiles::{
     bag::bag_profile::BagProfile, bundle::standard_profile_bundle::standard_profile_bundle,
@@ -127,6 +129,7 @@ pub struct PcScenarioQuery<B = PcScenarioBoard> {
     solution_probability_policy: PcSolutionProbabilityPolicy,
     queue_observation_policy: QueueObservationPolicy,
     execution_policy: PcExecutionPolicy,
+    allowed_colored_solution_identities: Option<Vec<StandardBoard64ColoredTilingIdentity>>,
 }
 
 pub type ExtendedPcScenarioQuery = PcScenarioQuery<ExtendedPcScenarioBoard>;
@@ -179,6 +182,7 @@ impl<B> PcScenarioQuery<B> {
             solution_probability_policy: PcSolutionProbabilityPolicy::Omit,
             queue_observation_policy: QueueObservationPolicy::default(),
             execution_policy: PcExecutionPolicy::mvp_default(),
+            allowed_colored_solution_identities: None,
         }
     }
 
@@ -266,6 +270,12 @@ impl<B> PcScenarioQuery<B> {
         &self.execution_policy
     }
 
+    pub fn allowed_colored_solution_identities(
+        &self,
+    ) -> Option<&[StandardBoard64ColoredTilingIdentity]> {
+        self.allowed_colored_solution_identities.as_deref()
+    }
+
     pub fn with_hold_piece(mut self, piece: Option<PieceKind>) -> Self {
         self.hold_state = match piece {
             Some(piece) => HoldSlot::Occupied(piece),
@@ -330,6 +340,17 @@ impl<B> PcScenarioQuery<B> {
 
     pub fn with_solution_probability_policy(mut self, policy: PcSolutionProbabilityPolicy) -> Self {
         self.solution_probability_policy = policy;
+        self
+    }
+
+    pub fn with_allowed_colored_solution_identities(
+        mut self,
+        identities: impl IntoIterator<Item = StandardBoard64ColoredTilingIdentity>,
+    ) -> Self {
+        let mut identities = identities.into_iter().collect::<Vec<_>>();
+        identities.sort_unstable();
+        identities.dedup();
+        self.allowed_colored_solution_identities = Some(identities);
         self
     }
 

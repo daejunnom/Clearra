@@ -122,14 +122,7 @@ mod case_app_scenario_request_runs_without_cli_parser {
             panic!("scenario render model");
         };
         assert_eq!(result.field("solution_found"), Some("true"));
-        assert_eq!(
-            result.field("total_solution_count"),
-            Some(if native_core_runtime_available() {
-                "2"
-            } else {
-                "1"
-            })
-        );
+        assert_eq!(result.field("total_solution_count"), Some("1"));
     }
 }
 

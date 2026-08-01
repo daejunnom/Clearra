@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     ArrowDownToLine,
+    FileUp,
     FlipHorizontal2,
     Layers,
     Redo2,
@@ -9,8 +10,13 @@
     Undo2,
     Upload
   } from '@lucide/svelte';
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
 
+  import {
+    CTK3_FILE_ACCEPT,
+    installGlobalDocumentPaste,
+    sourceFromCtk3File
+  } from './ctk3File';
   import { decodeInterchangeField } from './fumenFieldImport';
   import {
     boardCellMask,
@@ -34,6 +40,9 @@
   export let targetMask = 0n;
   export let piecesNeeded: number | null;
   export let language: WorkspaceLanguage;
+  export let showImport = true;
+  export let showStats = true;
+  export let showToolbar = true;
 
   const dispatch = createEventDispatcher<{
     change: Snapshot;
@@ -51,6 +60,7 @@
   let boardElement: HTMLDivElement | null = null;
   let importInput = '';
   let importError = false;
+  let fileInput: HTMLInputElement | null = null;
   let lastExisting = existingMask;
   let lastTarget = targetMask;
   let boardLabel: WorkspaceMessageKey = 'field';
@@ -73,6 +83,11 @@
     lastExisting = existingMask;
     lastTarget = targetMask;
   }
+
+  onMount(() => installGlobalDocumentPaste({
+    importSource: (source) => importField(source),
+    importFailed: () => (importError = true)
+  }));
 
   function beginPaint(event: PointerEvent, x: number, y: number) {
     if (!event.isPrimary || event.button !== 0) return;
@@ -223,14 +238,26 @@
     return trimMask(compacted);
   }
 
-  function importField() {
+  function importField(source = importInput) {
     try {
-      const imported = decodeInterchangeField(importInput, mode === 'pc' ? 6 : 24);
+      const imported = decodeInterchangeField(source, mode === 'pc' ? 6 : 24);
       importError = false;
       dispatch('import', {
         existingMask: imported.boardMask,
         height: Math.max(height, imported.occupiedHeight || 1)
       });
+    } catch {
+      importError = true;
+    }
+  }
+
+  async function importCtk3File(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      importField(await sourceFromCtk3File(file));
     } catch {
       importError = true;
     }
@@ -249,73 +276,88 @@
 <svelte:window on:pointerup={stopPainting} on:pointercancel={stopPainting} />
 
 <section class="board-tool" aria-label={label(boardLabel)}>
-  <div class="section-heading">
-    <div>
-      <span class="eyebrow">{label(boardLabel)}</span>
-      <strong>{height}L · 10×{height}</strong>
-    </div>
-    <div class="board-actions" role="toolbar" aria-label={label(boardLabel)}>
-      <button type="button" title={label('undo')} aria-label={label('undo')} disabled={!undoStack.length} on:click={undo}>
-        <Undo2 size={16} strokeWidth={1.8} />
-      </button>
-      <button type="button" title={label('redo')} aria-label={label('redo')} disabled={!redoStack.length} on:click={redo}>
-        <Redo2 size={16} strokeWidth={1.8} />
-      </button>
-      {#if mode === 'build-probability'}
-        <span class="toolbar-divider" aria-hidden="true"></span>
+  {#if showToolbar}
+    <div class="section-heading">
+      <div>
+        <span class="eyebrow">{label(boardLabel)}</span>
+        <strong>{height}L · 10×{height}</strong>
+      </div>
+      <div class="board-actions" role="toolbar" aria-label={label(boardLabel)}>
+        <button type="button" title={label('undo')} aria-label={label('undo')} disabled={!undoStack.length} on:click={undo}>
+          <Undo2 size={16} strokeWidth={1.8} />
+        </button>
+        <button type="button" title={label('redo')} aria-label={label('redo')} disabled={!redoStack.length} on:click={redo}>
+          <Redo2 size={16} strokeWidth={1.8} />
+        </button>
+        {#if mode === 'build-probability'}
+          <span class="toolbar-divider" aria-hidden="true"></span>
+          <button
+            type="button"
+            class="layer-button existing-layer"
+            class:active={activeLayer === 'existing'}
+            title={label('editExistingLayer')}
+            aria-label={label('editExistingLayer')}
+            aria-pressed={activeLayer === 'existing'}
+            on:click={() => (activeLayer = 'existing')}
+          ><Layers size={16} strokeWidth={1.8} /></button>
+          <button
+            type="button"
+            class="layer-button target-layer"
+            class:active={activeLayer === 'target'}
+            title={label('editTargetLayer')}
+            aria-label={label('editTargetLayer')}
+            aria-pressed={activeLayer === 'target'}
+            on:click={() => (activeLayer = 'target')}
+          ><Target size={16} strokeWidth={1.8} /></button>
+          <span class="toolbar-divider" aria-hidden="true"></span>
+        {/if}
+        <button type="button" title={label('mirrorField')} aria-label={label('mirrorField')} on:click={mirror}>
+          <FlipHorizontal2 size={16} strokeWidth={1.8} />
+        </button>
         <button
           type="button"
-          class="layer-button existing-layer"
-          class:active={activeLayer === 'existing'}
-          title={label('editExistingLayer')}
-          aria-label={label('editExistingLayer')}
-          aria-pressed={activeLayer === 'existing'}
-          on:click={() => (activeLayer = 'existing')}
-        ><Layers size={16} strokeWidth={1.8} /></button>
-        <button
-          type="button"
-          class="layer-button target-layer"
-          class:active={activeLayer === 'target'}
-          title={label('editTargetLayer')}
-          aria-label={label('editTargetLayer')}
-          aria-pressed={activeLayer === 'target'}
-          on:click={() => (activeLayer = 'target')}
-        ><Target size={16} strokeWidth={1.8} /></button>
-        <span class="toolbar-divider" aria-hidden="true"></span>
-      {/if}
-      <button type="button" title={label('mirrorField')} aria-label={label('mirrorField')} on:click={mirror}>
-        <FlipHorizontal2 size={16} strokeWidth={1.8} />
-      </button>
-      <button
-        type="button"
-        title={label('clearField')}
-        aria-label={label('clearField')}
-        disabled={existingMask === 0n && targetMask === 0n}
-        on:click={clearField}
-      ><Trash2 size={16} strokeWidth={1.8} /></button>
+          title={label('clearField')}
+          aria-label={label('clearField')}
+          disabled={existingMask === 0n && targetMask === 0n}
+          on:click={clearField}
+        ><Trash2 size={16} strokeWidth={1.8} /></button>
+      </div>
     </div>
-  </div>
+  {/if}
 
-  <div class="fumen-import">
-    <label>
-      <span>{label(mode === 'pc' ? 'fieldImport' : 'existingFieldImport')}</span>
+  {#if showImport}
+    <div class="fumen-import">
+      <label>
+        <span>{label(mode === 'pc' ? 'fieldImport' : 'existingFieldImport')}</span>
+        <input
+          value={importInput}
+          placeholder="v115@... / ctk3_..."
+          spellcheck="false"
+          aria-invalid={importError}
+          on:input={(event) => {
+            importInput = (event.currentTarget as HTMLInputElement).value;
+            importError = false;
+          }}
+          on:keydown={(event) => event.key === 'Enter' && importField()}
+        />
+      </label>
       <input
-        value={importInput}
-        placeholder="v115@... / ctk3_..."
-        spellcheck="false"
-        aria-invalid={importError}
-        on:input={(event) => {
-          importInput = (event.currentTarget as HTMLInputElement).value;
-          importError = false;
-        }}
-        on:keydown={(event) => event.key === 'Enter' && importField()}
+        bind:this={fileInput}
+        class="file-input"
+        type="file"
+        accept={CTK3_FILE_ACCEPT}
+        hidden
+        on:change={importCtk3File}
       />
-    </label>
-    <button type="button" disabled={!importInput.trim()} on:click={importField}>
-      <Upload size={15} strokeWidth={1.8} />{label('loadField')}
-    </button>
-  </div>
-  {#if importError}<p class="fumen-error" role="alert">{label('fieldImportInvalid')}</p>{/if}
+      <button type="button" title={label('loadCtk3File')} on:click={() => fileInput?.click()}>
+        <FileUp size={15} strokeWidth={1.8} />{label('loadCtk3File')}
+      </button>
+      <button type="button" disabled={!importInput.trim()} on:click={() => importField()}>
+        <Upload size={15} strokeWidth={1.8} />{label('loadField')}
+      </button>
+    </div>
+    {#if importError}<p class="fumen-error" role="alert">{label('fieldImportInvalid')}</p>{/if}
+  {/if}
 
   {#if mode === 'build-probability'}
     <div class="layer-help">
@@ -354,15 +396,17 @@
     </div>
   </div>
 
-  <dl class:build-stats={mode === 'build-probability'} class="board-stats">
-    {#if mode !== 'build-probability'}
-      <div><dt>{label('filledCells')}</dt><dd>{existingCells}</dd></div>
-    {:else}
-      <div><dt>{label('existingCells')}</dt><dd>{existingCells}</dd></div>
-      <div><dt>{label('targetCells')}</dt><dd>{targetCells}</dd></div>
-    {/if}
-    <div><dt>{label('piecesNeeded')}</dt><dd>{piecesNeeded ?? '—'}</dd></div>
-  </dl>
+  {#if showStats}
+    <dl class:build-stats={mode === 'build-probability'} class="board-stats">
+      {#if mode !== 'build-probability'}
+        <div><dt>{label('filledCells')}</dt><dd>{existingCells}</dd></div>
+      {:else}
+        <div><dt>{label('existingCells')}</dt><dd>{existingCells}</dd></div>
+        <div><dt>{label('targetCells')}</dt><dd>{targetCells}</dd></div>
+      {/if}
+      <div><dt>{label('piecesNeeded')}</dt><dd>{piecesNeeded ?? '—'}</dd></div>
+    </dl>
+  {/if}
   {#if mode === 'build-probability'}
     <button
       class="continue-button"
@@ -388,11 +432,12 @@
   .board-actions .layer-button { position: relative; }
   .board-actions .layer-button.active::after { background: #16877d; bottom: 2px; content: ''; height: 2px; left: 6px; position: absolute; right: 6px; }
   .toolbar-divider { background: #d8dfdb; height: 22px; margin: 0 2px; width: 1px; }
-  .fumen-import { align-items: end; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 12px; }
+  .fumen-import { align-items: end; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto auto; margin-bottom: 12px; }
   .fumen-import label { display: grid; gap: 6px; }
   .fumen-import label span { color: #68736f; font-size: 11px; font-weight: 650; }
   .fumen-import input { border: 1px solid #cbd3ce; border-radius: 5px; color: #17211e; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; height: 36px; min-width: 0; padding: 0 9px; width: 100%; }
   .fumen-import input[aria-invalid='true'] { border-color: #c45635; }
+  .fumen-import .file-input { display: none; }
   .fumen-import button { align-items: center; background: #fff; border: 1px solid #aebbb5; border-radius: 5px; color: #27403a; cursor: pointer; display: inline-flex; font-size: 12px; font-weight: 700; gap: 6px; height: 36px; padding: 0 12px; }
   .fumen-import button:disabled { cursor: default; opacity: .4; }
   .fumen-error { color: #9b3c22; font-size: 11px; margin: -5px 0 10px; }

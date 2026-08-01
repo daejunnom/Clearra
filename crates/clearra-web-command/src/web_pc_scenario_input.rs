@@ -1,4 +1,6 @@
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{
+    piece::piece_kind::PieceKind, solution::StandardBoard64ColoredTilingIdentity,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
@@ -16,6 +18,7 @@ pub struct WebPcScenarioInput {
     supply_window_size: Option<SupplyWindowSize>,
     count_policy: PcCountPolicy,
     retained_trace_limit: usize,
+    allowed_colored_solution_identities: Option<Vec<StandardBoard64ColoredTilingIdentity>>,
 }
 
 impl WebPcScenarioInput {
@@ -29,6 +32,7 @@ impl WebPcScenarioInput {
             supply_window_size: None,
             count_policy: PcCountPolicy::CountUnique,
             retained_trace_limit: 1,
+            allowed_colored_solution_identities: None,
         }
     }
 
@@ -54,6 +58,14 @@ impl WebPcScenarioInput {
 
     pub fn with_retained_trace_limit(mut self, retained_trace_limit: usize) -> Self {
         self.retained_trace_limit = retained_trace_limit;
+        self
+    }
+
+    pub fn with_allowed_colored_solution_identities(
+        mut self,
+        identities: impl IntoIterator<Item = StandardBoard64ColoredTilingIdentity>,
+    ) -> Self {
+        self.allowed_colored_solution_identities = Some(identities.into_iter().collect());
         self
     }
 
@@ -90,6 +102,9 @@ impl WebPcScenarioInput {
             .map(|length| SupplyWindowSize::new(length.min(automatic_source_pieces)));
         if let Some(supply_window_size) = self.supply_window_size.or(finite_standard_bag_window) {
             query = query.with_supply_window_size(supply_window_size);
+        }
+        if let Some(identities) = self.allowed_colored_solution_identities.clone() {
+            query = query.with_allowed_colored_solution_identities(identities);
         }
         query
     }

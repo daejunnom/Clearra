@@ -54,6 +54,16 @@ export async function encodeSolutionKeySourceForClipboard(
   throwIfAborted(options.signal);
   validateKeySource(source);
   await requireClipboardSizedSource(source, format, options.signal);
+  return encodeSolutionKeySource(source, format, options);
+}
+
+export async function encodeSolutionKeySource(
+  source: SolutionExportKeySource,
+  format: SolutionCopyFormat,
+  options: SolutionExportAsyncOptions = {}
+): Promise<string> {
+  throwIfAborted(options.signal);
+  validateKeySource(source);
   if (source.keyCount < WORKER_THRESHOLD) {
     const keys = await readSourceKeys(
       source,

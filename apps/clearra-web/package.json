@@ -11,7 +11,7 @@
     "dev": "vite --host 127.0.0.1 --port 4194 --strictPort",
     "dev:wsl": "npm run sync && npm run wasm:build:wsl && vite --host 127.0.0.1 --port 4194 --strictPort",
     "prebuild": "npm run sync && npm run wasm:build",
-    "build": "vite build",
+    "build": "vite build && node scripts/prepare-pages-fallback.mjs",
     "build:wsl": "npm run sync && npm run wasm:build:wsl && vite build"
   },
   "dependencies": {

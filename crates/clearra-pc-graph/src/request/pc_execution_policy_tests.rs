@@ -63,6 +63,21 @@ fn worker_policy_reserves_one_logical_processor_unless_explicitly_requested() {
 }
 
 #[test]
+fn automatic_worker_limit_caps_auto_policy_without_becoming_a_fixed_request() {
+    let default_workers = WorkerPolicy::default_worker_limit();
+    let limit = default_workers.min(3);
+    let policy = PcExecutionPolicy::mvp_default().with_automatic_worker_limit(limit);
+
+    assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
+    assert_eq!(policy.workers_requested(), None);
+    assert_eq!(policy.workers(), limit);
+
+    let fixed = policy.with_worker_policy(WorkerPolicy::Fixed(1));
+    assert_eq!(fixed.workers_requested(), Some(1));
+    assert_eq!(fixed.workers(), 1);
+}
+
+#[test]
 fn execution_backend_strings_are_canonical() {
     assert_eq!(
         RequestedSearchBackend::ALL.map(RequestedSearchBackend::as_str),

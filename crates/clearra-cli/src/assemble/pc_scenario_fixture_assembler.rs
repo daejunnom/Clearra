@@ -42,6 +42,7 @@ pub(super) fn query_from_fixture(fixture: &PcScenarioFixture) -> Result<PcScenar
         assemble_policy(ExecutionPolicyInput {
             backend: scenario.backend(),
             workers: scenario.workers(),
+            automatic_worker_limit: None,
             use_all_logical_processors: None,
             cpu_warmup: None,
             gpu_warmup: None,

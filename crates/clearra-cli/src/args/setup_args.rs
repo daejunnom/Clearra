@@ -18,6 +18,7 @@ pub struct SetupArgs {
     queue_observation_policy: QueueObservationPolicy,
     tablebase_requested: Option<bool>,
     workers: Option<usize>,
+    automatic_worker_limit: Option<usize>,
     use_all_logical_processors: bool,
 }
 
@@ -39,6 +40,7 @@ impl SetupArgs {
             queue_observation_policy: QueueObservationPolicy::default(),
             tablebase_requested: None,
             workers: None,
+            automatic_worker_limit: None,
             use_all_logical_processors: false,
         }
     }
@@ -103,6 +105,10 @@ impl SetupArgs {
 
     pub fn workers(&self) -> Option<usize> {
         self.workers
+    }
+
+    pub fn automatic_worker_limit(&self) -> Option<usize> {
+        self.automatic_worker_limit
     }
 
     pub fn use_all_logical_processors(&self) -> bool {
@@ -172,6 +178,11 @@ impl SetupArgs {
 
     pub fn with_workers(mut self, workers: Option<usize>) -> Self {
         self.workers = workers;
+        self
+    }
+
+    pub fn with_automatic_worker_limit(mut self, workers: Option<usize>) -> Self {
+        self.automatic_worker_limit = workers;
         self
     }
 

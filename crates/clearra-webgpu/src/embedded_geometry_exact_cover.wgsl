@@ -41,7 +41,7 @@ struct BatchParams {
 }
 
 struct CertifiedConstraints {
-    words: array<u32, 452>,
+    words: array<vec4<u32>, 113>,
 }
 
 @group(0) @binding(0)
@@ -64,6 +64,10 @@ var<storage, read_write> counters: OutputCounters;
 var<uniform> params: BatchParams;
 @group(0) @binding(9)
 var<uniform> certified_constraints: CertifiedConstraints;
+
+fn certified_constraint_word(index: u32) -> u32 {
+    return certified_constraints.words[index / 4u][index % 4u];
+}
 
 fn cell_is_set(lo: u32, hi: u32, cell: u32) -> bool {
     if (cell < 32u) {
@@ -114,14 +118,14 @@ fn missing_required(state: FrontierState, cell: u32) -> bool {
 }
 
 fn certified_constraints_enabled() -> bool {
-    return (certified_constraints.words[0] & 1u) != 0u;
+    return (certified_constraint_word(0u) & 1u) != 0u;
 }
 
 fn safe_separator_column(column: u32) -> bool {
     if (column < 32u) {
-        return (certified_constraints.words[1] & (1u << column)) != 0u;
+        return (certified_constraint_word(1u) & (1u << column)) != 0u;
     }
-    return (certified_constraints.words[2] & (1u << (column - 32u))) != 0u;
+    return (certified_constraint_word(2u) & (1u << (column - 32u))) != 0u;
 }
 
 fn missing_column_count(state: FrontierState, column: u32) -> u32 {
@@ -212,9 +216,9 @@ fn residual_constraints_allow(state: FrontierState) -> bool {
             let used = (state.used_counts >> shift) & 15u;
             let desired = (state.family_counts_and_depth >> (shift + 4u)) & 15u;
             let remaining_count = desired - used;
-            let bounds = certified_constraints.words[
+            let bounds = certified_constraint_word(
                 4u + piece * params.board_width + column
-            ];
+            );
             minimum += remaining_count * (bounds & 255u);
             maximum += remaining_count * ((bounds >> 8u) & 255u);
         }
@@ -223,7 +227,7 @@ fn residual_constraints_allow(state: FrontierState) -> bool {
         }
     }
 
-    if ((certified_constraints.words[0] & 2u) != 0u) {
+    if ((certified_constraint_word(0u) & 2u) != 0u) {
         var checker_delta = 0i;
         for (var cell = 0u; cell < params.cell_count; cell += 1u) {
             if (!missing_required(state, cell)) {

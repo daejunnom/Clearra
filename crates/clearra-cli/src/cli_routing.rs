@@ -38,6 +38,10 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                         .as_str(),
                     "tiling" | "tiling-only"
                 )
+        ) || matches!(
+            &command,
+            ParsedCliCommand::Product(tokens)
+                if tokens.iter().any(|token| token == "--tiling-only")
         );
         #[cfg(feature = "wasm-cpu-runtime")]
         let _tablebase_session = match tablebase_session_for_command(&command) {
@@ -75,6 +79,9 @@ fn tablebase_session_for_command(
     let requested = match command {
         ParsedCliCommand::Pc(args) => args.tablebase_requested() == Some(true),
         ParsedCliCommand::Setup(args) => args.tablebase_requested() == Some(true),
+        ParsedCliCommand::Product(tokens) => tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "--tablebase" | "--tb")),
         _ => false,
     };
     install_requested_tablebase(requested, PC4_COMPACT_TABLEBASE)

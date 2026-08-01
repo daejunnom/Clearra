@@ -6,7 +6,7 @@ export class DiscordGateway extends EventEmitter {
   constructor(token, options = {}) {
     super();
     this.token = token;
-    this.intents = options.intents ?? 33_281;
+    this.intents = options.intents ?? 0;
     this.stopped = false;
     this.socket = null;
     this.sequence = null;

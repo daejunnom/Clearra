@@ -2,10 +2,81 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
     solution::{
         NormalizedTilingSolutionError, NormalizedTilingSolutionKey, NormalizedTilingSolutionSet,
-        PiecePlacementMask,
+        PiecePlacementMask, StandardBoard64TilingIdentity,
     },
 };
 use fumen::CellColor;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceFumenBoard {
+    occupied_mask: u64,
+    grey_mask: u64,
+    colored_mask: u64,
+    visible_height: u8,
+}
+
+impl SourceFumenBoard {
+    pub fn decode(source: &str) -> Result<Self, SourceFumenDiagramError> {
+        let document = decode_document(source)?;
+        if document.pages.len() != 1 {
+            return Err(SourceFumenDiagramError::SetupPageCount {
+                actual: document.pages.len(),
+            });
+        }
+        let page = &document.pages[0];
+        if page.piece.is_some() {
+            return Err(SourceFumenDiagramError::SetupContainsOperation);
+        }
+
+        let mut grey_mask = 0u64;
+        let mut colored_mask = 0u64;
+        let mut visible_height = 0u8;
+        for (y, row) in page.field.iter().enumerate() {
+            for (x, cell) in row.iter().copied().enumerate() {
+                if cell == CellColor::Empty {
+                    continue;
+                }
+                let bit_index = y * 10 + x;
+                if bit_index >= u64::BITS as usize {
+                    return Err(SourceFumenDiagramError::CellOutsideBoard64 {
+                        page_index: 0,
+                        x,
+                        y,
+                    });
+                }
+                let bit = 1u64 << bit_index;
+                if cell == CellColor::Grey {
+                    grey_mask |= bit;
+                } else {
+                    colored_mask |= bit;
+                }
+                visible_height = visible_height.max((y + 1) as u8);
+            }
+        }
+        Ok(Self {
+            occupied_mask: grey_mask | colored_mask,
+            grey_mask,
+            colored_mask,
+            visible_height,
+        })
+    }
+
+    pub const fn occupied_mask(self) -> u64 {
+        self.occupied_mask
+    }
+
+    pub const fn grey_mask(self) -> u64 {
+        self.grey_mask
+    }
+
+    pub const fn colored_mask(self) -> u64 {
+        self.colored_mask
+    }
+
+    pub const fn visible_height(self) -> u8 {
+        self.visible_height
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceFumenSetup {
@@ -100,13 +171,14 @@ impl SourceFumenDiagramSet {
                 Some(_) => {}
             }
             visible_height = visible_height.max(decoded.visible_height);
-            keys.push(
-                NormalizedTilingSolutionKey::from_placements(
-                    decoded.initial_board_mask,
-                    decoded.placements,
-                )
-                .map_err(|source| SourceFumenDiagramError::InvalidTiling { page_index, source })?,
-            );
+            let identity = StandardBoard64TilingIdentity::from_placements(
+                decoded.initial_board_mask,
+                decoded.placements,
+            )
+            .map_err(|source| SourceFumenDiagramError::InvalidTiling { page_index, source })?;
+            keys.push(NormalizedTilingSolutionKey::from_standard_board64_identity(
+                identity,
+            ));
             operation_replay_available |= page.piece.is_some();
         }
 

@@ -54,7 +54,7 @@ fn verify_command_reports_builtin_kick_contracts() {
         .stdout()
         .contains("srs_plus_effective_kick_model: srs-plus-180"));
     assert!(output.stdout().contains("srs_plus_180_transitions: 24"));
-    assert!(output.stdout().contains("kick_verification_cases: 192"));
+    assert!(output.stdout().contains("kick_verification_cases: 264"));
     assert!(output.stdout().contains("kick_verification_failures: 0"));
     assert!(!output.stdout().contains("srs_plus_extension_reason"));
 }

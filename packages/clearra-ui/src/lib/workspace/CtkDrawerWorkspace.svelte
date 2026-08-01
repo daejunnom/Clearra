@@ -7,6 +7,8 @@
     ChevronRight,
     ClipboardCopy,
     Copy,
+    Download,
+    FileUp,
     HelpCircle,
     LoaderCircle,
     Plus,
@@ -37,6 +39,12 @@
     encodeFieldDocumentAsync,
     openFieldDocument
   } from './fieldInterchange';
+  import {
+    CTK3_FILE_ACCEPT,
+    installGlobalDocumentPaste,
+    saveCtk3Source,
+    sourceFromCtk3File
+  } from './ctk3File';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
     preferredWorkspaceLanguage,
@@ -65,10 +73,14 @@
   let pageLoading = false;
   let copyFormat: 'fumen' | 'ctk' = 'ctk';
   let copyState: CopyState = 'idle';
+  let downloadState: CopyState = 'idle';
   let copyTimer = 0;
+  let downloadTimer = 0;
   let pageLoadToken = 0;
   let lifecycleController = new AbortController();
   let copyController: AbortController | null = null;
+  let downloadController: AbortController | null = null;
+  let fileInput: HTMLInputElement;
   let pendingImportModel: CtkDrawerDocument | null = null;
   let previewPages = new Map<number, Ctk3Page>();
   let previewLoadToken = 0;
@@ -116,9 +128,14 @@
     };
     window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('pageshow', handlePageShow);
+    const removeDocumentPaste = installGlobalDocumentPaste({
+      importSource: importPastedDocument,
+      importFailed: () => (importFailed = true)
+    });
     return () => {
       window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('pageshow', handlePageShow);
+      removeDocumentPaste();
     };
   });
 
@@ -288,6 +305,23 @@
     }
   }
 
+  async function importPastedDocument(source: string) {
+    while (importLoading && !closed) await nextPaint();
+    if (!closed) await importDocument(source);
+  }
+
+  async function importCtk3File(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      await importPastedDocument(await sourceFromCtk3File(file));
+    } catch {
+      if (!closed) importFailed = true;
+    }
+  }
+
   async function copyDocument() {
     if (copyState === 'loading' || closed) return;
     window.clearTimeout(copyTimer);
@@ -298,24 +332,7 @@
     await nextPaint();
     try {
       throwIfAborted(controller.signal);
-      const original = copyFormat === 'ctk' ? documentModel.originalCtk : null;
-      let encoded = original;
-      if (!encoded) {
-        if (copyFormat === 'ctk') {
-          encoded = await encodeCtk3PageSourceAsync(documentModel, {
-            workerFactory: createCtkDocumentWorker,
-            signal: controller.signal
-          });
-        } else {
-          const materialized = await documentModel.materialize(controller.signal);
-          throwIfAborted(controller.signal);
-          encoded = await encodeFieldDocumentAsync(
-            materialized,
-            copyFormat,
-            { signal: controller.signal }
-          );
-        }
-      }
+      const encoded = await encodeDocument(copyFormat, controller.signal);
       throwIfAborted(controller.signal);
       await writeClipboardText(encoded, controller.signal);
       if (copyController !== controller || closed) return;
@@ -331,11 +348,61 @@
     }
   }
 
+  async function downloadDocument() {
+    if (downloadState === 'loading' || closed) return;
+    window.clearTimeout(downloadTimer);
+    downloadController?.abort();
+    const controller = new AbortController();
+    downloadController = controller;
+    downloadState = 'loading';
+    await nextPaint();
+    try {
+      const encoded = await encodeDocument('ctk', controller.signal);
+      throwIfAborted(controller.signal);
+      saveCtk3Source(encoded, `clearra-${pageCount}-pages.ctk3`);
+      if (downloadController !== controller || closed) return;
+      setDownloadState('copied');
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) {
+        if (!closed && downloadController === controller) downloadState = 'idle';
+        return;
+      }
+      setDownloadState('failed');
+    } finally {
+      if (downloadController === controller) downloadController = null;
+    }
+  }
+
+  async function encodeDocument(
+    format: 'fumen' | 'ctk',
+    signal: AbortSignal
+  ): Promise<string> {
+    const original = format === 'ctk' ? documentModel.originalCtk : null;
+    if (original) return original;
+    if (format === 'ctk') {
+      return encodeCtk3PageSourceAsync(documentModel, {
+        workerFactory: createCtkDocumentWorker,
+        signal
+      });
+    }
+    const materialized = await documentModel.materialize(signal);
+    throwIfAborted(signal);
+    return encodeFieldDocumentAsync(materialized, format, { signal });
+  }
+
   function setCopyState(next: 'copied' | 'failed') {
     copyState = next;
     window.clearTimeout(copyTimer);
     copyTimer = window.setTimeout(() => {
       copyState = 'idle';
+    }, 1600);
+  }
+
+  function setDownloadState(next: 'copied' | 'failed') {
+    downloadState = next;
+    window.clearTimeout(downloadTimer);
+    downloadTimer = window.setTimeout(() => {
+      downloadState = 'idle';
     }, 1600);
   }
 
@@ -363,10 +430,14 @@
     pageLoadToken += 1;
     previewLoadToken += 1;
     clearTimeout(copyTimer);
+    clearTimeout(downloadTimer);
     const error = abortError('CTK workspace was closed.');
     if (!lifecycleController.signal.aborted) lifecycleController.abort(error);
     if (copyController && !copyController.signal.aborted) {
       copyController.abort(error);
+    }
+    if (downloadController && !downloadController.signal.aborted) {
+      downloadController.abort(error);
     }
     pendingImportModel?.close();
     pendingImportModel = null;
@@ -374,6 +445,7 @@
     importLoading = false;
     pageLoading = false;
     copyState = 'idle';
+    downloadState = 'idle';
   }
 
   function throwIfAborted(signal: AbortSignal) {
@@ -695,6 +767,22 @@
         {/if}
         {label('loadDocument')}
       </button>
+      <input
+        class="file-input"
+        bind:this={fileInput}
+        type="file"
+        accept={CTK3_FILE_ACCEPT}
+        on:change={importCtk3File}
+      />
+      <button
+        class="command-button"
+        type="button"
+        disabled={importLoading}
+        on:click={() => fileInput?.click()}
+      >
+        <FileUp size={15} />
+        {label('loadCtk3File')}
+      </button>
       {#if importFailed}
         <p class="error" role="alert">{label('fieldImportInvalid')}</p>
       {/if}
@@ -758,8 +846,28 @@
           {/if}
           {label(copyState === 'loading' ? 'copyAllPending' : 'copyDocument')}
         </button>
+        {#if copyFormat === 'ctk'}
+          <button
+            type="button"
+            class="copy-document"
+            disabled={downloadState === 'loading'}
+            aria-busy={downloadState === 'loading'}
+            on:click={downloadDocument}
+          >
+            {#if downloadState === 'loading'}
+              <span class="spinner"><LoaderCircle size={15} /></span>
+            {:else if downloadState === 'copied'}
+              <Check size={15} />
+            {:else if downloadState === 'failed'}
+              <AlertTriangle size={15} />
+            {:else}
+              <Download size={15} />
+            {/if}
+            {label('downloadCtk3File')}
+          </button>
+        {/if}
       </div>
-      {#if copyState === 'failed'}
+      {#if copyState === 'failed' || downloadState === 'failed'}
         <p class="error" role="alert">{label('documentCopyFailed')}</p>
       {/if}
     </div>
@@ -920,6 +1028,7 @@
     padding: 0 11px;
   }
   .command-button { justify-self: start; }
+  .file-input { display: none; }
   .flag-grid {
     display: grid;
     gap: 8px 14px;
@@ -975,6 +1084,7 @@
   .export-row {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
   }
   .segments {

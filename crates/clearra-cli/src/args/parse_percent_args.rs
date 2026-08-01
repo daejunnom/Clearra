@@ -9,6 +9,7 @@ pub(crate) fn parse_percent(args: &[String]) -> Result<ParsedCliCommand, CliPars
     let mut mode = PercentQueueMode::Observed;
     let mut minimum_len = None;
     let mut max_patterns = 0;
+    let mut failed_pattern_limit = 100;
     let mut index = 0;
 
     while index < args.len() {
@@ -37,6 +38,10 @@ pub(crate) fn parse_percent(args: &[String]) -> Result<ParsedCliCommand, CliPars
                 max_patterns = parse_usize_option(args, index, "--max-patterns")?;
                 index += 2;
             }
+            "--failed-count" | "--failed-pattern-limit" => {
+                failed_pattern_limit = parse_usize_option(args, index, "--failed-count")?;
+                index += 2;
+            }
             "--help" | "-h" => return Ok(ParsedCliCommand::Help(CliHelpTopic::Percent)),
             value if is_positional(value) && queue.is_empty() => {
                 queue = value.to_owned();
@@ -50,6 +55,7 @@ pub(crate) fn parse_percent(args: &[String]) -> Result<ParsedCliCommand, CliPars
         PercentArgs::new(queue)
             .with_mode(mode)
             .with_minimum_len(minimum_len)
-            .with_max_patterns(max_patterns),
+            .with_max_patterns(max_patterns)
+            .with_failed_pattern_limit(failed_pattern_limit),
     ))
 }

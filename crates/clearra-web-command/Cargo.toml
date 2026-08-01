@@ -9,6 +9,7 @@ publish = false
 clearra-app = { path = "../clearra-app", default-features = false }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-forward-search = { path = "../clearra-forward-search" }
+clearra-fumen = { path = "../clearra-fumen" }
 clearra-objectives = { path = "../clearra-objectives" }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-problem = { path = "../clearra-problem" }

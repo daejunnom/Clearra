@@ -1,70 +1,157 @@
 # Clearrabot
 
-The bot runs Clearra searches and renders Fumen or CTK3 documents without an
-external solver or image-rendering service.
+Clearrabot submits Clearra searches to a long-running HTTP job service and
+renders Fumen or CTK3 documents without an external rendering service.
 
-## Requirements
+## Active Discord surface
 
-- Node.js 22 or newer
-- A release `clearra` executable on `PATH`
-- A Discord application with the Bot and Message Content intents enabled
+Only the `/clearra` and `/view` slash commands are enabled. Prefix commands,
+ordinary-message command detection, and automatic viewing of documents posted
+as ordinary messages are disabled. The Gateway fallback requests zero intents
+and applies the same slash-only policy.
 
-Discord carries events and API responses; it does not host the bot process or
-provide search CPUs. Run Clearrabot on a machine or container that you operate,
-or deploy it through a separate hosting provider.
+`/clearra` accepts Clearra command text without the executable name. `/view`
+accepts a Fumen or CTK3 value, a Clearra viewer URL, or a `.ctk3` attachment.
+Search commands may also receive a `.ctk3` attachment as field input.
 
-Configure the process environment:
+## Configuration
+
+Required in every mode:
 
 ```text
 DISCORD_TOKEN=...
-CLEARRA_EXECUTABLE=clearra
-CLEARRA_VIEWER_URL=https://daejunnom.github.io/Clearra/
+CLEARRA_JOB_URL=https://jobs.example.test/jobs
 ```
+
+Cloud Run HTTP interaction mode also requires:
+
+```text
+CLEARRA_DISCORD_INGRESS=cloud-run
+DISCORD_PUBLIC_KEY=...
+```
+
+`DISCORD_PUBLIC_KEY` is the public key shown for the Discord application. It is
+not an SSH key. GitHub or deployment SSH private keys must never be mounted in
+the container or used to verify Discord requests.
+
+`DISCORD_APPLICATION_ID` is optional during normal HTTP operation because each
+interaction carries it. Provide it together with `CLEARRA_REGISTER_COMMANDS=1`
+when this process should register the global slash commands. Command
+registration defaults off on Cloud Run so scaled instances do not repeat it.
 
 Optional settings:
 
 ```text
-CLEARRA_DISCORD_PREFIX=!
 CLEARRA_REGISTER_COMMANDS=1
 CLEARRA_MAX_CONCURRENT_SEARCHES=1
 CLEARRA_SEARCH_WORKERS_PER_SESSION=auto
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0
 CLEARRA_SEARCH_TIMEOUT_MS=180000
+CLEARRA_JOB_TOKEN=...
+CLEARRA_JOB_POLL_INTERVAL_MS=250
+CLEARRA_JOB_CANCEL_TIMEOUT_MS=2000
+CLEARRA_VIEWER_URL=https://daejunnom.github.io/Clearra/
 CLEARRA_MAX_GIF_BYTES=25165824
+CLEARRA_MAX_CTK3_FILE_BYTES=25165824
+CLEARRA_DISCORD_INTERACTION_PATH=/interactions
+CLEARRA_MAX_INTERACTION_BODY_BYTES=1048576
 ```
 
-Build CTK3 once, then start the bot:
+Local Gateway mode is selected outside Cloud Run by default. Set
+`CLEARRA_DISCORD_INGRESS=gateway` explicitly when needed. Discord delivers
+interactions either through the Gateway or through the configured HTTP
+endpoint, so only one mode should be enabled for an application at a time.
+
+## Cloud Run adapter
+
+The HTTP adapter listens on `0.0.0.0:$PORT`, exposes `GET /healthz`, and accepts
+Discord requests at `POST /interactions`. It verifies the raw request body with
+`X-Signature-Ed25519`, `X-Signature-Timestamp`, and the Discord application
+public key before parsing JSON. Invalid requests receive HTTP 401. Discord
+PING receives PONG, while enabled slash commands receive an immediate deferred
+response before the existing Clearra POST job is submitted.
+
+Build the container from the repository root:
+
+```powershell
+docker build -f apps/clearra-discord-bot/Dockerfile -t clearrabot .
+```
+
+The Cloud Run service must be publicly reachable because Discord cannot attach
+a Google IAM identity token. Request authenticity is provided by Discord's
+Ed25519 signature. Use concurrency 1 for CPU-heavy sessions and instance-based
+CPU allocation (`--no-cpu-throttling`) because direct mode polls and edits the
+deferred interaction after the initial HTTP response. A minimum instance can
+reduce cold starts but incurs cost.
+
+Set the deployed URL plus the configured path as the application's Interaction
+Endpoint URL, for example:
+
+```text
+https://clearrabot-PROJECT.REGION.run.app/interactions
+```
+
+Cloud Run may still terminate an instance after acknowledgement. The Clearra
+job service remains deadline-bound and idempotent, but durable result delivery
+should use the relay boundary below.
+
+## Relay boundary
+
+`DiscordRelayIngressAdapter` accepts versioned
+`clearra.discord.relay.v1` envelopes. A relay must acknowledge the Discord
+interaction first and send an event with:
+
+```json
+{
+  "protocol": "clearra.discord.relay.v1",
+  "deliveryId": "stable-delivery-id",
+  "acknowledgement": "deferred",
+  "event": {
+    "kind": "discord.interaction.create",
+    "payload": {}
+  }
+}
+```
+
+The adapter shares the exact slash-command ingress used by Cloud Run. The
+protocol reserves `discord.message.create`, but its default message ingress is
+disabled. A future Gateway relay can inject a separate message ingress without
+expanding the direct Cloud Run endpoint or changing slash-command execution.
+
+## Search resources
+
+Each search is stopped after three minutes by default. Clearrabot runs one
+search session at a time unless `CLEARRA_MAX_CONCURRENT_SEARCHES` is raised.
+At startup it reads the logical processors visible to its process, reserves one
+by default, and divides the remaining capacity between concurrent sessions.
+Discord users cannot override this allocation with `--workers` or
+`--cpu-threads`.
+
+## Job service protocol
+
+Clearrabot never starts a `clearra` process. It creates an idempotent job ID and
+posts one JSON document to `CLEARRA_JOB_URL`:
+
+```json
+{
+  "protocol": "clearra.job.v1",
+  "id": "client-generated-id",
+  "kind": "clearra.command",
+  "arguments": ["pc", "--lines", "4", "--format", "text"],
+  "deadlineUnixMs": 0,
+  "maxOutputBytes": 4194304
+}
+```
+
+The service may complete immediately or return HTTP 202 with state `accepted`
+or `running`. Clearrabot polls `GET {CLEARRA_JOB_URL}/{id}`. Cancellation and
+timeout send `DELETE {CLEARRA_JOB_URL}/{id}`. Repeated POSTs with the same ID
+must refer to the same job, and the service must enforce `deadlineUnixMs` even
+if the bot disconnects.
+
+Build CTK3 once, then start a local Gateway instance:
 
 ```powershell
 npm run build --workspace ctk3
 npm start --workspace @clearra/discord-bot
 ```
-
-## Commands
-
-`/clearra` and `!clearra` accept the command text after the executable name.
-The shorter `!pc`, `!setup`, `!path`, `!percent`, and `!cover` forms are also
-accepted.
-
-Each search is stopped after three minutes by default. Clearrabot runs one
-search session at a time unless `CLEARRA_MAX_CONCURRENT_SEARCHES` is raised.
-At startup it reads the logical processors visible to its process, reserves one
-by default, and divides the remaining PC/path/setup capacity between concurrent sessions.
-`CLEARRA_SEARCH_WORKERS_PER_SESSION` may lower that per-session allocation; it
-cannot exceed the runtime limit. Set `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` only
-when the host operator explicitly wants to remove the reserved processor.
-Discord users cannot override this allocation with `--workers` or
-`--cpu-threads`. The resolved allocation is printed once in the startup log.
-The current native percent and cover commands do not use this worker pool and
-execute on one search thread.
-
-```text
-!pc --lines 4 --patterns P7 --hold
-!setup --remaining SZ --priority pc --max-setup-pieces 4
-```
-
-`/view` renders a raw Fumen, raw CTK3 document, or Clearra viewer URL. Fumen
-and CTK3 values in ordinary messages are detected automatically. The GIF and
-the interactive Clearra viewer link are sent as a separate reply. When the
-direct reply would exceed Discord's 2,000-character limit, Clearrabot attaches
-a canonical CTK3 document and links to the Clearra CTK renderer instead.

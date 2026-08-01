@@ -4,12 +4,14 @@ use clearra_forward_search::{
     ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery,
     ForwardSpinCategory, ForwardSpinLineRequirement, ForwardSpinTarget,
 };
+use clearra_fumen::SourceFumenColoredFieldSet;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_objectives::policy::score_objective_policy::{
     ScoreProfileSelection, SpinProfileSelection,
 };
 use clearra_pc_graph::request::{
-    GpuDeviceSelection, PcCountPolicy, RequestedSearchBackend, WorkerPolicy,
+    GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
+    PcScenarioQuery, PieceWindow, RequestedSearchBackend, WorkerPolicy,
 };
 use clearra_problem::BuildProbabilityAggregation;
 use clearra_rules::profile::{
@@ -18,7 +20,11 @@ use clearra_rules::profile::{
 };
 use clearra_scoring::profile::SpinProfileId;
 use clearra_supply::{
-    queue::queue_pattern_expression::QueuePatternExpression, QueueObservationPolicy,
+    queue::{
+        queue_parser::{parse_bag_aligned_pattern, parse_fixed_sequence, parse_observed_queue},
+        queue_pattern_expression::QueuePatternExpression,
+    },
+    QueueObservationPolicy,
 };
 
 use crate::{
@@ -40,6 +46,18 @@ impl WebCommandParser {
     ) -> Result<WebCommandRequest, WebCommandError> {
         reject_process_semantics(command_text)?;
         let tokens = tokenize(command_text)?;
+        Self::parse_tokens_with_worker_limit(&tokens, worker_hardware_limit)
+    }
+
+    pub fn parse_tokens(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
+        Self::parse_tokens_with_worker_limit(tokens, WorkerPolicy::hardware_worker_limit())
+    }
+
+    pub fn parse_tokens_with_worker_limit(
+        tokens: &[String],
+        worker_hardware_limit: usize,
+    ) -> Result<WebCommandRequest, WebCommandError> {
+        let tokens = crate::sfinder_compat::translate_command(tokens)?;
         let mut cursor = 0usize;
 
         if tokens.get(cursor).map(String::as_str) == Some("clearra") {
@@ -53,10 +71,13 @@ impl WebCommandParser {
 
         match command.as_str() {
             "pc" => parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1)),
+            "percent" => parse_percent_command(&tokens[cursor..], worker_hardware_limit.max(1)),
             "build-probability" => {
                 parse_build_probability_command(&tokens[cursor..], worker_hardware_limit.max(1))
             }
-            "setup" => parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1)),
+            "setup-finder" | "setup" => {
+                parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1))
+            }
             "damage" => {
                 parse_forward_command(&tokens[cursor..], false, worker_hardware_limit.max(1))
             }
@@ -70,6 +91,114 @@ impl WebCommandParser {
             )),
         }
     }
+}
+
+fn parse_percent_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    enum QueueMode {
+        Observed,
+        BagAligned,
+        Fixed,
+    }
+
+    let mut queue_text = String::new();
+    let mut mode = QueueMode::Observed;
+    let mut minimum_len = None;
+    let mut max_patterns = 0;
+    let mut failed_pattern_limit = 100;
+    let mut cursor = 0;
+    while cursor < tokens.len() {
+        match tokens[cursor].as_str() {
+            "--queue" | "-q" => {
+                let option = tokens[cursor].clone();
+                queue_text = next_value(tokens, &mut cursor, &option)?.to_owned();
+            }
+            "--observed" => {
+                mode = QueueMode::Observed;
+                cursor += 1;
+            }
+            "--bag-aligned" | "--bag" => {
+                mode = QueueMode::BagAligned;
+                cursor += 1;
+            }
+            "--fixed" => {
+                mode = QueueMode::Fixed;
+                cursor += 1;
+            }
+            "--min-len" | "--minimum-len" => {
+                let option = tokens[cursor].clone();
+                minimum_len = Some(parse_nonnegative_usize(
+                    next_value(tokens, &mut cursor, &option)?,
+                    &option,
+                )?);
+            }
+            "--max-patterns" => {
+                max_patterns = parse_nonnegative_usize(
+                    next_value(tokens, &mut cursor, "--max-patterns")?,
+                    "--max-patterns",
+                )?;
+            }
+            "--failed-count" | "--failed-pattern-limit" => {
+                let option = tokens[cursor].clone();
+                failed_pattern_limit =
+                    parse_nonnegative_usize(next_value(tokens, &mut cursor, &option)?, &option)?;
+            }
+            value if !value.starts_with('-') && queue_text.is_empty() => {
+                queue_text = value.to_owned();
+                cursor += 1;
+            }
+            flag => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unsupported percent option '{flag}'"),
+                ));
+            }
+        }
+    }
+
+    let queue = match mode {
+        QueueMode::Observed => {
+            PcQueueInput::observed(parse_observed_queue(&queue_text).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "invalid observed percent queue",
+                )
+            })?)
+        }
+        QueueMode::BagAligned => PcQueueInput::bag_aligned_pattern(
+            parse_bag_aligned_pattern(&queue_text).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "invalid bag-aligned percent pattern",
+                )
+            })?,
+        ),
+        QueueMode::Fixed => {
+            PcQueueInput::fixed_sequence(parse_fixed_sequence(&queue_text).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "invalid fixed percent sequence",
+                )
+            })?)
+        }
+    };
+    let minimum_len = minimum_len.unwrap_or(queue.len()).max(1);
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        queue,
+        PieceWindow::new(minimum_len),
+    )
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_retained_trace_limit(0)
+    .with_execution_policy(
+        PcExecutionPolicy::mvp_default()
+            .with_worker_hardware_limit(worker_hardware_limit)
+            .with_max_patterns(max_patterns),
+    );
+
+    Ok(WebCommandRequest::percent(query, failed_pattern_limit))
 }
 
 fn parse_setup_command(
@@ -89,6 +218,7 @@ fn parse_setup_command(
     let mut path_detail_setup_id = None;
     let mut path_detail_condition_id = None;
     let mut workers = None;
+    let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut tablebase_requested = false;
     let mut cursor = 0_usize;
@@ -187,6 +317,12 @@ fn parse_setup_command(
                     "--workers",
                 )?);
             }
+            "--auto-workers" => {
+                automatic_worker_limit = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--auto-workers")?,
+                    "--auto-workers",
+                )?);
+            }
             "--use-all-cpu-threads" => {
                 use_all_logical_processors = true;
                 cursor += 1;
@@ -254,21 +390,12 @@ fn parse_setup_command(
         (None, true) => clearra_problem::SetupSearchMode::QueueBased,
         (None, false) => clearra_problem::SetupSearchMode::ShapeOracle,
     };
-    if let Some(workers) = workers {
-        let default_limit = WorkerPolicy::default_worker_limit_for_hardware(worker_hardware_limit);
-        if workers > worker_hardware_limit {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                format!("--workers {workers} exceeds the hard limit of {worker_hardware_limit}"),
-            ));
-        }
-        if workers > default_limit && !use_all_logical_processors {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                "using the reserved logical processor requires --use-all-cpu-threads",
-            ));
-        }
-    }
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
     let mut request = WebCommandRequest::setup(pieces, allow_post_cycle_borrow)
         .with_rule(rule)
         .with_setup_candidate_priority(candidate_priority)
@@ -312,6 +439,8 @@ fn parse_setup_command(
     }
     if let Some(workers) = workers {
         request = request.with_workers(workers);
+    } else if let Some(workers) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(workers);
     }
     Ok(request)
 }
@@ -334,6 +463,7 @@ fn parse_forward_command(
     let mut target_lines = ForwardSpinLineRequirement::Any;
     let mut target_category = ForwardSpinCategory::Any;
     let mut workers = None;
+    let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
@@ -475,6 +605,12 @@ fn parse_forward_command(
                     "--workers",
                 )?);
             }
+            "--auto-workers" => {
+                automatic_worker_limit = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--auto-workers")?,
+                    "--auto-workers",
+                )?);
+            }
             "--use-all-cpu-threads" => {
                 use_all_logical_processors = true;
                 cursor += 1;
@@ -525,31 +661,20 @@ fn parse_forward_command(
         mode,
     )
     .with_line_clear_policy(line_clear_policy);
-    if let Some(workers) = workers {
-        if workers > worker_hardware_limit {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                format!(
-                    "--workers {workers} exceeds the hard limit of {worker_hardware_limit} logical processors"
-                ),
-            ));
-        }
-        let default_limit = WorkerPolicy::default_worker_limit_for_hardware(worker_hardware_limit);
-        if workers > default_limit && !use_all_logical_processors {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                format!(
-                    "--workers {workers} uses the reserved logical processor; pass --use-all-cpu-threads explicitly"
-                ),
-            ));
-        }
-    }
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
     let mut request =
         WebCommandRequest::forward(if spin_finder { "spin-finder" } else { "damage" }, query)
             .with_worker_hardware_limit(worker_hardware_limit)
             .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(workers) = workers {
         request = request.with_workers(workers);
+    } else if let Some(workers) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(workers);
     }
     Ok(request)
 }
@@ -583,6 +708,7 @@ fn parse_build_probability_command(
     let mut max_candidates = None;
     let mut max_memory_mib = None;
     let mut workers = None;
+    let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut cpu_warmup = false;
     let mut include_horizontal_mirror = true;
@@ -656,6 +782,12 @@ fn parse_build_probability_command(
                 workers = Some(parse_positive(
                     next_value(tokens, &mut cursor, "--workers")?,
                     "--workers",
+                )?);
+            }
+            "--auto-workers" => {
+                automatic_worker_limit = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--auto-workers")?,
+                    "--auto-workers",
                 )?);
             }
             "--use-all-cpu-threads" => {
@@ -771,21 +903,12 @@ fn parse_build_probability_command(
             "--no-hold cannot be combined with an occupied --hold slot",
         ));
     }
-    if let Some(workers) = workers {
-        let default_limit = WorkerPolicy::default_worker_limit_for_hardware(worker_hardware_limit);
-        if workers > worker_hardware_limit {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                format!("--workers {workers} exceeds the hard limit of {worker_hardware_limit}"),
-            ));
-        }
-        if workers > default_limit && !use_all_logical_processors {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                "using the reserved logical processor requires --use-all-cpu-threads",
-            ));
-        }
-    }
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
 
     let mut input = WebBuildProbabilityInput::from_words(
         base_mask.ok_or_else(|| missing_build_probability_option("--base-mask"))?,
@@ -833,6 +956,8 @@ fn parse_build_probability_command(
     }
     if let Some(workers) = workers {
         request = request.with_workers(workers);
+    } else if let Some(workers) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(workers);
     }
     Ok(request)
 }
@@ -887,6 +1012,7 @@ fn parse_pc_command(
     let mut max_candidates: Option<usize> = None;
     let mut max_memory_mib: Option<u64> = None;
     let mut workers: Option<usize> = None;
+    let mut automatic_worker_limit: Option<usize> = None;
     let mut use_all_logical_processors = false;
     let mut cpu_warmup = false;
     let mut gpu_warmup = false;
@@ -895,6 +1021,7 @@ fn parse_pc_command(
     let mut solution_probabilities = false;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
+    let mut allowed_colored_solution_identities = None;
     let mut cursor = 0usize;
 
     while cursor < tokens.len() {
@@ -1049,6 +1176,10 @@ fn parse_pc_command(
                 let value = next_value(tokens, &mut cursor, "--workers")?;
                 workers = Some(parse_positive(value, "--workers")?);
             }
+            "--auto-workers" => {
+                let value = next_value(tokens, &mut cursor, "--auto-workers")?;
+                automatic_worker_limit = Some(parse_positive(value, "--auto-workers")?);
+            }
             "--use-all-cpu-threads" => {
                 use_all_logical_processors = true;
                 cursor += 1;
@@ -1112,6 +1243,16 @@ fn parse_pc_command(
                 let value = next_value(tokens, &mut cursor, "--output")?;
                 reject_native_path_semantics(value)?;
             }
+            "--solution-fumen" => {
+                let value = next_value(tokens, &mut cursor, "--solution-fumen")?;
+                let solutions = SourceFumenColoredFieldSet::decode(value).map_err(|error| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid supplied solution Fumen: {error:?}"),
+                    )
+                })?;
+                allowed_colored_solution_identities = Some(solutions.identities().to_vec());
+            }
             flag if flag.starts_with("--") => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::UnsupportedCommand,
@@ -1133,26 +1274,12 @@ fn parse_pc_command(
             "--queue and --patterns are mutually exclusive",
         ));
     }
-    if let Some(workers) = workers {
-        let hardware_limit = worker_hardware_limit.max(1);
-        let default_limit = WorkerPolicy::default_worker_limit_for_hardware(hardware_limit);
-        if workers > hardware_limit {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                format!(
-                    "--workers {workers} exceeds the hard limit of {hardware_limit} logical processors"
-                ),
-            ));
-        }
-        if workers > default_limit && !use_all_logical_processors {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                format!(
-                    "--workers {workers} uses the reserved logical processor; pass --use-all-cpu-threads explicitly"
-                ),
-            ));
-        }
-    }
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
     if tiling_only_flag
         && objective.is_some_and(|policy| {
             policy.kind() != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
@@ -1257,11 +1384,14 @@ fn parse_pc_command(
         let board_mask = board_mask.ok_or_else(|| missing_scenario_option("--board-mask"))?;
         let visible_height = visible_height.ok_or_else(|| missing_scenario_option("--height"))?;
         let piece_window = piece_window.ok_or_else(|| missing_scenario_option("--pieces"))?;
-        let scenario = WebPcScenarioInput::new(board_mask, visible_height, piece_window)
+        let mut scenario = WebPcScenarioInput::new(board_mask, visible_height, piece_window)
             .with_hold_piece(hold_piece.unwrap_or(None))
             .with_allow_hold(hold_enabled)
             .with_count_policy(count_policy)
             .with_retained_trace_limit(retained_trace_limit);
+        if let Some(identities) = allowed_colored_solution_identities {
+            scenario = scenario.with_allowed_colored_solution_identities(identities);
+        }
         let scenario = if let Some(source_piece_count) = source_piece_count {
             scenario.with_source_piece_count(source_piece_count)
         } else {
@@ -1286,11 +1416,52 @@ fn parse_pc_command(
     }
     if let Some(workers) = workers {
         request = request.with_workers(workers);
+    } else if let Some(workers) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(workers);
     }
     for file in virtual_files {
         request = request.with_virtual_file(file);
     }
     Ok(request)
+}
+
+fn validate_worker_options(
+    workers: Option<usize>,
+    automatic_worker_limit: Option<usize>,
+    use_all_logical_processors: bool,
+    worker_hardware_limit: usize,
+) -> Result<(), WebCommandError> {
+    if workers.is_some() && automatic_worker_limit.is_some() {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--workers and --auto-workers are mutually exclusive",
+        ));
+    }
+    let Some((option, workers)) = workers
+        .map(|workers| ("--workers", workers))
+        .or_else(|| automatic_worker_limit.map(|workers| ("--auto-workers", workers)))
+    else {
+        return Ok(());
+    };
+    let hardware_limit = worker_hardware_limit.max(1);
+    if workers > hardware_limit {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!(
+                "{option} {workers} exceeds the hard limit of {hardware_limit} logical processors"
+            ),
+        ));
+    }
+    let default_limit = WorkerPolicy::default_worker_limit_for_hardware(hardware_limit);
+    if workers > default_limit && !use_all_logical_processors {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!(
+                "{option} {workers} uses the reserved logical processor; pass --use-all-cpu-threads explicitly"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_rule_profile(value: &str) -> Result<RuleProfile, WebCommandError> {
@@ -1327,6 +1498,15 @@ fn parse_u64(value: &str, option: &str) -> Result<u64, WebCommandError> {
         None => value.parse::<u64>(),
     };
     result.map_err(|_| {
+        WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("invalid {option} value '{value}'"),
+        )
+    })
+}
+
+fn parse_nonnegative_usize(value: &str, option: &str) -> Result<usize, WebCommandError> {
+    value.parse::<usize>().map_err(|_| {
         WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
             format!("invalid {option} value '{value}'"),

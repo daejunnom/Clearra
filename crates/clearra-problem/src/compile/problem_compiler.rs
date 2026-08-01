@@ -7,7 +7,7 @@ use crate::{
         SetupPostPcPreset,
     },
     query::{BuildQuery, PcQuery, SetupSearchQuery},
-    search_problem::{SearchProblem, SearchProblemPreset},
+    search_problem::{SearchOutputPolicy, SearchProblem, SearchProblemPreset},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -34,6 +34,14 @@ impl ProblemCompiler {
             SearchProblemPreset::ScenarioPc,
             ScenarioPreset::from_query(query.clone()).into_scenario_query(),
         )
+    }
+}
+impl ProblemCompiler {
+    pub fn compile_scenario_percent(
+        query: &PcScenarioQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_scenario_pc(query)
+            .map(|problem| problem.with_output_policy(SearchOutputPolicy::CoverageSummary))
     }
 }
 impl ProblemCompiler {

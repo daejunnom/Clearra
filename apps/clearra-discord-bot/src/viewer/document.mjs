@@ -1,6 +1,7 @@
 import {
   decodeCtk3,
   isCtk3,
+  parseCtk3File,
 } from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
 
@@ -84,6 +85,15 @@ export function decodeViewerDocument(source) {
         },
       };
     }),
+  };
+}
+
+export function decodeViewerFile(data) {
+  const { source, document } = parseCtk3File(data);
+  return {
+    format: "ctk3",
+    source,
+    document,
   };
 }
 

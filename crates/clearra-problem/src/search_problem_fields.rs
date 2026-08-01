@@ -199,6 +199,30 @@ mod search_output_policy {
         Summary,
         Trace,
         CoverageRows,
+        CoverageSummary,
+    }
+
+    impl SearchOutputPolicy {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Summary => "summary",
+                Self::Trace => "trace",
+                Self::CoverageRows => "coverage-rows",
+                Self::CoverageSummary => "coverage-summary",
+            }
+        }
+
+        pub const fn retains_solution_set(self) -> bool {
+            !matches!(self, Self::CoverageSummary)
+        }
+
+        pub const fn retains_representative_trace(self) -> bool {
+            !matches!(self, Self::CoverageSummary)
+        }
+
+        pub const fn retains_candidate_digest(self) -> bool {
+            !matches!(self, Self::CoverageSummary)
+        }
     }
 }
 mod search_problem_board {

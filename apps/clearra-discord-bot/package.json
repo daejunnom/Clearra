@@ -8,7 +8,7 @@
     "test": "npm run build --workspace ctk3 && node --test ./test/*.test.mjs"
   },
   "dependencies": {
-    "ctk3": "0.1.0",
+    "ctk3": "0.1.1",
     "tetris-fumen": "^1.1.3"
   },
   "engines": {

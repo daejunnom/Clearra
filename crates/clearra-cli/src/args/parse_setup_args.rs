@@ -20,6 +20,7 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut tablebase_requested = None;
     let mut workers = None;
+    let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut index = 0;
 
@@ -126,6 +127,10 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
                 workers = Some(parse_usize_option(args, index, "--workers")?);
                 index += 2;
             }
+            "--auto-workers" => {
+                automatic_worker_limit = Some(parse_usize_option(args, index, "--auto-workers")?);
+                index += 2;
+            }
             "--cpu-threads" => {
                 workers = Some(parse_usize_option(args, index, "--cpu-threads")?);
                 index += 2;
@@ -137,6 +142,13 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
             "--help" | "-h" => return Ok(ParsedCliCommand::Help(CliHelpTopic::Setup)),
             option => return Err(unknown_option("setup", option)),
         }
+    }
+
+    if workers.is_some() && automatic_worker_limit.is_some() {
+        return Err(CliParseError::InvalidValue {
+            option: "--auto-workers",
+            value: "cannot be combined with --workers or --cpu-threads".to_owned(),
+        });
     }
 
     let search_mode = match (explicit_search_mode, queue_based_pieces.is_some()) {
@@ -158,6 +170,7 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
         .with_queue_observation_policy(queue_observation_policy)
         .with_tablebase_requested(tablebase_requested)
         .with_workers(workers)
+        .with_automatic_worker_limit(automatic_worker_limit)
         .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(pieces) = queue_based_pieces {
         setup_args = setup_args.with_queue_based_pieces(pieces);

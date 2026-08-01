@@ -221,6 +221,59 @@ fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     }
 }
 
+#[cfg(test)]
+mod coverage_summary_tests {
+    use clearra_core_domain::{
+        execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+        piece::piece_kind::PieceKind,
+    };
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::WasmCpuSearchBackend;
+
+    #[test]
+    fn percent_coverage_summary_omits_solution_set_and_trace() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_retained_trace_limit(0);
+        let problem = ProblemCompiler::compile_scenario_percent(&query).expect("problem");
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+
+        let result = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("coverage summary");
+
+        assert!(result.solution_found());
+        assert_eq!(
+            result.field("search_output_policy"),
+            Some("coverage-summary")
+        );
+        assert_eq!(result.field("coverage_probability"), Some("1"));
+        assert_eq!(result.field("covered_pattern_count"), Some("1"));
+        assert_eq!(result.field("solution_count_calculated"), Some("false"));
+        assert_eq!(result.field("solution_set_materialized"), Some("false"));
+        assert_eq!(
+            result.field("unique_solution_count"),
+            Some("not-calculated")
+        );
+        assert_eq!(
+            result.field("normalized_solution_set_hash"),
+            Some("not-calculated")
+        );
+        assert!(result.normalized_solution_identities().is_empty());
+        assert!(result.path_steps().is_empty());
+    }
+}
+
 #[cfg(all(test, feature = "webgpu-search"))]
 mod tests {
     use clearra_pc_graph::request::RequestedSearchBackend;

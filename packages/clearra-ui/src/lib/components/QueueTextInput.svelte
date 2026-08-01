@@ -43,4 +43,4 @@
   });
 </script>
 
-<input {...$$restProps} bind:this={input} on:input={handleInput} />
+<input {...$$restProps} bind:this={input} on:input={handleInput} on:keydown />

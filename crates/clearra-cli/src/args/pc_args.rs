@@ -15,6 +15,7 @@ pub struct PcArgs {
     kick_profile_json: Option<String>,
     backend: Option<String>,
     workers: Option<usize>,
+    automatic_worker_limit: Option<usize>,
     use_all_logical_processors: Option<bool>,
     cpu_warmup: Option<bool>,
     gpu_warmup: Option<bool>,
@@ -47,6 +48,7 @@ impl PcArgs {
             kick_profile_json: None,
             backend: None,
             workers: None,
+            automatic_worker_limit: None,
             use_all_logical_processors: None,
             cpu_warmup: None,
             gpu_warmup: None,
@@ -125,6 +127,10 @@ impl PcArgs {
     pub fn workers(&self) -> Option<usize> {
         self.workers
     }
+
+    pub fn automatic_worker_limit(&self) -> Option<usize> {
+        self.automatic_worker_limit
+    }
 }
 impl PcArgs {
     pub fn use_all_logical_processors(&self) -> Option<bool> {
@@ -196,6 +202,7 @@ impl PcArgs {
     pub fn has_execution_options(&self) -> bool {
         self.backend.is_some()
             || self.workers.is_some()
+            || self.automatic_worker_limit.is_some()
             || self.use_all_logical_processors.is_some()
             || self.cpu_warmup.is_some()
             || self.gpu_warmup.is_some()
@@ -271,6 +278,11 @@ impl PcArgs {
 impl PcArgs {
     pub fn with_workers(mut self, workers: Option<usize>) -> Self {
         self.workers = workers;
+        self
+    }
+
+    pub fn with_automatic_worker_limit(mut self, workers: Option<usize>) -> Self {
+        self.automatic_worker_limit = workers;
         self
     }
 }

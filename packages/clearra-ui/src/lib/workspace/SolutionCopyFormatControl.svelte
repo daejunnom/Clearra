@@ -1,6 +1,7 @@
 <script lang="ts">
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import SolutionCopyAllButton from './SolutionCopyAllButton.svelte';
+  import SolutionDownloadButton from './SolutionDownloadButton.svelte';
   import type {
     SolutionCopyFormat,
     SolutionExportPage
@@ -9,6 +10,7 @@
 
   export let value: SolutionCopyFormat = 'ctk';
   export let language: WorkspaceLanguage;
+  export let compact = false;
   export let solutionKeys: string[] = [];
   export let loadPages:
     | ((signal?: AbortSignal) => Promise<SolutionExportPage[]> | SolutionExportPage[])
@@ -21,11 +23,13 @@
   ) => workspaceMessage(language, key, values);
 </script>
 
-<div class="copy-format">
-  <div>
-    <strong>{label('solutionCopyFormat')}</strong>
-    <span>{label('solutionCopyFormatHelp')}</span>
-  </div>
+<div class="copy-format" class:compact>
+  {#if !compact}
+    <div>
+      <strong>{label('solutionCopyFormat')}</strong>
+      <span>{label('solutionCopyFormatHelp')}</span>
+    </div>
+  {/if}
   <div class="copy-actions">
     <div class="segments" role="group" aria-label={label('solutionCopyFormat')}>
       <button
@@ -48,6 +52,14 @@
       {loadPages}
       {keySource}
     />
+    {#if value === 'ctk'}
+      <SolutionDownloadButton
+        {language}
+        {solutionKeys}
+        {loadPages}
+        {keySource}
+      />
+    {/if}
   </div>
 </div>
 
@@ -61,6 +73,7 @@
     min-width: 0;
     padding: 10px 12px;
   }
+  .copy-format.compact { background: transparent; justify-content: flex-end; padding: 0; }
 
   .copy-format > div:first-child {
     display: grid;
@@ -93,6 +106,7 @@
     display: flex;
     flex: 0 0 auto;
     gap: 7px;
+    flex-wrap: wrap;
   }
 
   button {
@@ -126,7 +140,7 @@
     .copy-actions {
       align-items: stretch;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) repeat(2, auto);
     }
   }
 </style>

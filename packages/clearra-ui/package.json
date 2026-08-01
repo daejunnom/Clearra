@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "scripts": {
+    "test": "node --test ./test/*.test.mjs"
+  },
   "exports": {
     ".": "./src/lib/index.ts",
     "./components": "./src/lib/components/index.ts",

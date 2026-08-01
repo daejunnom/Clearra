@@ -1,6 +1,6 @@
 {
   "name": "ctk3",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Compact, lossless Tetris field interchange with a tetris-fumen-compatible API",
   "type": "module",
   "main": "./dist/index.cjs",

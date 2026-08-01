@@ -19,7 +19,7 @@ const config = {
     },
     paths: {
       base: deploymentBase,
-      relative: true
+      relative: deploymentBase === ''
     }
   }
 };

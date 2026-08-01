@@ -11,11 +11,10 @@ use clearra_core_domain::{
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
-use clearra_pc_graph::request::PcCountPolicy;
 use clearra_problem::SearchProblem;
 
 use super::{
-    buildup::{verify_candidate, BuildUpWorkspace, CandidateBuildResult},
+    buildup::{verify_candidate, BuildUpWorkspace, CandidateBuildResult, CandidateWitnessMode},
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
     geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, TargetGroup},
@@ -71,6 +70,7 @@ impl ParallelBranchQueue {
 pub(super) struct BranchSearchOutcome {
     pub canonical_index: usize,
     pub geometry: GeometrySearch,
+    pub candidate_count: usize,
     pub candidate_hashes: Vec<u64>,
     pub truncated_reason: Option<&'static str>,
 }
@@ -146,6 +146,8 @@ impl WorkerAggregate {
         candidate: GeometryCandidate,
         result: CandidateBuildResult,
         solution_coverage: Option<PatternBitSet>,
+        retain_solution_set: bool,
+        retain_representative: bool,
     ) -> Result<(), WasmExactSearchError> {
         self.peak_build_nodes = self.peak_build_nodes.max(result.graph_nodes);
         self.total_build_nodes = self.total_build_nodes.saturating_add(result.graph_nodes);
@@ -198,25 +200,29 @@ impl WorkerAggregate {
             })?;
         }
 
-        self.buildable_identities.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_parallel_solution_storage_unavailable")
-        })?;
-        self.buildable_identities.push(candidate.identity);
+        if retain_solution_set {
+            self.buildable_identities.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_parallel_solution_storage_unavailable")
+            })?;
+            self.buildable_identities.push(candidate.identity);
+        }
         let next = self
             .build_variant_count
             .checked_add(result.build_variant_count);
         self.build_variant_count = next.unwrap_or(u128::MAX);
         self.count_complete &= next.is_some() && result.count_complete;
-        let representative = RepresentativeCandidate {
-            branch_index,
-            local_ordinal,
-            candidate,
-        };
-        if self
-            .representative
-            .is_none_or(|current| representative.rank() < current.rank())
-        {
-            self.representative = Some(representative);
+        if retain_representative {
+            let representative = RepresentativeCandidate {
+                branch_index,
+                local_ordinal,
+                candidate,
+            };
+            if self
+                .representative
+                .is_none_or(|current| representative.rank() < current.rank())
+            {
+                self.representative = Some(representative);
+            }
         }
         Ok(())
     }
@@ -412,12 +418,17 @@ fn run_branch(
                 break;
             }
             GeometryAdvance::Candidate(candidate) => {
-                candidate_hashes.try_reserve(1).map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_parallel_candidate_digest_storage_unavailable",
-                    )
-                })?;
-                candidate_hashes.push(candidate.identity.bucket_hash());
+                if !problem.allows_solution_identity(&candidate.identity) {
+                    continue;
+                }
+                if problem.output_policy().retains_candidate_digest() {
+                    candidate_hashes.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_parallel_candidate_digest_storage_unavailable",
+                        )
+                    })?;
+                    candidate_hashes.push(candidate.identity.bucket_hash());
+                }
                 if problem.objective().kind() == ObjectiveKind::Tiling {
                     aggregate.observe_tiling(task.canonical_index, local_ordinal, candidate)?;
                     local_ordinal = local_ordinal.saturating_add(1);
@@ -432,11 +443,14 @@ fn run_branch(
                     problem.solution_probability_policy().requested();
                 let solution_coverage_required = solution_probabilities_requested
                     || problem.objective().kind() == ObjectiveKind::MinimumCover;
-                let coverage_only_needs_witness = !solution_coverage_required
-                    && problem.count_policy() == PcCountPolicy::CountUnique
-                    && target.single_pattern_witness_is_exact()
-                    && (workspace.standard_bag_coverage_complete()
-                        || shared_coverage.is_superset(target.possible_patterns.as_ref()));
+                let coverage_already_known = workspace.standard_bag_coverage_complete()
+                    || shared_coverage.is_superset(target.possible_patterns.as_ref());
+                let witness_mode = CandidateWitnessMode::for_candidate(
+                    problem,
+                    target,
+                    coverage_already_known,
+                    solution_coverage_required,
+                );
                 let result = verify_candidate(
                     problem,
                     catalog,
@@ -444,7 +458,7 @@ fn run_branch(
                     target,
                     workspace,
                     evaluator,
-                    coverage_only_needs_witness,
+                    witness_mode,
                     false,
                     0,
                     control,
@@ -477,6 +491,8 @@ fn run_branch(
                     candidate,
                     result,
                     solution_coverage,
+                    problem.output_policy().retains_solution_set(),
+                    problem.output_policy().retains_representative_trace(),
                 )?;
                 local_ordinal = local_ordinal.saturating_add(1);
             }
@@ -486,6 +502,7 @@ fn run_branch(
         BranchSearchOutcome {
             canonical_index: task.canonical_index,
             geometry: search,
+            candidate_count: local_ordinal,
             candidate_hashes,
             truncated_reason,
         },

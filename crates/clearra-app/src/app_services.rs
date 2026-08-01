@@ -17,8 +17,8 @@ use clearra_core_domain::{
 use clearra_core_executor::WasmSetupParallelCoordinator;
 use clearra_core_executor::{
     CoreExecutionError, CoreExecutionResult, CoreExecutor, CorePostProcessScoreCell,
-    CorePostProcessSpinCoverage, PercentService, PercentServiceError, SolutionAverageScoreReport,
-    WasmBuildProbabilityBackend, WasmCpuSearchBackend, WasmCpuSearchError, WasmSetupSearchBackend,
+    CorePostProcessSpinCoverage, SolutionAverageScoreReport, WasmBuildProbabilityBackend,
+    WasmCpuSearchBackend, WasmCpuSearchError, WasmSetupSearchBackend,
 };
 use clearra_i18n::{LanguageId, LanguagePreference, LanguageResolver};
 use clearra_objectives::policy::score_objective_policy::{
@@ -460,21 +460,6 @@ impl AppCoreExecutorService {
         apply_build_spin_postprocess(result, control)
     }
 }
-impl AppCoreExecutorService {
-    pub fn execute_percent_with_control(
-        &self,
-        problem: &SearchProblem,
-        control: &ExecutionControl,
-    ) -> Result<CoreExecutionResult, PercentServiceError> {
-        match self.backend {
-            AppCoreExecutorBackend::NativeCore => {
-                PercentService::execute_with_cancellation(problem, &control.cancellation)
-            }
-            AppCoreExecutorBackend::WasmCpu => Err(PercentServiceError::UnsupportedPreset),
-        }
-    }
-}
-
 fn apply_pc_postprocess(
     result: CoreExecutionResult,
     control: &ExecutionControl,

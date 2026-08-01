@@ -60,6 +60,7 @@ mod policy {
     pub struct PcExecutionPolicy {
         requested_backend: RequestedSearchBackend,
         worker_policy: WorkerPolicy,
+        automatic_worker_limit: Option<usize>,
         worker_hardware_limit: usize,
         runtime_webgpu_available: bool,
         use_all_logical_processors: bool,
@@ -99,10 +100,12 @@ mod policy {
     }
     impl PcExecutionPolicy {
         pub fn workers(&self) -> usize {
-            self.worker_policy.effective_for_hardware_limit(
+            let workers = self.worker_policy.effective_for_hardware_limit(
                 self.use_all_logical_processors,
                 self.worker_hardware_limit,
-            )
+            );
+            self.automatic_worker_limit
+                .map_or(workers, |limit| workers.min(limit.max(1)))
         }
     }
     impl PcExecutionPolicy {
@@ -209,12 +212,21 @@ mod policy {
     impl PcExecutionPolicy {
         pub fn with_worker_policy(mut self, worker_policy: WorkerPolicy) -> Self {
             self.worker_policy = worker_policy;
+            self.automatic_worker_limit = None;
             self
         }
     }
     impl PcExecutionPolicy {
         pub fn with_workers(mut self, workers: usize) -> Self {
             self.worker_policy = WorkerPolicy::Fixed(workers);
+            self.automatic_worker_limit = None;
+            self
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn with_automatic_worker_limit(mut self, workers: usize) -> Self {
+            self.worker_policy = WorkerPolicy::Auto;
+            self.automatic_worker_limit = Some(workers.max(1));
             self
         }
     }
@@ -324,6 +336,7 @@ mod policy {
             Self {
                 requested_backend: RequestedSearchBackend::Auto,
                 worker_policy: WorkerPolicy::Auto,
+                automatic_worker_limit: None,
                 worker_hardware_limit: WorkerPolicy::hardware_worker_limit(),
                 runtime_webgpu_available: true,
                 use_all_logical_processors: false,

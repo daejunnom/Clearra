@@ -74,6 +74,50 @@ fn build_dependency_dag_is_explicit_for_pc() {
 }
 
 #[test]
+fn tiling_only_rejects_build_dependency_preanalysis() {
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "4",
+            "--tiling-only",
+            "--build-dependency-dag",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--build-dependency-dag",
+            value: "not available with tiling-only search".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn tiling_only_preserves_explicit_hold_policy() {
+    let with_hold = CliParser::parse(["clearra", "pc", "--lines", "4", "--tiling-only", "--hold"])
+        .expect("tiling-only with hold")
+        .into_command();
+    let ParsedCliCommand::Pc(with_hold) = with_hold else {
+        panic!("expected PC command");
+    };
+    assert!(with_hold.hold_enabled());
+
+    let without_hold = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--tiling-only",
+        "--no-hold",
+    ])
+    .expect("tiling-only without hold")
+    .into_command();
+    let ParsedCliCommand::Pc(without_hold) = without_hold else {
+        panic!("expected PC command");
+    };
+    assert!(!without_hold.hold_enabled());
+}
+
+#[test]
 fn parses_pc_args_outside_lib_router() {
     let invocation = CliParser::parse([
         "clearra",
@@ -188,6 +232,38 @@ fn parses_explicit_cpu_pool_warmup_and_all_thread_opt_in() {
     assert_eq!(args.workers(), Some(1));
     assert_eq!(args.use_all_logical_processors(), Some(true));
     assert_eq!(args.cpu_warmup(), Some(true));
+}
+
+#[test]
+fn parses_automatic_worker_ceiling_without_forcing_parallel_selection() {
+    let invocation = CliParser::parse(["clearra", "pc", "--lines", "4", "--auto-workers", "3"])
+        .expect("adaptive CPU ceiling");
+
+    let ParsedCliCommand::Pc(args) = invocation.into_command() else {
+        panic!("expected pc command");
+    };
+    assert_eq!(args.workers(), None);
+    assert_eq!(args.automatic_worker_limit(), Some(3));
+}
+
+#[test]
+fn rejects_fixed_and_automatic_worker_counts_together() {
+    assert!(matches!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "4",
+            "--workers",
+            "2",
+            "--auto-workers",
+            "3",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--auto-workers",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -338,6 +414,57 @@ fn parses_command_specific_help_as_help_topic() {
 }
 
 #[test]
+fn canonical_clearra_commands_match_legacy_aliases() {
+    let canonical_path = CliParser::parse(["clearra", "pc-replay", "--lines", "2"])
+        .expect("canonical replay command")
+        .into_command();
+    let legacy_path = CliParser::parse(["clearra", "path", "--lines", "2"])
+        .expect("legacy replay alias")
+        .into_command();
+    assert_eq!(canonical_path, legacy_path);
+
+    let canonical_setup = CliParser::parse(["clearra", "setup-finder", "--remaining", "IOTS"])
+        .expect("canonical setup finder command")
+        .into_command();
+    let legacy_setup = CliParser::parse(["clearra", "setup", "--remaining", "IOTS"])
+        .expect("legacy setup alias")
+        .into_command();
+    assert_eq!(canonical_setup, legacy_setup);
+
+    let canonical_coverage = CliParser::parse(["clearra", "build-coverage", "--template", "pc4"])
+        .expect("canonical build coverage command")
+        .into_command();
+    let legacy_coverage = CliParser::parse(["clearra", "cover", "--template", "pc4"])
+        .expect("legacy coverage alias")
+        .into_command();
+    assert_eq!(canonical_coverage, legacy_coverage);
+}
+
+#[test]
+fn sfinder_namespace_does_not_collide_with_clearra_legacy_aliases() {
+    let clearra_path = CliParser::parse(["clearra", "path", "--lines", "2"])
+        .expect("Clearra path alias")
+        .into_command();
+    assert!(matches!(clearra_path, ParsedCliCommand::Path(_)));
+
+    let sfinder_path =
+        CliParser::parse(["clearra", "sfinder", "path", "v115@vhAAgH", "*p7,*p3", "4"])
+            .expect("Sfinder path namespace")
+            .into_command();
+    let ParsedCliCommand::Product(tokens) = sfinder_path else {
+        panic!("expected product compatibility command");
+    };
+    assert_eq!(&tokens[..3], ["clearra", "sfinder", "path"]);
+
+    assert_eq!(
+        CliParser::parse(["clearra", "sfinder", "--help"])
+            .expect("Sfinder help")
+            .into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Sfinder)
+    );
+}
+
+#[test]
 fn parses_setup_candidate_priority() {
     let invocation = CliParser::parse([
         "clearra",
@@ -376,6 +503,25 @@ fn parses_setup_worker_allocation() {
     };
     assert_eq!(args.workers(), Some(4));
     assert!(args.use_all_logical_processors());
+}
+
+#[test]
+fn parses_setup_automatic_worker_ceiling() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--auto-workers",
+        "3",
+    ])
+    .expect("setup automatic worker ceiling");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.workers(), None);
+    assert_eq!(args.automatic_worker_limit(), Some(3));
 }
 
 #[test]
@@ -755,4 +901,22 @@ fn parses_mvp2_cli_command_surfaces() {
             .into_command(),
         ParsedCliCommand::Percent(_)
     ));
+}
+
+#[test]
+fn parses_percent_failed_pattern_limit() {
+    let parsed = CliParser::parse([
+        "clearra",
+        "percent",
+        "--queue",
+        "IOT",
+        "--failed-count",
+        "23",
+    ])
+    .expect("percent")
+    .into_command();
+    let ParsedCliCommand::Percent(args) = parsed else {
+        panic!("expected percent command");
+    };
+    assert_eq!(args.failed_pattern_limit(), 23);
 }

@@ -11,4 +11,6 @@ pub use source_fumen_colored_field_set::{
     SourceFumenColoredFieldSet, COLORED_FIELD_SOLUTION_KEY_ALGORITHM,
     COLORED_FIELD_SOLUTION_SET_HASH_ALGORITHM,
 };
-pub use source_fumen_diagram::{SourceFumenDiagramError, SourceFumenDiagramSet, SourceFumenSetup};
+pub use source_fumen_diagram::{
+    SourceFumenBoard, SourceFumenDiagramError, SourceFumenDiagramSet, SourceFumenSetup,
+};

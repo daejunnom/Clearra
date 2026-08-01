@@ -572,6 +572,86 @@ struct WitnessProductState {
     active_patterns: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FixedWitnessProductState {
+    subset: u16,
+    extra_draw: u8,
+    hold_code: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CandidateWitnessMode {
+    Disabled,
+    MembershipOnly,
+    ExactSinglePatternCoverage,
+}
+
+impl CandidateWitnessMode {
+    pub(super) fn for_candidate(
+        problem: &SearchProblem,
+        target: &TargetGroup,
+        coverage_already_known: bool,
+        solution_coverage_required: bool,
+    ) -> Self {
+        if solution_coverage_required
+            || problem.objective().execution_constraints().requested()
+            || problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || problem.count_policy() != PcCountPolicy::CountUnique
+            || !target.single_pattern_witness_is_exact()
+        {
+            return Self::Disabled;
+        }
+        if coverage_already_known {
+            return Self::MembershipOnly;
+        }
+        if problem.piece_source().fixed_sequence().is_some() {
+            return Self::ExactSinglePatternCoverage;
+        }
+        Self::Disabled
+    }
+
+    const fn enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    const fn returns_coverage(self) -> bool {
+        matches!(self, Self::ExactSinglePatternCoverage)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FixedWitnessBranch {
+    desired_piece: u8,
+    next_extra_draw: u8,
+    next_hold_code: u8,
+    hold_kind: &'static str,
+}
+
+const EMPTY_FIXED_WITNESS_BRANCH: FixedWitnessBranch = FixedWitnessBranch {
+    desired_piece: 0,
+    next_extra_draw: 0,
+    next_hold_code: 0,
+    hold_kind: "",
+};
+
+struct FixedWitnessBranches {
+    values: [FixedWitnessBranch; 3],
+    len: usize,
+}
+
+impl FixedWitnessBranches {
+    fn push(&mut self, branch: FixedWitnessBranch) {
+        self.values[self.len] = branch;
+        self.len += 1;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = FixedWitnessBranch> + '_ {
+        self.values[..self.len].iter().copied()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct WitnessStep {
     edge: BuildEdge,
@@ -592,7 +672,7 @@ pub(super) fn verify_candidate(
     target: &TargetGroup,
     workspace: &mut BuildUpWorkspace,
     evaluator: &mut CoverageProductEvaluator,
-    coverage_only_needs_witness: bool,
+    witness_mode: CandidateWitnessMode,
     retain_trace: bool,
     profile_scale: u64,
     control: &ExecutionControl,
@@ -604,7 +684,7 @@ pub(super) fn verify_candidate(
         target,
         workspace,
         evaluator,
-        coverage_only_needs_witness,
+        witness_mode,
         retain_trace,
         profile_scale,
         BuildCompletion::ClearToEmpty,
@@ -620,7 +700,7 @@ pub(super) fn verify_candidate_for_completion(
     target: &TargetGroup,
     workspace: &mut BuildUpWorkspace,
     evaluator: &mut CoverageProductEvaluator,
-    coverage_only_needs_witness: bool,
+    witness_mode: CandidateWitnessMode,
     retain_trace: bool,
     profile_scale: u64,
     completion: BuildCompletion,
@@ -651,7 +731,7 @@ pub(super) fn verify_candidate_for_completion(
         &mut projection,
         workspace,
         evaluator,
-        coverage_only_needs_witness,
+        witness_mode,
         retain_trace,
         profile_scale,
         completion,
@@ -670,7 +750,7 @@ fn verify_candidate_with_projection(
     projection: &mut CandidateProjection,
     workspace: &mut BuildUpWorkspace,
     evaluator: &mut CoverageProductEvaluator,
-    coverage_only_needs_witness: bool,
+    witness_mode: CandidateWitnessMode,
     retain_trace: bool,
     profile_scale: u64,
     completion: BuildCompletion,
@@ -694,7 +774,7 @@ fn verify_candidate_with_projection(
     if feasibility.is_infeasible() {
         return Ok(infeasible_candidate_result(feasibility_states));
     }
-    if coverage_only_needs_witness
+    if witness_mode.enabled()
         && problem.count_policy() == PcCountPolicy::CountUnique
         && target.pattern_index.is_some()
     {
@@ -705,6 +785,7 @@ fn verify_candidate_with_projection(
             target,
             projection,
             workspace,
+            witness_mode,
             retain_trace,
             feasibility_states,
             profile_scale,
@@ -985,6 +1066,7 @@ fn verify_first_pattern_witness(
     target: &TargetGroup,
     projection: &mut CandidateProjection,
     workspace: &mut BuildUpWorkspace,
+    witness_mode: CandidateWitnessMode,
     retain_trace: bool,
     feasibility_states: usize,
     profile_scale: u64,
@@ -1050,9 +1132,12 @@ fn verify_first_pattern_witness(
     } else {
         Vec::new()
     };
+    let covered_patterns = witness_mode
+        .returns_coverage()
+        .then(|| target.possible_patterns.as_ref().clone());
     Ok(CandidateBuildResult {
         buildable: true,
-        covered_patterns: None,
+        covered_patterns,
         symbolic_coverage_root: None,
         observation_language_root: None,
         symbolic_covered_pattern_count: 0,
@@ -1108,6 +1193,60 @@ fn find_first_pattern_witness(
             "wasm_witness_transition_storage_overflow",
         ))?;
     let mut transition_cache = vec![CachedWitnessTransition::Unknown; transition_count];
+    if let Some(fixed_sequence) = problem
+        .piece_source()
+        .fixed_sequence()
+        .filter(|_| !problem.supply().projects_standard_bag_lookahead())
+        .filter(|_| pattern_index.local_pattern_count() == 1)
+    {
+        let mut operation_masks_by_piece = [0_u16; 8];
+        for (operation_index, row_id) in candidate.row_ids().iter().copied().enumerate() {
+            let piece_code = usize::from(witness_piece_code(catalog.skeleton(row_id).piece));
+            operation_masks_by_piece[piece_code] |= 1_u16 << operation_index;
+        }
+        let mut failed = ExactHashSet::default();
+        let mut path = Vec::with_capacity(projection.operation_count());
+        let mut visited_product_states = 0usize;
+        let root = FixedWitnessProductState {
+            subset: 0,
+            extra_draw: 0,
+            hold_code: initial_hold_code,
+        };
+        let accepted = visit_fixed_witness_state(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            fixed_sequence.pieces(),
+            &operation_masks_by_piece,
+            root,
+            workspace,
+            &mut transition_cache,
+            &mut failed,
+            &mut path,
+            &mut visited_product_states,
+            completion,
+            feasibility,
+            control,
+        )?;
+        if !accepted {
+            return Ok(None);
+        }
+        let global_pattern_index =
+            pattern_index
+                .global_pattern_index(0)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_witness_pattern_index_missing",
+                ))?;
+        return Ok(Some(CandidateWitness {
+            global_pattern_index,
+            path,
+            visited_product_states,
+            retained_bytes: transition_cache.capacity()
+                * core::mem::size_of::<CachedWitnessTransition>()
+                + failed.capacity() * core::mem::size_of::<FixedWitnessProductState>(),
+        }));
+    }
     let mut failed = ExactHashSet::default();
     let mut path = Vec::with_capacity(projection.operation_count());
     let mut visited_product_states = 0usize;
@@ -1163,6 +1302,154 @@ fn find_first_pattern_witness(
         }
     }
     Ok(None)
+}
+
+fn fixed_witness_branches(
+    sequence: &[PieceKind],
+    queue_position: usize,
+    hold_enabled: bool,
+    state: FixedWitnessProductState,
+) -> FixedWitnessBranches {
+    let mut branches = FixedWitnessBranches {
+        values: [EMPTY_FIXED_WITNESS_BRANCH; 3],
+        len: 0,
+    };
+    let Some(current_piece) = sequence.get(queue_position).copied() else {
+        return branches;
+    };
+    let current_code = witness_piece_code(current_piece);
+    branches.push(FixedWitnessBranch {
+        desired_piece: current_code,
+        next_extra_draw: state.extra_draw,
+        next_hold_code: state.hold_code,
+        hold_kind: "use-current",
+    });
+    if !hold_enabled {
+        return branches;
+    }
+    if state.hold_code != 0 {
+        // Swapping equal pieces reaches the exact same semantic state as using
+        // current, so it is not a second search branch.
+        if state.hold_code != current_code {
+            branches.push(FixedWitnessBranch {
+                desired_piece: state.hold_code,
+                next_extra_draw: state.extra_draw,
+                next_hold_code: current_code,
+                hold_kind: "swap-held",
+            });
+        }
+    } else if state.extra_draw == 0 {
+        if let Some(next_piece) = sequence.get(queue_position.saturating_add(1)).copied() {
+            branches.push(FixedWitnessBranch {
+                desired_piece: witness_piece_code(next_piece),
+                next_extra_draw: 1,
+                next_hold_code: current_code,
+                hold_kind: "store-current-use-next",
+            });
+        }
+    }
+    branches
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_fixed_witness_state(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    projection: &mut CandidateProjection,
+    sequence: &[PieceKind],
+    operation_masks_by_piece: &[u16; 8],
+    state: FixedWitnessProductState,
+    workspace: &mut BuildUpWorkspace,
+    transition_cache: &mut [CachedWitnessTransition],
+    failed: &mut ExactHashSet<FixedWitnessProductState>,
+    path: &mut Vec<WitnessStep>,
+    visited_product_states: &mut usize,
+    completion: BuildCompletion,
+    feasibility: RealizationFeasibility,
+    control: &ExecutionControl,
+) -> Result<bool, WasmExactSearchError> {
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    if failed.contains(&state) {
+        return Ok(false);
+    }
+    *visited_product_states = visited_product_states.saturating_add(1);
+    let subset = usize::from(state.subset);
+    if subset == projection.all_placed {
+        return Ok(completion.accepts(projection, subset));
+    }
+    let depth = subset.count_ones() as usize;
+    let queue_position = problem
+        .initial_hold()
+        .cursor()
+        .checked_add(depth as u16)
+        .and_then(|position| position.checked_add(u16::from(state.extra_draw)))
+        .map(usize::from)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_witness_queue_position_overflow",
+        ))?;
+    let permitted_operations = workspace
+        .realization_feasibility
+        .permitted_operation_mask(feasibility, subset);
+    let branches = fixed_witness_branches(
+        sequence,
+        queue_position,
+        problem.supply().hold_enabled(),
+        state,
+    );
+    for branch in branches.iter() {
+        let mut operations =
+            permitted_operations & operation_masks_by_piece[usize::from(branch.desired_piece)];
+        while operations != 0 {
+            let operation_index = operations.trailing_zeros() as usize;
+            operations &= operations - 1;
+            let Some(edge) = witness_transition(
+                problem,
+                catalog,
+                candidate,
+                projection,
+                subset,
+                operation_index,
+                workspace,
+                transition_cache,
+            ) else {
+                continue;
+            };
+            path.push(WitnessStep {
+                edge,
+                hold_kind: branch.hold_kind,
+            });
+            let next = FixedWitnessProductState {
+                subset: edge.to as u16,
+                extra_draw: branch.next_extra_draw,
+                hold_code: branch.next_hold_code,
+            };
+            if visit_fixed_witness_state(
+                problem,
+                catalog,
+                candidate,
+                projection,
+                sequence,
+                operation_masks_by_piece,
+                next,
+                workspace,
+                transition_cache,
+                failed,
+                path,
+                visited_product_states,
+                completion,
+                feasibility,
+                control,
+            )? {
+                return Ok(true);
+            }
+            path.pop();
+        }
+    }
+    failed.insert(state);
+    Ok(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2412,5 +2699,91 @@ fn occupied_rows(width: u8, mut cells: u64) -> u16 {
         rows |= 1_u16 << (cell / width as usize);
     }
     rows
+}
+
+#[cfg(test)]
+mod fixed_witness_tests {
+    use super::{fixed_witness_branches, witness_piece_code, FixedWitnessProductState};
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    fn state(extra_draw: u8, hold: Option<PieceKind>) -> FixedWitnessProductState {
+        FixedWitnessProductState {
+            subset: 0,
+            extra_draw,
+            hold_code: hold.map_or(0, witness_piece_code),
+        }
+    }
+
+    #[test]
+    fn fixed_queue_without_hold_only_uses_current_piece() {
+        let branches =
+            fixed_witness_branches(&[PieceKind::I, PieceKind::O], 0, false, state(0, None));
+        let actual = branches
+            .iter()
+            .map(|branch| (branch.desired_piece, branch.hold_kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![(witness_piece_code(PieceKind::I), "use-current")]
+        );
+    }
+
+    #[test]
+    fn fixed_queue_occupied_hold_can_swap_with_current() {
+        let branches =
+            fixed_witness_branches(&[PieceKind::I], 0, true, state(0, Some(PieceKind::O)));
+        let actual = branches
+            .iter()
+            .map(|branch| {
+                (
+                    branch.desired_piece,
+                    branch.next_hold_code,
+                    branch.hold_kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    witness_piece_code(PieceKind::I),
+                    witness_piece_code(PieceKind::O),
+                    "use-current",
+                ),
+                (
+                    witness_piece_code(PieceKind::O),
+                    witness_piece_code(PieceKind::I),
+                    "swap-held",
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn fixed_queue_equal_current_and_hold_has_one_semantic_branch() {
+        let branches =
+            fixed_witness_branches(&[PieceKind::I], 0, true, state(0, Some(PieceKind::I)));
+        assert_eq!(branches.iter().count(), 1);
+    }
+
+    #[test]
+    fn fixed_queue_empty_hold_can_store_current_and_use_next() {
+        let branches =
+            fixed_witness_branches(&[PieceKind::I, PieceKind::O], 0, true, state(0, None));
+        let stored = branches
+            .iter()
+            .find(|branch| branch.hold_kind == "store-current-use-next")
+            .expect("empty hold branch");
+        assert_eq!(stored.desired_piece, witness_piece_code(PieceKind::O));
+        assert_eq!(stored.next_hold_code, witness_piece_code(PieceKind::I));
+        assert_eq!(stored.next_extra_draw, 1);
+    }
+
+    #[test]
+    fn fixed_queue_does_not_release_hold_after_source_exhaustion() {
+        let branches =
+            fixed_witness_branches(&[PieceKind::I], 1, true, state(0, Some(PieceKind::O)));
+        assert_eq!(branches.iter().count(), 0);
+    }
 }
 // SRP rationale: this module has one behavior-level change reason: exact WASM BuildUp state expansion and trace preservation.

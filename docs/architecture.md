@@ -965,12 +965,17 @@ cover lowers BuildCoverageQuery into BuildQuery.
 
 percent uses PercentQueryAssembler to interpret queue arguments into a
 scenario-shaped `PcScenarioQuery`. The app command validates the queue contract,
-compiles the query, and calls `PercentService`; observed queue expansion belongs
-to the executor service, not to the CLI command file.
+compiles a `coverage-summary` SearchProblem, and calls the same exact executor
+boundary as PC search. Observed queue expansion and failed-pattern calculation
+belong to the typed app/executor path, not to the CLI command file. The browser
+WASM command parser exposes the same percent arguments and does not route through
+a native-only service.
 
 Process-level E2E owns the product-route contract for `clearra pc --lines 2`,
-`clearra pc-scenario --fixture tests/fixtures/pc/example.json`, `clearra path`,
-`clearra percent`, `clearra setup`, and `clearra cover`.
+`clearra pc-scenario --fixture tests/fixtures/pc/example.json`, `clearra pc-replay`,
+`clearra percent`, `clearra setup-finder`, and `clearra build-coverage`.
+`path`, `setup`, and `cover` remain input-only compatibility aliases and do not
+adopt the semantics of identically named Sfinder commands.
 
 ## M19 Backend Policy and Fallback
 
@@ -1689,7 +1694,13 @@ Percent follows:
 The percent command must report `total_pattern_count`, `covered_pattern_count`,
 `probability`, `weighted_probability`, `coverage_probability`, and
 `c_buildup_coverage_row_count`. Coverage probability is measured from the OR
-union of covered pattern ids, not by summing variant rows.
+union of covered pattern ids, not by summing variant rows. Percent uses the
+`coverage-summary` output policy: normalized solution identities, solution-set
+hashes, candidate digests, and replay traces are neither retained nor reported
+as calculated. Failed queue examples are materialized only up to the explicit
+output limit; the exact failed count is derived from the complete PatternBitSet.
+The count is exact for the materialized universe; `failed_pattern_count_complete`
+is true only when the universe itself is complete.
 
 Path follows:
 

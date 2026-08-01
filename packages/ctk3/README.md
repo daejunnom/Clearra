@@ -82,6 +82,32 @@ encodeCtk3(document);
 The native document model uses bottom-up row-major cells and preserves every
 CTK3 page property without imposing Fumen's 10x23 limit.
 
+## `.ctk3` files
+
+A `.ctk3` file contains one canonical CTK3 document as BOM-free UTF-8. Its MIME
+type is `application/vnd.clearra.ctk3`; the same checksummed codec is therefore
+used for text, URLs, clipboard values, and files.
+
+```ts
+import {
+  CTK3_FILE_EXTENSION,
+  CTK3_FILE_MIME_TYPE,
+  createCtk3Blob,
+  decodeCtk3File,
+  encodeCtk3File,
+  readCtk3File,
+} from "ctk3";
+
+const bytes = encodeCtk3File(document);
+decodeCtk3File(bytes);
+
+const blob = createCtk3Blob(document);
+await readCtk3File(blob);
+```
+
+`decodeCtk3File()` accepts strings, `ArrayBuffer`, and typed-array views.
+`readCtk3File()` accepts browser `File` and `Blob` objects.
+
 ## Large documents
 
 A single CTK3 segment contains at most 4,096 pages. A `ctk3b_` bundle can

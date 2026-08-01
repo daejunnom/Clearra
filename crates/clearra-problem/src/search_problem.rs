@@ -85,6 +85,7 @@ mod budget_policy {
     }
 }
 mod constructor {
+    use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
     use clearra_rules::spawn::SpawnProfile;
 
     use crate::{compile::ProblemCompileError, query::ScenarioQuery};
@@ -133,6 +134,11 @@ mod constructor {
             let continuation_policy =
                 ContinuationPolicy::new(true, core_query.min_remaining_queue());
             let labels = scenario.labels().to_vec();
+            let allowed_colored_solution_identities: Option<
+                Vec<StandardBoard64ColoredTilingIdentity>,
+            > = core_query
+                .allowed_colored_solution_identities()
+                .map(ToOwned::to_owned);
             let rule_profile = RuleProfileSelection::new(
                 core_query.rule(),
                 core_query.verified_kick_profile().cloned(),
@@ -179,6 +185,7 @@ mod constructor {
                 trace_policy,
                 continuation_policy,
                 labels,
+                allowed_colored_solution_identities,
                 scenario,
             })
         }
@@ -274,6 +281,12 @@ mod execution_accessors {
         }
     }
     impl SearchProblem {
+        pub fn with_output_policy(mut self, output_policy: SearchOutputPolicy) -> Self {
+            self.output_policy = output_policy;
+            self
+        }
+    }
+    impl SearchProblem {
         pub fn replay_trace_policy(&self) -> SearchReplayTracePolicy {
             self.replay_trace_policy
         }
@@ -290,6 +303,9 @@ mod execution_accessors {
     }
 }
 mod identity_accessors {
+    use clearra_core_domain::solution::{
+        StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
+    };
     use clearra_pc_graph::{classification::ChainClass, dag::CheckpointSchedule};
 
     use super::{SearchProblem, SearchProblemId, SearchProblemKind, SearchProblemPreset};
@@ -313,6 +329,24 @@ mod identity_accessors {
         pub fn labels(&self) -> &[String] {
             &self.labels
         }
+
+        pub fn allowed_colored_solution_identities(
+            &self,
+        ) -> Option<&[StandardBoard64ColoredTilingIdentity]> {
+            self.allowed_colored_solution_identities.as_deref()
+        }
+
+        pub fn allows_solution_identity(&self, identity: &StandardBoard64TilingIdentity) -> bool {
+            self.allowed_colored_solution_identities
+                .as_ref()
+                .is_none_or(|allowed| {
+                    let colored =
+                        StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(
+                            *identity,
+                        );
+                    allowed.binary_search(&colored).is_ok()
+                })
+        }
     }
     impl SearchProblem {
         pub fn checkpoint_schedule(&self) -> Option<&CheckpointSchedule> {
@@ -326,6 +360,7 @@ mod identity_accessors {
     }
 }
 mod model {
+    use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::PieceWindow;
     use clearra_profiles::{
@@ -373,6 +408,8 @@ mod model {
         pub(super) trace_policy: TracePolicy,
         pub(super) continuation_policy: ContinuationPolicy,
         pub(super) labels: Vec<String>,
+        pub(super) allowed_colored_solution_identities:
+            Option<Vec<StandardBoard64ColoredTilingIdentity>>,
     }
 }
 mod output_policy {

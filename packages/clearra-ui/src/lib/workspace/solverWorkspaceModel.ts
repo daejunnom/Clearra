@@ -37,6 +37,7 @@ export type WorkspaceValidationCode =
   | 'queue_invalid'
   | 'target_lines_invalid'
   | 'scenario_not_tileable'
+  | 'scenario_supply_mismatch'
   | 'scenario_full'
   | 'worker_count_invalid'
   | 'initial_b2b_invalid'
@@ -280,6 +281,32 @@ export function scenarioPieceWindow(request: SolverWorkspaceRequest): number | n
   const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);
   if (emptyCells <= 0 || emptyCells % 4 !== 0) return null;
   return emptyCells / 4;
+}
+
+export function automaticPcTargetLines(
+  boardMask: bigint,
+  queue: string,
+  maxLines = 4
+): number | null {
+  const boundedMaxLines = Math.max(1, Math.min(6, Math.trunc(maxLines)));
+  const parsedQueue = parseBrowserQueueInput(queue);
+  if (!parsedQueue) return null;
+
+  const normalized = clearCompletedRows(boardMask, boundedMaxLines);
+  const occupiedCells = occupiedCellCount(normalized.boardMask);
+  let occupiedHeight = 0;
+  for (let index = 0; index < boundedMaxLines * 10; index += 1) {
+    if ((normalized.boardMask & (1n << BigInt(index))) !== 0n) {
+      occupiedHeight = Math.floor(index / 10) + 1;
+    }
+  }
+
+  for (let lines = boundedMaxLines; lines >= Math.max(1, occupiedHeight); lines -= 1) {
+    const emptyCells = lines * 10 - occupiedCells;
+    if (emptyCells <= 0 || emptyCells % 4 !== 0) continue;
+    if (emptyCells / 4 <= parsedQueue.sequenceLength) return lines;
+  }
+  return null;
 }
 
 export function workspaceValidationCodes(

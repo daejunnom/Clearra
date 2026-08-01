@@ -22,7 +22,6 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut hold_enabled = true;
     let mut objective: Option<String> = None;
     let mut tiling_only = false;
-    let mut hold_option: Option<bool> = None;
     let mut score_requested = false;
     let mut score_profile = None;
     let mut spin_profile = None;
@@ -31,6 +30,7 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut kick_profile_json = None;
     let mut backend = None;
     let mut workers = None;
+    let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = None;
     let mut cpu_warmup = None;
     let mut gpu_warmup = None;
@@ -69,12 +69,10 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
             }
             "--hold" => {
                 hold_enabled = true;
-                hold_option = Some(true);
                 index += 1;
             }
             "--no-hold" => {
                 hold_enabled = false;
-                hold_option = Some(false);
                 index += 1;
             }
             "--objective" | "-o" => {
@@ -118,6 +116,10 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
             }
             "--workers" => {
                 workers = Some(parse_usize_option(args, index, "--workers")?);
+                index += 2;
+            }
+            "--auto-workers" => {
+                automatic_worker_limit = Some(parse_usize_option(args, index, "--auto-workers")?);
                 index += 2;
             }
             "--cpu-threads" => {
@@ -215,6 +217,12 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         no_gpu,
         gpu_device.as_deref(),
     )?;
+    if workers.is_some() && automatic_worker_limit.is_some() {
+        return Err(CliParseError::InvalidValue {
+            option: "--auto-workers",
+            value: "cannot be combined with --workers or --cpu-threads".to_owned(),
+        });
+    }
     if tiling_only
         && objective.as_deref().is_some_and(|value| {
             !matches!(
@@ -235,7 +243,6 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     };
     if objective.trim().to_ascii_lowercase().replace('_', "-") == "tiling" {
         let incompatible = [
-            (hold_option == Some(true), "--hold"),
             (score_requested, "--score"),
             (score_profile.is_some(), "--score-profile"),
             (spin_profile.is_some(), "--spin-profile"),
@@ -259,7 +266,6 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 value: "not available with tiling-only search".to_owned(),
             });
         }
-        hold_enabled = false;
     }
 
     Ok(PcArgs::new(lines)
@@ -274,6 +280,7 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         .with_kick_profile_json(kick_profile_json)
         .with_backend(backend)
         .with_workers(workers)
+        .with_automatic_worker_limit(automatic_worker_limit)
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
         .with_gpu_warmup(gpu_warmup)

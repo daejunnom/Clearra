@@ -53,6 +53,56 @@ export class DiscordRestClient {
     );
   }
 
+  async downloadAttachment(url, maxBytes) {
+    const parsed = discordAttachmentUrl(url);
+    const limit = Number(maxBytes);
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("The Discord attachment size limit is invalid.");
+    }
+    const response = await this.fetch(parsed, {
+      method: "GET",
+      headers: { "user-agent": "Clearrabot/0.1" },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`Discord attachment ${response.status}.`);
+    }
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > limit) {
+      throw new Error("The CTK3 attachment is too large.");
+    }
+    if (!response.body) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > limit) throw new Error("The CTK3 attachment is too large.");
+      return bytes;
+    }
+
+    const chunks = [];
+    const reader = response.body.getReader();
+    let length = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > limit) {
+          await reader.cancel();
+          throw new Error("The CTK3 attachment is too large.");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  }
+
   async request(method, path, payload, files = [], authenticate = true) {
     let attempt = 0;
     while (true) {
@@ -133,4 +183,21 @@ export function attachmentMessage(content, files) {
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function discordAttachmentUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("The Discord attachment URL is invalid.");
+  }
+  const allowedHosts = new Set([
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+  ]);
+  if (url.protocol !== "https:" || !allowedHosts.has(url.hostname)) {
+    throw new Error("The Discord attachment URL is not trusted.");
+  }
+  return url;
 }

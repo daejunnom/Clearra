@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { Languages } from '@lucide/svelte';
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { ExternalLink, Languages } from '@lucide/svelte';
+  import { createEventDispatcher, getContext, onMount } from 'svelte';
 
   import ProductModeTabs from './ProductModeTabs.svelte';
+  import { PC_SOLVER_HREF_CONTEXT } from './workspaceNavigation';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import type { WorkspaceMode } from './workspaceMode';
 
@@ -12,6 +13,7 @@
   export let statusLabel: string;
 
   const dispatch = createEventDispatcher<{ language: WorkspaceLanguage }>();
+  const pcSolverHref = getContext<string | null>(PC_SOLVER_HREF_CONTEXT) ?? null;
   let hidden = false;
   let lastScrollY = 0;
   let frame = 0;
@@ -39,11 +41,17 @@
 <svelte:window on:scroll={handleScroll} />
 
 <div class:hidden class="header-shell">
-  <header class="app-header">
+  <header class="app-header" class:has-solver-link={Boolean(pcSolverHref)}>
     <div class="brand">
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
       <h1>Clearra</h1>
     </div>
+    {#if pcSolverHref}
+      <a class="pc-solver-link" href={pcSolverHref} title={label('openPcSolver')}>
+        <ExternalLink size={15} strokeWidth={1.8} />
+        <span>{label('pcSolver')}</span>
+      </a>
+    {/if}
     <div class="header-status">
       <span class:running={active}><i></i>{statusLabel}</span>
     </div>
@@ -86,7 +94,10 @@
   .brand-mark span:nth-child(2) { background: #e0ac36; }
   .brand-mark span:nth-child(3) { background: #d96c4b; }
   .brand-mark span:nth-child(4) { background: #334e77; }
+  .app-header.has-solver-link { grid-template-columns: minmax(230px, 1fr) auto auto auto; }
   h1 { color: #17211e; font-size: 22px; line-height: 1; margin: 0; }
+  .pc-solver-link { align-items: center; border: 1px solid #cfd7d2; border-radius: 5px; color: #42504b; display: inline-flex; font-size: 11px; font-weight: 750; gap: 6px; height: 34px; padding: 0 10px; text-decoration: none; }
+  .pc-solver-link:hover { background: #eef6f3; border-color: #75a9a1; color: #075f58; }
   .header-status, .header-status > span, .language-control { align-items: center; display: flex; }
   .header-status { gap: 8px; }
   .header-status > span { background: #f0f3f1; border: 1px solid #d5ddd8; border-radius: 4px; color: #52605a; font-size: 11px; font-weight: 700; gap: 6px; min-height: 29px; padding: 0 9px; }
@@ -105,7 +116,10 @@
 
   @media (max-width: 720px) {
     .app-header { grid-template-columns: 1fr auto; }
+    .app-header.has-solver-link { grid-template-columns: 1fr auto auto; }
     .header-status { display: none; }
+    .pc-solver-link { justify-content: center; padding: 0; width: 34px; }
+    .pc-solver-link span { display: none; }
   }
 
   @media (max-width: 520px) {

@@ -46,6 +46,17 @@ fn all_logical_processors_require_the_explicit_cli_opt_in() {
 }
 
 #[test]
+fn automatic_worker_limit_preserves_auto_selection() {
+    let limit = clearra_pc_graph::request::WorkerPolicy::default_worker_limit().min(4);
+    let args = PcArgs::new(2).with_automatic_worker_limit(Some(limit));
+
+    let policy = ExecutionPolicyAssembler::from_pc_args(&args).expect("automatic worker policy");
+
+    assert_eq!(policy.workers(), limit);
+    assert_eq!(policy.workers_requested(), None);
+}
+
+#[test]
 fn rejects_unknown_backend_before_query_validation() {
     let args = PcArgs::new(2).with_backend(Some("quantum".to_owned()));
 

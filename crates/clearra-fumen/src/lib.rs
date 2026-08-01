@@ -10,7 +10,7 @@ pub use adapter::{
     ColoredSolutionPlacement,
 };
 pub use codec::{
-    FumenLikeReadError, FumenLikeReader, FumenLikeTrace, FumenLikeWriter,
+    FumenLikeReadError, FumenLikeReader, FumenLikeTrace, FumenLikeWriter, SourceFumenBoard,
     SourceFumenColoredFieldSet, SourceFumenDiagramError, SourceFumenDiagramSet, SourceFumenSetup,
     COLORED_FIELD_SOLUTION_KEY_ALGORITHM, COLORED_FIELD_SOLUTION_SET_HASH_ALGORITHM,
 };

@@ -1,6 +1,7 @@
 use clearra_app::{
     AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand, PcAppCommand,
-    ResourceBudget, ScenarioAppCommand, SetupAppCommand, SpinFinderAppCommand, VerifyAppCommand,
+    PercentAppCommand, ResourceBudget, ScenarioAppCommand, SetupAppCommand, SpinFinderAppCommand,
+    VerifyAppCommand,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -8,8 +9,8 @@ use clearra_forward_search::{ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     GpuDeviceSelection, OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy,
-    PcQueueInput, PcSolutionProbabilityPolicy, RequestedSearchBackend, SupplyWindowSize,
-    WorkerPolicy,
+    PcQueueInput, PcScenarioQuery, PcSolutionProbabilityPolicy, RequestedSearchBackend,
+    SupplyWindowSize, WorkerPolicy,
 };
 use clearra_problem::{
     SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference, SetupPathDetail,
@@ -42,6 +43,8 @@ pub struct WebCommandRequest {
     scenario: Option<WebPcScenarioInput>,
     build_probability: Option<WebBuildProbabilityInput>,
     forward_search: Option<ForwardSearchQuery>,
+    percent_query: Option<PcScenarioQuery>,
+    percent_failed_pattern_limit: usize,
     setup_remaining: Option<Vec<PieceKind>>,
     setup_queue_based_pieces: Option<Vec<PieceKind>>,
     setup_next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
@@ -57,6 +60,7 @@ pub struct WebCommandRequest {
     max_candidates: Option<usize>,
     max_memory_mib: Option<u64>,
     workers: Option<usize>,
+    automatic_worker_limit: Option<usize>,
     worker_hardware_limit: usize,
     runtime_webgpu_available: bool,
     use_all_logical_processors: bool,
@@ -88,6 +92,8 @@ impl WebCommandRequest {
             scenario: None,
             build_probability: None,
             forward_search: None,
+            percent_query: None,
+            percent_failed_pattern_limit: 100,
             setup_remaining: None,
             setup_queue_based_pieces: None,
             setup_next_cycle_remaining_pieces: None,
@@ -103,6 +109,7 @@ impl WebCommandRequest {
             max_candidates: None,
             max_memory_mib: None,
             workers: None,
+            automatic_worker_limit: None,
             worker_hardware_limit: clearra_pc_graph::request::WorkerPolicy::hardware_worker_limit(),
             runtime_webgpu_available: true,
             use_all_logical_processors: false,
@@ -135,6 +142,8 @@ impl WebCommandRequest {
             scenario: None,
             build_probability: None,
             forward_search: None,
+            percent_query: None,
+            percent_failed_pattern_limit: 100,
             setup_remaining: None,
             setup_queue_based_pieces: None,
             setup_next_cycle_remaining_pieces: None,
@@ -150,6 +159,7 @@ impl WebCommandRequest {
             max_candidates: None,
             max_memory_mib: None,
             workers: None,
+            automatic_worker_limit: None,
             worker_hardware_limit: clearra_pc_graph::request::WorkerPolicy::hardware_worker_limit(),
             runtime_webgpu_available: true,
             use_all_logical_processors: false,
@@ -164,6 +174,15 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    pub fn percent(query: PcScenarioQuery, failed_pattern_limit: usize) -> Self {
+        let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
+        request.command_kind = "percent".to_owned();
+        request.allow_backend_fallback = false;
+        request.percent_query = Some(query);
+        request.percent_failed_pattern_limit = failed_pattern_limit;
+        request
+    }
+
     pub fn setup(remaining: Vec<PieceKind>, allow_post_cycle_borrow: bool) -> Self {
         let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
         request.command_kind = "setup".to_owned();
@@ -282,6 +301,13 @@ impl WebCommandRequest {
 
     pub fn with_workers(mut self, workers: usize) -> Self {
         self.workers = Some(workers);
+        self.automatic_worker_limit = None;
+        self
+    }
+
+    pub fn with_automatic_worker_limit(mut self, workers: usize) -> Self {
+        self.workers = None;
+        self.automatic_worker_limit = Some(workers.max(1));
         self
     }
 
@@ -371,6 +397,18 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    fn resolved_worker_budget(&self) -> usize {
+        let default = if self.use_all_logical_processors {
+            self.worker_hardware_limit
+        } else {
+            WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
+        };
+        let workers = self.workers.unwrap_or(default);
+        self.automatic_worker_limit
+            .map_or(workers, |limit| workers.min(limit.max(1)))
+            .max(1)
+    }
+
     pub fn to_app_request(&self) -> Result<AppRequest, WebCommandError> {
         if self.command_kind == "verify" {
             return Ok(match self.verify_scope.as_deref() {
@@ -389,9 +427,7 @@ impl WebCommandRequest {
                     "forward-search command is missing its typed query",
                 )
             })?;
-            let workers = self.workers.unwrap_or_else(|| {
-                WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
-            });
+            let workers = self.resolved_worker_budget();
             let command = match query.mode() {
                 ForwardSearchMode::MaximumDamage | ForwardSearchMode::DamageAtLeast(_) => {
                     AppCommand::Damage(DamageAppCommand::new(query))
@@ -407,6 +443,18 @@ impl WebCommandRequest {
                     None,
                 )),
             );
+        }
+        if self.command_kind == "percent" {
+            let query = self.percent_query.clone().ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::MissingValue,
+                    "percent requires a compiled scenario query",
+                )
+            })?;
+            return Ok(AppRequest::new(AppCommand::Percent(
+                PercentAppCommand::new(query)
+                    .with_failed_pattern_limit(self.percent_failed_pattern_limit),
+            )));
         }
         if self.command_kind == "setup" {
             let remaining = self.setup_remaining.clone().ok_or_else(|| {
@@ -455,9 +503,7 @@ impl WebCommandRequest {
             if let Some(detail) = self.setup_path_detail.clone() {
                 query = query.with_path_detail(detail);
             }
-            let workers = self.workers.unwrap_or_else(|| {
-                WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
-            });
+            let workers = self.resolved_worker_budget();
             return Ok(
                 AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query)))
                     .with_resource_budget(ResourceBudget::new(
@@ -504,6 +550,8 @@ impl WebCommandRequest {
         }
         if let Some(workers) = self.workers {
             policy = policy.with_workers(workers);
+        } else if let Some(workers) = self.automatic_worker_limit {
+            policy = policy.with_automatic_worker_limit(workers);
         }
 
         let standard_bag_pattern = self

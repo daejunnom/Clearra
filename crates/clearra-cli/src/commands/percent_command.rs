@@ -18,7 +18,8 @@ impl PercentCommand {
         };
         AppResponseRenderer::render(
             AppContext::default().run(AppRequest::new(AppCommand::Percent(
-                PercentAppCommand::new(assembly.query().clone()),
+                PercentAppCommand::new(assembly.query().clone())
+                    .with_failed_pattern_limit(assembly.failed_pattern_limit()),
             ))),
             format,
             CliErrorCode::PercentQueryInvalid,

@@ -2,8 +2,8 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
-  import { onMount } from 'svelte';
+  import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, PC_SOLVER_HREF_CONTEXT, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
+  import { onMount, setContext } from 'svelte';
   import { resolveCtkViewerQuery } from '../lib/ctkViewerQuery';
 
   function workerFactory() {
@@ -11,6 +11,8 @@
       type: 'module'
     });
   }
+
+  setContext(PC_SOLVER_HREF_CONTEXT, `${base}/pc-solver`);
 
   $: ctkViewer = resolveCtkViewerQuery($page.url);
   $: selectedTool =

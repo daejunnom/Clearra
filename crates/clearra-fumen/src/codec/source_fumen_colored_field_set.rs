@@ -1,6 +1,8 @@
 use std::{collections::BTreeSet, hash::Hasher};
 
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{
+    piece::piece_kind::PieceKind, solution::StandardBoard64ColoredTilingIdentity,
+};
 use fumen::CellColor;
 
 use super::source_fumen_diagram::{decode_document, SourceFumenDiagramError};
@@ -15,6 +17,7 @@ pub struct SourceFumenColoredFieldSet {
     page_count: usize,
     operation_replay_available: bool,
     keys: BTreeSet<String>,
+    identities: Vec<StandardBoard64ColoredTilingIdentity>,
     hash: String,
 }
 
@@ -28,6 +31,7 @@ impl SourceFumenColoredFieldSet {
         let mut initial_board_mask = None;
         let mut visible_height = 0u8;
         let mut keys = BTreeSet::new();
+        let mut identities = Vec::with_capacity(document.pages.len());
         let mut operation_replay_available = false;
         for (page_index, page) in document.pages.iter().enumerate() {
             let decoded = decode_colored_page(page_index, &page.field)?;
@@ -47,8 +51,17 @@ impl SourceFumenColoredFieldSet {
                 decoded.initial_board_mask,
                 &decoded.piece_masks,
             ));
+            identities.push(
+                StandardBoard64ColoredTilingIdentity::from_piece_masks(
+                    decoded.initial_board_mask,
+                    decoded.piece_masks,
+                )
+                .map_err(|source| SourceFumenDiagramError::InvalidTiling { page_index, source })?,
+            );
             operation_replay_available |= page.piece.is_some();
         }
+        identities.sort_unstable();
+        identities.dedup();
         let hash = stable_colored_field_set_hash(&keys);
 
         Ok(Self {
@@ -57,6 +70,7 @@ impl SourceFumenColoredFieldSet {
             page_count: document.pages.len(),
             operation_replay_available,
             keys,
+            identities,
             hash,
         })
     }
@@ -79,6 +93,10 @@ impl SourceFumenColoredFieldSet {
 
     pub fn keys(&self) -> &BTreeSet<String> {
         &self.keys
+    }
+
+    pub fn identities(&self) -> &[StandardBoard64ColoredTilingIdentity] {
+        &self.identities
     }
 
     pub fn hash(&self) -> &str {
@@ -201,5 +219,35 @@ impl Hasher for StableFnv64 {
             self.0 ^= u64::from(*byte);
             self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    use crate::{ColoredSolutionFumenExporter, ColoredSolutionPage, ColoredSolutionPlacement};
+
+    use super::SourceFumenColoredFieldSet;
+
+    #[test]
+    fn repeated_same_piece_color_decodes_without_inventing_placement_boundaries() {
+        let page = ColoredSolutionPage::new(
+            10,
+            1,
+            0b11u64 << 8,
+            vec![
+                ColoredSolutionPlacement::new(PieceKind::I, 0b1111),
+                ColoredSolutionPlacement::new(PieceKind::I, 0b1111 << 4),
+            ],
+        )
+        .expect("valid repeated-I page");
+        let fumen = ColoredSolutionFumenExporter::encode(&[page]).expect("encoded fumen");
+
+        let decoded = SourceFumenColoredFieldSet::decode(&fumen).expect("colored field set");
+
+        assert_eq!(decoded.identities().len(), 1);
+        assert_eq!(decoded.identities()[0].placement_count(), 2);
+        assert_eq!(decoded.identities()[0].piece_masks()[0], 0xff);
     }
 }

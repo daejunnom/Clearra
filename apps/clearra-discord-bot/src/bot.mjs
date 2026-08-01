@@ -1,16 +1,23 @@
 import {
-  ClearraProcessExecutor,
-  parseClearraMessage,
+  ClearraJobExecutor,
   prepareClearraArguments,
   tilingOnlyRequested,
   tokenizeCommand,
 } from "./clearra/command.mjs";
-import { encodeCtk3 } from "ctk3";
+import {
+  CTK3_FILE_MIME_TYPE,
+  encodeCtk3File,
+  isCtk3File,
+} from "ctk3";
 import {
   attachmentMessage,
   textMessage,
 } from "./discord/rest.mjs";
-import { extractViewerDocuments } from "./viewer/document.mjs";
+import { RestInteractionAcknowledger } from "./discord/interaction-acknowledger.mjs";
+import {
+  decodeViewerFile,
+  extractViewerDocuments,
+} from "./viewer/document.mjs";
 import { GifRenderLimitError, renderDocumentGif } from "./viewer/gif.mjs";
 import {
   buildClearraRendererUrl,
@@ -26,11 +33,16 @@ export class Clearrabot {
     this.config = config;
     this.executor =
       options.executor ??
-      new ClearraProcessExecutor({
-        executable: config.executable,
+      new ClearraJobExecutor({
+        endpoint: config.jobEndpoint,
+        authorizationToken: config.jobToken,
         timeoutMs: config.searchTimeoutMs,
+        pollIntervalMs: config.jobPollIntervalMs,
+        cancelTimeoutMs: config.jobCancelTimeoutMs,
       });
     this.applicationId = options.applicationId ?? null;
+    this.interactionAcknowledger =
+      options.interactionAcknowledger ?? new RestInteractionAcknowledger(rest);
     this.activeSearches = 0;
     this.pendingSearches = [];
     this.controllers = new Set();
@@ -48,61 +60,48 @@ export class Clearrabot {
     }
   }
 
-  async handleDispatch(type, data) {
-    if (type === "MESSAGE_CREATE") await this.handleMessage(data);
-    else if (type === "INTERACTION_CREATE") await this.handleInteraction(data);
+  async handleDispatch(type, data, options = {}) {
+    if (type !== "INTERACTION_CREATE") return false;
+    await this.handleInteraction(data, options);
+    return true;
   }
 
-  async handleMessage(message) {
-    if (message.author?.bot || !message.channel_id) return;
-    let arguments_ = null;
-    let commandError = null;
-    try {
-      arguments_ = parseClearraMessage(
-        message.content || "",
-        this.config.prefix,
-        this.searchExecutionOptions(),
-      );
-    } catch (error) {
-      commandError = error;
-    }
-
-    if (commandError) {
-      await this.rest.createChannelMessage(
-        message.channel_id,
-        textMessage(errorText(commandError)),
-      );
-      return;
-    }
-    if (arguments_) {
-      await this.runMessageCommand(message, arguments_);
-      return;
-    }
-
-    const documents = extractViewerDocuments(message.content || "");
-    if (documents.length > 0) {
-      await this.sendViewerReplies(
-        (reply) => this.rest.createChannelMessage(message.channel_id, reply),
-        documents,
-      );
-    }
-  }
-
-  async handleInteraction(interaction) {
-    if (interaction.type !== 2 || !interaction.data?.name) return;
+  async handleInteraction(interaction, context = {}) {
+    if (
+      interaction.type !== 2 ||
+      interaction.data?.type !== 1 ||
+      !interaction.data?.name
+    ) return;
     if (!this.applicationId) {
       this.applicationId = interaction.application_id;
     }
     const name = interaction.data.name;
     if (name !== "clearra" && name !== "view") return;
-    await this.rest.deferInteraction(interaction);
+    const acknowledger =
+      context.acknowledger ?? this.interactionAcknowledger;
+    await acknowledger.defer(interaction);
 
     const options = Object.fromEntries(
       (interaction.data.options ?? []).map((option) => [option.name, option.value]),
     );
+    let attachmentDocuments;
+    try {
+      const attachment = options.file
+        ? interaction.data.resolved?.attachments?.[String(options.file)]
+        : null;
+      attachmentDocuments = await this.readAttachmentDocuments(
+        attachment ? [attachment] : [],
+      );
+    } catch (error) {
+      await this.editInteraction(interaction, textMessage(errorText(error)));
+      return;
+    }
     if (name === "view") {
       const source = String(options.document ?? "");
-      const documents = extractViewerDocuments(source);
+      const documents = mergeViewerDocuments(
+        extractViewerDocuments(source),
+        attachmentDocuments,
+      );
       await this.editInteraction(
         interaction,
         textMessage(
@@ -121,7 +120,10 @@ export class Clearrabot {
       return;
     }
 
-    const commandText = String(options.command ?? "");
+    const commandText = appendViewerSources(
+      String(options.command ?? ""),
+      attachmentDocuments,
+    );
     let arguments_;
     try {
       const tokens = tokenizeCommand(commandText);
@@ -131,46 +133,35 @@ export class Clearrabot {
       await this.editInteraction(interaction, textMessage(errorText(error)));
       return;
     }
-    await this.runInteractionCommand(interaction, arguments_, commandText);
+    await this.runInteractionCommand(
+      interaction,
+      arguments_,
+      commandText,
+      attachmentDocuments,
+    );
   }
 
-  async runMessageCommand(message, arguments_) {
+  async runInteractionCommand(
+    interaction,
+    arguments_,
+    source,
+    attachmentDocuments = [],
+  ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
     this.controllers.add(controller);
     try {
       const result = await this.withSearchSlot(() =>
-        this.executor.execute(arguments_, { signal: controller.signal }),
-      );
-      await this.rest.createChannelMessage(
-        message.channel_id,
-        resultMessage(result, tilingOnly),
-      );
-      const documents = extractViewerDocuments(message.content || "");
-      await this.sendViewerReplies(
-        (reply) => this.rest.createChannelMessage(message.channel_id, reply),
-        documents,
-      );
-    } catch (error) {
-      await this.rest.createChannelMessage(
-        message.channel_id,
-        textMessage(errorText(error)),
-      );
-    } finally {
-      this.controllers.delete(controller);
-    }
-  }
-
-  async runInteractionCommand(interaction, arguments_, source) {
-    const controller = new AbortController();
-    const tilingOnly = tilingOnlyRequested(arguments_);
-    this.controllers.add(controller);
-    try {
-      const result = await this.withSearchSlot(() =>
-        this.executor.execute(arguments_, { signal: controller.signal }),
+        this.executor.execute(arguments_, {
+          signal: controller.signal,
+          jobId: `discord-${interaction.id}`,
+        }),
       );
       await this.editInteraction(interaction, resultMessage(result, tilingOnly));
-      const documents = extractViewerDocuments(source);
+      const documents = mergeViewerDocuments(
+        extractViewerDocuments(source),
+        attachmentDocuments,
+      );
       await this.sendViewerReplies(
         (reply) => this.followupInteraction(interaction, reply),
         documents,
@@ -182,6 +173,24 @@ export class Clearrabot {
     }
   }
 
+  async readAttachmentDocuments(attachments = []) {
+    const documents = [];
+    for (const attachment of attachments ?? []) {
+      if (!isCtk3File({
+        name: attachment?.filename,
+        type: attachment?.content_type,
+      })) continue;
+      const limit = this.config.maxCtk3FileBytes ?? 24 * 1024 * 1024;
+      if (Number(attachment.size) > limit) {
+        throw new Error("The CTK3 attachment is too large.");
+      }
+      if (!attachment.url) throw new Error("The CTK3 attachment URL is missing.");
+      const bytes = await this.rest.downloadAttachment(attachment.url, limit);
+      documents.push(decodeViewerFile(bytes));
+    }
+    return documents;
+  }
+
   async sendViewerReplies(send, documents, delayMs = 500) {
     for (let index = 0; index < Math.min(10, documents.length); index += 1) {
       const document = documents[index];
@@ -191,7 +200,6 @@ export class Clearrabot {
         const files = [];
         let content = directContent;
         if (directContent.length > DISCORD_CONTENT_LIMIT) {
-          const ctk3 = encodeCtk3(document.document);
           const rendererUrl = buildClearraRendererUrl(this.config.viewerBaseUrl).href;
           content =
             "The direct viewer link exceeds Discord's 2,000-character limit. " +
@@ -199,8 +207,8 @@ export class Clearrabot {
           files.push({
             name: `clearra-view-${index + 1}.ctk3`,
             description: "CTK3 document for the Clearra renderer",
-            contentType: "text/plain; charset=utf-8",
-            bytes: new TextEncoder().encode(ctk3),
+            contentType: CTK3_FILE_MIME_TYPE,
+            bytes: encodeCtk3File(document.document),
           });
         }
 
@@ -287,6 +295,12 @@ export const globalCommands = [
         required: true,
         max_length: 4096,
       },
+      {
+        type: 11,
+        name: "file",
+        description: "Optional CTK3 field document",
+        required: false,
+      },
     ],
   },
   {
@@ -297,8 +311,14 @@ export const globalCommands = [
         type: 3,
         name: "document",
         description: "Fumen, CTK3, or Clearra viewer URL",
-        required: true,
+        required: false,
         max_length: 6000,
+      },
+      {
+        type: 11,
+        name: "file",
+        description: "CTK3 document file",
+        required: false,
       },
       {
         type: 10,
@@ -336,6 +356,20 @@ function resultMessage(result, tilingOnly = false) {
 
 const TILING_ONLY_WARNING =
   "WARNING: BuildUp and probability are skipped. Results may include solutions that cannot be built.";
+
+function appendViewerSources(source, documents) {
+  const additions = documents.map((document) => document.source);
+  return [source.trim(), ...additions].filter(Boolean).join(" ");
+}
+
+function mergeViewerDocuments(...groups) {
+  const unique = new Map();
+  for (const document of groups.flat()) {
+    const key = `${document.format}:${document.source}`;
+    if (!unique.has(key)) unique.set(key, document);
+  }
+  return [...unique.values()];
+}
 
 function fenced(value) {
   return `\`\`\`text\n${value.replaceAll("```", "'''")}\n\`\`\``;
