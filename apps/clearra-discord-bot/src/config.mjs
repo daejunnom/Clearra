@@ -6,35 +6,60 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     environment.CLEARRA_DISCORD_INGRESS,
     Boolean(environment.K_SERVICE),
   );
-  const maxConcurrentSearches = positiveInteger(
-    environment.CLEARRA_MAX_CONCURRENT_SEARCHES,
-    1,
+  const jobEndpoint = httpEndpoint(
+    environment.CLEARRA_JOB_URL || "http://127.0.0.1:8787/jobs",
+  );
+  const workerAuthority = workerAuthoritySetting(
+    environment.CLEARRA_WORKER_AUTHORITY,
+    environment.CLEARRA_JOB_URL ? "remote" : "gateway",
   );
   const processLogicalProcessors = runtimeLogicalProcessorCount(runtime);
   const useAllLogicalProcessors =
     environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS === "1";
-  const sharedWorkerCapacity = useAllLogicalProcessors
-    ? processLogicalProcessors
-    : Math.max(1, processLogicalProcessors - 1);
-  if (maxConcurrentSearches > sharedWorkerCapacity) {
-    throw new Error(
-      `CLEARRA_MAX_CONCURRENT_SEARCHES exceeds the runtime CPU capacity of ${sharedWorkerCapacity}.`,
+
+  let maxConcurrentSearches;
+  let searchWorkersPerSession;
+  let effectiveUseAllLogicalProcessors;
+  if (workerAuthority === "remote") {
+    maxConcurrentSearches = positiveInteger(
+      environment.CLEARRA_MAX_CONCURRENT_REMOTE_JOBS ??
+        environment.CLEARRA_MAX_CONCURRENT_SEARCHES,
+      1,
     );
-  }
-  const workerLimitPerSession = defaultSearchWorkersPerSession(
-    processLogicalProcessors,
-    maxConcurrentSearches,
-    useAllLogicalProcessors,
-  );
-  const searchWorkersPerSession = positiveIntegerOrAuto(
-    environment.CLEARRA_SEARCH_WORKERS_PER_SESSION,
-    workerLimitPerSession,
-  );
-  if (searchWorkersPerSession > workerLimitPerSession) {
-    throw new Error(
-      `CLEARRA_SEARCH_WORKERS_PER_SESSION exceeds the runtime limit of ${workerLimitPerSession}.`,
+    searchWorkersPerSession = undefined;
+    effectiveUseAllLogicalProcessors = false;
+  } else {
+    maxConcurrentSearches = positiveInteger(
+      environment.CLEARRA_MAX_CONCURRENT_SEARCHES,
+      1,
     );
+    const sharedWorkerCapacity = useAllLogicalProcessors
+      ? processLogicalProcessors
+      : Math.max(1, processLogicalProcessors - 1);
+    if (maxConcurrentSearches > sharedWorkerCapacity) {
+      throw new Error(
+        `CLEARRA_MAX_CONCURRENT_SEARCHES exceeds the runtime CPU capacity of ${sharedWorkerCapacity}.`,
+      );
+    }
+    const workerLimitPerSession = defaultSearchWorkersPerSession(
+      processLogicalProcessors,
+      maxConcurrentSearches,
+      useAllLogicalProcessors,
+    );
+    searchWorkersPerSession = positiveIntegerOrAuto(
+      environment.CLEARRA_SEARCH_WORKERS_PER_SESSION,
+      workerLimitPerSession,
+    );
+    if (searchWorkersPerSession > workerLimitPerSession) {
+      throw new Error(
+        `CLEARRA_SEARCH_WORKERS_PER_SESSION exceeds the runtime limit of ${workerLimitPerSession}.`,
+      );
+    }
+    effectiveUseAllLogicalProcessors =
+      useAllLogicalProcessors &&
+      searchWorkersPerSession > Math.max(1, processLogicalProcessors - 1);
   }
+
   return {
     token,
     applicationId: environment.DISCORD_APPLICATION_ID || null,
@@ -52,9 +77,7 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
       environment.CLEARRA_MAX_INTERACTION_BODY_BYTES,
       1024 * 1024,
     ),
-    jobEndpoint: httpEndpoint(
-      environment.CLEARRA_JOB_URL || "http://127.0.0.1:8787/jobs",
-    ),
+    jobEndpoint,
     jobToken: environment.CLEARRA_JOB_TOKEN || null,
     jobPollIntervalMs: positiveInteger(
       environment.CLEARRA_JOB_POLL_INTERVAL_MS,
@@ -83,12 +106,11 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
       environment.CLEARRA_MAX_CTK3_FILE_BYTES,
       24 * 1024 * 1024,
     ),
+    workerAuthority,
     maxConcurrentSearches,
     processLogicalProcessors,
     searchWorkersPerSession,
-    useAllLogicalProcessors:
-      useAllLogicalProcessors &&
-      searchWorkersPerSession > Math.max(1, processLogicalProcessors - 1),
+    useAllLogicalProcessors: effectiveUseAllLogicalProcessors,
   };
 }
 
@@ -130,6 +152,14 @@ function booleanSetting(value, fallback) {
   if (value === "1") return true;
   if (value === "0") return false;
   throw new Error("A Clearra Discord boolean setting is invalid.");
+}
+
+function workerAuthoritySetting(value, fallback) {
+  const authority = value || fallback;
+  if (authority !== "gateway" && authority !== "remote") {
+    throw new Error("CLEARRA_WORKER_AUTHORITY must be gateway or remote.");
+  }
+  return authority;
 }
 
 function discordIngressMode(value, runningOnCloudRun) {

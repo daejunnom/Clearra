@@ -7,10 +7,14 @@ import { DiscordRestClient } from "./discord/rest.mjs";
 import { SlashCommandIngress } from "./ingress/slash-command-ingress.mjs";
 
 const config = loadDiscordBotConfig();
+const workerSummary =
+  config.workerAuthority === "remote"
+    ? `remote job service owns search workers; ${config.maxConcurrentSearches} remote job(s)`
+    : `${config.searchWorkersPerSession} worker(s) per session; ` +
+      `${config.processLogicalProcessors} logical processor(s) visible; ` +
+      `${config.maxConcurrentSearches} concurrent session(s)`;
 console.info(
-  `Clearrabot PC/path/setup CPU allocation: ${config.searchWorkersPerSession} worker(s) per session; ` +
-    `${config.processLogicalProcessors} logical processor(s) visible; ` +
-    `${config.maxConcurrentSearches} concurrent session(s); ` +
+  `Clearrabot execution allocation: ${workerSummary}; ` +
     `${config.ingressMode} slash-command ingress; HTTP job execution enabled.`,
 );
 const rest = new DiscordRestClient(config.token);
