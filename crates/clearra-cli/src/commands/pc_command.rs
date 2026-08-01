@@ -47,6 +47,12 @@ impl PcCommand {
                     format!("unsupported PC spin profile '{value}'"),
                 );
             }
+            Err(PcQueryAssemblyError::IncompatibleTilingOnlyOption { option }) => {
+                return CliOutput::error(
+                    CliErrorCode::PcQueryInvalid,
+                    format!("{option} is not available with tiling-only search"),
+                );
+            }
             Err(PcQueryAssemblyError::UnknownRuleProfile { value }) => {
                 return CliOutput::error(
                     CliErrorCode::PcQueryInvalid,

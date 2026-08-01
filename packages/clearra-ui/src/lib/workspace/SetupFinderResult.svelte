@@ -43,7 +43,7 @@
   let visibleCandidateCount = PAGE_SIZE;
   let visiblePathCounts: Record<string, number> = {};
   let lastReport: ClearraSetupFinderReport | null = null;
-  let copyFormat: SolutionCopyFormat = 'fumen';
+  let copyFormat: SolutionCopyFormat = 'ctk';
   const setupBoardCache = new Map<string, {
     candidate: ClearraSetupCandidate;
     board: SetupPlacementBoard;

@@ -16,7 +16,10 @@ impl ObjectiveValidator {
     pub fn validate_kind(kind: ObjectiveKind) -> DiagnosticReport {
         let mut report = DiagnosticReport::new();
         match kind {
-            ObjectiveKind::All | ObjectiveKind::Unique | ObjectiveKind::MinimumCover => {
+            ObjectiveKind::All
+            | ObjectiveKind::Unique
+            | ObjectiveKind::MinimumCover
+            | ObjectiveKind::Tiling => {
                 report.push(
                     Diagnostic::new(
                         DiagnosticCode::IObjectiveMvpSupported,

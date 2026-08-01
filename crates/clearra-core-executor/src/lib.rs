@@ -26,6 +26,7 @@ pub mod service;
 pub mod setup_finder_report;
 pub mod solution_probability;
 pub mod spin;
+pub mod tiling_solution_store;
 
 #[cfg(feature = "webgpu-search")]
 pub use backend::WasmWebGpuCandidateProducer;
@@ -38,10 +39,11 @@ pub use backend::{
     WasmCandidateProducerAdvance, WasmCpuCandidateProducer, WasmCpuSearchAdvance,
     WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
-    WasmDistributedResultMerger, WasmDistributedVerifier, WasmProductSearchBackend,
-    WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
-    WasmSetupSearchAdvance, WasmSetupSearchBackend, WasmSetupSearchSession,
-    PC4_COMPACT_TABLEBASE_MAX_BYTES,
+    WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
+    WasmProductSearchBackend, WasmSetupParallelCoordinator, WasmSetupParallelProduce,
+    WasmSetupParallelWorker, WasmSetupSearchAdvance, WasmSetupSearchBackend,
+    WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
+    WasmTilingRootResultMerger, WasmTilingRootWorker, PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,
@@ -66,9 +68,11 @@ pub use service::{
 };
 pub use setup_finder_report::{SetupCandidateReport, SetupFinderReport, SetupHoldConditionReport};
 pub use solution_probability::{
-    NormalizedSolutionCoverage, SolutionCoverage, SolutionProbabilityReport,
+    NormalizedSolutionCoverage, SolutionAverageScoreReport, SolutionCoverage,
+    SolutionProbabilityReport,
 };
 pub use spin::{BuildVariantReplayEvidence, BuildVariantReplayEvidenceError};
+pub use tiling_solution_store::TilingSolutionPageStore;
 
 pub fn native_core_runtime_available() -> bool {
     clearra_core_ffi::CoreCNative::linked()

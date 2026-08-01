@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -9,7 +10,7 @@ use clearra_core_domain::{
     objective::objective_kind::ObjectiveKind,
     solution::normalized_tiling_solution::{
         normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
-        NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
+        NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity,
         NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM, NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
     },
 };
@@ -19,9 +20,14 @@ use clearra_coverage::{
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_problem::SearchProblem;
 use clearra_replay::ExactScoringExecutionBatch;
+use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
+    tiling_solution_store::{
+        canonicalize_catalog_rows, pack_canonical_tiling_row_ids, read_packed_tiling_row,
+        PackedTilingRows, TilingSolutionPageStore, PACKED_TILING_MAX_ROW_ID,
+    },
     CoreExecutionResult, CorePathStep,
 };
 
@@ -51,6 +57,7 @@ use crate::solution_probability::{
 // Keep browser-worker cancellation responsive without paying an ABI/event-loop
 // round trip after every tiny candidate batch.
 const MAX_BUILDUP_CANDIDATES_PER_ADVANCE: usize = 512;
+const TILING_SOLUTION_INITIAL_PAGE_SIZE: usize = 100;
 
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 #[inline]
@@ -68,6 +75,142 @@ const fn profile_sample_scale(ordinal: usize) -> u64 {
 struct TilingIdentityEntry {
     bucket_hash: u64,
     identity: StandardBoard64TilingIdentity,
+}
+
+#[derive(Debug, Default)]
+struct DistributedTilingRootRun {
+    identities: Vec<PackedTilingRows>,
+    committed_chunks: Vec<DistributedTilingChunkCommit>,
+    next_chunk_sequence: u32,
+    complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DistributedTilingChunkCommit {
+    identity_end: usize,
+    root_complete: bool,
+    completed_roots: usize,
+    candidate_family_count: Option<u128>,
+    expanded_nodes: usize,
+    peak_frontier: usize,
+    domain_pruned_states: usize,
+    hall_pruned_states: usize,
+    column_pruned_states: usize,
+    component_compositions: usize,
+}
+
+impl DistributedTilingChunkCommit {
+    fn from_chunk(
+        chunk: &super::tiling_parallel::WasmTilingRootChunk,
+        identity_end: usize,
+    ) -> Self {
+        Self {
+            identity_end,
+            root_complete: chunk.root_complete(),
+            completed_roots: chunk.completed_roots(),
+            candidate_family_count: chunk.candidate_family_count(),
+            expanded_nodes: chunk.expanded_nodes(),
+            peak_frontier: chunk.peak_frontier(),
+            domain_pruned_states: chunk.domain_pruned_states(),
+            hall_pruned_states: chunk.hall_pruned_states(),
+            column_pruned_states: chunk.column_pruned_states(),
+            component_compositions: chunk.component_compositions(),
+        }
+    }
+}
+
+impl DistributedTilingRootRun {
+    fn absorb_chunk(
+        &mut self,
+        chunk: &super::tiling_parallel::WasmTilingRootChunk,
+    ) -> Result<bool, WasmExactSearchError> {
+        let sequence = usize::try_from(chunk.chunk_sequence()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_tiling_root_chunk_sequence_invalid")
+        })?;
+        if sequence < self.committed_chunks.len() {
+            let begin = sequence
+                .checked_sub(1)
+                .map_or(0, |previous| self.committed_chunks[previous].identity_end);
+            let committed = self.committed_chunks[sequence];
+            let replay_matches = committed
+                == DistributedTilingChunkCommit::from_chunk(chunk, committed.identity_end)
+                && committed.identity_end.saturating_sub(begin) == chunk.identities().len()
+                && self.identities[begin..committed.identity_end]
+                    .iter()
+                    .copied()
+                    .eq(chunk
+                        .identities()
+                        .iter()
+                        .map(|identity| identity.packed_rows()));
+            return replay_matches
+                .then_some(false)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_chunk_replay_mismatch",
+                ));
+        }
+        if self.complete
+            || chunk.chunk_sequence() != self.next_chunk_sequence
+            || sequence != self.committed_chunks.len()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_tiling_root_chunk_sequence_invalid",
+            ));
+        }
+
+        let begin = self.identities.len();
+        let identity_end = begin.checked_add(chunk.identities().len()).ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "wasm_compact_tiling_identity_storage_unavailable",
+            ),
+        )?;
+        let mut previous = self.identities.last().copied();
+        for packed in chunk.identities().iter().copied() {
+            let packed_rows = packed.packed_rows();
+            if !packed_rows_are_valid(&packed_rows) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_packed_tiling_identity_invalid",
+                ));
+            }
+            if previous.is_some_and(|previous| previous >= packed_rows) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_identity_order_invalid",
+                ));
+            }
+            previous = Some(packed_rows);
+        }
+
+        self.identities
+            .try_reserve(chunk.identities().len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_tiling_identity_storage_unavailable",
+                )
+            })?;
+        self.committed_chunks.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_tiling_root_commit_storage_unavailable")
+        })?;
+        self.identities.extend(
+            chunk
+                .identities()
+                .iter()
+                .map(|identity| identity.packed_rows()),
+        );
+        self.committed_chunks
+            .push(DistributedTilingChunkCommit::from_chunk(
+                chunk,
+                identity_end,
+            ));
+        self.next_chunk_sequence =
+            self.next_chunk_sequence
+                .checked_add(1)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_chunk_sequence_overflow",
+                ))?;
+        if chunk.root_complete() {
+            self.complete = true;
+        }
+        Ok(true)
+    }
 }
 
 impl TilingIdentityEntry {
@@ -91,6 +234,77 @@ impl Hash for TilingIdentityEntry {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.bucket_hash);
     }
+}
+
+fn packed_rows_from_identity(
+    catalog: &GeometryCatalog,
+    canonical_rank_by_source: &[u32],
+    identity: StandardBoard64TilingIdentity,
+) -> Option<PackedTilingRows> {
+    let mut rows = [0_u32; MAX_BOARD64_PIECES];
+    let count = identity.placement_count();
+    if count == 0 || count > rows.len() {
+        return None;
+    }
+    for (index, output) in rows.iter_mut().enumerate().take(count) {
+        let placement = identity.placement(index)?;
+        *output = catalog.skeleton_id(placement.piece(), placement.cells_mask())?;
+    }
+    pack_canonical_tiling_row_ids(&rows[..count], canonical_rank_by_source)
+}
+
+pub(super) fn canonical_tiling_rank_by_source(
+    catalog: &GeometryCatalog,
+) -> Result<Vec<u32>, WasmExactSearchError> {
+    let mut catalog_rows = Vec::new();
+    catalog_rows
+        .try_reserve_exact(catalog.skeleton_count())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_tiling_page_catalog_unavailable")
+        })?;
+    for row_id in 0..catalog.skeleton_count() {
+        let row = catalog.skeleton(row_id as u32);
+        catalog_rows.push(PiecePlacementMask::new(row.piece, row.cells));
+    }
+    canonicalize_catalog_rows(catalog_rows)
+        .map(|(_, ranks)| ranks)
+        .map_err(WasmExactSearchError::InvalidProblem)
+}
+
+fn packed_rows_are_valid(packed_rows: &PackedTilingRows) -> bool {
+    let mut count = 0;
+    let mut ended = false;
+    for index in 0..MAX_BOARD64_PIECES {
+        let encoded = read_packed_tiling_row(packed_rows, index);
+        if encoded == 0 {
+            ended = true;
+            continue;
+        }
+        if ended {
+            return false;
+        }
+        let Ok(row_id) = u32::try_from(encoded - 1) else {
+            return false;
+        };
+        if row_id > PACKED_TILING_MAX_ROW_ID {
+            return false;
+        }
+        count += 1;
+    }
+    count != 0
+}
+
+fn canonical_multiset_order(left: [u8; 7], right: [u8; 7]) -> Ordering {
+    // StandardBoard64TilingIdentity orders placements by ASCII piece name.
+    // With a fixed placement count, larger counts of the first differing
+    // piece therefore form the lexicographically earlier identity group.
+    for index in [0_usize, 5, 6, 1, 3, 2, 4] {
+        let order = right[index].cmp(&left[index]);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    Ordering::Equal
 }
 
 pub(crate) enum ExactSearchAdvance {
@@ -118,6 +332,10 @@ pub(crate) struct WasmExactSearchSession {
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
     buildable_identities: ExactHashSet<TilingIdentityEntry>,
+    compact_tiling_identities: Option<Vec<PackedTilingRows>>,
+    distributed_tiling_root_runs: Option<Vec<DistributedTilingRootRun>>,
+    tiling_canonical_rank_by_source: Option<Arc<[u32]>>,
+    tiling_supply_projection_complete: bool,
     solution_coverage: Option<ExactHashMap<StandardBoard64TilingIdentity, PatternBitSet>>,
     solution_coverage_bytes: usize,
     packing_candidate_count: usize,
@@ -197,6 +415,22 @@ impl WasmExactSearchSession {
         Self::new_with_external_geometry(problem, true)
     }
 
+    pub(super) fn new_external_geometry_for_required_cells_on_board(
+        problem: &SearchProblem,
+        initial_board: u64,
+        required_cells: u64,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::validate_tiling_session_problem(problem)?;
+        let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
+        let catalog = Arc::new(GeometryCatalog::compile_for_required_cells_on_board(
+            problem,
+            initial_board,
+            required_cells,
+        )?);
+        catalog_span.finish(catalog.skeleton_count() as u64);
+        Self::new_with_external_geometry_catalog(problem, true, catalog)
+    }
+
     pub(super) fn geometry_expanded_nodes(&self) -> usize {
         self.geometry.expanded_nodes()
     }
@@ -217,10 +451,40 @@ impl WasmExactSearchSession {
         problem: &SearchProblem,
         external_geometry: bool,
     ) -> Result<Self, WasmExactSearchError> {
-        super::ensure_connected_kick_profile(problem)?;
+        Self::validate_tiling_session_problem(problem)?;
         let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
         let catalog = Arc::new(GeometryCatalog::compile(problem)?);
         catalog_span.finish(catalog.skeleton_count() as u64);
+        Self::new_with_external_geometry_catalog(problem, external_geometry, catalog)
+    }
+
+    fn validate_tiling_session_problem(
+        problem: &SearchProblem,
+    ) -> Result<(), WasmExactSearchError> {
+        super::ensure_connected_kick_profile(problem)?;
+        if problem.objective().kind() == ObjectiveKind::Tiling {
+            if problem.objective().score().requested()
+                || problem.objective().execution_constraints().requested()
+                || problem.solution_probability_policy().requested()
+                || problem
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || problem.backend_policy().tablebase_requested()
+                || problem.backend_policy().precompute_build_dependencies()
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_only_option_conflict",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn new_with_external_geometry_catalog(
+        problem: &SearchProblem,
+        external_geometry: bool,
+        catalog: Arc<GeometryCatalog>,
+    ) -> Result<Self, WasmExactSearchError> {
         let tablebase_requested = problem.backend_policy().tablebase_requested();
         let loaded_tablebase = tablebase_requested
             .then(loaded_pc4_compact_tablebase)
@@ -286,20 +550,20 @@ impl WasmExactSearchSession {
         };
         supply_span.finish(universe.pattern_count() as u64);
         let covered_patterns = PatternBitSet::new(universe.pattern_count());
-        let uses_symbolic_standard_bag = problem.count_policy()
-            == clearra_pc_graph::request::PcCountPolicy::CountUnique
-            && StandardBagCoverage::supports(universe, problem.initial_hold());
+        let omits_geometry_pattern_indices = problem.objective().kind() == ObjectiveKind::Tiling
+            || (problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
+                && StandardBagCoverage::supports(universe, problem.initial_hold()));
         let geometry_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionGeometryPrepare);
         let geometry = if external_geometry {
             let (targets, pattern_index_bytes) =
-                compile_target_groups(universe, &multiset_family, !uses_symbolic_standard_bag)?;
+                compile_target_groups(universe, &multiset_family, !omits_geometry_pattern_indices)?;
             GeometrySearch::external(targets, pattern_index_bytes)
         } else if let Some(tablebase) = tablebase {
             GeometrySearch::new_with_tablebase(
                 universe,
                 &multiset_family,
                 catalog.required_cells(),
-                !uses_symbolic_standard_bag,
+                !omits_geometry_pattern_indices,
                 tablebase,
             )?
         } else {
@@ -307,7 +571,7 @@ impl WasmExactSearchSession {
                 universe,
                 &multiset_family,
                 catalog.required_cells(),
-                !uses_symbolic_standard_bag,
+                !omits_geometry_pattern_indices,
             )?
         };
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
@@ -315,6 +579,15 @@ impl WasmExactSearchSession {
             .retained_bytes()
             .saturating_add(geometry.retained_bytes())
             .saturating_add(tablebase_retained_bytes);
+        let compact_tiling_identity_supported = problem.objective().kind() == ObjectiveKind::Tiling
+            && catalog.skeleton_count() <= PACKED_TILING_MAX_ROW_ID as usize + 1;
+        let tiling_canonical_rank_by_source = compact_tiling_identity_supported
+            .then(|| canonical_tiling_rank_by_source(&catalog))
+            .transpose()?
+            .map(Arc::from);
+        let tiling_supply_projection_complete = universe.complete()
+            || multiset_family.membership_kind()
+                == PackingPatternMembershipKind::ExactSymbolicStandardBag;
         Ok(Self {
             problem: Arc::new(problem.clone()),
             catalog,
@@ -323,6 +596,10 @@ impl WasmExactSearchSession {
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             buildable_identities: ExactHashSet::default(),
+            compact_tiling_identities: compact_tiling_identity_supported.then(Vec::new),
+            distributed_tiling_root_runs: None,
+            tiling_canonical_rank_by_source,
+            tiling_supply_projection_complete,
             solution_coverage: (problem.solution_probability_policy().requested()
                 || problem.objective().kind() == ObjectiveKind::MinimumCover
                 || problem.objective().execution_constraints().requested())
@@ -518,6 +795,10 @@ impl WasmExactSearchSession {
                 WasmExactSearchError::InvalidProblem("wasm_parallel_coverage_universe_mismatch")
             })?;
         for identity in outcome.buildable_identities {
+            if self.problem.objective().kind() == ObjectiveKind::Tiling {
+                self.insert_tiling_result_identity(identity)?;
+                continue;
+            }
             let identity = TilingIdentityEntry::new(identity);
             if !self.buildable_identities.contains(&identity)
                 && self.buildable_identities.try_reserve(1).is_err()
@@ -564,10 +845,7 @@ impl WasmExactSearchSession {
                 .saturating_add(self.geometry.retained_bytes())
                 .saturating_add(self.tablebase_retained_bytes)
                 .saturating_add(self.parallel_worker_retained_bytes)
-                .saturating_add(
-                    self.buildable_identities.capacity()
-                        * core::mem::size_of::<TilingIdentityEntry>(),
-                ),
+                .saturating_add(self.solution_identity_retained_bytes()),
         );
         if let Some(reason) = outcome.truncated_reason {
             self.mark_truncated(reason);
@@ -725,6 +1003,285 @@ impl WasmExactSearchSession {
         Ok(self)
     }
 
+    pub(super) fn distributed_tiling_root_order(&self) -> Result<Vec<u32>, WasmExactSearchError> {
+        let targets = self
+            .geometry
+            .targets()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_tiling_root_targets_unavailable",
+            ))?;
+        let mut roots = Vec::new();
+        roots.try_reserve_exact(targets.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_tiling_root_order_storage_unavailable")
+        })?;
+        for index in 0..targets.len() {
+            roots.push(u32::try_from(index).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_tiling_root_index_overflow")
+            })?);
+        }
+        roots.sort_unstable_by(|left, right| {
+            canonical_multiset_order(
+                targets[*left as usize].key.counts(),
+                targets[*right as usize].key.counts(),
+            )
+        });
+        Ok(roots)
+    }
+
+    pub(super) fn prepare_distributed_tiling_root_runs(
+        &mut self,
+        root_count: usize,
+    ) -> Result<(), WasmExactSearchError> {
+        let compact =
+            self.compact_tiling_identities
+                .as_ref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_tiling_identity_unavailable",
+                ))?;
+        if !compact.is_empty() || self.distributed_tiling_root_runs.is_some() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_tiling_root_merge_already_started",
+            ));
+        }
+        let mut runs = Vec::new();
+        runs.try_reserve_exact(root_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_tiling_root_runs_storage_unavailable")
+        })?;
+        runs.resize_with(root_count, DistributedTilingRootRun::default);
+        self.distributed_tiling_root_runs = Some(runs);
+        Ok(())
+    }
+
+    fn solution_identity_count(&self) -> usize {
+        self.distributed_tiling_root_runs.as_ref().map_or_else(
+            || {
+                self.compact_tiling_identities
+                    .as_ref()
+                    .map_or_else(|| self.buildable_identities.len(), Vec::len)
+            },
+            |runs| runs.iter().map(|run| run.identities.len()).sum(),
+        )
+    }
+
+    fn solution_identity_retained_bytes(&self) -> usize {
+        self.buildable_identities
+            .capacity()
+            .saturating_mul(core::mem::size_of::<TilingIdentityEntry>())
+            .saturating_add(
+                self.compact_tiling_identities
+                    .as_ref()
+                    .map_or(0, |identities| {
+                        identities
+                            .capacity()
+                            .saturating_mul(core::mem::size_of::<PackedTilingRows>())
+                    }),
+            )
+            .saturating_add(
+                self.distributed_tiling_root_runs
+                    .as_ref()
+                    .map_or(0, |runs| {
+                        runs.iter()
+                            .map(|run| {
+                                run.identities
+                                    .capacity()
+                                    .saturating_mul(core::mem::size_of::<PackedTilingRows>())
+                                    .saturating_add(run.committed_chunks.capacity().saturating_mul(
+                                        core::mem::size_of::<DistributedTilingChunkCommit>(),
+                                    ))
+                            })
+                            .sum()
+                    }),
+            )
+    }
+
+    fn insert_tiling_candidate_identity(
+        &mut self,
+        candidate: &GeometryCandidate,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.compact_tiling_identities.is_some() {
+            let canonical_rank_by_source = self.tiling_canonical_rank_by_source.as_deref().ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_tiling_canonical_rank_unavailable"),
+            )?;
+            let packed_rows =
+                pack_canonical_tiling_row_ids(candidate.row_ids(), canonical_rank_by_source)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_compact_tiling_identity_invalid",
+                    ))?;
+            let identities = self
+                .compact_tiling_identities
+                .as_mut()
+                .expect("compact tiling identity storage was checked");
+            identities.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_tiling_identity_storage_unavailable",
+                )
+            })?;
+            identities.push(packed_rows);
+            return Ok(());
+        }
+        self.insert_standard_solution_identity(candidate.identity)
+    }
+
+    fn insert_tiling_result_identity(
+        &mut self,
+        identity: StandardBoard64TilingIdentity,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.compact_tiling_identities.is_some() {
+            let canonical_rank_by_source = self.tiling_canonical_rank_by_source.as_deref().ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_tiling_canonical_rank_unavailable"),
+            )?;
+            let packed_rows =
+                packed_rows_from_identity(&self.catalog, canonical_rank_by_source, identity)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_compact_tiling_result_identity_invalid",
+                    ))?;
+            let identities = self
+                .compact_tiling_identities
+                .as_mut()
+                .expect("compact tiling identity storage was checked");
+            identities.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_tiling_identity_storage_unavailable",
+                )
+            })?;
+            identities.push(packed_rows);
+            return Ok(());
+        }
+        self.insert_standard_solution_identity(identity)
+    }
+
+    pub(super) fn absorb_packed_tiling_chunk(
+        &mut self,
+        chunk: &super::tiling_parallel::WasmTilingRootChunk,
+    ) -> Result<bool, WasmExactSearchError> {
+        if self.problem.objective().kind() != ObjectiveKind::Tiling {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_packed_tiling_chunk_requires_tiling_objective",
+            ));
+        }
+        if let Some(runs) = self.distributed_tiling_root_runs.as_mut() {
+            let root_ordinal = chunk
+                .root_ordinal()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_chunk_ordinal_missing",
+                ))?;
+            let run =
+                runs.get_mut(root_ordinal as usize)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_tiling_root_chunk_ordinal_invalid",
+                    ))?;
+            if !run.absorb_chunk(chunk)? {
+                return Ok(false);
+            }
+        } else {
+            if chunk.root_ordinal().is_some() || chunk.root_complete() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_chunk_unexpected",
+                ));
+            }
+            let identities = self.compact_tiling_identities.as_mut().ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_compact_tiling_identity_unavailable"),
+            )?;
+            identities
+                .try_reserve(chunk.identities().len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_compact_tiling_identity_storage_unavailable",
+                    )
+                })?;
+            for packed in chunk.identities().iter().copied() {
+                let packed_rows = packed.packed_rows();
+                if !packed_rows_are_valid(&packed_rows) {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_packed_tiling_identity_invalid",
+                    ));
+                }
+                identities.push(packed_rows);
+            }
+        }
+        for packed in chunk.identities().iter().copied() {
+            self.packing_candidate_count = self.packing_candidate_count.saturating_add(1);
+            self.packing_candidate_digest =
+                mix_digest(self.packing_candidate_digest, packed.bucket_hash());
+        }
+        self.peak_cpu_bytes = self
+            .peak_cpu_bytes
+            .max(self.solution_identity_retained_bytes());
+        Ok(true)
+    }
+
+    fn insert_standard_solution_identity(
+        &mut self,
+        identity: StandardBoard64TilingIdentity,
+    ) -> Result<(), WasmExactSearchError> {
+        let identity = TilingIdentityEntry::new(identity);
+        if !self.buildable_identities.contains(&identity) {
+            self.buildable_identities.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_solution_identity_storage_unavailable")
+            })?;
+            self.buildable_identities.insert(identity);
+        }
+        Ok(())
+    }
+
+    fn take_sorted_solution_identities(
+        &mut self,
+    ) -> Result<Vec<StandardBoard64TilingIdentity>, WasmExactSearchError> {
+        let full_set = core::mem::take(&mut self.buildable_identities);
+        let mut identities = Vec::new();
+        identities.try_reserve_exact(full_set.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_solution_sort_storage_unavailable")
+        })?;
+        identities.extend(full_set.into_iter().map(|entry| entry.identity));
+        identities.sort_unstable();
+        Ok(identities)
+    }
+
+    fn take_tiling_solution_page_store(
+        &mut self,
+    ) -> Result<Option<Arc<TilingSolutionPageStore>>, WasmExactSearchError> {
+        let Some(packed) = self.compact_tiling_identities.take() else {
+            return Ok(None);
+        };
+
+        let mut catalog_rows = Vec::new();
+        catalog_rows
+            .try_reserve_exact(self.catalog.skeleton_count())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_tiling_page_catalog_unavailable")
+            })?;
+        for row_id in 0..self.catalog.skeleton_count() {
+            let row = self.catalog.skeleton(row_id as u32);
+            catalog_rows.push(PiecePlacementMask::new(row.piece, row.cells));
+        }
+        let store = if let Some(runs) = self.distributed_tiling_root_runs.take() {
+            if runs.iter().any(|run| !run.complete) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_runs_incomplete",
+                ));
+            }
+            if !packed.is_empty() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_and_sequential_storage_mixed",
+                ));
+            }
+            TilingSolutionPageStore::new_canonical_runs(
+                self.catalog.initial_board(),
+                catalog_rows,
+                runs.into_iter().map(|run| run.identities).collect(),
+            )
+        } else {
+            TilingSolutionPageStore::new_canonical(
+                self.catalog.initial_board(),
+                catalog_rows,
+                packed,
+            )
+        }
+        .map_err(WasmExactSearchError::InvalidProblem)?;
+        self.peak_cpu_bytes = self.peak_cpu_bytes.max(store.retained_bytes());
+        Ok(Some(Arc::new(store)))
+    }
+
     pub fn process_external_candidate(
         &mut self,
         target_index: u32,
@@ -799,6 +1356,9 @@ impl WasmExactSearchSession {
             self.packing_candidate_digest,
             candidate.identity.bucket_hash(),
         );
+        if self.problem.objective().kind() == ObjectiveKind::Tiling {
+            return self.observe_tiling_candidate(candidate, candidate_ordinal);
+        }
         #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
         let profile_scale = profile_sample_scale(self.packing_candidate_count);
         #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
@@ -877,8 +1437,7 @@ impl WasmExactSearchSession {
                 + result.retained_bytes
                 + self.coverage_evaluator.retained_bytes()
                 + self.buildup_workspace.retained_bytes()
-                + self.buildable_identities.capacity()
-                    * core::mem::size_of::<TilingIdentityEntry>()
+                + self.solution_identity_retained_bytes()
                 + self.solution_coverage.as_ref().map_or(0, |coverage| {
                     coverage.capacity()
                         * (core::mem::size_of::<StandardBoard64TilingIdentity>()
@@ -958,6 +1517,37 @@ impl WasmExactSearchSession {
         Ok(None)
     }
 
+    fn observe_tiling_candidate(
+        &mut self,
+        candidate: GeometryCandidate,
+        candidate_ordinal: u64,
+    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        if self.insert_tiling_candidate_identity(&candidate).is_err() {
+            self.mark_truncated("solution_identity_storage_unavailable");
+            return self.complete().map(Some);
+        }
+        if self
+            .representative_rank
+            .is_none_or(|rank| candidate_ordinal < rank)
+        {
+            self.representative_rank = Some(candidate_ordinal);
+            self.representative_identity = Some(candidate.identity);
+            self.representative_candidate_id = Some(candidate.identity.bucket_hash());
+        }
+        self.peak_cpu_bytes = self.peak_cpu_bytes.max(
+            self.catalog
+                .retained_bytes()
+                .saturating_add(self.geometry.retained_bytes())
+                .saturating_add(self.tablebase_retained_bytes)
+                .saturating_add(self.solution_identity_retained_bytes()),
+        );
+        if self.memory_budget_exceeded() {
+            self.mark_truncated("memory_budget_exceeded");
+            return self.complete().map(Some);
+        }
+        Ok(None)
+    }
+
     fn merge_solution_coverage(
         &mut self,
         identity: StandardBoard64TilingIdentity,
@@ -1004,6 +1594,21 @@ impl WasmExactSearchSession {
         })?;
 
         for identity in result.normalized_solution_identities() {
+            if self.problem.objective().kind() == ObjectiveKind::Tiling {
+                self.insert_tiling_result_identity(*identity)
+                    .map_err(|error| match error {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_compact_tiling_identity_storage_unavailable",
+                        )
+                        | WasmExactSearchError::InvalidProblem(
+                            "wasm_solution_identity_storage_unavailable",
+                        ) => WasmExactSearchError::InvalidProblem(
+                            "wasm_distributed_solution_storage_unavailable",
+                        ),
+                        other => other,
+                    })?;
+                continue;
+            }
             let identity = TilingIdentityEntry::new(*identity);
             if !self.buildable_identities.contains(&identity) {
                 self.buildable_identities.try_reserve(1).map_err(|_| {
@@ -1214,7 +1819,9 @@ impl WasmExactSearchSession {
         }
         self.cpu_warmup_performed = self.cpu_warmup_requested;
         match &summary.backend_execution {
-            WasmDistributedBackendExecution::Cpu => {}
+            WasmDistributedBackendExecution::Cpu => {
+                self.backend_selected = "wasm-cpu";
+            }
             WasmDistributedBackendExecution::WebGpu {
                 adapter_index,
                 adapter_name,
@@ -1291,71 +1898,70 @@ impl WasmExactSearchSession {
         include_normalized_keys: bool,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
         let coverage_span = SearchStageSpan::begin(ExecutorSearchStage::WasmFinalCoverage);
-        if let Some(symbolic_coverage) =
-            self.buildup_workspace.materialize_standard_bag_coverage()?
-        {
-            self.coverage_product_words = self
-                .coverage_product_words
-                .saturating_add(symbolic_coverage.word_count());
-            self.covered_patterns
-                .union_with(&symbolic_coverage)
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_standard_bag_coverage_universe_mismatch",
-                    )
-                })?;
-        }
-        if self
-            .problem
-            .queue_observation_policy()
-            .requires_observation_policy()
-        {
-            let control = self.execution_control.clone();
-            match self
-                .buildup_workspace
-                .evaluate_observation_language(&self.problem, &control)
+        if self.problem.objective().kind() != ObjectiveKind::Tiling {
+            if let Some(symbolic_coverage) =
+                self.buildup_workspace.materialize_standard_bag_coverage()?
             {
-                Ok(Some(coverage)) => {
-                    let metrics = coverage.metrics;
-                    self.covered_patterns = coverage.covered_patterns;
-                    self.observation_policy_states = metrics.policy_states;
-                    self.observation_policy_action_checks = metrics.action_checks;
-                    self.observation_trie_nodes = metrics.observation_nodes;
-                    self.peak_cpu_bytes = self.peak_cpu_bytes.max(
-                        self.catalog
-                            .retained_bytes()
-                            .saturating_add(self.geometry.retained_bytes())
-                            .saturating_add(self.tablebase_retained_bytes)
-                            .saturating_add(self.coverage_evaluator.retained_bytes())
-                            .saturating_add(self.buildup_workspace.retained_bytes())
-                            .saturating_add(
-                                self.buildable_identities.capacity()
-                                    * core::mem::size_of::<TilingIdentityEntry>(),
-                            )
-                            .saturating_add(self.solution_coverage.as_ref().map_or(
-                                0,
-                                |solution_coverage| {
-                                    solution_coverage.capacity()
-                                        * (core::mem::size_of::<StandardBoard64TilingIdentity>()
-                                            + core::mem::size_of::<PatternBitSet>())
-                                },
-                            ))
-                            .saturating_add(self.solution_coverage_bytes)
-                            .saturating_add(metrics.retained_bytes),
-                    );
+                self.coverage_product_words = self
+                    .coverage_product_words
+                    .saturating_add(symbolic_coverage.word_count());
+                self.covered_patterns
+                    .union_with(&symbolic_coverage)
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_standard_bag_coverage_universe_mismatch",
+                        )
+                    })?;
+            }
+            if self
+                .problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            {
+                let control = self.execution_control.clone();
+                match self
+                    .buildup_workspace
+                    .evaluate_observation_language(&self.problem, &control)
+                {
+                    Ok(Some(coverage)) => {
+                        let metrics = coverage.metrics;
+                        self.covered_patterns = coverage.covered_patterns;
+                        self.observation_policy_states = metrics.policy_states;
+                        self.observation_policy_action_checks = metrics.action_checks;
+                        self.observation_trie_nodes = metrics.observation_nodes;
+                        self.peak_cpu_bytes = self.peak_cpu_bytes.max(
+                            self.catalog
+                                .retained_bytes()
+                                .saturating_add(self.geometry.retained_bytes())
+                                .saturating_add(self.tablebase_retained_bytes)
+                                .saturating_add(self.coverage_evaluator.retained_bytes())
+                                .saturating_add(self.buildup_workspace.retained_bytes())
+                                .saturating_add(self.solution_identity_retained_bytes())
+                                .saturating_add(self.solution_coverage.as_ref().map_or(
+                                    0,
+                                    |solution_coverage| {
+                                        solution_coverage.capacity()
+                                            * (core::mem::size_of::<StandardBoard64TilingIdentity>(
+                                            ) + core::mem::size_of::<PatternBitSet>())
+                                    },
+                                ))
+                                .saturating_add(self.solution_coverage_bytes)
+                                .saturating_add(metrics.retained_bytes),
+                        );
+                    }
+                    Ok(None) => {
+                        let pattern_count = self
+                            .problem
+                            .piece_source()
+                            .materialized_universe()
+                            .map_or(0, |universe| universe.pattern_count());
+                        self.covered_patterns = PatternBitSet::new(pattern_count);
+                    }
+                    Err(WasmExactSearchError::Cancelled) => {
+                        return Ok(ExactSearchAdvance::Cancelled);
+                    }
+                    Err(error) => return Err(error),
                 }
-                Ok(None) => {
-                    let pattern_count = self
-                        .problem
-                        .piece_source()
-                        .materialized_universe()
-                        .map_or(0, |universe| universe.pattern_count());
-                    self.covered_patterns = PatternBitSet::new(pattern_count);
-                }
-                Err(WasmExactSearchError::Cancelled) => {
-                    return Ok(ExactSearchAdvance::Cancelled);
-                }
-                Err(error) => return Err(error),
             }
         }
         coverage_span.finish(u64::from(self.covered_patterns.count_ones()));
@@ -1369,8 +1975,9 @@ impl WasmExactSearchSession {
         } else {
             None
         };
-        let result = self.build_result(include_normalized_keys, scoring_batch);
-        result_span.finish(self.buildable_identities.len() as u64);
+        let solution_identity_count = self.solution_identity_count();
+        let result = self.build_result(include_normalized_keys, scoring_batch)?;
+        result_span.finish(solution_identity_count as u64);
         Ok(ExactSearchAdvance::Completed(result))
     }
 
@@ -1447,10 +2054,23 @@ impl WasmExactSearchSession {
     }
 
     fn build_result(
-        &self,
+        &mut self,
         include_normalized_keys: bool,
         scoring_batch: Option<ExactScoringExecutionBatch>,
-    ) -> CoreExecutionResult {
+    ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        let tiling_only = self.problem.objective().kind() == ObjectiveKind::Tiling;
+        let tiling_solution_store = if tiling_only {
+            self.take_tiling_solution_page_store()?
+        } else {
+            None
+        };
+        let mut identities = if let Some(store) = &tiling_solution_store {
+            store
+                .page_identities(0, TILING_SOLUTION_INITIAL_PAGE_SIZE)
+                .map_err(WasmExactSearchError::InvalidProblem)?
+        } else {
+            self.take_sorted_solution_identities()?
+        };
         let universe = self
             .problem
             .piece_source()
@@ -1461,20 +2081,24 @@ impl WasmExactSearchSession {
         } else {
             universe.sequence_at(0).len()
         };
-        let coverage_probability = universe
-            .weights()
-            .covered_weight(&self.covered_patterns)
-            .expect("coverage and supply use one pattern universe")
-            .get();
-        let probability_complete = universe.complete() && self.truncated_reason.is_none();
-        let count_complete = self.truncated_reason.is_none() && self.count_complete;
-        let mut identities = self
-            .buildable_identities
-            .iter()
-            .map(|entry| entry.identity)
-            .collect::<Vec<_>>();
-        identities.sort_unstable();
-        let source_solution_count = identities.len();
+        let coverage_probability = if tiling_only {
+            "not-calculated".to_owned()
+        } else {
+            universe
+                .weights()
+                .covered_weight(&self.covered_patterns)
+                .expect("coverage and supply use one pattern universe")
+                .get()
+                .to_string()
+        };
+        let probability_complete =
+            !tiling_only && universe.complete() && self.truncated_reason.is_none();
+        let count_complete = self.truncated_reason.is_none()
+            && self.count_complete
+            && (!tiling_only || self.tiling_supply_projection_complete);
+        let source_solution_count = tiling_solution_store
+            .as_ref()
+            .map_or(identities.len(), |store| store.len());
         let mut solution_coverages = self
             .solution_coverage
             .as_ref()
@@ -1554,10 +2178,14 @@ impl WasmExactSearchSession {
                 "deferred-to-coordinator"
             };
         }
-        let normalized_hash =
-            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-                &identities,
-            );
+        let normalized_hash = tiling_solution_store.as_ref().map_or_else(
+            || {
+                normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+                    &identities,
+                )
+            },
+            |store| store.normalized_hash().to_owned(),
+        );
         let normalized_keys = if include_normalized_keys {
             identities
                 .iter()
@@ -1569,7 +2197,7 @@ impl WasmExactSearchSession {
             Vec::new()
         };
         let solution_probabilities_requested =
-            self.problem.solution_probability_policy().requested();
+            !tiling_only && self.problem.solution_probability_policy().requested();
         let solution_probability_complete = !solution_probabilities_requested
             || (!visible_seven_policy
                 && probability_complete
@@ -1586,13 +2214,14 @@ impl WasmExactSearchSession {
             } else {
                 Vec::new()
             };
-        let build_variant_count_exact = self.problem.count_policy()
-            == clearra_pc_graph::request::PcCountPolicy::CountAll
+        let build_variant_count_exact = !tiling_only
+            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
             && count_complete;
         let objective = match self.problem.objective().kind() {
             ObjectiveKind::All => "all",
             ObjectiveKind::Unique => "unique",
             ObjectiveKind::MinimumCover => "minimum-cover",
+            ObjectiveKind::Tiling => "tiling",
         };
         let score_policy = self.problem.objective().score();
         let execution_constraints = self.problem.objective().execution_constraints();
@@ -1603,7 +2232,12 @@ impl WasmExactSearchSession {
         let score_objective_requested = score_policy.requested();
         let non_score_objective_complete = count_complete
             && (!minimum_cover_requested || (minimum_cover_complete && minimum_cover_proven));
-        let solution_found = !identities.is_empty();
+        let solution_count = if minimum_cover_requested {
+            identities.len()
+        } else {
+            source_solution_count
+        };
+        let solution_found = solution_count != 0;
         let mut reachability_metrics = self.buildup_workspace.reachability_metrics();
         add_reachability_metrics(
             &mut reachability_metrics,
@@ -1755,7 +2389,11 @@ impl WasmExactSearchSession {
             field("queue_knowledge", observation_policy.keyword()),
             field(
                 "coverage_semantics",
-                observation_policy.coverage_semantics(),
+                if tiling_only {
+                    "not-evaluated-tiling-only"
+                } else {
+                    observation_policy.coverage_semantics()
+                },
             ),
             field(
                 "visible_piece_count",
@@ -1785,7 +2423,7 @@ impl WasmExactSearchSession {
                 "instantiation_table_connected",
                 self.catalog.has_instantiation_table(),
             ),
-            field("packing_candidate_is_solution", false),
+            field("packing_candidate_is_solution", tiling_only),
             field("packing_candidate_count", self.packing_candidate_count),
             field(
                 "geometry_candidate_family_count",
@@ -1798,20 +2436,37 @@ impl WasmExactSearchSession {
                 "packing_candidate_set_digest",
                 format!("{:016x}", self.packing_candidate_digest),
             ),
-            field("packing_count_complete", self.truncated_reason.is_none()),
+            field("packing_count_complete", count_complete),
             field(
                 "packing_truncation_reason",
                 self.truncated_reason.unwrap_or("none"),
             ),
             field("solution_found", solution_found),
-            field("unique_solution_count", identities.len()),
-            field("normalized_unique_solution_count", identities.len()),
+            field("unique_solution_count", solution_count),
+            field("normalized_unique_solution_count", solution_count),
+            field("solution_keys_materialized_count", normalized_keys.len()),
+            field(
+                "solution_keys_complete",
+                tiling_solution_store
+                    .as_ref()
+                    .is_none_or(|store| store.len() == normalized_keys.len()),
+            ),
+            field(
+                "solution_page_available",
+                tiling_solution_store
+                    .as_ref()
+                    .is_some_and(|store| store.len() > normalized_keys.len()),
+            ),
             field("minimum_cover_requested", minimum_cover_requested),
             field("minimum_cover_source_solution_count", source_solution_count),
-            field("minimum_cover_selected_solution_count", identities.len()),
+            field("minimum_cover_selected_solution_count", solution_count),
             field(
                 "minimum_cover_required_pattern_count",
-                self.covered_patterns.count_ones(),
+                if tiling_only {
+                    0
+                } else {
+                    self.covered_patterns.count_ones()
+                },
             ),
             field("minimum_cover_complete", minimum_cover_complete),
             field("minimum_cover_proven_minimum", minimum_cover_proven),
@@ -1828,6 +2483,9 @@ impl WasmExactSearchSession {
             field("actual_normalized_solution_set_hash", &normalized_hash),
             field("build_variant_count", self.build_variant_count),
             field("build_variant_count_exact", build_variant_count_exact),
+            field("buildability_verified", !tiling_only),
+            field("coverage_calculated", !tiling_only),
+            field("probability_calculated", !tiling_only),
             field(
                 "pattern_verified_execution_count",
                 self.pattern_verified_execution_count,
@@ -1835,7 +2493,14 @@ impl WasmExactSearchSession {
             field("coverage_row_count", self.coverage_row_count),
             field("coverage_pattern_count", universe.pattern_count()),
             field("materialized_pattern_count", universe.pattern_count()),
-            field("covered_pattern_count", self.covered_patterns.count_ones()),
+            field(
+                "covered_pattern_count",
+                if tiling_only {
+                    0
+                } else {
+                    self.covered_patterns.count_ones()
+                },
+            ),
             field("coverage_probability", coverage_probability),
             field("observation_policy_states", self.observation_policy_states),
             field(
@@ -2070,7 +2735,7 @@ impl WasmExactSearchSession {
         } else {
             Vec::new()
         };
-        CoreExecutionResult::new(fields, self.representative_path.clone())
+        let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
             .with_normalized_solution_keys(normalized_keys)
             .with_normalized_solution_identities(identities)
             .with_representative_solution_identity(self.representative_identity)
@@ -2083,7 +2748,11 @@ impl WasmExactSearchSession {
                 scoring_execution_complete,
                 pattern_weights,
             )
-            .with_exact_scoring_execution_batch(scoring_batch)
+            .with_exact_scoring_execution_batch(scoring_batch);
+        if let Some(store) = tiling_solution_store {
+            result = result.with_tiling_solution_page_store(store);
+        }
+        Ok(result)
     }
 }
 
@@ -2106,5 +2775,78 @@ fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityM
     total.exhaustive_searches = total
         .exhaustive_searches
         .saturating_add(next.exhaustive_searches);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{packed_rows_are_valid, DistributedTilingRootRun, MAX_BOARD64_PIECES};
+    use crate::backend::wasm_cpu::tiling_parallel::{
+        WasmPackedTilingIdentity, WasmTilingRootChunk,
+    };
+    use crate::tiling_solution_store::{
+        pack_tiling_row_ids, read_packed_tiling_row, PackedTilingRows, PACKED_TILING_MAX_ROW_ID,
+    };
+
+    #[test]
+    fn compact_tiling_rows_round_trip_across_word_boundaries() {
+        let mut rows = (0..MAX_BOARD64_PIECES as u32).collect::<Vec<_>>();
+        *rows.last_mut().expect("last row") = PACKED_TILING_MAX_ROW_ID;
+        let packed_rows = pack_tiling_row_ids(&rows).expect("compact identity");
+
+        for (index, row_id) in rows.iter().copied().enumerate() {
+            assert_eq!(
+                read_packed_tiling_row(&packed_rows, index),
+                u64::from(row_id) + 1
+            );
+        }
+        assert!(packed_rows_are_valid(&packed_rows));
+        assert_eq!(core::mem::size_of::<PackedTilingRows>(), 24);
+    }
+
+    #[test]
+    fn compact_tiling_rows_require_a_canonical_strict_order() {
+        assert!(pack_tiling_row_ids(&[3, 3]).is_none());
+        assert!(pack_tiling_row_ids(&[4, 3]).is_none());
+        assert!(pack_tiling_row_ids(&[PACKED_TILING_MAX_ROW_ID + 1]).is_none());
+    }
+
+    #[test]
+    fn distributed_tiling_chunk_replay_is_exact_and_idempotent() {
+        fn chunk(row_id: u32, sequence: u32, root_complete: bool) -> WasmTilingRootChunk {
+            let packed = pack_tiling_row_ids(&[row_id]).expect("packed row");
+            WasmTilingRootChunk::from_wire_parts(
+                0,
+                0,
+                sequence,
+                root_complete,
+                vec![WasmPackedTilingIdentity::new(u64::from(row_id), packed)],
+                usize::from(root_complete),
+                Some(u128::from(root_complete)),
+                usize::from(root_complete) * 11,
+                usize::from(root_complete) * 7,
+                usize::from(root_complete) * 5,
+                usize::from(root_complete) * 3,
+                usize::from(root_complete) * 2,
+                usize::from(root_complete),
+            )
+        }
+
+        let mut run = DistributedTilingRootRun::default();
+        let first = chunk(3, 0, false);
+        let last = chunk(4, 1, true);
+        assert_eq!(run.absorb_chunk(&first).expect("first chunk"), true);
+        assert_eq!(run.absorb_chunk(&first).expect("first replay"), false);
+        assert_eq!(run.absorb_chunk(&last).expect("last chunk"), true);
+        assert_eq!(
+            run.absorb_chunk(&first).expect("replay after completion"),
+            false
+        );
+        assert_eq!(run.absorb_chunk(&last).expect("last replay"), false);
+        assert_eq!(run.identities.len(), 2);
+
+        let mismatched_replay = chunk(5, 0, false);
+        assert!(run.absorb_chunk(&mismatched_replay).is_err());
+        assert_eq!(run.identities.len(), 2);
+    }
 }
 // SRP rationale: this module has one behavior-level change reason: canonical exact-search result accumulation and finalization.

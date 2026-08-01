@@ -1,4 +1,5 @@
 use clearra_core_domain::execution_cancellation::{ExecutionCancellationToken, ExecutionControl};
+use clearra_host_contract::ResourceBudget;
 use clearra_i18n::LanguageId;
 
 use crate::{
@@ -56,6 +57,7 @@ impl AppContext {
         execution_control: &ExecutionControl,
     ) -> AppResponse {
         let command_kind = request.command_kind();
+        let resource_budget = request.resource_budget();
         let (command, output_policy, language, file_policy) = request.into_parts();
         let file_policy = file_policy.as_ref().unwrap_or(&self.file_policy);
         let language = self
@@ -67,6 +69,7 @@ impl AppContext {
             language,
             file_policy,
             output_policy: &output_policy,
+            resource_budget: &resource_budget,
             execution_control,
         };
         execution_control.report_progress("validation", 0, Some(1));
@@ -141,6 +144,7 @@ pub struct AppExecutionContext<'a> {
     pub language: LanguageId,
     pub file_policy: &'a AppFilePolicy,
     pub output_policy: &'a AppOutputPolicy,
+    pub resource_budget: &'a ResourceBudget,
     pub execution_control: &'a ExecutionControl,
 }
 
@@ -167,6 +171,11 @@ impl<'a> AppExecutionContext<'a> {
 impl<'a> AppExecutionContext<'a> {
     pub fn output_policy(&self) -> &'a AppOutputPolicy {
         self.output_policy
+    }
+}
+impl<'a> AppExecutionContext<'a> {
+    pub fn resource_budget(&self) -> ResourceBudget {
+        *self.resource_budget
     }
 }
 impl<'a> AppExecutionContext<'a> {

@@ -1,7 +1,9 @@
 use super::*;
+#[cfg(not(target_family = "wasm"))]
+use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_problem::{
-    SetupCandidatePriority, SetupHoldPolicy, SetupLengthPreference, SetupPathDetail,
+    SetupCandidatePriority, SetupHoldPolicy, SetupLengthPreference, SetupLimits, SetupPathDetail,
 };
 use clearra_rules::profile::builtin_rules::{jstris_180, srs_x};
 
@@ -35,6 +37,57 @@ fn standard_bag_condition_keeps_every_verifier_busy_until_the_tail() {
         .iter()
         .all(|task| task.word_end.saturating_sub(task.word_start) <= 2));
     assert_exact_condition_ranges(&condition_words, &tasks);
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+#[ignore = "full empty-4L serial/multiworker equivalence; run in the release acceptance suite"]
+fn native_multiworker_matches_serial_setup_result() {
+    let limits = SetupLimits::new(32, 32, 32, 32, 2_000_000, 32).expect("bounded setup limits");
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I])
+        .with_max_setup_pieces(1)
+        .with_tablebase_requested(false)
+        .with_limits(limits);
+    let serial_control = ExecutionControl::new(ExecutionCancellationToken::new());
+    let mut serial_session =
+        super::super::WasmSetupSearchSession::new(&query).expect("serial setup session");
+    let serial = loop {
+        match serial_session
+            .advance(8_192, &serial_control)
+            .expect("serial setup advance")
+        {
+            super::super::WasmSetupSearchAdvance::Pending => {}
+            super::super::WasmSetupSearchAdvance::Completed(result) => break result,
+            super::super::WasmSetupSearchAdvance::Cancelled => {
+                panic!("serial setup was not cancelled")
+            }
+        }
+    };
+    let parallel = execute_setup_parallel_native(
+        &query,
+        3,
+        &ExecutionControl::new(ExecutionCancellationToken::new()),
+    )
+    .expect("native parallel setup");
+
+    assert_eq!(
+        serial.field("normalized_solution_set_hash"),
+        parallel.field("normalized_solution_set_hash")
+    );
+    assert_eq!(
+        serial
+            .setup_finder_report()
+            .expect("serial setup report")
+            .hold_conditions(),
+        parallel
+            .setup_finder_report()
+            .expect("parallel setup report")
+            .hold_conditions()
+    );
+    assert!(parallel
+        .usize_field("workers_used")
+        .is_some_and(|workers| workers > 1));
 }
 
 #[test]

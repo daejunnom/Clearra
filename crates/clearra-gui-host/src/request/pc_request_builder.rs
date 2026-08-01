@@ -1,5 +1,5 @@
 use clearra_app::{AppCommand, PcAppCommand};
-use clearra_core_domain::pc::pc_target::PcTarget;
+use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput, PcSolutionProbabilityPolicy, SupplyWindowSize,
 };
@@ -28,7 +28,6 @@ impl PcRequestBuilder {
                 format!("invalid GUI PC line target: {error:?}"),
             )
         })?;
-        let policy = BackendRequestBuilder::build_execution_policy(backend)?;
         let objective = score_objective_policy(
             form.score_mode(),
             form.score_profile(),
@@ -36,6 +35,21 @@ impl PcRequestBuilder {
             form.initial_b2b(),
             clearra_objectives::policy::objective_policy::ObjectivePolicy::unique(),
         )?;
+        let tiling_only = objective.kind() == ObjectiveKind::Tiling;
+        if tiling_only
+            && (form.preserve_b2b()
+                || form.solution_probabilities()
+                || form
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || backend.precompute_build_dependencies())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "GUI tiling-only search cannot use BuildUp, coverage, probability, or dependency-analysis options",
+            ));
+        }
+        let policy = BackendRequestBuilder::build_execution_policy(backend)?;
         let objective = execution_constraint_objective_policy(
             form.preserve_b2b(),
             form.spin_profile(),

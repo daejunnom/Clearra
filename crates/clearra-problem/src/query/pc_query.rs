@@ -137,7 +137,7 @@ impl PcQuery {
             return PcCountPolicy::CountAll;
         }
         match self.objective.kind() {
-            ObjectiveKind::Unique => PcCountPolicy::CountUnique,
+            ObjectiveKind::Unique | ObjectiveKind::Tiling => PcCountPolicy::CountUnique,
             ObjectiveKind::All | ObjectiveKind::MinimumCover => PcCountPolicy::CountAll,
         }
     }

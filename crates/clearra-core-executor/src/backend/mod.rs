@@ -105,7 +105,8 @@ pub use wasm_cpu::{
     WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
     WasmCpuCandidateProducer, WasmDistributedBackendExecution, WasmDistributedGeometrySummary,
     WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
-    PC4_COMPACT_TABLEBASE_MAX_BYTES,
+    WasmPackedTilingIdentity, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
+    WasmTilingRootResultMerger, WasmTilingRootWorker, PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub use wasm_cpu_search_backend::{
     WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,

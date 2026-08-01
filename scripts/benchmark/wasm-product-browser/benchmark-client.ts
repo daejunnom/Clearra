@@ -33,6 +33,7 @@ let runtimePrewarmElapsedMs: number | null = null;
 let runStarted = started;
 
 worker.onmessage = (message: MessageEvent<Record<string, unknown>>) => {
+  if (completed) return;
   const event = message.data;
   if (prewarmWorkerCount !== null) {
     if (!['completed', 'failed'].includes(String(event.type))) return;
@@ -59,6 +60,15 @@ worker.onmessage = (message: MessageEvent<Record<string, unknown>>) => {
     return;
   }
   if (event.event === 'progress') {
+    status.textContent = JSON.stringify(
+      {
+        state: 'running',
+        elapsed_ms: performance.now() - started,
+        progress: event.progress ?? null
+      },
+      null,
+      2
+    );
     void postProgress(event);
     return;
   }
@@ -77,6 +87,7 @@ worker.onmessage = (message: MessageEvent<Record<string, unknown>>) => {
 
 worker.onerror = (event) => {
   const elapsedMs = performance.now() - started;
+  const error = event.error instanceof Error ? event.error : null;
   void complete({
     surface: 'browser-wasm-product-worker',
     elapsed_ms: elapsedMs,
@@ -84,7 +95,11 @@ worker.onerror = (event) => {
     runtime_prewarm_elapsed_ms: runtimePrewarmElapsedMs,
     capabilities: browserCapabilities(),
     command: commandText,
-    worker_error: event.message
+    worker_error: event.message || error?.message || 'worker failed without a browser diagnostic',
+    worker_error_name: error?.name ?? null,
+    worker_error_filename: event.filename || null,
+    worker_error_line: event.lineno || null,
+    worker_error_column: event.colno || null
   });
 };
 
@@ -104,7 +119,11 @@ if (prewarmWorkerCount === null) {
 async function complete(result: Record<string, unknown>) {
   if (completed) return;
   completed = true;
-  terminalBrowserMemoryBytes = await measureBrowserMemory();
+  status!.textContent = JSON.stringify(result, null, 2);
+  terminalBrowserMemoryBytes = await Promise.race([
+    measureBrowserMemory(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000))
+  ]);
   result.browser_memory_terminal_bytes = terminalBrowserMemoryBytes;
   result.browser_memory_sample_count = terminalBrowserMemoryBytes === null ? 0 : 1;
   worker.terminate();

@@ -4,6 +4,7 @@ use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
 use clearra_replay::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
+use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 
 use crate::{CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage};
 
@@ -54,6 +55,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     representative_pattern_id: Option<u32>,
     representative_rank: Option<u64>,
     truncated_reason: Option<&'static str>,
+    supply_projection_complete: bool,
     trivial_target: bool,
     external_geometry: bool,
     workers_used: usize,
@@ -110,6 +112,8 @@ impl ExtendedBuildProbabilitySession {
             ));
         }
         let catalog = ExtendedInverseCatalog::compile(field)?;
+        let supply_projection_complete = universe.complete()
+            || family.membership_kind() == PackingPatternMembershipKind::ExactSymbolicStandardBag;
         let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog)?;
         let build_order_workspace = ExtendedBuildOrderWorkspace::new(
             field.width(),
@@ -153,6 +157,7 @@ impl ExtendedBuildProbabilitySession {
             representative_pattern_id: None,
             representative_rank: None,
             truncated_reason: None,
+            supply_projection_complete,
             trivial_target: target_piece_count == 0,
             external_geometry: false,
             workers_used: 1,
@@ -260,6 +265,16 @@ impl ExtendedBuildProbabilitySession {
         self.processed_candidate_count = self.processed_candidate_count.saturating_add(1);
         let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
         let tiling_digest = tiling.digest();
+        self.candidate_digest = mix_digest(self.candidate_digest, tiling_digest);
+        if self.aggregation.is_tiling_only() {
+            self.buildable_tilings.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_build_probability_solution_storage_unavailable",
+                )
+            })?;
+            self.buildable_tilings.insert(tiling);
+            return Ok(());
+        }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested();
         let candidate_key = execution_evidence_requested
@@ -267,7 +282,6 @@ impl ExtendedBuildProbabilitySession {
         let spin_candidate = candidate_key
             .as_ref()
             .map(|candidate_key| (tiling_digest, candidate_key.clone()));
-        self.candidate_digest = mix_digest(self.candidate_digest, tiling_digest);
         let node_limit = self.remaining_node_budget();
         if self.problem.backend_request().max_nodes() != 0 && node_limit == 0 {
             self.truncated_reason = Some("node_budget_exceeded");
@@ -692,17 +706,24 @@ impl ExtendedBuildProbabilitySession {
     }
 
     fn build_result(&mut self) -> CoreExecutionResult {
+        let tiling_only = self.aggregation.is_tiling_only();
         let universe = self
             .problem
             .piece_source()
             .materialized_universe()
             .expect("extended build probability requires a materialized universe");
-        let probability = universe
-            .weights()
-            .covered_weight(&self.covered_patterns)
-            .expect("coverage belongs to the materialized universe")
-            .get();
-        let complete = universe.complete() && self.truncated_reason.is_none();
+        let probability = if tiling_only {
+            "not-calculated".to_owned()
+        } else {
+            universe
+                .weights()
+                .covered_weight(&self.covered_patterns)
+                .expect("coverage belongs to the materialized universe")
+                .get()
+                .to_string()
+        };
+        let count_complete = self.supply_projection_complete && self.truncated_reason.is_none();
+        let probability_complete = !tiling_only && count_complete;
         let execution_constraints = self.problem.objective().execution_constraints();
         let execution_evidence_requested =
             self.aggregation.requests_spin_coverage() || execution_constraints.requested();
@@ -724,7 +745,7 @@ impl ExtendedBuildProbabilitySession {
                 kick_table_id,
                 rule_profile_id,
                 core::mem::take(&mut self.spin_execution_graphs),
-                complete,
+                count_complete && probability_complete,
             ))
         } else {
             None
@@ -907,15 +928,26 @@ impl ExtendedBuildProbabilitySession {
             field("build_variant_count_exact", false),
             field(
                 "build_probability_evaluation_basis",
-                "candidate-pattern-existence",
+                if tiling_only {
+                    "geometry-only"
+                } else {
+                    "candidate-pattern-existence"
+                },
             ),
             field("build_path_multiplicity_counted", false),
             field("materialized_pattern_count", universe.pattern_count()),
             field("coverage_pattern_count", universe.pattern_count()),
-            field("covered_pattern_count", self.covered_patterns.count_ones()),
+            field(
+                "covered_pattern_count",
+                if tiling_only {
+                    0
+                } else {
+                    self.covered_patterns.count_ones()
+                },
+            ),
             field("coverage_probability", probability),
-            field("probability_complete", complete),
-            field("count_complete", complete),
+            field("probability_complete", probability_complete),
+            field("count_complete", count_complete),
             field(
                 "searched_nodes",
                 self.geometry
@@ -969,6 +1001,9 @@ impl ExtendedBuildProbabilitySession {
             ),
             field("objective", "build-probability"),
             field("build_probability_aggregation", self.aggregation.as_str()),
+            field("buildability_verified", !tiling_only),
+            field("coverage_calculated", !tiling_only),
+            field("probability_calculated", !tiling_only),
             field(
                 "spin_profile_requested",
                 self.aggregation
@@ -991,16 +1026,16 @@ impl ExtendedBuildProbabilitySession {
                 "execution_constraint_materialized",
                 self.distributed_execution_constraint_materialized,
             ),
-            field("objective_search_complete", complete),
+            field("objective_search_complete", count_complete),
             field(
                 "objective_complete",
-                complete
+                count_complete
                     && (!execution_constraints.requested()
                         || self.distributed_execution_constraint_materialized),
             ),
             field(
                 "objective_incomplete_reason",
-                if !complete {
+                if !count_complete {
                     self.truncated_reason
                         .unwrap_or("pattern_universe_incomplete")
                 } else if execution_constraints.requested()
@@ -1031,7 +1066,11 @@ impl ExtendedBuildProbabilitySession {
             let pattern_weights = (0..universe.pattern_count())
                 .map(|pattern| universe.weight_at(pattern).get().to_string())
                 .collect();
-            result.with_postprocess_execution_batch(Vec::new(), complete, pattern_weights)
+            result.with_postprocess_execution_batch(
+                Vec::new(),
+                count_complete && probability_complete,
+                pattern_weights,
+            )
         } else {
             result
         }

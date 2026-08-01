@@ -1,3 +1,6 @@
+//! SRP rationale: this module has one change reason: the exact PC4 tablebase artifact contract,
+//! including compilation, validation, installation, and certified lookup semantics.
+
 use std::sync::{Arc, OnceLock, RwLock};
 
 use clearra_problem::SearchProblem;

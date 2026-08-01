@@ -63,6 +63,26 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn tiling_only_returns_exact_geometry_without_buildup_or_probability() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc --lines 2 --queue IIOOO --tiling-only \
+             --backend cpu --workers 1 --no-hold",
+        )
+        .expect("tiling-only search");
+    let report = result.search_report().expect("tiling-only report");
+
+    assert!(report.unique_solution_count > 0);
+    assert!(!report.buildability_verified);
+    assert!(!report.coverage_calculated);
+    assert!(!report.probability_calculated);
+    assert_eq!(report.coverage_probability, "not-calculated");
+    assert_eq!(report.total_build_order_nodes, 0);
+    assert_eq!(report.coverage_product_edge_checks, 0);
+    assert!(report.count_complete);
+}
+
+#[test]
 fn wasm_setup_command_preserves_the_exact_residue_contract() {
     let request = WasmCommandRuntime::default()
         .compile_command_text("clearra setup --remaining IOTS")
@@ -189,6 +209,26 @@ fn finite_pattern_releases_terminal_hold_for_complete_build_coverage() {
             .abs()
             <= f64::EPSILON
     );
+}
+
+#[test]
+fn build_probability_tiling_only_returns_geometry_without_buildup_or_coverage() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+             --queue I --hold empty --no-mirror --tiling-only --workers 1",
+        )
+        .expect("build-probability tiling-only result");
+    let report = result.search_report().expect("tiling-only report");
+
+    assert_eq!(report.unique_solution_count, 1);
+    assert!(!report.buildability_verified);
+    assert!(!report.coverage_calculated);
+    assert!(!report.probability_calculated);
+    assert_eq!(report.coverage_probability, "not-calculated");
+    assert_eq!(report.total_build_order_nodes, 0);
+    assert_eq!(report.coverage_product_edge_checks, 0);
+    assert!(report.count_complete);
 }
 
 #[test]
@@ -469,6 +509,98 @@ fn distributed_build_probability_b2b_constraint_matches_serial_exact_result() {
     assert_eq!(distributed_report.workers_used, 2);
 }
 
+#[test]
+fn distributed_build_probability_tiling_matches_serial_without_buildup() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let serial_command = "clearra build-probability --base-mask 0x0 --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI --no-hold --no-mirror --tiling-only --workers 1";
+    let distributed_command = "clearra build-probability --base-mask 0x0 --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI --no-hold --no-mirror --tiling-only --workers 2";
+    let serial = runtime
+        .run_command_text(serial_command)
+        .expect("serial build-probability tiling result");
+    let distributed = run_distributed_cpu(&runtime, distributed_command);
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert_eq!(distributed_report.total_build_order_nodes, 0);
+    assert_eq!(distributed_report.coverage_product_edge_checks, 0);
+    assert!(!distributed_report.buildability_verified);
+    assert_eq!(distributed_report.workers_used, 2);
+}
+
+#[test]
+fn distributed_build_probability_tiling_unions_distinct_mirror_passes() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let serial_command = "clearra build-probability --base-mask 0x0 --target-mask 0xcc33fffff --height 4 --queue OOOOOOO --no-hold --include-mirror --tiling-only --workers 1";
+    let distributed_command = "clearra build-probability --base-mask 0x0 --target-mask 0xcc33fffff --height 4 --queue OOOOOOO --no-hold --include-mirror --tiling-only --workers 2";
+    let serial = runtime
+        .run_command_text(serial_command)
+        .expect("serial mirrored build-probability tiling result");
+    let distributed = run_distributed_cpu(&runtime, distributed_command);
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert!(serial_report.unique_solution_count > 0);
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert!(distributed_report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| { key == "build_mirror_distinct_target" && value == "true" }));
+    assert!(distributed_report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| { key == "build_mirror_search_executed" && value == "true" }));
+    assert_eq!(distributed_report.total_build_order_nodes, 0);
+    assert!(!distributed_report.buildability_verified);
+}
+
+#[test]
+fn distributed_tiling_root_tasks_match_serial_hold_supply_result() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let serial_command = "clearra pc --lines 4 --board-mask 0x80787 --height 4 --pieces 8 --patterns P7 --hold S --tiling-only --backend cpu --workers 1";
+    let distributed_command = "clearra pc --lines 4 --board-mask 0x80787 --height 4 --pieces 8 --patterns P7 --hold S --tiling-only --backend cpu --workers 2";
+    let serial = runtime
+        .run_command_text(serial_command)
+        .expect("serial tiling result");
+    let distributed = run_distributed_cpu(&runtime, distributed_command);
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert!(!distributed_report.buildability_verified);
+    assert_eq!(distributed_report.workers_used, 2);
+}
+
 fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecutionResult {
     let preparation =
         WasmDistributedCoordinator::prepare(runtime, command).expect("distributed preparation");
@@ -486,16 +618,31 @@ fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecu
             WasmDistributedProducerAdvance::Pending => {}
             WasmDistributedProducerAdvance::Initialization(_) => {}
             WasmDistributedProducerAdvance::Batch(batch) => {
-                verifier.consume(&batch).expect("candidate batch");
+                let mut consumed = verifier.consume(&batch).expect("candidate batch");
+                if let Some(partial) = consumed.partial.take() {
+                    coordinator
+                        .absorb_partial(&partial)
+                        .expect("merge streamed partial result");
+                }
+                while consumed.has_pending_work {
+                    consumed = verifier.continue_work().expect("continue worker task");
+                    if let Some(partial) = consumed.partial.take() {
+                        coordinator
+                            .absorb_partial(&partial)
+                            .expect("merge streamed partial result");
+                    }
+                }
             }
             WasmDistributedProducerAdvance::Completed => break,
             WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
         }
     }
     let partial = verifier.finish().expect("partial exact result");
-    coordinator
-        .absorb_partial(&partial)
-        .expect("merge partial exact result");
+    if !partial.is_empty() {
+        coordinator
+            .absorb_partial(&partial)
+            .expect("merge partial exact result");
+    }
     coordinator.finish(2).expect("distributed exact result")
 }
 

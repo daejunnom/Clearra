@@ -4,6 +4,10 @@ import { defineConfig } from 'vite';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const repository = resolve(root, '../../..');
+const isolationHeaders = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp'
+};
 
 export default defineConfig({
   root,
@@ -12,6 +16,10 @@ export default defineConfig({
     target: 'es2022'
   },
   server: {
-    fs: { allow: [repository] }
+    fs: { allow: [repository] },
+    headers: isolationHeaders
+  },
+  preview: {
+    headers: isolationHeaders
   }
 });

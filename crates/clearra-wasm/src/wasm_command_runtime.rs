@@ -1,9 +1,10 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use clearra_app::{
     AppContext, AppCoreExecutorService, AppRequest, AppServices, CooperativeAppAdvance,
     CooperativeAppExecution, ExecutionControl,
 };
+use clearra_core_executor::TilingSolutionPageStore;
 use clearra_host_contract::{AppResponse as HostAppResponse, Diagnostic, DiagnosticReport};
 use clearra_web_command::{WebCommandError, WebCommandParser, WebCommandRequest};
 
@@ -15,6 +16,7 @@ pub struct WasmExecutionResult {
     app_response: HostAppResponse,
     webgpu_backend: WebGpuBackendReport,
     search_report: Option<WasmSearchReport>,
+    tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -38,8 +40,12 @@ pub struct WasmSearchReport {
     pub normalized_solution_set_hash: String,
     pub normalized_solution_keys: Vec<String>,
     pub solution_probabilities: Vec<WasmSolutionProbability>,
+    pub solution_average_scores: Vec<WasmSolutionAverageScore>,
     pub build_variant_count: u64,
     pub build_variant_count_exact: String,
+    pub buildability_verified: bool,
+    pub coverage_calculated: bool,
+    pub probability_calculated: bool,
     pub materialized_pattern_count: usize,
     pub covered_pattern_count: usize,
     pub coverage_probability: String,
@@ -169,6 +175,15 @@ pub struct WasmSolutionProbability {
     pub covered_pattern_count: usize,
     pub pattern_count: usize,
     pub probability_complete: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmSolutionAverageScore {
+    pub solution_key: String,
+    pub average_score: String,
+    pub covered_pattern_count: usize,
+    pub pattern_count: usize,
+    pub score_complete: bool,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -316,6 +331,17 @@ impl WasmSearchReport {
                     probability_complete: entry.probability_complete(),
                 })
                 .collect(),
+            solution_average_scores: result
+                .solution_average_scores()
+                .iter()
+                .map(|entry| WasmSolutionAverageScore {
+                    solution_key: entry.solution_key().to_owned(),
+                    average_score: entry.average_score().to_owned(),
+                    covered_pattern_count: entry.covered_pattern_count(),
+                    pattern_count: entry.pattern_count(),
+                    score_complete: entry.score_complete(),
+                })
+                .collect(),
             build_variant_count: result
                 .field("build_variant_count")
                 .and_then(|value| value.parse().ok())
@@ -324,6 +350,9 @@ impl WasmSearchReport {
                 .field("build_variant_count_exact")
                 .unwrap_or("false")
                 .to_owned(),
+            buildability_verified: result.bool_field("buildability_verified").unwrap_or(true),
+            coverage_calculated: result.bool_field("coverage_calculated").unwrap_or(true),
+            probability_calculated: result.bool_field("probability_calculated").unwrap_or(true),
             materialized_pattern_count: result
                 .usize_field("materialized_pattern_count")
                 .unwrap_or(0),
@@ -525,10 +554,16 @@ impl WasmExecutionResult {
     ) -> Self {
         let search_report = WasmSearchReport::from_response(&response);
         let webgpu_backend = WebGpuBackendReport::from_app_response(&response, webgpu_requested);
+        let tiling_solution_page_store = response
+            .render_model()
+            .and_then(|model| model.core_result())
+            .and_then(|result| result.tiling_solution_page_store())
+            .cloned();
         Self {
             app_response: response.to_host_response(),
             webgpu_backend,
             search_report,
+            tiling_solution_page_store,
         }
     }
 
@@ -542,6 +577,10 @@ impl WasmExecutionResult {
 
     pub fn search_report(&self) -> Option<&WasmSearchReport> {
         self.search_report.as_ref()
+    }
+
+    pub fn tiling_solution_page_store(&self) -> Option<&Arc<TilingSolutionPageStore>> {
+        self.tiling_solution_page_store.as_ref()
     }
 }
 

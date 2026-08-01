@@ -22,11 +22,11 @@
   export let height = 8;
   export let existingMask = 0n;
   export let targetMask = 0n;
-  export let aggregation: 'buildability' | 'spin' = 'buildability';
+  export let aggregation: 'buildability' | 'tiling' | 'spin' = 'buildability';
 
   const dispatch = createEventDispatcher<{ continue: { existingMask: bigint; height: number } }>();
   const columns = Array.from({ length: 10 }, (_, index) => index);
-  let copyFormat: SolutionCopyFormat = 'fumen';
+  let copyFormat: SolutionCopyFormat = 'ctk';
 
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: report = view.searchReport;
@@ -71,7 +71,7 @@
   statusLabel={label(view.status)}
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
-  progressProfile="build"
+  progressProfile={aggregation === 'tiling' ? 'tiling' : 'build'}
   {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}
@@ -107,7 +107,11 @@
 
         <div class="metrics-panel">
           <div class="hero-metric">
-            {#if aggregation === 'spin'}
+            {#if aggregation === 'tiling'}
+              <span>{label('tilingCount')}</span>
+              <strong>{number(report?.unique_solution_count)}</strong>
+              <small>{label('tilingOnlyWarning')}</small>
+            {:else if aggregation === 'spin'}
               <span>{label('spinSearchProbability')}</span>
               <strong>{workspaceProbability(language, summary.spin_search_probability)}</strong>
               <small>{number(summaryNumber(summary.spin_search_candidate_count))} {label('spinSearchBuilds')} · {label('spinAccuracy')}: {summary.spin_search_accuracy ?? '—'}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
@@ -125,8 +129,8 @@
             </div>
           {/if}
           <dl>
-            <div><dt>{label('buildableTilings')}</dt><dd>{number(report?.unique_solution_count)}</dd></div>
-            {#if summary.build_mirror_included === 'true'}
+            <div><dt>{label(aggregation === 'tiling' ? 'tilingCount' : 'buildableTilings')}</dt><dd>{number(report?.unique_solution_count)}</dd></div>
+            {#if aggregation !== 'tiling' && summary.build_mirror_included === 'true'}
               <div><dt>{label('originalBuildProbability')}</dt><dd>{workspaceProbability(language, summary.original_coverage_probability)}</dd></div>
               <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber(summary.mirror_union_added_pattern_count))}</dd></div>
             {/if}

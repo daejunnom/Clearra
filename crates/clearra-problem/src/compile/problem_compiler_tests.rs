@@ -205,6 +205,36 @@ mod case_occupied_initial_hold_projects_terminal_standard_bag_lookahead {
     }
 }
 
+mod case_tiling_only_preserves_hold_supply {
+    use super::*;
+
+    #[test]
+    fn tiling_only_preserves_occupied_initial_hold_supply_projection() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::T,
+                PieceKind::Z,
+            ])),
+            PieceWindow::new(5),
+        )
+        .with_hold_piece(Some(PieceKind::S))
+        .with_allow_hold(true)
+        .with_exact_pieces(Some(5))
+        .with_objective(clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling());
+
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("tiling-only problem");
+
+        assert_eq!(problem.initial_hold().hold_piece(), Some(PieceKind::S));
+        assert_eq!(problem.supply().hold_piece(), Some(PieceKind::S));
+        assert!(problem.supply().hold_enabled());
+        assert!(problem.supply().projects_unplaced_lookahead());
+        assert_eq!(problem.supply().source_sequence_length(), 4);
+    }
+}
+
 mod case_finite_sources_project_terminal_hold_lookahead {
     use super::*;
 

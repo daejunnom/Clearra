@@ -12,7 +12,8 @@ use clearra_host_contract::{AppResponse, Diagnostic, DiagnosticReport};
 use crate::{
     json_event_envelope::serialize_worker_events,
     wasm_command_runtime::{PreparedWasmAdvance, PreparedWasmExecution},
-    WasmCommandRuntime, WasmCommandRuntimeError, WasmSearchReport, WebGpuBackendReport,
+    TilingSolutionPageStore, WasmCommandRuntime, WasmCommandRuntimeError, WasmSearchReport,
+    WebGpuBackendReport,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -312,6 +313,7 @@ pub struct WasmWorkerJobRuntime {
     statuses: HashMap<WasmWorkerJobId, WasmWorkerJobStatus>,
     events: HashMap<WasmWorkerJobId, VecDeque<WasmWorkerJobEvent>>,
     active_jobs: HashMap<WasmWorkerJobId, ActiveJob>,
+    completed_tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
 }
 
 impl WasmWorkerJobRuntime {
@@ -322,6 +324,7 @@ impl WasmWorkerJobRuntime {
             statuses: HashMap::new(),
             events: HashMap::new(),
             active_jobs: HashMap::new(),
+            completed_tiling_solution_page_store: None,
         }
     }
 
@@ -344,6 +347,7 @@ impl WasmWorkerJobRuntime {
         &mut self,
         command_text: &str,
     ) -> Result<WasmWorkerJobId, WasmCommandRuntimeError> {
+        self.completed_tiling_solution_page_store = None;
         let job_id = self.allocate_job()?;
         self.active_jobs.insert(
             job_id,
@@ -435,6 +439,8 @@ impl WasmWorkerJobRuntime {
                 Ok(WasmWorkerAdvanceStatus::Cancelled)
             }
             PreparedWasmAdvance::Completed(result) => {
+                self.completed_tiling_solution_page_store =
+                    result.tiling_solution_page_store().cloned();
                 self.release_scope(job_id);
                 self.push_event(WasmWorkerJobEvent::Progress {
                     job_id,
@@ -496,6 +502,12 @@ impl WasmWorkerJobRuntime {
 
     pub fn status(&self, job_id: WasmWorkerJobId) -> Option<WasmWorkerJobStatus> {
         self.statuses.get(&job_id).copied()
+    }
+
+    pub fn take_completed_tiling_solution_page_store(
+        &mut self,
+    ) -> Option<Arc<TilingSolutionPageStore>> {
+        self.completed_tiling_solution_page_store.take()
     }
 
     fn finish_cancelled(&mut self, job_id: WasmWorkerJobId) -> Result<(), WasmCommandRuntimeError> {

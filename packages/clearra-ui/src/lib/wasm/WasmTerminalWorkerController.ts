@@ -1,5 +1,12 @@
-import type { ClearraWasmWorkerEvent } from './wasmCommandClient';
-import { postPrewarmRuntime } from './wasmCommandClient';
+import type {
+  ClearraSolutionPageWorkerEvent,
+  ClearraWasmWorkerEvent
+} from './wasmCommandClient';
+import {
+  isSolutionPageWorkerEvent,
+  postLoadSolutionPage,
+  postPrewarmRuntime
+} from './wasmCommandClient';
 import {
   ensureWasmWorkerOwnerId,
   terminateOwnedWasmWorker,
@@ -31,6 +38,14 @@ export class WasmTerminalWorkerController {
   private prewarmDeferred = false;
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
   private cancellingJobId: number | null = null;
+  private nextSolutionPageRequestId = 1;
+  private solutionPageRequests = new Map<
+    number,
+    {
+      resolve: (value: { keys: string[]; total: number }) => void;
+      reject: (reason: Error) => void;
+    }
+  >();
 
   constructor(private workerFactory: (() => Worker) | null) {}
 
@@ -41,6 +56,7 @@ export class WasmTerminalWorkerController {
   }
 
   run() {
+    this.rejectSolutionPages(new Error('a new search replaced the previous solution pages'));
     if (this.worker && this.prewarmingWorker === this.worker) {
       // The worker awaits in-flight prewarm and preserves its compiled
       // coordinator module and verifier pool for the requested job.
@@ -104,6 +120,23 @@ export class WasmTerminalWorkerController {
     }, COOPERATIVE_CANCEL_GRACE_MS);
   }
 
+  loadSolutionPage(offset: number, limit: number): Promise<{ keys: string[]; total: number }> {
+    const worker = this.worker;
+    if (!worker || this.runInFlight || this.cancellingWorker !== null) {
+      return Promise.reject(new Error('solution page runtime is not available'));
+    }
+    const requestId = this.nextSolutionPageRequestId++;
+    return new Promise((resolve, reject) => {
+      this.solutionPageRequests.set(requestId, { resolve, reject });
+      try {
+        postLoadSolutionPage(worker, requestId, offset, limit);
+      } catch (error) {
+        this.solutionPageRequests.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
   takeIdleWorker(): Worker | null {
     if (
       !this.worker ||
@@ -153,10 +186,17 @@ export class WasmTerminalWorkerController {
       this.worker = worker;
       worker.onmessage = (
         message: MessageEvent<
-          ClearraWasmWorkerEvent | RuntimePrewarmWorkerEvent | TablebaseWarmupWorkerEvent
+          | ClearraWasmWorkerEvent
+          | RuntimePrewarmWorkerEvent
+          | TablebaseWarmupWorkerEvent
+          | ClearraSolutionPageWorkerEvent
         >
       ) => {
         if (this.worker !== worker) return;
+        if (isSolutionPageWorkerEvent(message.data)) {
+          this.resolveSolutionPage(message.data);
+          return;
+        }
         if (isRuntimePrewarmWorkerEvent(message.data)) {
           this.prewarmingWorker = message.data.phase === 'started' ? worker : null;
           return;
@@ -300,6 +340,7 @@ export class WasmTerminalWorkerController {
   }
 
   private releaseWorker(worker: Worker, reason: ClearraWasmForcedTerminationReason) {
+    this.rejectSolutionPages(new Error('solution page runtime was released'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
@@ -311,6 +352,7 @@ export class WasmTerminalWorkerController {
   }
 
   private disposeOwnedWorker(worker: Worker) {
+    this.rejectSolutionPages(new Error('solution page runtime was disposed'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
@@ -322,6 +364,22 @@ export class WasmTerminalWorkerController {
       worker.postMessage({ type: 'dispose_runtime' });
     } catch {}
     terminateOwnedWasmWorker(worker, 'owner-disposed');
+  }
+
+  private resolveSolutionPage(event: ClearraSolutionPageWorkerEvent) {
+    const pending = this.solutionPageRequests.get(event.request_id);
+    if (!pending) return;
+    this.solutionPageRequests.delete(event.request_id);
+    if (event.type === 'solution_page_failed') {
+      pending.reject(new Error(event.message));
+    } else {
+      pending.resolve({ keys: event.keys, total: event.total });
+    }
+  }
+
+  private rejectSolutionPages(error: Error) {
+    for (const pending of this.solutionPageRequests.values()) pending.reject(error);
+    this.solutionPageRequests.clear();
   }
 
   private clearCancelFallback() {

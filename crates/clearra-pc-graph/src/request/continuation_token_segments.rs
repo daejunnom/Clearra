@@ -76,6 +76,7 @@ pub(crate) fn parse_objective(value: &str) -> Result<ObjectivePolicy, PcContinua
         "all" => Ok(ObjectivePolicy::all()),
         "unique" => Ok(ObjectivePolicy::unique()),
         "min-cover" | "minimum-cover" => Ok(ObjectivePolicy::minimum_cover()),
+        "tiling" => Ok(ObjectivePolicy::tiling()),
         _ => Err(PcContinuationTokenError::new(format!(
             "unsupported objective '{value}'"
         ))),
@@ -198,6 +199,7 @@ pub(crate) fn objective_name(objective: ObjectivePolicy) -> &'static str {
         ObjectiveKind::All => "all",
         ObjectiveKind::Unique => "unique",
         ObjectiveKind::MinimumCover => "min-cover",
+        ObjectiveKind::Tiling => "tiling",
     }
 }
 

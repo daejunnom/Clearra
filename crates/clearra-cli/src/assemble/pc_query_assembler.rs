@@ -37,6 +37,9 @@ pub enum PcQueryAssemblyError {
     UnsupportedSpinProfile {
         value: String,
     },
+    IncompatibleTilingOnlyOption {
+        option: &'static str,
+    },
     UnknownRuleProfile {
         value: String,
     },
@@ -65,15 +68,19 @@ impl PcQueryAssembler {
                 lines: target.lines(),
             });
         }
+        let mut objective = parse_objective(args.objective())?;
+        let tiling_only = objective.kind()
+            == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
+        if tiling_only {
+            validate_tiling_only_options(args)?;
+        }
         let query = OpeningPcSearchQuery::new(target);
-
         let queue = parse_queue(args)?;
         let hold_policy = if args.hold_enabled() {
             PcHoldPolicy::EnabledEmpty
         } else {
             PcHoldPolicy::Disabled
         };
-        let mut objective = parse_objective(args.objective())?;
         if args.score_requested() && !objective.score().requested() {
             objective = objective.with_score_summary();
         }
@@ -194,10 +201,37 @@ fn parse_objective(value: &str) -> Result<ObjectivePolicy, PcQueryAssemblyError>
         "" | "all" => Ok(ObjectivePolicy::all()),
         "unique" => Ok(ObjectivePolicy::unique()),
         "minimum-cover" | "min-cover" => Ok(ObjectivePolicy::minimum_cover()),
+        "tiling" | "tiling-only" => Ok(ObjectivePolicy::tiling()),
         _ => Err(PcQueryAssemblyError::UnsupportedObjective {
             value: value.to_owned(),
         }),
     }
+}
+
+fn validate_tiling_only_options(args: &PcArgs) -> Result<(), PcQueryAssemblyError> {
+    let incompatible = [
+        (args.score_requested(), "--score"),
+        (args.score_profile().is_some(), "--score-profile"),
+        (args.spin_profile().is_some(), "--spin-profile"),
+        (args.initial_b2b().is_some(), "--initial-b2b"),
+        (args.rule().is_some(), "--rule"),
+        (args.kick_profile_json().is_some(), "--kick-profile-json"),
+        (args.tablebase_requested() == Some(true), "--tablebase"),
+        (
+            args.precompute_build_dependencies() == Some(true),
+            "--build-dependency-dag",
+        ),
+        (args.solution_probabilities(), "--solution-probabilities"),
+        (
+            args.queue_observation_policy()
+                .requires_observation_policy(),
+            "--queue-knowledge",
+        ),
+    ];
+    if let Some((_, option)) = incompatible.into_iter().find(|(enabled, _)| *enabled) {
+        return Err(PcQueryAssemblyError::IncompatibleTilingOnlyOption { option });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -30,10 +30,10 @@ export function wasmArtifactGuard(): Plugin {
       }
       if (
         manifest.schema_version !== 1 ||
-        manifest.bindings.path !== 'clearra_wasm.js' ||
-        manifest.wasm.path !== 'clearra_wasm_bg.wasm' ||
         !isSha256(manifest.bindings.sha256) ||
-        !isSha256(manifest.wasm.sha256)
+        !isSha256(manifest.wasm.sha256) ||
+        !isArtifactPath(manifest.bindings, 'clearra_wasm.js', 'clearra_wasm', '.js') ||
+        !isArtifactPath(manifest.wasm, 'clearra_wasm_bg.wasm', 'clearra_wasm_bg', '.wasm')
       ) {
         throw new Error(`Invalid Clearra WASM artifact manifest: ${manifestPath}`);
       }
@@ -64,6 +64,20 @@ async function assertArtifact(root: string, artifact: WasmArtifact): Promise<voi
 
 function isSha256(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
+}
+
+function isArtifactPath(
+  artifact: WasmArtifact,
+  legacyPath: string,
+  versionedPrefix: string,
+  versionedSuffix: string
+): boolean {
+  if (artifact.path === legacyPath) return true;
+  return [20, 24, 64].some(
+    (length) =>
+      artifact.path ===
+      `${versionedPrefix}.${artifact.sha256.slice(0, length)}${versionedSuffix}`
+  );
 }
 
 function missingArtifactError(path: string, cause: unknown): Error {

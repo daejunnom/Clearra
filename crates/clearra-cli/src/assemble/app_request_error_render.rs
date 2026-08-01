@@ -29,6 +29,10 @@ pub(crate) fn pc_assembly_error(error: PcQueryAssemblyError) -> CliOutput {
             CliErrorCode::PcQueryInvalid,
             format!("unsupported PC spin profile '{value}'"),
         ),
+        PcQueryAssemblyError::IncompatibleTilingOnlyOption { option } => CliOutput::error(
+            CliErrorCode::PcQueryInvalid,
+            format!("{option} is not available with tiling-only search"),
+        ),
         PcQueryAssemblyError::UnknownRuleProfile { value } => CliOutput::error(
             CliErrorCode::PcQueryInvalid,
             format!("unknown rule profile '{value}'"),

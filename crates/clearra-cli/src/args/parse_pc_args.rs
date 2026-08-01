@@ -20,7 +20,9 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut queue = String::new();
     let mut fixed_queue = false;
     let mut hold_enabled = true;
-    let mut objective = "all".to_owned();
+    let mut objective: Option<String> = None;
+    let mut tiling_only = false;
+    let mut hold_option: Option<bool> = None;
     let mut score_requested = false;
     let mut score_profile = None;
     let mut spin_profile = None;
@@ -67,15 +69,21 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
             }
             "--hold" => {
                 hold_enabled = true;
+                hold_option = Some(true);
                 index += 1;
             }
             "--no-hold" => {
                 hold_enabled = false;
+                hold_option = Some(false);
                 index += 1;
             }
             "--objective" | "-o" => {
-                objective = option_value(args, index, "--objective")?.to_owned();
+                objective = Some(option_value(args, index, "--objective")?.to_owned());
                 index += 2;
+            }
+            "--tiling-only" => {
+                tiling_only = true;
+                index += 1;
             }
             "--score" => {
                 score_requested = true;
@@ -207,6 +215,52 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         no_gpu,
         gpu_device.as_deref(),
     )?;
+    if tiling_only
+        && objective.as_deref().is_some_and(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+                "tiling"
+            )
+        })
+    {
+        return Err(CliParseError::InvalidValue {
+            option: "--objective",
+            value: objective.unwrap_or_default(),
+        });
+    }
+    let objective = if tiling_only {
+        "tiling".to_owned()
+    } else {
+        objective.unwrap_or_else(|| "all".to_owned())
+    };
+    if objective.trim().to_ascii_lowercase().replace('_', "-") == "tiling" {
+        let incompatible = [
+            (hold_option == Some(true), "--hold"),
+            (score_requested, "--score"),
+            (score_profile.is_some(), "--score-profile"),
+            (spin_profile.is_some(), "--spin-profile"),
+            (initial_b2b.is_some(), "--initial-b2b"),
+            (rule.is_some(), "--rule"),
+            (kick_profile_json.is_some(), "--kick-profile-json"),
+            (tablebase_requested == Some(true), "--tablebase"),
+            (
+                precompute_build_dependencies == Some(true),
+                "--build-dependency-dag",
+            ),
+            (solution_probabilities, "--solution-probabilities"),
+            (
+                queue_observation_policy.requires_observation_policy(),
+                "--queue-knowledge",
+            ),
+        ];
+        if let Some((_, option)) = incompatible.into_iter().find(|(enabled, _)| *enabled) {
+            return Err(CliParseError::InvalidValue {
+                option,
+                value: "not available with tiling-only search".to_owned(),
+            });
+        }
+        hold_enabled = false;
+    }
 
     Ok(PcArgs::new(lines)
         .with_queue(queue, fixed_queue)

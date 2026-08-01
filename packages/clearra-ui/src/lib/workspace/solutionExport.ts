@@ -20,6 +20,7 @@ export type SolutionExportPage = {
   height: number;
   initialMask: bigint;
   placements: SolutionExportPlacement[];
+  comment?: string;
 };
 
 export type SolutionExportBoard = {
@@ -31,6 +32,7 @@ export type SolutionExportBoard = {
 export type SolutionExportErrorCode =
   | 'invalid-page'
   | 'invalid-solution-key'
+  | 'clipboard-output-too-large'
   | 'fumen-height-unsupported'
   | 'fumen-roundtrip-mismatch';
 
@@ -195,6 +197,7 @@ function solutionPageToCtk3PageUnchecked(page: SolutionExportPage): Ctk3Page {
   return {
     height,
     cells,
+    ...(page.comment ? { comment: page.comment } : {}),
     flags: {
       lock: true,
       mirror: false,

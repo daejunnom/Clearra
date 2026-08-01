@@ -131,15 +131,19 @@ pub struct WasmCpuCandidateProducer {
     session: WasmExactSearchSession,
     candidate_count: usize,
     candidate_digest: u64,
+    verification_required: bool,
     finished: bool,
 }
 
 impl WasmCpuCandidateProducer {
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+        let verification_required = problem.objective().kind()
+            != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         Ok(Self {
             session: WasmExactSearchSession::new(problem).map_err(map_error)?,
             candidate_count: 0,
             candidate_digest: 0,
+            verification_required,
             finished: false,
         })
     }
@@ -168,9 +172,30 @@ impl WasmCpuCandidateProducer {
                 let ordinal = self.candidate_count as u64;
                 self.candidate_count = self.candidate_count.saturating_add(1);
                 self.candidate_digest = mix_digest(self.candidate_digest, identity_hash);
-                Ok(WasmCandidateProducerAdvance::Candidate(
-                    WasmCandidatePacket::new(ordinal, target_index, row_ids),
-                ))
+                let candidate = WasmCandidatePacket::new(ordinal, target_index, row_ids);
+                if !self.verification_required {
+                    match self
+                        .session
+                        .process_external_candidate_with_ordinal(
+                            candidate.target_index(),
+                            candidate.row_ids(),
+                            candidate.ordinal(),
+                            control,
+                        )
+                        .map_err(map_error)?
+                    {
+                        Some(ExactSearchAdvance::Cancelled) => {
+                            return Ok(WasmCandidateProducerAdvance::Cancelled);
+                        }
+                        Some(ExactSearchAdvance::Completed(_)) => {
+                            return Err("wasm_tiling_producer_completed_early");
+                        }
+                        Some(ExactSearchAdvance::Pending) | None => {}
+                    }
+                    Ok(WasmCandidateProducerAdvance::Pending)
+                } else {
+                    Ok(WasmCandidateProducerAdvance::Candidate(candidate))
+                }
             }
             DistributedGeometryAdvance::ResourceIncomplete(reason) => {
                 self.finished = true;
@@ -210,6 +235,10 @@ impl WasmCpuCandidateProducer {
         let mut progress = self.session.distributed_progress();
         progress.candidates = self.candidate_count;
         progress
+    }
+
+    pub const fn verification_required(&self) -> bool {
+        self.verification_required
     }
 }
 
@@ -278,6 +307,14 @@ pub struct WasmDistributedResultMerger {
     score_cells: Vec<CorePostProcessScoreCell>,
     score_cells_complete: bool,
     score_profile_id: Option<String>,
+    tiling_candidate_count: usize,
+    tiling_candidate_family_count: Option<u128>,
+    tiling_expanded_nodes: usize,
+    tiling_peak_frontier: usize,
+    tiling_domain_pruned_states: usize,
+    tiling_hall_pruned_states: usize,
+    tiling_column_pruned_states: usize,
+    tiling_component_compositions: usize,
 }
 
 impl WasmDistributedResultMerger {
@@ -287,7 +324,71 @@ impl WasmDistributedResultMerger {
             score_cells: Vec::new(),
             score_cells_complete: true,
             score_profile_id: None,
+            tiling_candidate_count: 0,
+            tiling_candidate_family_count: Some(0),
+            tiling_expanded_nodes: 0,
+            tiling_peak_frontier: 0,
+            tiling_domain_pruned_states: 0,
+            tiling_hall_pruned_states: 0,
+            tiling_column_pruned_states: 0,
+            tiling_component_compositions: 0,
         }
+    }
+
+    pub fn absorb_tiling_chunk(
+        &mut self,
+        chunk: &super::tiling_parallel::WasmTilingRootChunk,
+    ) -> Result<(), &'static str> {
+        let applied = self
+            .session
+            .absorb_packed_tiling_chunk(chunk)
+            .map_err(map_error)?;
+        if !applied {
+            return Ok(());
+        }
+        self.tiling_candidate_count = self
+            .tiling_candidate_count
+            .saturating_add(chunk.identities().len());
+        self.tiling_candidate_family_count = match (
+            self.tiling_candidate_family_count,
+            chunk.candidate_family_count(),
+        ) {
+            (Some(total), Some(value)) => total.checked_add(value),
+            _ => None,
+        };
+        self.tiling_expanded_nodes = self
+            .tiling_expanded_nodes
+            .saturating_add(chunk.expanded_nodes());
+        self.tiling_peak_frontier = self.tiling_peak_frontier.max(chunk.peak_frontier());
+        self.tiling_domain_pruned_states = self
+            .tiling_domain_pruned_states
+            .saturating_add(chunk.domain_pruned_states());
+        self.tiling_hall_pruned_states = self
+            .tiling_hall_pruned_states
+            .saturating_add(chunk.hall_pruned_states());
+        self.tiling_column_pruned_states = self
+            .tiling_column_pruned_states
+            .saturating_add(chunk.column_pruned_states());
+        self.tiling_component_compositions = self
+            .tiling_component_compositions
+            .saturating_add(chunk.component_compositions());
+        Ok(())
+    }
+
+    pub(super) const fn tiling_candidate_count(&self) -> usize {
+        self.tiling_candidate_count
+    }
+
+    pub fn tiling_progress(&self) -> Option<WasmDistributedProgress> {
+        (self.tiling_candidate_count != 0 || self.tiling_expanded_nodes != 0).then_some(
+            WasmDistributedProgress {
+                geometry_nodes: self.tiling_expanded_nodes,
+                candidates: self.tiling_candidate_count,
+                candidate_family_count: self.tiling_candidate_family_count,
+                pass_count: 1,
+                ..WasmDistributedProgress::default()
+            },
+        )
     }
 
     pub fn absorb(&mut self, result: &CoreExecutionResult) -> Result<(), &'static str> {
@@ -314,9 +415,20 @@ impl WasmDistributedResultMerger {
         summary: &WasmDistributedGeometrySummary,
         workers_used: usize,
     ) -> Result<CoreExecutionResult, &'static str> {
+        let mut summary = summary.clone();
+        if self.tiling_candidate_count != 0 || self.tiling_expanded_nodes != 0 {
+            summary.candidate_count = self.tiling_candidate_count;
+            summary.candidate_family_count = self.tiling_candidate_family_count;
+            summary.expanded_nodes = self.tiling_expanded_nodes;
+            summary.peak_frontier = self.tiling_peak_frontier;
+            summary.domain_pruned_states = self.tiling_domain_pruned_states;
+            summary.hall_pruned_states = self.tiling_hall_pruned_states;
+            summary.column_pruned_states = self.tiling_column_pruned_states;
+            summary.component_compositions = self.tiling_component_compositions;
+        }
         let result = match self
             .session
-            .complete_distributed_geometry(summary, workers_used)
+            .complete_distributed_geometry(&summary, workers_used)
             .map_err(map_error)?
         {
             ExactSearchAdvance::Completed(result) => result,
@@ -336,7 +448,7 @@ impl WasmDistributedResultMerger {
     }
 }
 
-fn map_error(error: WasmExactSearchError) -> &'static str {
+pub(super) fn map_error(error: WasmExactSearchError) -> &'static str {
     match error {
         WasmExactSearchError::InvalidProblem(reason) => reason,
         WasmExactSearchError::Cancelled => "wasm_cpu_search_cancelled",

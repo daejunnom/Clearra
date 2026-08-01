@@ -1,3 +1,6 @@
+//! SRP rationale: this module has one change reason: the distributed WASM coordinator state
+//! machine shared by producer, verifier, merge, cancellation, and terminal transitions.
+
 use clearra_app::{
     AppCommand, AppCoreExecutorService, AppRequest, DistributedForwardPreparation,
     DistributedSearchPreparation, DistributedSetupPreparation, ExecutionControl,
@@ -11,17 +14,20 @@ use clearra_core_executor::{
     WasmCpuCandidateProducer, WasmCpuSearchBackend, WasmDistributedGeometrySummary,
     WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
     WasmProductSearchBackend, WasmSetupParallelCoordinator, WasmSetupParallelProduce,
-    WasmSetupParallelWorker,
+    WasmSetupParallelWorker, WasmTilingRootAdvance, WasmTilingRootProducer,
+    WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 use clearra_forward_search::{
     ForwardParallelCoordinator, ForwardParallelProduce, ForwardParallelWorker,
 };
 use clearra_pc_graph::request::RequestedSearchBackend;
+use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField};
 
 use crate::{
     distributed_wire::{
-        decode_candidate_batch, decode_partial_results, encode_candidate_batch,
-        encode_partial_results,
+        decode_candidate_batch, decode_partial_results, decode_tiling_root_chunk,
+        encode_candidate_batch, encode_partial_results, encode_tiling_root_chunk,
+        is_tiling_root_chunk,
     },
     json_event_envelope::serialize_worker_events,
     BackendStatus, JobProgress, WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult,
@@ -77,6 +83,7 @@ pub struct WasmDistributedCoordinator {
     completed_progress: WasmDistributedProgress,
     forward_completed: bool,
     worker_count: usize,
+    verification_required: bool,
     webgpu_requested: bool,
     mode: WasmDistributedMode,
     requested_backend: WasmDistributedRequestedBackend,
@@ -87,6 +94,7 @@ pub struct WasmDistributedCoordinator {
 
 enum DistributedCandidateProducer {
     Cpu(WasmCpuCandidateProducer),
+    Tiling(WasmTilingRootProducer),
     BuildProbability(WasmBuildProbabilityCandidateProducer),
     Forward(ForwardParallelCoordinator),
     Setup(WasmSetupParallelCoordinator),
@@ -102,6 +110,7 @@ pub struct WasmDistributedVerifierRuntime {
 
 enum DistributedVerifier {
     Pc(WasmDistributedVerifier),
+    Tiling(WasmTilingRootWorker),
     BuildProbability(WasmBuildProbabilityDistributedVerifier),
     Forward(ForwardParallelWorker),
     Setup(WasmSetupParallelWorker),
@@ -109,6 +118,7 @@ enum DistributedVerifier {
 
 enum DistributedResultMerger {
     Pc(WasmDistributedResultMerger),
+    Tiling(WasmTilingRootResultMerger),
     BuildProbability(WasmBuildProbabilityDistributedResultMerger),
     Forward(ForwardParallelCoordinator),
 }
@@ -122,6 +132,7 @@ enum DistributedPreparedSearch {
 pub struct WasmDistributedVerifierConsume {
     pub candidate_count: usize,
     pub partial: Option<Vec<u8>>,
+    pub has_pending_work: bool,
 }
 
 impl WasmDistributedCoordinator {
@@ -170,6 +181,7 @@ impl WasmDistributedCoordinator {
                 completed_progress: WasmDistributedProgress::default(),
                 forward_completed: false,
                 worker_count,
+                verification_required: true,
                 webgpu_requested: false,
                 mode: WasmDistributedMode::CpuMulti,
                 requested_backend: WasmDistributedRequestedBackend::Cpu,
@@ -219,6 +231,7 @@ impl WasmDistributedCoordinator {
                 completed_progress: WasmDistributedProgress::default(),
                 forward_completed: false,
                 worker_count: workers,
+                verification_required: true,
                 webgpu_requested: false,
                 mode: WasmDistributedMode::CpuMulti,
                 requested_backend: WasmDistributedRequestedBackend::Cpu,
@@ -246,6 +259,10 @@ impl WasmDistributedCoordinator {
             return Ok(WasmDistributedPreparation::Serial);
         }
         let build_probability_request = prepared.build_probability_request();
+        let build_probability_tiling_roots =
+            build_probability_request.is_some_and(|(field, aggregation)| {
+                build_probability_uses_tiling_roots(problem, field, aggregation)
+            });
         let worker_count = problem.backend_policy().workers();
         let distributed_worthwhile = build_probability_request.map_or_else(
             || WasmCpuSearchBackend::distributed_execution_is_worthwhile(problem),
@@ -280,16 +297,49 @@ impl WasmDistributedCoordinator {
         } else {
             WasmDistributedFallbackReason::None
         };
-        let (producer, mode) = if let Some((field, aggregation)) = build_probability_request {
+        let selected_product_backend = build_probability_request
+            .is_none()
+            .then(|| WasmCpuSearchBackend::selected_product_backend(problem));
+        let (producer, mode, worker_count) = if build_probability_tiling_roots {
+            let (field, _) = build_probability_request
+                .expect("tiling root build probability request was checked above");
+            let producer = WasmTilingRootProducer::new_for_build_probability(problem, field)
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
+            if producer.root_count() < 2 {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
+            let worker_count = worker_count.min(producer.root_count().saturating_add(1));
+            (
+                DistributedCandidateProducer::Tiling(producer),
+                WasmDistributedMode::CpuMulti,
+                worker_count,
+            )
+        } else if let Some((field, aggregation)) = build_probability_request {
             (
                 DistributedCandidateProducer::BuildProbability(
                     WasmBuildProbabilityCandidateProducer::new(problem, field, aggregation)
                         .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?,
                 ),
                 WasmDistributedMode::CpuMulti,
+                worker_count,
+            )
+        } else if problem.objective().kind()
+            == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+            && selected_product_backend == Some(WasmProductSearchBackend::Cpu)
+        {
+            let producer = WasmTilingRootProducer::new(problem)
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
+            if producer.root_count() < 2 {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
+            let worker_count = worker_count.min(producer.root_count().saturating_add(1));
+            (
+                DistributedCandidateProducer::Tiling(producer),
+                WasmDistributedMode::CpuMulti,
+                worker_count,
             )
         } else {
-            match WasmCpuSearchBackend::selected_product_backend(problem) {
+            match selected_product_backend.unwrap_or(WasmProductSearchBackend::Cpu) {
                 WasmProductSearchBackend::Cpu => (
                     DistributedCandidateProducer::Cpu(
                         WasmCpuCandidateProducer::new(problem).map_err(|reason| {
@@ -297,6 +347,7 @@ impl WasmDistributedCoordinator {
                         })?,
                     ),
                     WasmDistributedMode::CpuMulti,
+                    worker_count,
                 ),
                 WasmProductSearchBackend::WebGpu => {
                     #[cfg(feature = "webgpu-search")]
@@ -308,6 +359,7 @@ impl WasmDistributedCoordinator {
                                 })?,
                             ),
                             WasmDistributedMode::WebGpuMulti,
+                            worker_count,
                         )
                     }
                     #[cfg(not(feature = "webgpu-search"))]
@@ -317,6 +369,7 @@ impl WasmDistributedCoordinator {
                 }
             }
         };
+        let verification_required = producer.verification_required();
         Ok(WasmDistributedPreparation::Coordinator(Self {
             prepared: Some(DistributedPreparedSearch::Core(prepared)),
             producer: Some(producer),
@@ -325,6 +378,7 @@ impl WasmDistributedCoordinator {
             completed_progress: WasmDistributedProgress::default(),
             forward_completed: false,
             worker_count,
+            verification_required,
             webgpu_requested,
             mode,
             requested_backend: distributed_requested_backend,
@@ -340,6 +394,14 @@ impl WasmDistributedCoordinator {
 
     pub const fn worker_count(&self) -> usize {
         self.worker_count
+    }
+
+    pub const fn verification_required(&self) -> bool {
+        self.verification_required
+    }
+
+    pub fn tiling_geometry_parallel(&self) -> bool {
+        matches!(self.producer, Some(DistributedCandidateProducer::Tiling(_)))
     }
 
     pub const fn requested_backend(&self) -> WasmDistributedRequestedBackend {
@@ -366,6 +428,13 @@ impl WasmDistributedCoordinator {
     pub fn progress(&self) -> WasmDistributedProgress {
         if let Some(producer) = &self.producer {
             return producer.progress();
+        }
+        if let Some(progress) = self
+            .merger
+            .as_ref()
+            .and_then(DistributedResultMerger::tiling_progress)
+        {
+            return progress;
         }
         self.summary
             .as_ref()
@@ -463,6 +532,8 @@ impl WasmDistributedCoordinator {
                 }
             };
         }
+        let tiling_root_tasks =
+            matches!(self.producer, Some(DistributedCandidateProducer::Tiling(_)));
         let producer = self.producer.as_mut().ok_or_else(|| {
             distributed_error(
                 "E_WASM_DISTRIBUTED_STATE",
@@ -470,7 +541,11 @@ impl WasmDistributedCoordinator {
             )
         })?;
         let mut candidates = Vec::<WasmCandidatePacket>::new();
-        let batch_capacity = batch_capacity.max(1);
+        let batch_capacity = if tiling_root_tasks {
+            1
+        } else {
+            batch_capacity.max(1)
+        };
         candidates.reserve(batch_capacity);
         for _ in 0..work_budget.max(1) {
             match producer
@@ -526,6 +601,27 @@ impl WasmDistributedCoordinator {
     }
 
     pub fn absorb_partial(&mut self, input: &[u8]) -> Result<(), WasmCommandRuntimeError> {
+        if is_tiling_root_chunk(input) {
+            let chunk = decode_tiling_root_chunk(input).map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_TILING_PARTIAL_INVALID", error.reason())
+            })?;
+            if let Some(DistributedCandidateProducer::Tiling(producer)) = self.producer.as_mut() {
+                producer.absorb(&chunk).map_err(|reason| {
+                    distributed_error("E_WASM_DISTRIBUTED_TILING_MERGE", reason)
+                })?;
+                return Ok(());
+            }
+            let merger = self.merger.as_mut().ok_or_else(|| {
+                distributed_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "tiling result merger is not ready",
+                )
+            })?;
+            merger
+                .absorb_tiling_chunk(&chunk)
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_TILING_MERGE", reason))?;
+            return Ok(());
+        }
         if let Some(DistributedCandidateProducer::Setup(producer)) = self.producer.as_mut() {
             producer.absorb(input).map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_SETUP_MERGE", error.reason())
@@ -642,6 +738,17 @@ impl WasmDistributedCoordinator {
     }
 }
 
+fn build_probability_uses_tiling_roots(
+    problem: &clearra_problem::SearchProblem,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+) -> bool {
+    aggregation.is_tiling_only()
+        && field.is_compact()
+        && WasmTilingRootProducer::build_probability_root_count(problem, field)
+            .is_ok_and(|count| count >= 2)
+}
+
 impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
     fn from(value: RequestedSearchBackend) -> Self {
         match value {
@@ -654,12 +761,23 @@ impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
 }
 
 impl DistributedCandidateProducer {
+    fn verification_required(&self) -> bool {
+        match self {
+            Self::Cpu(producer) => producer.verification_required(),
+            Self::Tiling(_) => true,
+            Self::BuildProbability(_) | Self::Forward(_) | Self::Setup(_) => true,
+            #[cfg(feature = "webgpu-search")]
+            Self::WebGpu(producer) => producer.verification_required(),
+        }
+    }
+
     fn advance(
         &mut self,
         control: &ExecutionControl,
     ) -> Result<WasmCandidateProducerAdvance, &'static str> {
         match self {
             Self::Cpu(producer) => producer.advance(control),
+            Self::Tiling(producer) => producer.advance(control),
             Self::BuildProbability(producer) => producer.advance(control),
             Self::Forward(_) => Err("forward_producer_requires_batch_advance"),
             Self::Setup(_) => Err("setup_producer_requires_task_batch_advance"),
@@ -671,6 +789,7 @@ impl DistributedCandidateProducer {
     fn into_merger(self) -> Result<DistributedResultMerger, &'static str> {
         match self {
             Self::Cpu(producer) => producer.into_merger().map(DistributedResultMerger::Pc),
+            Self::Tiling(producer) => producer.into_merger().map(DistributedResultMerger::Tiling),
             Self::BuildProbability(producer) => producer
                 .into_merger()
                 .map(DistributedResultMerger::BuildProbability),
@@ -684,6 +803,7 @@ impl DistributedCandidateProducer {
     fn progress(&self) -> WasmDistributedProgress {
         match self {
             Self::Cpu(producer) => producer.progress(),
+            Self::Tiling(producer) => producer.progress(),
             Self::BuildProbability(producer) => producer.progress(),
             Self::Forward(producer) => {
                 let progress = producer.progress();
@@ -721,6 +841,7 @@ impl DistributedVerifier {
     ) -> Result<(), &'static str> {
         match self {
             Self::Pc(verifier) => verifier.consume(candidate, control),
+            Self::Tiling(_) => Err("tiling_verifier_requires_root_task_batch"),
             Self::BuildProbability(verifier) => verifier.consume(candidate, control),
             Self::Forward(_) => Err("forward_verifier_requires_forward_task_wire"),
             Self::Setup(_) => Err("setup_verifier_requires_setup_task_wire"),
@@ -730,6 +851,13 @@ impl DistributedVerifier {
     fn finish(&mut self) -> Result<Vec<clearra_core_executor::CoreExecutionResult>, &'static str> {
         match self {
             Self::Pc(verifier) => verifier.finish().map(|result| vec![result]),
+            Self::Tiling(verifier) => {
+                if verifier.has_pending_work() {
+                    Err("wasm_tiling_root_worker_finish_pending")
+                } else {
+                    Ok(Vec::new())
+                }
+            }
             Self::BuildProbability(verifier) => verifier.finish(),
             Self::Forward(_) => Ok(Vec::new()),
             Self::Setup(_) => Ok(Vec::new()),
@@ -739,6 +867,16 @@ impl DistributedVerifier {
     fn progress(&self) -> WasmDistributedProgress {
         match self {
             Self::Pc(verifier) => verifier.progress(),
+            Self::Tiling(verifier) => {
+                let progress = verifier.progress();
+                WasmDistributedProgress {
+                    candidates: progress.candidates,
+                    build_nodes: progress.geometry_nodes,
+                    coverage_checks: progress.coverage_checks,
+                    candidate_family_count: progress.candidate_family_count,
+                    ..WasmDistributedProgress::default()
+                }
+            }
             Self::BuildProbability(verifier) => verifier.progress(),
             Self::Forward(verifier) => {
                 let progress = verifier.progress();
@@ -756,14 +894,35 @@ impl DistributedVerifier {
 }
 
 impl DistributedResultMerger {
+    fn tiling_progress(&self) -> Option<WasmDistributedProgress> {
+        match self {
+            Self::Pc(merger) => merger.tiling_progress(),
+            Self::Tiling(merger) => merger.progress(),
+            Self::BuildProbability(_) | Self::Forward(_) => None,
+        }
+    }
+
     fn absorb(
         &mut self,
         result: &clearra_core_executor::CoreExecutionResult,
     ) -> Result<(), &'static str> {
         match self {
             Self::Pc(merger) => merger.absorb(result),
+            Self::Tiling(_) => Err("tiling_merger_requires_tiling_chunk"),
             Self::BuildProbability(merger) => merger.absorb(result),
             Self::Forward(_) => Err("forward_merger_requires_forward_result_wire"),
+        }
+    }
+
+    fn absorb_tiling_chunk(
+        &mut self,
+        chunk: &clearra_core_executor::WasmTilingRootChunk,
+    ) -> Result<(), &'static str> {
+        match self {
+            Self::Pc(merger) => merger.absorb_tiling_chunk(chunk),
+            Self::Tiling(merger) => merger.absorb(chunk),
+            Self::BuildProbability(_) => Err("tiling_chunk_requires_pc_result_merger"),
+            Self::Forward(_) => Err("tiling_chunk_requires_pc_result_merger"),
         }
     }
 
@@ -774,6 +933,7 @@ impl DistributedResultMerger {
     ) -> Result<clearra_core_executor::CoreExecutionResult, &'static str> {
         match self {
             Self::Pc(merger) => merger.finish(summary, workers_used),
+            Self::Tiling(merger) => merger.finish(summary, workers_used),
             Self::BuildProbability(merger) => merger.finish(summary, workers_used),
             Self::Forward(_) => Err("forward_merger_requires_forward_finish"),
         }
@@ -796,22 +956,38 @@ impl WasmDistributedVerifierRuntime {
                 ));
             }
         };
-        let verifier = if let Some((field, aggregation)) = prepared.build_probability_request() {
-            DistributedVerifier::BuildProbability(
-                WasmBuildProbabilityDistributedVerifier::new(
-                    prepared.problem(),
-                    field,
-                    aggregation,
-                )
-                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason))?,
-            )
-        } else {
-            DistributedVerifier::Pc(
-                WasmDistributedVerifier::new(prepared.problem()).map_err(|reason| {
-                    distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason)
-                })?,
-            )
-        };
+        let verifier =
+            if let Some((field, aggregation)) = prepared.build_probability_request() {
+                if build_probability_uses_tiling_roots(prepared.problem(), field, aggregation) {
+                    DistributedVerifier::Tiling(
+                        WasmTilingRootWorker::new_for_build_probability(prepared.problem(), field)
+                            .map_err(|reason| {
+                                distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason)
+                            })?,
+                    )
+                } else {
+                    DistributedVerifier::BuildProbability(
+                        WasmBuildProbabilityDistributedVerifier::new(
+                            prepared.problem(),
+                            field,
+                            aggregation,
+                        )
+                        .map_err(|reason| {
+                            distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason)
+                        })?,
+                    )
+                }
+            } else if prepared.problem().objective().kind()
+                == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+            {
+                DistributedVerifier::Tiling(WasmTilingRootWorker::new(prepared.problem()).map_err(
+                    |reason| distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason),
+                )?)
+            } else {
+                DistributedVerifier::Pc(WasmDistributedVerifier::new(prepared.problem()).map_err(
+                    |reason| distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason),
+                )?)
+            };
         Ok(Self {
             verifier,
             postprocessor: *runtime.app_context().services().core_executor(),
@@ -847,6 +1023,45 @@ impl WasmDistributedVerifierRuntime {
         &mut self,
         input: &[u8],
     ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+        if let DistributedVerifier::Tiling(verifier) = &mut self.verifier {
+            let candidates = decode_candidate_batch(input).map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", error.reason())
+            })?;
+            let mut roots = Vec::new();
+            roots.try_reserve_exact(candidates.len()).map_err(|_| {
+                distributed_error(
+                    "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
+                    "wasm_tiling_root_batch_storage_unavailable",
+                )
+            })?;
+            for candidate in &candidates {
+                if !candidate.row_ids().is_empty() {
+                    return Err(distributed_error(
+                        "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
+                        "wasm_tiling_root_task_rows_must_be_empty",
+                    ));
+                }
+                roots.push((
+                    candidate.pass_index(),
+                    u32::try_from(candidate.ordinal()).map_err(|_| {
+                        distributed_error(
+                            "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
+                            "wasm_tiling_root_ordinal_overflow",
+                        )
+                    })?,
+                    candidate.target_index(),
+                ));
+            }
+            verifier.enqueue(&roots).map_err(|reason| {
+                distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", reason)
+            })?;
+            let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+            return Ok(WasmDistributedVerifierConsume {
+                candidate_count: candidates.len(),
+                partial,
+                has_pending_work,
+            });
+        }
         if let DistributedVerifier::Forward(verifier) = &mut self.verifier {
             let (candidate_count, partial) =
                 verifier.consume(input, &self.control).map_err(|error| {
@@ -855,6 +1070,7 @@ impl WasmDistributedVerifierRuntime {
             return Ok(WasmDistributedVerifierConsume {
                 candidate_count,
                 partial: Some(partial),
+                has_pending_work: false,
             });
         }
         if let DistributedVerifier::Setup(verifier) = &mut self.verifier {
@@ -865,6 +1081,7 @@ impl WasmDistributedVerifierRuntime {
             return Ok(WasmDistributedVerifierConsume {
                 candidate_count,
                 partial: Some(partial),
+                has_pending_work: false,
             });
         }
         let candidates = decode_candidate_batch(input).map_err(|error| {
@@ -878,6 +1095,24 @@ impl WasmDistributedVerifierRuntime {
         Ok(WasmDistributedVerifierConsume {
             candidate_count: candidates.len(),
             partial: None,
+            has_pending_work: false,
+        })
+    }
+
+    pub fn continue_work(
+        &mut self,
+    ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+        let DistributedVerifier::Tiling(verifier) = &mut self.verifier else {
+            return Err(distributed_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed verifier has no resumable work",
+            ));
+        };
+        let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+        Ok(WasmDistributedVerifierConsume {
+            candidate_count: 0,
+            partial,
+            has_pending_work,
         })
     }
 
@@ -886,6 +1121,12 @@ impl WasmDistributedVerifierRuntime {
     }
 
     pub fn finish(&mut self) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+        if matches!(self.verifier, DistributedVerifier::Tiling(_)) {
+            self.verifier
+                .finish()
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", reason))?;
+            return Ok(Vec::new());
+        }
         if matches!(
             self.verifier,
             DistributedVerifier::Forward(_) | DistributedVerifier::Setup(_)
@@ -911,6 +1152,26 @@ impl WasmDistributedVerifierRuntime {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(encode_partial_results(&results))
     }
+}
+
+fn advance_tiling_worker(
+    verifier: &mut WasmTilingRootWorker,
+    control: &ExecutionControl,
+) -> Result<(Option<Vec<u8>>, bool), WasmCommandRuntimeError> {
+    let chunk = match verifier
+        .advance(16_384, control)
+        .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_TILING_GEOMETRY", reason))?
+    {
+        WasmTilingRootAdvance::Pending(chunk) | WasmTilingRootAdvance::Completed(chunk) => chunk,
+        WasmTilingRootAdvance::Cancelled => {
+            return Err(distributed_error(
+                "E_WASM_DISTRIBUTED_TILING_GEOMETRY",
+                "wasm_cpu_search_cancelled",
+            ));
+        }
+    };
+    let partial = (!chunk.is_empty()).then(|| encode_tiling_root_chunk(&chunk));
+    Ok((partial, verifier.has_pending_work()))
 }
 
 pub fn serialize_distributed_final_events(

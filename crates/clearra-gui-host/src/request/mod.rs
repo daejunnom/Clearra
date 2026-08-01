@@ -50,6 +50,9 @@ pub(crate) fn score_objective_policy(
 ) -> Result<clearra_objectives::policy::objective_policy::ObjectivePolicy, RequestBuildError> {
     let objective = match mode {
         "off" | "disabled" | "" => return Ok(base),
+        "tiling" | "tiling-only" => {
+            return Ok(clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling())
+        }
         "minimum-cover" | "minimum" => {
             return Ok(
                 clearra_objectives::policy::objective_policy::ObjectivePolicy::minimum_cover(),

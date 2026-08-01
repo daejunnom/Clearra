@@ -3,6 +3,7 @@ use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64Ti
 use clearra_replay::{
     ExactScoringExecutionBatch, ReplayTrace as PostProcessReplayTrace, SpinCoverageExecutionBatch,
 };
+use std::sync::Arc;
 
 use crate::{
     core_postprocess_execution::CorePostProcessExecution,
@@ -11,8 +12,10 @@ use crate::{
     result_views::SearchExecutionReport,
     setup_finder_report::SetupFinderReport,
     solution_probability::{
-        NormalizedSolutionCoverage, SolutionCoverage, SolutionProbabilityReport,
+        NormalizedSolutionCoverage, SolutionAverageScoreReport, SolutionCoverage,
+        SolutionProbabilityReport,
     },
+    tiling_solution_store::TilingSolutionPageStore,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,6 +94,7 @@ pub struct CoreExecutionResult {
     solution_coverages: Vec<SolutionCoverage>,
     normalized_solution_coverages: Vec<NormalizedSolutionCoverage>,
     solution_probabilities: Vec<SolutionProbabilityReport>,
+    solution_average_scores: Vec<SolutionAverageScoreReport>,
     exact_scoring_execution_batches: Vec<ExactScoringExecutionBatch>,
     spin_coverage_execution_batches: Vec<SpinCoverageExecutionBatch>,
     postprocess_score_cells: Vec<CorePostProcessScoreCell>,
@@ -98,6 +102,7 @@ pub struct CoreExecutionResult {
     postprocess_score_profile_id: Option<String>,
     postprocess_spin_coverages: Vec<CorePostProcessSpinCoverage>,
     setup_finder_report: Option<SetupFinderReport>,
+    tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
 }
 
 impl CoreExecutionResult {
@@ -118,6 +123,7 @@ impl CoreExecutionResult {
             solution_coverages: Vec::new(),
             normalized_solution_coverages: Vec::new(),
             solution_probabilities: Vec::new(),
+            solution_average_scores: Vec::new(),
             exact_scoring_execution_batches: Vec::new(),
             spin_coverage_execution_batches: Vec::new(),
             postprocess_score_cells: Vec::new(),
@@ -125,6 +131,7 @@ impl CoreExecutionResult {
             postprocess_score_profile_id: None,
             postprocess_spin_coverages: Vec::new(),
             setup_finder_report: None,
+            tiling_solution_page_store: None,
         }
     }
 }
@@ -137,6 +144,11 @@ impl CoreExecutionResult {
 impl CoreExecutionResult {
     pub fn with_normalized_solution_keys(mut self, keys: Vec<String>) -> Self {
         self.normalized_solution_keys = keys;
+        self
+    }
+
+    pub fn with_tiling_solution_page_store(mut self, store: Arc<TilingSolutionPageStore>) -> Self {
+        self.tiling_solution_page_store = Some(store);
         self
     }
 
@@ -185,6 +197,11 @@ impl CoreExecutionResult {
         probabilities: Vec<SolutionProbabilityReport>,
     ) -> Self {
         self.solution_probabilities = probabilities;
+        self
+    }
+
+    pub fn with_solution_average_scores(mut self, scores: Vec<SolutionAverageScoreReport>) -> Self {
+        self.solution_average_scores = scores;
         self
     }
 
@@ -332,6 +349,10 @@ impl CoreExecutionResult {
         &self.normalized_solution_keys
     }
 
+    pub fn tiling_solution_page_store(&self) -> Option<&Arc<TilingSolutionPageStore>> {
+        self.tiling_solution_page_store.as_ref()
+    }
+
     pub fn normalized_solution_identities(&self) -> &[StandardBoard64TilingIdentity] {
         &self.normalized_solution_identities
     }
@@ -354,6 +375,10 @@ impl CoreExecutionResult {
 
     pub fn solution_probabilities(&self) -> &[SolutionProbabilityReport] {
         &self.solution_probabilities
+    }
+
+    pub fn solution_average_scores(&self) -> &[SolutionAverageScoreReport] {
+        &self.solution_average_scores
     }
 
     pub fn exact_scoring_execution_batch(&self) -> Option<&ExactScoringExecutionBatch> {

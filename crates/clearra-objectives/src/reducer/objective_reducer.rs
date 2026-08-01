@@ -272,7 +272,8 @@ impl ObjectiveReducer {
         requested_kind: Option<ObjectiveKind>,
     ) -> Result<ObjectiveReductionResult, ObjectiveReducerError> {
         let run_all_collector = requested_kind.is_none_or(|kind| kind == ObjectiveKind::All);
-        let run_unique_collector = requested_kind.is_none_or(|kind| kind == ObjectiveKind::Unique);
+        let run_unique_collector = requested_kind
+            .is_none_or(|kind| matches!(kind, ObjectiveKind::Unique | ObjectiveKind::Tiling));
         let run_minimum_cover =
             requested_kind.is_none_or(|kind| kind == ObjectiveKind::MinimumCover);
         // Product requests always pass an explicit coverage objective. Generic internal
@@ -436,7 +437,10 @@ impl ObjectiveReducer {
         } else {
             Vec::new()
         };
-        let unique_candidate_ids = if objective_kind == ObjectiveKind::Unique {
+        let unique_candidate_ids = if matches!(
+            objective_kind,
+            ObjectiveKind::Unique | ObjectiveKind::Tiling
+        ) {
             candidate_ids.clone()
         } else {
             Vec::new()

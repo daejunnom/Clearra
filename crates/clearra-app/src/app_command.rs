@@ -204,10 +204,16 @@ impl AppCommand {
 impl AppCommand {
     pub fn pattern_coverage_requested(&self) -> bool {
         match self {
-            Self::Pc(command) => command.query().objective().kind() != ObjectiveKind::Unique,
+            Self::Pc(command) => !matches!(
+                command.query().objective().kind(),
+                ObjectiveKind::Unique | ObjectiveKind::Tiling
+            ),
             Self::Scenario(command) => command.query().count_policy() != PcCountPolicy::CountUnique,
-            Self::Path(command) => command.query().objective().kind() != ObjectiveKind::Unique,
-            Self::BuildProbability(_) => true,
+            Self::Path(command) => !matches!(
+                command.query().objective().kind(),
+                ObjectiveKind::Unique | ObjectiveKind::Tiling
+            ),
+            Self::BuildProbability(command) => !command.query().aggregation().is_tiling_only(),
             Self::Damage(_) | Self::SpinFinder(_) => false,
             _ => false,
         }

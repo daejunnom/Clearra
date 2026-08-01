@@ -24,6 +24,44 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn tiling_only_preserves_hold_supply_projection() {
+    let request = WebCommandParser::parse(
+        "clearra pc --lines 2 --board-mask 0 --height 2 --pieces 5 \
+         --queue IOTZ --hold S --tiling-only --backend cpu",
+    )
+    .expect("tiling-only command")
+    .to_app_request()
+    .expect("tiling-only AppRequest");
+
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected AppCommand::Scenario");
+    };
+    assert_eq!(
+        command.query().objective().kind(),
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+    );
+    assert_eq!(command.query().hold_state().piece(), Some(PieceKind::S));
+    assert!(command.query().allow_hold());
+}
+
+#[test]
+fn tiling_only_rejects_buildup_and_probability_options() {
+    for option in [
+        "--rule srs-plus",
+        "--score",
+        "--preserve-b2b",
+        "--solution-probabilities",
+        "--queue-knowledge visible-7",
+        "--tablebase",
+        "--build-dependency-dag",
+    ] {
+        let command = format!("clearra pc --lines 2 --queue IIOOO --tiling-only {option}");
+        let error = WebCommandParser::parse(&command).expect_err(option);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
 fn browser_tablebase_is_opt_in_for_pc_and_setup() {
     let default_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu")
         .expect("default PC command")
@@ -665,6 +703,45 @@ fn build_probability_preserves_rule_spin_profile_and_initial_hold() {
             .as_str(),
         "all-mini-plus"
     );
+}
+
+#[test]
+fn build_probability_tiling_only_preserves_hold_supply_and_sets_tiling_objective() {
+    let request = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue IO --hold T --no-mirror --tiling-only",
+    )
+    .expect("web command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert!(command.query().aggregation().is_tiling_only());
+    assert_eq!(
+        command.query().core_query().objective().kind(),
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+    );
+    assert!(command.query().core_query().allow_hold());
+    assert_eq!(
+        command.query().core_query().hold_state().piece(),
+        Some(PieceKind::T)
+    );
+}
+
+#[test]
+fn build_probability_tiling_only_rejects_buildup_only_options() {
+    for option in [
+        "--aggregate spin",
+        "--spin-profile t-spins",
+        "--preserve-b2b",
+        "--build-dependency-dag",
+    ] {
+        let command = format!(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --tiling-only {option}"
+        );
+        assert!(WebCommandParser::parse(&command).is_err(), "{option}");
+    }
 }
 
 #[test]

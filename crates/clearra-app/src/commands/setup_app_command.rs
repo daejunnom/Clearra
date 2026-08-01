@@ -35,8 +35,11 @@ impl RunnableAppCommand for SetupAppCommand {
         match context
             .services()
             .core_executor()
-            .execute_setup_with_control(&self.query, context.execution_control())
-        {
+            .execute_setup_with_workers_and_control(
+                &self.query,
+                usize::from(context.resource_budget().workers()).max(1),
+                context.execution_control(),
+            ) {
             Ok(result) => AppResponse::success(AppRenderModel::Setup(result)),
             Err(error) => core_execution_error_response(error),
         }

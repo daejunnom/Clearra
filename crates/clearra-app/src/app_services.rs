@@ -1,23 +1,35 @@
+//! SRP rationale: this module has one change reason: the application-service execution contract
+//! that coordinates domain services and post-processing without owning their algorithms.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use clearra_build_coverage::query::build_coverage_query::BuildCoverageQuery;
-use clearra_core_domain::execution_cancellation::{ExecutionCancellationToken, ExecutionControl};
+use clearra_core_domain::{
+    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+    solution::normalized_tiling_solution::{
+        NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
+    },
+};
+#[cfg(not(target_family = "wasm"))]
+use clearra_core_executor::WasmSetupParallelCoordinator;
 use clearra_core_executor::{
     CoreExecutionError, CoreExecutionResult, CoreExecutor, CorePostProcessScoreCell,
-    CorePostProcessSpinCoverage, PercentService, PercentServiceError, WasmBuildProbabilityBackend,
-    WasmCpuSearchBackend, WasmCpuSearchError, WasmSetupSearchBackend,
+    CorePostProcessSpinCoverage, PercentService, PercentServiceError, SolutionAverageScoreReport,
+    WasmBuildProbabilityBackend, WasmCpuSearchBackend, WasmCpuSearchError, WasmSetupSearchBackend,
 };
 use clearra_i18n::{LanguageId, LanguagePreference, LanguageResolver};
 use clearra_objectives::policy::score_objective_policy::{
     ScoreObjectiveMode, ScoreObjectivePolicy, ScoreProfileSelection, SpinProfileSelection,
 };
+#[cfg(not(target_family = "wasm"))]
+use clearra_pc_graph::request::WorkerPolicy;
 use clearra_postprocess::{
-    CandidateExecution, CandidateExecutionAggregate, ExactScoringExecutionMaterializer,
-    PcScoringPostProcessInput, PcScoringPostProcessor, ScoreCell, ScoreMatrix, SpinCoverageTarget,
-    TSpinCoverageOnlyMaterializer,
+    CandidateExecution, CandidateExecutionAggregate, ExactScoredExecution,
+    ExactScoringExecutionMaterializer, PcScoringPostProcessInput, PcScoringPostProcessor,
+    ScoreCell, ScoreMatrix, SpinCoverageTarget, TSpinCoverageOnlyMaterializer,
 };
 use clearra_problem::{SearchProblem, SetupSearchQuery};
 use clearra_scoring::{
@@ -277,6 +289,27 @@ impl AppCoreExecutorService {
     }
 }
 impl AppCoreExecutorService {
+    pub fn execute_setup_with_workers_and_control(
+        &self,
+        query: &SetupSearchQuery,
+        workers: usize,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let workers = workers.max(1).min(WorkerPolicy::hardware_worker_limit());
+            if workers > 1
+                && !query
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+            {
+                return WasmSetupParallelCoordinator::execute_native(query, workers, control)
+                    .map_err(core_error_from_wasm);
+            }
+        }
+        self.execute_setup_with_control(query, control)
+    }
+
     pub fn execute_setup_with_control(
         &self,
         query: &SetupSearchQuery,
@@ -471,7 +504,7 @@ fn apply_pc_postprocess(
         .unwrap_or(false);
     let retained_trace_count = result.usize_field("retained_trace_count").unwrap_or(0);
     let distributed_score_available = result.postprocess_score_profile_id().is_some();
-    let postprocess = if distributed_score_available {
+    let (postprocess, solution_average_scores) = if distributed_score_available {
         let profile = score_profile_for_policy(score_policy);
         let mut identities = result.normalized_solution_identities().to_vec();
         identities.sort_unstable();
@@ -508,20 +541,25 @@ fn apply_pc_postprocess(
             pattern_count,
             execution_source_complete && weights_complete,
         );
-        PcScoringPostProcessor::process_materialized_with_control(
-            PcScoringPostProcessInput::new(
-                result.postprocess_replay_trace(),
-                &[],
-                &pattern_weights,
-                pattern_count,
-                execution_source_complete && weights_complete,
-                score_policy,
-                search_objective_complete,
-                &probability,
-                retained_trace_count,
+        let solution_average_scores =
+            solution_average_score_reports(&identities, &matrix, &pattern_weights, pattern_count);
+        (
+            PcScoringPostProcessor::process_materialized_with_control(
+                PcScoringPostProcessInput::new(
+                    result.postprocess_replay_trace(),
+                    &[],
+                    &pattern_weights,
+                    pattern_count,
+                    execution_source_complete && weights_complete,
+                    score_policy,
+                    search_objective_complete,
+                    &probability,
+                    retained_trace_count,
+                ),
+                matrix,
+                control,
             ),
-            matrix,
-            control,
+            solution_average_scores,
         )
     } else {
         let legacy_candidate_executions = candidate_execution_aggregates(&result);
@@ -543,22 +581,47 @@ fn apply_pc_postprocess(
                 materialized.complete()
             })
             && search_objective_complete;
-        PcScoringPostProcessor::process_with_control(
-            PcScoringPostProcessInput::new(
-                result.postprocess_replay_trace(),
-                candidate_executions,
-                &pattern_weights,
-                pattern_count,
-                execution_source_complete && weights_complete,
-                score_policy,
-                search_objective_complete,
-                &probability,
-                retained_trace_count,
+        let solution_average_scores =
+            exact_materialization
+                .as_ref()
+                .map_or_else(Vec::new, |materialized| {
+                    let profile = score_profile_for_policy(score_policy);
+                    let mut identities = result.normalized_solution_identities().to_vec();
+                    identities.sort_unstable();
+                    identities.dedup();
+                    let matrix = score_matrix_for_exact_solutions(
+                        &identities,
+                        materialized.scored_executions(),
+                        &profile,
+                        pattern_count,
+                        execution_source_complete && weights_complete,
+                    );
+                    solution_average_score_reports(
+                        &identities,
+                        &matrix,
+                        &pattern_weights,
+                        pattern_count,
+                    )
+                });
+        (
+            PcScoringPostProcessor::process_with_control(
+                PcScoringPostProcessInput::new(
+                    result.postprocess_replay_trace(),
+                    candidate_executions,
+                    &pattern_weights,
+                    pattern_count,
+                    execution_source_complete && weights_complete,
+                    score_policy,
+                    search_objective_complete,
+                    &probability,
+                    retained_trace_count,
+                ),
+                control,
             ),
-            control,
+            solution_average_scores,
         )
-    }
-    .map_err(|_| CoreExecutionError::Cancelled)?;
+    };
+    let postprocess = postprocess.map_err(|_| CoreExecutionError::Cancelled)?;
 
     let mut fields = postprocess.fields();
     fields.push((
@@ -578,7 +641,102 @@ fn apply_pc_postprocess(
     if control.is_cancelled() {
         return Err(CoreExecutionError::Cancelled);
     }
-    Ok(result.with_replaced_fields(fields))
+    Ok(result
+        .with_solution_average_scores(solution_average_scores)
+        .with_replaced_fields(fields))
+}
+
+fn score_matrix_for_exact_solutions(
+    identities: &[StandardBoard64TilingIdentity],
+    executions: &[ExactScoredExecution],
+    profile: &clearra_scoring::profile::ScoreProfile,
+    pattern_count: usize,
+    source_complete: bool,
+) -> ScoreMatrix {
+    let mut identities_complete = true;
+    let cells = executions
+        .iter()
+        .filter_map(
+            |execution| match identities.binary_search(&execution.candidate_identity()) {
+                Ok(index) => Some(ScoreCell::new(
+                    (index + 1) as u64,
+                    execution.pattern_id(),
+                    execution.trace_identity(),
+                    execution.score(),
+                    execution.attack(),
+                    profile.accuracy_level().as_str(),
+                )),
+                Err(_) => {
+                    identities_complete = false;
+                    None
+                }
+            },
+        )
+        .collect();
+    ScoreMatrix::from_materialized_cells(
+        cells,
+        profile,
+        pattern_count,
+        source_complete && identities_complete,
+    )
+}
+
+fn solution_average_score_reports(
+    identities: &[StandardBoard64TilingIdentity],
+    matrix: &ScoreMatrix,
+    pattern_weights: &[f64],
+    pattern_count: usize,
+) -> Vec<SolutionAverageScoreReport> {
+    let weights_valid = pattern_count > 0
+        && pattern_weights.len() == pattern_count
+        && pattern_weights
+            .iter()
+            .all(|weight| weight.is_finite() && *weight >= 0.0)
+        && (pattern_weights.iter().sum::<f64>() - 1.0).abs() <= 1.0e-8;
+    if identities.is_empty() || !weights_valid {
+        return Vec::new();
+    }
+
+    let mut expected_scores = vec![0.0_f64; identities.len()];
+    let mut covered_patterns = vec![0_usize; identities.len()];
+    let mut identities_valid = true;
+    for cell in matrix.highest_legal_cells_by_candidate_pattern() {
+        let Some(candidate_index) = usize::try_from(cell.candidate_id())
+            .ok()
+            .and_then(|candidate_id| candidate_id.checked_sub(1))
+            .filter(|index| *index < identities.len())
+        else {
+            identities_valid = false;
+            continue;
+        };
+        let Some(weight) = pattern_weights.get(cell.pattern_id()) else {
+            identities_valid = false;
+            continue;
+        };
+        expected_scores[candidate_index] += *weight * cell.score() as f64;
+        covered_patterns[candidate_index] = covered_patterns[candidate_index].saturating_add(1);
+    }
+    let score_complete = matrix.complete() && identities_valid;
+
+    identities
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, identity)| {
+            let average_score = expected_scores[index];
+            SolutionAverageScoreReport::new(
+                NormalizedTilingSolutionKey::from_standard_board64_identity(identity).to_string(),
+                if average_score == 0.0 {
+                    "0".to_owned()
+                } else {
+                    average_score.to_string()
+                },
+                covered_patterns[index],
+                pattern_count,
+                score_complete,
+            )
+        })
+        .collect()
 }
 
 fn apply_build_spin_postprocess(
@@ -885,6 +1043,46 @@ fn candidate_execution_aggregates(
             CandidateExecutionAggregate::new(candidate_id, executions)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod solution_average_score_tests {
+    use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
+    use clearra_objectives::policy::score_objective_policy::ScoreObjectivePolicy;
+    use clearra_postprocess::{ScoreCell, ScoreMatrix};
+
+    use super::{score_profile_for_policy, solution_average_score_reports};
+
+    #[test]
+    fn averages_each_solution_over_the_whole_weighted_pattern_universe() {
+        let identities = vec![
+            StandardBoard64TilingIdentity::from_placements(0, std::iter::empty()).unwrap(),
+            StandardBoard64TilingIdentity::from_placements(1, std::iter::empty()).unwrap(),
+        ];
+        let profile = score_profile_for_policy(ScoreObjectivePolicy::default());
+        let accuracy = profile.accuracy_level().as_str();
+        let matrix = ScoreMatrix::from_materialized_cells(
+            vec![
+                ScoreCell::new(1, 0, "lower", 100, 0, accuracy),
+                ScoreCell::new(1, 0, "best", 150, 0, accuracy),
+                ScoreCell::new(1, 1, "only", 50, 0, accuracy),
+                ScoreCell::new(2, 0, "only", 40, 0, accuracy),
+            ],
+            &profile,
+            2,
+            true,
+        );
+
+        let reports = solution_average_score_reports(&identities, &matrix, &[0.25, 0.75], 2);
+
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].average_score(), "75");
+        assert_eq!(reports[0].covered_pattern_count(), 2);
+        assert!(reports[0].score_complete());
+        assert_eq!(reports[1].average_score(), "10");
+        assert_eq!(reports[1].covered_pattern_count(), 1);
+        assert!(reports[1].score_complete());
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

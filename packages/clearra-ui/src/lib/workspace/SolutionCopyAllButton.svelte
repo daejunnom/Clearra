@@ -9,20 +9,26 @@
     type SolutionExportPage
   } from './solutionExport';
   import {
+    encodeSolutionKeySourceForClipboard,
     encodeSolutionKeysForClipboard,
-    encodeSolutionPagesForClipboard
+    encodeSolutionPagesForClipboard,
+    type SolutionExportKeySource
   } from './solutionExportAsync';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
-  export let format: SolutionCopyFormat = 'fumen';
+  export let format: SolutionCopyFormat = 'ctk';
   export let language: WorkspaceLanguage;
   export let solutionKeys: string[] = [];
   export let loadPages:
     | ((signal?: AbortSignal) => Promise<SolutionExportPage[]> | SolutionExportPage[])
     | null = null;
+  export let keySource: SolutionExportKeySource | null = null;
 
   let state: 'idle' | 'loading' | 'copied' | 'failed' = 'idle';
-  let failureKey: 'solutionCopyFailed' | 'fumenCopyHeightUnsupported' =
+  let failureKey:
+    | 'solutionCopyFailed'
+    | 'solutionCopyTooLarge'
+    | 'fumenCopyHeightUnsupported' =
     'solutionCopyFailed';
   let timer = 0;
   let copyController: AbortController | null = null;
@@ -44,7 +50,8 @@
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
-  $: available = solutionKeys.length > 0 || loadPages !== null;
+  $: available =
+    solutionKeys.length > 0 || loadPages !== null || keySource !== null;
   $: title = state === 'failed'
     ? label(failureKey)
     : state === 'loading'
@@ -62,7 +69,11 @@
     try {
       throwIfAborted(controller.signal);
       let encoded: string;
-      if (loadPages) {
+      if (keySource) {
+        encoded = await encodeSolutionKeySourceForClipboard(keySource, format, {
+          signal: controller.signal
+        });
+      } else if (loadPages) {
         const pages = await loadPages(controller.signal);
         throwIfAborted(controller.signal);
         encoded = await encodeSolutionPagesForClipboard(pages, format, {
@@ -86,7 +97,10 @@
         error instanceof SolutionExportError &&
         error.code === 'fumen-height-unsupported'
           ? 'fumenCopyHeightUnsupported'
-          : 'solutionCopyFailed';
+          : error instanceof SolutionExportError &&
+              error.code === 'clipboard-output-too-large'
+            ? 'solutionCopyTooLarge'
+            : 'solutionCopyFailed';
       setTerminalState('failed');
     } finally {
       if (copyController === controller) copyController = null;
@@ -106,7 +120,7 @@
     window.clearTimeout(timer);
     timer = window.setTimeout(() => {
       state = 'idle';
-    }, 1600);
+    }, next === 'failed' ? 4000 : 1600);
   }
 
   function nextPaint(): Promise<void> {
@@ -149,7 +163,13 @@
   {:else}
     <Copy size={14} />
   {/if}
-  <span>{label(state === 'loading' ? 'copyAllPending' : 'copyAll')}</span>
+  <span>{label(
+    state === 'loading'
+      ? 'copyAllPending'
+      : state === 'failed'
+        ? failureKey
+        : 'copyAll'
+  )}</span>
 </button>
 
 <style>

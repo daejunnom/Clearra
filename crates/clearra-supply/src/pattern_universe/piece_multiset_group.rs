@@ -124,6 +124,15 @@ impl PackingMultisetFamily {
         self.membership_kind
     }
 
+    pub fn single_group(&self, index: usize) -> Option<Self> {
+        let group = self.groups.get(index)?.clone();
+        Some(Self {
+            envelope: group.key(),
+            groups: vec![group],
+            membership_kind: self.membership_kind,
+        })
+    }
+
     pub fn pattern_bits(&self, key: PieceMultisetKey) -> Option<&PatternBitSet> {
         self.groups
             .binary_search_by_key(&key, PackingMultisetGroup::key)

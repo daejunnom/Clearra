@@ -43,6 +43,27 @@ Assert-ArtifactPathCondition `
 Assert-ClearraRepositoryArtifactPolicy $repository
 Assert-ArtifactPathCondition $true 'default_tasks_do_not_create_repo_local_artifacts'
 
+$transientPrefix = "clearra-core-c-policy-$PID"
+$firstTransient = New-TransientBuildDir $transientPrefix
+try {
+    Set-Content -LiteralPath (Join-Path $firstTransient 'stale.txt') -Value 'stale'
+} finally {
+    Remove-TransientBuildDir $firstTransient
+}
+New-Item -ItemType Directory -Force -Path $firstTransient | Out-Null
+Set-Content -LiteralPath (Join-Path $firstTransient 'stale.txt') -Value 'stale'
+$secondTransient = New-TransientBuildDir $transientPrefix
+try {
+    Assert-ArtifactPathCondition `
+        ($firstTransient -eq $secondTransient) `
+        'transient_build_reuses_stable_slot'
+    Assert-ArtifactPathCondition `
+        (-not (Test-Path -LiteralPath (Join-Path $secondTransient 'stale.txt'))) `
+        'transient_build_overwrites_previous_slot_contents'
+} finally {
+    Remove-TransientBuildDir $secondTransient
+}
+
 $fakeRepository = Join-Path ([System.IO.Path]::GetTempPath()) `
     "clearra-artifact-policy-$PID-$([System.Guid]::NewGuid().ToString('N'))"
 try {

@@ -14,7 +14,7 @@ export type ClearraDesktopRequest = {
   hold_piece: 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
   backend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
   rule: 'srs-plus' | string;
-  score_mode: 'off' | 'minimum-cover' | 'summary';
+  score_mode: 'tiling' | 'off' | 'minimum-cover' | 'summary';
   score_profile: 'guideline' | 'jstris-ultra' | 'tetrio';
   spin_profile:
     | 't-spins'

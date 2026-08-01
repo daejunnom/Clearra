@@ -83,6 +83,8 @@ impl PreparedDistributedSearch {
     }
 
     pub fn complete(self, result: CoreExecutionResult, control: &ExecutionControl) -> AppResponse {
+        let result =
+            decorate_distributed_build_probability_tiling_result(&self.response_kind, result);
         let response = match self
             .context
             .services()
@@ -108,4 +110,105 @@ impl PreparedDistributedSearch {
             &self.output_policy,
         )
     }
+}
+
+fn decorate_distributed_build_probability_tiling_result(
+    response_kind: &CooperativeSearchResponseKind,
+    result: CoreExecutionResult,
+) -> CoreExecutionResult {
+    let CooperativeSearchResponseKind::BuildProbability { field, aggregation } = response_kind
+    else {
+        return result;
+    };
+    if !aggregation.is_tiling_only() || result.field("search_kind") == Some("build-probability") {
+        return result;
+    }
+    let Some(base_mask) = field.compact_base_mask() else {
+        return result;
+    };
+    let Some(target_cells) = field.compact_target_mask() else {
+        return result;
+    };
+    let Some(final_board) = field.compact_final_board_mask() else {
+        return result;
+    };
+    let mirror_included = field.includes_applicable_horizontal_mirror();
+    let solution_count = result.usize_field("unique_solution_count").unwrap_or(0);
+    let mirror_distinct = result
+        .bool_field("build_mirror_distinct_target")
+        .unwrap_or(false);
+    let mirror_search_executed = result
+        .bool_field("build_mirror_search_executed")
+        .unwrap_or(mirror_distinct);
+    let mirror_solution_count = result
+        .usize_field("mirror_unique_solution_count")
+        .unwrap_or(if mirror_included { solution_count } else { 0 });
+    let mirror_candidate_count = result
+        .usize_field("mirror_packing_candidate_count")
+        .unwrap_or(0);
+    let solution_hash = result
+        .field("normalized_solution_set_hash")
+        .unwrap_or("not-calculated")
+        .to_owned();
+    let mirror_solution_hash = result
+        .field("mirror_normalized_solution_set_hash")
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if mirror_included {
+                solution_hash.clone()
+            } else {
+                "not-calculated".to_owned()
+            }
+        });
+    result.with_replaced_fields(vec![
+        text_field("search_kind", "build-probability"),
+        text_field(
+            "build_probability_completion",
+            "exact-board-with-inverse-lock-clear",
+        ),
+        text_field("build_base_mask", base_mask),
+        text_field("build_target_cells_mask", target_cells),
+        text_field("build_target_board_mask", base_mask | target_cells),
+        text_field("build_final_board_mask", final_board),
+        text_field("target_piece_count", field.target_piece_count()),
+        text_field("objective", "build-probability"),
+        text_field("build_probability_aggregation", aggregation.as_str()),
+        text_field("build_probability_evaluation_basis", "geometry-only"),
+        text_field("build_path_multiplicity_counted", false),
+        text_field("buildability_verified", false),
+        text_field("coverage_calculated", false),
+        text_field("probability_calculated", false),
+        text_field(
+            "build_symmetry_policy",
+            if mirror_included {
+                "original-or-horizontal-mirror"
+            } else {
+                "original-only"
+            },
+        ),
+        text_field("build_mirror_included", mirror_included),
+        text_field("build_mirror_distinct_target", mirror_distinct),
+        text_field("build_mirror_search_executed", mirror_search_executed),
+        text_field(
+            "solution_count_basis",
+            if mirror_included {
+                "original-or-horizontal-mirror-union"
+            } else {
+                "original-field"
+            },
+        ),
+        text_field("coverage_basis", "not-evaluated-tiling-only"),
+        text_field("original_covered_pattern_count", 0),
+        text_field("original_coverage_probability", "not-calculated"),
+        text_field("mirror_covered_pattern_count", 0),
+        text_field("mirror_coverage_probability", "not-calculated"),
+        text_field("mirror_union_added_pattern_count", 0),
+        text_field("mirror_unique_solution_count", mirror_solution_count),
+        text_field("mirror_packing_candidate_count", mirror_candidate_count),
+        text_field("mirror_normalized_solution_set_hash", mirror_solution_hash),
+    ])
+}
+
+fn text_field(key: impl Into<String>, value: impl ToString) -> (String, String) {
+    (key.into(), value.to_string())
 }

@@ -67,5 +67,8 @@ pub(crate) fn objective_code(objective: ObjectiveKind) -> u32 {
         ObjectiveKind::All => C_OBJECTIVE_ALL,
         ObjectiveKind::Unique => C_OBJECTIVE_UNIQUE,
         ObjectiveKind::MinimumCover => C_OBJECTIVE_MIN_COVER,
+        // The C packing layer only consumes the geometry uniqueness contract.
+        // BuildUp bypass remains owned by the Rust/WASM executor.
+        ObjectiveKind::Tiling => C_OBJECTIVE_UNIQUE,
     }
 }

@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const root = resolve(scriptDir, '..', '..');
+const MANIFEST_BYTES = 335;
+const GENERATION_HEX_LENGTH = 24;
 const targetRoot = process.env.CARGO_TARGET_DIR
   ? resolve(process.env.CARGO_TARGET_DIR)
   : resolve(root, 'target');
@@ -51,27 +53,39 @@ try {
     readFile(bindings),
     readFile(destination)
   ]);
+  const bindingsSha256 = sha256(bindingsBytes);
+  const wasmSha256 = sha256(wasmBytes);
   const artifactManifest = {
     schema_version: 1,
     bindings: {
-      path: 'clearra_wasm.js',
+      path: `clearra_wasm.${bindingsSha256.slice(0, GENERATION_HEX_LENGTH)}.js`,
       bytes: bindingsBytes.byteLength,
-      sha256: sha256(bindingsBytes)
+      sha256: bindingsSha256
     },
     wasm: {
-      path: 'clearra_wasm_bg.wasm',
+      path: `clearra_wasm_bg.${wasmSha256.slice(0, GENERATION_HEX_LENGTH)}.wasm`,
       bytes: wasmBytes.byteLength,
-      sha256: sha256(wasmBytes)
+      sha256: wasmSha256
     }
   };
-  await writeFile(manifest, `${JSON.stringify(artifactManifest, null, 2)}\n`, 'utf8');
-  for (const name of ['clearra_wasm.js', 'clearra_wasm_bg.wasm']) {
+  await Promise.all([
+    writeFile(resolve(stagingDir, artifactManifest.bindings.path), bindingsBytes),
+    writeFile(resolve(stagingDir, artifactManifest.wasm.path), wasmBytes)
+  ]);
+  await writeFile(manifest, serializeManifest(artifactManifest), 'utf8');
+  for (const name of [
+    artifactManifest.bindings.path,
+    artifactManifest.wasm.path,
+    'clearra_wasm.js',
+    'clearra_wasm_bg.wasm'
+  ]) {
     await replaceFileAtomically(resolve(stagingDir, name), resolve(destinationDir, name));
   }
   await replaceFileAtomically(
     manifest,
     resolve(destinationDir, 'clearra_wasm.manifest.json')
   );
+  await removeStaleVersionedArtifacts(artifactManifest);
   console.log(
     `staged_wasm=${resolve(destinationDir, artifactManifest.wasm.path)} bytes=${destinationStat.size} wasm_sha256=${artifactManifest.wasm.sha256} bindings=${resolve(destinationDir, artifactManifest.bindings.path)} bindings_bytes=${bindingsStat.size} manifest=${resolve(destinationDir, 'clearra_wasm.manifest.json')}`
   );
@@ -81,6 +95,35 @@ try {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function serializeManifest(artifactManifest) {
+  const json = JSON.stringify(artifactManifest);
+  const byteLength = Buffer.byteLength(json, 'utf8') + 1;
+  if (byteLength > MANIFEST_BYTES) {
+    throw new Error(
+      `Clearra WASM manifest exceeds the fixed ${MANIFEST_BYTES}-byte deployment contract`
+    );
+  }
+  return `${json}${' '.repeat(MANIFEST_BYTES - byteLength)}\n`;
+}
+
+async function removeStaleVersionedArtifacts(artifactManifest) {
+  const retained = new Set([
+    artifactManifest.bindings.path,
+    artifactManifest.wasm.path
+  ]);
+  for (const name of await readdir(destinationDir)) {
+    if (retained.has(name) || !isVersionedArtifactName(name)) continue;
+    await rm(resolve(destinationDir, name), { force: true });
+  }
+}
+
+function isVersionedArtifactName(name) {
+  return (
+    /^clearra_wasm\.[0-9a-f]{20,64}\.js$/.test(name) ||
+    /^clearra_wasm_bg\.[0-9a-f]{20,64}\.wasm$/.test(name)
+  );
 }
 
 async function replaceFileAtomically(sourcePath, destinationPath) {

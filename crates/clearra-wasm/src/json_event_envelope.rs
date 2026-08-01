@@ -387,11 +387,30 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
         }
         output.push(']');
     });
+    object.array("solution_average_scores", |output| {
+        output.push('[');
+        for (index, entry) in report.solution_average_scores.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            let mut nested = JsonObject::begin(output);
+            nested.string("solution_key", &entry.solution_key);
+            nested.string("average_score", &entry.average_score);
+            nested.number("covered_pattern_count", entry.covered_pattern_count);
+            nested.number("pattern_count", entry.pattern_count);
+            nested.boolean("score_complete", entry.score_complete);
+            nested.finish();
+        }
+        output.push(']');
+    });
     object.number("build_variant_count", report.build_variant_count);
     object.string(
         "build_variant_count_exact",
         &report.build_variant_count_exact,
     );
+    object.boolean("buildability_verified", report.buildability_verified);
+    object.boolean("coverage_calculated", report.coverage_calculated);
+    object.boolean("probability_calculated", report.probability_calculated);
     object.number(
         "materialized_pattern_count",
         report.materialized_pattern_count,

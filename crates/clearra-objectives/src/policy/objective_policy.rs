@@ -55,6 +55,15 @@ impl ObjectivePolicy {
     }
 }
 impl ObjectivePolicy {
+    pub fn tiling() -> Self {
+        Self::new(
+            ObjectiveKind::Tiling,
+            TiePolicy::StableInputOrder,
+            TracePolicy::Discard,
+        )
+    }
+}
+impl ObjectivePolicy {
     pub const fn with_score_policy(mut self, score: ScoreObjectivePolicy) -> Self {
         self.score = score;
         self

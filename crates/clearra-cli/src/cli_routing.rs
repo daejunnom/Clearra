@@ -14,6 +14,8 @@ use clearra_app::{AppCoreExecutorService, AppServices, AppTablebaseSession};
 const PC4_COMPACT_TABLEBASE: &[u8] =
     include_bytes!("../../../apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin");
 
+const TILING_ONLY_WARNING: &str = "WARNING: Tiling-only search skips BuildUp and probability calculation. Results may include solutions that cannot be built.";
+
 pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     let format = invocation
         .output_verbosity()
@@ -25,6 +27,18 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
         if let ParsedCliCommand::Help(topic) = command {
             return topic.into_output(language);
         }
+        let tiling_only = matches!(
+            &command,
+            ParsedCliCommand::Pc(args)
+                if matches!(
+                    args.objective()
+                        .trim()
+                        .to_ascii_lowercase()
+                        .replace('_', "-")
+                        .as_str(),
+                    "tiling" | "tiling-only"
+                )
+        );
         #[cfg(feature = "wasm-cpu-runtime")]
         let _tablebase_session = match tablebase_session_for_command(&command) {
             Ok(session) => session,
@@ -45,7 +59,12 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths))
             .run(request);
-        AppResponseRenderer::render(response, render_format, default_error)
+        let output = AppResponseRenderer::render(response, render_format, default_error);
+        if tiling_only {
+            output.with_surrounding_warning(TILING_ONLY_WARNING)
+        } else {
+            output
+        }
     })
 }
 

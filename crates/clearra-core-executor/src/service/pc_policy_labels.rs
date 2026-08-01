@@ -7,6 +7,7 @@ pub(crate) fn objective_name(kind: ObjectiveKind) -> &'static str {
         ObjectiveKind::All => "all",
         ObjectiveKind::Unique => "unique",
         ObjectiveKind::MinimumCover => "min-cover",
+        ObjectiveKind::Tiling => "tiling",
     }
 }
 
@@ -15,6 +16,7 @@ pub(crate) fn objective_execution_name(kind: ObjectiveKind) -> &'static str {
         ObjectiveKind::All => "all-traces",
         ObjectiveKind::Unique => "unique-canonical-traces",
         ObjectiveKind::MinimumCover => "minimum-cover-coverage-matrix",
+        ObjectiveKind::Tiling => "geometry-tilings-only",
     }
 }
 

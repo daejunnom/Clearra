@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const root = resolve(scriptDir, '..', '..');
+const MANIFEST_BYTES = 335;
+const GENERATION_HEX_LENGTH = 24;
 const options = parseArguments(process.argv.slice(2));
 const destinationDir = options.destination
   ? resolve(options.destination)
@@ -24,7 +26,7 @@ try {
     await buildNative();
   }
   const manifest = await writeManifest(stagingDir);
-  await publishArtifacts();
+  await publishArtifacts(manifest);
   console.log(
     `staged_wasm=${resolve(destinationDir, manifest.wasm.path)} bytes=${manifest.wasm.bytes} wasm_sha256=${manifest.wasm.sha256} bindings=${resolve(destinationDir, manifest.bindings.path)} bindings_bytes=${manifest.bindings.bytes} manifest=${resolve(destinationDir, 'clearra_wasm.manifest.json')}`
   );
@@ -148,24 +150,51 @@ async function writeManifest(outputDir) {
     readFile(bindingsPath),
     readFile(wasmPath)
   ]);
+  const bindingsArtifact = versionedArtifact('clearra_wasm', '.js', bindings);
+  const wasmArtifact = versionedArtifact('clearra_wasm_bg', '.wasm', wasm);
   const manifest = {
     schema_version: 1,
-    bindings: artifact('clearra_wasm.js', bindings),
-    wasm: artifact('clearra_wasm_bg.wasm', wasm)
+    bindings: bindingsArtifact,
+    wasm: wasmArtifact
   };
+  await Promise.all([
+    writeFile(resolve(outputDir, bindingsArtifact.path), bindings),
+    writeFile(resolve(outputDir, wasmArtifact.path), wasm)
+  ]);
   const manifestPath = resolve(outputDir, 'clearra_wasm.manifest.json');
   await mkdir(dirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  await writeFile(manifestPath, serializeManifest(manifest), 'utf8');
   return manifest;
 }
 
-async function publishArtifacts() {
-  for (const name of ['clearra_wasm.js', 'clearra_wasm_bg.wasm']) {
+async function publishArtifacts(manifest) {
+  for (const name of [
+    manifest.bindings.path,
+    manifest.wasm.path,
+    'clearra_wasm.js',
+    'clearra_wasm_bg.wasm'
+  ]) {
     await replaceFileAtomically(resolve(stagingDir, name), resolve(destinationDir, name));
   }
   await replaceFileAtomically(
     resolve(stagingDir, 'clearra_wasm.manifest.json'),
     resolve(destinationDir, 'clearra_wasm.manifest.json')
+  );
+  await removeStaleVersionedArtifacts(manifest);
+}
+
+async function removeStaleVersionedArtifacts(manifest) {
+  const retained = new Set([manifest.bindings.path, manifest.wasm.path]);
+  for (const name of await readdir(destinationDir)) {
+    if (retained.has(name) || !isVersionedArtifactName(name)) continue;
+    await rm(resolve(destinationDir, name), { force: true });
+  }
+}
+
+function isVersionedArtifactName(name) {
+  return (
+    /^clearra_wasm\.[0-9a-f]{20,64}\.js$/.test(name) ||
+    /^clearra_wasm_bg\.[0-9a-f]{20,64}\.wasm$/.test(name)
   );
 }
 
@@ -186,12 +215,24 @@ async function replaceFileAtomically(source, destination) {
   }
 }
 
-function artifact(path, bytes) {
+function versionedArtifact(prefix, suffix, bytes) {
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
   return {
-    path,
+    path: `${prefix}.${sha256.slice(0, GENERATION_HEX_LENGTH)}${suffix}`,
     bytes: bytes.byteLength,
-    sha256: createHash('sha256').update(bytes).digest('hex')
+    sha256
   };
+}
+
+function serializeManifest(manifest) {
+  const json = JSON.stringify(manifest);
+  const byteLength = Buffer.byteLength(json, 'utf8') + 1;
+  if (byteLength > MANIFEST_BYTES) {
+    throw new Error(
+      `Clearra WASM manifest exceeds the fixed ${MANIFEST_BYTES}-byte deployment contract`
+    );
+  }
+  return `${json}${' '.repeat(MANIFEST_BYTES - byteLength)}\n`;
 }
 
 function shellQuote(value) {

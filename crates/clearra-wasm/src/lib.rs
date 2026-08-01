@@ -17,6 +17,7 @@ pub use clearra_core_executor::backend::{
 };
 pub use clearra_core_executor::{
     install_pc4_compact_tablebase, release_pc4_compact_tablebase, Pc4TablebaseError,
+    TilingSolutionPageStore,
 };
 pub use distributed_runtime::{
     serialize_distributed_final_events, WasmDistributedCoordinator, WasmDistributedFallbackReason,
@@ -31,7 +32,8 @@ pub use host_contract_bridge::wasm_worker_event_to_host_contract;
 pub use wasm_command_runtime::{
     WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult, WasmForwardPathStep,
     WasmForwardSearchOutcome, WasmSearchPathStep, WasmSearchReport, WasmSetupCandidate,
-    WasmSetupFinderReport, WasmSetupHoldCondition, WasmSolutionProbability,
+    WasmSetupFinderReport, WasmSetupHoldCondition, WasmSolutionAverageScore,
+    WasmSolutionProbability,
 };
 pub use wasm_host_capabilities::WasmHostCapabilities;
 pub use wasm_worker_job::{

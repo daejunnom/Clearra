@@ -27,6 +27,7 @@ pub struct WasmWebGpuCandidateProducer {
     fallback_allowed: bool,
     fallback_execution: Option<WasmDistributedBackendExecution>,
     fallback_producer: Option<WasmCpuCandidateProducer>,
+    verification_required: bool,
     candidate_count: usize,
     candidate_digest: u64,
     summary: Option<WasmDistributedGeometrySummary>,
@@ -46,6 +47,8 @@ enum WebGpuProducerPhase {
 
 impl WasmWebGpuCandidateProducer {
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+        let verification_required = problem.objective().kind()
+            != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         let exact = WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?;
         let batches = compile_batches(&exact, problem.backend_policy()).map_err(map_error)?;
         Ok(Self {
@@ -59,6 +62,7 @@ impl WasmWebGpuCandidateProducer {
             fallback_allowed: problem.backend_policy().allow_backend_fallback(),
             fallback_execution: None,
             fallback_producer: None,
+            verification_required,
             candidate_count: 0,
             candidate_digest: 0,
             summary: None,
@@ -158,6 +162,28 @@ impl WasmWebGpuCandidateProducer {
                                 path.operation_indices().to_vec(),
                             );
                             self.phase = WebGpuProducerPhase::Reducing(reduction);
+                            if !self.verification_required {
+                                let exact =
+                                    self.exact.as_mut().ok_or("webgpu_exact_session_missing")?;
+                                match exact
+                                    .process_external_candidate_with_ordinal(
+                                        candidate.target_index(),
+                                        candidate.row_ids(),
+                                        candidate.ordinal(),
+                                        control,
+                                    )
+                                    .map_err(map_error)?
+                                {
+                                    Some(super::result::ExactSearchAdvance::Cancelled) => {
+                                        return Ok(WasmCandidateProducerAdvance::Cancelled);
+                                    }
+                                    Some(super::result::ExactSearchAdvance::Completed(_)) => {
+                                        return Err("wasm_tiling_producer_completed_early");
+                                    }
+                                    Some(super::result::ExactSearchAdvance::Pending) | None => {}
+                                }
+                                return Ok(WasmCandidateProducerAdvance::Pending);
+                            }
                             return Ok(WasmCandidateProducerAdvance::Candidate(candidate));
                         }
                         Ok(None) => {
@@ -230,6 +256,14 @@ impl WasmWebGpuCandidateProducer {
             pass_count: 1,
             ..WasmDistributedProgress::default()
         }
+    }
+
+    pub fn verification_required(&self) -> bool {
+        self.fallback_producer
+            .as_ref()
+            .map_or(self.verification_required, |producer| {
+                producer.verification_required()
+            })
     }
 
     fn start_cpu_fallback(&mut self, failure: GpuExecutionFailure) -> Result<bool, &'static str> {

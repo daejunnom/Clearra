@@ -359,6 +359,26 @@ fn parses_setup_candidate_priority() {
 }
 
 #[test]
+fn parses_setup_worker_allocation() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTS",
+        "--cpu-threads",
+        "4",
+        "--use-all-cpu-threads",
+    ])
+    .expect("setup command");
+
+    let ParsedCliCommand::Setup(args) = invocation.into_command() else {
+        panic!("expected setup command");
+    };
+    assert_eq!(args.workers(), Some(4));
+    assert!(args.use_all_logical_processors());
+}
+
+#[test]
 fn parses_setup_length_preference() {
     let invocation = CliParser::parse([
         "clearra",

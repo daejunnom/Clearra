@@ -115,6 +115,30 @@ pub(super) struct WorkerAggregate {
 }
 
 impl WorkerAggregate {
+    fn observe_tiling(
+        &mut self,
+        branch_index: usize,
+        local_ordinal: usize,
+        candidate: GeometryCandidate,
+    ) -> Result<(), WasmExactSearchError> {
+        self.buildable_identities.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_parallel_solution_storage_unavailable")
+        })?;
+        self.buildable_identities.push(candidate.identity);
+        let representative = RepresentativeCandidate {
+            branch_index,
+            local_ordinal,
+            candidate,
+        };
+        if self
+            .representative
+            .is_none_or(|current| representative.rank() < current.rank())
+        {
+            self.representative = Some(representative);
+        }
+        Ok(())
+    }
+
     fn observe(
         &mut self,
         branch_index: usize,
@@ -322,8 +346,10 @@ pub(super) fn run_branch_worker(
         outcomes.push(outcome);
     }
 
-    if let Some(coverage) = workspace.materialize_standard_bag_coverage()? {
-        shared_coverage.union(&coverage)?;
+    if problem.objective().kind() != ObjectiveKind::Tiling {
+        if let Some(coverage) = workspace.materialize_standard_bag_coverage()? {
+            shared_coverage.union(&coverage)?;
+        }
     }
     aggregate.worker_retained_bytes = workspace
         .retained_bytes()
@@ -392,6 +418,11 @@ fn run_branch(
                     )
                 })?;
                 candidate_hashes.push(candidate.identity.bucket_hash());
+                if problem.objective().kind() == ObjectiveKind::Tiling {
+                    aggregate.observe_tiling(task.canonical_index, local_ordinal, candidate)?;
+                    local_ordinal = local_ordinal.saturating_add(1);
+                    continue;
+                }
                 let target = targets.get(candidate.target_index as usize).ok_or(
                     WasmExactSearchError::InvalidProblem(
                         "wasm_geometry_candidate_target_out_of_range",

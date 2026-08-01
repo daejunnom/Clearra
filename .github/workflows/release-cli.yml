@@ -53,6 +53,20 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  discord-bot:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install JavaScript workspace
+        run: npm ci --ignore-scripts
+      - name: Verify Clearrabot contracts
+        run: npm test --workspace @clearra/discord-bot
+
   windows-products:
     needs: metadata
     runs-on: windows-latest
@@ -113,7 +127,7 @@ jobs:
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [metadata, linux-cli, windows-products]
+    needs: [metadata, linux-cli, windows-products, discord-bot]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

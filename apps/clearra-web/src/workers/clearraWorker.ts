@@ -31,6 +31,12 @@ type ClearraWorkerMessage =
       tablebaseRequested?: boolean;
       lifecycleOwnerId?: string;
     }
+  | {
+      type: 'load_solution_page';
+      requestId: number;
+      offset: number;
+      limit: number;
+    }
   | { type: 'cancel_job'; jobId?: number }
   | { type: 'dispose_runtime' };
 
@@ -57,6 +63,10 @@ let failClosed = false;
 let lifecycleOwnerId = '';
 
 self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
+  if (message.data.type === 'load_solution_page') {
+    loadSolutionPage(message.data.requestId, message.data.offset, message.data.limit);
+    return;
+  }
   if (message.data.type === 'dispose_runtime') {
     disposeRuntime();
     return;
@@ -80,6 +90,26 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
     message.data.tablebaseRequested ?? false
   );
 };
+
+function loadSolutionPage(requestId: number, offset: number, limit: number) {
+  try {
+    if (!loadedWasm) throw new Error('WASM runtime is not loaded');
+    const keys = loadedWasm.tiling_solution_page(offset, limit);
+    self.postMessage({
+      type: 'solution_page',
+      request_id: requestId,
+      offset,
+      total: loadedWasm.tiling_solution_count(),
+      keys
+    });
+  } catch (error) {
+    self.postMessage({
+      type: 'solution_page_failed',
+      request_id: requestId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
 
 self.addEventListener('error', (event) => {
   event.preventDefault();

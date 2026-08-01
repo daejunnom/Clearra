@@ -4,4 +4,5 @@ pub enum ObjectiveKind {
     All,
     Unique,
     MinimumCover,
+    Tiling,
 }

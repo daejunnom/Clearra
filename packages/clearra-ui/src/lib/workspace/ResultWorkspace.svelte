@@ -5,6 +5,7 @@
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
+  import type { SolutionExportKeySource } from './solutionExportAsync';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -18,14 +19,31 @@
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
   export let targetLines = 4;
+  export let tilingOnlyRequested = false;
+  export let loadSolutionPage:
+    | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
+    | null = null;
 
-  let copyFormat: SolutionCopyFormat = 'fumen';
+  let copyFormat: SolutionCopyFormat = 'ctk';
+  const SOLUTION_EXPORT_PAGE_SIZE = 1_000;
 
   $: report = view.searchReport;
   $: canonicalSolutionKeys = report?.normalized_solution_keys ?? [];
   $: solutionProbabilityByKey = Object.fromEntries(
     (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
   );
+  $: solutionAverageScoreByKey = Object.fromEntries(
+    (report?.solution_average_scores ?? []).map((entry) => [entry.solution_key, entry])
+  );
+  $: solutionCommentByKey = buildSolutionComments(
+    canonicalSolutionKeys,
+    language,
+    solutionProbabilityByKey,
+    solutionAverageScoreByKey
+  );
+  $: solutionCommentsAvailable =
+    (report?.solution_probabilities.length ?? 0) > 0 ||
+    (report?.solution_average_scores.length ?? 0) > 0;
   $: solutionKeys = canonicalSolutionKeys
     .map((key, canonicalIndex) => ({
       canonicalIndex,
@@ -35,7 +53,14 @@
     .sort(compareSolutionProbability)
     .map((entry) => entry.key);
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
+  $: tilingOnly = summaryFields.objective === 'tiling';
+  $: solutionPageAvailable = summaryFields.solution_page_available === 'true';
+  $: tilingProgress = tilingOnly || (!report && tilingOnlyRequested);
   $: scoringRequested = summaryFields.score_requested === 'true';
+  $: solutionExportKeySource =
+    (solutionPageAvailable && loadSolutionPage) || solutionCommentsAvailable
+      ? createSolutionExportKeySource()
+      : null;
   $: hasResult = Boolean(view.response || report);
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
@@ -69,6 +94,103 @@
     return number(report.build_variant_count);
   }
 
+  function probabilityLabel(value: string): string {
+    const probability = Number(value);
+    if (!Number.isFinite(probability)) return value;
+    return new Intl.NumberFormat(language, {
+      style: 'percent',
+      maximumFractionDigits: 4
+    }).format(probability);
+  }
+
+  function scoreLabel(value: string): string {
+    const score = Number(value);
+    if (!Number.isFinite(score)) return value;
+    return new Intl.NumberFormat(language, {
+      maximumFractionDigits: 4
+    }).format(score);
+  }
+
+  function createSolutionExportKeySource(): SolutionExportKeySource | null {
+    const loader = loadSolutionPage;
+    const lazy = solutionPageAvailable && Boolean(loader);
+    const localKeys = solutionKeys;
+    const keyCount = lazy ? (report?.unique_solution_count ?? 0) : localKeys.length;
+    if (keyCount < 1) return null;
+    return {
+      keyCount,
+      ...(solutionCommentsAvailable
+        ? { commentForKey: (key: string) => solutionCommentByKey[key] }
+        : {}),
+      async readKeys(start, count, signal) {
+        if (
+          !Number.isSafeInteger(start) ||
+          !Number.isSafeInteger(count) ||
+          start < 0 ||
+          count < 0 ||
+          start + count > keyCount
+        ) {
+          throw new RangeError('tiling solution export range is invalid');
+        }
+        if (!lazy || !loader) {
+          throwIfAborted(signal);
+          return localKeys.slice(start, start + count);
+        }
+        const keys: string[] = [];
+        while (keys.length < count) {
+          throwIfAborted(signal);
+          const offset = start + keys.length;
+          const response = await loader(
+            offset,
+            Math.min(SOLUTION_EXPORT_PAGE_SIZE, count - keys.length)
+          );
+          if (!response.keys.length) {
+            throw new Error(
+              'tiling solution page store ended before the reported total'
+            );
+          }
+          keys.push(...response.keys.slice(0, count - keys.length));
+        }
+        throwIfAborted(signal);
+        return keys;
+      }
+    };
+  }
+
+  function buildSolutionComments(
+    keys: string[],
+    selectedLanguage: WorkspaceLanguage,
+    probabilities: typeof solutionProbabilityByKey,
+    scores: typeof solutionAverageScoreByKey
+  ): Record<string, string> {
+    return Object.fromEntries(
+      keys.flatMap((key) => {
+        const parts: string[] = [];
+        const probability = probabilities[key];
+        if (probability) {
+          parts.push(
+            `${workspaceMessage(selectedLanguage, 'solutionProbability')}: ${probabilityLabel(probability.probability)}`
+          );
+        }
+        const score = scores[key];
+        if (score) {
+          parts.push(
+            `${workspaceMessage(selectedLanguage, 'solutionAverageScore')}: ${scoreLabel(score.average_score)}`
+          );
+        }
+        return parts.length ? [[key, parts.join(' | ')]] : [];
+      })
+    );
+  }
+
+  function throwIfAborted(signal: AbortSignal | undefined) {
+    if (!signal?.aborted) return;
+    if (signal.reason instanceof Error) throw signal.reason;
+    const error = new Error('Solution copy was aborted.');
+    error.name = 'AbortError';
+    throw error;
+  }
+
 </script>
 
 <ResultWorkspaceFrame
@@ -77,7 +199,7 @@
   statusLabel={label(view.status)}
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
-  progressProfile="pc"
+  progressProfile={tilingProgress ? 'tiling' : 'pc'}
   {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}
@@ -90,10 +212,12 @@
   {#if !hasResult && view.status === 'idle'}
     <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noResult')}</p></div>
   {:else if view.status !== 'failed' && view.status !== 'terminated'}
-    <div class="metric-grid">
-      <article><span>{label('solutionCount')}</span><strong>{number(report?.unique_solution_count)}</strong></article>
-      <article><span>{label('coverage')}</span><strong>{workspaceProbability(language, report?.coverage_probability)}</strong></article>
-      <article><span>{label('buildVariants')}</span><strong>{exactBuildVariantCount()}</strong></article>
+    <div class="metric-grid" class:tiling-only={tilingOnly}>
+      <article><span>{label(tilingOnly ? 'tilingCount' : 'solutionCount')}</span><strong>{number(report?.unique_solution_count)}</strong></article>
+      {#if !tilingOnly}
+        <article><span>{label('coverage')}</span><strong>{workspaceProbability(language, report?.coverage_probability)}</strong></article>
+        <article><span>{label('buildVariants')}</span><strong>{exactBuildVariantCount()}</strong></article>
+      {/if}
     </div>
 
     {#if scoringRequested}
@@ -109,12 +233,17 @@
           bind:value={copyFormat}
           {language}
           {solutionKeys}
+          keySource={solutionExportKeySource}
         />
       </div>
       {#if solutionKeys.length}
         <SolutionGallery
           {solutionKeys}
+          solutionCount={report?.unique_solution_count ?? solutionKeys.length}
+          loadSolutionPage={solutionPageAvailable ? loadSolutionPage : null}
           solutionProbabilities={solutionProbabilityByKey}
+          solutionAverageScores={solutionAverageScoreByKey}
+          solutionComments={solutionCommentByKey}
           solutionSetHash={report?.normalized_solution_set_hash ?? ''}
           {targetLines}
           {language}
@@ -132,6 +261,14 @@
     display: grid;
     gap: 1px;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .metric-grid.tiling-only {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .metric-grid.tiling-only article {
+    border-radius: 6px;
   }
 
   .metric-grid article {

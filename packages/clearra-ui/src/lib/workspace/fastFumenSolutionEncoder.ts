@@ -10,6 +10,11 @@ const FUMEN_FIELD_CELLS = BOARD_WIDTH * FUMEN_FIELD_HEIGHT;
 const FUMEN_ALPHABET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const EMPTY_ACTION = 30_720;
+const COMMENT_ACTION_FLAG = 61_440;
+const COMMENT_BASE = 96;
+const COMMENT_MAX_LENGTH = 4_095;
+const COMMENT_TABLE =
+  ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';
 const VALUE_CHUNK_SIZE = 65_536;
 
 const PIECE_CODES: Record<SolutionPiece, number> = {
@@ -41,6 +46,8 @@ export class FastColoredFumenEncoder {
   private current = new Uint8Array(FUMEN_FIELD_CELLS);
   private lastRepeatIndex = -1;
   private repeatCount = 0;
+  private previousComment: string | undefined = '';
+  private pageCount = 0;
 
   append(page: SolutionExportPage) {
     if (!Number.isInteger(page.height) || page.height < 1 || page.height > 24) {
@@ -56,7 +63,21 @@ export class FastColoredFumenEncoder {
     }
 
     this.writeFieldDiff();
-    this.values.push(EMPTY_ACTION, 3);
+    const currentComment =
+      page.comment !== undefined && (this.pageCount !== 0 || page.comment !== '')
+        ? page.comment
+        : undefined;
+    const changedComment =
+      currentComment !== undefined && currentComment !== this.previousComment
+        ? currentComment
+        : undefined;
+    this.values.push(
+      EMPTY_ACTION + (changedComment === undefined ? 0 : COMMENT_ACTION_FLAG),
+      3
+    );
+    if (changedComment !== undefined) this.writeComment(changedComment);
+    this.previousComment = currentComment;
+    this.pageCount += 1;
     clearFullLines(this.current);
     const swap = this.previous;
     this.previous = this.current;
@@ -112,6 +133,24 @@ export class FastColoredFumenEncoder {
     const y = FUMEN_VISIBLE_HEIGHT - yIndex - 1;
     const index = (y + 1) * BOARD_WIDTH + x;
     return this.current[index] - this.previous[index] + 8;
+  }
+
+  private writeComment(comment: string) {
+    const escaped = escapeFumenComment(comment).slice(0, COMMENT_MAX_LENGTH);
+    this.values.push(escaped.length, 2);
+    for (let offset = 0; offset < escaped.length; offset += 4) {
+      let value = 0;
+      let multiplier = 1;
+      for (let index = 0; index < 4; index += 1) {
+        const character = escaped[offset + index];
+        if (character === undefined) break;
+        const code = COMMENT_TABLE.indexOf(character);
+        if (code < 0) throw new Error('invalid-fumen-comment');
+        value += code * multiplier;
+        multiplier *= COMMENT_BASE;
+      }
+      this.values.push(value, 5);
+    }
   }
 }
 
@@ -224,4 +263,26 @@ function trailingZeroes(value: bigint): number {
     count += 1;
   }
   return count;
+}
+
+function escapeFumenComment(value: string): string {
+  let escaped = '';
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    if (/^[A-Za-z0-9@*_+\-./]$/.test(character)) {
+      escaped += character;
+    } else if (code <= 0xff) {
+      escaped += `%${code.toString(16).toUpperCase().padStart(2, '0')}`;
+    } else if (code <= 0xffff) {
+      escaped += `%u${code.toString(16).toUpperCase().padStart(4, '0')}`;
+    } else {
+      const scalar = code - 0x10000;
+      const high = 0xd800 + (scalar >> 10);
+      const low = 0xdc00 + (scalar & 0x3ff);
+      escaped += `%u${high.toString(16).toUpperCase()}%u${low
+        .toString(16)
+        .toUpperCase()}`;
+    }
+  }
+  return escaped;
 }

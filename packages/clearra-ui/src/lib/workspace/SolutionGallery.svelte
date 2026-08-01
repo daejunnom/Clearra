@@ -13,6 +13,10 @@
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let solutionKeys: string[] = [];
+  export let solutionCount = solutionKeys.length;
+  export let loadSolutionPage:
+    | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
+    | null = null;
   export let solutionProbabilities: Record<
     string,
     {
@@ -20,10 +24,18 @@
       probability_complete: boolean;
     }
   > = {};
+  export let solutionAverageScores: Record<
+    string,
+    {
+      average_score: string;
+      score_complete: boolean;
+    }
+  > = {};
+  export let solutionComments: Record<string, string> = {};
   export let solutionSetHash = '';
   export let targetLines = 4;
   export let language: WorkspaceLanguage;
-  export let copyFormat: SolutionCopyFormat = 'fumen';
+  export let copyFormat: SolutionCopyFormat = 'ctk';
 
   const PAGE_SIZE = 100;
 
@@ -42,34 +54,44 @@
   let preparedSolutions: PreparedSolution[] = [];
   let lastSetIdentity = '';
   let solutionViewCache = new Map<string, SolutionView>();
+  let loadedSolutionKeys: string[] = [];
+  let loadingMore = false;
+  let pageTotal = solutionCount;
+  let pageLoadFailed = false;
 
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
-  $: setIdentity = `${solutionSetHash || 'unhashed'}:${fallbackSetIdentity(solutionKeys)}:${targetLines}`;
+  $: setIdentity = `${solutionSetHash || 'unhashed'}:${fallbackSetIdentity(solutionKeys)}:${solutionCount}:${targetLines}`;
   $: if (setIdentity !== lastSetIdentity) {
     lastSetIdentity = setIdentity;
     visibleCount = PAGE_SIZE;
-    preparedCount = Math.min(solutionKeys.length, PAGE_SIZE * 2);
+    loadedSolutionKeys = solutionKeys.slice();
+    pageTotal = solutionCount;
+    pageLoadFailed = false;
+    preparedCount = Math.min(loadedSolutionKeys.length, PAGE_SIZE * 2);
     solutionViewCache = new Map<string, SolutionView>();
   }
+  $: totalSolutionCount = Math.max(solutionCount, pageTotal, loadedSolutionKeys.length);
   $: minimumPreparedCount = Math.min(
-    solutionKeys.length,
+    loadedSolutionKeys.length,
     Math.max(PAGE_SIZE * 2, visibleCount)
   );
   $: if (preparedCount < minimumPreparedCount) preparedCount = minimumPreparedCount;
-  $: if (preparedCount > solutionKeys.length) preparedCount = solutionKeys.length;
-  $: preparedSolutions = solutionKeys.slice(0, preparedCount).map((key, index) => ({
+  $: if (preparedCount > loadedSolutionKeys.length) preparedCount = loadedSolutionKeys.length;
+  $: preparedSolutions = loadedSolutionKeys.slice(0, preparedCount).map((key, index) => ({
     ...solutionView(key, targetLines, solutionViewCache),
     index,
     key
   }));
   $: visibleSolutions = preparedSolutions.slice(0, visibleCount).map((solution) => ({
     ...solution,
-    probability: solutionProbabilities[solution.key]
+    probability: solutionProbabilities[solution.key],
+    averageScore: solutionAverageScores[solution.key],
+    comment: solutionComments[solution.key]
   }));
-  $: remainingCount = Math.max(0, solutionKeys.length - visibleSolutions.length);
+  $: remainingCount = Math.max(0, totalSolutionCount - visibleSolutions.length);
   $: nextPageCount = Math.min(PAGE_SIZE, remainingCount);
 
   function fallbackSetIdentity(keys: string[]): string {
@@ -77,11 +99,35 @@
   }
 
   async function showMore() {
+    if (loadingMore) return;
     const identity = setIdentity;
-    visibleCount = Math.min(solutionKeys.length, visibleCount + PAGE_SIZE);
+    const nextVisibleCount = Math.min(totalSolutionCount, visibleCount + PAGE_SIZE);
+    loadingMore = true;
+    try {
+      await ensureLoaded(Math.min(totalSolutionCount, nextVisibleCount + PAGE_SIZE));
+      pageLoadFailed = false;
+    } catch {
+      pageLoadFailed = true;
+      return;
+    } finally {
+      loadingMore = false;
+    }
+    if (identity !== setIdentity) return;
+    visibleCount = Math.min(loadedSolutionKeys.length, nextVisibleCount);
     await tick();
     if (identity !== setIdentity) return;
-    preparedCount = Math.min(solutionKeys.length, visibleCount + PAGE_SIZE);
+    preparedCount = Math.min(loadedSolutionKeys.length, visibleCount + PAGE_SIZE);
+  }
+
+  async function ensureLoaded(target: number) {
+    if (!loadSolutionPage) return;
+    while (loadedSolutionKeys.length < target) {
+      const offset = loadedSolutionKeys.length;
+      const response = await loadSolutionPage(offset, Math.min(PAGE_SIZE, target - offset));
+      if (!response.keys.length) break;
+      loadedSolutionKeys = [...loadedSolutionKeys, ...response.keys];
+      pageTotal = Math.max(pageTotal, response.total);
+    }
   }
 
   function probabilityLabel(value: string): string {
@@ -91,6 +137,21 @@
       style: 'percent',
       maximumFractionDigits: 4
     }).format(probability);
+  }
+
+  function scoreLabel(value: string): string {
+    const score = Number(value);
+    if (!Number.isFinite(score)) return value;
+    return new Intl.NumberFormat(language, {
+      maximumFractionDigits: 4
+    }).format(score);
+  }
+
+  function pageWithComment(
+    page: SolutionExportPage | null,
+    comment: string | undefined
+  ): SolutionExportPage | null {
+    return page && comment ? { ...page, comment } : page;
   }
 
   function solutionView(
@@ -111,9 +172,9 @@
 </script>
 
 {#if visibleSolutions.length}
-  {#if solutionKeys.length > PAGE_SIZE}
+  {#if totalSolutionCount > PAGE_SIZE}
     <p class="gallery-status">
-      {label('resultLimited', { count: visibleSolutions.length, total: solutionKeys.length })}
+      {label('resultLimited', { count: visibleSolutions.length, total: totalSolutionCount })}
     </p>
   {/if}
 
@@ -129,9 +190,15 @@
                 {#if !solution.probability.probability_complete} ({label('incomplete')}){/if}
               </span>
             {/if}
+            {#if solution.averageScore}
+              <span class="solution-probability">
+                {label('solutionAverageScore')}: {scoreLabel(solution.averageScore.average_score)}
+                {#if !solution.averageScore.score_complete} ({label('incomplete')}){/if}
+              </span>
+            {/if}
           </div>
           <SolutionCopyButton
-            page={solution.page}
+            page={pageWithComment(solution.page, solution.comment)}
             format={copyFormat}
             {language}
           />
@@ -160,10 +227,16 @@
 
   {#if remainingCount > 0}
     <div class="load-more-row">
-      <button type="button" on:click={showMore}>
+      <button type="button" on:click={showMore} disabled={loadingMore}>
         {label('showMore', { count: nextPageCount })}
       </button>
     </div>
+    {#if pageLoadFailed}
+      <div class="invalid-solution" role="alert">
+        <AlertTriangle size={18} />
+        <span>{label('solutionPageLoadFailed')}</span>
+      </div>
+    {/if}
   {/if}
 {/if}
 

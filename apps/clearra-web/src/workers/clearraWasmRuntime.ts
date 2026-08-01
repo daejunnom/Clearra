@@ -18,10 +18,14 @@ export type ClearraWasmModule = {
   distributed_progress: () => ClearraDistributedCoreProgress;
   distributed_merge_partial: (partial: ArrayBuffer) => void;
   distributed_finish: (jobId: number, workersUsed: number) => string;
+  tiling_solution_count: () => number;
+  tiling_solution_page: (offset: number, limit: number) => string[];
+  tiling_solution_release: () => void;
   distributed_cancel: () => void;
   distributed_reset: () => void;
   distributed_verifier_start: (initialization: string | ArrayBuffer) => void;
   distributed_verifier_consume: (batch: ArrayBuffer) => ClearraDistributedVerifierConsume;
+  distributed_verifier_continue: () => ClearraDistributedVerifierConsume;
   distributed_verifier_progress: () => ClearraDistributedVerifierProgress;
   distributed_verifier_finish: () => ArrayBuffer;
   prewarm_gpu: (deviceIndex: number | null) => Promise<'connected' | 'unavailable'>;
@@ -53,11 +57,14 @@ export type ClearraDistributedPlan = {
   fallbackReason: string | null;
   workerInitialization: ArrayBuffer | null;
   deferredInitialization: boolean;
+  verificationRequired: boolean;
+  tilingGeometryParallel: boolean;
 };
 
 export type ClearraDistributedVerifierConsume = {
   candidateCount: number;
   partial: ArrayBuffer | null;
+  hasPendingWork: boolean;
 };
 
 export type ClearraDistributedProducerResult =
@@ -110,6 +117,8 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_worker_initialization: () => number;
   clearra_wasm_distributed_worker_initialization_deferred: () => number;
   clearra_wasm_distributed_worker_count: () => number;
+  clearra_wasm_distributed_verification_required: () => number;
+  clearra_wasm_distributed_tiling_geometry_parallel: () => number;
   clearra_wasm_distributed_requested_backend: () => number;
   clearra_wasm_distributed_preparation_fallback_reason: () => number;
   clearra_wasm_distributed_produce: (
@@ -130,12 +139,17 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_progress_layer_total: () => number;
   clearra_wasm_distributed_merge_partial: () => number;
   clearra_wasm_distributed_finish: (jobId: number, workersUsed: number) => number;
+  clearra_wasm_tiling_solution_count: () => number;
+  clearra_wasm_tiling_solution_page: (offset: number, limit: number) => number;
+  clearra_wasm_tiling_solution_release: () => number;
   clearra_wasm_distributed_cancel: () => number;
   clearra_wasm_distributed_reset: () => number;
   clearra_wasm_distributed_verifier_start: () => number;
   clearra_wasm_distributed_forward_verifier_start: () => number;
   clearra_wasm_distributed_verifier_consume: () => number;
   clearra_wasm_distributed_verifier_partial_available: () => number;
+  clearra_wasm_distributed_verifier_pending_work: () => number;
+  clearra_wasm_distributed_verifier_continue: () => number;
   clearra_wasm_distributed_verifier_progress_candidate_count: () => number;
   clearra_wasm_distributed_verifier_progress_build_nodes: () => number;
   clearra_wasm_distributed_verifier_progress_coverage_checks: () => number;
@@ -327,16 +341,28 @@ function isArtifactManifest(manifest: unknown): manifest is ClearraWasmArtifactM
   const candidate = manifest as Partial<ClearraWasmArtifactManifest>;
   return (
     candidate.schema_version === 1 &&
-    isArtifact(candidate.bindings, 'clearra_wasm.js') &&
-    isArtifact(candidate.wasm, 'clearra_wasm_bg.wasm')
+    isArtifact(candidate.bindings, 'clearra_wasm.js', 'clearra_wasm', '.js') &&
+    isArtifact(candidate.wasm, 'clearra_wasm_bg.wasm', 'clearra_wasm_bg', '.wasm')
   );
 }
 
-function isArtifact(value: unknown, expectedPath: string): value is ClearraWasmArtifact {
+function isArtifact(
+  value: unknown,
+  legacyPath: string,
+  versionedPrefix: string,
+  versionedSuffix: string
+): value is ClearraWasmArtifact {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<ClearraWasmArtifact>;
+  const versionedPaths =
+    typeof candidate.sha256 === 'string'
+      ? [20, 24, 64].map(
+          (length) =>
+            `${versionedPrefix}.${candidate.sha256!.slice(0, length)}${versionedSuffix}`
+        )
+      : [];
   return (
-    candidate.path === expectedPath &&
+    (candidate.path === legacyPath || versionedPaths.includes(candidate.path ?? '')) &&
     Number.isSafeInteger(candidate.bytes) &&
     Number(candidate.bytes) > 0 &&
     typeof candidate.sha256 === 'string' &&
@@ -467,7 +493,11 @@ function wrapRawModule(
         fallbackReason: fallbackReasonCode === 1 ? 'gpu_kernel_unavailable' : null,
         workerInitialization: initialization.byteLength === 0 ? null : initialization,
         deferredInitialization:
-          raw.clearra_wasm_distributed_worker_initialization_deferred() !== 0
+          raw.clearra_wasm_distributed_worker_initialization_deferred() !== 0,
+        verificationRequired:
+          raw.clearra_wasm_distributed_verification_required() !== 0,
+        tilingGeometryParallel:
+          raw.clearra_wasm_distributed_tiling_geometry_parallel() !== 0
       };
     },
     distributed_produce(workBudget, batchCapacity) {
@@ -505,6 +535,16 @@ function wrapRawModule(
       requireOk(raw.clearra_wasm_distributed_finish(jobId, workersUsed));
       return outputText();
     },
+    tiling_solution_count() {
+      return raw.clearra_wasm_tiling_solution_count() >>> 0;
+    },
+    tiling_solution_page(offset, limit) {
+      requireOk(raw.clearra_wasm_tiling_solution_page(offset, limit));
+      return JSON.parse(outputText()) as string[];
+    },
+    tiling_solution_release() {
+      requireOk(raw.clearra_wasm_tiling_solution_release());
+    },
     distributed_cancel() {
       requireOk(raw.clearra_wasm_distributed_cancel());
     },
@@ -529,7 +569,20 @@ function wrapRawModule(
         partial:
           raw.clearra_wasm_distributed_verifier_partial_available() === 0
             ? null
-            : outputBytes()
+            : outputBytes(),
+        hasPendingWork: raw.clearra_wasm_distributed_verifier_pending_work() !== 0
+      };
+    },
+    distributed_verifier_continue() {
+      const consumed = raw.clearra_wasm_distributed_verifier_continue();
+      requireOk(consumed);
+      return {
+        candidateCount: consumed,
+        partial:
+          raw.clearra_wasm_distributed_verifier_partial_available() === 0
+            ? null
+            : outputBytes(),
+        hasPendingWork: raw.clearra_wasm_distributed_verifier_pending_work() !== 0
       };
     },
     distributed_verifier_progress() {
@@ -569,8 +622,12 @@ const yieldToRuntimeHost = createRuntimeHostYield();
 
 function createRuntimeHostYield(): () => Promise<void> {
   const channel = new MessageChannel();
+  const nodePort1 = channel.port1 as MessagePort & { unref?: () => void };
+  const nodePort2 = channel.port2 as MessagePort & { unref?: () => void };
   const pending: Array<() => void> = [];
   channel.port1.onmessage = () => pending.shift()?.();
+  nodePort1.unref?.();
+  nodePort2.unref?.();
   return () =>
     new Promise<void>((resolve) => {
       pending.push(resolve);

@@ -585,8 +585,13 @@ impl WebCommandRequest {
                 |piece| scenario.clone().with_hold_piece(Some(piece)),
             );
             let mut query = scenario
-                .to_query(queue, policy, finite_standard_bag_len, self.rule)
-                .with_objective(self.objective)
+                .to_query(
+                    queue,
+                    policy,
+                    finite_standard_bag_len,
+                    self.rule,
+                    self.objective,
+                )
                 .with_queue_observation_policy(self.queue_observation_policy);
             if self.solution_probabilities {
                 query =

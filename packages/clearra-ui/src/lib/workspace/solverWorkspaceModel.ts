@@ -1,6 +1,6 @@
 import type { ClearraDesktopRequest } from '../host';
 
-export type ScoreMode = 'off' | 'minimum-cover' | 'summary';
+export type ScoreMode = 'tiling' | 'off' | 'minimum-cover' | 'summary';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
 export type SpinProfile =
@@ -59,6 +59,22 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     backend: 'auto',
     gpuDevice: 'auto',
     workers: defaultWorkerCount(),
+    tablebaseEnabled: false,
+    precomputeBuildDependencies: false
+  };
+}
+
+export function normalizeWorkspaceRequest(
+  request: SolverWorkspaceRequest
+): SolverWorkspaceRequest {
+  if (request.scoreMode !== 'tiling') return request;
+  return {
+    ...request,
+    queueKnowledge: 'oracle',
+    rule: 'srs-plus',
+    preserveB2B: false,
+    initialB2B: 0,
+    solutionProbabilities: false,
     tablebaseEnabled: false,
     precomputeBuildDependencies: false
   };
@@ -292,6 +308,7 @@ export function workspaceValidationCodes(
 }
 
 export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
+  request = normalizeWorkspaceRequest(request);
   const tokens = ['clearra', 'pc', '--lines', String(request.lines)];
   const pieceWindow = scenarioPieceWindow(request);
   const parsedQueue = parseBrowserQueueInput(request.queue);
@@ -303,6 +320,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     '--pieces',
     String(pieceWindow ?? 1)
   );
+  if (request.scoreMode === 'tiling') tokens.push('--tiling-only');
   if (request.holdEnabled) tokens.push('--hold', 'empty');
   else tokens.push('--no-hold');
   if (request.queue) {
@@ -311,26 +329,33 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
       parsedQueue?.source ?? request.queue
     );
   }
-  tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all', '--backend', request.backend);
-  tokens.push('--rule', request.rule);
-  tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
   tokens.push(
-    request.precomputeBuildDependencies
-      ? '--build-dependency-dag'
-      : '--no-build-dependency-dag'
+    '--count',
+    request.scoreMode === 'off' || request.scoreMode === 'tiling' ? 'unique' : 'all',
+    '--backend',
+    request.backend
   );
-  if (request.solutionProbabilities) tokens.push('--solution-probabilities');
-  tokens.push('--queue-knowledge', request.queueKnowledge);
-  if (request.scoreMode === 'minimum-cover') tokens.push('--objective', 'minimum-cover');
-  if (request.scoreMode === 'summary') tokens.push('--score');
-  if (request.scoreMode === 'summary') {
-    tokens.push('--score-profile', request.scoreProfile);
-    tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
+  if (request.scoreMode !== 'tiling') {
+    tokens.push('--rule', request.rule);
+    tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
+    tokens.push(
+      request.precomputeBuildDependencies
+        ? '--build-dependency-dag'
+        : '--no-build-dependency-dag'
+    );
+    if (request.solutionProbabilities) tokens.push('--solution-probabilities');
+    tokens.push('--queue-knowledge', request.queueKnowledge);
+    if (request.scoreMode === 'minimum-cover') tokens.push('--objective', 'minimum-cover');
+    if (request.scoreMode === 'summary') tokens.push('--score');
+    if (request.scoreMode === 'summary') {
+      tokens.push('--score-profile', request.scoreProfile);
+      tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
+    }
+    if (request.scoreMode === 'summary' || request.preserveB2B) {
+      tokens.push('--spin-profile', request.spinProfile);
+    }
+    if (request.preserveB2B) tokens.push('--preserve-b2b');
   }
-  if (request.scoreMode === 'summary' || request.preserveB2B) {
-    tokens.push('--spin-profile', request.spinProfile);
-  }
-  if (request.preserveB2B) tokens.push('--preserve-b2b');
   if (request.gpuDevice !== 'auto' && request.backend !== 'cpu') {
     tokens.push('--gpu-device', request.gpuDevice);
   }
@@ -348,6 +373,7 @@ export function workspaceRequestForDesktop(
   request: SolverWorkspaceRequest,
   language: 'en' | 'ko'
 ): ClearraDesktopRequest {
+  request = normalizeWorkspaceRequest(request);
   const parsedQueue = parseBrowserQueueInput(request.queue);
   return {
     app_request_model: 'clearra-app/AppRequest' as const,
@@ -364,7 +390,8 @@ export function workspaceRequestForDesktop(
     board_mask: boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
     visible_height: request.lines,
     piece_window: scenarioPieceWindow(request),
-    count_policy: request.scoreMode === 'off' ? 'unique' : 'all',
+    count_policy:
+      request.scoreMode === 'off' || request.scoreMode === 'tiling' ? 'unique' : 'all',
     score_mode: request.scoreMode,
     score_profile: request.scoreProfile,
     spin_profile: request.spinProfile,

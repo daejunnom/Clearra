@@ -1,4 +1,10 @@
-use std::{cell::RefCell, sync::Once};
+//! SRP rationale: this module has one change reason: the stable WASM export contract and its
+//! single owned ABI state boundary.
+
+use std::{
+    cell::RefCell,
+    sync::{Arc, Once},
+};
 
 use clearra_pc_graph::request::GpuDeviceSelection;
 #[cfg(target_arch = "wasm32")]
@@ -7,9 +13,9 @@ use clearra_wasm::prewarm_gpu_search_async;
 use clearra_wasm::ExecutorSearchProfileSession;
 use clearra_wasm::{
     install_pc4_compact_tablebase, release_pc4_compact_tablebase,
-    serialize_distributed_final_events, GpuSearchWarmupReport, WasmDistributedCoordinator,
-    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
-    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    serialize_distributed_final_events, GpuSearchWarmupReport, TilingSolutionPageStore,
+    WasmDistributedCoordinator, WasmDistributedFallbackReason, WasmDistributedMode,
+    WasmDistributedPreparation, WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
     WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmWorkerAdvanceStatus, WasmWorkerJobId,
     WasmWorkerJobRuntime,
 };
@@ -31,6 +37,8 @@ struct WasmAbiState {
     distributed_coordinator: Option<WasmDistributedCoordinator>,
     distributed_verifier: Option<WasmDistributedVerifierRuntime>,
     distributed_verifier_partial_available: bool,
+    distributed_verifier_pending_work: bool,
+    tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
     gpu_warmup: Option<GpuWarmupState>,
     #[cfg(feature = "stage-profiling")]
     profile: Option<ExecutorSearchProfileSession>,
@@ -282,6 +290,7 @@ pub extern "C" fn clearra_wasm_tablebase_release() -> i32 {
 pub extern "C" fn clearra_wasm_distributed_prepare() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        state.tiling_solution_page_store = None;
         let command_text = match std::str::from_utf8(&state.input) {
             Ok(command_text) => command_text.to_owned(),
             Err(error) => {
@@ -319,6 +328,30 @@ pub extern "C" fn clearra_wasm_distributed_worker_count() -> u32 {
             .as_ref()
             .and_then(|coordinator| u32::try_from(coordinator.worker_count()).ok())
             .unwrap_or(1)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verification_required() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_none_or(WasmDistributedCoordinator::verification_required)
+            .into()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_tiling_geometry_parallel() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_some_and(WasmDistributedCoordinator::tiling_geometry_parallel)
+            .into()
     })
 }
 
@@ -598,19 +631,78 @@ pub extern "C" fn clearra_wasm_distributed_finish(job_id: u32, workers_used: u32
             );
             return ABI_ERROR;
         };
-        match coordinator
-            .finish(workers_used as usize)
-            .and_then(|result| serialize_distributed_final_events(job_id.into(), &result))
-        {
-            Ok(output) => {
-                state.set_output(output);
-                ABI_OK
-            }
+        let result = match coordinator.finish(workers_used as usize) {
+            Ok(result) => result,
             Err(error) => {
                 state.set_error(error.code(), error.message());
-                ABI_ERROR
+                return ABI_ERROR;
             }
+        };
+        let output = match serialize_distributed_final_events(job_id.into(), &result) {
+            Ok(output) => output,
+            Err(error) => {
+                state.set_error(error.code(), error.message());
+                return ABI_ERROR;
+            }
+        };
+        state.tiling_solution_page_store = result.tiling_solution_page_store().cloned();
+        state.set_output(output);
+        ABI_OK
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tiling_solution_count() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .tiling_solution_page_store
+            .as_ref()
+            .and_then(|store| u32::try_from(store.len()).ok())
+            .unwrap_or(u32::MAX)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tiling_solution_page(offset: u32, limit: u32) -> i32 {
+    const MAX_PAGE_SIZE: usize = 1_000;
+
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(store) = state.tiling_solution_page_store.as_ref() else {
+            state.set_error(
+                "E_WASM_TILING_PAGE_STATE",
+                "tiling solution page store is not available",
+            );
+            return ABI_ERROR;
+        };
+        let keys = match store.page_keys(offset as usize, (limit as usize).min(MAX_PAGE_SIZE)) {
+            Ok(keys) => keys,
+            Err(reason) => {
+                state.set_error("E_WASM_TILING_PAGE", reason);
+                return ABI_ERROR;
+            }
+        };
+        let mut output = String::from("[");
+        for (index, key) in keys.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            output.push('"');
+            output.push_str(key);
+            output.push('"');
         }
+        output.push(']');
+        state.set_output(output);
+        ABI_OK
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tiling_solution_release() -> i32 {
+    ABI_STATE.with(|state| {
+        state.borrow_mut().tiling_solution_page_store = None;
+        ABI_OK
     })
 }
 
@@ -631,6 +723,7 @@ pub extern "C" fn clearra_wasm_distributed_reset() -> i32 {
         state.distributed_coordinator = None;
         state.distributed_verifier = None;
         state.distributed_verifier_partial_available = false;
+        state.distributed_verifier_pending_work = false;
         state.transfer_input.clear();
         ABI_OK
     })
@@ -654,6 +747,8 @@ pub extern "C" fn clearra_wasm_distributed_verifier_start() -> i32 {
         ) {
             Ok(verifier) => {
                 state.distributed_verifier = Some(verifier);
+                state.distributed_verifier_partial_available = false;
+                state.distributed_verifier_pending_work = false;
                 ABI_OK
             }
             Err(error) => {
@@ -679,6 +774,7 @@ pub extern "C" fn clearra_wasm_distributed_forward_verifier_start() -> i32 {
             Ok(verifier) => {
                 state.distributed_verifier = Some(verifier);
                 state.distributed_verifier_partial_available = false;
+                state.distributed_verifier_pending_work = false;
                 ABI_OK
             }
             Err(error) => {
@@ -710,6 +806,7 @@ pub extern "C" fn clearra_wasm_distributed_verifier_consume() -> i32 {
         match outcome {
             Ok(consumed) => {
                 state.distributed_verifier_partial_available = consumed.partial.is_some();
+                state.distributed_verifier_pending_work = consumed.has_pending_work;
                 if let Some(partial) = consumed.partial {
                     state.set_output_bytes(partial);
                 }
@@ -726,6 +823,44 @@ pub extern "C" fn clearra_wasm_distributed_verifier_consume() -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_partial_available() -> u32 {
     ABI_STATE.with(|state| state.borrow().distributed_verifier_partial_available.into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_pending_work() -> u32 {
+    ABI_STATE.with(|state| state.borrow().distributed_verifier_pending_work.into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_continue() -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let outcome = state
+            .distributed_verifier
+            .as_mut()
+            .ok_or((
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed verifier is not active".to_owned(),
+            ))
+            .and_then(|verifier| {
+                verifier
+                    .continue_work()
+                    .map_err(|error| (error.code(), error.message().to_owned()))
+            });
+        match outcome {
+            Ok(consumed) => {
+                state.distributed_verifier_partial_available = consumed.partial.is_some();
+                state.distributed_verifier_pending_work = consumed.has_pending_work;
+                if let Some(partial) = consumed.partial {
+                    state.set_output_bytes(partial);
+                }
+                i32::try_from(consumed.candidate_count).unwrap_or(i32::MAX)
+            }
+            Err((code, message)) => {
+                state.set_error(code, message);
+                ABI_ERROR
+            }
+        }
+    })
 }
 
 #[no_mangle]
@@ -779,6 +914,7 @@ pub extern "C" fn clearra_wasm_distributed_verifier_finish() -> i32 {
                 state.set_output_bytes(output);
                 state.distributed_verifier = None;
                 state.distributed_verifier_partial_available = false;
+                state.distributed_verifier_pending_work = false;
                 ABI_OK
             }
             Err(error) => {
@@ -832,18 +968,25 @@ pub extern "C" fn clearra_wasm_start_job() -> u32 {
 pub extern "C" fn clearra_wasm_advance_job(job_id: u32, work_budget: u32) -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        match state
+        let status = match state
             .runtime
             .advance_job(WasmWorkerJobId::new(job_id.into()), work_budget.max(1))
         {
-            Ok(WasmWorkerAdvanceStatus::Pending) => 0,
-            Ok(WasmWorkerAdvanceStatus::Completed) => 1,
-            Ok(WasmWorkerAdvanceStatus::Cancelled) => 2,
-            Ok(WasmWorkerAdvanceStatus::Failed) => 3,
+            Ok(status) => status,
             Err(error) => {
                 state.set_error(error.code(), error.message());
-                ABI_ERROR
+                return ABI_ERROR;
             }
+        };
+        if status == WasmWorkerAdvanceStatus::Completed {
+            state.tiling_solution_page_store =
+                state.runtime.take_completed_tiling_solution_page_store();
+        }
+        match status {
+            WasmWorkerAdvanceStatus::Pending => 0,
+            WasmWorkerAdvanceStatus::Completed => 1,
+            WasmWorkerAdvanceStatus::Cancelled => 2,
+            WasmWorkerAdvanceStatus::Failed => 3,
         }
     })
 }

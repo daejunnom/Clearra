@@ -101,7 +101,11 @@ Build/cache artifacts live below the platform Clearra artifact root, normally
 report root. Repository-local `target`, `build`, and report output are rejected.
 The external CMake/Cargo trees are reused across source changes and rely on
 their native dependency tracking; only cache-budget overflow or a different
-workspace/schema identity resets the complete tree.
+workspace/schema identity resets the complete tree. Disposable builds reuse a
+locked `build/transient/<purpose>` slot and overwrite its previous contents;
+the default runtime comparison report similarly replaces
+`reports/runtime-environments/latest`. Pass an explicit output path only when
+an additional local history is intentionally required.
 The sole `_local` exception is `_local/bundle.py`, which writes the review
 bundle under `_local` at the user's request.
 
@@ -128,6 +132,28 @@ printed by Vite. Use `dev:wsl` only when WSL was selected explicitly. To preview
 It uses the source-built `wasm-bindgen` CLI rather than a downloaded helper
 executable. Generated JS/WASM lives in `apps/clearra-web/static/wasm` and is not
 review or release source.
+
+## Clearrabot
+
+`apps/clearra-discord-bot` exposes Clearra searches through `/clearra`,
+`!clearra`, and short product commands. It launches only the configured
+Clearra executable with an argument array; no shell or external solver is part
+of the command path.
+
+Fumen and CTK3 documents can be passed to `/view` or posted in a normal
+message. Clearrabot decodes them through the Clearra document contract and
+uses its own indexed-pixel GIF89a/LZW renderer. Search text and image previews
+are separate replies. Clearrabot links directly to the loaded CTK workspace
+when the reply fits Discord's 2,000-character limit; otherwise it attaches a
+canonical CTK3 document and links to the CTK renderer:
+
+```text
+https://daejunnom.github.io/Clearra/?tool=ctk&ctk=ctk3_...&viewer=1
+https://daejunnom.github.io/Clearra/?tool=ctk&fumen=v115@...&viewer=1
+```
+
+See [apps/clearra-discord-bot/README.md](apps/clearra-discord-bot/README.md)
+for Discord application settings and startup commands.
 
 ## Published Products
 

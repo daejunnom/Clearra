@@ -121,7 +121,10 @@ pub(crate) enum PackingProblemPrepareError {
 pub(crate) fn backend_context(problem: &SearchProblem) -> PcBackendSelectionContext {
     match problem.preset() {
         SearchProblemPreset::OpeningPc => PcBackendSelectionContext::opening(
-            matches!(problem.objective().kind(), ObjectiveKind::Unique),
+            matches!(
+                problem.objective().kind(),
+                ObjectiveKind::Unique | ObjectiveKind::Tiling
+            ),
             problem.piece_window().max_pieces(),
         ),
         SearchProblemPreset::ScenarioPc => PcBackendSelectionContext::scenario(

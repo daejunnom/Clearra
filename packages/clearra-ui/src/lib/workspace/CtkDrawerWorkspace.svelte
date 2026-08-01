@@ -1,3 +1,4 @@
+<!-- SRP rationale: this component has one change reason: the complete CTK document-editing workspace interaction contract. -->
 <script lang="ts">
   import {
     AlertTriangle,
@@ -48,6 +49,9 @@
     | { kind: 'page'; index: number }
     | { kind: 'gap'; key: string };
 
+  export let initialDocument: string | undefined = undefined;
+  export let viewerMode = false;
+
   let language: WorkspaceLanguage = 'en';
   let currentPage = blankPage(8);
   let documentModel = CtkDrawerDocument.fromPages(10, [currentPage]);
@@ -66,20 +70,46 @@
   let lifecycleController = new AbortController();
   let copyController: AbortController | null = null;
   let pendingImportModel: CtkDrawerDocument | null = null;
+  let previewPages = new Map<number, Ctk3Page>();
+  let previewLoadToken = 0;
+  let previewRequestKey = '';
+  let mounted = false;
   let closed = false;
 
   $: currentHeight = Math.max(1, currentPage?.height ?? 1);
   $: hasImport = pendingImportSource !== null || importValue.trim().length > 0;
   $: pageStrip = pageStripItems(pageCount, pageIndex);
+  $: {
+    const nextPreviewKey = pageStrip
+      .filter((item): item is Extract<PageStripItem, { kind: 'page' }> => item.kind === 'page')
+      .map((item) => item.index)
+      .join(',');
+    if (mounted && nextPreviewKey !== previewRequestKey) {
+      previewRequestKey = nextPreviewKey;
+      void refreshPagePreviews();
+    }
+  }
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
 
   onMount(() => {
+    mounted = true;
     language = preferredWorkspaceLanguage(
       localStorage.getItem('clearra-language') ?? navigator.language
     );
+    const viewerDocument = initialDocument ?? documentFromLocation();
+    if (viewerDocument) {
+      const source = viewerDocument;
+      pendingImportSource = source;
+      importSummary = documentSummary(source.length);
+      requestAnimationFrame(() => {
+        if (!closed) void importDocument(source);
+      });
+    } else {
+      void refreshPagePreviews();
+    }
     const handlePageHide = () => closeWorkspace();
     const handlePageShow = (event: PageTransitionEvent) => {
       if (event.persisted && closed) window.location.reload();
@@ -117,6 +147,7 @@
   function updateCurrent(page: Ctk3Page) {
     documentModel.updatePage(pageIndex, page);
     currentPage = page;
+    previewPages = new Map(previewPages).set(pageIndex, clonePage(page));
   }
 
   function updateComment(comment: string) {
@@ -213,6 +244,7 @@
       if (token !== pageLoadToken || closed) return;
       pageIndex = nextIndex;
       currentPage = page;
+      previewPages = new Map(previewPages).set(nextIndex, clonePage(page));
     } catch (error) {
       if (!isAbortError(error) && token === pageLoadToken && !closed) {
         importFailed = true;
@@ -222,15 +254,15 @@
     }
   }
 
-  async function importDocument() {
-    if (!hasImport || importLoading || closed) return;
+  async function importDocument(sourceOverride?: string) {
+    if ((!sourceOverride && !hasImport) || importLoading || closed) return;
     importLoading = true;
     importFailed = false;
     await nextPaint();
     let nextModel: CtkDrawerDocument | null = null;
     try {
       throwIfAborted(lifecycleController.signal);
-      const source = pendingImportSource ?? importValue;
+      const source = sourceOverride ?? pendingImportSource ?? importValue;
       const reader = openFieldDocument(source, {
         workerFactory: createCtkDocumentWorker,
         signal: lifecycleController.signal
@@ -318,6 +350,9 @@
     pageCount = next.pageCount;
     pageIndex = 0;
     currentPage = page;
+    previewPages = new Map([[0, clonePage(page)]]);
+    previewRequestKey = '';
+    previewLoadToken += 1;
     pageLoadToken += 1;
     pageLoading = false;
   }
@@ -326,6 +361,7 @@
     if (closed) return;
     closed = true;
     pageLoadToken += 1;
+    previewLoadToken += 1;
     clearTimeout(copyTimer);
     const error = abortError('CTK workspace was closed.');
     if (!lifecycleController.signal.aborted) lifecycleController.abort(error);
@@ -383,6 +419,22 @@
     ) as unknown as Ctk3DecodeWorkerLike;
   }
 
+  function documentFromLocation(): string | undefined {
+    const url = new URL(window.location.href);
+    const named =
+      url.searchParams.get('ctk') ??
+      url.searchParams.get('fumen') ??
+      url.searchParams.get('document');
+    if (named) return named;
+    const raw = url.search.slice(1);
+    if (!/^(?:v11(?:0|5)@|ctk3(?:b_|_|@))/i.test(raw)) return undefined;
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+
   function documentSummary(characters: number, pages?: number): string {
     const size = characters >= 1024 * 1024
       ? `${(characters / 1024 / 1024).toFixed(1)} MiB`
@@ -392,8 +444,60 @@
       : `CTK3 · ${size}`;
   }
 
+  async function refreshPagePreviews() {
+    if (closed) return;
+    const token = ++previewLoadToken;
+    const indices = pageStrip
+      .filter((item): item is Extract<PageStripItem, { kind: 'page' }> => item.kind === 'page')
+      .map((item) => item.index)
+      .sort((left, right) => left - right);
+    const next = new Map<number, Ctk3Page>();
+    try {
+      for (let cursor = 0; cursor < indices.length;) {
+        const start = indices[cursor];
+        let end = cursor + 1;
+        while (end < indices.length && indices[end] === indices[end - 1] + 1) end += 1;
+        const pages = await documentModel.readPages(
+          start,
+          end - cursor,
+          lifecycleController.signal
+        );
+        throwIfAborted(lifecycleController.signal);
+        if (token !== previewLoadToken || closed) return;
+        for (let offset = 0; offset < pages.length; offset += 1) {
+          next.set(start + offset, normalizeImportedPage(pages[offset]));
+        }
+        cursor = end;
+      }
+      if (token === previewLoadToken && !closed) previewPages = next;
+    } catch (error) {
+      if (!isAbortError(error) && token === previewLoadToken && !closed) {
+        previewPages = new Map([[pageIndex, clonePage(currentPage)]]);
+      }
+    }
+  }
+
+  function previewCells(page: Ctk3Page): Ctk3Page['cells'] {
+    const height = Math.max(1, page.height);
+    const cells = Array(height * 10).fill(null) as Ctk3Page['cells'];
+    cells.splice(0, Math.min(cells.length, page.cells.length), ...page.cells.slice(0, cells.length));
+    if (page.operation) {
+      for (const cell of operationCells(page.operation)) {
+        if (cell.x >= 0 && cell.x < 10 && cell.y >= 0 && cell.y < height) {
+          cells[cell.y * 10 + cell.x] = page.operation.piece;
+        }
+      }
+    }
+    const display: Ctk3Page['cells'] = [];
+    for (let y = height - 1; y >= 0; y -= 1) {
+      display.push(...cells.slice(y * 10, y * 10 + 10));
+    }
+    return display;
+  }
+
   function pageStripItems(total: number, current: number): PageStripItem[] {
-    if (total <= 19) {
+    const nearbyPageRadius = 10;
+    if (total <= nearbyPageRadius * 2 + 5) {
       return Array.from({ length: total }, (_, index) => ({
         kind: 'page' as const,
         index
@@ -401,8 +505,8 @@
     }
     const indices = new Set<number>([0, total - 1]);
     for (
-      let index = Math.max(0, current - 7);
-      index <= Math.min(total - 1, current + 7);
+      let index = Math.max(0, current - nearbyPageRadius);
+      index <= Math.min(total - 1, current + nearbyPageRadius);
       index += 1
     ) {
       indices.add(index);
@@ -464,6 +568,10 @@
 <svelte:head>
   <title>{label('ctkDrawer')} · Clearra</title>
   <meta name="description" content="Multi-page Fumen and CTK field editor" />
+  {#if viewerMode}
+    <meta property="og:title" content="Clearra CTK Viewer" />
+    <meta property="og:description" content="Open this Fumen or CTK3 document in Clearra." />
+  {/if}
 </svelte:head>
 
 <WorkspaceShell
@@ -507,22 +615,6 @@
       </div>
     </header>
 
-    <div class="page-strip" aria-label={label('ctkPages')}>
-      {#each pageStrip as item}
-        {#if item.kind === 'gap'}
-          <span class="page-gap" aria-hidden="true">…</span>
-        {:else}
-          <button
-            type="button"
-            class:active={item.index === pageIndex}
-            aria-current={item.index === pageIndex ? 'page' : undefined}
-            disabled={pageLoading}
-            on:click={() => selectPage(item.index)}
-          >{item.index + 1}</button>
-        {/if}
-      {/each}
-    </div>
-
     <CtkColorBoardEditor
       height={currentHeight}
       cells={currentPage.cells}
@@ -535,6 +627,40 @@
       on:clear={clearCurrentField}
       on:operation={(event) => updateOperation(event.detail)}
     />
+
+    <div class="page-strip" aria-label={label('ctkPages')}>
+      {#each pageStrip as item}
+        {#if item.kind === 'gap'}
+          <span class="page-gap" aria-hidden="true">…</span>
+        {:else}
+          {@const preview = previewPages.get(item.index)}
+          <button
+            type="button"
+            class="page-preview"
+            class:active={item.index === pageIndex}
+            aria-current={item.index === pageIndex ? 'page' : undefined}
+            disabled={pageLoading}
+            title={`${label('ctkPage')} ${item.index + 1}`}
+            on:click={() => selectPage(item.index)}
+          >
+            <span class="page-number">{item.index + 1}</span>
+            {#if preview}
+              <span
+                class="page-mini-board"
+                style={`--preview-height: ${Math.max(1, preview.height)}`}
+                aria-hidden="true"
+              >
+                {#each previewCells(preview) as cell}
+                  <span class={`preview-cell piece-${cell ?? 'empty'}`}></span>
+                {/each}
+              </span>
+            {:else}
+              <span class="page-preview-placeholder" aria-hidden="true"></span>
+            {/if}
+          </button>
+        {/if}
+      {/each}
+    </div>
   </section>
 
   <section slot="controls" class="drawer-controls">
@@ -555,7 +681,13 @@
       {#if importSummary}
         <p class="import-summary">{importSummary}</p>
       {/if}
-      <button class="command-button" type="button" disabled={!hasImport || importLoading} aria-busy={importLoading} on:click={importDocument}>
+      <button
+        class="command-button"
+        type="button"
+        disabled={!hasImport || importLoading}
+        aria-busy={importLoading}
+        on:click={() => void importDocument()}
+      >
         {#if importLoading}
           <span class="spinner"><LoaderCircle size={15} /></span>
         {:else}
@@ -662,39 +794,82 @@
   }
   button:disabled { cursor: default; opacity: .4; }
   .page-strip {
-    display: flex;
-    gap: 5px;
-    margin-bottom: 14px;
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    margin-top: 14px;
     max-width: 100%;
-    overflow-x: auto;
+    min-width: 0;
     padding: 2px;
   }
-  .page-strip button {
+  .page-preview {
+    align-items: center;
     background: #f3f5f4;
     border: 1px solid #cbd3ce;
-    border-radius: 4px;
+    border-radius: 5px;
     color: #596560;
     cursor: pointer;
-    flex: 0 0 auto;
+    display: grid;
     font: inherit;
-    font-size: 10px;
-    height: 28px;
-    width: 30px;
+    gap: 5px;
+    justify-items: center;
+    min-height: 82px;
+    min-width: 0;
+    padding: 6px;
+    width: 100%;
   }
-  .page-strip button.active {
-    background: #16877d;
+  .page-preview.active {
+    background: #e8f5f3;
     border-color: #0f766e;
-    color: #fff;
+    box-shadow: inset 0 0 0 1px #0f766e;
+    color: #0f665f;
+  }
+  .page-number {
+    font-size: 10px;
+    font-weight: 750;
+    line-height: 1;
+  }
+  .page-mini-board {
+    background: #172320;
+    border: 2px solid #172320;
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    grid-template-rows: repeat(var(--preview-height), minmax(0, 1fr));
+    max-height: 72px;
+    overflow: hidden;
+    width: min(100%, calc(72px * 10 / var(--preview-height)));
+    aspect-ratio: 10 / var(--preview-height);
+  }
+  .preview-cell {
+    background: #172320;
+    min-height: 0;
+    min-width: 0;
+  }
+  .preview-cell.piece-I { background: #55cbd3; }
+  .preview-cell.piece-O { background: #f1ce47; }
+  .preview-cell.piece-T { background: #b66bd1; }
+  .preview-cell.piece-S { background: #64c67a; }
+  .preview-cell.piece-Z { background: #ec6969; }
+  .preview-cell.piece-J { background: #5c86df; }
+  .preview-cell.piece-L { background: #e89a46; }
+  .preview-cell.piece-G { background: #858d89; }
+  .page-preview-placeholder {
+    animation: preview-pulse 1.2s ease-in-out infinite alternate;
+    background: #dde3e0;
+    height: 42px;
+    width: min(100%, 76px);
   }
   .page-gap {
     align-items: center;
     color: #77827d;
-    display: inline-flex;
-    flex: 0 0 auto;
+    display: flex;
     font-size: 12px;
-    height: 28px;
     justify-content: center;
-    width: 18px;
+    min-height: 82px;
+  }
+  @keyframes preview-pulse {
+    from { opacity: .45; }
+    to { opacity: .9; }
   }
   .drawer-controls { display: grid; gap: 20px; }
   .control-section {

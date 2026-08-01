@@ -21,10 +21,11 @@ case "$BINARY" in
     /home/*/.cache/Clearra/build/cargo-target/*/clearra-pc-artifact) ;;
     *) printf 'unsafe WSL runtime artifact: %s\n' "$BINARY" >&2; exit 2 ;;
 esac
-case "$REPORT_ROOT" in
-    /home/*/.local/state/Clearra/reports/runtime-environments/*) ;;
-    *) printf 'unsafe WSL runtime report root: %s\n' "$REPORT_ROOT" >&2; exit 2 ;;
-esac
+EXPECTED_REPORT_ROOT="$HOME/.local/state/Clearra/reports/runtime-environments/latest"
+[[ "$REPORT_ROOT" == "$EXPECTED_REPORT_ROOT" ]] || {
+    printf 'unsafe WSL runtime report root: %s\n' "$REPORT_ROOT" >&2
+    exit 2
+}
 case "$BACKEND" in auto | cpu | gpu | hybrid) ;; *) exit 2 ;; esac
 [[ "$GPU_DEVICE" == auto || "$GPU_DEVICE" =~ ^[0-9]+$ ]] || exit 2
 [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] || exit 2
@@ -32,6 +33,7 @@ case "$GPU_INVENTORY_MODE" in query | skip) ;; *) exit 2 ;; esac
 case "$PROFILE_MODE" in profile | no-profile) ;; *) exit 2 ;; esac
 [[ -x "$BINARY" ]] || { printf 'WSL runtime artifact is not executable: %s\n' "$BINARY" >&2; exit 2; }
 
+rm -rf -- "$REPORT_ROOT"
 mkdir -p "$REPORT_ROOT"
 REPORT_FS="$(stat -f -c %T "$REPORT_ROOT")"
 case "$REPORT_FS" in

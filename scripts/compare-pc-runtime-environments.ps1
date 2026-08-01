@@ -33,10 +33,14 @@ $Root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'lib/clearra-application-control.ps1')
 
 $runId = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
-$outputRoot = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    Resolve-ClearraReportPath (Join-Path 'runtime-environments' $runId) $Root
+$usesDefaultOutput = [string]::IsNullOrWhiteSpace($OutputDirectory)
+$outputRoot = if ($usesDefaultOutput) {
+    Resolve-ClearraReportPath (Join-Path 'runtime-environments' 'latest') $Root
 } else {
     Resolve-ClearraReportPath $OutputDirectory $Root
+}
+if ($usesDefaultOutput -and (Test-Path -LiteralPath $outputRoot)) {
+    Remove-Item -LiteralPath $outputRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $selectedEnvironments = if ($Environment -eq 'all') {
@@ -284,7 +288,7 @@ function Invoke-WslEnvironment {
     }
     & wsl.exe -d $Distribution -- test -x $binary
     if ($LASTEXITCODE -ne 0) { throw "Prepared WSL artifact executable is missing: $binary" }
-    $linuxReportRoot = "$linuxHome/.local/state/Clearra/reports/runtime-environments/$runId"
+    $linuxReportRoot = "$linuxHome/.local/state/Clearra/reports/runtime-environments/latest"
     $batchScript = "$($sync.workspace)/scripts/tools/wsl-pc-runtime-batch.sh"
     $batch = Invoke-CapturedCommand 'wsl.exe' @(
         '-d', $Distribution, '--', 'bash', $batchScript,

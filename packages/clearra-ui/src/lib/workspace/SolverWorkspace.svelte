@@ -24,6 +24,7 @@
     clearCompletedRows,
     createDefaultWorkspaceRequest,
     defaultWorkerCount,
+    normalizeWorkspaceRequest,
     trimBoardMask,
     workspaceRequestForDesktop,
     workspaceValidationCodes,
@@ -94,7 +95,7 @@
   }
 
   function updateRequest(next: SolverWorkspaceRequest) {
-    const automaticRequest = withAutomaticBackend(next);
+    const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(next));
     const workersChanged = automaticRequest.workers !== request.workers;
     const tablebaseChanged = automaticRequest.tablebaseEnabled !== request.tablebaseEnabled;
     request = automaticRequest;
@@ -220,6 +221,14 @@
     on:cancel={cancel}
     on:run={run}
   >
+  <svelte:fragment slot="action-warning">
+    {#if request.scoreMode === 'tiling'}
+      <div class="tiling-warning" role="status">
+        <TriangleAlert size={16} strokeWidth={1.9} />
+        <span>{label('tilingOnlyWarning')}</span>
+      </div>
+    {/if}
+  </svelte:fragment>
   <svelte:fragment slot="notice">
     {#if clearedRowsWarning > 0}
       <div class="field-warning" role="status" aria-live="polite">
@@ -240,7 +249,15 @@
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
     on:change={(event) => updateRequest(event.detail)}
   />
-  <ResultWorkspace slot="result" view={runtimeView} {language} {elapsedMs} targetLines={resultTargetLines} />
+  <ResultWorkspace
+    slot="result"
+    view={runtimeView}
+    {language}
+    {elapsedMs}
+    targetLines={resultTargetLines}
+    tilingOnlyRequested={request.scoreMode === 'tiling'}
+    loadSolutionPage={(offset, limit) => workerController.loadSolutionPage(offset, limit)}
+  />
 </WorkspaceShell>
 
 <style>
@@ -256,6 +273,16 @@
     gap: 8px;
     margin: 0 0 10px;
     padding: 9px 11px;
+  }
+
+  .tiling-warning {
+    align-items: center;
+    color: #76530a;
+    display: flex;
+    font-size: 11px;
+    font-weight: 700;
+    gap: 7px;
+    max-width: 520px;
   }
 
 </style>

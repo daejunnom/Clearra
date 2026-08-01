@@ -15,11 +15,14 @@ use clearra_coverage::pattern::{
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
 use clearra_replay::ExactScoringExecutionBatch;
-use clearra_supply::hold_automaton::HoldAutomatonState;
+use clearra_supply::{
+    hold_automaton::HoldAutomatonState, pattern_universe::PackingPatternMembershipKind,
+};
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
     CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage, SolutionCoverage,
+    TilingSolutionPageStore,
 };
 
 use super::{
@@ -181,6 +184,7 @@ pub(super) fn merge_symmetry_results(
         ));
     }
     let mut primary = results.remove(0);
+    let tiling_only = primary.field("build_probability_aggregation") == Some("tiling");
     let pattern_count = primary.usize_field("coverage_pattern_count").ok_or(
         WasmExactSearchError::InvalidProblem("wasm_build_probability_pattern_count_missing"),
     )?;
@@ -270,6 +274,18 @@ pub(super) fn merge_symmetry_results(
     let all_results = core::iter::once(&primary)
         .chain(results.iter())
         .collect::<Vec<_>>();
+    let page_stores = all_results
+        .iter()
+        .filter_map(|result| result.tiling_solution_page_store().cloned())
+        .collect::<Vec<_>>();
+    let merged_page_store = if page_stores.len() == all_results.len() {
+        Some(
+            TilingSolutionPageStore::merge_canonical_stores(page_stores)
+                .map_err(WasmExactSearchError::InvalidProblem)?,
+        )
+    } else {
+        None
+    };
     let merged_solution_coverages = merge_board64_solution_coverages(&all_results, pattern_count)?;
     let merged_normalized_solution_coverages =
         merge_normalized_solution_coverages(&all_results, pattern_count)?;
@@ -284,13 +300,21 @@ pub(super) fn merge_symmetry_results(
     let normalized_keys_complete = all_results.iter().all(|result| {
         result.usize_field("unique_solution_count") == Some(result.normalized_solution_keys().len())
     });
-    let mut merged_identities = all_results
-        .iter()
-        .flat_map(|result| result.normalized_solution_identities().iter().copied())
-        .collect::<Vec<_>>();
-    merged_identities.sort_unstable();
-    merged_identities.dedup();
-    let mut merged_solution_keys = if normalized_identities_complete {
+    let merged_identities = if let Some(store) = &merged_page_store {
+        store
+            .page_identities(0, 100)
+            .map_err(WasmExactSearchError::InvalidProblem)?
+    } else {
+        let mut identities = all_results
+            .iter()
+            .flat_map(|result| result.normalized_solution_identities().iter().copied())
+            .collect::<Vec<_>>();
+        identities.sort_unstable();
+        identities.dedup();
+        identities
+    };
+    let mut merged_solution_keys = if merged_page_store.is_some() || normalized_identities_complete
+    {
         merged_identities
             .iter()
             .copied()
@@ -307,8 +331,11 @@ pub(super) fn merge_symmetry_results(
     };
     merged_solution_keys.sort_unstable();
     merged_solution_keys.dedup();
-    let normalized_solutions_complete = normalized_identities_complete || normalized_keys_complete;
-    let merged_solution_hash = if normalized_identities_complete {
+    let normalized_solutions_complete =
+        merged_page_store.is_some() || normalized_identities_complete || normalized_keys_complete;
+    let merged_solution_hash = if let Some(store) = &merged_page_store {
+        store.normalized_hash().to_owned()
+    } else if normalized_identities_complete {
         normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
             &merged_identities,
         )
@@ -337,7 +364,9 @@ pub(super) fn merge_symmetry_results(
         ),
         field(
             "coverage_basis",
-            if mirror_included {
+            if tiling_only {
+                "not-evaluated-tiling-only"
+            } else if mirror_included {
                 "original-or-horizontal-mirror-pattern-union"
             } else {
                 "original-field-patterns"
@@ -346,12 +375,20 @@ pub(super) fn merge_symmetry_results(
         field("original_covered_pattern_count", original_covered),
         field(
             "original_coverage_probability",
-            probability_text(original_probability),
+            if tiling_only {
+                "not-calculated".to_owned()
+            } else {
+                probability_text(original_probability)
+            },
         ),
         field("mirror_covered_pattern_count", mirrored_covered),
         field(
             "mirror_coverage_probability",
-            probability_text(mirrored_probability),
+            if tiling_only {
+                "not-calculated".to_owned()
+            } else {
+                probability_text(mirrored_probability)
+            },
         ),
         field(
             "mirror_union_added_pattern_count",
@@ -360,17 +397,30 @@ pub(super) fn merge_symmetry_results(
         field("mirror_unique_solution_count", mirror_solution_count),
         field("mirror_packing_candidate_count", mirror_candidate_count),
         field("mirror_normalized_solution_set_hash", mirror_solution_hash),
-        field("covered_pattern_count", union_covered),
-        field("coverage_probability", probability_text(union_probability)),
+        field(
+            "covered_pattern_count",
+            if tiling_only { 0 } else { union_covered },
+        ),
+        field(
+            "coverage_probability",
+            if tiling_only {
+                "not-calculated".to_owned()
+            } else {
+                probability_text(union_probability)
+            },
+        ),
         field("probability_complete", probability_complete),
         field("count_complete", count_complete),
         field("resource_truncated", resource_truncated),
         field("resource_truncation_reason", resource_reason),
         field(
             "objective_search_complete",
-            probability_complete && count_complete,
+            count_complete && (tiling_only || probability_complete),
         ),
-        field("objective_complete", probability_complete && count_complete),
+        field(
+            "objective_complete",
+            count_complete && (tiling_only || probability_complete),
+        ),
         field(
             "packing_candidate_count",
             sum_usize_field(&all_results, "packing_candidate_count"),
@@ -429,7 +479,12 @@ pub(super) fn merge_symmetry_results(
         ),
     ];
     if normalized_solutions_complete {
-        replacements.push(field("unique_solution_count", merged_solution_keys.len()));
+        replacements.push(field(
+            "unique_solution_count",
+            merged_page_store
+                .as_ref()
+                .map_or(merged_solution_keys.len(), |store| store.len()),
+        ));
         replacements.push(field("normalized_solution_set_hash", merged_solution_hash));
     }
 
@@ -464,7 +519,7 @@ pub(super) fn merge_symmetry_results(
     } else {
         merged
     };
-    Ok(if normalized_identities_complete {
+    let mut merged = if merged_page_store.is_some() || normalized_identities_complete {
         merged
             .with_normalized_solution_keys(merged_solution_keys)
             .with_normalized_solution_identities(merged_identities)
@@ -472,7 +527,11 @@ pub(super) fn merge_symmetry_results(
         merged.with_normalized_solution_keys(merged_solution_keys)
     } else {
         merged
-    })
+    };
+    if let Some(store) = merged_page_store {
+        merged = merged.with_tiling_solution_page_store(store);
+    }
+    Ok(merged)
 }
 
 pub(super) fn normalized_string_solution_set_hash(keys: &[String]) -> String {
@@ -594,6 +653,7 @@ struct CompactBuildProbabilitySharedCatalogKey {
 pub(super) struct CompactBuildProbabilitySharedCatalog {
     key: CompactBuildProbabilitySharedCatalogKey,
     targets: SharedTargetGroups,
+    supply_projection_complete: bool,
 }
 
 impl CompactBuildProbabilitySession {
@@ -716,9 +776,13 @@ impl CompactBuildProbabilitySession {
                         "wasm_supply_has_no_reachable_piece_multiset",
                     ));
                 }
+                let supply_projection_complete = universe.complete()
+                    || family.membership_kind()
+                        == PackingPatternMembershipKind::ExactSymbolicStandardBag;
                 CompactBuildProbabilitySharedCatalog {
                     key: shared_key,
                     targets: SharedTargetGroups::compile(universe, &family, !symbolic)?,
+                    supply_projection_complete,
                 }
             }
         };
@@ -840,6 +904,15 @@ impl CompactBuildProbabilitySession {
         self.candidate_count += 1;
         self.candidate_digest =
             super::mix_digest(self.candidate_digest, candidate.identity.bucket_hash());
+        if self.aggregation.is_tiling_only() {
+            self.buildable_tilings.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_storage_unavailable",
+                )
+            })?;
+            self.buildable_tilings.insert(candidate.identity);
+            return Ok(());
+        }
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
         )?;
@@ -1076,12 +1149,14 @@ impl CompactBuildProbabilitySession {
                 "wasm_build_probability_verifier_already_finished",
             ));
         }
-        if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
-            self.covered_patterns.union_with(&symbolic).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_build_probability_symbolic_coverage_mismatch",
-                )
-            })?;
+        if !self.aggregation.is_tiling_only() {
+            if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
+                self.covered_patterns.union_with(&symbolic).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_symbolic_coverage_mismatch",
+                    )
+                })?;
+            }
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested();
@@ -1218,12 +1293,14 @@ impl CompactBuildProbabilitySession {
     }
 
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
-        if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
-            self.covered_patterns.union_with(&symbolic).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_build_probability_symbolic_coverage_mismatch",
-                )
-            })?;
+        if !self.aggregation.is_tiling_only() {
+            if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
+                self.covered_patterns.union_with(&symbolic).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_symbolic_coverage_mismatch",
+                    )
+                })?;
+            }
         }
         self.finished = true;
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
@@ -1305,20 +1382,29 @@ impl CompactBuildProbabilitySession {
         &self,
         scoring_batch: Option<ExactScoringExecutionBatch>,
     ) -> CoreExecutionResult {
+        let tiling_only = self.aggregation.is_tiling_only();
         let universe = self
             .problem
             .piece_source()
             .materialized_universe()
             .expect("build probability requires a materialized supply");
-        let probability = universe
-            .weights()
-            .covered_weight(&self.covered_patterns)
-            .expect("build probability coverage belongs to its supply universe")
-            .get();
-        let probability_complete = universe.complete() && self.truncated_reason.is_none();
-        let count_complete = self.count_complete && self.truncated_reason.is_none();
-        let build_variant_count_exact = self.problem.count_policy()
-            == clearra_pc_graph::request::PcCountPolicy::CountAll
+        let probability = if tiling_only {
+            "not-calculated".to_owned()
+        } else {
+            universe
+                .weights()
+                .covered_weight(&self.covered_patterns)
+                .expect("build probability coverage belongs to its supply universe")
+                .get()
+                .to_string()
+        };
+        let probability_complete =
+            !tiling_only && universe.complete() && self.truncated_reason.is_none();
+        let count_complete = self.count_complete
+            && self.truncated_reason.is_none()
+            && (!tiling_only || self.shared_supply_catalog.supply_projection_complete);
+        let build_variant_count_exact = !tiling_only
+            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
             && count_complete;
         let execution_constraints = self.problem.objective().execution_constraints();
         let execution_constraint_complete = !execution_constraints.requested()
@@ -1448,12 +1534,23 @@ impl CompactBuildProbabilitySession {
             field("build_variant_count_exact", build_variant_count_exact),
             field(
                 "build_probability_evaluation_basis",
-                "candidate-pattern-existence",
+                if tiling_only {
+                    "geometry-only"
+                } else {
+                    "candidate-pattern-existence"
+                },
             ),
             field("build_path_multiplicity_counted", false),
             field("materialized_pattern_count", universe.pattern_count()),
             field("coverage_pattern_count", universe.pattern_count()),
-            field("covered_pattern_count", self.covered_patterns.count_ones()),
+            field(
+                "covered_pattern_count",
+                if tiling_only {
+                    0
+                } else {
+                    self.covered_patterns.count_ones()
+                },
+            ),
             field("coverage_probability", probability),
             field("probability_complete", probability_complete),
             field("count_complete", count_complete),
@@ -1496,6 +1593,9 @@ impl CompactBuildProbabilitySession {
             ),
             field("objective", "build-probability"),
             field("build_probability_aggregation", self.aggregation.as_str()),
+            field("buildability_verified", !tiling_only),
+            field("coverage_calculated", !tiling_only),
+            field("probability_calculated", !tiling_only),
             field(
                 "spin_profile_requested",
                 self.aggregation
@@ -1520,15 +1620,17 @@ impl CompactBuildProbabilitySession {
             ),
             field(
                 "objective_search_complete",
-                count_complete && probability_complete,
+                count_complete && (tiling_only || probability_complete),
             ),
             field(
                 "objective_complete",
-                count_complete && probability_complete && execution_constraint_complete,
+                count_complete
+                    && (tiling_only || probability_complete)
+                    && execution_constraint_complete,
             ),
             field(
                 "objective_incomplete_reason",
-                if !count_complete || !probability_complete {
+                if !count_complete || (!tiling_only && !probability_complete) {
                     self.truncated_reason
                         .unwrap_or("pattern_universe_incomplete")
                 } else if !execution_constraint_complete {

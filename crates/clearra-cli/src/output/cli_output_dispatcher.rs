@@ -11,6 +11,8 @@ pub struct CliOutput {
     exit_code: ExitCode,
     stdout: String,
     stderr: String,
+    warning_before: String,
+    warning_after: String,
 }
 
 impl CliOutput {
@@ -19,6 +21,8 @@ impl CliOutput {
             exit_code,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            warning_before: String::new(),
+            warning_after: String::new(),
         }
     }
 }
@@ -59,6 +63,13 @@ impl CliOutput {
             | RenderFormat::FumenLike => Self::validation_failed(report),
         }
     }
+
+    pub fn with_surrounding_warning(mut self, warning: impl Into<String>) -> Self {
+        let warning = warning.into();
+        self.warning_before = warning.clone();
+        self.warning_after = warning;
+        self
+    }
 }
 impl CliOutput {
     pub fn exit_code(&self) -> ExitCode {
@@ -74,6 +85,14 @@ impl CliOutput {
     pub fn stderr(&self) -> &str {
         &self.stderr
     }
+
+    pub fn warning_before(&self) -> &str {
+        &self.warning_before
+    }
+
+    pub fn warning_after(&self) -> &str {
+        &self.warning_after
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -81,11 +100,17 @@ pub struct CliOutputDispatcher;
 
 impl CliOutputDispatcher {
     pub fn dispatch(output: &CliOutput) -> i32 {
+        if !output.warning_before().is_empty() {
+            eprintln!("{}", output.warning_before());
+        }
         if !output.stdout().is_empty() {
             println!("{}", output.stdout());
         }
         if !output.stderr().is_empty() {
             eprintln!("{}", output.stderr());
+        }
+        if !output.warning_after().is_empty() {
+            eprintln!("{}", output.warning_after());
         }
         output.exit_code().code()
     }

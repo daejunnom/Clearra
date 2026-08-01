@@ -21,6 +21,7 @@
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: tilingOnly = request.scoreMode === 'tiling';
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     dispatch('change', { ...request, ...change });
@@ -87,6 +88,7 @@
       <span>{label('queueKnowledge')}</span>
       <select
         value={request.queueKnowledge}
+        disabled={tilingOnly}
         on:change={(event) => patch({
           queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['queueKnowledge']
         })}
@@ -103,6 +105,7 @@
       <label class="workspace-field">
         <span>{label('scoreMode')}</span>
         <select value={request.scoreMode} on:change={(event) => patch({ scoreMode: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreMode'] })}>
+          <option value="tiling">{label('tilingOnly')}</option>
           <option value="off">{label('scoreOff')}</option>
           <option value="minimum-cover">{label('minimumSolutions')}</option>
           <option value="summary">{label('scoreSummary')}</option>
@@ -110,7 +113,7 @@
       </label>
       <label class="workspace-field">
         <span>{label('rule')}</span>
-        <select value={request.rule} on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['rule'] })}>
+        <select value={request.rule} disabled={tilingOnly} on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['rule'] })}>
           <option value="srs-plus">SRS+</option>
           <option value="srs">SRS</option>
           <option value="srs-x">SRS-X</option>
@@ -124,7 +127,7 @@
           min="0"
           step="1"
           value={request.initialB2B}
-          disabled={request.scoreMode !== 'summary'}
+          disabled={tilingOnly || request.scoreMode !== 'summary'}
           on:input={(event) => patch({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })}
         />
       </label>
@@ -132,7 +135,7 @@
         <span>{label('scoreProfile')}</span>
         <select
           value={request.scoreProfile}
-          disabled={request.scoreMode !== 'summary'}
+          disabled={tilingOnly || request.scoreMode !== 'summary'}
           on:change={(event) => patch({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreProfile'] })}
         >
           <option value="tetrio">{label('scoreProfileTetrio')}</option>
@@ -144,7 +147,7 @@
         <span>{label('spinProfile')}</span>
         <select
           value={request.spinProfile}
-          disabled={request.scoreMode !== 'summary' && !request.preserveB2B}
+          disabled={tilingOnly || (request.scoreMode !== 'summary' && !request.preserveB2B)}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -162,6 +165,7 @@
           <input
             type="checkbox"
             checked={request.preserveB2B}
+            disabled={tilingOnly}
             on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
           />
           <span class="workspace-switch" aria-hidden="true"></span>
@@ -172,6 +176,7 @@
         <input
           type="checkbox"
           checked={request.solutionProbabilities}
+          disabled={tilingOnly}
           on:change={(event) => patch({ solutionProbabilities: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>
@@ -184,6 +189,7 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
+            disabled={tilingOnly}
             on:change={(event) => patch({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}
@@ -201,6 +207,7 @@
           <input
             type="checkbox"
             checked={request.precomputeBuildDependencies}
+            disabled={tilingOnly}
             on:change={(event) => patch({
               precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
             })}

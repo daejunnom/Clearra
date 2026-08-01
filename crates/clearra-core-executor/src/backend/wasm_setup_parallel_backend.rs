@@ -89,6 +89,16 @@ impl WasmSetupParallelCoordinator {
     pub fn received_conditions(&self) -> usize {
         self.inner.received_conditions()
     }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn execute_native(
+        query: &SetupSearchQuery,
+        worker_count: usize,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        super::wasm_cpu::execute_setup_parallel_native(query, worker_count, control)
+            .map_err(map_error)
+    }
 }
 
 pub struct WasmSetupParallelWorker {

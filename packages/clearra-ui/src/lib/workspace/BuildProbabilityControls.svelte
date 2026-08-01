@@ -21,6 +21,15 @@
   function patch(change: Partial<BuildProbabilityRequest>) {
     dispatch('change', { ...request, ...change });
   }
+
+  function setAggregation(aggregation: BuildProbabilityRequest['aggregation']) {
+    patch({
+      aggregation,
+      preserveB2B: aggregation === 'tiling' ? false : request.preserveB2B,
+      precomputeBuildDependencies:
+        aggregation === 'tiling' ? false : request.precomputeBuildDependencies
+    });
+  }
 </script>
 
 <WorkspaceControlPanel ariaLabel={label('buildProbability')}>
@@ -54,15 +63,20 @@
         <span>{label('scoreMode')}</span>
         <select
           value={request.aggregation}
-          on:change={(event) => patch({ aggregation: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['aggregation'] })}
+          on:change={(event) => setAggregation((event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['aggregation'])}
         >
+          <option value="tiling">{label('tilingOnly')}</option>
           <option value="buildability">{label('buildProbability')}</option>
           <option value="spin">{label('spinSearch')}</option>
         </select>
       </label>
       <label class="workspace-field">
         <span>{label('rule')}</span>
-        <select value={request.rule} on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['rule'] })}>
+        <select
+          value={request.rule}
+          disabled={request.aggregation === 'tiling'}
+          on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['rule'] })}
+        >
           <option value="srs-plus">SRS+</option>
           <option value="srs">SRS</option>
           <option value="srs-x">SRS-X</option>
@@ -73,7 +87,7 @@
         <span>{label('spinProfile')}</span>
         <select
           value={request.spinProfile}
-          disabled={request.aggregation === 'buildability' && !request.preserveB2B}
+          disabled={request.aggregation === 'tiling' || (request.aggregation === 'buildability' && !request.preserveB2B)}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -90,6 +104,7 @@
         <input
           type="checkbox"
           checked={request.preserveB2B}
+          disabled={request.aggregation === 'tiling'}
           on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>
@@ -101,6 +116,7 @@
         <input
           type="checkbox"
           checked={request.precomputeBuildDependencies}
+          disabled={request.aggregation === 'tiling'}
           on:change={(event) => patch({
             precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
           })}

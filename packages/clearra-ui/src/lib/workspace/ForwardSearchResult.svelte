@@ -58,7 +58,7 @@
   let preparationGeneration = 0;
   let preparationFrame: number | null = null;
   let preparationTimer: ReturnType<typeof setTimeout> | null = null;
-  let copyFormat: SolutionCopyFormat = 'fumen';
+  let copyFormat: SolutionCopyFormat = 'ctk';
   $: label = (key: Parameters<typeof workspaceMessage>[1], values: Record<string, string | number> = {}) => workspaceMessage(language, key, values);
   $: outcomes = report?.forward_search_kind === tool ? report.forward_outcomes : [];
   $: resultInitialBoardMask = parseInitialBoard(report?.forward_initial_board_mask, initialBoardMask);

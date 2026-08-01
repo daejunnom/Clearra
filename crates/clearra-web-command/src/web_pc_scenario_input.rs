@@ -1,4 +1,5 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
     SupplyWindowSize,
@@ -62,6 +63,7 @@ impl WebPcScenarioInput {
         execution_policy: PcExecutionPolicy,
         finite_standard_bag_len: Option<usize>,
         rule: RuleProfile,
+        objective: ObjectivePolicy,
     ) -> PcScenarioQuery {
         let mut query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(self.visible_height, self.board_mask),
@@ -74,6 +76,7 @@ impl WebPcScenarioInput {
         .with_hold_piece(self.hold_piece)
         .with_allow_hold(self.allow_hold)
         .with_count_policy(self.count_policy)
+        .with_objective(objective)
         .with_retained_trace_limit(self.retained_trace_limit)
         .with_execution_policy(execution_policy);
         // An occupied initial hold contributes one independently supplied

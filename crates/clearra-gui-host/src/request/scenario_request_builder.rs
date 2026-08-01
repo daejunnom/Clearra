@@ -1,5 +1,5 @@
 use clearra_app::{AppCommand, ScenarioAppCommand};
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{objective::objective_kind::ObjectiveKind, piece::piece_kind::PieceKind};
 use clearra_pc_graph::request::{
     PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy,
     PieceWindow,
@@ -57,12 +57,6 @@ impl ScenarioRequestBuilder {
                 "scenario remaining queue",
             )?)
         };
-        if !form.allow_hold() && form.hold_piece().is_some() {
-            return Err(RequestBuildError::new(
-                RequestBuildErrorCode::ValidationFailed,
-                "GUI scenario cannot use an occupied hold slot when hold is disabled",
-            ));
-        }
         let hold_piece = form
             .hold_piece()
             .map(PieceKind::from_ascii)
@@ -99,6 +93,26 @@ impl ScenarioRequestBuilder {
             form.initial_b2b(),
             base_objective,
         )?;
+        let tiling_only = objective.kind() == ObjectiveKind::Tiling;
+        if !form.allow_hold() && form.hold_piece().is_some() {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "GUI scenario cannot use an occupied hold slot when hold is disabled",
+            ));
+        }
+        if tiling_only
+            && (form.preserve_b2b()
+                || form.solution_probabilities()
+                || form
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || backend.precompute_build_dependencies())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "GUI tiling-only search cannot use BuildUp, coverage, probability, or dependency-analysis options",
+            ));
+        }
         let objective = execution_constraint_objective_policy(
             form.preserve_b2b(),
             form.spin_profile(),
@@ -106,6 +120,9 @@ impl ScenarioRequestBuilder {
         )?;
         if objective.score().requested() {
             count_policy = PcCountPolicy::CountAll;
+        }
+        if tiling_only {
+            count_policy = PcCountPolicy::CountUnique;
         }
         let mut query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(

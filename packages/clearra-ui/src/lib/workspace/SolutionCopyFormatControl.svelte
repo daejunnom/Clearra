@@ -5,13 +5,15 @@
     SolutionCopyFormat,
     SolutionExportPage
   } from './solutionExport';
+  import type { SolutionExportKeySource } from './solutionExportAsync';
 
-  export let value: SolutionCopyFormat = 'fumen';
+  export let value: SolutionCopyFormat = 'ctk';
   export let language: WorkspaceLanguage;
   export let solutionKeys: string[] = [];
   export let loadPages:
     | ((signal?: AbortSignal) => Promise<SolutionExportPage[]> | SolutionExportPage[])
     | null = null;
+  export let keySource: SolutionExportKeySource | null = null;
 
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
@@ -44,6 +46,7 @@
       {language}
       {solutionKeys}
       {loadPages}
+      {keySource}
     />
   </div>
 </div>

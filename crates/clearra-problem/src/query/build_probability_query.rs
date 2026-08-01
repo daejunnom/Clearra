@@ -9,6 +9,7 @@ use clearra_pc_graph::request::PcScenarioQuery;
 pub enum BuildProbabilityAggregation {
     #[default]
     Buildability,
+    TilingOnly,
     SpinSearch {
         profile: SpinProfileSelection,
     },
@@ -22,8 +23,13 @@ impl BuildProbabilityAggregation {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Buildability => "buildability",
+            Self::TilingOnly => "tiling",
             Self::SpinSearch { .. } => "spin",
         }
+    }
+
+    pub const fn is_tiling_only(self) -> bool {
+        matches!(self, Self::TilingOnly)
     }
 
     pub const fn requests_spin_coverage(self) -> bool {
@@ -32,14 +38,14 @@ impl BuildProbabilityAggregation {
 
     pub const fn spin_coverage_target_id(self) -> Option<&'static str> {
         match self {
-            Self::Buildability => None,
+            Self::Buildability | Self::TilingOnly => None,
             Self::SpinSearch { profile } => Some(profile.as_str()),
         }
     }
 
     pub const fn spin_profile(self) -> Option<SpinProfileSelection> {
         match self {
-            Self::Buildability => None,
+            Self::Buildability | Self::TilingOnly => None,
             Self::SpinSearch { profile } => Some(profile),
         }
     }
@@ -173,6 +179,23 @@ impl BuildProbabilityField {
             None
         }
     }
+
+    pub fn compact_final_board_mask(self) -> Option<u64> {
+        let board = self.compact_base_mask()? | self.compact_target_mask()?;
+        let full_row = (1_u64 << STANDARD_PC_BOARD_WIDTH) - 1;
+        let row_width = u32::from(STANDARD_PC_BOARD_WIDTH);
+        let mut compacted = 0_u64;
+        let mut destination_row = 0_u32;
+        for source_row in 0..u32::from(self.height) {
+            let row = (board >> (source_row * row_width)) & full_row;
+            if row == full_row {
+                continue;
+            }
+            compacted |= row << (destination_row * row_width);
+            destination_row += 1;
+        }
+        Some(compacted)
+    }
 }
 
 fn occupied_height(mask: Board256Mask) -> u8 {
@@ -193,6 +216,26 @@ pub enum BuildProbabilityFieldError {
     HeightOutOfRange { height: u8 },
     BaseOutsideField { height: u8 },
     TargetOutsideField { height: u8 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BuildProbabilityField;
+
+    #[test]
+    fn compact_final_board_mask_applies_completed_line_clears() {
+        let field = BuildProbabilityField::from_words(3, [0; 4], [0x0fff_ffff, 0, 0, 0]).unwrap();
+
+        assert_eq!(field.compact_final_board_mask(), Some(0xff));
+    }
+
+    #[test]
+    fn compact_final_board_mask_clears_a_completed_pc_field() {
+        let field =
+            BuildProbabilityField::from_words(4, [0; 4], [0xff_ffff_ffff, 0, 0, 0]).unwrap();
+
+        assert_eq!(field.compact_final_board_mask(), Some(0));
+    }
 }
 
 /// A fixed-field buildability query whose field remains authoritative outside

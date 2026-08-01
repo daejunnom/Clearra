@@ -33,6 +33,7 @@ type VerifierResponse =
       progress: ClearraDistributedVerifierProgress;
     }
   | { type: 'partial'; requestId: number; partial: ArrayBuffer }
+  | { type: 'finished'; requestId: number; partial: ArrayBuffer }
   | { type: 'failed'; requestId?: number; code: string; message: string };
 
 let wasm: ClearraWasmModule | null = null;
@@ -67,12 +68,23 @@ async function handleRequest(request: VerifierRequest) {
     }
     if (!wasm || !initialized) throw new Error('distributed verifier is not initialized');
     if (request.type === 'consume') {
-      const consumed: ClearraDistributedVerifierConsume =
+      let consumed: ClearraDistributedVerifierConsume =
         wasm.distributed_verifier_consume(request.batch);
+      const candidateCount = consumed.candidateCount;
+      while (consumed.hasPendingWork) {
+        if (consumed.partial) {
+          post(
+            { type: 'partial', requestId: request.requestId, partial: consumed.partial },
+            [consumed.partial]
+          );
+        }
+        await yieldToHost();
+        consumed = wasm.distributed_verifier_continue();
+      }
       const response: VerifierResponse = {
         type: 'consumed',
         requestId: request.requestId,
-        candidateCount: consumed.candidateCount,
+        candidateCount,
         partial: consumed.partial,
         progress: wasm.distributed_verifier_progress()
       };
@@ -81,7 +93,7 @@ async function handleRequest(request: VerifierRequest) {
     }
     const partial = wasm.distributed_verifier_finish();
     initialized = false;
-    post({ type: 'partial', requestId: request.requestId, partial }, [partial]);
+    post({ type: 'finished', requestId: request.requestId, partial }, [partial]);
   } catch (error) {
     const failure = verifierFailure(error, wasm);
     initialized = false;
@@ -97,6 +109,10 @@ async function handleRequest(request: VerifierRequest) {
       message: failure.message
     });
   }
+}
+
+function yieldToHost(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function bindLifecycleOwner(ownerId: string) {

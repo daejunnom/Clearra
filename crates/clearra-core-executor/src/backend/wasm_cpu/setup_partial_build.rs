@@ -1,3 +1,6 @@
+//! SRP rationale: this module has one change reason: exact partial-setup BuildUp state
+//! transitions and their compact candidate representation.
+
 use std::hash::{Hash, Hasher};
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};

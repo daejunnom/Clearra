@@ -10,7 +10,7 @@
   } from './solutionExport';
 
   export let page: SolutionExportPage | null = null;
-  export let format: SolutionCopyFormat = 'fumen';
+  export let format: SolutionCopyFormat = 'ctk';
   export let language: WorkspaceLanguage;
 
   let state: 'idle' | 'copied' | 'failed' = 'idle';

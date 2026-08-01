@@ -11,8 +11,9 @@ pub use normalized_tiling_solution::{
     normalized_tiling_solution_key_set_hash_from_sorted_strings,
     normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
     NormalizedTilingSolutionError, NormalizedTilingSolutionKey, NormalizedTilingSolutionSet,
-    PiecePlacementMask, StandardBoard64TilingIdentity, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
-    NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM, STANDARD_BOARD64_TILING_MAX_PLACEMENTS,
+    NormalizedTilingSolutionSetHasher, PiecePlacementMask, StandardBoard64TilingIdentity,
+    NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM, NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
+    STANDARD_BOARD64_TILING_MAX_PLACEMENTS,
 };
 pub use shape_family::{ShapeFamily, ShapeFamilyId, ShapeKey, VisualGroupKey};
 pub use tiling_variant::{

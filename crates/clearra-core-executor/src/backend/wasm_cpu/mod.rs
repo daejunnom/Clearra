@@ -47,6 +47,7 @@ mod setup_partial_build;
 mod setup_representative;
 mod setup_suffix_coverage;
 mod standard_bag_coverage;
+mod tiling_parallel;
 #[cfg(feature = "webgpu-search")]
 mod webgpu_distributed;
 #[cfg(feature = "webgpu-search")]
@@ -69,8 +70,14 @@ pub use pc4_tablebase::{
 };
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use setup_parallel::execute_setup_parallel_native;
 pub(crate) use setup_parallel::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+};
+pub use tiling_parallel::{
+    WasmPackedTilingIdentity, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
+    WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 #[cfg(feature = "webgpu-search")]
 pub use webgpu_distributed::WasmWebGpuCandidateProducer;

@@ -296,8 +296,20 @@ fn merge_results(
     let truncated_reason = branch_outcomes
         .iter()
         .find_map(|branch| branch.truncated_reason);
+    if problem.objective().kind()
+        == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+    {
+        merged.buildable_identities.sort_unstable();
+        merged.buildable_identities.dedup();
+    }
     let representative = merged.representative;
     let (representative_path, representative_pattern_id) = match representative {
+        Some(_)
+            if problem.objective().kind()
+                == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling =>
+        {
+            (Vec::new(), None)
+        }
         Some(representative) => {
             reverify_representative(problem, catalog, targets, representative, control)?
         }

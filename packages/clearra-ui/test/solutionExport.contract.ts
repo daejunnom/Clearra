@@ -6,10 +6,12 @@ import { decodeCtk3 } from '../src/lib/workspace/ctk3Codec';
 import {
   encodeColoredFumenPages,
   encodeSolutionPages,
+  SolutionExportError,
   type SolutionExportPage,
   type SolutionPiece
 } from '../src/lib/workspace/solutionExport';
 import {
+  encodeSolutionKeySourceForClipboard,
   encodeSolutionKeysForClipboard,
   encodeSolutionPagesForClipboard
 } from '../src/lib/workspace/solutionExportAsync';
@@ -32,6 +34,11 @@ const partialPage: SolutionExportPage = {
     { piece: 'I', mask: 0x3c0n }
   ]
 };
+const solutionComment = 'PC probability: 50% | Average score: 1200';
+const commentedPage: SolutionExportPage = {
+  ...partialPage,
+  comment: solutionComment
+};
 const pages = [fullPage, partialPage, partialPage, fullPage];
 
 const expectedFumen = fumenEncoder.encode(
@@ -49,6 +56,11 @@ const actualFumen = encodeColoredFumenPages(pages);
 assert.equal(actualFumen, expectedFumen);
 assert.equal(fumenDecoder.decode(actualFumen).length, pages.length);
 
+const commentedFumen = encodeColoredFumenPages([commentedPage]);
+assert.equal(fumenDecoder.decode(commentedFumen)[0]?.comment, solutionComment);
+const commentedCtk = encodeSolutionPages([commentedPage], 'ctk');
+assert.equal(decodeCtk3(commentedCtk).pages[0]?.comment, solutionComment);
+
 const key =
   'ctk1|initial=0000000000000000|placements=T:000000000000000f';
 const keys = Array<string>(5000).fill(key);
@@ -56,6 +68,86 @@ const bundled = await encodeSolutionKeysForClipboard(keys, 'ctk');
 const decoded = decodeCtk3(bundled);
 assert.equal(decoded.pages.length, keys.length);
 assert.match(bundled, /^ctk3b_/);
+let sourceReadCount = 0;
+let largestSourceRead = 0;
+const streamedPageCount = 5000;
+const streamed = await encodeSolutionKeySourceForClipboard(
+  {
+    keyCount: streamedPageCount,
+    readKeys(_start, count) {
+      sourceReadCount += 1;
+      largestSourceRead = Math.max(largestSourceRead, count);
+      return Array<string>(count).fill(key);
+    }
+  },
+  'ctk'
+);
+assert.equal(decodeCtk3(streamed).pages.length, streamedPageCount);
+assert.equal(sourceReadCount, 8);
+assert.equal(largestSourceRead, 1000);
+
+const commentedFromKey = await encodeSolutionKeySourceForClipboard(
+  {
+    keyCount: 1,
+    readKeys() {
+      return [key];
+    },
+    commentForKey() {
+      return solutionComment;
+    }
+  },
+  'ctk'
+);
+assert.equal(decodeCtk3(commentedFromKey).pages[0]?.comment, solutionComment);
+const commentedFumenFromKey = await encodeSolutionKeySourceForClipboard(
+  {
+    keyCount: 1,
+    readKeys() {
+      return [key];
+    },
+    commentForKey() {
+      return solutionComment;
+    }
+  },
+  'fumen'
+);
+assert.equal(
+  fumenDecoder.decode(commentedFumenFromKey)[0]?.comment,
+  solutionComment
+);
+
+const p7p4TilingCount = 10_117_860;
+let oversizedCtkReads = 0;
+await assert.rejects(
+  encodeSolutionKeySourceForClipboard(
+    {
+      keyCount: p7p4TilingCount,
+      readKeys() {
+        oversizedCtkReads += 1;
+        return [];
+      }
+    },
+    'ctk'
+  ),
+  isClipboardSizeError
+);
+assert.equal(oversizedCtkReads, 0);
+
+let oversizedFumenReads = 0;
+await assert.rejects(
+  encodeSolutionKeySourceForClipboard(
+    {
+      keyCount: p7p4TilingCount,
+      readKeys() {
+        oversizedFumenReads += 1;
+        return [];
+      }
+    },
+    'fumen'
+  ),
+  isClipboardSizeError
+);
+assert.equal(oversizedFumenReads, 0);
 
 const originalWorker = globalThis.Worker;
 let terminatedWorkers = 0;
@@ -144,4 +236,11 @@ function paint(cells: string[], source: bigint, value: string) {
     mask >>= 1n;
     index += 1;
   }
+}
+
+function isClipboardSizeError(error: unknown): boolean {
+  return (
+    error instanceof SolutionExportError &&
+    error.code === 'clipboard-output-too-large'
+  );
 }

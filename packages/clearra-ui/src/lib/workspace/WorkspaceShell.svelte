@@ -61,6 +61,9 @@
       <div class="nav-spacer"></div>
     {/if}
     {#if showActions}
+      {#if $$slots['action-warning']}
+        <div class="action-warning"><slot name="action-warning" /></div>
+      {/if}
       <div class="run-actions">
         <button class="cancel" type="button" disabled={!active} on:click={() => dispatch('cancel')}>
           <Square size={14} fill="currentColor" />{cancelLabel}
@@ -103,6 +106,7 @@
   .dimension-field input { background: #fff; border: 1px solid #cbd3ce; border-radius: 5px; color: #26322e; font-size: 13px; height: 38px; padding: 0 10px; width: 130px; }
   .dimension-field input:focus { border-color: #16877d; box-shadow: 0 0 0 3px #16877d1f; outline: 0; }
   .run-actions { display: flex; gap: 8px; }
+  .action-warning { min-width: 0; }
   .run-actions button { align-items: center; border-radius: 5px; cursor: pointer; display: inline-flex; font-size: 12px; font-weight: 750; gap: 7px; height: 38px; padding: 0 15px; }
   .run-actions button:disabled { cursor: default; opacity: .4; }
   .run { background: #16877d; border: 1px solid #0e746b; color: #fff; }
@@ -133,7 +137,8 @@
     .workspace-nav { align-items: stretch; flex-wrap: wrap; padding: 16px 16px 2px; }
     .dimension-field { flex: 1 1 100%; }
     .dimension-field input { width: 100%; }
-    .run-actions { display: grid; flex: 1 1 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .run-actions { display: grid; flex: 1 1 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); order: 2; }
+    .action-warning { flex: 1 1 100%; order: 3; }
     .run-actions button { justify-content: center; min-width: 0; padding: 0 11px; width: 100%; }
     .workspace-band { padding-left: 16px; padding-right: 16px; }
     .workspace-grid { border-left: 0; border-radius: 0; border-right: 0; margin-left: -16px; margin-right: -16px; padding: 18px 16px; }

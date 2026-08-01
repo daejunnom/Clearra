@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: the versioned CTK3 wire-format encode and decode contract.
 import {
   canonicalizeCtkOperation,
   ctkOperationRotations,

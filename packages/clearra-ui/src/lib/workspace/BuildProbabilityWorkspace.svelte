@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { TriangleAlert } from '@lucide/svelte';
   import { onDestroy, onMount, tick } from 'svelte';
 
   import { updateWasmCommandText, wasmWorkerState, WasmTerminalWorkerController } from '../wasm';
@@ -163,6 +164,14 @@
     on:cancel={cancel}
     on:run={run}
   >
+  <svelte:fragment slot="action-warning">
+    {#if request.aggregation === 'tiling'}
+      <div class="tiling-warning" role="status">
+        <TriangleAlert size={16} strokeWidth={1.9} />
+        <span>{label('tilingOnlyWarning')}</span>
+      </div>
+    {/if}
+  </svelte:fragment>
   <svelte:fragment slot="notice">
     {#if continuationApplied}
       <p class="continuation-notice" aria-live="polite">{label('nextBuildBaseApplied')}</p>
@@ -191,4 +200,5 @@
 
 <style>
   .continuation-notice { background: #e8f3ef; border: 1px solid #c6ddd5; border-radius: 5px; color: #155d55; font-size: 12px; font-weight: 700; margin: 0 0 10px; padding: 10px 12px; }
+  .tiling-warning { align-items: center; color: #9a4d35; display: flex; font-size: 11px; font-weight: 700; gap: 7px; min-width: 0; }
 </style>

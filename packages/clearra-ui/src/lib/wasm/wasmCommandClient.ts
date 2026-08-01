@@ -165,6 +165,14 @@ export type ClearraSolutionProbability = {
   probability_complete: boolean;
 };
 
+export type ClearraSolutionAverageScore = {
+  solution_key: string;
+  average_score: string;
+  covered_pattern_count: number;
+  pattern_count: number;
+  score_complete: boolean;
+};
+
 export type ClearraSetupCandidate = {
   setup_id: string;
   board_mask: string;
@@ -220,8 +228,12 @@ export type ClearraWasmSearchReport = {
   normalized_solution_set_hash: string;
   normalized_solution_keys: string[];
   solution_probabilities: ClearraSolutionProbability[];
+  solution_average_scores: ClearraSolutionAverageScore[];
   build_variant_count: number;
   build_variant_count_exact: string;
+  buildability_verified: boolean;
+  coverage_calculated: boolean;
+  probability_calculated: boolean;
   materialized_pattern_count: number;
   covered_pattern_count: number;
   coverage_probability: string;
@@ -303,6 +315,20 @@ export type ClearraWasmWorkerEvent = ClearraWasmWorkerEventBase &
       }
   );
 
+export type ClearraSolutionPageWorkerEvent =
+  | {
+      type: 'solution_page';
+      request_id: number;
+      offset: number;
+      total: number;
+      keys: string[];
+    }
+  | {
+      type: 'solution_page_failed';
+      request_id: number;
+      message: string;
+    };
+
 export function buildWasmCommandRequest(
   input: Partial<ClearraWasmCommandRequest>
 ): ClearraWasmCommandRequest {
@@ -355,4 +381,26 @@ export function postPrewarmRuntime(
 
 export function postCancelJob(worker: Worker, jobId?: number) {
   worker.postMessage(jobId === undefined ? { type: 'cancel_job' } : { type: 'cancel_job', jobId });
+}
+
+export function postLoadSolutionPage(
+  worker: Worker,
+  requestId: number,
+  offset: number,
+  limit: number
+) {
+  worker.postMessage({
+    type: 'load_solution_page',
+    requestId,
+    offset,
+    limit
+  });
+}
+
+export function isSolutionPageWorkerEvent(
+  value: unknown
+): value is ClearraSolutionPageWorkerEvent {
+  if (!value || typeof value !== 'object') return false;
+  const type = (value as { type?: unknown }).type;
+  return type === 'solution_page' || type === 'solution_page_failed';
 }

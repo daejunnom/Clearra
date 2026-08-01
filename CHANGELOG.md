@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-01
+
+- Added Clearrabot with native Clearra command execution, bounded per-session
+  worker allocation, search timeouts, CTK3/Fumen detection, standalone GIF
+  rendering, and direct or attachment-based viewer links.
+- Added an explicit tiling-only objective across CLI, browser, desktop, and
+  bot surfaces, including incompatible-option validation and a clear warning
+  that geometric tilings may not be buildable.
+- Added a compact paged tiling-solution store and tiling-only root workers so
+  large result sets can be merged, paged, rendered, and exported without
+  routing every candidate through BuildUp or retaining expanded wire records.
+- Improved distributed WASM execution with bounded segmented results,
+  fail-operational worker retries, terminal resource cleanup, and exact
+  canonical merging that remains stable across worker completion order.
+- Improved large CTK3/Fumen export and document loading, browser viewer query
+  handling, lazy solution galleries, and user-facing progress reporting.
+- Reused external build caches and overwrite-in-place transient artifact slots
+  to prevent repeated builds and runtime comparisons from accumulating large
+  local histories.
+
 ## 0.4.0 - 2026-07-31
 
 - Added the compact, lossless CTK3 field-document format, CTK workspace,

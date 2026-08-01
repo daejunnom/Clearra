@@ -15,7 +15,7 @@ export type BuildProbabilityRequest = {
   targetMask: bigint;
   queue: string;
   holdEnabled: boolean;
-  aggregation: 'buildability' | 'spin';
+  aggregation: 'buildability' | 'tiling' | 'spin';
   rule: RuleProfile;
   spinProfile: SpinProfile;
   preserveB2B: boolean;
@@ -94,17 +94,21 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
       parsedQueue?.source ?? request.queue
     );
   }
-  tokens.push('--aggregate', request.aggregation);
-  tokens.push('--rule', request.rule);
-  if (request.aggregation === 'spin' || request.preserveB2B) {
-    tokens.push('--spin-profile', request.spinProfile);
+  if (request.aggregation === 'tiling') {
+    tokens.push('--tiling-only');
+  } else {
+    tokens.push('--aggregate', request.aggregation);
+    tokens.push('--rule', request.rule);
+    if (request.aggregation === 'spin' || request.preserveB2B) {
+      tokens.push('--spin-profile', request.spinProfile);
+    }
+    if (request.preserveB2B) tokens.push('--preserve-b2b');
+    tokens.push(
+      request.precomputeBuildDependencies
+        ? '--build-dependency-dag'
+        : '--no-build-dependency-dag'
+    );
   }
-  if (request.preserveB2B) tokens.push('--preserve-b2b');
-  tokens.push(
-    request.precomputeBuildDependencies
-      ? '--build-dependency-dag'
-      : '--no-build-dependency-dag'
-  );
   tokens.push(
     mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
   );

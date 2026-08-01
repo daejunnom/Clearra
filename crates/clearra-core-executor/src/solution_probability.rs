@@ -65,6 +65,53 @@ pub struct SolutionProbabilityReport {
     probability_complete: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SolutionAverageScoreReport {
+    solution_key: String,
+    average_score: String,
+    covered_pattern_count: usize,
+    pattern_count: usize,
+    score_complete: bool,
+}
+
+impl SolutionAverageScoreReport {
+    pub fn new(
+        solution_key: impl Into<String>,
+        average_score: impl Into<String>,
+        covered_pattern_count: usize,
+        pattern_count: usize,
+        score_complete: bool,
+    ) -> Self {
+        Self {
+            solution_key: solution_key.into(),
+            average_score: average_score.into(),
+            covered_pattern_count,
+            pattern_count,
+            score_complete,
+        }
+    }
+
+    pub fn solution_key(&self) -> &str {
+        &self.solution_key
+    }
+
+    pub fn average_score(&self) -> &str {
+        &self.average_score
+    }
+
+    pub const fn covered_pattern_count(&self) -> usize {
+        self.covered_pattern_count
+    }
+
+    pub const fn pattern_count(&self) -> usize {
+        self.pattern_count
+    }
+
+    pub const fn score_complete(&self) -> bool {
+        self.score_complete
+    }
+}
+
 impl SolutionProbabilityReport {
     pub fn solution_key(&self) -> &str {
         &self.solution_key

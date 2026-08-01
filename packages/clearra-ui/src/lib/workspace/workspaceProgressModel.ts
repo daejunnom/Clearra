@@ -2,7 +2,7 @@ import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
 import type { WorkspaceMessageKey } from './workspaceI18n';
 import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
-export type WorkspaceProgressProfile = 'pc' | 'setup' | 'build' | 'damage' | 'spin';
+export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin';
 export type WorkspaceProgressStageStatus = 'pending' | 'running' | 'complete' | 'stopped';
 
 export type WorkspaceProgressStage = {
@@ -61,6 +61,14 @@ const PROFILE_STAGES: Record<WorkspaceProgressProfile, StageDefinition[]> = {
     {
       id: 'verify',
       labelKey: 'progressStageBuildVerify'
+    },
+    COMMON_AGGREGATE
+  ],
+  tiling: [
+    COMMON_PREPARE,
+    {
+      id: 'geometry',
+      labelKey: 'progressStageGeometry'
     },
     COMMON_AGGREGATE
   ],
@@ -174,32 +182,39 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   const producerDone =
     telemetry.producer_complete || phase === 'draining' || phase === 'merging';
   const predictedCandidates = predictedCandidateTotal(telemetry);
-  const finalGeometryPass =
-    telemetry.pass_count <= 1 ||
-    telemetry.pass_index + 1 >= telemetry.pass_count;
-  const geometryCompiled =
-    producerDone ||
-    (finalGeometryPass &&
-      (telemetry.geometry_family_count !== null ||
-        (telemetry.pass_count <= 1 && telemetry.candidates_emitted > 0)));
+  const candidateGenerationStarted =
+    telemetry.candidates_emitted > 0 || predictedCandidates !== null;
+  const verificationStarted =
+    verify !== undefined &&
+    (telemetry.candidates_verified > 0 ||
+      telemetry.coverage_checks > 0 ||
+      producerDone);
 
   if (geometry) {
     geometry.status =
-      geometryCompiled || producerDone
+      producerDone || verificationStarted
         ? 'complete'
         : phase === 'searching'
           ? 'running'
           : 'pending';
-    if (telemetry.geometry_family_count !== null) {
+    if (candidateGenerationStarted) {
       applyMetric(
         geometry,
-        telemetry.geometry_family_count,
-        telemetry.geometry_family_count
+        telemetry.candidates_emitted,
+        predictedCandidates
       );
     } else {
       applyMetric(geometry, telemetry.geometry_nodes, null);
     }
     addMetric(geometry, 'progressMetricNodes', telemetry.geometry_nodes);
+    if (candidateGenerationStarted) {
+      addMetric(
+        geometry,
+        'progressMetricCandidates',
+        telemetry.candidates_emitted,
+        predictedCandidates
+      );
+    }
     if (telemetry.pass_count > 1) {
       addMetric(
         geometry,
@@ -210,10 +225,6 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
     }
   }
   if (verify) {
-    const verificationStarted =
-      telemetry.candidates_verified > 0 ||
-      telemetry.coverage_checks > 0 ||
-      producerDone;
     verify.status =
       phase === 'merging'
         ? 'complete'

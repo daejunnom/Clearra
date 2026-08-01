@@ -3,7 +3,10 @@ import type {
   ClearraWasmWorkerEvent
 } from '@clearra/ui/wasm';
 
-import { ClearraVerifierPool } from './ClearraVerifierPool';
+import {
+  ClearraVerifierPool,
+  type ClearraVerifierRecoveryMode
+} from './ClearraVerifierPool';
 import type { ClearraDistributedPlan, ClearraWasmModule } from './clearraWasmRuntime';
 
 const PRODUCER_WORK_BUDGET = 32768;
@@ -57,7 +60,9 @@ export class DistributedWasmJobRunner {
       this.wasm.profile_start();
       profilingActive = true;
     }
-    const verifierCount = Math.max(1, plan.workerCount - 1);
+    const verifierCount = plan.verificationRequired
+      ? Math.max(1, plan.workerCount - 1)
+      : 0;
     let lastHostYield = performance.now();
     let progressPhase: ClearraSearchProgressTelemetry['phase'] = 'initializing';
     let producerComplete = false;
@@ -80,9 +85,13 @@ export class DistributedWasmJobRunner {
         progressEvent(
           this.jobId,
           plan,
-          progressStep(progressPhase),
-          5,
-          progressLabel(progressPhase),
+          progressStep(progressPhase, plan.verificationRequired),
+          progressTotal(plan.verificationRequired),
+          progressLabel(
+            progressPhase,
+            plan.verificationRequired,
+            plan.tilingGeometryParallel
+          ),
           {
             phase: progressPhase,
             producer_complete: producerComplete,
@@ -118,12 +127,13 @@ export class DistributedWasmJobRunner {
       });
       emitProgress();
       let verifierInitialization: Promise<void> | null = null;
-      if (!plan.deferredInitialization) {
+      if (plan.verificationRequired && !plan.deferredInitialization) {
         verifierInitialization = this.pool.initialize(
           plan.workerInitialization ?? commandText,
           verifierCount,
           this.wasm.compiled_module(),
-          this.lifecycleOwnerId
+          this.lifecycleOwnerId,
+          verifierRecoveryMode(plan)
         );
         void verifierInitialization.catch(() => undefined);
       }
@@ -139,6 +149,9 @@ export class DistributedWasmJobRunner {
           CANDIDATE_BATCH_SIZE
         );
         if (produced.status === 'initialization') {
+          if (!plan.verificationRequired) {
+            throw new Error('distributed producer requested an unavailable verifier');
+          }
           if (verifierInitialization) {
             throw new Error('distributed worker initialization was produced more than once');
           }
@@ -146,7 +159,8 @@ export class DistributedWasmJobRunner {
             produced.initialization,
             verifierCount,
             this.wasm.compiled_module(),
-            this.lifecycleOwnerId
+            this.lifecycleOwnerId,
+            verifierRecoveryMode(plan)
           );
           void verifierInitialization.catch(() => undefined);
           await yieldToWorkerHost();
@@ -155,6 +169,9 @@ export class DistributedWasmJobRunner {
           continue;
         }
         if (produced.status === 'batch') {
+          if (!plan.verificationRequired) {
+            throw new Error('distributed producer emitted an unavailable worker batch');
+          }
           if (!verifierInitialization) {
             throw new Error('distributed task arrived before worker initialization');
           }
@@ -177,23 +194,29 @@ export class DistributedWasmJobRunner {
         this.requireActive();
       }
       this.requireActive();
-      if (!verifierInitialization) {
-        throw new Error('distributed producer completed without worker initialization');
-      }
-      await verifierInitialization;
-      this.requireActive();
-
       producerComplete = true;
-      progressPhase = 'draining';
-      emitProgress();
-      await this.pool.waitForIdle();
-      this.requireActive();
+      if (plan.verificationRequired) {
+        if (!verifierInitialization) {
+          throw new Error('distributed producer completed without worker initialization');
+        }
+        await verifierInitialization;
+        this.requireActive();
+        progressPhase = 'draining';
+        emitProgress();
+        await this.pool.waitForIdle();
+        this.requireActive();
+      }
+      if (plan.verificationRequired) {
+        await this.pool.finish((partial) => this.wasm.distributed_merge_partial(partial));
+        this.requireActive();
+      }
       progressPhase = 'merging';
       emitProgress();
-      await this.pool.finish((partial) => this.wasm.distributed_merge_partial(partial));
-      this.requireActive();
       const events = JSON.parse(
-        this.wasm.distributed_finish(this.jobId, plan.workerCount)
+        this.wasm.distributed_finish(
+          this.jobId,
+          plan.verificationRequired ? plan.workerCount : 1
+        )
       ) as ClearraWasmWorkerEvent[];
       if (profilingActive && this.wasm.profile_finish) {
         searchProfile = this.wasm.profile_finish();
@@ -305,11 +328,43 @@ function progressEvent(
   } as ClearraWasmWorkerEvent;
 }
 
-function progressStep(phase: ClearraSearchProgressTelemetry['phase']): number {
+function progressStep(
+  phase: ClearraSearchProgressTelemetry['phase'],
+  verificationRequired: boolean
+): number {
+  if (!verificationRequired) {
+    return { preparing: 0, initializing: 0, searching: 1, draining: 1, merging: 2 }[phase];
+  }
   return { preparing: 0, initializing: 1, searching: 2, draining: 3, merging: 4 }[phase];
 }
 
-function progressLabel(phase: ClearraSearchProgressTelemetry['phase']): string {
+function progressTotal(verificationRequired: boolean): number {
+  return verificationRequired ? 5 : 3;
+}
+
+function progressLabel(
+  phase: ClearraSearchProgressTelemetry['phase'],
+  verificationRequired: boolean,
+  tilingGeometryParallel: boolean
+): string {
+  if (tilingGeometryParallel) {
+    return {
+      preparing: 'Runtime preparing',
+      initializing: 'Geometry workers preparing',
+      searching: 'Geometry roots searching',
+      draining: 'Remaining geometry roots finishing',
+      merging: 'Exact tiling results merging'
+    }[phase];
+  }
+  if (!verificationRequired) {
+    return {
+      preparing: 'Runtime preparing',
+      initializing: 'Runtime preparing',
+      searching: 'Geometry and candidates generating',
+      draining: 'Geometry and candidates generating',
+      merging: 'Exact tiling results merging'
+    }[phase];
+  }
   return {
     preparing: 'Search catalog preparing',
     initializing: 'Distributed workers initializing',
@@ -328,4 +383,12 @@ function createWorkerHostYield(): () => Promise<void> {
       pending.push(resolve);
       channel.port2.postMessage(undefined);
     });
+}
+
+function verifierRecoveryMode(plan: ClearraDistributedPlan): ClearraVerifierRecoveryMode {
+  if (plan.tilingGeometryParallel) return 'streaming';
+  if (plan.workerInitialization !== null || plan.deferredInitialization) {
+    return 'atomic-task';
+  }
+  return 'replay-state';
 }

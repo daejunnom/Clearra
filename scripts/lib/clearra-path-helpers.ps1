@@ -6,6 +6,9 @@ $script:ClearraAllowedRepositoryLocalFiles = [string[]]@(
     '_local/bundle.py',
     '_local/project_bundle.txt'
 )
+if ($null -eq (Get-Variable -Name ClearraTransientBuildSlotLocks -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:ClearraTransientBuildSlotLocks = @{}
+}
 
 function Resolve-ClearraRoot {
     return $script:ClearraPathPolicyRepositoryRoot
@@ -170,8 +173,47 @@ function New-TransientBuildDir([string]$Prefix) {
     if ([string]::IsNullOrWhiteSpace($base)) {
         throw "No transient build root is available; pass -CoreCBuildDir explicitly."
     }
-    New-Item -ItemType Directory -Force -Path $base | Out-Null
-    return (Join-Path $base "$Prefix-$PID-$([Guid]::NewGuid().ToString('N'))")
+    if ($Prefix -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw "Transient build prefix contains unsupported path characters: $Prefix"
+    }
+    $slotRoot = [System.IO.Path]::GetFullPath((Join-Path $base 'transient'))
+    $path = [System.IO.Path]::GetFullPath((Join-Path $slotRoot $Prefix))
+    Assert-ClearraPathOutsideRepository $path | Out-Null
+    New-Item -ItemType Directory -Force -Path $slotRoot | Out-Null
+    if ($script:ClearraTransientBuildSlotLocks.ContainsKey($path)) {
+        throw "Transient build slot is already active in this process: $path"
+    }
+
+    $lockPath = Join-Path $slotRoot ".$Prefix.lock"
+    $deadline = [DateTime]::UtcNow.AddMinutes(30)
+    $lock = $null
+    do {
+        try {
+            $lock = [System.IO.File]::Open(
+                $lockPath,
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+        } catch [System.IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Timed out waiting for transient build slot: $path"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    } while ($null -eq $lock)
+
+    try {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $path | Out-Null
+        $script:ClearraTransientBuildSlotLocks[$path] = $lock
+        return $path
+    } catch {
+        $lock.Dispose()
+        throw
+    }
 }
 function Get-StartTestsPersistentBuildDir([string]$Name) {
     Ensure-ClearraBuildArtifactCache
@@ -227,9 +269,16 @@ function Remove-TransientBuildDir([string]$BuildDir) {
         }
     }
 
-    if ($isAllowed -and
-        (Split-Path -Leaf $buildPath).StartsWith("clearra-core-c-", [System.StringComparison]::OrdinalIgnoreCase)) {
-        Remove-Item -LiteralPath $buildPath -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        if ($isAllowed -and
+            (Split-Path -Leaf $buildPath).StartsWith("clearra-core-c", [System.StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $buildPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        if ($script:ClearraTransientBuildSlotLocks.ContainsKey($buildPath)) {
+            $script:ClearraTransientBuildSlotLocks[$buildPath].Dispose()
+            $script:ClearraTransientBuildSlotLocks.Remove($buildPath)
+        }
     }
 }
 function Resolve-CoreCBuildDirForStartTests(

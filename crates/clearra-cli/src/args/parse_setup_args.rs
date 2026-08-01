@@ -1,5 +1,5 @@
 use super::{
-    parse_option_value::{option_value, unknown_option},
+    parse_option_value::{option_value, parse_usize_option, unknown_option},
     CliHelpTopic, CliParseError, ParsedCliCommand, SetupArgs,
 };
 use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
@@ -19,6 +19,8 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut path_detail_condition_id = None;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut tablebase_requested = None;
+    let mut workers = None;
+    let mut use_all_logical_processors = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -120,6 +122,18 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
                 tablebase_requested = Some(false);
                 index += 1;
             }
+            "--workers" => {
+                workers = Some(parse_usize_option(args, index, "--workers")?);
+                index += 2;
+            }
+            "--cpu-threads" => {
+                workers = Some(parse_usize_option(args, index, "--cpu-threads")?);
+                index += 2;
+            }
+            "--use-all-cpu-threads" => {
+                use_all_logical_processors = true;
+                index += 1;
+            }
             "--help" | "-h" => return Ok(ParsedCliCommand::Help(CliHelpTopic::Setup)),
             option => return Err(unknown_option("setup", option)),
         }
@@ -142,7 +156,9 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
         .with_max_setup_pieces(max_setup_pieces)
         .with_search_mode(search_mode)
         .with_queue_observation_policy(queue_observation_policy)
-        .with_tablebase_requested(tablebase_requested);
+        .with_tablebase_requested(tablebase_requested)
+        .with_workers(workers)
+        .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(pieces) = queue_based_pieces {
         setup_args = setup_args.with_queue_based_pieces(pieces);
     }

@@ -3,14 +3,16 @@ use clearra_core_domain::{
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_core_executor::{
-    CoreExecutionResult, CorePathStep, CorePostProcessScoreCell, CorePostProcessSpinCoverage,
-    SolutionCoverage, WasmCandidatePacket,
+    tiling_solution_store::PackedTilingRows, CoreExecutionResult, CorePathStep,
+    CorePostProcessScoreCell, CorePostProcessSpinCoverage, SolutionCoverage, WasmCandidatePacket,
+    WasmPackedTilingIdentity, WasmTilingRootChunk,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 
 const CANDIDATE_MAGIC: u32 = 0x4342_4131;
 const PARTIAL_MAGIC: u32 = 0x5052_5431;
 const PARTIAL_BATCH_MAGIC: u32 = 0x5052_4231;
+const TILING_ROOT_CHUNK_MAGIC: u32 = 0x5452_4331;
 const WIRE_VERSION: u32 = 7;
 const MAX_WIRE_ITEMS: usize = 16_000_000;
 
@@ -78,11 +80,121 @@ pub fn decode_candidate_batch(
     Ok(candidates)
 }
 
+pub fn encode_tiling_root_chunk(chunk: &WasmTilingRootChunk) -> Vec<u8> {
+    let mut output = Vec::with_capacity(91 + chunk.identities().len() * 32);
+    put_u32(&mut output, TILING_ROOT_CHUNK_MAGIC);
+    put_u32(&mut output, WIRE_VERSION);
+    output.push(chunk.pass_index());
+    put_u32(&mut output, chunk.root_ordinal().unwrap_or(u32::MAX));
+    put_u32(&mut output, chunk.chunk_sequence());
+    output.push(u8::from(chunk.root_complete()));
+    put_u32(&mut output, chunk.identities().len() as u32);
+    put_u64(&mut output, chunk.completed_roots() as u64);
+    match chunk.candidate_family_count() {
+        Some(count) => {
+            output.push(1);
+            put_u128(&mut output, count);
+        }
+        None => {
+            output.push(0);
+            put_u128(&mut output, 0);
+        }
+    }
+    put_u64(&mut output, chunk.expanded_nodes() as u64);
+    put_u64(&mut output, chunk.peak_frontier() as u64);
+    put_u64(&mut output, chunk.domain_pruned_states() as u64);
+    put_u64(&mut output, chunk.hall_pruned_states() as u64);
+    put_u64(&mut output, chunk.column_pruned_states() as u64);
+    put_u64(&mut output, chunk.component_compositions() as u64);
+    for identity in chunk.identities().iter().copied() {
+        put_u64(&mut output, identity.bucket_hash());
+        for word in identity.packed_rows() {
+            put_u64(&mut output, word);
+        }
+    }
+    output
+}
+
+pub fn decode_tiling_root_chunk(input: &[u8]) -> Result<WasmTilingRootChunk, DistributedWireError> {
+    let mut reader = Reader::new(input);
+    reader.require_header(TILING_ROOT_CHUNK_MAGIC)?;
+    let pass_index = reader.u8()?;
+    let root_ordinal = reader.u32()?;
+    let chunk_sequence = reader.u32()?;
+    let root_complete = match reader.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(DistributedWireError("tiling_root_complete_flag_invalid")),
+    };
+    let identity_count = reader.count()?;
+    let completed_roots = reader.usize_u64()?;
+    let candidate_family_count = match reader.u8()? {
+        0 => {
+            reader.u128()?;
+            None
+        }
+        1 => Some(reader.u128()?),
+        _ => {
+            return Err(DistributedWireError(
+                "tiling_root_candidate_family_flag_invalid",
+            ));
+        }
+    };
+    let expanded_nodes = reader.usize_u64()?;
+    let peak_frontier = reader.usize_u64()?;
+    let domain_pruned_states = reader.usize_u64()?;
+    let hall_pruned_states = reader.usize_u64()?;
+    let column_pruned_states = reader.usize_u64()?;
+    let component_compositions = reader.usize_u64()?;
+    let mut identities = Vec::new();
+    identities
+        .try_reserve_exact(identity_count)
+        .map_err(|_| DistributedWireError("tiling_root_chunk_allocation_failed"))?;
+    for _ in 0..identity_count {
+        let bucket_hash = reader.u64()?;
+        let mut packed_rows = PackedTilingRows::default();
+        for word in &mut packed_rows {
+            *word = reader.u64()?;
+        }
+        identities.push(WasmPackedTilingIdentity::new(bucket_hash, packed_rows));
+    }
+    reader.finish()?;
+    Ok(WasmTilingRootChunk::from_wire_parts(
+        pass_index,
+        root_ordinal,
+        chunk_sequence,
+        root_complete,
+        identities,
+        completed_roots,
+        candidate_family_count,
+        expanded_nodes,
+        peak_frontier,
+        domain_pruned_states,
+        hall_pruned_states,
+        column_pruned_states,
+        component_compositions,
+    ))
+}
+
+pub fn is_tiling_root_chunk(input: &[u8]) -> bool {
+    input
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .is_some_and(|bytes| u32::from_le_bytes(bytes) == TILING_ROOT_CHUNK_MAGIC)
+}
+
 pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
     let fields = result.summary_fields();
     let path = result.path_steps();
     let identities = result.normalized_solution_identities();
-    let normalized_keys = result.normalized_solution_keys();
+    // The PC merger rebuilds canonical keys from exact identities. Tiling-only
+    // workers therefore do not need to duplicate every large string key on
+    // the inter-worker wire.
+    let normalized_keys = if result.field("objective") == Some("tiling") {
+        &[]
+    } else {
+        result.normalized_solution_keys()
+    };
     let coverage = result.coverage_pattern_words();
     let solution_coverage = result.solution_coverages();
     let score_cells = result.postprocess_score_cells();
@@ -92,7 +204,12 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
         .map(|(key, value)| key.len() + value.len() + 8)
         .sum::<usize>()
         .saturating_add(path.len() * 20)
-        .saturating_add(identities.len() * 152)
+        .saturating_add(
+            identities
+                .iter()
+                .map(|identity| 17 + identity.placement_count() * 8)
+                .sum::<usize>(),
+        )
         .saturating_add(
             normalized_keys
                 .iter()
@@ -418,7 +535,7 @@ pub fn decode_partial_results(
         .try_reserve_exact(count)
         .map_err(|_| DistributedWireError("partial_batch_allocation_failed"))?;
     for _ in 0..count {
-        let length = reader.count()?;
+        let length = reader.byte_length()?;
         results.push(decode_partial_result(reader.take(length)?)?);
     }
     reader.finish()?;
@@ -549,6 +666,10 @@ impl<'a> Reader<'a> {
         Ok(count)
     }
 
+    fn byte_length(&mut self) -> Result<usize, DistributedWireError> {
+        Ok(self.u32()? as usize)
+    }
+
     fn u8(&mut self) -> Result<u8, DistributedWireError> {
         Ok(*self
             .take(1)?
@@ -588,8 +709,13 @@ impl<'a> Reader<'a> {
         Ok(u128::from_le_bytes(bytes))
     }
 
+    fn usize_u64(&mut self) -> Result<usize, DistributedWireError> {
+        usize::try_from(self.u64()?)
+            .map_err(|_| DistributedWireError("distributed_wire_usize_overflow"))
+    }
+
     fn string(&mut self) -> Result<String, DistributedWireError> {
-        let length = self.count()?;
+        let length = self.byte_length()?;
         let bytes = self.take(length)?;
         std::str::from_utf8(bytes)
             .map(str::to_owned)
@@ -615,5 +741,73 @@ impl<'a> Reader<'a> {
         } else {
             Err(DistributedWireError("distributed_wire_trailing_bytes"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_lengths_are_bounded_by_the_input_instead_of_the_item_count_limit() {
+        let encoded = u32::try_from(MAX_WIRE_ITEMS + 1)
+            .expect("test length fits the wire")
+            .to_le_bytes();
+
+        let mut length_reader = Reader::new(&encoded);
+        assert_eq!(
+            length_reader.byte_length(),
+            Ok(MAX_WIRE_ITEMS + 1),
+            "a large result blob is not a collection with that many entries"
+        );
+
+        let mut count_reader = Reader::new(&encoded);
+        assert_eq!(
+            count_reader.count(),
+            Err(DistributedWireError("distributed_wire_count_exceeded"))
+        );
+    }
+
+    #[test]
+    fn tiling_partial_wire_omits_reconstructable_string_keys() {
+        let result = CoreExecutionResult::new(
+            vec![("objective".to_owned(), "tiling".to_owned())],
+            Vec::new(),
+        )
+        .with_normalized_solution_keys(vec!["reconstructed-at-merge".to_owned()]);
+
+        let decoded =
+            decode_partial_result(&encode_partial_result(&result)).expect("tiling partial result");
+
+        assert!(decoded.normalized_solution_keys().is_empty());
+    }
+
+    #[test]
+    fn tiling_root_chunk_round_trips_fixed_size_identities() {
+        let chunk = WasmTilingRootChunk::from_wire_parts(
+            2,
+            7,
+            3,
+            true,
+            vec![
+                WasmPackedTilingIdentity::new(11, [1, 2, 3]),
+                WasmPackedTilingIdentity::new(19, [4, 5, 6]),
+            ],
+            2,
+            Some(17),
+            31,
+            7,
+            5,
+            3,
+            2,
+            1,
+        );
+
+        let encoded = encode_tiling_root_chunk(&chunk);
+        assert!(is_tiling_root_chunk(&encoded));
+        assert_eq!(
+            decode_tiling_root_chunk(&encoded).expect("tiling root chunk"),
+            chunk
+        );
     }
 }

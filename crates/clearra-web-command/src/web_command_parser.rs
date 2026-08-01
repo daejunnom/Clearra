@@ -587,6 +587,8 @@ fn parse_build_probability_command(
     let mut cpu_warmup = false;
     let mut include_horizontal_mirror = true;
     let mut aggregation = BuildProbabilityAggregation::Buildability;
+    let mut tiling_only = false;
+    let mut spin_aggregation_requested = false;
     let mut spin_profile = None;
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
@@ -675,18 +677,28 @@ fn parse_build_probability_command(
             "--aggregate" => {
                 aggregation = match next_value(tokens, &mut cursor, "--aggregate")? {
                     "buildability" | "build" => BuildProbabilityAggregation::Buildability,
+                    "tiling" => {
+                        tiling_only = true;
+                        BuildProbabilityAggregation::TilingOnly
+                    }
                     "spin" => {
+                        spin_aggregation_requested = true;
                         BuildProbabilityAggregation::spin_search(SpinProfileSelection::TSpins)
                     }
                     value => {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             format!(
-                                "unsupported build-probability aggregation '{value}'; expected buildability or spin"
+                                "unsupported build-probability aggregation '{value}'; expected buildability, tiling, or spin"
                             ),
                         ));
                     }
                 };
+            }
+            "--tiling-only" => {
+                tiling_only = true;
+                aggregation = BuildProbabilityAggregation::TilingOnly;
+                cursor += 1;
             }
             "--spin-profile" => {
                 let value = next_value(tokens, &mut cursor, "--spin-profile")?;
@@ -738,6 +750,20 @@ fn parse_build_probability_command(
             aggregation = BuildProbabilityAggregation::spin_search(profile);
         }
     }
+    if tiling_only
+        && (spin_aggregation_requested
+            || spin_profile.is_some()
+            || preserve_back_to_back
+            || precompute_build_dependencies)
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--tiling-only cannot be combined with spin, B2B-preservation, or BuildUp dependency options",
+        ));
+    }
+    if tiling_only {
+        aggregation = BuildProbabilityAggregation::TilingOnly;
+    }
     let constraint_profile = spin_profile.unwrap_or(SpinProfileSelection::TSpins);
     if !hold_enabled && hold_piece.is_some_and(|piece| piece.is_some()) {
         return Err(WebCommandError::new(
@@ -780,7 +806,9 @@ fn parse_build_probability_command(
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
         .with_precompute_build_dependencies(precompute_build_dependencies);
-    if preserve_back_to_back {
+    if tiling_only {
+        request = request.with_objective(ObjectivePolicy::tiling());
+    } else if preserve_back_to_back {
         request = request.with_objective(
             ObjectivePolicy::unique().with_back_to_back_preservation(constraint_profile),
         );
@@ -844,11 +872,13 @@ fn parse_pc_command(
     let mut source_piece_count: Option<usize> = None;
     let mut count_policy = PcCountPolicy::CountUnique;
     let mut objective: Option<ObjectivePolicy> = None;
+    let mut tiling_only_flag = false;
     let mut score_requested = false;
     let mut score_profile = None;
     let mut spin_profile = None;
     let mut preserve_back_to_back = false;
     let mut rule = srs_plus();
+    let mut rule_requested = false;
     let mut initial_b2b: Option<u32> = None;
     let mut retained_trace_limit = 1usize;
     let mut max_patterns: Option<usize> = None;
@@ -947,6 +977,10 @@ fn parse_pc_command(
                 let value = next_value(tokens, &mut cursor, "--objective")?;
                 objective = Some(parse_objective(value)?);
             }
+            "--tiling-only" => {
+                tiling_only_flag = true;
+                cursor += 1;
+            }
             "--score" => {
                 score_requested = true;
                 cursor += 1;
@@ -976,6 +1010,7 @@ fn parse_pc_command(
             }
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
+                rule_requested = true;
             }
             "--initial-b2b" => {
                 let value = next_value(tokens, &mut cursor, "--initial-b2b")?;
@@ -1092,12 +1127,6 @@ fn parse_pc_command(
         }
     }
 
-    if !hold_enabled && hold_piece.is_some_and(|piece| piece.is_some()) {
-        return Err(WebCommandError::new(
-            WebCommandErrorCode::InvalidValue,
-            "--no-hold cannot be combined with an occupied --hold slot",
-        ));
-    }
     if queue.is_some() && patterns.is_some() {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
@@ -1124,10 +1153,55 @@ fn parse_pc_command(
             ));
         }
     }
+    if tiling_only_flag
+        && objective.is_some_and(|policy| {
+            policy.kind() != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+        })
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--tiling-only conflicts with a non-tiling --objective",
+        ));
+    }
     let mut objective = objective.unwrap_or_else(|| match count_policy {
         PcCountPolicy::CountAll => ObjectivePolicy::all(),
         PcCountPolicy::FirstSolution | PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
     });
+    if tiling_only_flag {
+        objective = ObjectivePolicy::tiling();
+    }
+    let tiling_only =
+        objective.kind() == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
+    if tiling_only {
+        let incompatible = [
+            (rule_requested, "--rule"),
+            (score_requested, "--score"),
+            (score_profile.is_some(), "--score-profile"),
+            (spin_profile.is_some(), "--spin-profile"),
+            (preserve_back_to_back, "--preserve-b2b"),
+            (initial_b2b.is_some(), "--initial-b2b"),
+            (tablebase_requested, "--tablebase"),
+            (precompute_build_dependencies, "--build-dependency-dag"),
+            (solution_probabilities, "--solution-probabilities"),
+            (
+                queue_observation_policy.requires_observation_policy(),
+                "--queue-knowledge visible-7",
+            ),
+        ];
+        if let Some((_, option)) = incompatible.into_iter().find(|(enabled, _)| *enabled) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("{option} is not available with tiling-only search"),
+            ));
+        }
+        count_policy = PcCountPolicy::CountUnique;
+    }
+    if !hold_enabled && hold_piece.is_some_and(|piece| piece.is_some()) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--no-hold cannot be combined with an occupied --hold slot",
+        ));
+    }
     if spin_profile.is_some() && !preserve_back_to_back {
         score_requested = true;
     }
@@ -1236,6 +1310,7 @@ fn parse_objective(value: &str) -> Result<ObjectivePolicy, WebCommandError> {
         "all" => Ok(ObjectivePolicy::all()),
         "unique" => Ok(ObjectivePolicy::unique()),
         "minimum-cover" | "min-cover" => Ok(ObjectivePolicy::minimum_cover()),
+        "tiling" => Ok(ObjectivePolicy::tiling()),
         _ => Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
             format!("invalid --objective value '{value}'"),

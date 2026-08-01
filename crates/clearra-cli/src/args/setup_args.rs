@@ -17,6 +17,8 @@ pub struct SetupArgs {
     path_detail_condition_id: Option<String>,
     queue_observation_policy: QueueObservationPolicy,
     tablebase_requested: Option<bool>,
+    workers: Option<usize>,
+    use_all_logical_processors: bool,
 }
 
 impl SetupArgs {
@@ -36,6 +38,8 @@ impl SetupArgs {
             path_detail_condition_id: None,
             queue_observation_policy: QueueObservationPolicy::default(),
             tablebase_requested: None,
+            workers: None,
+            use_all_logical_processors: false,
         }
     }
 }
@@ -97,6 +101,14 @@ impl SetupArgs {
         self.tablebase_requested
     }
 
+    pub fn workers(&self) -> Option<usize> {
+        self.workers
+    }
+
+    pub fn use_all_logical_processors(&self) -> bool {
+        self.use_all_logical_processors
+    }
+
     pub fn with_candidate_priority(mut self, priority: SetupCandidatePriority) -> Self {
         self.candidate_priority = priority;
         self
@@ -155,6 +167,16 @@ impl SetupArgs {
 
     pub fn with_tablebase_requested(mut self, requested: Option<bool>) -> Self {
         self.tablebase_requested = requested;
+        self
+    }
+
+    pub fn with_workers(mut self, workers: Option<usize>) -> Self {
+        self.workers = workers;
+        self
+    }
+
+    pub fn with_use_all_logical_processors(mut self, value: bool) -> Self {
+        self.use_all_logical_processors = value;
         self
     }
 }

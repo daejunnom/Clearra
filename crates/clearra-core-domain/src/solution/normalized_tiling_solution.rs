@@ -352,14 +352,114 @@ fn stable_solution_set_hash(keys: &[NormalizedTilingSolutionKey]) -> String {
 pub fn normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
     identities: &[StandardBoard64TilingIdentity],
 ) -> String {
-    let mut hasher = StableFnv64::default();
+    normalized_tiling_solution_set_hash_from_sorted_standard_board64_identity_iter(
+        identities.iter().copied(),
+    )
+}
+
+pub fn normalized_tiling_solution_set_hash_from_sorted_standard_board64_identity_iter(
+    identities: impl IntoIterator<Item = StandardBoard64TilingIdentity>,
+) -> String {
+    let mut hasher = NormalizedTilingSolutionSetHasher::default();
     for identity in identities {
-        identity
-            .write_canonical(&mut HasherWriter(&mut hasher))
-            .expect("hash writer cannot fail");
-        hasher.write(&[0]);
+        hasher.update_canonical_placements(
+            identity.initial_board_mask(),
+            (0..identity.placement_count()).map(|index| {
+                identity
+                    .placement(index)
+                    .expect("placement index is in range")
+            }),
+        );
     }
-    format!("cts1:{:016x}", hasher.finish())
+    hasher.finish()
+}
+
+pub fn try_normalized_tiling_solution_set_hash_from_sorted_standard_board64_identity_iter<E>(
+    identities: impl IntoIterator<Item = Result<StandardBoard64TilingIdentity, E>>,
+) -> Result<String, E> {
+    let mut hasher = NormalizedTilingSolutionSetHasher::default();
+    for identity in identities {
+        let identity = identity?;
+        hasher.update_canonical_placements(
+            identity.initial_board_mask(),
+            (0..identity.placement_count()).map(|index| {
+                identity
+                    .placement(index)
+                    .expect("placement index is in range")
+            }),
+        );
+    }
+    Ok(hasher.finish())
+}
+
+#[derive(Default)]
+pub struct NormalizedTilingSolutionSetHasher {
+    hasher: StableFnv64,
+}
+
+impl NormalizedTilingSolutionSetHasher {
+    pub fn begin_canonical_identity(&mut self, initial_board_mask: u64) {
+        self.hasher.write(b"ctk1|initial=");
+        write_hex_u64(&mut self.hasher, initial_board_mask);
+        self.hasher.write(b"|placements=");
+    }
+
+    pub fn update_canonical_placement(&mut self, placement: PiecePlacementMask, first: bool) {
+        if !first {
+            self.hasher.write(b",");
+        }
+        self.hasher
+            .write(&[placement.piece().as_ascii() as u8, b':']);
+        write_hex_u64(&mut self.hasher, placement.cells_mask());
+    }
+
+    pub fn end_canonical_identity(&mut self) {
+        self.hasher.write(&[0]);
+    }
+
+    pub fn update_canonical_placements(
+        &mut self,
+        initial_board_mask: u64,
+        placements: impl IntoIterator<Item = PiecePlacementMask>,
+    ) {
+        self.begin_canonical_identity(initial_board_mask);
+        let mut first = true;
+        for placement in placements {
+            self.update_canonical_placement(placement, first);
+            first = false;
+        }
+        self.end_canonical_identity();
+    }
+
+    pub fn try_update_canonical_placements<E>(
+        &mut self,
+        initial_board_mask: u64,
+        placements: impl IntoIterator<Item = Result<PiecePlacementMask, E>>,
+    ) -> Result<(), E> {
+        self.begin_canonical_identity(initial_board_mask);
+        let mut first = true;
+        for placement in placements {
+            let placement = placement?;
+            self.update_canonical_placement(placement, first);
+            first = false;
+        }
+        self.end_canonical_identity();
+        Ok(())
+    }
+
+    pub fn finish(self) -> String {
+        format!("cts1:{:016x}", self.hasher.finish())
+    }
+}
+
+fn write_hex_u64(hasher: &mut StableFnv64, value: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 16];
+    for (index, output) in bytes.iter_mut().enumerate() {
+        let shift = (15 - index) * 4;
+        *output = HEX[((value >> shift) & 0xf) as usize];
+    }
+    hasher.write(&bytes);
 }
 
 pub fn normalized_tiling_solution_key_set_hash_from_sorted_strings(keys: &[String]) -> String {
@@ -398,15 +498,6 @@ const fn piece_from_sort_key(key: u8) -> PieceKind {
 
 #[derive(Default)]
 struct StableFnv64(u64);
-
-struct HasherWriter<'a>(&'a mut StableFnv64);
-
-impl fmt::Write for HasherWriter<'_> {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        self.0.write(value.as_bytes());
-        Ok(())
-    }
-}
 
 impl Hasher for StableFnv64 {
     fn finish(&self) -> u64 {
