@@ -1,6 +1,6 @@
 import type { ClearraDesktopRequest } from '../host';
 
-export type ScoreMode = 'tiling' | 'off' | 'minimum-cover' | 'summary';
+export type ScoreMode = 'tiling' | 'off' | 'minimum-cover' | 'summary' | 'failed-queue';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
 export type SpinProfile =
@@ -68,6 +68,13 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
 export function normalizeWorkspaceRequest(
   request: SolverWorkspaceRequest
 ): SolverWorkspaceRequest {
+  if (request.scoreMode === 'failed-queue') {
+    return {
+      ...request,
+      initialB2B: 0,
+      solutionProbabilities: false
+    };
+  }
   if (request.scoreMode !== 'tiling') return request;
   return {
     ...request,
@@ -336,7 +343,12 @@ export function workspaceValidationCodes(
 
 export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   request = normalizeWorkspaceRequest(request);
-  const tokens = ['clearra', 'pc', '--lines', String(request.lines)];
+  const tokens = [
+    'clearra',
+    request.scoreMode === 'failed-queue' ? 'failed-queue' : 'pc',
+    '--lines',
+    String(request.lines)
+  ];
   const pieceWindow = scenarioPieceWindow(request);
   const parsedQueue = parseBrowserQueueInput(request.queue);
   tokens.push(

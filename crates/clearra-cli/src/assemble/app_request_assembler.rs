@@ -101,6 +101,32 @@ impl CliAppRequestAssembler {
                     CliErrorCode::PercentQueryInvalid,
                 ))
             }
+            ParsedCliCommand::FailedQueue(args) => {
+                let mut query = PcQueryAssembler::assemble(args.pc()).map_err(pc_assembly_error)?;
+                if let Some(patterns) = args.patterns() {
+                    let pattern = clearra_supply::queue::queue_pattern_expression::QueuePatternExpression::parse(
+                        patterns,
+                        query.execution_policy().max_patterns(),
+                    )
+                    .map_err(|error| {
+                        CliOutput::error(
+                            CliErrorCode::PercentQueryInvalid,
+                            format!("invalid failed-queue pattern: {error}"),
+                        )
+                    })?;
+                    query = query.with_queue(
+                        clearra_pc_graph::request::PcQueueInput::pattern_expression(pattern),
+                    );
+                }
+                Ok(CliAppRequestAssembly::new(
+                    AppRequest::new(AppCommand::Percent(
+                        PercentAppCommand::failed_queue_opening(query)
+                            .with_failed_pattern_limit(args.failed_pattern_limit()),
+                    )),
+                    default_format,
+                    CliErrorCode::PercentQueryInvalid,
+                ))
+            }
             ParsedCliCommand::Setup(args) => {
                 let query = SetupQueryAssembler::assemble(&args).map_err(|error| {
                     CliOutput::error(CliErrorCode::SetupQueryInvalid, format!("{error:?}"))

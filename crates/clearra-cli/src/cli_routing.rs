@@ -78,6 +78,7 @@ fn tablebase_session_for_command(
 ) -> Result<Option<AppTablebaseSession>, CliOutput> {
     let requested = match command {
         ParsedCliCommand::Pc(args) => args.tablebase_requested() == Some(true),
+        ParsedCliCommand::FailedQueue(args) => args.pc().tablebase_requested() == Some(true),
         ParsedCliCommand::Setup(args) => args.tablebase_requested() == Some(true),
         ParsedCliCommand::Product(tokens) => tokens
             .iter()

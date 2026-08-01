@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Search } from '@lucide/svelte';
+  import { Check, ChevronDown, Copy, Search } from '@lucide/svelte';
 
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
@@ -20,11 +20,15 @@
   export let elapsedMs = 0;
   export let targetLines = 4;
   export let tilingOnlyRequested = false;
+  export let failedQueueRequested = false;
   export let loadSolutionPage:
     | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
     | null = null;
 
   let copyFormat: SolutionCopyFormat = 'ctk';
+  let failedQueueCopyComplete = false;
+  let visibleFailedQueueCount = 100;
+  let failedQueueResultIdentity = '';
   const SOLUTION_EXPORT_PAGE_SIZE = 1_000;
 
   $: report = view.searchReport;
@@ -53,6 +57,21 @@
     .sort(compareSolutionProbability)
     .map((entry) => entry.key);
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
+  $: failedQueueResult = report
+    ? summaryFields.result_mode === 'failed-queue'
+    : failedQueueRequested;
+  $: failedQueueEntries = (report?.summary_fields ?? [])
+    .filter(([key]) => /^failed_pattern_\d+$/.test(key))
+    .sort(([left], [right]) => failedQueueIndex(left) - failedQueueIndex(right))
+    .map(([, queue]) => queue);
+  $: currentFailedQueueResultIdentity = failedQueueResult
+    ? `${summaryFields.total_pattern_count ?? ''}:${summaryFields.failed_pattern_count ?? ''}:${failedQueueEntries[0] ?? ''}`
+    : '';
+  $: if (currentFailedQueueResultIdentity !== failedQueueResultIdentity) {
+    failedQueueResultIdentity = currentFailedQueueResultIdentity;
+    visibleFailedQueueCount = 100;
+    failedQueueCopyComplete = false;
+  }
   $: tilingOnly = summaryFields.objective === 'tiling';
   $: solutionPageAvailable = summaryFields.solution_page_available === 'true';
   $: tilingProgress = tilingOnly || (!report && tilingOnlyRequested);
@@ -191,6 +210,24 @@
     throw error;
   }
 
+  function failedQueueIndex(key: string): number {
+    const value = Number(key.slice('failed_pattern_'.length));
+    return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+  }
+
+  async function copyFailedQueues() {
+    if (!failedQueueEntries.length) return;
+    try {
+      await navigator.clipboard.writeText(failedQueueEntries.join('\n'));
+      failedQueueCopyComplete = true;
+      setTimeout(() => {
+        failedQueueCopyComplete = false;
+      }, 1600);
+    } catch {
+      failedQueueCopyComplete = false;
+    }
+  }
+
 </script>
 
 <ResultWorkspaceFrame
@@ -212,47 +249,86 @@
   {#if !hasResult && view.status === 'idle'}
     <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noResult')}</p></div>
   {:else if view.status !== 'failed' && view.status !== 'terminated'}
-    <div class="metric-grid" class:tiling-only={tilingOnly}>
-      <article><span>{label(tilingOnly ? 'tilingCount' : 'solutionCount')}</span><strong>{number(report?.unique_solution_count)}</strong></article>
-      {#if !tilingOnly}
-        <article><span>{label('coverage')}</span><strong>{workspaceProbability(language, report?.coverage_probability)}</strong></article>
-        <article><span>{label('buildVariants')}</span><strong>{exactBuildVariantCount()}</strong></article>
-      {/if}
-    </div>
-
-    {#if scoringRequested}
-      <div class="metric-grid score-metrics">
-        <article><span>{label('averageScore')}</span><strong>{summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong></article>
+    {#if failedQueueResult}
+      <div class="metric-grid failed-queue-metrics">
+        <article><span>{label('failedQueueCount')}</span><strong>{summaryFields.failed_pattern_count ?? '—'}</strong></article>
+        <article><span>{label('failedQueueProbability')}</span><strong>{workspaceProbability(language, summaryFields.failed_queue_probability)}</strong></article>
+        <article><span>{label('totalQueueCount')}</span><strong>{summaryFields.total_pattern_count ?? '—'}</strong></article>
       </div>
+
+      <section class="solutions-section failed-queue-section" aria-label={label('failedQueueList')}>
+        <div class="solutions-heading">
+          <h2>{label('failedQueueList')}</h2>
+          {#if failedQueueEntries.length}
+            <button class="queue-copy-button" type="button" on:click={copyFailedQueues}>
+              {#if failedQueueCopyComplete}<Check size={15} />{:else}<Copy size={15} />{/if}
+              <span>{label(failedQueueCopyComplete ? 'failedQueuesCopied' : 'copyFailedQueues')}</span>
+            </button>
+          {/if}
+        </div>
+        {#if failedQueueEntries.length}
+          <div class="failed-queue-grid">
+            {#each failedQueueEntries.slice(0, visibleFailedQueueCount) as queue}
+              <code>{queue}</code>
+            {/each}
+          </div>
+          {#if visibleFailedQueueCount < failedQueueEntries.length}
+            <button
+              class="show-more-queues"
+              type="button"
+              on:click={() => (visibleFailedQueueCount += 100)}
+            >
+              <ChevronDown size={16} />
+              <span>{label('showMoreFailedQueues')}</span>
+            </button>
+          {/if}
+        {:else if view.status === 'completed'}
+          <div class="empty-state compact"><Check size={26} strokeWidth={1.7} /><p>{label('noFailedQueues')}</p></div>
+        {/if}
+      </section>
+    {:else}
+      <div class="metric-grid" class:tiling-only={tilingOnly}>
+        <article><span>{label(tilingOnly ? 'tilingCount' : 'solutionCount')}</span><strong>{number(report?.unique_solution_count)}</strong></article>
+        {#if !tilingOnly}
+          <article><span>{label('coverage')}</span><strong>{workspaceProbability(language, report?.coverage_probability)}</strong></article>
+          <article><span>{label('buildVariants')}</span><strong>{exactBuildVariantCount()}</strong></article>
+        {/if}
+      </div>
+
+      {#if scoringRequested}
+        <div class="metric-grid score-metrics">
+          <article><span>{label('averageScore')}</span><strong>{summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong></article>
+        </div>
+      {/if}
+
+      <section class="solutions-section" aria-label={label('solutions')}>
+        <div class="solutions-heading">
+          <h2>{label('solutions')}</h2>
+          <SolutionCopyFormatControl
+            bind:value={copyFormat}
+            {language}
+            {solutionKeys}
+            keySource={solutionExportKeySource}
+          />
+        </div>
+        {#if solutionKeys.length}
+          <SolutionGallery
+            {solutionKeys}
+            solutionCount={report?.unique_solution_count ?? solutionKeys.length}
+            loadSolutionPage={solutionPageAvailable ? loadSolutionPage : null}
+            solutionProbabilities={solutionProbabilityByKey}
+            solutionAverageScores={solutionAverageScoreByKey}
+            solutionComments={solutionCommentByKey}
+            solutionSetHash={report?.normalized_solution_set_hash ?? ''}
+            {targetLines}
+            {language}
+            {copyFormat}
+          />
+        {:else}
+          <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
+        {/if}
+      </section>
     {/if}
-
-    <section class="solutions-section" aria-label={label('solutions')}>
-      <div class="solutions-heading">
-        <h2>{label('solutions')}</h2>
-        <SolutionCopyFormatControl
-          bind:value={copyFormat}
-          {language}
-          {solutionKeys}
-          keySource={solutionExportKeySource}
-        />
-      </div>
-      {#if solutionKeys.length}
-        <SolutionGallery
-          {solutionKeys}
-          solutionCount={report?.unique_solution_count ?? solutionKeys.length}
-          loadSolutionPage={solutionPageAvailable ? loadSolutionPage : null}
-          solutionProbabilities={solutionProbabilityByKey}
-          solutionAverageScores={solutionAverageScoreByKey}
-          solutionComments={solutionCommentByKey}
-          solutionSetHash={report?.normalized_solution_set_hash ?? ''}
-          {targetLines}
-          {language}
-          {copyFormat}
-        />
-      {:else}
-        <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
-      {/if}
-    </section>
   {/if}
 </ResultWorkspaceFrame>
 
@@ -302,6 +378,43 @@
   .score-metrics {
     grid-template-columns: minmax(0, 1fr);
     margin-top: 1px;
+  }
+
+  .failed-queue-grid {
+    display: grid;
+    gap: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  }
+
+  .failed-queue-grid code {
+    background: #f0f3f1;
+    border: 1px solid #dfe5e2;
+    border-radius: 4px;
+    color: #22302b;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    padding: 8px 9px;
+  }
+
+  .queue-copy-button,
+  .show-more-queues {
+    align-items: center;
+    background: #fff;
+    border: 1px solid #cbd4d0;
+    border-radius: 5px;
+    color: #2d3b36;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    gap: 7px;
+    min-height: 34px;
+    padding: 7px 10px;
+  }
+
+  .show-more-queues {
+    margin-top: 14px;
   }
 
   .score-metrics article:first-child,

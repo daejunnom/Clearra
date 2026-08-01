@@ -28,6 +28,39 @@ mod case_gui_pc_request_preserves_back_to_back_constraint {
     }
 }
 
+mod case_gui_failed_queue_request_uses_coverage_without_scoring {
+    use clearra_app::AppCommand;
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+
+    use super::*;
+
+    #[test]
+    fn gui_failed_queue_request_uses_coverage_without_scoring() {
+        let form = GuiOpeningPcForm::new(2, "srs-plus")
+            .with_score_input("failed-queue", 0)
+            .with_score_profiles("tetrio", "all-mini-plus")
+            .with_back_to_back_preservation(true);
+        let command = PcRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("GUI failed-queue request");
+        let AppCommand::Percent(command) = command else {
+            panic!("expected percent-backed failed-queue command");
+        };
+        assert!(command.is_failed_queue());
+        assert!(command.query().is_none());
+        let objective = command
+            .opening_query()
+            .expect("opening failed-queue query")
+            .objective();
+        assert_eq!(objective.kind(), ObjectiveKind::All);
+        assert!(!objective.score().requested());
+        assert!(objective.execution_constraints().preserves_back_to_back());
+        assert_eq!(
+            objective.execution_constraints().spin_profile().as_str(),
+            "all-mini-plus"
+        );
+    }
+}
+
 mod case_gui_pc_request_preserves_dependency_dag_policy {
     use clearra_app::AppCommand;
 

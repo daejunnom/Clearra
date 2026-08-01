@@ -1,5 +1,8 @@
 use crate::{
-    args::{ContinueArgs, ConvertArgs, CoverArgs, PcArgs, PcScenarioArgs, SetupArgs, VerifyArgs},
+    args::{
+        ContinueArgs, ConvertArgs, CoverArgs, FailedQueueArgs, PcArgs, PcScenarioArgs, SetupArgs,
+        VerifyArgs,
+    },
     args::{PathArgs, PercentArgs, RulesArgs, ScoringArgs},
     error::CliErrorCode,
     output::{
@@ -74,6 +77,7 @@ pub enum ParsedCliCommand {
     PcScenario(PcScenarioArgs),
     Path(PathArgs),
     Percent(PercentArgs),
+    FailedQueue(FailedQueueArgs),
     Setup(SetupArgs),
     Cover(CoverArgs),
     Rules(RulesArgs),
@@ -93,6 +97,7 @@ pub enum CliHelpTopic {
     PcScenario,
     Path,
     Percent,
+    FailedQueue,
     Setup,
     Cover,
     Rules,
@@ -114,7 +119,7 @@ impl CliHelpTopic {
             "{title}\n{}",
             match self {
                 Self::TopLevel => {
-                    "usage: clearra [--format text|json|fumen-like] [--lang en|ko] [--verbose] [--diagnostics] [--verbose-paths] <pc|pc-scenario|pc-replay|percent|setup-finder|build-probability|damage|spin-finder|build-coverage|rules|scoring|convert|continue|verify|sfinder> [options]\nglobal options may appear before or after the command\nlegacy Clearra aliases: path=pc-replay, setup=setup-finder, cover=build-coverage\nSfinder-compatible path/setup/cover meanings are isolated under: clearra sfinder <command>\ntry opening preset: clearra pc --lines 2"
+                    "usage: clearra [--format text|json|fumen-like] [--lang en|ko] [--verbose] [--diagnostics] [--verbose-paths] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build-probability|damage|spin-finder|build-coverage|rules|scoring|convert|continue|verify|sfinder> [options]\nglobal options may appear before or after the command\nlegacy Clearra aliases: path=pc-replay, setup=setup-finder, cover=build-coverage\nSfinder-compatible path/setup/cover meanings are isolated under: clearra sfinder <command>\ntry opening preset: clearra pc --lines 2"
                 }
                 Self::Pc => {
                     "usage: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]\n--auto-workers caps adaptive CPU parallelism without forcing small searches onto the parallel path\n--tiling-only enumerates exact geometry tilings without BuildUp or probability calculation; results may include solutions that cannot be built, hold still determines the reachable supply multiset, and rule, scoring, B2B, visible-7, tablebase, dependency-DAG, and per-solution probability options are unavailable"
@@ -127,6 +132,9 @@ impl CliHelpTopic {
                 }
                 Self::Percent => {
                     "usage: clearra percent --queue IOTSZ [--observed|--bag-aligned|--fixed] [--min-len N] [--max-patterns N] [--failed-count N]"
+                }
+                Self::FailedQueue => {
+                    "usage: clearra failed-queue --lines 4 [--patterns P7P3 | --queue IOTSZJL --fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--rule srs-plus|srs|srs-x|jstris-180] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--failed-count N]\nreturns the exact complement of queues that reach the requested reverse-search PC target; omitted --failed-count materializes every failed queue"
                 }
                 Self::Setup => {
                     "usage: clearra setup-finder --remaining IOTSZJL [--initial-hold empty|I|O|T|S|Z|J|L] [--mode oracle] [--queue-knowledge oracle|visible-7] [--next-cycle-remaining IOTS] [--rule srs-plus|srs|srs-x|jstris-180] [--priority all|build|pc] [--setup-length auto|longer|shorter] [--max-setup-pieces 1..10] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--tablebase|--no-tablebase] [--allow-post-cycle-borrow]\n   or: clearra setup-finder --remaining TI --mode qb --qb OS [--queue-knowledge oracle|visible-7] [--next-cycle-remaining OOSITZ] [--initial-hold empty|I|O|T|S|Z|J|L] [--rule srs-plus|srs|srs-x|jstris-180] [--priority all|build|pc] [--setup-length auto|longer|shorter] [--max-setup-pieces 1..10] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--tablebase|--no-tablebase]\nthis PC-family partial-BuildUp finder is not Sfinder setup's required-area placement command; 'setup' remains a legacy alias. --remaining is the unordered inventory before the next bag boundary and determines the PC cycle before any hold separation. At most one piece kind may appear twice; that duplicated piece is automatically placed in initial hold and still counts toward the cycle. --initial-hold remains a CLI-only explicit override and removes one matching piece from the same inventory. --qb is the observed next-bag piece group and enables queue-based setup generation; it is independent from --queue-knowledge, which selects full-future oracle coverage or an exact visible-seven action policy. --next-cycle-remaining independently constrains the exact hold plus bag remainder left after this PC and is valid in oracle or QB mode. --tablebase is opt-in and only rejects precomputed exact-dead PC4 completion states; all other states use the standard exact search. --rule selects the kick table used for every setup and completion BuildUp check. Setup search defaults to the process-visible logical processor count minus one; --auto-workers lowers that adaptive ceiling without forcing fixed parallel execution; --use-all-cpu-threads explicitly removes the reserved processor. --max-setup-pieces defaults to 9; use 10 to include complete PC solutions. Priority all ranks joint Build x PC coverage. Setup length is independent; auto favors longer setups for all/build and shorter setups for pc"

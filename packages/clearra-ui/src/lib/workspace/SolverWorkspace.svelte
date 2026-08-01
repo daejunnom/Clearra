@@ -256,6 +256,7 @@
     {elapsedMs}
     targetLines={resultTargetLines}
     tilingOnlyRequested={request.scoreMode === 'tiling'}
+    failedQueueRequested={request.scoreMode === 'failed-queue'}
     loadSolutionPage={(offset, limit) => workerController.loadSolutionPage(offset, limit)}
   />
 </WorkspaceShell>

@@ -125,12 +125,8 @@ impl AppCommand {
                 command.query().execution_policy().allow_backend_fallback(),
             ),
             Self::Percent(command) => BackendPolicy::new(
-                command
-                    .query()
-                    .execution_policy()
-                    .requested_backend()
-                    .as_str(),
-                command.query().execution_policy().allow_backend_fallback(),
+                command.requested_backend(),
+                command.allow_backend_fallback(),
             ),
             Self::BuildProbability(command) => BackendPolicy::new(
                 command
@@ -174,13 +170,7 @@ impl AppCommand {
                     .gpu_device()
                     .as_display_string(),
             ),
-            Self::Percent(command) => Some(
-                command
-                    .query()
-                    .execution_policy()
-                    .gpu_device()
-                    .as_display_string(),
-            ),
+            Self::Percent(command) => Some(command.gpu_device_display()),
             Self::Path(command) => Some(
                 command
                     .query()
@@ -214,6 +204,7 @@ impl AppCommand {
                 ObjectiveKind::Unique | ObjectiveKind::Tiling
             ),
             Self::BuildProbability(command) => !command.query().aggregation().is_tiling_only(),
+            Self::Percent(_) => true,
             Self::Damage(_) | Self::SpinFinder(_) => false,
             _ => false,
         }

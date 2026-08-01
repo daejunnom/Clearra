@@ -103,6 +103,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Clearra CLI rules smoke failed: $LASTEXITCODE" }
           & $cli --format json pc --lines 2 --queue IJLOO --fixed --no-hold | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Clearra CLI solver smoke failed: $LASTEXITCODE" }
+          & $cli --format json failed-queue --lines 2 --patterns P5 --backend cpu --failed-count 7 | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Clearra CLI failed-queue smoke failed: $LASTEXITCODE" }
       - name: Build standalone SvelteKit and Tauri GUI
         run: npm run tauri -w @clearra/desktop -- build --no-bundle
       - name: Stage Windows executables

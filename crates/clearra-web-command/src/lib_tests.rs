@@ -36,9 +36,73 @@ fn percent_command_compiles_to_coverage_summary_request() {
         panic!("expected AppCommand::Percent");
     };
     assert_eq!(command.failed_pattern_limit(), 3);
-    assert_eq!(command.query().initial_board().visible_height(), 1);
-    assert_eq!(command.query().piece_window().max_pieces(), 1);
-    assert_eq!(command.query().execution_policy().max_patterns(), 8);
+    let query = command.query().expect("scenario percent query");
+    assert_eq!(query.initial_board().visible_height(), 1);
+    assert_eq!(query.piece_window().max_pieces(), 1);
+    assert_eq!(query.execution_policy().max_patterns(), 8);
+}
+
+#[test]
+fn failed_queue_command_reuses_the_reverse_scenario_contract() {
+    let request = WebCommandParser::parse(
+        "clearra failed-queue --lines 4 --board-mask 0 --height 4 --pieces 10 \
+         --patterns P7P3 --hold empty --rule srs-plus --backend cpu --failed-count 17",
+    )
+    .expect("failed-queue command")
+    .to_app_request()
+    .expect("failed-queue AppRequest");
+
+    let AppCommand::Percent(command) = request.command() else {
+        panic!("expected AppCommand::Percent");
+    };
+    assert!(command.is_failed_queue());
+    assert_eq!(command.failed_pattern_limit(), 17);
+    let query = command.query().expect("scenario failed-queue query");
+    assert_eq!(query.initial_board().visible_height(), 4);
+    assert_eq!(query.piece_window().max_pieces(), 10);
+    assert_eq!(
+        query.objective().kind(),
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::All
+    );
+    assert!(!query.objective().score().requested());
+}
+
+#[test]
+fn failed_queue_keeps_b2b_constraints_without_enabling_scoring() {
+    let request = WebCommandParser::parse(
+        "clearra failed-queue --lines 2 --patterns P5 --preserve-b2b \
+         --spin-profile all-mini-plus --backend cpu --failed-count 4",
+    )
+    .expect("failed-queue command")
+    .to_app_request()
+    .expect("failed-queue AppRequest");
+
+    let AppCommand::Percent(command) = request.command() else {
+        panic!("expected AppCommand::Percent");
+    };
+    let query = command.opening_query().expect("opening failed-queue query");
+    let objective = query.objective();
+    assert!(!objective.score().requested());
+    assert!(objective.execution_constraints().preserves_back_to_back());
+    assert_eq!(
+        objective.execution_constraints().spin_profile().as_str(),
+        "all-mini-plus"
+    );
+}
+
+#[test]
+fn failed_queue_rejects_scoring_options() {
+    for option in [
+        "--score",
+        "--score-profile guideline",
+        "--initial-b2b 1",
+        "--solution-probabilities",
+        "--spin-profile all-mini-plus",
+    ] {
+        let command = format!("clearra failed-queue --lines 2 --patterns P5 {option}");
+        let error = WebCommandParser::parse(&command).expect_err(option);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
 }
 
 #[test]

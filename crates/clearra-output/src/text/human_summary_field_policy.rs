@@ -61,13 +61,23 @@ fn is_common_result_field(key: &str) -> bool {
 
 fn is_probability_query_field(kind: &str, key: &str) -> bool {
     matches!(kind, "percent" | "setup")
-        && matches!(
+        && (matches!(
             key,
             "materialized_probability_mass"
                 | "probability_complete"
                 | "renormalized"
                 | "truncation_reason"
-        )
+                | "result_mode"
+                | "failed_queue_contract"
+                | "failed_queue_probability"
+                | "total_pattern_count"
+                | "failed_pattern_count"
+                | "failed_pattern_scope"
+                | "failed_pattern_count_complete"
+                | "failed_pattern_limit"
+                | "failed_pattern_examples_materialized"
+                | "failed_pattern_examples_truncated"
+        ) || key.starts_with("failed_pattern_"))
 }
 
 fn is_pc_family_summary_field(key: &str) -> bool {
@@ -90,4 +100,28 @@ fn is_cover_summary_field(key: &str) -> bool {
         key,
         "template" | "template_id" | "action" | "exported" | "coverage_row_source"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HumanSummaryFieldPolicy;
+
+    #[test]
+    fn percent_human_output_keeps_failed_queue_fields() {
+        for key in [
+            "result_mode",
+            "failed_queue_probability",
+            "failed_pattern_count",
+            "failed_pattern_0",
+        ] {
+            assert!(
+                HumanSummaryFieldPolicy::include_field("percent", key),
+                "{key}"
+            );
+        }
+        assert!(!HumanSummaryFieldPolicy::include_field(
+            "pc",
+            "failed_pattern_0"
+        ));
+    }
 }

@@ -114,6 +114,22 @@ mod case_pc_contract_exposes_scoring_post_processing_contract {
                 RenderField::new("spin_probability", RenderFieldValue::number("0.5")),
                 RenderField::new("spin_covered_pattern_count", RenderFieldValue::number("2")),
                 RenderField::new("spin_pattern_count", RenderFieldValue::number("4")),
+                RenderField::new(
+                    "objective_max_score_cover",
+                    RenderFieldValue::string("connected-approximate"),
+                ),
+                RenderField::new(
+                    "objective_best_score_by_pattern_count",
+                    RenderFieldValue::number("2"),
+                ),
+                RenderField::new(
+                    "objective_score_probability_no_double_count",
+                    RenderFieldValue::Bool(true),
+                ),
+                RenderField::new(
+                    "objective_score_does_not_modify_coverage_probability",
+                    RenderFieldValue::Bool(true),
+                ),
             ],
         );
 

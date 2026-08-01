@@ -49,7 +49,7 @@ pub(crate) fn score_objective_policy(
     base: clearra_objectives::policy::objective_policy::ObjectivePolicy,
 ) -> Result<clearra_objectives::policy::objective_policy::ObjectivePolicy, RequestBuildError> {
     let objective = match mode {
-        "off" | "disabled" | "" => return Ok(base),
+        "off" | "disabled" | "failed-queue" | "" => return Ok(base),
         "tiling" | "tiling-only" => {
             return Ok(clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling())
         }

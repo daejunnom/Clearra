@@ -28,6 +28,7 @@ are never summed because multiple variants may cover the same queue pattern.
 clearra pc
 clearra pc-replay
 clearra percent
+clearra failed-queue
 clearra build-coverage
 clearra setup-finder
 clearra continue
@@ -38,6 +39,10 @@ clearra inspect
 clearra verify
 clearra verify kicks
 ```
+
+`clearra failed-queue` runs the reverse PC search and returns the exact
+complement of queues that reach the target. Use `--failed-count N` to bound the
+materialized queue list without changing the exact failed count or probability.
 
 The historical `path`, `cover`, and `setup` spellings remain compatibility
 aliases. Their canonical Clearra names avoid implying Sfinder command semantics.

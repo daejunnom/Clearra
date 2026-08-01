@@ -920,3 +920,28 @@ fn parses_percent_failed_pattern_limit() {
     };
     assert_eq!(args.failed_pattern_limit(), 23);
 }
+
+#[test]
+fn parses_failed_queue_with_pc_options_and_exact_output_limit() {
+    let parsed = CliParser::parse([
+        "clearra",
+        "failed-queue",
+        "--lines",
+        "4",
+        "--patterns",
+        "P7P3",
+        "--failed-count",
+        "41",
+        "--workers",
+        "2",
+    ])
+    .expect("failed-queue")
+    .into_command();
+    let ParsedCliCommand::FailedQueue(args) = parsed else {
+        panic!("expected failed-queue command");
+    };
+    assert_eq!(args.pc().lines(), 4);
+    assert_eq!(args.patterns(), Some("P7P3"));
+    assert_eq!(args.pc().workers(), Some(2));
+    assert_eq!(args.failed_pattern_limit(), 41);
+}

@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, PcAppCommand};
+use clearra_app::{AppCommand, PcAppCommand, PercentAppCommand};
 use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput, PcSolutionProbabilityPolicy, SupplyWindowSize,
@@ -28,12 +28,17 @@ impl PcRequestBuilder {
                 format!("invalid GUI PC line target: {error:?}"),
             )
         })?;
+        let base_objective = if form.score_mode() == "failed-queue" {
+            clearra_objectives::policy::objective_policy::ObjectivePolicy::all()
+        } else {
+            clearra_objectives::policy::objective_policy::ObjectivePolicy::unique()
+        };
         let objective = score_objective_policy(
             form.score_mode(),
             form.score_profile(),
             form.spin_profile(),
             form.initial_b2b(),
-            clearra_objectives::policy::objective_policy::ObjectivePolicy::unique(),
+            base_objective,
         )?;
         let tiling_only = objective.kind() == ObjectiveKind::Tiling;
         if tiling_only
@@ -97,6 +102,12 @@ impl PcRequestBuilder {
             query = query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
         }
 
-        Ok(AppCommand::Pc(PcAppCommand::new(query)))
+        if form.score_mode() == "failed-queue" {
+            Ok(AppCommand::Percent(
+                PercentAppCommand::failed_queue_opening(query),
+            ))
+        } else {
+            Ok(AppCommand::Pc(PcAppCommand::new(query)))
+        }
     }
 }

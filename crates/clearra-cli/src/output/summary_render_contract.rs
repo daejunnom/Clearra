@@ -140,6 +140,8 @@ fn bool_keys() -> BTreeSet<&'static str> {
         "verified_kick_profile",
         "clear_event_available",
         "drop_event_basis_available",
+        "failed_pattern_count_complete",
+        "failed_pattern_examples_truncated",
     ]
     .into_iter()
     .collect()
@@ -169,6 +171,10 @@ fn number_keys() -> BTreeSet<&'static str> {
         "diagnostic_count",
         "duplicate_transition_count",
         "exact_pieces",
+        "failed_pattern_count",
+        "failed_pattern_examples_materialized",
+        "failed_pattern_limit",
+        "failed_queue_probability",
         "execution_max_frontier_states",
         "execution_max_candidates",
         "execution_max_patterns",

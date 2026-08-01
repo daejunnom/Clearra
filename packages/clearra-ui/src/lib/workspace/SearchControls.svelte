@@ -22,6 +22,7 @@
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: tilingOnly = request.scoreMode === 'tiling';
+  $: failedQueueOnly = request.scoreMode === 'failed-queue';
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     dispatch('change', { ...request, ...change });
@@ -109,6 +110,7 @@
           <option value="off">{label('scoreOff')}</option>
           <option value="minimum-cover">{label('minimumSolutions')}</option>
           <option value="summary">{label('scoreSummary')}</option>
+          <option value="failed-queue">{label('failedQueues')}</option>
         </select>
       </label>
       <label class="workspace-field">
@@ -127,7 +129,7 @@
           min="0"
           step="1"
           value={request.initialB2B}
-          disabled={tilingOnly || request.scoreMode !== 'summary'}
+          disabled={tilingOnly || failedQueueOnly || request.scoreMode !== 'summary'}
           on:input={(event) => patch({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })}
         />
       </label>
@@ -135,7 +137,7 @@
         <span>{label('scoreProfile')}</span>
         <select
           value={request.scoreProfile}
-          disabled={tilingOnly || request.scoreMode !== 'summary'}
+          disabled={tilingOnly || failedQueueOnly || request.scoreMode !== 'summary'}
           on:change={(event) => patch({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreProfile'] })}
         >
           <option value="tetrio">{label('scoreProfileTetrio')}</option>
@@ -176,7 +178,7 @@
         <input
           type="checkbox"
           checked={request.solutionProbabilities}
-          disabled={tilingOnly}
+          disabled={tilingOnly || failedQueueOnly}
           on:change={(event) => patch({ solutionProbabilities: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>

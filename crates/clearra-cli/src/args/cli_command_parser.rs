@@ -1,6 +1,7 @@
 use super::{
     parse_continue_args::parse_continue, parse_convert_args::parse_convert,
-    parse_cover_args::parse_cover, parse_path_args::parse_path, parse_pc_args::parse_pc,
+    parse_cover_args::parse_cover, parse_failed_queue_args::parse_failed_queue,
+    parse_path_args::parse_path, parse_pc_args::parse_pc,
     parse_pc_scenario_args::parse_pc_scenario, parse_percent_args::parse_percent,
     parse_rules_args::parse_rules, parse_scoring_args::parse_scoring,
     parse_setup_args::parse_setup, parse_verify_args::parse_verify, CliHelpTopic, CliParseError,
@@ -16,6 +17,7 @@ pub(crate) fn parse_command(
         "pc-scenario" => parse_pc_scenario(command_args),
         "pc-replay" | "path" => parse_path(command_args),
         "percent" => parse_percent(command_args),
+        "failed-queue" | "failed_queue" => parse_failed_queue(command_args),
         "setup-finder" | "setup" => parse_setup(command_args),
         "build-coverage" | "cover" => parse_cover(command_args),
         "rules" => parse_rules(command_args),

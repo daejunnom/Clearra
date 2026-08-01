@@ -43,6 +43,13 @@ impl ProblemCompiler {
         Self::compile_scenario_pc(query)
             .map(|problem| problem.with_output_policy(SearchOutputPolicy::CoverageSummary))
     }
+
+    pub fn compile_opening_percent(
+        query: &OpeningPcSearchQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_opening_pc(query)
+            .map(|problem| problem.with_output_policy(SearchOutputPolicy::CoverageSummary))
+    }
 }
 impl ProblemCompiler {
     pub fn compile_setup(query: &SetupSearchQuery) -> Result<SearchProblem, ProblemCompileError> {

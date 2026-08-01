@@ -70,7 +70,10 @@ impl WebCommandParser {
         cursor += 1;
 
         match command.as_str() {
-            "pc" => parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1)),
+            "pc" => parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1), false),
+            "failed-queue" | "failed_queue" => {
+                parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1), true)
+            }
             "percent" => parse_percent_command(&tokens[cursor..], worker_hardware_limit.max(1)),
             "build-probability" => {
                 parse_build_probability_command(&tokens[cursor..], worker_hardware_limit.max(1))
@@ -982,6 +985,7 @@ fn parse_verify_command(tokens: &[String]) -> Result<WebCommandRequest, WebComma
 fn parse_pc_command(
     tokens: &[String],
     worker_hardware_limit: usize,
+    failed_queue_requested: bool,
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut lines = 2u8;
     let mut backend = RequestedSearchBackend::Auto;
@@ -1022,6 +1026,7 @@ fn parse_pc_command(
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
     let mut allowed_colored_solution_identities = None;
+    let mut failed_pattern_limit = usize::MAX;
     let mut cursor = 0usize;
 
     while cursor < tokens.len() {
@@ -1253,6 +1258,16 @@ fn parse_pc_command(
                 })?;
                 allowed_colored_solution_identities = Some(solutions.identities().to_vec());
             }
+            "--failed-count" | "--limit" if failed_queue_requested => {
+                let option = tokens[cursor].clone();
+                let value = next_value(tokens, &mut cursor, option.as_str())?;
+                failed_pattern_limit = value.parse::<usize>().map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid {option} value '{value}'"),
+                    )
+                })?;
+            }
             flag if flag.starts_with("--") => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::UnsupportedCommand,
@@ -1290,10 +1305,35 @@ fn parse_pc_command(
             "--tiling-only conflicts with a non-tiling --objective",
         ));
     }
-    let mut objective = objective.unwrap_or_else(|| match count_policy {
-        PcCountPolicy::CountAll => ObjectivePolicy::all(),
-        PcCountPolicy::FirstSolution | PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
-    });
+    if failed_queue_requested {
+        let incompatible = [
+            (tiling_only_flag, "--tiling-only"),
+            (objective.is_some(), "--objective"),
+            (score_requested, "--score"),
+            (score_profile.is_some(), "--score-profile"),
+            (initial_b2b.is_some(), "--initial-b2b"),
+            (solution_probabilities, "--solution-probabilities"),
+            (
+                spin_profile.is_some() && !preserve_back_to_back,
+                "--spin-profile without --preserve-b2b",
+            ),
+        ];
+        if let Some((_, option)) = incompatible.into_iter().find(|(enabled, _)| *enabled) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("{option} is not available with failed-queue search"),
+            ));
+        }
+        count_policy = PcCountPolicy::CountAll;
+    }
+    let mut objective = if failed_queue_requested {
+        ObjectivePolicy::all()
+    } else {
+        objective.unwrap_or_else(|| match count_policy {
+            PcCountPolicy::CountAll => ObjectivePolicy::all(),
+            PcCountPolicy::FirstSolution | PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
+        })
+    };
     if tiling_only_flag {
         objective = ObjectivePolicy::tiling();
     }
@@ -1329,7 +1369,7 @@ fn parse_pc_command(
             "--no-hold cannot be combined with an occupied --hold slot",
         ));
     }
-    if spin_profile.is_some() && !preserve_back_to_back {
+    if !failed_queue_requested && spin_profile.is_some() && !preserve_back_to_back {
         score_requested = true;
     }
     if score_requested && !objective.score().requested() {
@@ -1421,6 +1461,9 @@ fn parse_pc_command(
     }
     for file in virtual_files {
         request = request.with_virtual_file(file);
+    }
+    if failed_queue_requested {
+        request = request.with_failed_queue_mode(failed_pattern_limit);
     }
     Ok(request)
 }

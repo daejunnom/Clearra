@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, ScenarioAppCommand};
+use clearra_app::{AppCommand, PercentAppCommand, ScenarioAppCommand};
 use clearra_core_domain::{objective::objective_kind::ObjectiveKind, piece::piece_kind::PieceKind};
 use clearra_pc_graph::request::{
     PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy,
@@ -153,6 +153,10 @@ impl ScenarioRequestBuilder {
             query = query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
         }
 
-        Ok(AppCommand::Scenario(ScenarioAppCommand::new(query)))
+        if form.score_mode() == "failed-queue" {
+            Ok(AppCommand::Percent(PercentAppCommand::failed_queue(query)))
+        } else {
+            Ok(AppCommand::Scenario(ScenarioAppCommand::new(query)))
+        }
     }
 }

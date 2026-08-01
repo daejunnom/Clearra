@@ -951,8 +951,9 @@ language preference, file input policy, and effect/report models. It must not
 own argv parsing, stdout/stderr output, text/json/fumen-like formatting, raw C
 ABI calls, or GUI widget schema.
 
-The command files stay thin. `pc`, `pc-scenario`, `path`, `percent`, `setup`,
-`cover`, and `continue` assemble canonical typed inputs and call `clearra-app`.
+The command files stay thin. `pc`, `pc-scenario`, `path`, `percent`,
+`failed-queue`, `setup`, `cover`, and `continue` assemble canonical typed inputs
+and call `clearra-app`.
 `clearra-cli` renders the returned `AppResponse` to stdout/stderr through
 `clearra-output`; it must not call `CoreExecutor`, `ProblemCompiler`, or query
 validators directly from production command handlers.
@@ -971,9 +972,16 @@ belong to the typed app/executor path, not to the CLI command file. The browser
 WASM command parser exposes the same percent arguments and does not route through
 a native-only service.
 
+`failed-queue` is a reverse-search output policy over that same exact coverage
+result. It returns the complement of the covered `PatternBitSet`, never runs a
+separate forward solver, and fails closed when probability coverage is
+incomplete. A materialization limit may bound displayed queue strings, but must
+not change the exact failed count or complement probability.
+
 Process-level E2E owns the product-route contract for `clearra pc --lines 2`,
 `clearra pc-scenario --fixture tests/fixtures/pc/example.json`, `clearra pc-replay`,
-`clearra percent`, `clearra setup-finder`, and `clearra build-coverage`.
+`clearra percent`, `clearra failed-queue`, `clearra setup-finder`, and
+`clearra build-coverage`.
 `path`, `setup`, and `cover` remain input-only compatibility aliases and do not
 adopt the semantics of identically named Sfinder commands.
 

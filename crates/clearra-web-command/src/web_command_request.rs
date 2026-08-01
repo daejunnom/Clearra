@@ -183,6 +183,12 @@ impl WebCommandRequest {
         request
     }
 
+    pub(crate) fn with_failed_queue_mode(mut self, failed_pattern_limit: usize) -> Self {
+        self.command_kind = "failed-queue".to_owned();
+        self.percent_failed_pattern_limit = failed_pattern_limit;
+        self
+    }
+
     pub fn setup(remaining: Vec<PieceKind>, allow_post_cycle_borrow: bool) -> Self {
         let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
         request.command_kind = "setup".to_owned();
@@ -513,7 +519,10 @@ impl WebCommandRequest {
                     )),
             );
         }
-        if !matches!(self.command_kind.as_str(), "pc" | "build-probability") {
+        if !matches!(
+            self.command_kind.as_str(),
+            "pc" | "failed-queue" | "build-probability"
+        ) {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::UnsupportedCommand,
                 format!("unsupported web command '{}'", self.command_kind),
@@ -645,9 +654,15 @@ impl WebCommandRequest {
                 query =
                     query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
             }
-            return Ok(AppRequest::new(AppCommand::Scenario(
-                ScenarioAppCommand::new(query),
-            )));
+            let command = if self.command_kind == "failed-queue" {
+                AppCommand::Percent(
+                    PercentAppCommand::failed_queue(query)
+                        .with_failed_pattern_limit(self.percent_failed_pattern_limit),
+                )
+            } else {
+                AppCommand::Scenario(ScenarioAppCommand::new(query))
+            };
+            return Ok(AppRequest::new(command));
         }
 
         let target = PcTarget::new(self.lines).map_err(|error| {
@@ -683,7 +698,15 @@ impl WebCommandRequest {
             query = query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
         }
 
-        Ok(AppRequest::new(AppCommand::Pc(PcAppCommand::new(query))))
+        let command = if self.command_kind == "failed-queue" {
+            AppCommand::Percent(
+                PercentAppCommand::failed_queue_opening(query)
+                    .with_failed_pattern_limit(self.percent_failed_pattern_limit),
+            )
+        } else {
+            AppCommand::Pc(PcAppCommand::new(query))
+        };
+        Ok(AppRequest::new(command))
     }
 }
 impl WebCommandRequest {
@@ -742,7 +765,7 @@ impl WebCommandRequest {
     pub fn backend_requested(&self) -> &'static str {
         if matches!(
             self.command_kind.as_str(),
-            "pc" | "build-probability" | "setup"
+            "pc" | "failed-queue" | "build-probability" | "setup"
         ) {
             self.backend.as_str()
         } else {
@@ -751,7 +774,7 @@ impl WebCommandRequest {
     }
 
     pub fn requests_webgpu(&self) -> bool {
-        self.command_kind == "pc"
+        matches!(self.command_kind.as_str(), "pc" | "failed-queue")
             && matches!(
                 self.backend,
                 RequestedSearchBackend::Auto
