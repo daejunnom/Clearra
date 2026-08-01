@@ -1,0 +1,31 @@
+FROM node:22-bookworm-slim AS clearra-cli
+
+ARG CLEARRA_VERSION=0.5.1
+ARG CLEARRA_CLI_SHA256=""
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --fail --location --retry 5 --retry-delay 2 \
+      "https://github.com/daejunnom/Clearra/releases/download/v${CLEARRA_VERSION}/Clearra-CLI-v${CLEARRA_VERSION}-linux-x86_64" \
+      --output /usr/local/bin/clearra \
+    && chmod 0755 /usr/local/bin/clearra \
+    && if [ -n "${CLEARRA_CLI_SHA256}" ]; then \
+         echo "${CLEARRA_CLI_SHA256}  /usr/local/bin/clearra" | sha256sum --check --strict; \
+       fi \
+    && /usr/local/bin/clearra --format json rules list >/dev/null
+
+FROM node:22-bookworm-slim AS runtime
+
+ENV NODE_ENV=production
+ENV PORT=8080
+ENV CLEARRA_EXECUTABLE=/usr/local/bin/clearra
+WORKDIR /app
+
+COPY --from=clearra-cli /usr/local/bin/clearra /usr/local/bin/clearra
+COPY apps/clearra-discord-bot/src/clearra ./clearra
+COPY apps/clearra-discord-bot/src/job-service ./job-service
+
+USER node
+EXPOSE 8080
+CMD ["node", "./job-service/main.mjs"]
