@@ -1,0 +1,17 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - apps/clearra-discord-bot/Dockerfile.job-service
+      - --build-arg
+      - CLEARRA_VERSION=${_CLEARRA_VERSION}
+      - -t
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+substitutions:
+  _CLEARRA_VERSION: 0.5.1
+options:
+  logging: CLOUD_LOGGING_ONLY
