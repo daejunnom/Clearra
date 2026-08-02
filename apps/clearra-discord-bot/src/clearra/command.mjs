@@ -139,23 +139,25 @@ export function prepareClearraArguments(tokens, execution = {}) {
   }
   const parallelSearch = PARALLEL_SEARCH_COMMANDS.has(command) ||
     (command === "sfinder" && SFINDER_SEARCH_COMMANDS.has(sfinderCommand));
-  if (parallelSearch && execution.workers !== undefined) {
-    const workers = Number(execution.workers);
-    if (!Number.isSafeInteger(workers) || workers < 1) {
-      throw new Error("Clearrabot received an invalid search worker allocation.");
-    }
-    if (execution.logicalProcessors !== undefined) {
-      const logicalProcessors = Number(execution.logicalProcessors);
-      if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 1) {
-        throw new Error("Clearrabot received an invalid logical processor limit.");
+  if (parallelSearch) {
+    if (execution.workers !== undefined) {
+      const workers = Number(execution.workers);
+      if (!Number.isSafeInteger(workers) || workers < 1) {
+        throw new Error("Clearrabot received an invalid search worker allocation.");
       }
-      if (workers > logicalProcessors) {
-        throw new Error(
-          `Clearrabot worker allocation exceeds the hard limit of ${logicalProcessors} logical processors.`,
-        );
+      if (execution.logicalProcessors !== undefined) {
+        const logicalProcessors = Number(execution.logicalProcessors);
+        if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 1) {
+          throw new Error("Clearrabot received an invalid logical processor limit.");
+        }
+        if (workers > logicalProcessors) {
+          throw new Error(
+            `Clearrabot worker allocation exceeds the hard limit of ${logicalProcessors} logical processors.`,
+          );
+        }
       }
+      output.push("--auto-workers", String(workers));
     }
-    output.push("--auto-workers", String(workers));
     if (execution.useAllLogicalProcessors) {
       output.push("--use-all-cpu-threads");
     }

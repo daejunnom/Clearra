@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-08-02
+
+- Fixed the Discord/Cloud Run worker-authority boundary so a single automatic
+  session delegates the final worker count to the native Clearra hard limit
+  while preserving the explicit full-CPU policy. This avoids forcing Node's
+  affinity-visible count into a Rust runtime that reports a lower effective
+  Linux parallelism limit; explicit and multi-session allocations remain
+  bounded numeric requests.
+
 ## 0.6.1 - 2026-08-02
 
 - Kept queued interaction deadlines and Discord REST request timeouts alive

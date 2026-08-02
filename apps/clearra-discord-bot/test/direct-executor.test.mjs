@@ -21,6 +21,8 @@ test("Cloud Run interactions default to bounded in-process execution without a b
   assert.equal(config.maxOutputBytes, 4 * 1024 * 1024);
   assert.equal(config.maxPendingSearches, 8);
   assert.equal(config.interactionDeadlineMs, 4 * 60_000);
+  assert.equal(config.searchWorkersPerSession, undefined);
+  assert.equal(config.useAllLogicalProcessors, true);
 });
 
 test("gateway ingress and Cloud Run command registration still require a bot token", () => {

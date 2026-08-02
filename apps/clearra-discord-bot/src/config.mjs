@@ -66,18 +66,22 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
       maxConcurrentSearches,
       useAllLogicalProcessors,
     );
-    searchWorkersPerSession = positiveIntegerOrAuto(
-      environment.CLEARRA_SEARCH_WORKERS_PER_SESSION,
-      workerLimitPerSession,
-    );
-    if (searchWorkersPerSession > workerLimitPerSession) {
+    const configuredWorkers = environment.CLEARRA_SEARCH_WORKERS_PER_SESSION;
+    const runtimeSelectedWorkers = automaticWorkerSetting(configuredWorkers);
+    searchWorkersPerSession = runtimeSelectedWorkers
+      ? maxConcurrentSearches === 1
+        ? undefined
+        : workerLimitPerSession
+      : positiveInteger(configuredWorkers, workerLimitPerSession);
+    if (
+      searchWorkersPerSession !== undefined &&
+      searchWorkersPerSession > workerLimitPerSession
+    ) {
       throw new Error(
         `CLEARRA_SEARCH_WORKERS_PER_SESSION exceeds the runtime limit of ${workerLimitPerSession}.`,
       );
     }
-    effectiveUseAllLogicalProcessors =
-      useAllLogicalProcessors &&
-      searchWorkersPerSession > Math.max(1, processLogicalProcessors - 1);
+    effectiveUseAllLogicalProcessors = useAllLogicalProcessors;
   }
 
   return {
@@ -178,9 +182,9 @@ function boundedPositiveInteger(value, fallback, maximum, name) {
   return parsed;
 }
 
-function positiveIntegerOrAuto(value, fallback) {
-  if (typeof value === "string" && value.toLowerCase() === "auto") return fallback;
-  return positiveInteger(value, fallback);
+function automaticWorkerSetting(value) {
+  return value === undefined || value === "" ||
+    (typeof value === "string" && value.toLowerCase() === "auto");
 }
 
 function booleanSetting(value, fallback) {

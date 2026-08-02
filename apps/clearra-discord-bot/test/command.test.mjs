@@ -70,7 +70,7 @@ test("Clearrabot uses every logical processor by default with an explicit reserv
   const runtime = { availableParallelism: () => 8 };
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" }, runtime);
   assert.equal(config.processLogicalProcessors, 8);
-  assert.equal(config.searchWorkersPerSession, 8);
+  assert.equal(config.searchWorkersPerSession, undefined);
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(defaultSearchWorkersPerSession(8, 2), 4);
   assert.equal(
@@ -81,7 +81,7 @@ test("Clearrabot uses every logical processor by default with an explicit reserv
       },
       runtime,
     ).searchWorkersPerSession,
-    8,
+    undefined,
   );
 
   const reserveCore = loadDiscordBotConfig(
@@ -91,7 +91,7 @@ test("Clearrabot uses every logical processor by default with an explicit reserv
     },
     runtime,
   );
-  assert.equal(reserveCore.searchWorkersPerSession, 7);
+  assert.equal(reserveCore.searchWorkersPerSession, undefined);
   assert.equal(reserveCore.useAllLogicalProcessors, false);
 
   const shared = loadDiscordBotConfig(
@@ -103,6 +103,26 @@ test("Clearrabot uses every logical processor by default with an explicit reserv
     runtime,
   );
   assert.equal(shared.searchWorkersPerSession, 4);
+  assert.equal(shared.useAllLogicalProcessors, true);
+  const sharedAuto = loadDiscordBotConfig(
+    {
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_MAX_CONCURRENT_SEARCHES: "2",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "auto",
+    },
+    runtime,
+  );
+  assert.equal(sharedAuto.searchWorkersPerSession, 4);
+  assert.equal(sharedAuto.useAllLogicalProcessors, true);
+  const explicit = loadDiscordBotConfig(
+    {
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "6",
+    },
+    runtime,
+  );
+  assert.equal(explicit.searchWorkersPerSession, 6);
+  assert.equal(explicit.useAllLogicalProcessors, true);
   assert.throws(
     () =>
       loadDiscordBotConfig(
@@ -210,6 +230,27 @@ test("Discord commands always use the Clearra exact product path", () => {
 });
 
 test("Discord owns an adaptive worker ceiling instead of accepting a user override", () => {
+  const runtimeSelected = prepareClearraArguments(
+    ["pc", "--lines", "2", "--auto-workers", "99"],
+    { workers: undefined, useAllLogicalProcessors: true },
+  );
+  assert.deepEqual(runtimeSelected, [
+    "pc",
+    "--lines",
+    "2",
+    "--no-tablebase",
+    "--no-build-dependency-dag",
+    "--use-all-cpu-threads",
+    "--format",
+    "text",
+  ]);
+  assert.deepEqual(
+    prepareClearraArguments(runtimeSelected, {
+      workers: undefined,
+      useAllLogicalProcessors: true,
+    }),
+    runtimeSelected,
+  );
   assert.deepEqual(
     prepareClearraArguments(
       [

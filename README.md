@@ -191,10 +191,13 @@ The raw CLI compatibility form remains available as a separate legacy boundary:
 Discord `/cover` contract and is not converted into the two-field ingress.
 
 The approved Cloud Run shape scales from zero to four instances. Each instance
-has 8 vCPUs and 16 GiB, accepts request concurrency 1, runs one eight-worker
-search at a time, and keeps CPU throttling disabled. The service can therefore
-run four searches across four instances; it is not globally serial. Cloud Run's
-eight-vCPU per-instance maximum rules out a single 16-vCPU instance. Slash
+has 8 vCPUs and 16 GiB, accepts request concurrency 1, runs one native
+runtime-selected full-capacity search at a time, and keeps CPU throttling
+disabled. The native hard limit remains authoritative if the container's
+effective Linux parallelism is lower than its configured vCPU count. The
+service can therefore run four searches across four instances; it is not
+globally serial. Cloud Run's eight-vCPU per-instance maximum rules out a single
+16-vCPU instance. Slash
 command registration is a trusted local one-shot operation; the deployed service
 does not need `DISCORD_TOKEN`. See
 [apps/clearra-discord-bot/README.md](apps/clearra-discord-bot/README.md) for

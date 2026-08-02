@@ -72,7 +72,7 @@ The Oracle Gateway is not in the slash-command path. With no
 own bounded pending queue. Cloud Run may create up to four instances, so the
 service is not globally serial: at full scale it can run four searches in
 parallel, one per instance, without making two CPU-heavy searches compete for
-the same instance's eight vCPUs.
+the same instance's CPU allocation.
 
 `CLEARRA_JOB_URL` remains an explicit remote-execution seam for later testing;
 it is not the Cloud Run default. The older `clearra.job.v1` service and Oracle
@@ -272,6 +272,14 @@ gcloud run deploy clearra-interaction `
 Both maximum flags are intentional: `--max=4` is the service-wide cost ceiling,
 while `--max-instances=4` prevents Cloud Run's lower revision default from
 silently limiting the active revision to three instances.
+
+Keep `CLEARRA_SEARCH_WORKERS_PER_SESSION=auto` for the single-session Cloud Run
+service. The Discord host passes the full-use policy but leaves the final count
+to the native Clearra hard limit. Node's affinity-visible count can be higher
+than Rust's effective Linux parallelism estimate when container affinity or
+cgroup limits differ; forcing the advertised vCPU count can therefore fail
+before a search starts. Explicit numeric allocations and configurations with
+multiple concurrent searches continue to use the bounded per-session number.
 
 Set the deployed URL plus `/interactions` as the Discord application's
 Interaction Endpoint URL. Do not point Discord at the Oracle Gateway or the

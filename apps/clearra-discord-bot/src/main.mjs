@@ -10,7 +10,9 @@ const config = loadDiscordBotConfig();
 const workerSummary =
   config.workerAuthority === "remote"
     ? `remote job service owns search workers; ${config.maxConcurrentSearches} remote job(s)`
-    : `${config.searchWorkersPerSession} worker(s) per session; ` +
+    : `${config.searchWorkersPerSession === undefined
+      ? "native runtime-selected worker(s)"
+      : `${config.searchWorkersPerSession} worker(s)`} per session; ` +
       `${config.processLogicalProcessors} logical processor(s) visible; ` +
       `${config.maxConcurrentSearches} concurrent session(s)`;
 const executionSummary = config.jobEndpoint

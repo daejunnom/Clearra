@@ -201,9 +201,10 @@ shape is not re-applied to the slash path without new evidence:
 - Execution is serial per instance, not globally serial. Request concurrency 1
   and one active Clearra search apply independently to each instance; Cloud Run
   may scale from zero to four instances, so four searches can run concurrently.
-  Each instance has its own bounded pending queue, 8 vCPUs, 16 GiB, and eight
-  automatic search workers. Instance CPU stays allocated after the HTTP ACK
-  through `--no-cpu-throttling`, and startup CPU boost remains enabled.
+  Each instance has its own bounded pending queue, 8 configured vCPUs, 16 GiB,
+  and one native runtime-selected full-capacity search. Instance CPU stays
+  allocated after the HTTP ACK through `--no-cpu-throttling`, and startup CPU
+  boost remains enabled.
 - Deployment fixes both the service maximum and active-revision maximum at four.
   Setting only service `--max=4` left Cloud Run's revision default at three, so
   `--max-instances=4` is also required for the approved capacity.
@@ -309,11 +310,12 @@ Production revision `clearra-interaction-00003-kls` serves 100% of traffic at
 `https://clearra-interaction-50060711800.asia-northeast1.run.app`. Its observed
 configuration has no minimum-scale annotation, fixes both service and revision
 maximums at four, and assigns each instance concurrency 1, 8 vCPUs, and 16 GiB.
-The live `/health` probe returned 200, an unsigned `/interactions` request was
-rejected with 401, and startup logs confirmed eight visible logical processors
-and eight automatic search workers for the single active session per instance.
-This deployed revision is the completed form of the accepted boundary above;
-do not repeat the earlier service-only maximum deployment.
+The live `/health` probe returned 200 and an unsigned `/interactions` request was
+rejected with 401. Startup logs reported Node's eight affinity-visible logical
+processors and the then-materialized eight-worker request. A later real command
+showed that this was not proof of native capacity: Rust rejected that request
+against its effective hard limit of six. Do not restore the eight-worker
+materialization or repeat the earlier service-only maximum deployment.
 
 The Discord Developer Portal initially rejected the saved application metadata
 as `tags: 0`. The first tag was `#falling-block-puzzle`, which is 21 characters
@@ -333,6 +335,61 @@ Windows path is the `register:commands:windows` workspace script: it uses the
 5.1-compatible `-AsSecureString`, converts the token only in process memory for
 the child Node process, and removes the temporary environment value afterward.
 Do not retry the unsupported manual `-MaskInput` command on this host.
+
+### Native worker authority correction
+
+Production revision `clearra-interaction-00005-lpg` remained configured for
+8 vCPUs, 16 GiB, concurrency 1, minimum 0, and maximum 4. Node 22's
+`os.availableParallelism()` reported eight, while the source-built Rust CLI's
+`std::thread::available_parallelism()` reported a hard limit of six and rejected
+`--auto-workers 8` before search execution. Node wraps libuv, whose Linux query
+uses the calling thread's affinity mask; Rust also treats container affinity and
+cgroup capacity as part of its effective estimate. The observed values alone do
+not distinguish a steady cgroup quota from a thread-affinity undercount, so an
+eight-worker override would violate the product hard-lock contract.
+
+The accepted fix applies only at the host/runtime boundary. A single automatic
+session omits the numeric `--auto-workers` argument and passes
+`--use-all-cpu-threads`, allowing the native Auto policy to choose its own hard
+limit (six in the failing revision). Reserve-core mode omits the full-use flag
+and therefore selects the native limit minus one. Explicit numeric settings and
+automatic allocations divided across multiple concurrent sessions retain their
+bounded numeric requests. PC/build candidate generation, result identity, and
+pruning are unchanged. The current production concurrency remains one; raising
+the per-instance search concurrency above one requires a separate native
+capacity probe or shared worker budget so a Node-based partition cannot
+oversubscribe a lower Rust effective limit.
+
+References: [Rust `available_parallelism`](https://doc.rust-lang.org/std/thread/fn.available_parallelism.html),
+[Node `os.availableParallelism`](https://nodejs.org/api/os.html#osavailableparallelism),
+and [libuv `uv_available_parallelism`](https://docs.libuv.org/en/v1.x/misc.html#c.uv_available_parallelism).
+
+### Evaluated modal field fallback (not enabled)
+
+A missing board can be collected with a Discord Modal, including `/cover`'s
+separate `base` and `target` boards, but the current command registration and
+HTTP ingress deliberately do not enable it yet. Board options are registered as
+required, the adapter always returns deferred callback type 5, and ingress only
+accepts application-command interactions. A Modal must instead be the initial
+type 9 response before any defer; its submission arrives as a new type 5
+interaction and can then enter the existing deferred search path.
+
+The safe Cloud Run design is stateless. The modal must contain every value needed
+to reconstruct the command (board fields plus any already supplied next/options)
+rather than storing a nonce in an instance-local Map, because scale-to-zero,
+four instances, and revision replacement can route the submission elsewhere.
+`/cover` fits within the five-component modal limit with `base`, `target`,
+`next`, and `options`. Modal text inputs are limited to 4,000 characters while
+the current slash board boundary accepts 6,000, so the future modal path must
+cap inline values at 4,000 and direct larger CTK3/Fumen values to the existing
+payload-URL path. The eventual implementation also requires optional board
+registration, an initial-response preflight router, modal-submit validation,
+and new command registration; none of those changes are part of this worker
+correction.
+
+References: [Discord interaction responses](https://docs.discord.com/developers/interactions/receiving-and-responding),
+[Discord component reference](https://docs.discord.com/developers/components/reference),
+and [Discord application commands](https://docs.discord.com/developers/interactions/application-commands).
 
 ### Rejected coverage-summary reroute
 
