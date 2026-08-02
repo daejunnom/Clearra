@@ -67,12 +67,16 @@ export class DiscordRestClient {
     }
     let response;
     try {
-      response = await this.fetch(parsed, {
-        method: "GET",
-        headers: { "user-agent": "Clearrabot/0.1" },
-        redirect: "error",
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
-      });
+      response = await fetchWithTimeout(
+        this.fetch,
+        parsed,
+        {
+          method: "GET",
+          headers: { "user-agent": "Clearrabot/0.1" },
+          redirect: "error",
+        },
+        this.requestTimeoutMs,
+      );
     } catch (error) {
       throw discordNetworkError(error);
     }
@@ -152,12 +156,12 @@ export class DiscordRestClient {
 
       let response;
       try {
-        response = await this.fetch(`${API_ROOT}${path}`, {
-          method,
-          headers,
-          body,
-          signal: AbortSignal.timeout(this.requestTimeoutMs),
-        });
+        response = await fetchWithTimeout(
+          this.fetch,
+          `${API_ROOT}${path}`,
+          { method, headers, body },
+          this.requestTimeoutMs,
+        );
       } catch (error) {
         throw discordNetworkError(error);
       }
@@ -208,6 +212,19 @@ export function attachmentMessage(content, files) {
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function fetchWithTimeout(fetchImplementation, url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImplementation(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function positiveInteger(value, fallback) {

@@ -259,7 +259,6 @@ export class Clearrabot {
         () => removeAndReject(interactionDeadlineError()),
         Math.max(1, deadlineUnixMs - Date.now()),
       );
-      pending.timeout.unref?.();
       this.pendingSearches.push(pending);
       options.signal?.addEventListener("abort", pending.abort, { once: true });
       if (options.signal?.aborted) {

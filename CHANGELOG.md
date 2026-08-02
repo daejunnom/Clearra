@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-08-02
+
+- Kept queued interaction deadlines and Discord REST request timeouts alive
+  until their pending work settles, including under the Node.js 22 event-loop
+  behavior used by the release workflow.
+
 ## 0.6.0 - 2026-08-02
 
 - Added `/help` and structured Discord command inputs (`field`, `next`,
