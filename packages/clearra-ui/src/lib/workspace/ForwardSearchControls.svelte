@@ -3,6 +3,7 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
+    MAX_FORWARD_CHAIN,
     spinCategoryOptions,
     type ForwardDamageAggregation,
     type ForwardSearchRequest,
@@ -98,6 +99,19 @@
         <span>{label('preserveB2B')}</span>
       </label>
     </div>
+    <div class="worker-policy-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.useAllLogicalProcessors}
+          on:change={(event) => update({
+            useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('useAllThreads')}</span>
+      </label>
+    </div>
 
   {#if request.tool === 'damage'}
     <label class="workspace-field wide damage-mode">
@@ -128,11 +142,11 @@
     <div class="workspace-field-grid">
       <label class="workspace-field">
         <span>{label('initialCombo')}</span>
-        <input type="number" min="0" step="1" value={request.initialCombo} on:input={(event) => update({ initialCombo: Number((event.currentTarget as HTMLInputElement).value) })} />
+        <input type="number" min="0" max={MAX_FORWARD_CHAIN} step="1" value={request.initialCombo} on:input={(event) => update({ initialCombo: Number((event.currentTarget as HTMLInputElement).value) })} />
       </label>
       <label class="workspace-field">
         <span>{label('initialB2B')}</span>
-        <input type="number" min="0" step="1" value={request.initialB2B} on:input={(event) => update({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })} />
+        <input type="number" min="0" max={MAX_FORWARD_CHAIN} step="1" value={request.initialB2B} on:input={(event) => update({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })} />
       </label>
     </div>
   {:else}
@@ -175,5 +189,6 @@
 <style>
   .damage-mode { margin-top: 12px; }
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
+  .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .queue-field :global(input[aria-invalid='true']) { border-color: #bd5a3d; }
 </style>

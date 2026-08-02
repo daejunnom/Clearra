@@ -111,6 +111,19 @@
         <span>{label('preserveB2B')}</span>
       </label>
     </div>
+    <div class="worker-policy-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.useAllLogicalProcessors}
+          on:change={(event) => patch({
+            useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('useAllThreads')}</span>
+      </label>
+    </div>
     <div class="dependency-analysis-control">
       <label class="workspace-switch-label">
         <input
@@ -137,5 +150,6 @@
 
 <style>
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
+  .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .dependency-analysis-control { display: grid; gap: 5px; margin-top: 14px; }
 </style>

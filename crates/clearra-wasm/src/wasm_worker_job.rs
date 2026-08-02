@@ -41,6 +41,7 @@ pub enum WasmWorkerJobStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WasmWorkerAdvanceStatus {
     Pending,
+    Progress,
     Completed,
     Cancelled,
     Failed,
@@ -50,6 +51,7 @@ impl WasmWorkerAdvanceStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Progress => "progress",
             Self::Completed => "completed",
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
@@ -57,7 +59,7 @@ impl WasmWorkerAdvanceStatus {
     }
 
     pub const fn is_terminal(self) -> bool {
-        !matches!(self, Self::Pending)
+        !matches!(self, Self::Pending | Self::Progress)
     }
 }
 
@@ -434,6 +436,7 @@ impl WasmWorkerJobRuntime {
         self.emit_buffered_progress(job_id);
         match advance {
             PreparedWasmAdvance::Pending => Ok(WasmWorkerAdvanceStatus::Pending),
+            PreparedWasmAdvance::Progress => Ok(WasmWorkerAdvanceStatus::Progress),
             PreparedWasmAdvance::Cancelled => {
                 self.finish_cancelled(job_id)?;
                 Ok(WasmWorkerAdvanceStatus::Cancelled)

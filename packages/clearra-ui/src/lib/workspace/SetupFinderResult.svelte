@@ -29,6 +29,7 @@
   } from './workspaceI18n';
   import {
     setupPathDetailKey,
+    type SetupSearchMode,
     type SetupPathDetailRequest,
     type SetupPathDetailState
   } from './setupFinderModel';
@@ -36,6 +37,7 @@
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
+  export let searchMode: SetupSearchMode = 'oracle';
   export let pathDetails: Record<string, SetupPathDetailState> = {};
 
   const PAGE_SIZE = 100;
@@ -267,6 +269,7 @@
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
   progressProfile="setup"
+  progressMode={searchMode === 'qb' ? 'setup-qb' : 'setup-oracle'}
   {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail=""

@@ -4,6 +4,7 @@
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
+  import type { ScoreMode } from './solverWorkspaceModel';
   import type { SolutionCopyFormat } from './solutionExport';
   import type { SolutionExportKeySource } from './solutionExportAsync';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
@@ -21,6 +22,7 @@
   export let targetLines = 4;
   export let tilingOnlyRequested = false;
   export let failedQueueRequested = false;
+  export let scoreMode: ScoreMode = 'off';
   export let loadSolutionPage:
     | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
     | null = null;
@@ -76,6 +78,13 @@
   $: solutionPageAvailable = summaryFields.solution_page_available === 'true';
   $: tilingProgress = tilingOnly || (!report && tilingOnlyRequested);
   $: scoringRequested = summaryFields.score_requested === 'true';
+  $: progressMode = failedQueueResult
+    ? 'pc-failed-queue' as const
+    : summaryFields.objective === 'minimum-cover' || scoreMode === 'minimum-cover'
+      ? 'pc-minimum-cover' as const
+      : scoringRequested || scoreMode === 'summary'
+        ? 'pc-score' as const
+        : 'pc-all' as const;
   $: solutionExportKeySource =
     (solutionPageAvailable && loadSolutionPage) || solutionCommentsAvailable
       ? createSolutionExportKeySource()
@@ -237,6 +246,7 @@
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
   progressProfile={tilingProgress ? 'tiling' : 'pc'}
+  {progressMode}
   {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}

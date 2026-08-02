@@ -158,28 +158,48 @@ review or release source.
 
 ## Clearrabot
 
-`apps/clearra-discord-bot` exposes Clearra searches through the `/clearra` and
-`/view` slash commands. Ordinary messages and prefix commands are disabled.
-Commands are submitted to the configured idempotent HTTP job service; no shell
-or external solver is part of the bot command path.
+`apps/clearra-discord-bot` exposes the represented Sfinder-compatible contracts
+as individual slash commands such as `/path`, `/percent`, and `/setup`, plus
+local syntax guidance through `/help`. Search commands receive structured
+`field`, `next`, or `remaining` inputs; `/cover` instead receives separate
+`base`, `target`, and `next` inputs, where `target` contains only cells to add.
+One command-specific `options` string is used only for allow-listed optional
+settings. CTK3 is decoded directly by the npm `ctk3` package and is never
+converted to Fumen. CTK3 and Fumen compute inputs must each be one static
+10-column page; every non-empty input color is projected to the same occupancy
+bit before the typed Rust validation boundary. `/cover` sends its colorless
+base and target-delta masks to the existing build-probability command.
 
-Fumen and CTK3 documents can be passed to `/view` as text or `.ctk3` files.
-Clearrabot decodes them through the Clearra document contract and
-uses its own indexed-pixel GIF89a/LZW renderer. Search text and image previews
-are separate replies. Clearrabot links directly to the loaded CTK workspace
-when the reply fits Discord's 2,000-character limit; otherwise it attaches a
-canonical CTK3 document and links to the CTK renderer:
+Discord search solution documents are emitted only as CTK3. Generated pieces
+retain their tetromino colors and cells that were occupied in the input field
+are `G`; the active Discord result path does not emit Fumen. This presentation
+contract does not change PC/build candidate generation or pruning. Discord
+sends those commands directly to one public Cloud Run interaction service in
+Tokyo (`asia-northeast1`). That service verifies the Discord Ed25519 signature,
+acknowledges within Discord's three-second window, runs the current-source
+Clearra CLI serially per instance, and edits the deferred interaction.
 
-```text
-https://daejunnom.github.io/Clearra/?tool=ctk&ctk=ctk3_...&viewer=1
-https://daejunnom.github.io/Clearra/?tool=ctk&fumen=v115@...&viewer=1
-```
+Oracle is not part of the slash-command path. Prefix/ordinary-message commands,
+Gateway-delivered slash commands, `/clearra`, and `/view` are disabled. CTK3 and
+Fumen normalization is active only for compute fields; the GIF renderer remains
+unregistered and has no active ingress. Future length-bounded text/image requests
+may use Oracle as a proxy after separate testing; that deferred path must not
+reroute the active slash catalog.
 
-The bot supports a signed Discord Interaction HTTP adapter for Google Cloud Run
-and an intent-free local Gateway fallback. See
+The raw CLI compatibility form remains available as a separate legacy boundary:
+`clearra sfinder cover <solution-fumen> <pattern> [lines]`. It is not the
+Discord `/cover` contract and is not converted into the two-field ingress.
+
+The approved Cloud Run shape scales from zero to four instances. Each instance
+has 8 vCPUs and 16 GiB, accepts request concurrency 1, runs one eight-worker
+search at a time, and keeps CPU throttling disabled. The service can therefore
+run four searches across four instances; it is not globally serial. Cloud Run's
+eight-vCPU per-instance maximum rules out a single 16-vCPU instance. Slash
+command registration is a trusted local one-shot operation; the deployed service
+does not need `DISCORD_TOKEN`. See
 [apps/clearra-discord-bot/README.md](apps/clearra-discord-bot/README.md) for
-Discord application settings, Cloud Run requirements, and the future relay
-protocol boundary.
+the command catalog, Discord timing boundary, Cloud Run settings, and the
+future Oracle/job-service seams.
 
 ## Published Products
 

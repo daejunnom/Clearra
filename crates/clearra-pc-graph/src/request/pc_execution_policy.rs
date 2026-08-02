@@ -102,10 +102,25 @@ mod policy {
         pub fn workers(&self) -> usize {
             let workers = self.worker_policy.effective_for_hardware_limit(
                 self.use_all_logical_processors,
-                self.worker_hardware_limit,
+                self.effective_worker_hardware_limit(),
             );
             self.automatic_worker_limit
                 .map_or(workers, |limit| workers.min(limit.max(1)))
+        }
+    }
+    impl PcExecutionPolicy {
+        fn effective_worker_hardware_limit(&self) -> usize {
+            let injected_limit = self.worker_hardware_limit.max(1);
+            #[cfg(target_family = "wasm")]
+            {
+                // Browser hardware concurrency is injected by the JS host. Native
+                // available_parallelism is not authoritative in a WASM guest.
+                injected_limit
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                injected_limit.min(WorkerPolicy::hardware_worker_limit())
+            }
         }
     }
     impl PcExecutionPolicy {

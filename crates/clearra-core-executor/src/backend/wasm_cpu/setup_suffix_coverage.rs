@@ -237,6 +237,46 @@ impl SetupSuffixCoverageSession {
         self.prefix.as_ref().map_or(0, |prefix| prefix.nodes.len())
     }
 
+    pub(super) fn layer_progress(&self) -> (usize, usize, usize, usize) {
+        match self.phase {
+            SuffixPhase::Build => {
+                let candidate_depth = self
+                    .prefix
+                    .as_ref()
+                    .map_or(self.current_depth, SetupPartialBuildPrefix::candidate_depth);
+                let layer_count = usize::from(MAX_PC_LOCKS.saturating_sub(candidate_depth)).max(1);
+                let layer_index = usize::from(self.current_depth.saturating_sub(candidate_depth))
+                    .min(layer_count.saturating_sub(1));
+                (
+                    layer_index,
+                    layer_count,
+                    self.current_state_cursor.min(self.current_states.len()),
+                    self.current_states.len(),
+                )
+            }
+            SuffixPhase::Compile => {
+                let layer_count = self.layers.len().max(1);
+                let layer_index = self
+                    .layers
+                    .len()
+                    .saturating_sub(self.compile_layer_count)
+                    .min(layer_count.saturating_sub(1));
+                let layer_total = self
+                    .compile_layer_count
+                    .checked_sub(1)
+                    .and_then(|index| self.layers.get(index))
+                    .map_or(0, |layer| layer.nodes.len());
+                (
+                    layer_index,
+                    layer_count,
+                    self.compile_node_cursor.min(layer_total),
+                    layer_total,
+                )
+            }
+            SuffixPhase::Complete => (1, 1, 1, 1),
+        }
+    }
+
     pub(super) fn advance(
         &mut self,
         work_budget: usize,

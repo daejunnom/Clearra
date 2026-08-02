@@ -165,6 +165,26 @@ function Assert-ClearraRepositoryArtifactPolicy(
         }
     }
 }
+function Remove-ClearraRepositoryLocalBuildArtifacts(
+    [string]$RepositoryRoot = $script:ClearraPathPolicyRepositoryRoot
+) {
+    $repository = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
+    foreach ($name in @('target', 'build')) {
+        $candidate = [System.IO.Path]::GetFullPath((Join-Path $repository $name))
+        $expected = $repository + [System.IO.Path]::DirectorySeparatorChar + $name
+        $comparison = if (Test-StartTestsWindows) {
+            [System.StringComparison]::OrdinalIgnoreCase
+        } else {
+            [System.StringComparison]::Ordinal
+        }
+        if (-not $candidate.Equals($expected, $comparison)) {
+            throw "Refusing to clean an unexpected repository-local build path: $candidate"
+        }
+        if (Test-Path -LiteralPath $candidate) {
+            Remove-Item -LiteralPath $candidate -Recurse -Force
+        }
+    }
+}
 function Get-StartTestsTransientBuildRoots {
     return [string[]]@((Get-ClearraArtifactRoot))
 }
@@ -212,6 +232,7 @@ function New-TransientBuildDir([string]$Prefix) {
         return $path
     } catch {
         $lock.Dispose()
+        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
         throw
     }
 }
@@ -252,6 +273,7 @@ function Remove-TransientBuildDir([string]$BuildDir) {
     }
     $buildPath = [System.IO.Path]::GetFullPath($BuildDir)
     $isAllowed = $false
+    $lockPath = $null
     foreach ($root in Get-StartTestsTransientBuildRoots) {
         if ([string]::IsNullOrWhiteSpace($root)) {
             continue
@@ -262,22 +284,27 @@ function Remove-TransientBuildDir([string]$BuildDir) {
         } else {
             [System.StringComparison]::Ordinal
         }
-        $prefix = $rootPath.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-        if ($buildPath.StartsWith($prefix, $comparison)) {
+        $slotRoot = [System.IO.Path]::GetFullPath((Join-Path $rootPath 'transient')).TrimEnd('\', '/')
+        $parent = [System.IO.Path]::GetFullPath((Split-Path -Parent $buildPath)).TrimEnd('\', '/')
+        if ($parent.Equals($slotRoot, $comparison) -and
+            $script:ClearraTransientBuildSlotLocks.ContainsKey($buildPath)) {
             $isAllowed = $true
+            $lockPath = Join-Path $slotRoot ".$([System.IO.Path]::GetFileName($buildPath)).lock"
             break
         }
     }
 
     try {
-        if ($isAllowed -and
-            (Split-Path -Leaf $buildPath).StartsWith("clearra-core-c", [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($isAllowed) {
             Remove-Item -LiteralPath $buildPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     } finally {
         if ($script:ClearraTransientBuildSlotLocks.ContainsKey($buildPath)) {
             $script:ClearraTransientBuildSlotLocks[$buildPath].Dispose()
             $script:ClearraTransientBuildSlotLocks.Remove($buildPath)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($lockPath)) {
+            Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
         }
     }
 }

@@ -404,12 +404,16 @@ impl WebCommandRequest {
 }
 impl WebCommandRequest {
     fn resolved_worker_budget(&self) -> usize {
-        let default = if self.use_all_logical_processors {
-            self.worker_hardware_limit
-        } else {
-            WorkerPolicy::default_worker_limit_for_hardware(self.worker_hardware_limit)
+        let hardware_limit = self.worker_hardware_limit.max(1);
+        let workers = match self.workers {
+            Some(workers) => WorkerPolicy::clamp_requested_for_hardware(
+                workers,
+                self.use_all_logical_processors,
+                hardware_limit,
+            ),
+            None => WorkerPolicy::Auto
+                .effective_for_hardware_limit(self.use_all_logical_processors, hardware_limit),
         };
-        let workers = self.workers.unwrap_or(default);
         self.automatic_worker_limit
             .map_or(workers, |limit| workers.min(limit.max(1)))
             .max(1)

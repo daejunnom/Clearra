@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-08-02
+
+- Added `/help` and structured Discord command inputs (`field`, `next`,
+  `remaining`, and `scope`). Optional search settings now use one bounded,
+  command-specific `key=value` allow-list instead of an unrestricted argv
+  string. CTK3 is decoded directly through the npm package and is never
+  re-encoded as Fumen; Fumen is decoded independently. Both formats require one
+  static page and project every non-empty input color to canonical occupancy
+  masks. `/cover` now accepts separate `base` and non-overlapping `target`
+  delta fields plus `next`, then compiles to the existing build-probability
+  request. The legacy raw CLI colored-Fumen cover boundary remains available.
+- Made CTK3 the active Discord solution-document output. Generated tetrominoes
+  retain piece colors and inherited initial occupancy is encoded as `G`; the
+  Discord result path does not emit Fumen. These boundary changes do not alter
+  PC/build engines or pruning. The discarded CTK input piece-identity,
+  grey/colored pair, and multi-page cover designs must not be reapplied.
+- Replaced the Discord `/clearra` and `/view` surface with individual represented
+  Sfinder-compatible slash commands and made the direct signed Cloud Run
+  interaction service the only active slash ingress. Oracle, ordinary-message
+  commands, and image rendering remain disabled future proxy seams.
+- Added bounded per-instance serial Clearra execution with queue-inclusive
+  interaction deadlines, source-built Linux CLI packaging, local one-shot
+  command registration, and a Tokyo (`asia-northeast1`) Cloud Run deployment
+  contract: 0--4 instances, concurrency 1, 8 vCPUs/16 GiB per instance, CPU
+  throttling disabled, and startup CPU boost enabled.
+- Fixed both service-level and revision-level maximum instances at four so the
+  platform's lower revision default cannot silently cap the service at three.
+- Added `/health` as the Cloud Run-safe health endpoint while retaining
+  `/healthz` only as a local compatibility alias because Cloud Run reserves
+  some paths ending in `z`.
+- Added a Windows PowerShell 5.1/7-compatible masked Discord command-registration
+  wrapper and fail-fast credential diagnostics so unsupported `-MaskInput`
+  syntax cannot silently leave `DISCORD_TOKEN` unset.
+- Restored the Tauri desktop entry points for all six product tools and routed
+  their forms through typed native requests instead of leaving the desktop on a
+  solver-only surface.
+- Unified worker allocation across native, browser, and bot hosts: automatic
+  desktop work reserves one logical processor, explicit full-use and Discord or
+  Linux hosts may use all logical processors, and every path is hard-capped at
+  the processors visible to that host.
+- Hardened browser and desktop worker lifecycles with bounded artifact waits,
+  verifier heartbeats and watchdogs, terminal cleanup, and prewarm ownership so
+  failed joins or stale workers cannot leave the five product flows loading
+  indefinitely.
+- Improved Setup execution and presentation with bounded parallel progress,
+  lower duplicate-state memory pressure, stable path-detail ownership, and
+  retained exact reachability and pruning rules.
+- Hardened transient build and artifact-cache boundaries so repeated WASM,
+  desktop, and benchmark runs reuse managed locations without accumulating
+  stale generated output.
+- Corrected Discord result completeness reporting to ignore inactive optional
+  post-processing stages and propagated the configured output ceiling through
+  the optional remote job seam.
+
 ## 0.5.1 - 2026-08-01
 
 - Added native Sfinder-compatible command roles and a compact standalone PC

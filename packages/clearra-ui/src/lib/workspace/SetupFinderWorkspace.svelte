@@ -2,7 +2,25 @@
   import { onDestroy, onMount } from 'svelte';
 
   import {
+    cancelJob as cancelDesktopDetailJob,
+    getJobEvents as getDesktopDetailJobEvents,
+    startJob as startDesktopDetailJob,
+    type ClearraDesktopJobEvent
+  } from '../host';
+
+  import {
+    cancelDesktopJob,
+    clearDesktopTerminalResult,
+    desktopJobState,
+    disposeDesktopJobPolling,
+    resumeDesktopJobPolling,
+    startDesktopJob,
+    updateDesktopRequest
+  } from '../stores';
+
+  import {
     buildWasmCommandRequest,
+    clearWasmTerminalResult,
     ensureWasmWorkerOwnerId,
     postRunCommand,
     terminateOwnedWasmWorker,
@@ -19,21 +37,27 @@
     createDefaultSetupFinderRequest,
     setupCycle,
     setupFinderValidationCodes,
+    setupFinderRequestForDesktop,
     setupPathDetailKey,
     type SetupFinderRequest,
     type SetupPathDetailRequest,
     type SetupPathDetailState
   } from './setupFinderModel';
+  import { cancelSetupPathDetail } from './setupPathDetailState';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
     preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
-  import { workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
-  import { defaultWorkerCount } from './solverWorkspaceModel';
+  import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
+  import {
+    defaultBrowserWorkerCount,
+    defaultWorkerCount
+  } from './solverWorkspaceModel';
 
   export let workerFactory: (() => Worker) | null = null;
+  export let runtime: 'web' | 'desktop' = 'web';
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
   let request = createDefaultSetupFinderRequest();
@@ -43,6 +67,9 @@
   let detailWorkerBusy = false;
   let activeDetailKey: string | null = null;
   let detailGeneration = 0;
+  let desktopDetailJobId: number | null = null;
+  let desktopDetailPending: DesktopDetailRequest | null = null;
+  let desktopDetailPump: Promise<void> | null = null;
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
   let runStartedAt = 0;
@@ -50,9 +77,12 @@
   let prewarmWorkerCount = 1;
 
   $: workerController.setWorkerFactory(workerFactory);
-  $: runtimeView = workspaceViewFromWasm($wasmWorkerState);
+  $: runtimeView = runtime === 'web'
+    ? workspaceViewFromWasm($wasmWorkerState)
+    : workspaceViewFromDesktop($desktopJobState);
   $: validationCodes = setupFinderValidationCodes(request);
-  $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
+  $: mainJobActive = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
+  $: active = mainJobActive || detailWorkerBusy;
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
@@ -60,8 +90,9 @@
     language = preferredWorkspaceLanguage(
       localStorage.getItem('clearra-language') ?? navigator.language
     );
-    prewarmWorkerCount = defaultWorkerCount(navigator.hardwareConcurrency);
-    workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
+    prewarmWorkerCount = automaticWorkerCount(request.useAllLogicalProcessors);
+    if (runtime === 'web') workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
+    else resumeDesktopJobPolling();
     const handlePageHide = () => disposeWorkspace();
     window.addEventListener('pagehide', handlePageHide);
     return () => window.removeEventListener('pagehide', handlePageHide);
@@ -71,8 +102,15 @@
 
   function disposeWorkspace() {
     stopElapsedTimer();
-    disposeDetailWorker();
+    if (runtime === 'desktop') void stopDesktopDetail(false);
+    else disposeDetailWorker();
     workerController.dispose();
+    if (runtime === 'desktop') {
+      disposeDesktopJobPolling();
+      clearDesktopTerminalResult();
+    } else {
+      clearWasmTerminalResult();
+    }
   }
 
   function setLanguage(next: WorkspaceLanguage) {
@@ -82,26 +120,48 @@
 
   function updateRequest(next: SetupFinderRequest) {
     const tablebaseChanged = next.tablebaseEnabled !== request.tablebaseEnabled;
+    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    if (useAllChanged) {
+      prewarmWorkerCount = automaticWorkerCount(next.useAllLogicalProcessors);
+    }
     request = setupCycle(next.remaining) === 7
       ? next
       : { ...next, allowPostCycleBorrow: false };
-    if (tablebaseChanged) {
+    if (runtime === 'web' && (tablebaseChanged || useAllChanged)) {
       workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
     }
   }
 
-  function run() {
+  function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
+    return runtime === 'web'
+      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
+      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+  }
+
+  async function run() {
     if (active || validationCodes.length) return;
     disposeDetailWorker();
     pathDetails = {};
     resultRequest = { ...request };
+    if (runtime === 'web') {
+      updateWasmCommandText(buildSetupFinderCommand(request, prewarmWorkerCount));
+      if (workerController.run()) startElapsedTimer();
+      return;
+    }
     startElapsedTimer();
-    updateWasmCommandText(buildSetupFinderCommand(request));
-    workerController.run();
+    updateDesktopRequest(setupFinderRequestForDesktop(request, language, prewarmWorkerCount));
+    await startDesktopJob();
   }
 
-  function cancel() {
-    if (active) workerController.cancel();
+  async function cancel() {
+    if (!active) return;
+    if (detailWorkerBusy) {
+      if (runtime === 'desktop') await stopDesktopDetail(true);
+      else cancelWebDetail();
+      return;
+    }
+    if (runtime === 'web') workerController.cancel();
+    else await cancelDesktopJob();
   }
 
   function startElapsedTimer() {
@@ -134,7 +194,20 @@
     const key = setupPathDetailKey(detail);
     const existing = pathDetails[key];
     if (existing?.status === 'loading' || existing?.status === 'complete') return;
-    if (!workerFactory || !resultRequest) {
+    if (!resultRequest) {
+      updatePathDetail(key, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: label('pathDetailUnavailable')
+      });
+      return;
+    }
+    if (runtime === 'desktop') {
+      queueDesktopDetail(key, detail, resultRequest);
+      return;
+    }
+    if (!workerFactory) {
       updatePathDetail(key, {
         status: 'failed',
         paths: [],
@@ -255,7 +328,7 @@
       postRunCommand(
         worker,
         buildWasmCommandRequest({
-          commandText: buildSetupPathDetailCommand(resultRequest, detail)
+          commandText: buildSetupPathDetailCommand(resultRequest, detail, 1)
         }),
         1,
         resultRequest.tablebaseEnabled,
@@ -276,6 +349,182 @@
     pathDetails = { ...pathDetails, [key]: state };
   }
 
+  type DesktopDetailRequest = {
+    key: string;
+    detail: SetupPathDetailRequest;
+    request: SetupFinderRequest;
+    generation: number;
+  };
+
+  function queueDesktopDetail(
+    key: string,
+    detail: SetupPathDetailRequest,
+    sourceRequest: SetupFinderRequest
+  ) {
+    if (activeDetailKey && activeDetailKey !== key) {
+      updatePathDetail(activeDetailKey, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: label('cancelled')
+      });
+    }
+    const generation = ++detailGeneration;
+    activeDetailKey = key;
+    detailWorkerBusy = true;
+    updatePathDetail(key, {
+      status: 'loading',
+      paths: [],
+      complete: false,
+      error: null
+    });
+    desktopDetailPending = {
+      key,
+      detail,
+      request: { ...sourceRequest },
+      generation
+    };
+    if (desktopDetailJobId !== null) {
+      void cancelDesktopDetailJob(desktopDetailJobId).catch(() => undefined);
+    }
+    ensureDesktopDetailPump();
+  }
+
+  function ensureDesktopDetailPump() {
+    if (desktopDetailPump !== null) return;
+    desktopDetailPump = pumpDesktopDetails().finally(() => {
+      desktopDetailPump = null;
+      if (desktopDetailPending !== null) {
+        ensureDesktopDetailPump();
+      } else if (desktopDetailJobId === null) {
+        detailWorkerBusy = false;
+        activeDetailKey = null;
+      }
+    });
+  }
+
+  async function pumpDesktopDetails() {
+    while (desktopDetailPending !== null) {
+      const pending = desktopDetailPending;
+      desktopDetailPending = null;
+      await runDesktopDetail(pending);
+    }
+  }
+
+  async function runDesktopDetail(pending: DesktopDetailRequest) {
+    if (pending.generation !== detailGeneration) return;
+    let jobId: number;
+    try {
+      jobId = await startDesktopDetailJob(
+        setupFinderRequestForDesktop(pending.request, language, 1, pending.detail)
+      );
+      desktopDetailJobId = jobId;
+    } catch (error) {
+      failDesktopDetail(pending, error instanceof Error ? error.message : String(error));
+      return;
+    }
+
+    let cancellationSent = false;
+    while (desktopDetailJobId === jobId) {
+      if (pending.generation !== detailGeneration && !cancellationSent) {
+        cancellationSent = true;
+        try {
+          await cancelDesktopDetailJob(jobId);
+        } catch {}
+      }
+      let events: ClearraDesktopJobEvent[];
+      try {
+        events = await getDesktopDetailJobEvents(jobId);
+      } catch (error) {
+        desktopDetailJobId = null;
+        failDesktopDetail(pending, error instanceof Error ? error.message : String(error));
+        return;
+      }
+      const terminal = events.find((event) =>
+        event.event === 'completed' || event.event === 'failed' || event.event === 'cancelled'
+      );
+      if (terminal) {
+        desktopDetailJobId = null;
+        if (pending.generation === detailGeneration) {
+          applyDesktopDetailTerminal(pending, terminal);
+        }
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  function applyDesktopDetailTerminal(
+    pending: DesktopDetailRequest,
+    event: ClearraDesktopJobEvent
+  ) {
+    if (event.event === 'completed') {
+      const condition = event.search_report?.setup_report?.hold_conditions.find(
+        (candidate) => candidate.condition_id === pending.detail.conditionId
+      );
+      const candidate = condition?.candidates.find(
+        (candidate) => candidate.setup_id === pending.detail.setupId
+      );
+      if (event.response?.status === 'success' && candidate?.solution_paths_complete === true) {
+        updatePathDetail(pending.key, {
+          status: 'complete',
+          paths: candidate.solution_paths ?? [],
+          complete: true,
+          error: null
+        });
+        return;
+      }
+      failDesktopDetail(
+        pending,
+        event.response?.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
+          label('pathDetailFailed')
+      );
+      return;
+    }
+    failDesktopDetail(
+      pending,
+      event.event === 'cancelled' ? label('cancelled') : event.code ?? label('pathDetailFailed')
+    );
+  }
+
+  function failDesktopDetail(pending: DesktopDetailRequest, error: string) {
+    if (pending.generation !== detailGeneration) return;
+    updatePathDetail(pending.key, {
+      status: 'failed',
+      paths: [],
+      complete: false,
+      error
+    });
+  }
+
+  async function stopDesktopDetail(showCancelled: boolean) {
+    const activeKey = activeDetailKey;
+    detailGeneration += 1;
+    desktopDetailPending = null;
+    if (showCancelled && activeKey) {
+      updatePathDetail(activeKey, {
+        status: 'failed',
+        paths: [],
+        complete: false,
+        error: label('cancelled')
+      });
+    }
+    const jobId = desktopDetailJobId;
+    if (jobId !== null) {
+      try {
+        await cancelDesktopDetailJob(jobId);
+      } catch {}
+    }
+    if (desktopDetailPump !== null) {
+      try {
+        await desktopDetailPump;
+      } catch {}
+    }
+    desktopDetailJobId = null;
+    detailWorkerBusy = false;
+    activeDetailKey = null;
+  }
+
   function disposeDetailWorker() {
     detailGeneration += 1;
     detailWorkerBusy = false;
@@ -287,6 +536,11 @@
     worker.onerror = null;
     worker.onmessageerror = null;
     terminateOwnedWasmWorker(worker, 'owner-disposed');
+  }
+
+  function cancelWebDetail() {
+    pathDetails = cancelSetupPathDetail(pathDetails, activeDetailKey, label('cancelled'));
+    disposeDetailWorker();
   }
 
   function releaseDetailWorker(
@@ -340,7 +594,7 @@
     {request}
     {language}
     {validationCodes}
-    tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
+    tablebaseStatus={runtime === 'web' ? $wasmWorkerState.tablebaseWarmup.status : 'disabled'}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
     on:change={(event) => updateRequest(event.detail)}
   />
@@ -349,6 +603,7 @@
     view={runtimeView}
     {language}
     {elapsedMs}
+    searchMode={resultRequest?.searchMode ?? request.searchMode}
     {pathDetails}
     on:loadPaths={(event) => loadSetupPaths(event.detail)}
   />

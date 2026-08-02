@@ -7,7 +7,7 @@ export type ClearraWasmModule = {
   advance_job: (
     jobId: number,
     workBudget: number
-  ) => 'pending' | 'completed' | 'cancelled' | 'failed';
+  ) => 'pending' | 'progress' | 'completed' | 'cancelled' | 'failed';
   cancel_job: (jobId: number) => void;
   drain_job_events_json: (jobId: number) => string;
   distributed_prepare: (commandText: string) => ClearraDistributedPlan;
@@ -29,6 +29,7 @@ export type ClearraWasmModule = {
   distributed_verifier_progress: () => ClearraDistributedVerifierProgress;
   distributed_verifier_finish: () => ArrayBuffer;
   prewarm_gpu: (deviceIndex: number | null) => Promise<'connected' | 'unavailable'>;
+  cancel_gpu_warmup: () => void;
   profile_start?: () => void;
   profile_finish?: () => unknown;
   failure_diagnostics: () => ClearraWasmFailureDiagnostics;
@@ -99,6 +100,8 @@ export type ClearraWasmHostCapabilities = {
 };
 
 let wasmModulePromise: Promise<ClearraWasmModule> | null = null;
+const ARTIFACT_NETWORK_TIMEOUT_MS = 30_000;
+const ARTIFACT_MODULE_TIMEOUT_MS = 60_000;
 
 type ClearraRawWasmExports = {
   memory: WebAssembly.Memory;
@@ -156,6 +159,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_verifier_finish: () => number;
   clearra_wasm_gpu_warmup_start: (deviceIndex: number) => number;
   clearra_wasm_gpu_warmup_advance: () => number;
+  clearra_wasm_gpu_warmup_cancel: () => number;
   clearra_wasm_start_job: () => number;
   clearra_wasm_advance_job: (jobId: number, workBudget: number) => number;
   clearra_wasm_cancel_job: (jobId: number) => number;
@@ -228,11 +232,17 @@ async function loadClearraWasmArtifactGeneration(
     try {
       const wasmRoot = `${deploymentBaseFromWorkerLocation(self.location.pathname)}/wasm`;
       const manifestUrl = new URL(`${wasmRoot}/clearra_wasm.manifest.json`, self.location.origin);
-      const manifestResponse = await fetch(manifestUrl, { cache: 'no-store' });
-      if (!manifestResponse.ok) {
-        throw new Error(`Clearra WASM manifest unavailable: ${manifestResponse.status}`);
-      }
-      const manifest = (await manifestResponse.json()) as ClearraWasmArtifactManifest;
+      const manifest = await withArtifactDeadline(
+        'Clearra WASM manifest fetch',
+        ARTIFACT_NETWORK_TIMEOUT_MS,
+        async (signal) => {
+          const response = await fetch(manifestUrl, { cache: 'no-store', signal });
+          if (!response.ok) {
+            throw new Error(`Clearra WASM manifest unavailable: ${response.status}`);
+          }
+          return (await response.json()) as ClearraWasmArtifactManifest;
+        }
+      );
       if (!isArtifactManifest(manifest)) {
         throw new Error('Clearra WASM manifest is invalid');
       }
@@ -247,11 +257,16 @@ async function loadClearraWasmArtifactGeneration(
       const bindings = await importClearraWasmBindings(bindingsUrl, manifest.bindings);
       const compiledModule =
         sharedCompiledModule ?? (await compileClearraWasmModule(wasmUrl, manifest.wasm));
-      const raw = await bindings.default({ module_or_path: compiledModule });
+      const raw = await withArtifactDeadline(
+        'Clearra WASM instantiation',
+        ARTIFACT_MODULE_TIMEOUT_MS,
+        () => bindings.default({ module_or_path: compiledModule })
+      );
       const module = wrapRawModule(raw, compiledModule);
       module.configure_host(detectHostCapabilities());
       return module;
     } catch (error) {
+      if (isArtifactTimeout(error)) throw error;
       if (attempt !== 0) {
         throw new Error('Clearra WASM artifact generation could not be loaded after a fresh retry', {
           cause: error
@@ -268,16 +283,27 @@ async function importClearraWasmBindings(
   artifact: ClearraWasmArtifact
 ): Promise<ClearraWasmBindings> {
   try {
-    return (await import(
-      /* @vite-ignore */ bindingsUrl.href
-    )) as ClearraWasmBindings;
-  } catch {
+    return await withArtifactDeadline(
+      'Clearra WASM bindings import',
+      ARTIFACT_MODULE_TIMEOUT_MS,
+      async () =>
+        (await import(
+          /* @vite-ignore */ bindingsUrl.href
+        )) as ClearraWasmBindings
+    );
+  } catch (error) {
+    if (isArtifactTimeout(error)) throw error;
     const bytes = await fetchVerifiedArtifactBytes(bindingsUrl, artifact);
     const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'text/javascript' }));
     try {
-      return (await import(
-        /* @vite-ignore */ blobUrl
-      )) as ClearraWasmBindings;
+      return await withArtifactDeadline(
+        'verified Clearra WASM bindings import',
+        ARTIFACT_MODULE_TIMEOUT_MS,
+        async () =>
+          (await import(
+            /* @vite-ignore */ blobUrl
+          )) as ClearraWasmBindings
+      );
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
@@ -288,42 +314,95 @@ async function compileClearraWasmModule(
   wasmUrl: URL,
   artifact: ClearraWasmArtifact
 ): Promise<WebAssembly.Module> {
-  const response = await fetch(wasmUrl, { cache: 'no-store' });
-  if (!response.ok) {
-    throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
-  }
   if (typeof WebAssembly.compileStreaming === 'function') {
     try {
-      return await WebAssembly.compileStreaming(response);
-    } catch {
-      return WebAssembly.compile(await fetchVerifiedArtifactBytes(wasmUrl, artifact));
+      return await withArtifactDeadline(
+        'Clearra WASM streaming compile',
+        ARTIFACT_MODULE_TIMEOUT_MS,
+        async (signal) => {
+          const response = await fetch(wasmUrl, { cache: 'no-store', signal });
+          if (!response.ok) {
+            throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
+          }
+          return WebAssembly.compileStreaming(response);
+        }
+      );
+    } catch (error) {
+      if (isArtifactTimeout(error)) throw error;
     }
   }
-  return WebAssembly.compile(await fetchVerifiedArtifactBytes(wasmUrl, artifact));
+  const bytes = await fetchVerifiedArtifactBytes(wasmUrl, artifact);
+  return withArtifactDeadline(
+    'verified Clearra WASM compile',
+    ARTIFACT_MODULE_TIMEOUT_MS,
+    () => WebAssembly.compile(bytes)
+  );
 }
 
 async function fetchVerifiedArtifactBytes(
   artifactUrl: URL,
   artifact: ClearraWasmArtifact
 ): Promise<ArrayBuffer> {
-  const response = await fetch(artifactUrl, { cache: 'no-store' });
-  if (!response.ok) {
-    throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
+  return withArtifactDeadline(
+    'Clearra WASM artifact verification',
+    ARTIFACT_NETWORK_TIMEOUT_MS,
+    async (signal) => {
+      const response = await fetch(artifactUrl, { cache: 'no-store', signal });
+      if (!response.ok) {
+        throw new Error(`Clearra WASM artifact unavailable: ${response.status}`);
+      }
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength !== artifact.bytes) {
+        throw new Error(
+          `Clearra WASM artifact length mismatch: expected ${artifact.bytes}, received ${bytes.byteLength}`
+        );
+      }
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      const actualSha256 = [...new Uint8Array(digest)]
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+      if (actualSha256 !== artifact.sha256) {
+        throw new Error('Clearra WASM artifact SHA-256 mismatch');
+      }
+      return bytes;
+    }
+  );
+}
+
+export async function withArtifactDeadline<T>(
+  label: string,
+  timeoutMs: number,
+  operation: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutError = new ClearraWasmRuntimeError(
+    'E_WASM_MODULE_LOAD_TIMEOUT',
+    `${label} timed out after ${timeoutMs} ms`
+  );
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort(timeoutError);
+          reject(timeoutError);
+        }, timeoutMs);
+      })
+    ]);
+  } catch (error) {
+    if (controller.signal.aborted) throw timeoutError;
+    throw error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
-  const bytes = await response.arrayBuffer();
-  if (bytes.byteLength !== artifact.bytes) {
-    throw new Error(
-      `Clearra WASM artifact length mismatch: expected ${artifact.bytes}, received ${bytes.byteLength}`
-    );
-  }
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const actualSha256 = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-  if (actualSha256 !== artifact.sha256) {
-    throw new Error('Clearra WASM artifact SHA-256 mismatch');
-  }
-  return bytes;
+}
+
+function isArtifactTimeout(error: unknown): boolean {
+  return (
+    error instanceof ClearraWasmRuntimeError &&
+    error.diagnosticCode === 'E_WASM_MODULE_LOAD_TIMEOUT'
+  );
 }
 
 function deploymentBaseFromWorkerLocation(pathname: string): string {
@@ -407,6 +486,7 @@ function wrapRawModule(
     const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
   };
+  let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
     compiled_module() {
@@ -461,8 +541,14 @@ function wrapRawModule(
     advance_job(jobId, workBudget) {
       const status = raw.clearra_wasm_advance_job(jobId, workBudget);
       requireOk(status);
-      const labels = ['pending', 'completed', 'cancelled', 'failed'] as const;
-      const label = labels[status];
+      const labels = {
+        0: 'pending',
+        1: 'completed',
+        2: 'cancelled',
+        3: 'failed',
+        4: 'progress'
+      } as const;
+      const label = labels[status as keyof typeof labels];
       if (!label) throw new Error(`invalid Clearra WASM advance status: ${status}`);
       return label;
     },
@@ -597,8 +683,15 @@ function wrapRawModule(
       return outputBytes();
     },
     async prewarm_gpu(deviceIndex) {
+      const generation = ++gpuWarmupGeneration;
       requireOk(raw.clearra_wasm_gpu_warmup_start(deviceIndex ?? -1));
       for (;;) {
+        if (generation !== gpuWarmupGeneration) {
+          throw new ClearraWasmRuntimeError(
+            'E_WASM_GPU_WARMUP_CANCELLED',
+            'GPU warmup ownership was transferred to a foreground command'
+          );
+        }
         const status = raw.clearra_wasm_gpu_warmup_advance();
         requireOk(status);
         if (status === 1) return 'connected';
@@ -606,6 +699,10 @@ function wrapRawModule(
         if (status !== 0) throw new Error(`invalid GPU warmup status: ${status}`);
         await yieldToRuntimeHost();
       }
+    },
+    cancel_gpu_warmup() {
+      gpuWarmupGeneration += 1;
+      requireOk(raw.clearra_wasm_gpu_warmup_cancel());
     }
   };
   if (raw.clearra_wasm_profile_start && raw.clearra_wasm_profile_finish) {

@@ -23,18 +23,23 @@ It must not:
 
 ## Request Route
 
-`DesktopTauriCommandBridge::run_request` parses the desktop form envelope,
-builds an `AppRequest` through `GuiToAppRequest`, calls `AppContext::run`, and
-serializes `AppResponse::to_host_response`. `validate_request` uses the same
-builder and calls application validation without executing the solver.
+`DesktopTauriCommandBridge::run_request` parses the desktop form envelope and
+builds a typed `AppRequest`. PC and PC-scenario retain the GUI form builder;
+setup, build probability, damage, and spin finder are translated through their
+typed web-command inputs. No route creates CLI text. `validate_request` and
+`start_job` use the same dispatcher, so validation and execution cannot disagree
+about the command family.
 
 ## Job Route
 
 `start_job` queues the same typed request. `GuiJobRunner` executes it on the
 host worker thread and emits a completed event containing the real host
-`AppResponse`. It does not emit a synthetic partial or marker-only final
-response. `cancel_job` sets the cooperative cancellation token; event JSON
-reports cancellation without exposing an execution scope or raw pointer.
+`AppResponse` plus the structured search report required by the shared result
+UI. The report is embedded with a borrowed raw-JSON serializer, avoiding a
+second parsed `serde_json::Value` tree for large setup and forward-search
+results. It does not emit a synthetic partial or marker-only final response.
+`cancel_job` sets the cooperative cancellation token; event JSON reports
+cancellation without exposing an execution scope or raw pointer.
 
 ## Desktop Ownership
 

@@ -1,13 +1,25 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import { extname, resolve, sep } from 'node:path';
+import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const options = parseArgs(process.argv.slice(2));
 const root = resolve(options.root);
+const benchmarkEntry = resolve(root, 'index.html');
+if (!fs.existsSync(benchmarkEntry) || !fs.statSync(benchmarkEntry).isFile()) {
+  throw new Error(
+    `benchmark root must contain a built index.html entrypoint: ${benchmarkEntry}`
+  );
+}
 const timeoutMs = positiveInteger(options.timeout ?? '3600000', 'timeout');
-const profile = fs.mkdtempSync(resolve(os.tmpdir(), 'clearra-browser-benchmark-'));
+const cacheBase = process.platform === 'win32'
+  ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
+  : process.env.XDG_CACHE_HOME || resolve(process.env.HOME || '.', '.cache');
+const profileLease = await acquireManagedTransientDirectory(
+  resolve(cacheBase, 'Clearra', 'benchmark-runtime', 'browser-profile')
+);
+const profile = profileLease.path;
 let browser = null;
 let server = null;
 let timeout = null;
@@ -94,7 +106,11 @@ try {
   clearTimeout(timeout);
   await stopBrowser(browser, profile);
   await closeServer(server);
-  await removeBrowserProfile(profile);
+  try {
+    await removeBrowserProfile(profile);
+  } finally {
+    await profileLease.release({ remove: false });
+  }
 }
 
 async function closeServer(activeServer) {

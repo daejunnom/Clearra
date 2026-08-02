@@ -52,10 +52,10 @@ test("gateway worker authority preserves host-local CPU allocation", () => {
 
   assert.equal(config.workerAuthority, "gateway");
   assert.equal(config.maxConcurrentSearches, 2);
-  assert.equal(config.searchWorkersPerSession, 3);
+  assert.equal(config.searchWorkersPerSession, 4);
 });
 
-test("job service derives Clearra workers from the Cloud Run CPU limit", () => {
+test("job service uses every Cloud Run logical processor by default", () => {
   const config = loadClearraJobServiceConfig(
     {
       CLEARRA_JOB_TOKEN: "job-token",
@@ -65,9 +65,42 @@ test("job service derives Clearra workers from the Cloud Run CPU limit", () => {
   );
 
   assert.equal(config.processLogicalProcessors, 6);
-  assert.equal(config.searchWorkersPerSession, 5);
+  assert.equal(config.searchWorkersPerSession, 6);
+  assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(config.maxConcurrentJobs, 1);
   assert.equal(config.port, 8787);
+
+  const reserveCore = loadClearraJobServiceConfig(
+    {
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "auto",
+      CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "0",
+    },
+    { availableParallelism: () => 6 },
+  );
+  assert.equal(reserveCore.searchWorkersPerSession, 5);
+  assert.equal(reserveCore.useAllLogicalProcessors, false);
+
+  assert.throws(
+    () => loadClearraJobServiceConfig(
+      {
+        CLEARRA_JOB_TOKEN: "job-token",
+        CLEARRA_SEARCH_WORKERS_PER_SESSION: "7",
+      },
+      { availableParallelism: () => 6 },
+    ),
+    /per-job runtime limit of 6/,
+  );
+  assert.throws(
+    () => loadClearraJobServiceConfig(
+      {
+        CLEARRA_JOB_TOKEN: "job-token",
+        CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "yes",
+      },
+      { availableParallelism: () => 6 },
+    ),
+    /boolean setting is invalid/,
+  );
 });
 
 test("unauthenticated local job service is restricted to loopback", () => {
@@ -96,18 +129,82 @@ test("job service partitions its CPU limit across concurrent jobs", () => {
   );
 
   assert.equal(config.maxConcurrentJobs, 2);
-  assert.equal(config.searchWorkersPerSession, 2);
+  assert.equal(config.searchWorkersPerSession, 3);
   assert.throws(
     () => loadClearraJobServiceConfig(
       {
         CLEARRA_JOB_TOKEN: "job-token",
         CLEARRA_MAX_CONCURRENT_JOBS: "2",
-        CLEARRA_SEARCH_WORKERS_PER_SESSION: "3",
+        CLEARRA_SEARCH_WORKERS_PER_SESSION: "4",
       },
       { availableParallelism: () => 6 },
     ),
-    /per-job runtime limit of 2/,
+    /per-job runtime limit of 3/,
   );
+});
+
+test("job runner sends curated sfinder argv without shell interpretation", async () => {
+  let invocation;
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra",
+      processLogicalProcessors: 6,
+      searchWorkersPerSession: 6,
+      useAllLogicalProcessors: true,
+      searchTimeoutMs: 5_000,
+      maxOutputBytes: 1024 * 1024,
+      terminationGraceMs: 100,
+    },
+    {
+      spawn: (executable, arguments_, options) => {
+        invocation = { executable, arguments_, options };
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.kill = () => true;
+        queueMicrotask(() => {
+          child.exitCode = 0;
+          child.emit("close", 0, null);
+        });
+        return child;
+      },
+    },
+  );
+
+  const result = await runner.execute({
+    arguments: [
+      "sfinder",
+      "chance",
+      "v115@vhAAgH",
+      "P7P3",
+      "4",
+      "--workers",
+      "99",
+      "--format",
+      "json",
+    ],
+    deadlineUnixMs: Date.now() + 5_000,
+    maxOutputBytes: 1024 * 1024,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(invocation.executable, "clearra");
+  assert.equal(invocation.options.shell, false);
+  assert.deepEqual(invocation.arguments_, [
+    "sfinder",
+    "chance",
+    "v115@vhAAgH",
+    "P7P3",
+    "4",
+    "--auto-workers",
+    "6",
+    "--use-all-cpu-threads",
+    "--format",
+    "json",
+    "--include-solution-data",
+  ]);
 });
 
 test("job runner retains its slot until a cancelled process closes", async () => {

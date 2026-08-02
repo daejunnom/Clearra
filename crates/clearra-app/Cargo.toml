@@ -12,6 +12,7 @@ workspace = true
 default = ["bitmap-render"]
 bitmap-render = ["clearra-output/bitmap-render"]
 native-c-core = ["clearra-core-executor/native-c-core"]
+parallel = ["clearra-core-executor/parallel"]
 webgpu-search = ["clearra-core-executor/webgpu-search"]
 wasm-stage-profiling = [
     "clearra-core-executor/wasm-stage-profiling",

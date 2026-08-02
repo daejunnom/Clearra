@@ -9,6 +9,8 @@ import {
   signalWasmOwnerTermination
 } from '../src/lib/wasm/wasmWorkerLifecycle';
 import {
+  applyWasmWorkerEvent,
+  clearWasmTerminalResult,
   updateWasmCommandText,
   wasmWorkerState
 } from '../src/lib/wasm/wasmWorkerStore';
@@ -106,6 +108,78 @@ async function ownerTerminationReachesDescendants() {
   assert.equal(await reason, 'worker-failure');
 }
 
+async function duplicateRunIsRejectedBeforePosting() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+
+  assert.equal(controller.run(), true);
+  assert.equal(controller.run(), false);
+  assert.equal(
+    worker.messages.filter(
+      (message) => (message as { type?: string }).type === 'run_command_text'
+    ).length,
+    1
+  );
+
+  controller.dispose();
+}
+
+async function workerCreationFailureBecomesTerminalFailure() {
+  resetState();
+  const controller = new WasmTerminalWorkerController(() => {
+    throw new Error('worker construction failed');
+  });
+
+  assert.equal(controller.run(), false);
+  const state = get(wasmWorkerState);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.diagnostics[0]?.code, 'E_WASM_WORKER_CREATE_FAILED');
+}
+
+async function nonSuccessFinalResponseRemainsFailure() {
+  resetState();
+  applyWasmWorkerEvent({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'final_response',
+    job_id: 17,
+    response: {
+      command: 'setup-finder',
+      status: 'execution-failed',
+      result: null,
+      diagnostics: [
+        {
+          code: 'E_TEST_EXECUTION_FAILED',
+          severity: 'error',
+          message: 'execution failed'
+        }
+      ]
+    },
+    search_report: null,
+    webgpu_backend: null
+  } as unknown as ClearraWasmWorkerEvent);
+
+  const state = get(wasmWorkerState);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.error, 'E_TEST_EXECUTION_FAILED: execution failed');
+  assert.equal(state.response?.status, 'execution-failed');
+}
+
+async function clearingTerminalResultReleasesLogPayloads() {
+  resetState();
+  wasmWorkerState.update((state) => ({
+    ...state,
+    status: 'completed',
+    terminalLines: ['large serialized response']
+  }));
+  clearWasmTerminalResult();
+
+  const state = get(wasmWorkerState);
+  assert.equal(state.status, 'idle');
+  assert.deepEqual(state.terminalLines, ['clearra web runtime ready']);
+}
+
 function controllerFor(worker: FakeWorker) {
   return new WasmTerminalWorkerController(() => worker as unknown as Worker);
 }
@@ -180,6 +254,10 @@ try {
   await realTerminalEventWinsCancellationRace();
   await ownerDisposalIsForceTermination();
   await ownerTerminationReachesDescendants();
+  await duplicateRunIsRejectedBeforePosting();
+  await workerCreationFailureBecomesTerminalFailure();
+  await nonSuccessFinalResponseRemainsFailure();
+  await clearingTerminalResultReleasesLogPayloads();
 } finally {
   wasmWorkerState.set(originalState);
 }
@@ -189,6 +267,10 @@ console.log(
     cooperative_cancel: 'cancelled',
     cancel_timeout: 'terminated',
     terminal_race: 'preserved',
-    descendant_release_signal: 'delivered'
+    descendant_release_signal: 'delivered',
+    duplicate_run: 'rejected',
+    worker_creation_failure: 'reported',
+    non_success_response: 'failed',
+    terminal_log_release: 'cleared'
   })
 );

@@ -40,3 +40,40 @@ test("Discord attachment streaming stops at the configured limit", async () => {
     /too large/,
   );
 });
+
+test("Discord webhook requests do not require a bot token", async () => {
+  let authorization;
+  const client = new DiscordRestClient(null, async (_url, options) => {
+    authorization = options.headers.get("authorization");
+    return new Response(null, { status: 204 });
+  });
+
+  await client.editOriginalInteraction("application", "interaction", {
+    payload: { content: "done" },
+    files: [],
+  });
+  assert.equal(authorization, null);
+  await assert.rejects(client.application(), /DISCORD_TOKEN is required/);
+});
+
+test("Discord requests fail closed on a bounded network timeout", async () => {
+  const client = new DiscordRestClient(
+    null,
+    async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener(
+        "abort",
+        () => reject(options.signal.reason),
+        { once: true },
+      );
+    }),
+    { requestTimeoutMs: 5 },
+  );
+
+  await assert.rejects(
+    client.editOriginalInteraction("application", "interaction", {
+      payload: { content: "done" },
+      files: [],
+    }),
+    /timed out/,
+  );
+});

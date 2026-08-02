@@ -92,7 +92,7 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
       message: diagnostic.code
     })),
     response: state.result,
-    searchReport: null,
+    searchReport: state.searchReport,
     webgpuReport: null,
     backendReport: state.backendStatus ?? state.result?.backend_report ?? null,
     resourceReport: state.resourceStatus ?? state.result?.resource_report ?? null,

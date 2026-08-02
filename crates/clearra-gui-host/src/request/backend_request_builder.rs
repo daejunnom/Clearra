@@ -1,4 +1,6 @@
-use clearra_pc_graph::request::{GpuDeviceSelection, PcExecutionPolicy, RequestedSearchBackend};
+use clearra_pc_graph::request::{
+    GpuDeviceSelection, PcExecutionPolicy, RequestedSearchBackend, WorkerPolicy,
+};
 
 use crate::{
     model::GuiBackendForm,
@@ -40,14 +42,23 @@ impl BackendRequestBuilder {
 
         let mut policy = PcExecutionPolicy::mvp_default()
             .with_requested_backend(backend)
-            .with_workers(usize::from(form.workers()))
+            .with_worker_hardware_limit(WorkerPolicy::hardware_worker_limit())
+            .with_use_all_logical_processors(form.use_all_logical_processors())
             .with_deterministic(form.deterministic())
             .with_max_candidates(form.candidate_budget() as usize)
             .with_max_frontier_states(form.candidate_budget() as usize)
             .with_max_patterns(form.pattern_budget() as usize)
-            .with_max_memory_mib(Some(u64::from(form.memory_budget_mb())))
             .with_precompute_build_dependencies(form.precompute_build_dependencies())
             .with_allow_backend_fallback(form.allow_fallback());
+
+        if let Some(workers) = form.workers_requested() {
+            policy = policy.with_workers(usize::from(workers));
+        }
+
+        // The desktop contract uses zero for an unbounded policy.
+        if form.memory_budget_mb() != 0 {
+            policy = policy.with_max_memory_mib(Some(u64::from(form.memory_budget_mb())));
+        }
 
         if let Some(device) = form.gpu_device() {
             let gpu_device = GpuDeviceSelection::parse(device).ok_or_else(|| {
@@ -69,18 +80,6 @@ impl BackendRequestBuilder {
 }
 impl BackendRequestBuilder {
     fn validate_budget(form: &GuiBackendForm) -> Result<(), RequestBuildError> {
-        if form.workers() == 0 {
-            return Err(RequestBuildError::new(
-                RequestBuildErrorCode::InvalidBudget,
-                "GUI backend form requires at least one worker",
-            ));
-        }
-        if form.memory_budget_mb() == 0 {
-            return Err(RequestBuildError::new(
-                RequestBuildErrorCode::InvalidBudget,
-                "GUI backend form requires a nonzero memory budget",
-            ));
-        }
         if form.candidate_budget() == 0 {
             return Err(RequestBuildError::new(
                 RequestBuildErrorCode::InvalidBudget,

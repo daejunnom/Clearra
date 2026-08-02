@@ -64,7 +64,10 @@ export class CloudRunDiscordInteractionAdapter {
 
   async handleRequest(request, response) {
     const pathname = requestPathname(request.url);
-    if (request.method === "GET" && pathname === "/healthz") {
+    if (
+      request.method === "GET" &&
+      (pathname === "/health" || pathname === "/healthz")
+    ) {
       respondJson(response, 200, { status: "ok" });
       return;
     }

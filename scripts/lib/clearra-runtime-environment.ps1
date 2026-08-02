@@ -147,9 +147,10 @@ function Copy-ClearraWslFileToWindows(
     $destination = [System.IO.Path]::GetFullPath($WindowsDestination)
     $parent = Split-Path -Parent $destination
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    $temporary = "$destination.partial-$PID-$([Guid]::NewGuid().ToString('N'))"
+    $temporary = "$destination.partial"
     $wsl = (Get-Command 'wsl.exe' -ErrorAction Stop).Source
     try {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         $command = '""{0}" -d {1} -- cat -- "{2}" > "{3}""' -f `
             $wsl, $WslDistribution, $LinuxSource, $temporary
         & $env:ComSpec /d /s /c $command
@@ -203,10 +204,7 @@ function Sync-ClearraWslExt4Workspace(
         }
     }
 
-    $artifactRoot = Get-ClearraArtifactRoot
-    New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-    $transaction = Join-Path $artifactRoot "wsl-sync-$PID-$([Guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Force -Path $transaction | Out-Null
+    $transaction = New-TransientBuildDir 'clearra-wsl-sync'
     $listPath = Join-Path $transaction 'source-files.txt'
     $archivePath = Join-Path $transaction 'source.tar'
     $digestPath = Join-Path $transaction '.clearra-source-digest'
@@ -248,9 +246,7 @@ function Sync-ClearraWslExt4Workspace(
             throw "Failed to activate the WSL workspace: $linuxWorkspace"
         }
     } finally {
-        if (Test-Path -LiteralPath $transaction) {
-            Remove-Item -LiteralPath $transaction -Recurse -Force
-        }
+        Remove-TransientBuildDir $transaction
     }
     return [pscustomobject]@{
         distribution = $WslDistribution

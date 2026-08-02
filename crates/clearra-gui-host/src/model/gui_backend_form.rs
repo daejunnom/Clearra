@@ -39,6 +39,8 @@ pub struct GuiBackendForm {
     gpu_device: Option<String>,
     allow_fallback: bool,
     workers: u16,
+    workers_explicit: bool,
+    use_all_logical_processors: bool,
     deterministic: bool,
     precompute_build_dependencies: bool,
     memory_budget_mb: u32,
@@ -87,6 +89,13 @@ impl GuiBackendForm {
 impl GuiBackendForm {
     pub const fn with_workers(mut self, workers: u16) -> Self {
         self.workers = workers;
+        self.workers_explicit = workers > 0;
+        self
+    }
+}
+impl GuiBackendForm {
+    pub const fn with_use_all_logical_processors(mut self, value: bool) -> Self {
+        self.use_all_logical_processors = value;
         self
     }
 }
@@ -146,6 +155,20 @@ impl GuiBackendForm {
     }
 }
 impl GuiBackendForm {
+    pub const fn workers_requested(&self) -> Option<u16> {
+        if self.workers_explicit {
+            Some(self.workers)
+        } else {
+            None
+        }
+    }
+}
+impl GuiBackendForm {
+    pub const fn use_all_logical_processors(&self) -> bool {
+        self.use_all_logical_processors
+    }
+}
+impl GuiBackendForm {
     pub const fn deterministic(&self) -> bool {
         self.deterministic
     }
@@ -178,10 +201,12 @@ impl Default for GuiBackendForm {
             backend_id: GuiBackendChoice::Auto.as_str().to_owned(),
             gpu_device: None,
             allow_fallback: true,
-            workers: 1,
+            workers: 0,
+            workers_explicit: false,
+            use_all_logical_processors: false,
             deterministic: true,
             precompute_build_dependencies: false,
-            memory_budget_mb: 256,
+            memory_budget_mb: 0,
             candidate_budget: 4096,
             pattern_budget: 1024,
         }

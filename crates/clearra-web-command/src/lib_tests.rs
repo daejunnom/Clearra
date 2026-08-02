@@ -330,6 +330,34 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
 }
 
 #[test]
+fn setup_command_accepts_the_complete_cycle_one_pattern_domain() {
+    let request = WebCommandParser::parse(
+        "clearra setup-finder --remaining IOTSZJL --priority pc --setup-length longer --max-setup-pieces 5",
+    )
+    .expect("cycle one setup command")
+    .to_app_request()
+    .expect("cycle one AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+
+    let conditions = clearra_problem::compile_setup_search_conditions(command.query())
+        .expect("complete cycle one condition");
+
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0].pattern_expression(), "[IOTSZJL]!P4");
+    assert_eq!(
+        conditions[0]
+            .problem()
+            .piece_source()
+            .materialized_universe()
+            .expect("factorized setup universe")
+            .pattern_count(),
+        4_233_600
+    );
+}
+
+#[test]
 fn setup_command_accepts_visible_seven_queue_knowledge() {
     let request =
         WebCommandParser::parse("clearra setup --remaining IOTS --queue-knowledge visible-7")
@@ -939,6 +967,31 @@ fn product_worker_modes_are_mutually_exclusive() {
 }
 
 #[test]
+fn directly_constructed_typed_requests_obey_reserved_and_hardware_worker_limits() {
+    let reserved = WebCommandRequest::setup(vec![PieceKind::I], false)
+        .with_worker_hardware_limit(8)
+        .with_workers(usize::MAX)
+        .to_app_request()
+        .expect("reserved-core setup request");
+    assert_eq!(reserved.resource_budget().workers(), 7);
+
+    let all = WebCommandRequest::setup(vec![PieceKind::I], false)
+        .with_worker_hardware_limit(8)
+        .with_use_all_logical_processors(true)
+        .with_workers(usize::MAX)
+        .to_app_request()
+        .expect("all-logical-processors setup request");
+    assert_eq!(all.resource_budget().workers(), 8);
+
+    let automatically_capped = WebCommandRequest::setup(vec![PieceKind::I], false)
+        .with_worker_hardware_limit(8)
+        .with_automatic_worker_limit(3)
+        .to_app_request()
+        .expect("automatically capped setup request");
+    assert_eq!(automatically_capped.resource_budget().workers(), 3);
+}
+
+#[test]
 fn web_command_preserves_gpu_device_and_warmup_in_the_typed_request() {
     let request = WebCommandParser::parse(
         "clearra pc --lines 2 --backend gpu --gpu-device 3 --gpu-warmup --allow-backend-fallback",
@@ -1102,3 +1155,5 @@ fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
         WebCommandErrorCode::UnsupportedCommand
     );
 }
+// SRP rationale: this module has one behavior-level change reason: verifying the complete public
+// web command grammar reaches the intended typed Clearra request contracts.

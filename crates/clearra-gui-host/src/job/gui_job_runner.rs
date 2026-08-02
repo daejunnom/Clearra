@@ -55,9 +55,15 @@ impl GuiJobRunner {
                 job_id,
                 progress: GuiJobProgress::new(1, 1, "clearra-app"),
             });
+            #[cfg(feature = "wasm-cpu-runtime")]
+            let search_report_json =
+                clearra_wasm::serialize_search_report_from_app_response(&response);
+            #[cfg(not(feature = "wasm-cpu-runtime"))]
+            let search_report_json = None;
             let _ = sender.send(GuiJobEvent::Completed {
                 job_id,
                 response: response.to_host_response(),
+                search_report_json,
             });
             if response.status() == AppStatus::Success {
                 GuiJobResult::completed(job_id, response)

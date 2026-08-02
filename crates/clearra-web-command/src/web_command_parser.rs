@@ -1249,6 +1249,12 @@ fn parse_pc_command(
                 reject_native_path_semantics(value)?;
             }
             "--solution-fumen" => {
+                if allowed_colored_solution_identities.is_some() {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "solution identity input may be specified only once",
+                    ));
+                }
                 let value = next_value(tokens, &mut cursor, "--solution-fumen")?;
                 let solutions = SourceFumenColoredFieldSet::decode(value).map_err(|error| {
                     WebCommandError::new(

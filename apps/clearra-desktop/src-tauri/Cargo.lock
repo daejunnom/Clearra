@@ -509,6 +509,7 @@ dependencies = [
  "clearra-app",
  "clearra-build-coverage",
  "clearra-core-domain",
+ "clearra-forward-search",
  "clearra-host-contract",
  "clearra-i18n",
  "clearra-objectives",
@@ -516,9 +517,12 @@ dependencies = [
  "clearra-pc-graph",
  "clearra-problem",
  "clearra-rules",
+ "clearra-scoring",
  "clearra-supply",
  "clearra-ui-schema",
  "clearra-validation",
+ "clearra-wasm",
+ "clearra-web-command",
  "serde",
  "serde_json",
 ]
@@ -722,6 +726,37 @@ dependencies = [
  "clearra-setup-search",
  "clearra-supply",
  "clearra-two-line",
+]
+
+[[package]]
+name = "clearra-wasm"
+version = "0.5.1"
+dependencies = [
+ "clearra-app",
+ "clearra-core-domain",
+ "clearra-core-executor",
+ "clearra-coverage",
+ "clearra-forward-search",
+ "clearra-host-contract",
+ "clearra-pc-graph",
+ "clearra-problem",
+ "clearra-web-command",
+]
+
+[[package]]
+name = "clearra-web-command"
+version = "0.5.1"
+dependencies = [
+ "clearra-app",
+ "clearra-core-domain",
+ "clearra-forward-search",
+ "clearra-fumen",
+ "clearra-objectives",
+ "clearra-pc-graph",
+ "clearra-problem",
+ "clearra-rules",
+ "clearra-scoring",
+ "clearra-supply",
 ]
 
 [[package]]

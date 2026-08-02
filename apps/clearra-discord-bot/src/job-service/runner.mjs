@@ -25,6 +25,9 @@ export class ClearraCommandRunner {
     const arguments_ = prepareClearraArguments(job.arguments, {
       workers: this.config.searchWorkersPerSession,
       useAllLogicalProcessors: this.config.useAllLogicalProcessors,
+      logicalProcessors: this.config.processLogicalProcessors,
+      outputFormat: "json",
+      includeSolutionData: true,
     });
 
     return new Promise((resolve, reject) => {

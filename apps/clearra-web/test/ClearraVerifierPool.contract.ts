@@ -90,7 +90,7 @@ class FakeVerifierWorker {
     });
   }
 
-  private emit(data: unknown) {
+  protected emit(data: unknown) {
     const event = { data } as MessageEvent;
     for (const listener of this.listeners.get('message') ?? []) listener(event);
     this.onmessage?.(event);
@@ -213,3 +213,274 @@ await bounded('streaming finish', streamingPool.finish(() => undefined));
 assert.equal(streamingWorkers.length, 2);
 assert.equal(streamingWorkers[0].terminated, true);
 assert.deepEqual(streamed, [7, 7]);
+
+class FullInitializationVerifierWorker extends FakeVerifierWorker {
+  constructor(
+    failOnSecondConsume: boolean,
+    private readonly initializeImmediately: boolean
+  ) {
+    super(failOnSecondConsume);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'initialize' && !this.initializeImmediately) return;
+    super.postMessage(message);
+  }
+}
+
+const fullInitializationWorkers: FullInitializationVerifierWorker[] = [];
+const fullInitializationPool = new ClearraVerifierPool(() => {
+  const worker = new FullInitializationVerifierWorker(
+    false,
+    fullInitializationWorkers.length === 0
+  );
+  fullInitializationWorkers.push(worker);
+  return worker as unknown as Worker;
+}, {
+  initializationTimeoutMs: 25
+});
+
+await assert.rejects(
+  bounded(
+    'full verifier initialization',
+    fullInitializationPool.initialize(
+      new ArrayBuffer(0),
+      2,
+      undefined,
+      'full-initialization-contract-owner',
+      'atomic-task'
+    )
+  ),
+  /initialization timed out/
+);
+assert.equal(fullInitializationWorkers.length, 2);
+assert.equal(
+  fullInitializationWorkers.filter((worker) => worker.terminated).length,
+  2
+);
+
+class PrewarmGateVerifierWorker extends FakeVerifierWorker {
+  constructor() {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'prewarm') return;
+    super.postMessage(message);
+  }
+}
+
+const prewarmGateWorkers: PrewarmGateVerifierWorker[] = [];
+const prewarmGatePool = new ClearraVerifierPool(() => {
+  const worker = new PrewarmGateVerifierWorker();
+  prewarmGateWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+const pendingPrewarm = prewarmGatePool.prewarm(2, undefined, 'prewarm-gate-owner');
+await new Promise<void>((resolve) => setTimeout(resolve, 0));
+prewarmGatePool.cancel();
+await bounded('cancelled prewarm', pendingPrewarm);
+assert.equal(prewarmGateWorkers.filter((worker) => worker.terminated).length, 2);
+
+class HeartbeatVerifierWorker extends FakeVerifierWorker {
+  constructor() {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type !== 'consume') {
+      super.postMessage(message);
+      return;
+    }
+    const heartbeat = setInterval(() => {
+      if (this.terminated) {
+        clearInterval(heartbeat);
+        return;
+      }
+      this.emit({
+        type: 'heartbeat',
+        requestId: message.requestId,
+        progress: { candidateCount: 0, buildNodes: 1, coverageChecks: 2 }
+      });
+    }, 10);
+    setTimeout(() => {
+      clearInterval(heartbeat);
+      if (!this.terminated) super.postMessage(message);
+    }, 80);
+  }
+}
+
+const heartbeatWorkers: HeartbeatVerifierWorker[] = [];
+const heartbeatPool = new ClearraVerifierPool(() => {
+  const worker = new HeartbeatVerifierWorker();
+  heartbeatWorkers.push(worker);
+  return worker as unknown as Worker;
+}, {
+  requestStallTimeoutMs: 25
+});
+await bounded(
+  'heartbeat initialize',
+  heartbeatPool.initialize(
+    new ArrayBuffer(0),
+    1,
+    undefined,
+    'heartbeat-contract-owner',
+    'atomic-task'
+  )
+);
+await bounded(
+  'heartbeat enqueue',
+  heartbeatPool.enqueue(Uint8Array.of(4).buffer, () => undefined)
+);
+await bounded('heartbeat idle', heartbeatPool.waitForIdle());
+assert.equal(heartbeatWorkers.length, 1);
+assert.deepEqual(heartbeatPool.progressSnapshot(), {
+  candidatesVerified: 1,
+  buildNodes: 0,
+  coverageChecks: 0,
+  readyWorkers: 1,
+  activeWorkers: 0,
+  workerCount: 1,
+  oldestBatchMs: 0
+});
+await bounded('heartbeat finish', heartbeatPool.finish(() => undefined));
+
+class FinishGateVerifierWorker extends FakeVerifierWorker {
+  private pendingFinish: WorkerMessage | null = null;
+
+  constructor() {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'finish') {
+      this.pendingFinish = message;
+      return;
+    }
+    super.postMessage(message);
+  }
+
+  releaseFinish() {
+    const message = this.pendingFinish;
+    this.pendingFinish = null;
+    if (message) super.postMessage(message);
+  }
+}
+
+const finishGateWorker = new FinishGateVerifierWorker();
+const finishGatePool = new ClearraVerifierPool(
+  () => finishGateWorker as unknown as Worker
+);
+await bounded(
+  'finish gate initialize',
+  finishGatePool.initialize(
+    new ArrayBuffer(0),
+    1,
+    undefined,
+    'finish-gate-owner',
+    'atomic-task'
+  )
+);
+const gatedFinish = finishGatePool.finish(() => undefined);
+await bounded(
+  'finish gate becomes active',
+  (async () => {
+    while (finishGatePool.progressSnapshot().activeWorkers !== 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  })()
+);
+assert.equal(finishGatePool.progressSnapshot().activeWorkers, 1);
+finishGateWorker.releaseFinish();
+await bounded('finish gate release', gatedFinish);
+
+class StalledConsumeVerifierWorker extends FakeVerifierWorker {
+  constructor(private readonly stallConsume: boolean) {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'consume' && this.stallConsume) return;
+    super.postMessage(message);
+  }
+}
+
+const stalledConsumeWorkers: StalledConsumeVerifierWorker[] = [];
+const stalledConsumePool = new ClearraVerifierPool(() => {
+  const worker = new StalledConsumeVerifierWorker(stalledConsumeWorkers.length === 0);
+  stalledConsumeWorkers.push(worker);
+  return worker as unknown as Worker;
+}, {
+  requestStallTimeoutMs: 25
+});
+await bounded(
+  'stalled consume initialize',
+  stalledConsumePool.initialize(
+    new ArrayBuffer(0),
+    1,
+    undefined,
+    'stalled-consume-owner',
+    'replay-state'
+  )
+);
+await bounded(
+  'stalled consume enqueue',
+  stalledConsumePool.enqueue(Uint8Array.of(5).buffer, () => undefined)
+);
+await bounded('stalled consume recovery', stalledConsumePool.waitForIdle());
+const stalledConsumePartials: number[] = [];
+await bounded(
+  'stalled consume finish',
+  stalledConsumePool.finish((partial) =>
+    stalledConsumePartials.push(new Uint8Array(partial)[0])
+  )
+);
+assert.equal(stalledConsumeWorkers.length, 2);
+assert.equal(stalledConsumeWorkers[0].terminated, true);
+assert.deepEqual(stalledConsumePartials, [5]);
+
+class StalledFinishVerifierWorker extends FakeVerifierWorker {
+  constructor(private readonly stallFinish: boolean) {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'finish' && this.stallFinish) return;
+    super.postMessage(message);
+  }
+}
+
+const stalledFinishWorkers: StalledFinishVerifierWorker[] = [];
+const stalledFinishPool = new ClearraVerifierPool(() => {
+  const worker = new StalledFinishVerifierWorker(stalledFinishWorkers.length === 0);
+  stalledFinishWorkers.push(worker);
+  return worker as unknown as Worker;
+}, {
+  requestStallTimeoutMs: 25,
+  finishStallTimeoutMs: 25
+});
+await bounded(
+  'stalled finish initialize',
+  stalledFinishPool.initialize(
+    new ArrayBuffer(0),
+    1,
+    undefined,
+    'stalled-finish-owner',
+    'replay-state'
+  )
+);
+await bounded(
+  'stalled finish enqueue',
+  stalledFinishPool.enqueue(Uint8Array.of(6).buffer, () => undefined)
+);
+await bounded('stalled finish idle', stalledFinishPool.waitForIdle());
+const stalledFinishPartials: number[] = [];
+await bounded(
+  'stalled finish recovery',
+  stalledFinishPool.finish((partial) =>
+    stalledFinishPartials.push(new Uint8Array(partial)[0])
+  )
+);
+assert.equal(stalledFinishWorkers.length, 2);
+assert.equal(stalledFinishWorkers[0].terminated, true);
+assert.deepEqual(stalledFinishPartials, [6]);

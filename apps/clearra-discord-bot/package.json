@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node ./src/main.mjs",
     "start:job-service": "node ./src/job-service/main.mjs",
+    "register:commands": "node ./src/register-commands.mjs",
+    "register:commands:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/register-commands.ps1",
     "test": "npm run build --workspace ctk3 && node --test ./test/*.test.mjs"
   },
   "dependencies": {

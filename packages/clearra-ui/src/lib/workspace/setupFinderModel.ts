@@ -1,4 +1,5 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient';
+import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
 import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel';
 
 export type SetupCandidatePriority = 'all' | 'build' | 'pc';
@@ -17,6 +18,7 @@ export type SetupFinderRequest = {
   lengthPreference: SetupLengthPreference;
   maxSetupPieces: number;
   tablebaseEnabled: boolean;
+  useAllLogicalProcessors: boolean;
 };
 
 export type SetupFinderValidationCode =
@@ -59,7 +61,8 @@ export function createDefaultSetupFinderRequest(): SetupFinderRequest {
     candidatePriority: 'all',
     lengthPreference: 'auto',
     maxSetupPieces: 9,
-    tablebaseEnabled: false
+    tablebaseEnabled: false,
+    useAllLogicalProcessors: false
   };
 }
 
@@ -155,9 +158,12 @@ export function setupFinderValidationCodes(
   return [...new Set(codes)];
 }
 
-export function buildSetupFinderCommand(request: SetupFinderRequest): string {
+export function buildSetupFinderCommand(
+  request: SetupFinderRequest,
+  automaticWorkerLimit?: number
+): string {
   const remaining = normalizedSetupResidue(request.remaining);
-  return [
+  const tokens = [
     'clearra setup-finder',
     `--remaining ${remaining}`,
     request.searchMode === 'qb'
@@ -172,19 +178,60 @@ export function buildSetupFinderCommand(request: SetupFinderRequest): string {
     request.candidatePriority === 'all' ? '' : `--priority ${request.candidatePriority}`,
     request.lengthPreference === 'auto' ? '' : `--setup-length ${request.lengthPreference}`,
     `--max-setup-pieces ${request.maxSetupPieces}`,
+    automaticWorkerLimit === undefined
+      ? ''
+      : `--auto-workers ${Math.max(1, Math.trunc(automaticWorkerLimit))}`,
     request.allowPostCycleBorrow ? '--allow-post-cycle-borrow' : ''
-  ].filter(Boolean).join(' ');
+  ].filter(Boolean);
+  if (request.useAllLogicalProcessors && automaticWorkerLimit !== undefined) {
+    tokens.push('--use-all-cpu-threads');
+  }
+  return tokens.join(' ');
 }
 
 export function buildSetupPathDetailCommand(
   request: SetupFinderRequest,
-  detail: SetupPathDetailRequest
+  detail: SetupPathDetailRequest,
+  automaticWorkerLimit?: number
 ): string {
   return [
-    buildSetupFinderCommand(request),
+    buildSetupFinderCommand(
+      { ...request, useAllLogicalProcessors: false },
+      automaticWorkerLimit
+    ),
     `--paths-for ${detail.setupId}`,
     `--condition ${detail.conditionId}`
   ].join(' ');
+}
+
+export function setupFinderRequestForDesktop(
+  request: SetupFinderRequest,
+  language: 'en' | 'ko',
+  workers: number,
+  detail?: SetupPathDetailRequest
+): ClearraDesktopRequest {
+  const useAllLogicalProcessors = detail === undefined && request.useAllLogicalProcessors;
+  return buildDesktopAppRequest({
+    command: 'setup',
+    language,
+    rule: request.rule,
+    queue_knowledge: request.queueKnowledge,
+    workers: detail === undefined ? 0 : Math.max(1, Math.trunc(workers)),
+    use_all_logical_processors: useAllLogicalProcessors,
+    tablebase_requested: request.tablebaseEnabled,
+    setup_mode: request.searchMode,
+    setup_remaining: normalizedSetupResidue(request.remaining),
+    setup_qb: normalizedSetupResidue(request.qbQueue),
+    setup_next_cycle_remaining: normalizedSetupResidue(request.nextCycleRemaining),
+    setup_allow_post_cycle_borrow: request.allowPostCycleBorrow,
+    setup_priority: request.candidatePriority,
+    setup_length: request.lengthPreference,
+    setup_max_pieces: request.maxSetupPieces,
+    setup_path_setup_id: detail?.setupId,
+    setup_path_condition_id: detail?.conditionId,
+    backend: 'cpu',
+    allow_backend_fallback: false
+  });
 }
 
 export function setupPathDetailKey(detail: SetupPathDetailRequest): string {

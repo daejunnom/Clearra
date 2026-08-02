@@ -97,6 +97,43 @@ mod native {
             Ok(())
         }
 
+        fn ensure_background_workers_progressively(
+            &'static self,
+            background_workers: usize,
+        ) -> Result<(), CpuWorkerPoolError> {
+            if background_workers == 0 {
+                return Ok(());
+            }
+
+            // Guarantee one usable background worker, then let the caller begin
+            // useful work while the remaining workers join the shared queue.
+            self.ensure_background_workers(1)?;
+            let current_workers = self
+                .threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
+            if current_workers >= background_workers {
+                return Ok(());
+            }
+
+            let pool = self;
+            if std::thread::Builder::new()
+                .name("clearra-cpu-worker-growth".to_owned())
+                .spawn(move || {
+                    // A failed late spawn only reduces parallelism. Logical jobs
+                    // remain queued and are still completed by ready workers.
+                    let _ = pool.ensure_background_workers(background_workers);
+                })
+                .is_err()
+            {
+                // If even the lightweight growth coordinator cannot start, keep
+                // the previous exact behavior as the fail-operational fallback.
+                self.ensure_background_workers(background_workers)?;
+            }
+            Ok(())
+        }
+
         fn submit(&self, job: WorkerJob) {
             self.queue.push(job);
         }
@@ -134,7 +171,7 @@ mod native {
     ) -> Result<CpuWarmupReport, CpuWorkerPoolError> {
         let total_workers = total_workers.max(1);
         let background_workers = total_workers.saturating_sub(1);
-        pool().ensure_background_workers(background_workers)?;
+        pool().ensure_background_workers_progressively(background_workers)?;
         Ok(CpuWarmupReport { total_workers })
     }
 
@@ -189,3 +226,36 @@ mod wasm {
 pub(crate) use native::*;
 #[cfg(target_family = "wasm")]
 pub(crate) use wasm::*;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use super::*;
+
+    #[test]
+    fn progressive_pool_completes_every_submitted_logical_worker() {
+        let workers = ensure_cpu_workers(4).expect("progressive worker pool");
+        let background_jobs = workers.total_workers().saturating_sub(1);
+        let (sender, receiver) = mpsc::channel();
+        for worker_index in 0..background_jobs {
+            let sender = sender.clone();
+            submit_cpu_job(move || {
+                sender.send(worker_index).expect("worker result receiver");
+            })
+            .expect("submit logical worker");
+        }
+        drop(sender);
+
+        let mut completed = Vec::new();
+        for _ in 0..background_jobs {
+            completed.push(
+                receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("logical worker completion"),
+            );
+        }
+        completed.sort_unstable();
+        assert_eq!(completed, (0..background_jobs).collect::<Vec<_>>());
+    }
+}

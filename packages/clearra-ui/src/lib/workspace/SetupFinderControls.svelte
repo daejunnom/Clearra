@@ -167,6 +167,19 @@
         <small class="workspace-field-help">{label('tablebaseHelp')}</small>
         <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
       </div>
+      <div class="worker-policy-control">
+        <label class="workspace-switch-label">
+          <input
+            type="checkbox"
+            checked={request.useAllLogicalProcessors}
+            on:change={(event) => update({
+              useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked
+            })}
+          />
+          <span class="workspace-switch" aria-hidden="true"></span>
+          <span>{label('useAllThreads')}</span>
+        </label>
+      </div>
       <label class="workspace-field wide priority-field">
         <span>{label('rule')}</span>
         <select
@@ -275,6 +288,7 @@
   .priority-field { margin-top: 14px; }
   .queue-knowledge-field { margin-top: 14px; }
   .tablebase-control { display: grid; gap: 5px; margin-top: 14px; }
+  .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
   @media (max-width: 820px) {
     .setup-control-grid { gap: 20px; grid-template-columns: 1fr; }

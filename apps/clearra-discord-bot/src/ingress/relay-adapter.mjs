@@ -16,11 +16,9 @@ export class DiscordRelayIngressAdapter {
   accept(envelope) {
     validateEnvelope(envelope);
     if (envelope.event.kind === "discord.interaction.create") {
-      if (envelope.acknowledgement !== "deferred") {
-        throw new Error("Relayed Discord interactions must already be deferred.");
-      }
-      return this.slashCommandIngress.accept(envelope.event.payload, {
-        acknowledger: this.predeferredAcknowledger,
+      return Promise.resolve({
+        accepted: false,
+        reason: "relayed-slash-commands-disabled",
       });
     }
     if (envelope.event.kind === "discord.message.create") {

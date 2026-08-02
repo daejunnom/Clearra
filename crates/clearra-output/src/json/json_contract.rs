@@ -27,9 +27,29 @@ impl JsonContract {
 }
 impl JsonContract {
     pub fn from_render_message(kind: &str, fields: &[RenderField]) -> Self {
-        let summary = fields
+        let fields = fields
             .iter()
             .map(|field| JsonField::typed(field.key(), field.value().to_json_value()))
+            .collect::<Vec<_>>();
+        let solution_data_requested = fields.iter().any(|field| {
+            field.key() == "solution_data_requested"
+                && matches!(field.value(), JsonValue::Bool(true))
+        });
+        let summary = fields
+            .iter()
+            .filter(|field| {
+                field.key() != "solution_data_requested"
+                    && (!solution_data_requested
+                        || !matches!(
+                            field.key(),
+                            "solution_keys"
+                                | "solution_probabilities"
+                                | "hold_conditions"
+                                | "outcomes"
+                                | "forward_solution_data"
+                        ))
+            })
+            .cloned()
             .collect::<Vec<_>>();
         let mut root_members = vec![
             (
@@ -38,15 +58,15 @@ impl JsonContract {
             ),
             ("kind".to_owned(), JsonValue::string(kind)),
             ("summary".to_owned(), fields_object(&summary)),
-            ("contract".to_owned(), contract_object(kind, &summary)),
+            ("contract".to_owned(), contract_object(kind, &fields)),
         ];
-        if let Some(report) = resource_report_object(&summary) {
+        if let Some(report) = resource_report_object(&fields) {
             root_members.push(("resource_report".to_owned(), report));
         }
         let root = JsonValue::object(root_members);
 
         Self {
-            fields: summary,
+            fields,
             root: Some(root),
         }
     }

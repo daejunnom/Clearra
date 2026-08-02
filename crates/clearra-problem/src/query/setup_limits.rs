@@ -1,6 +1,8 @@
 use clearra_profiles::search::search_defaults::SearchDefaults;
 
-pub const SETUP_FINDER_DEFAULT_MAX_PATTERNS: usize = 2_000_000;
+// Cycle one is the largest generated setup domain: every ordering of the
+// seven-piece residue followed by four draws from the next bag (7! * 7P4).
+pub const SETUP_FINDER_DEFAULT_MAX_PATTERNS: usize = 4_233_600;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SetupLimits {
@@ -117,4 +119,18 @@ pub enum SetupLimitsError {
     ZeroMaxResults,
     ZeroMaxPatterns,
     ZeroPostPcRetainedTraceLimit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_limit_covers_the_complete_cycle_one_domain() {
+        assert_eq!(SETUP_FINDER_DEFAULT_MAX_PATTERNS, 5_040 * 840);
+        assert_eq!(
+            SetupLimits::default().max_patterns(),
+            SETUP_FINDER_DEFAULT_MAX_PATTERNS
+        );
+    }
 }

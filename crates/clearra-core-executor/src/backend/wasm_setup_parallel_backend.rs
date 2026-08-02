@@ -47,6 +47,10 @@ impl WasmSetupParallelCoordinator {
         self.inner.partial_build_nodes()
     }
 
+    pub fn build_progress(&self) -> (usize, usize, usize, usize, usize, usize) {
+        self.inner.build_progress()
+    }
+
     pub fn advance(
         &mut self,
         work_budget: usize,

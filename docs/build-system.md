@@ -61,6 +61,19 @@ longer matches. This prevents unrelated Rust changes from rebuilding C and
 prevents repeated runs from accumulating one full cache generation per input
 signature.
 
+The budget is checked both before reuse and when the owning runner exits. A
+failed or forcibly stopped run is recovered by the next owning runner before
+it starts work. Repository-local `target` and `build` directories are legacy
+surfaces and are removed before the canonical external cache is initialized.
+
+Disposable work uses one locked slot per purpose under
+`<artifact-root>/transient`. WASM publication staging and the headless browser
+profile follow the same fixed-slot rule: a normal exit removes the slot, while
+the next invocation reclaims a slot whose owner no longer exists. Temporary
+files are atomically replaced at a stable path where the consumer contract
+allows replacement; timestamp, PID, and GUID directory generations are not a
+retention mechanism.
+
 ## Standard Workspace Policy
 
 Cargo build scripts are forbidden in the repository's standard verification

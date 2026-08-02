@@ -73,7 +73,8 @@ function ConvertTo-ClearraProcessArgument {
     )
 
     $commandLeaf = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
-    $cargoLaunch = $commandLeaf -eq "cargo" -and
+    $cargoCommand = $commandLeaf -eq "cargo"
+    $cargoLaunch = $cargoCommand -and
         $Arguments.Count -gt 0 -and
         $Arguments[0] -in @("test", "run")
     $generatedExecutableLaunch = $false
@@ -98,6 +99,15 @@ function ConvertTo-ClearraProcessArgument {
 
     $resolvedFileName = Resolve-ClearraNativeFileName $FileName
     $argumentText = ConvertTo-ClearraProcessArgumentString $Arguments
+    $cargoTargetDir = $null
+    if ($cargoCommand) {
+        Ensure-ClearraBuildArtifactCache
+        $cargoTargetDir = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+            Get-ClearraCargoTargetDir
+        } else {
+            Assert-ClearraCanonicalCargoTargetDir $env:CARGO_TARGET_DIR
+        }
+    }
     $process = $null
     $stdoutTask = $null
     $stderrTask = $null
@@ -110,6 +120,10 @@ function ConvertTo-ClearraProcessArgument {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.CreateNoWindow = $true
+        if (-not [string]::IsNullOrWhiteSpace($cargoTargetDir)) {
+            $psi.EnvironmentVariables['CARGO_TARGET_DIR'] = $cargoTargetDir
+            $psi.EnvironmentVariables['CARGO_INCREMENTAL'] = '0'
+        }
 
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $psi

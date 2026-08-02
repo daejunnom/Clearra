@@ -434,6 +434,27 @@ mod tests {
     }
 
     #[test]
+    fn cycle_one_compiles_the_complete_factorized_pattern_domain() {
+        let query = SetupSearchQuery::default();
+
+        let conditions = compile_setup_search_conditions(&query).expect("cycle one condition");
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].condition_id(), "hold-empty");
+        assert_eq!(conditions[0].pattern_expression(), "[IOTSZJL]!P4");
+        let universe = conditions[0]
+            .problem()
+            .piece_source()
+            .materialized_universe()
+            .expect("factorized pattern universe");
+        assert_eq!(universe.pattern_count(), 4_233_600);
+        assert!(matches!(
+            universe.structure(),
+            clearra_supply::pattern_universe::MaterializedPatternUniverseStructure::FactorizedQueueExpression { .. }
+        ));
+    }
+
+    #[test]
     fn selected_kick_table_reaches_every_compiled_setup_condition() {
         let query = SetupSearchQuery::default()
             .with_rule(srs_x())

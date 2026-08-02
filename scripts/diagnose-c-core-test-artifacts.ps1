@@ -148,12 +148,13 @@ $runtimeTrustReports = @($artifactPaths | ForEach-Object {
         Get-ClearraWindowsRuntimeArtifactTrustReport $_ 'core-c CTest artifact diagnosis'
     })
 
-$diagnosticTempPath = Join-Path ([System.IO.Path]::GetTempPath()) "clearra-c-core-artifacts-$([System.Guid]::NewGuid().ToString('N')).json"
+$diagnosticTempDir = New-TransientBuildDir 'clearra-c-core-artifacts'
+$diagnosticTempPath = Join-Path $diagnosticTempDir 'report.json'
 try {
     & (Join-Path $PSScriptRoot "diagnose-windows-block.ps1") -Path $artifactPaths -ReportPath $diagnosticTempPath | Out-Null
     $artifactDiagnostics = Get-Content -LiteralPath $diagnosticTempPath -Raw | ConvertFrom-Json
 } finally {
-    Remove-Item -LiteralPath $diagnosticTempPath -ErrorAction SilentlyContinue
+    Remove-TransientBuildDir $diagnosticTempDir
 }
 
 $report = [ordered]@{

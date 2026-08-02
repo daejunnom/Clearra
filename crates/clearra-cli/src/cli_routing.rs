@@ -22,6 +22,7 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
         .apply_to_format(invocation.format());
     let language = invocation.language();
     let verbose_paths = invocation.verbose_paths();
+    let include_solution_data = invocation.include_solution_data();
     file_input_guard::with_verbose_paths(verbose_paths, || {
         let command = invocation.into_command();
         if let ParsedCliCommand::Help(topic) = command {
@@ -63,7 +64,12 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths))
             .run(request);
-        let output = AppResponseRenderer::render(response, render_format, default_error);
+        let output = AppResponseRenderer::render_with_solution_data(
+            response,
+            render_format,
+            default_error,
+            include_solution_data,
+        );
         if tiling_only {
             output.with_surrounding_warning(TILING_ONLY_WARNING)
         } else {

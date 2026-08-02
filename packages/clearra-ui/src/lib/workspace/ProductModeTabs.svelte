@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { Blocks, Flame, Grid3X3, Layers3, Palette, RotateCw } from '@lucide/svelte';
 
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
@@ -6,35 +7,82 @@
 
   export let active: WorkspaceMode;
   export let language: WorkspaceLanguage;
+  export let busy = false;
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 
   function changeMode(event: Event) {
-    window.location.assign((event.currentTarget as HTMLSelectElement).value);
+    if (busy) return;
+    void goto((event.currentTarget as HTMLSelectElement).value, {
+      noScroll: true,
+      keepFocus: true
+    });
+  }
+
+  function preventBusyNavigation(event: MouseEvent) {
+    if (busy) event.preventDefault();
   }
 </script>
 
 <nav class="product-tabs" aria-label={label('workspaceMode')}>
-  <a href="?tool=pc" class:active={active === 'pc'} aria-current={active === 'pc' ? 'page' : undefined}>
+  <a
+    href="?tool=pc"
+    class:active={active === 'pc'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'pc' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
     <Grid3X3 size={16} strokeWidth={1.8} />{label('pcSearch')}
   </a>
-  <a href="?tool=setup" class:active={active === 'setup'} aria-current={active === 'setup' ? 'page' : undefined}>
+  <a
+    href="?tool=setup"
+    class:active={active === 'setup'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'setup' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
     <Layers3 size={16} strokeWidth={1.8} />{label('setupFinder')}
   </a>
   <a
     href="?tool=build-probability"
     class:active={active === 'build-probability'}
+    class:busy
+    aria-disabled={busy}
     aria-current={active === 'build-probability' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
   >
     <Blocks size={16} strokeWidth={1.8} />{label('buildProbability')}
   </a>
-  <a href="?tool=damage" class:active={active === 'damage'} aria-current={active === 'damage' ? 'page' : undefined}>
+  <a
+    href="?tool=damage"
+    class:active={active === 'damage'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'damage' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
     <Flame size={16} strokeWidth={1.8} />{label('maximumDamage')}
   </a>
-  <a href="?tool=spin-finder" class:active={active === 'spin-finder'} aria-current={active === 'spin-finder' ? 'page' : undefined}>
+  <a
+    href="?tool=spin-finder"
+    class:active={active === 'spin-finder'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'spin-finder' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
     <RotateCw size={16} strokeWidth={1.8} />{label('spinFinder')}
   </a>
-  <a href="?tool=ctk" class:active={active === 'ctk'} aria-current={active === 'ctk' ? 'page' : undefined}>
+  <a
+    href="?tool=ctk"
+    class:active={active === 'ctk'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'ctk' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
     <Palette size={16} strokeWidth={1.8} />{label('ctkDrawer')}
   </a>
 </nav>
@@ -42,7 +90,7 @@
 <div class="product-mode-select">
   <label>
     <span>{label('workspaceMode')}</span>
-    <select aria-label={label('workspaceMode')} value={`?tool=${active}`} on:change={changeMode}>
+    <select aria-label={label('workspaceMode')} value={`?tool=${active}`} disabled={busy} on:change={changeMode}>
       <option value="?tool=pc">{label('pcSearch')}</option>
       <option value="?tool=setup">{label('setupFinder')}</option>
       <option value="?tool=build-probability">{label('buildProbability')}</option>
@@ -84,6 +132,11 @@
   a.active {
     border-bottom-color: #16877d;
     color: #075f58;
+  }
+
+  a.busy {
+    cursor: not-allowed;
+    opacity: .55;
   }
 
   .product-mode-select {

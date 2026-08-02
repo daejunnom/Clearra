@@ -18,6 +18,7 @@ $pathHelpers = Read-Text "scripts/lib/clearra-path-helpers.ps1"
 foreach ($requiredCargoTargetPolicy in @(
     "function Get-ClearraCargoTargetDir",
     "function Assert-ClearraCanonicalCargoTargetDir",
+    "function Remove-ClearraRepositoryLocalBuildArtifacts",
     "clearra-artifact-cache.ps1"
 )) {
     if ($pathHelpers -notlike "*$requiredCargoTargetPolicy*") {
@@ -30,6 +31,7 @@ foreach ($requiredCachePolicy in @(
     "function Ensure-ClearraBuildArtifactCache",
     "function Enter-ClearraArtifactCacheUsageLock",
     "function Exit-ClearraBuildArtifactCacheUsage",
+    "function Invoke-ClearraBuildArtifactCacheRetention",
     "function Test-ClearraInheritedArtifactCacheOwner",
     "CLEARRA_BUILD_CACHE_OWNER_PID",
     "CLEARRA_MAX_BUILD_CACHE_GIB",
@@ -37,7 +39,8 @@ foreach ($requiredCachePolicy in @(
     ".clearra-cache-state.json",
     "input-change-reuse",
     "workspace-or-schema-reset",
-    "budget-reset"
+    "budget-reset",
+    "post-run-budget-reset"
 )) {
     if ($artifactCache -notlike "*$requiredCachePolicy*") {
         Add-ArchitectureError "bounded artifact-cache policy is missing '$requiredCachePolicy'"

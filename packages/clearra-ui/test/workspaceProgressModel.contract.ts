@@ -7,10 +7,12 @@ import {
 
 function input(
   profile: WorkspaceProgressInput['profile'],
-  telemetry: NonNullable<WorkspaceProgressInput['telemetry']>
+  telemetry: NonNullable<WorkspaceProgressInput['telemetry']>,
+  mode: WorkspaceProgressInput['mode'] = 'default'
 ): WorkspaceProgressInput {
   return {
     profile,
+    mode,
     status: 'running',
     progressLabel: '',
     progressDone: 0,
@@ -66,3 +68,138 @@ const tiling = buildWorkspaceProgressModel(
 );
 assert.equal(tiling.stages.some((stage) => stage.id === 'verify'), false);
 assert.equal(tiling.stages.find((stage) => stage.id === 'geometry')?.status, 'running');
+
+const setupGeometry = buildWorkspaceProgressModel(
+  input(
+    'setup',
+    telemetry({
+      candidates_emitted: 0,
+      geometry_family_count: '80',
+      pass_index: 0,
+      pass_count: 4
+    })
+  )
+);
+assert.equal(setupGeometry.stages.find((stage) => stage.id === 'geometry')?.status, 'running');
+assert.equal(setupGeometry.stages.find((stage) => stage.id === 'graph')?.status, 'pending');
+
+const setupPartialBuild = buildWorkspaceProgressModel(
+  input(
+    'setup',
+    telemetry({
+      candidates_emitted: 0,
+      geometry_family_count: '80',
+      producer_build_nodes: 1_024,
+      pass_index: 1,
+      pass_count: 4,
+      layer_index: 2,
+      layer_count: 5,
+      layer_done: 37,
+      layer_total: 120
+    })
+  )
+);
+const partialBuildGraph = setupPartialBuild.stages.find((stage) => stage.id === 'graph');
+assert.equal(setupPartialBuild.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(partialBuildGraph?.status, 'running');
+assert.equal(partialBuildGraph?.done, '37');
+assert.equal(partialBuildGraph?.total, '120');
+
+const setupDispatch = buildWorkspaceProgressModel(
+  input(
+    'setup',
+    telemetry({
+      candidates_emitted: 1,
+      geometry_family_count: '80',
+      producer_build_nodes: 1_024,
+      pass_index: 3,
+      pass_count: 4
+    })
+  )
+);
+assert.equal(setupDispatch.stages.find((stage) => stage.id === 'graph')?.status, 'complete');
+assert.equal(setupDispatch.stages.find((stage) => stage.id === 'tasks')?.status, 'running');
+
+const minimumCoverPostprocess = buildWorkspaceProgressModel(
+  input(
+    'pc',
+    telemetry({
+      phase: 'postprocessing',
+      producer_complete: true,
+      candidates_emitted: 80,
+      geometry_family_count: '80',
+      candidates_verified: 80
+    }),
+    'pc-minimum-cover'
+  )
+);
+assert.equal(minimumCoverPostprocess.stages.find((stage) => stage.id === 'verify')?.status, 'complete');
+assert.equal(minimumCoverPostprocess.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
+assert.equal(
+  minimumCoverPostprocess.stages.find((stage) => stage.id === 'finalize')?.labelKey,
+  'progressStageMinimumCover'
+);
+
+const scoreMerge = buildWorkspaceProgressModel(
+  input(
+    'pc',
+    telemetry({ phase: 'merging', producer_complete: true, candidates_verified: 80 }),
+    'pc-score'
+  )
+);
+assert.equal(scoreMerge.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
+assert.equal(
+  scoreMerge.stages.find((stage) => stage.id === 'finalize')?.labelKey,
+  'progressStageScore'
+);
+
+const setupPostprocess = buildWorkspaceProgressModel(
+  input(
+    'setup',
+    telemetry({ phase: 'postprocessing', producer_complete: true, pass_index: 3, pass_count: 4 }),
+    'setup-qb'
+  )
+);
+assert.equal(setupPostprocess.stages.find((stage) => stage.id === 'tasks')?.status, 'complete');
+assert.equal(setupPostprocess.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
+
+const buildSpinPostprocess = buildWorkspaceProgressModel(
+  input(
+    'build',
+    telemetry({ phase: 'postprocessing', producer_complete: true, candidates_verified: 12 }),
+    'build-spin'
+  )
+);
+assert.equal(buildSpinPostprocess.stages.find((stage) => stage.id === 'verify')?.status, 'complete');
+assert.equal(
+  buildSpinPostprocess.stages.find((stage) => stage.id === 'finalize')?.labelKey,
+  'progressStageSpinCoverage'
+);
+
+const damagePostprocess = buildWorkspaceProgressModel(
+  input(
+    'damage',
+    telemetry({ phase: 'postprocessing', producer_complete: true }),
+    'damage-at-least'
+  )
+);
+assert.equal(damagePostprocess.stages.find((stage) => stage.id === 'forward')?.status, 'complete');
+assert.equal(damagePostprocess.stages.find((stage) => stage.id === 'classify')?.status, 'running');
+
+const spinPostprocess = buildWorkspaceProgressModel(
+  input('spin', telemetry({ phase: 'postprocessing', producer_complete: true }), 'spin')
+);
+assert.equal(spinPostprocess.stages.find((stage) => stage.id === 'forward')?.status, 'complete');
+assert.equal(spinPostprocess.stages.find((stage) => stage.id === 'classify')?.status, 'running');
+
+const serialScorePostprocess = buildWorkspaceProgressModel({
+  profile: 'pc',
+  mode: 'pc-score',
+  status: 'running',
+  progressLabel: 'postprocess',
+  progressDone: 0,
+  progressTotal: 1,
+  telemetry: null
+});
+assert.equal(serialScorePostprocess.stages.find((stage) => stage.id === 'verify')?.status, 'complete');
+assert.equal(serialScorePostprocess.stages.find((stage) => stage.id === 'finalize')?.status, 'running');

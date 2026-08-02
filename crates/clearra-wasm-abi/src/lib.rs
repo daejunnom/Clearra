@@ -40,6 +40,7 @@ struct WasmAbiState {
     distributed_verifier_pending_work: bool,
     tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
     gpu_warmup: Option<GpuWarmupState>,
+    gpu_warmup_generation: u64,
     #[cfg(feature = "stage-profiling")]
     profile: Option<ExecutorSearchProfileSession>,
 }
@@ -50,6 +51,25 @@ enum GpuWarmupState {
 }
 
 impl WasmAbiState {
+    fn begin_gpu_warmup(&mut self) -> Option<u64> {
+        if self.gpu_warmup.is_some() {
+            return None;
+        }
+        self.gpu_warmup_generation = self.gpu_warmup_generation.wrapping_add(1);
+        self.gpu_warmup = Some(GpuWarmupState::Pending);
+        Some(self.gpu_warmup_generation)
+    }
+
+    fn cancel_gpu_warmup(&mut self) {
+        self.gpu_warmup_generation = self.gpu_warmup_generation.wrapping_add(1);
+        self.gpu_warmup = None;
+    }
+
+    fn accepts_gpu_warmup_completion(&self, generation: u64) -> bool {
+        self.gpu_warmup_generation == generation
+            && matches!(self.gpu_warmup, Some(GpuWarmupState::Pending))
+    }
+
     fn set_error(&mut self, code: &str, message: impl std::fmt::Display) {
         self.output = format!("{code}: {message}").into_bytes();
     }
@@ -126,7 +146,7 @@ pub extern "C" fn clearra_wasm_configure_host(
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_gpu_warmup_start(device_index: i32) -> i32 {
-    let device = ABI_STATE.with(|state| {
+    let warmup = ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
         if state.gpu_warmup.is_some() {
             return None;
@@ -140,11 +160,12 @@ pub extern "C" fn clearra_wasm_gpu_warmup_start(device_index: i32) -> i32 {
             };
             GpuDeviceSelection::Index(index)
         };
-        state.gpu_warmup = Some(GpuWarmupState::Pending);
-        Some(device)
+        state
+            .begin_gpu_warmup()
+            .map(|generation| (device, generation))
     });
-    if let Some(device) = device {
-        start_gpu_warmup(device);
+    if let Some((device, generation)) = warmup {
+        start_gpu_warmup(device, generation);
         return ABI_OK;
     }
     ABI_STATE.with(|state| {
@@ -153,6 +174,14 @@ pub extern "C" fn clearra_wasm_gpu_warmup_start(device_index: i32) -> i32 {
         } else {
             ABI_ERROR
         }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_gpu_warmup_cancel() -> i32 {
+    ABI_STATE.with(|state| {
+        state.borrow_mut().cancel_gpu_warmup();
+        ABI_OK
     })
 }
 
@@ -187,12 +216,12 @@ pub extern "C" fn clearra_wasm_gpu_warmup_advance() -> i32 {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn start_gpu_warmup(device: GpuDeviceSelection) {
+fn start_gpu_warmup(device: GpuDeviceSelection, generation: u64) {
     wasm_bindgen_futures::spawn_local(async move {
         let report = prewarm_gpu_search_async(device).await;
         ABI_STATE.with(|state| {
             let mut state = state.borrow_mut();
-            if matches!(state.gpu_warmup, Some(GpuWarmupState::Pending)) {
+            if state.accepts_gpu_warmup_completion(generation) {
                 state.gpu_warmup = Some(GpuWarmupState::Ready(report));
             }
         });
@@ -200,10 +229,13 @@ fn start_gpu_warmup(device: GpuDeviceSelection) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn start_gpu_warmup(device: GpuDeviceSelection) {
+fn start_gpu_warmup(device: GpuDeviceSelection, generation: u64) {
     let report = clearra_wasm::prewarm_gpu_search(device);
     ABI_STATE.with(|state| {
-        state.borrow_mut().gpu_warmup = Some(GpuWarmupState::Ready(report));
+        let mut state = state.borrow_mut();
+        if state.accepts_gpu_warmup_completion(generation) {
+            state.gpu_warmup = Some(GpuWarmupState::Ready(report));
+        }
     });
 }
 
@@ -987,6 +1019,7 @@ pub extern "C" fn clearra_wasm_advance_job(job_id: u32, work_budget: u32) -> i32
             WasmWorkerAdvanceStatus::Completed => 1,
             WasmWorkerAdvanceStatus::Cancelled => 2,
             WasmWorkerAdvanceStatus::Failed => 3,
+            WasmWorkerAdvanceStatus::Progress => 4,
         }
     })
 }
@@ -1111,4 +1144,23 @@ pub extern "C" fn clearra_wasm_profile_finish() -> i32 {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_gpu_warmup_cannot_complete_into_a_new_generation() {
+        let mut state = WasmAbiState::default();
+        let cancelled_generation = state.begin_gpu_warmup().expect("first warmup starts");
+
+        state.cancel_gpu_warmup();
+        assert!(!state.accepts_gpu_warmup_completion(cancelled_generation));
+
+        let active_generation = state.begin_gpu_warmup().expect("replacement warmup starts");
+        assert_ne!(cancelled_generation, active_generation);
+        assert!(!state.accepts_gpu_warmup_completion(cancelled_generation));
+        assert!(state.accepts_gpu_warmup_completion(active_generation));
+    }
 }

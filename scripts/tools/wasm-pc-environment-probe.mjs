@@ -64,7 +64,7 @@ let advanceCalls = 0;
 let terminalStatus = 0;
 const searchStarted = performance.now();
 let progressStarted = searchStarted;
-while (terminalStatus === 0) {
+while (jobIsActive(terminalStatus)) {
   if (debugLifecycle && advanceCalls < 4) {
     console.error(`[wasm-probe] advance begin call=${advanceCalls + 1}`);
   }
@@ -72,7 +72,7 @@ while (terminalStatus === 0) {
   advanceCalls += 1;
   if (
     progressInterval !== null &&
-    (advanceCalls % progressInterval === 0 || terminalStatus !== 0)
+    (advanceCalls % progressInterval === 0 || jobIsTerminal(terminalStatus))
   ) {
     const now = performance.now();
     console.error(JSON.stringify({
@@ -102,6 +102,9 @@ while (terminalStatus === 0) {
   }
   if (terminalStatus < 0) {
     throw new Error(readOutput(api));
+  }
+  if (!jobIsActive(terminalStatus) && !jobIsTerminal(terminalStatus)) {
+    throw new Error(`invalid Clearra WASM job status ${terminalStatus}`);
   }
 }
 const searchElapsedMs = performance.now() - searchStarted;
@@ -231,6 +234,14 @@ function summarizeFinal(finalEvent, searchReport) {
     resource_truncated: searchReport?.resource_truncated ?? null,
     resource_truncation_reason: searchReport?.resource_truncation_reason ?? null,
   };
+}
+
+function jobIsActive(status) {
+  return status === 0 || status === 4;
+}
+
+function jobIsTerminal(status) {
+  return status === 1 || status === 2 || status === 3;
 }
 
 function bindRawAbi(exports) {

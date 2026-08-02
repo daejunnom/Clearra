@@ -13,9 +13,12 @@ const workerSummary =
     : `${config.searchWorkersPerSession} worker(s) per session; ` +
       `${config.processLogicalProcessors} logical processor(s) visible; ` +
       `${config.maxConcurrentSearches} concurrent session(s)`;
+const executionSummary = config.jobEndpoint
+  ? "remote HTTP job execution"
+  : "in-process Clearra execution";
 console.info(
   `Clearrabot execution allocation: ${workerSummary}; ` +
-    `${config.ingressMode} slash-command ingress; HTTP job execution enabled.`,
+    `${config.ingressMode} slash-command ingress; ${executionSummary}.`,
 );
 const rest = new DiscordRestClient(config.token);
 let applicationId = config.applicationId;

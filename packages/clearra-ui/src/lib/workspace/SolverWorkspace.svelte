@@ -4,6 +4,7 @@
 
   import {
     cancelDesktopJob,
+    clearDesktopTerminalResult,
     desktopJobState,
     disposeDesktopJobPolling,
     resumeDesktopJobPolling,
@@ -11,6 +12,7 @@
     updateDesktopRequest
   } from '../stores';
   import {
+    clearWasmTerminalResult,
     updateWasmCommandText,
     wasmWorkerState,
     WasmTerminalWorkerController
@@ -23,6 +25,7 @@
     buildWorkspaceCommand,
     clearCompletedRows,
     createDefaultWorkspaceRequest,
+    defaultBrowserWorkerCount,
     defaultWorkerCount,
     normalizeWorkspaceRequest,
     trimBoardMask,
@@ -52,6 +55,7 @@
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
   let clearedRowsWarning = 0;
   let resultTargetLines = request.lines;
+  let resultScoreMode = request.scoreMode;
 
   $: workerController.setWorkerFactory(workerFactory);
   $: runtimeView = runtime === 'web'
@@ -69,7 +73,7 @@
     language = preferredWorkspaceLanguage(
       localStorage.getItem('clearra-language') ?? navigator.language
     );
-    const workers = defaultWorkerCount(navigator.hardwareConcurrency);
+    const workers = automaticWorkerCount(request.useAllLogicalProcessors);
     request = {
       ...request,
       workers
@@ -86,7 +90,12 @@
   function disposeWorkspace() {
     stopElapsedTimer();
     workerController.dispose();
-    if (runtime === 'desktop') disposeDesktopJobPolling();
+    if (runtime === 'desktop') {
+      disposeDesktopJobPolling();
+      clearDesktopTerminalResult();
+    } else {
+      clearWasmTerminalResult();
+    }
   }
 
   function setLanguage(next: WorkspaceLanguage) {
@@ -95,13 +104,22 @@
   }
 
   function updateRequest(next: SolverWorkspaceRequest) {
-    const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(next));
+    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(useAllChanged
+      ? { ...next, workers: automaticWorkerCount(next.useAllLogicalProcessors) }
+      : next));
     const workersChanged = automaticRequest.workers !== request.workers;
     const tablebaseChanged = automaticRequest.tablebaseEnabled !== request.tablebaseEnabled;
     request = automaticRequest;
     if (runtime === 'web' && (workersChanged || tablebaseChanged)) {
       workerController.prewarm(automaticRequest.workers, automaticRequest.tablebaseEnabled);
     }
+  }
+
+  function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
+    return runtime === 'web'
+      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
+      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
   }
 
   function withAutomaticBackend(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
@@ -145,12 +163,13 @@
     if (executionRequest !== request) request = executionRequest;
     clearedRowsWarning = normalized.clearedRows;
     resultTargetLines = executionRequest.lines;
-    startElapsedTimer();
+    resultScoreMode = executionRequest.scoreMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildWorkspaceCommand(executionRequest));
-      workerController.run();
+      if (workerController.run()) startElapsedTimer();
       return;
     }
+    startElapsedTimer();
     updateDesktopRequest(workspaceRequestForDesktop(executionRequest, language));
     await startDesktopJob();
   }
@@ -255,6 +274,7 @@
     {language}
     {elapsedMs}
     targetLines={resultTargetLines}
+    scoreMode={resultScoreMode}
     tilingOnlyRequested={request.scoreMode === 'tiling'}
     failedQueueRequested={request.scoreMode === 'failed-queue'}
     loadSolutionPage={(offset, limit) => workerController.loadSolutionPage(offset, limit)}

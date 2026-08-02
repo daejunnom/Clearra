@@ -689,9 +689,11 @@ impl WasmDistributedCoordinator {
                     ));
                 }
             };
-            let report = merger.finish().map_err(|error| {
-                distributed_error("E_WASM_DISTRIBUTED_FORWARD_FINISH", error.reason())
-            })?;
+            let report = merger
+                .finish(workers_used.min(self.worker_count).max(1))
+                .map_err(|error| {
+                    distributed_error("E_WASM_DISTRIBUTED_FORWARD_FINISH", error.reason())
+                })?;
             let prepared = match self.prepared.take() {
                 Some(DistributedPreparedSearch::Forward(prepared)) => prepared,
                 _ => {
@@ -819,14 +821,23 @@ impl DistributedCandidateProducer {
                     ..WasmDistributedProgress::default()
                 }
             }
-            Self::Setup(producer) => WasmDistributedProgress {
-                geometry_nodes: producer.geometry_nodes(),
-                candidates: producer.dispatched_conditions(),
-                candidate_family_count: Some(producer.task_count() as u128),
-                build_nodes: producer.partial_build_nodes(),
-                coverage_checks: producer.received_conditions(),
-                ..WasmDistributedProgress::default()
-            },
+            Self::Setup(producer) => {
+                let (pass_index, pass_count, layer_index, layer_count, layer_done, layer_total) =
+                    producer.build_progress();
+                WasmDistributedProgress {
+                    geometry_nodes: producer.geometry_nodes(),
+                    candidates: producer.dispatched_conditions(),
+                    candidate_family_count: Some(producer.task_count() as u128),
+                    build_nodes: producer.partial_build_nodes(),
+                    coverage_checks: producer.received_conditions(),
+                    pass_index,
+                    pass_count,
+                    layer_index,
+                    layer_count,
+                    layer_done,
+                    layer_total,
+                }
+            }
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.progress(),
         }

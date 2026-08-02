@@ -35,7 +35,9 @@
     viewerMode={ctkViewer.viewer}
   />
 {:else if selectedTool === 'damage' || selectedTool === 'spin-finder'}
-  <ForwardSearchWorkspace tool={selectedTool} {workerFactory} />
+  {#key selectedTool}
+    <ForwardSearchWorkspace tool={selectedTool} {workerFactory} />
+  {/key}
 {:else}
   <SolverWorkspace runtime="web" {workerFactory} />
 {/if}

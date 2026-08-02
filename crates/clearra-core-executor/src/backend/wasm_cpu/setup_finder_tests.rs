@@ -15,9 +15,18 @@ use clearra_supply::pattern_universe::{MaterializedPatternUniverse, PatternPiece
 use super::{
     compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
     merge_exact_state_coverage, piece_index, prefers_setup_representative_depth,
-    retain_best_setup_state_per_board, setup_supply_transitions, terminal_supply_target_word,
-    SetupShape, SetupSupplyStateLayout, WasmSetupSearchAdvance, WasmSetupSearchSession,
+    retain_best_setup_state_per_board, setup_build_progress_phase, setup_supply_transitions,
+    terminal_supply_target_word, SetupShape, SetupSupplyStateLayout, WasmSetupSearchAdvance,
+    WasmSetupSearchSession,
 };
+
+#[test]
+fn serial_setup_progress_maps_graph_passes_to_stable_ui_phases() {
+    assert_eq!(setup_build_progress_phase(0), ("setup-geometry", 1));
+    assert_eq!(setup_build_progress_phase(1), ("setup-graph", 2));
+    assert_eq!(setup_build_progress_phase(2), ("setup-graph", 2));
+    assert_eq!(setup_build_progress_phase(3), ("setup-graph", 2));
+}
 
 #[test]
 fn guaranteed_leading_residue_piece_covers_the_entire_pattern_word() {

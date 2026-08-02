@@ -1,9 +1,8 @@
-use clearra_app::{AppCommand, AppContext, AppRequest, ResourceBudget, SetupAppCommand};
-use clearra_pc_graph::request::WorkerPolicy;
+use clearra_app::{AppCommand, AppContext, AppRequest, SetupAppCommand};
 
 use crate::{
     args::setup_args::SetupArgs,
-    assemble::SetupQueryAssembler,
+    assemble::{setup_resource_budget, SetupQueryAssembler},
     error::CliErrorCode,
     output::{AppResponseRenderer, CliOutput, RenderFormat},
 };
@@ -19,20 +18,8 @@ impl SetupCommand {
                 return CliOutput::error(CliErrorCode::SetupQueryInvalid, format!("{error:?}"));
             }
         };
-        let workers = match args.workers() {
-            Some(workers) => {
-                WorkerPolicy::clamp_requested(workers, args.use_all_logical_processors())
-            }
-            None if args.use_all_logical_processors() => WorkerPolicy::hardware_worker_limit(),
-            None => WorkerPolicy::default_worker_limit(),
-        };
-        let workers = args
-            .automatic_worker_limit()
-            .map_or(workers, |limit| workers.min(limit.max(1)));
-        let request =
-            AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query))).with_resource_budget(
-                ResourceBudget::new(u16::try_from(workers).unwrap_or(u16::MAX), None, None),
-            );
+        let request = AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query)))
+            .with_resource_budget(setup_resource_budget(args));
         AppResponseRenderer::render(
             AppContext::default().run(request),
             format,

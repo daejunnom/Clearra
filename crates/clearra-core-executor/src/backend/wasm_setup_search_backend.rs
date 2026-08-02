@@ -41,6 +41,10 @@ impl WasmSetupSearchSession {
             InnerAdvance::Cancelled => Ok(WasmSetupSearchAdvance::Cancelled),
         }
     }
+
+    fn coarse_progress(&self) -> (&'static str, u64) {
+        self.inner.coarse_progress()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -52,10 +56,19 @@ impl WasmSetupSearchBackend {
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
         let mut session = WasmSetupSearchSession::new(query)?;
+        let mut last_progress = None;
         loop {
+            let progress = session.coarse_progress();
+            if last_progress != Some(progress) {
+                control.report_progress(progress.0, progress.1, Some(4));
+                last_progress = Some(progress);
+            }
             match session.advance(4096, control)? {
                 WasmSetupSearchAdvance::Pending => {}
-                WasmSetupSearchAdvance::Completed(result) => return Ok(result),
+                WasmSetupSearchAdvance::Completed(result) => {
+                    control.report_progress("setup-finalize", 4, Some(4));
+                    return Ok(result);
+                }
                 WasmSetupSearchAdvance::Cancelled => return Err(WasmCpuSearchError::Cancelled),
             }
         }

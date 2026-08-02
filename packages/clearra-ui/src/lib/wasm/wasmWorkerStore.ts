@@ -83,6 +83,30 @@ const wasmWorkerInitialState: WasmWorkerState = {
 
 export const wasmWorkerState = writable(wasmWorkerInitialState);
 
+export function clearWasmTerminalResult() {
+  wasmWorkerState.update((state) => {
+    if (state.status === 'running' || state.status === 'cancelling') return state;
+    return {
+      ...state,
+      jobId: null,
+      status: 'idle',
+      terminationReason: null,
+      progressLabel: '',
+      progressDone: 0,
+      progressTotal: 0,
+      forwardPatternDone: 0,
+      forwardPatternTotal: 0,
+      progressTelemetry: null,
+      terminalLines: ['clearra web runtime ready'],
+      diagnostics: [],
+      response: null,
+      searchReport: null,
+      webgpuBackend: null,
+      error: null
+    };
+  });
+}
+
 export function updateWasmCommandText(commandText: string) {
   wasmWorkerState.update((state) => ({
     ...state,
@@ -202,19 +226,27 @@ function reduceWasmWorkerEvent(
           event.partial ? `partial: ${event.label}` : event.label
         ]
       };
-    case 'final_response':
+    case 'final_response': {
+      const succeeded = event.response.status === 'success';
+      const error = succeeded
+        ? null
+        : event.response.diagnostics
+            .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+            .join('\n') || event.response.status;
       return {
         ...state,
         jobId: null,
-        status: 'completed',
+        status: succeeded ? 'completed' : 'failed',
         terminationReason: null,
         response: event.response,
         searchReport: event.search_report,
         webgpuBackend: event.webgpu_backend,
         progressTelemetry: null,
         diagnostics: event.response.diagnostics,
+        error,
         terminalLines: [...state.terminalLines, JSON.stringify(event.response, null, 2)]
       };
+    }
     case 'cancelled':
       return {
         ...state,

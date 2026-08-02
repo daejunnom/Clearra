@@ -2,6 +2,7 @@
 //!
 //! This crate intentionally does not reuse native CLI path/process semantics.
 
+mod ctk3_mask_input;
 mod sfinder_compat;
 pub mod web_command_error;
 pub mod web_command_parser;

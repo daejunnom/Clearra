@@ -69,6 +69,29 @@ where
     if has_diagnostic_payload(fields) {
         members.push(("diagnostics".to_owned(), diagnostics_contract(fields)));
     }
+    if matches!(
+        field_value(fields, "solution_data_requested"),
+        Some(JsonValue::Bool(true))
+    ) {
+        members.push(("artifacts".to_owned(), solution_artifacts_contract(fields)));
+    }
+    JsonValue::object(members)
+}
+
+fn solution_artifacts_contract(fields: &[JsonField]) -> JsonValue {
+    let mut members = vec![(
+        "schema_version".to_owned(),
+        JsonValue::string("clearra.solution-data.v1"),
+    )];
+    push_existing(fields, &mut members, "solution_keys", "solution_keys");
+    push_existing(
+        fields,
+        &mut members,
+        "solution_probabilities",
+        "solution_probabilities",
+    );
+    push_existing(fields, &mut members, "hold_conditions", "setup_conditions");
+    push_existing(fields, &mut members, "forward_solution_data", "forward");
     JsonValue::object(members)
 }
 

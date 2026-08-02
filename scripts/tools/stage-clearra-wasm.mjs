@@ -1,16 +1,20 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const root = resolve(scriptDir, '..', '..');
 const MANIFEST_BYTES = 335;
 const GENERATION_HEX_LENGTH = 24;
+const cacheBase = process.platform === 'win32'
+  ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
+  : process.env.XDG_CACHE_HOME || resolve(process.env.HOME || '.', '.cache');
 const targetRoot = process.env.CARGO_TARGET_DIR
   ? resolve(process.env.CARGO_TARGET_DIR)
-  : resolve(root, 'target');
+  : resolve(cacheBase, 'Clearra', 'build', 'cargo-target-wasm');
 const source = resolve(targetRoot, 'wasm32-unknown-unknown', 'release', 'clearra_wasm.wasm');
 const destinationDir = process.argv[2]
   ? resolve(process.argv[2])
@@ -23,7 +27,10 @@ if (!sourceStat.isFile() || sourceStat.size === 0) {
 await mkdir(dirname(destinationDir), { recursive: true });
 await mkdir(destinationDir, { recursive: true });
 await rm(resolve(destinationDir, 'clearra_wasm.wasm'), { force: true });
-const stagingDir = await mkdtemp(resolve(dirname(destinationDir), '.clearra-wasm-stage-'));
+const stagingLease = await acquireManagedTransientDirectory(
+  resolve(dirname(destinationDir), '.clearra-wasm-stage')
+);
+const stagingDir = stagingLease.path;
 const bindings = resolve(stagingDir, 'clearra_wasm.js');
 const destination = resolve(stagingDir, 'clearra_wasm_bg.wasm');
 const manifest = resolve(stagingDir, 'clearra_wasm.manifest.json');
@@ -90,7 +97,7 @@ try {
     `staged_wasm=${resolve(destinationDir, artifactManifest.wasm.path)} bytes=${destinationStat.size} wasm_sha256=${artifactManifest.wasm.sha256} bindings=${resolve(destinationDir, artifactManifest.bindings.path)} bindings_bytes=${bindingsStat.size} manifest=${resolve(destinationDir, 'clearra_wasm.manifest.json')}`
   );
 } finally {
-  await rm(stagingDir, { recursive: true, force: true });
+  await stagingLease.release();
 }
 
 function sha256(bytes) {

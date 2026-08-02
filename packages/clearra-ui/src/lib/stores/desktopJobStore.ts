@@ -14,6 +14,7 @@ import {
   type ClearraDesktopRequest,
   type ClearraDesktopResourceStatus
 } from '../host';
+import type { ClearraWasmSearchReport } from '../wasm';
 
 export type DesktopJobState = {
   request: ClearraDesktopRequest;
@@ -23,6 +24,7 @@ export type DesktopJobState = {
   progressDone: number;
   progressTotal: number;
   result: ClearraDesktopAppResponse | null;
+  searchReport: ClearraWasmSearchReport | null;
   validation: unknown | null;
   diagnostics: Array<{ code: string; severity: string }>;
   backendStatus: ClearraDesktopBackendStatus | null;
@@ -39,6 +41,7 @@ const desktopJobInitialState: DesktopJobState = {
   progressDone: 0,
   progressTotal: 0,
   result: null,
+  searchReport: null,
   validation: null,
   diagnostics: [],
   backendStatus: null,
@@ -54,10 +57,55 @@ let pollEpoch = 0;
 let gpuWarmupPromise: Promise<void> | null = null;
 let gpuWarmupAttempted = false;
 
+export function clearDesktopTerminalResult() {
+  desktopJobState.update((state) => {
+    if (
+      state.jobId !== null ||
+      state.status === 'running' ||
+      state.status === 'cancelling'
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      status: 'idle',
+      progressLabel: '',
+      progressDone: 0,
+      progressTotal: 0,
+      result: null,
+      searchReport: null,
+      validation: null,
+      diagnostics: [],
+      backendStatus: null,
+      memoryStatus: null,
+      resourceStatus: null,
+      error: null
+    };
+  });
+}
+
 export function updateDesktopRequest(patch: Partial<ClearraDesktopRequest>) {
   desktopJobState.update((state) => {
     const request = buildDesktopAppRequest({ ...state.request, ...patch });
-    return { ...state, request };
+    const commandChanged = request.command !== state.request.command;
+    if (!commandChanged || state.status === 'running' || state.status === 'cancelling') {
+      return { ...state, request };
+    }
+    return {
+      ...state,
+      request,
+      status: 'idle',
+      progressLabel: '',
+      progressDone: 0,
+      progressTotal: 0,
+      result: null,
+      searchReport: null,
+      diagnostics: [],
+      backendStatus: null,
+      memoryStatus: null,
+      resourceStatus: null,
+      error: null
+    };
   });
 }
 
@@ -91,6 +139,7 @@ export async function startDesktopJob() {
     progressDone: 0,
     progressTotal: 0,
     result: null,
+    searchReport: null,
     diagnostics: [],
     backendStatus: null,
     memoryStatus: null,
@@ -233,15 +282,23 @@ function applyDesktopJobEvent(
           { code: event.code ?? 'desktop-diagnostic', severity: event.severity ?? 'error' }
         ]
       };
-    case 'completed':
+    case 'completed': {
+      const succeeded = event.response?.status === 'success';
       return {
         ...state,
-        status: 'completed',
+        status: succeeded ? 'completed' : 'failed',
         jobId: null,
         result: event.response ?? null,
+        searchReport: event.search_report ?? null,
         backendStatus: event.response?.backend_report ?? state.backendStatus,
-        resourceStatus: event.response?.resource_report ?? state.resourceStatus
+        resourceStatus: event.response?.resource_report ?? state.resourceStatus,
+        error: succeeded
+          ? null
+          : event.response?.diagnostics
+              .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+              .join('\n') || event.response?.status || 'desktop-job-failed'
       };
+    }
     case 'failed':
       return { ...state, status: 'failed', jobId: null, error: event.code ?? 'desktop-job-failed' };
     case 'cancelled':

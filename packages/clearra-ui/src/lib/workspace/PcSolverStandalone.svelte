@@ -31,7 +31,7 @@
     buildWorkspaceCommand,
     clearCompletedRows,
     createDefaultWorkspaceRequest,
-    defaultWorkerCount,
+    defaultBrowserWorkerCount,
     trimBoardMask,
     workspaceValidationCodes,
     type RuleProfile,
@@ -99,7 +99,7 @@
     );
     request = withAutomaticTarget({
       ...request,
-      workers: defaultWorkerCount(navigator.hardwareConcurrency)
+      workers: defaultBrowserWorkerCount(navigator.hardwareConcurrency)
     });
     workerController.prewarm(request.workers, false);
     replacePath(encodePcSolverPath(linkStateFromRequest(request)));
@@ -138,14 +138,22 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     invalidSharedLink = false;
+    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
     request = withAutomaticTarget({
       ...next,
+      workers: useAllChanged
+        ? defaultBrowserWorkerCount(
+            navigator.hardwareConcurrency,
+            next.useAllLogicalProcessors
+          )
+        : next.workers,
       backend: 'auto',
       gpuDevice: 'auto',
       scoreMode: 'off',
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
     });
+    if (useAllChanged) workerController.prewarm(request.workers, false);
   }
 
   function withAutomaticTarget(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
@@ -208,10 +216,10 @@
     completedRowsWarning = normalized.clearedRows;
     if (executionRequest !== request) updateRequest(executionRequest);
     resultTargetLines = executionRequest.lines;
+    updateWasmCommandText(buildWorkspaceCommand(executionRequest));
+    if (!workerController.run()) return;
     hasRun = true;
     startElapsedTimer();
-    updateWasmCommandText(buildWorkspaceCommand(executionRequest));
-    workerController.run();
   }
 
   function cancel() {
@@ -376,6 +384,22 @@
             aria-label={label('hold')}
             aria-checked={request.holdEnabled}
             on:click={() => updateRequest({ ...request, holdEnabled: !request.holdEnabled })}
+          ><i></i></button>
+        </div>
+
+        <div class="option-row">
+          <span>{label('useAllThreads')}</span>
+          <button
+            class="switch"
+            class:active={request.useAllLogicalProcessors}
+            type="button"
+            role="switch"
+            aria-label={label('useAllThreads')}
+            aria-checked={request.useAllLogicalProcessors}
+            on:click={() => updateRequest({
+              ...request,
+              useAllLogicalProcessors: !request.useAllLogicalProcessors
+            })}
           ><i></i></button>
         </div>
 

@@ -611,6 +611,22 @@ impl PartialBuildGraphBuilder {
         self.geometry_expanded_nodes
     }
 
+    pub(super) fn frontier_progress(&self) -> (usize, usize, usize, usize) {
+        let layer_count = usize::from(self.candidate_depth()).max(1);
+        let layer_index = usize::from(self.current_depth).min(layer_count.saturating_sub(1));
+        let completed = match self.phase {
+            PartialBuildPhase::CollectRows => self.current_cursor,
+            PartialBuildPhase::EmitEdges => self.current_cursor.saturating_sub(1),
+        }
+        .min(self.current_states.len());
+        (
+            layer_index,
+            layer_count,
+            completed,
+            self.current_states.len(),
+        )
+    }
+
     fn collect_rows(
         &mut self,
         catalog: &GeometryCatalog,

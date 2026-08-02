@@ -17,6 +17,10 @@ import {
   releasePc4TablebaseAssets
 } from './pc4TablebaseAssets';
 
+const MAX_EAGER_PREWARM_TOTAL_WORKERS = 9;
+const RUNTIME_PREWARM_TIMEOUT_MS = 15_000;
+const TABLEBASE_WARMUP_TIMEOUT_MS = 30_000;
+
 type ClearraWorkerMessage =
   | {
       type: 'prewarm_runtime';
@@ -54,6 +58,9 @@ let runtimePrewarmGeneration = 0;
 let requestedPrewarmWorkerCount = 1;
 let completedPrewarmWorkerCount = 0;
 let loadedWasm: ClearraWasmModule | null = null;
+let gpuWarmup: Promise<void> | null = null;
+let gpuWarmupGeneration = 0;
+let gpuWarmupCompleted = false;
 let tablebaseRequested = false;
 let deferredTablebaseRequested = false;
 let tablebaseWarmup: Promise<void> | null = null;
@@ -130,7 +137,7 @@ async function runCommandText(
     postRuntimeFailure(active.id, 'E_WASM_JOB_ALREADY_RUNNING', 'a WASM job is already active');
     return;
   }
-  requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
+  requestedPrewarmWorkerCount = clampWorkerCountToBrowserHardware(prewarmWorkerCount);
   deferredTablebaseRequested = requestedTablebase;
   setTablebaseRequested(requestedTablebase);
   const jobId = nextJobId++;
@@ -145,9 +152,9 @@ async function runCommandText(
   let failureCode = 'E_WASM_MODULE_LOAD_FAILED';
   let wasm: ClearraWasmModule | null = null;
   try {
-    // Reuse entry prewarm instead of terminating a compiled coordinator and
-    // rebuilding the same verifier pool on the first request.
-    await runtimePrewarm;
+    // Entry warmup is opportunistic. A slow optional worker or GPU adapter
+    // must never become a correctness barrier for a foreground command.
+    interruptIncompleteRuntimePrewarm();
     wasm = loadedWasm ?? (await loadClearraWasmModule());
     loadedWasm = wasm;
     await startTablebaseWarmupAfterWasm(wasm);
@@ -188,36 +195,41 @@ async function runCommandText(
 }
 
 function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebaseRequested) {
-  const boundedWorkerCount = Math.max(1, Math.floor(workerCount));
+  const boundedWorkerCount = clampWorkerCountToBrowserHardware(workerCount);
+  const eagerWorkerCount = Math.min(
+    boundedWorkerCount,
+    MAX_EAGER_PREWARM_TOTAL_WORKERS
+  );
   requestedPrewarmWorkerCount = boundedWorkerCount;
   deferredTablebaseRequested = requestedTablebase;
   if (active) return;
   setTablebaseRequested(requestedTablebase);
-  if (runtimePrewarm || completedPrewarmWorkerCount >= boundedWorkerCount) {
-    if (loadedWasm) void startTablebaseWarmupAfterWasm(loadedWasm);
+  if (runtimePrewarm || completedPrewarmWorkerCount >= eagerWorkerCount) {
+    if (loadedWasm) {
+      void startGpuWarmupAfterWasm(loadedWasm);
+      void startTablebaseWarmupAfterWasm(loadedWasm);
+    }
     return;
   }
   const generation = ++runtimePrewarmGeneration;
-  postRuntimePrewarmPhase('started', boundedWorkerCount);
+  postRuntimePrewarmPhase('started', eagerWorkerCount);
   runtimePrewarm = loadClearraWasmModule()
     .then(async (wasm) => {
       loadedWasm = wasm;
       if (generation !== runtimePrewarmGeneration) return;
-      const gpuWarmup = wasm.prewarm_gpu(null).catch((error) => {
-        console.warn('Clearra GPU warmup was unavailable', error);
-        return 'unavailable' as const;
-      });
-      await Promise.all([
-        gpuWarmup,
+      void startGpuWarmupAfterWasm(wasm);
+      void startTablebaseWarmupAfterWasm(wasm);
+      await withTimeout(
         prewarmDistributedWorkers(
-          boundedWorkerCount,
+          eagerWorkerCount,
           wasm.compiled_module(),
           lifecycleOwnerId
         ),
-        startTablebaseWarmupAfterWasm(wasm)
-      ]);
+        RUNTIME_PREWARM_TIMEOUT_MS,
+        'distributed runtime warmup'
+      );
       if (generation === runtimePrewarmGeneration) {
-        completedPrewarmWorkerCount = boundedWorkerCount;
+        completedPrewarmWorkerCount = eagerWorkerCount;
       }
     })
     .then(() => undefined)
@@ -229,9 +241,55 @@ function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebase
     .finally(() => {
       if (generation === runtimePrewarmGeneration) {
         runtimePrewarm = null;
-        postRuntimePrewarmPhase('finished', boundedWorkerCount);
+        postRuntimePrewarmPhase('finished', eagerWorkerCount);
       }
     });
+}
+
+function clampWorkerCountToBrowserHardware(workerCount: number): number {
+  const reportedLogicalProcessors = self.navigator.hardwareConcurrency;
+  const logicalProcessors = Number.isFinite(reportedLogicalProcessors)
+    ? Math.max(1, Math.floor(reportedLogicalProcessors))
+    : 1;
+  const requested = Number.isFinite(workerCount) ? Math.max(1, Math.floor(workerCount)) : 1;
+  return Math.min(requested, logicalProcessors);
+}
+
+function startGpuWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
+  if (gpuWarmupCompleted) return Promise.resolve();
+  if (gpuWarmup) return gpuWarmup;
+  const generation = ++gpuWarmupGeneration;
+  gpuWarmup = wasm.prewarm_gpu(null)
+    .then(() => {
+      if (generation === gpuWarmupGeneration) gpuWarmupCompleted = true;
+    })
+    .catch((error) => {
+      if (generation === gpuWarmupGeneration) {
+        console.warn('Clearra GPU warmup was unavailable', error);
+      }
+    })
+    .finally(() => {
+      if (generation === gpuWarmupGeneration) gpuWarmup = null;
+    });
+  return gpuWarmup;
+}
+
+function interruptIncompleteRuntimePrewarm() {
+  if (gpuWarmup) {
+    gpuWarmupGeneration += 1;
+    gpuWarmup = null;
+    gpuWarmupCompleted = false;
+    const wasm = loadedWasm;
+    if (!wasm) {
+      throw new Error('GPU warmup is active without an owned WASM runtime');
+    }
+    wasm.cancel_gpu_warmup();
+  }
+  if (!runtimePrewarm) return;
+  runtimePrewarmGeneration += 1;
+  runtimePrewarm = null;
+  completedPrewarmWorkerCount = 0;
+  disposeDistributedWorkers();
 }
 
 function setTablebaseRequested(requested: boolean) {
@@ -261,7 +319,12 @@ function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
   tablebaseWarmupAttempted = true;
   const generation = ++tablebaseWarmupGeneration;
   postTablebaseWarmupPhase('loading', 0);
-  tablebaseWarmup = prewarmPc4TablebaseAssets()
+  tablebaseWarmup = withTimeout(
+    prewarmPc4TablebaseAssets(),
+    TABLEBASE_WARMUP_TIMEOUT_MS,
+    'tablebase warmup',
+    releasePc4TablebaseAssets
+  )
     .then((bundle) => {
       if (generation !== tablebaseWarmupGeneration || !tablebaseRequested) return;
       postTablebaseWarmupPhase('loading', bundle.byteLength);
@@ -283,6 +346,26 @@ function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
   return tablebaseWarmup;
 }
 
+function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  onTimeout?: () => void
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    operation,
+    new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        onTimeout?.();
+        reject(new Error(`${label} timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+    })
+  ]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
+  });
+}
+
 function cancelActiveJob(jobId: number | undefined) {
   const job = active;
   if (!job || job.terminalPosted || (jobId !== undefined && jobId !== job.id)) return;
@@ -301,6 +384,14 @@ function disposeRuntime() {
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  gpuWarmupGeneration++;
+  gpuWarmup = null;
+  gpuWarmupCompleted = false;
+  try {
+    loadedWasm?.cancel_gpu_warmup();
+  } catch {
+    // Closing the worker releases a trapped GPU warmup state.
+  }
   tablebaseRequested = false;
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
@@ -383,6 +474,14 @@ function closeFailClosedWorker() {
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  gpuWarmupGeneration++;
+  gpuWarmup = null;
+  gpuWarmupCompleted = false;
+  try {
+    loadedWasm?.cancel_gpu_warmup();
+  } catch {
+    // Worker termination is the final fail-closed release boundary.
+  }
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;

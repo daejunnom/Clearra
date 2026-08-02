@@ -30,6 +30,19 @@ pub(crate) fn serialize_worker_events(
     Ok(output)
 }
 
+/// Serializes the exact search payload used by the browser worker without
+/// routing a native host through command text or duplicating the report schema.
+pub fn serialize_search_report_from_app_response(
+    response: &clearra_app::AppResponse,
+) -> Option<String> {
+    let report = WasmSearchReport::from_response(response)?;
+    let mut output = String::with_capacity(4096);
+    let mut object = JsonObject::begin(&mut output);
+    write_search_report(&mut object, &report);
+    object.finish();
+    Some(output)
+}
+
 fn write_event(object: &mut JsonObject<'_>, event: &WasmWorkerJobEvent) {
     match event {
         WasmWorkerJobEvent::Started { job_id } => {

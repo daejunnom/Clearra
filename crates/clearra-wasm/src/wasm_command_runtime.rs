@@ -603,6 +603,7 @@ pub(crate) struct PreparedWasmExecution {
 
 pub(crate) enum PreparedWasmAdvance {
     Pending,
+    Progress,
     Completed(WasmExecutionResult),
     Cancelled,
 }
@@ -681,7 +682,7 @@ impl WasmCommandRuntime {
         let mut execution = self.start_prepared_execution(prepared);
         loop {
             match execution.advance(4096, &control) {
-                PreparedWasmAdvance::Pending => {}
+                PreparedWasmAdvance::Pending | PreparedWasmAdvance::Progress => {}
                 PreparedWasmAdvance::Completed(result) => return Ok(result),
                 PreparedWasmAdvance::Cancelled => {
                     return Err(WasmCommandRuntimeError::new(
@@ -728,6 +729,7 @@ impl PreparedWasmExecution {
     ) -> PreparedWasmAdvance {
         match self.execution.advance(work_budget, control) {
             CooperativeAppAdvance::Pending => PreparedWasmAdvance::Pending,
+            CooperativeAppAdvance::Progress => PreparedWasmAdvance::Progress,
             CooperativeAppAdvance::Cancelled => PreparedWasmAdvance::Cancelled,
             CooperativeAppAdvance::Completed(response) => PreparedWasmAdvance::Completed(
                 WasmExecutionResult::from_app_response(response, self.webgpu_requested),

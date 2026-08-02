@@ -18,6 +18,7 @@ pub enum GuiJobEvent {
     Completed {
         job_id: GuiJobId,
         response: AppResponse,
+        search_report_json: Option<String>,
     },
     Failed {
         job_id: GuiJobId,

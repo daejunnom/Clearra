@@ -8,6 +8,7 @@ import {
   type RuleProfile,
   type SpinProfile
 } from './solverWorkspaceModel';
+import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
 
 export type BuildProbabilityRequest = {
   height: number;
@@ -21,6 +22,7 @@ export type BuildProbabilityRequest = {
   preserveB2B: boolean;
   precomputeBuildDependencies: boolean;
   workers: number;
+  useAllLogicalProcessors: boolean;
 };
 
 export type BuildProbabilityValidationCode =
@@ -43,7 +45,8 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     spinProfile: 't-spins',
     preserveB2B: false,
     precomputeBuildDependencies: false,
-    workers: defaultWorkerCount()
+    workers: defaultWorkerCount(),
+    useAllLogicalProcessors: false
   };
 }
 
@@ -117,7 +120,40 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
     String(Math.max(1, Math.trunc(request.workers))),
     '--cpu-warmup'
   );
+  if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
   return tokens.join(' ');
+}
+
+export function buildProbabilityRequestForDesktop(
+  request: BuildProbabilityRequest,
+  language: 'en' | 'ko'
+): ClearraDesktopRequest {
+  const existing = trimBuildProbabilityMask(request.existingMask, request.height);
+  const target = trimBuildProbabilityMask(request.targetMask, request.height);
+  const parsedQueue = parseBrowserQueueInput(request.queue);
+  return buildDesktopAppRequest({
+    command: 'build-probability',
+    language,
+    visible_height: request.height,
+    base_mask: boardMaskHex(existing),
+    target_mask: boardMaskHex(target),
+    queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
+    patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
+    hold_enabled: request.holdEnabled,
+    build_aggregation: request.aggregation,
+    rule: request.rule,
+    spin_profile: request.spinProfile,
+    preserve_b2b: request.preserveB2B,
+    precompute_build_dependencies: request.precomputeBuildDependencies,
+    include_horizontal_mirror: mirrorBoardMask(existing, request.height) === existing,
+    workers: 0,
+    use_all_logical_processors: request.useAllLogicalProcessors,
+    backend: 'cpu',
+    allow_backend_fallback: false,
+    memory_budget_mb: 0,
+    candidate_budget: 0,
+    pattern_budget: 0
+  });
 }
 
 export function trimBuildProbabilityRequest(

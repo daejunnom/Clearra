@@ -1,7 +1,23 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
 
-  import { updateWasmCommandText, wasmWorkerState, WasmTerminalWorkerController } from '../wasm';
+  import {
+    cancelDesktopJob,
+    clearDesktopTerminalResult,
+    desktopJobState,
+    disposeDesktopJobPolling,
+    resumeDesktopJobPolling,
+    startDesktopJob,
+    updateDesktopRequest
+  } from '../stores';
+
+  import {
+    clearWasmTerminalResult,
+    updateWasmCommandText,
+    wasmWorkerState,
+    WasmTerminalWorkerController
+  } from '../wasm';
   import ForwardSearchControls from './ForwardSearchControls.svelte';
   import ForwardSearchResult from './ForwardSearchResult.svelte';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
@@ -10,18 +26,20 @@
     buildForwardSearchCommand,
     createDefaultForwardSearchRequest,
     forwardSourcePieceCount,
+    forwardSearchRequestForDesktop,
     forwardSearchValidationCodes,
     trimForwardBoardMask,
     type ForwardDamageAggregation,
     type ForwardSearchRequest,
     type ForwardTool
   } from './forwardSearchModel';
-  import { defaultWorkerCount } from './solverWorkspaceModel';
+  import { defaultBrowserWorkerCount, defaultWorkerCount } from './solverWorkspaceModel';
   import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
-  import { workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
+  import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let tool: ForwardTool;
   export let workerFactory: (() => Worker) | null = null;
+  export let runtime: 'web' | 'desktop' = 'web';
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
   let request = createDefaultForwardSearchRequest(tool);
@@ -33,10 +51,14 @@
   let resultInitialBoardMask = request.boardMask;
   let resultDamageAggregation: ForwardDamageAggregation = request.damageAggregation;
   let resultMinimumDamage = request.minimumDamage;
+  let workerCount = 1;
+  let disposed = false;
 
   $: workerController.setWorkerFactory(workerFactory);
   $: if (request.tool !== tool) request = createDefaultForwardSearchRequest(tool);
-  $: runtimeView = workspaceViewFromWasm($wasmWorkerState);
+  $: runtimeView = runtime === 'web'
+    ? workspaceViewFromWasm($wasmWorkerState)
+    : workspaceViewFromDesktop($desktopJobState);
   $: validationCodes = forwardSearchValidationCodes(request);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -44,7 +66,14 @@
 
   onMount(() => {
     language = preferredWorkspaceLanguage(localStorage.getItem('clearra-language') ?? navigator.language);
-    workerController.prewarm(defaultWorkerCount(navigator.hardwareConcurrency));
+    workerCount = automaticWorkerCount(request.useAllLogicalProcessors);
+    if (runtime === 'web') {
+      clearWasmTerminalResult();
+      workerController.prewarm(workerCount);
+    } else {
+      clearDesktopTerminalResult();
+      resumeDesktopJobPolling();
+    }
     const handlePageHide = () => disposeWorkspace();
     window.addEventListener('pagehide', handlePageHide);
     return () => window.removeEventListener('pagehide', handlePageHide);
@@ -53,8 +82,27 @@
   onDestroy(disposeWorkspace);
 
   function disposeWorkspace() {
+    if (disposed) return;
+    disposed = true;
     stopElapsedTimer();
+    if (runtime === 'desktop') {
+      const desktopState = get(desktopJobState);
+      const desktopJobActive =
+        desktopState.jobId !== null ||
+        desktopState.status === 'running' ||
+        desktopState.status === 'cancelling';
+      if (desktopJobActive) {
+        // Keep the shared poller alive until the host confirms cancellation;
+        // otherwise a route change can orphan the native job.
+        void cancelDesktopJob();
+      } else {
+        disposeDesktopJobPolling();
+        clearDesktopTerminalResult();
+      }
+      return;
+    }
     workerController.dispose();
+    clearWasmTerminalResult();
   }
 
   function setLanguage(next: WorkspaceLanguage) {
@@ -85,22 +133,40 @@
   }
 
   function updateRequest(next: ForwardSearchRequest) {
+    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    if (useAllChanged) {
+      workerCount = automaticWorkerCount(next.useAllLogicalProcessors);
+      if (runtime === 'web') workerController.prewarm(workerCount);
+    }
     request = { ...next, tool };
   }
 
-  function run() {
+  function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
+    return runtime === 'web'
+      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
+      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+  }
+
+  async function run() {
     if (active || validationCodes.length) return;
     resultHeight = request.height;
     resultInitialBoardMask = request.boardMask;
     resultDamageAggregation = request.damageAggregation;
     resultMinimumDamage = request.minimumDamage;
+    if (runtime === 'web') {
+      updateWasmCommandText(buildForwardSearchCommand(request, workerCount));
+      if (workerController.run()) startElapsedTimer();
+      return;
+    }
+    updateDesktopRequest(forwardSearchRequestForDesktop(request, language, workerCount));
     startElapsedTimer();
-    updateWasmCommandText(buildForwardSearchCommand(request));
-    workerController.run();
+    await startDesktopJob();
   }
 
-  function cancel() {
-    if (active) workerController.cancel();
+  async function cancel() {
+    if (!active) return;
+    if (runtime === 'web') workerController.cancel();
+    else await cancelDesktopJob();
   }
 
   function startElapsedTimer() {

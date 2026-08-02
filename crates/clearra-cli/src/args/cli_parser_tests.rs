@@ -345,6 +345,34 @@ fn strips_verbose_paths_as_global_option() {
 }
 
 #[test]
+fn strips_solution_data_as_host_output_option() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--include-solution-data",
+        "--format",
+        "json",
+        "--lines",
+        "2",
+    ])
+    .expect("parsed invocation");
+
+    assert!(invocation.include_solution_data());
+    assert!(matches!(invocation.into_command(), ParsedCliCommand::Pc(_)));
+}
+
+#[test]
+fn solution_data_requires_structured_json_output() {
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "--include-solution-data", "--lines", "2",]),
+        Err(CliParseError::InvalidValue {
+            option: "--include-solution-data",
+            value: "requires --format json".to_owned(),
+        })
+    );
+}
+
+#[test]
 fn parses_text_output_verbosity_as_global_option() {
     let verbose =
         CliParser::parse(["clearra", "pc", "--verbose", "--lines", "2"]).expect("verbose");

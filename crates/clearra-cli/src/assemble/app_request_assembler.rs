@@ -11,8 +11,8 @@ use crate::{
         app_request_format::{default_format_name, target_render_format},
         app_request_rules::{rules_command, scoring_command},
         app_request_scenario_contract::scenario_render_contract,
-        CoverQueryAssembler, PcQueryAssembler, PcScenarioQueryAssembler, PercentQueryAssembler,
-        SetupQueryAssembler,
+        setup_resource_budget, CoverQueryAssembler, PcQueryAssembler, PcScenarioQueryAssembler,
+        PercentQueryAssembler, SetupQueryAssembler,
     },
     error::CliErrorCode,
     output::{CliOutput, RenderFormat},
@@ -132,7 +132,8 @@ impl CliAppRequestAssembler {
                     CliOutput::error(CliErrorCode::SetupQueryInvalid, format!("{error:?}"))
                 })?;
                 Ok(CliAppRequestAssembly::new(
-                    AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query))),
+                    AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query)))
+                        .with_resource_budget(setup_resource_budget(&args)),
                     default_format,
                     CliErrorCode::SetupQueryInvalid,
                 ))

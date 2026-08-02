@@ -1,9 +1,15 @@
 const API_ROOT = "https://discord.com/api/v10";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_RATE_LIMIT_DELAY_MS = 30_000;
 
 export class DiscordRestClient {
-  constructor(token, fetchImplementation = fetch) {
-    this.token = token;
+  constructor(token = null, fetchImplementation = fetch, options = {}) {
+    this.token = token || null;
     this.fetch = fetchImplementation;
+    this.requestTimeoutMs = positiveInteger(
+      options.requestTimeoutMs,
+      DEFAULT_REQUEST_TIMEOUT_MS,
+    );
   }
 
   async application() {
@@ -59,11 +65,17 @@ export class DiscordRestClient {
     if (!Number.isSafeInteger(limit) || limit < 1) {
       throw new RangeError("The Discord attachment size limit is invalid.");
     }
-    const response = await this.fetch(parsed, {
-      method: "GET",
-      headers: { "user-agent": "Clearrabot/0.1" },
-      redirect: "error",
-    });
+    let response;
+    try {
+      response = await this.fetch(parsed, {
+        method: "GET",
+        headers: { "user-agent": "Clearrabot/0.1" },
+        redirect: "error",
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (error) {
+      throw discordNetworkError(error);
+    }
     if (!response.ok) {
       throw new Error(`Discord attachment ${response.status}.`);
     }
@@ -104,6 +116,9 @@ export class DiscordRestClient {
   }
 
   async request(method, path, payload, files = [], authenticate = true) {
+    if (authenticate && !this.token) {
+      throw new Error("DISCORD_TOKEN is required for this Discord API request.");
+    }
     let attempt = 0;
     while (true) {
       const headers = new Headers({
@@ -135,14 +150,24 @@ export class DiscordRestClient {
         body = JSON.stringify(payload);
       }
 
-      const response = await this.fetch(`${API_ROOT}${path}`, {
-        method,
-        headers,
-        body,
-      });
+      let response;
+      try {
+        response = await this.fetch(`${API_ROOT}${path}`, {
+          method,
+          headers,
+          body,
+          signal: AbortSignal.timeout(this.requestTimeoutMs),
+        });
+      } catch (error) {
+        throw discordNetworkError(error);
+      }
       if (response.status === 429 && attempt < 4) {
         const rateLimit = await response.json();
-        await sleep(Math.ceil(Number(rateLimit.retry_after ?? 1) * 1000));
+        const delayMs = Math.ceil(Number(rateLimit.retry_after ?? 1) * 1000);
+        if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > MAX_RATE_LIMIT_DELAY_MS) {
+          throw new Error("Discord API returned an unsafe rate-limit delay.");
+        }
+        await sleep(delayMs);
         attempt += 1;
         continue;
       }
@@ -183,6 +208,28 @@ export function attachmentMessage(content, files) {
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function positiveInteger(value, fallback) {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("The Discord request timeout is invalid.");
+  }
+  return parsed;
+}
+
+function discordNetworkError(error) {
+  if (
+    error?.name === "TimeoutError" ||
+    error?.name === "AbortError"
+  ) {
+    return new Error("Discord API request timed out.");
+  }
+  const detail = error instanceof Error && error.message
+    ? `: ${error.message}`
+    : "";
+  return new Error(`Discord API request failed${detail}`);
 }
 
 function discordAttachmentUrl(value) {

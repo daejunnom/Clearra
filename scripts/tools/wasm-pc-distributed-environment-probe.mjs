@@ -80,9 +80,12 @@ function runSerial(api, commandText, workBudget) {
   if (jobId === 0) throw new Error(readOutput(api));
   let status = 0;
   let advanceCalls = 0;
-  while (status === 0) {
+  while (status === 0 || status === 4) {
     status = api.advanceJob(jobId, workBudget);
     requireStatus(api, status);
+    if (![0, 1, 2, 3, 4].includes(status)) {
+      throw new Error(`invalid Clearra WASM job status ${status}`);
+    }
     advanceCalls += 1;
   }
   requireStatus(api, api.drainJobEvents(jobId));

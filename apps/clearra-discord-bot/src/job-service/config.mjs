@@ -5,8 +5,10 @@ export function loadClearraJobServiceConfig(
   runtime = {},
 ) {
   const processLogicalProcessors = runtimeLogicalProcessorCount(runtime);
-  const useAllLogicalProcessors =
-    environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS === "1";
+  const useAllLogicalProcessors = booleanSetting(
+    environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS,
+    true,
+  );
   const sharedWorkerCapacity = useAllLogicalProcessors
     ? processLogicalProcessors
     : Math.max(1, processLogicalProcessors - 1);
@@ -100,6 +102,13 @@ function positiveInteger(value, fallback) {
 function positiveIntegerOrAuto(value, fallback) {
   if (typeof value === "string" && value.toLowerCase() === "auto") return fallback;
   return positiveInteger(value, fallback);
+}
+
+function booleanSetting(value, fallback) {
+  if (value === undefined || value === "") return fallback;
+  if (value === "1") return true;
+  if (value === "0") return false;
+  throw new Error("A Clearra job-service boolean setting is invalid.");
 }
 
 function runtimeLogicalProcessorCount(runtime) {

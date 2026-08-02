@@ -126,7 +126,7 @@ function Invoke-NoProductDebtHoldLanguageProofProbe {
         [string]$CargoTargetDir
     )
 
-    $probeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "clearra-no-product-debt-proof-$PID-$([System.Guid]::NewGuid().ToString('N'))"
+    $probeRoot = New-TransientBuildDir 'clearra-no-product-debt-proof'
     $sourceRoot = Join-Path $probeRoot 'src'
     New-Item -ItemType Directory -Force -Path $sourceRoot | Out-Null
     $dependencyPath = (Join-Path $Root 'crates/clearra-core-executor').Replace('\', '/')
@@ -167,9 +167,7 @@ fn main() {
         Write-Output 'no_product_debt_evidence=hold_language_empty_requires_independent_proof status=passed source=compile-fail-probe'
     }
     finally {
-        if (Test-Path -LiteralPath $probeRoot) {
-            Remove-Item -LiteralPath $probeRoot -Recurse -Force
-        }
+        Remove-TransientBuildDir $probeRoot
     }
 }
 

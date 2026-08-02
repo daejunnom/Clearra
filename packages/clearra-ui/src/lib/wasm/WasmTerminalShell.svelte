@@ -24,7 +24,12 @@
       />
     </label>
     <div class="actions">
-      <button data-testid="run-job" type="button" on:click={() => workerController.run()} disabled={state.status === 'running'}>Run</button>
+      <button
+        data-testid="run-job"
+        type="button"
+        on:click={() => workerController.run()}
+        disabled={state.status === 'running' || state.status === 'cancelling'}
+      >Run</button>
       <button
         data-testid="cancel-job"
         type="button"

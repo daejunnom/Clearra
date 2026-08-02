@@ -130,6 +130,20 @@ impl WasmSetupParallelCoordinator {
         )
     }
 
+    pub fn build_progress(&self) -> (usize, usize, usize, usize, usize, usize) {
+        self.builder.as_ref().map_or((3, 4, 0, 0, 0, 0), |builder| {
+            let progress = builder.progress();
+            (
+                progress.pass_index,
+                progress.pass_count,
+                progress.layer_index,
+                progress.layer_count,
+                progress.layer_done,
+                progress.layer_total,
+            )
+        })
+    }
+
     pub(crate) fn advance(
         &mut self,
         work_budget: usize,
@@ -632,6 +646,7 @@ pub(crate) fn execute_setup_parallel_native(
         return Err(error);
     }
 
+    control.report_progress("setup-finalize", 4, Some(4));
     coordinator.next_task = coordinator.tasks.len();
     coordinator.merge_ready_results()?;
     coordinator.finish(workers_used)
@@ -642,9 +657,16 @@ fn prepare_native_setup_graph(
     coordinator: &mut WasmSetupParallelCoordinator,
     control: &ExecutionControl,
 ) -> Result<(), WasmExactSearchError> {
+    let mut last_progress = None;
     while coordinator.builder.is_some() {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
+        }
+        let pass_index = coordinator.build_progress().0;
+        let progress = native_setup_build_progress_phase(pass_index);
+        if last_progress != Some(progress) {
+            control.report_progress(progress.0, progress.1, Some(4));
+            last_progress = Some(progress);
         }
         let advance = coordinator
             .builder
@@ -661,7 +683,17 @@ fn prepare_native_setup_graph(
             }
         }
     }
+    control.report_progress("setup-coverage", 3, Some(4));
     Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn native_setup_build_progress_phase(pass_index: usize) -> (&'static str, u64) {
+    if pass_index == 0 {
+        ("setup-geometry", 1)
+    } else {
+        ("setup-graph", 2)
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1050,6 +1082,8 @@ struct CompletedParallelCondition {
 }
 
 const TARGET_TASKS_PER_VERIFIER: usize = 4;
+const HIGH_CONCURRENCY_TARGET_TASKS_PER_VERIFIER: usize = 2;
+const HIGH_CONCURRENCY_VERIFIER_THRESHOLD: usize = 32;
 const MIN_WORDS_PER_TASK: usize = COVERAGE_WORD_LANES;
 
 fn plan_parallel_tasks(
@@ -1065,7 +1099,12 @@ fn plan_parallel_tasks(
                 ))
         })?;
     let verifier_count = worker_count.saturating_sub(1).max(1);
-    let target_tasks = verifier_count.saturating_mul(TARGET_TASKS_PER_VERIFIER);
+    let tasks_per_verifier = if verifier_count >= HIGH_CONCURRENCY_VERIFIER_THRESHOLD {
+        HIGH_CONCURRENCY_TARGET_TASKS_PER_VERIFIER
+    } else {
+        TARGET_TASKS_PER_VERIFIER
+    };
+    let target_tasks = verifier_count.saturating_mul(tasks_per_verifier);
     let mut words_per_task = total_words
         .div_ceil(target_tasks.max(1))
         .max(MIN_WORDS_PER_TASK);

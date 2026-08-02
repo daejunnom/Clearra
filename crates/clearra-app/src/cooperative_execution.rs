@@ -26,6 +26,7 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CooperativeAppAdvance {
     Pending,
+    Progress,
     Completed(AppResponse),
     Cancelled,
 }
@@ -39,6 +40,7 @@ enum CooperativeExecutionState {
     Immediate(Option<AppRequest>),
     Ready(Option<AppResponse>),
     Search(CooperativeSearchExecution),
+    Postprocess(CooperativePostprocessExecution),
     Finished,
 }
 
@@ -50,6 +52,14 @@ struct CooperativeSearchExecution {
     validation_report: DiagnosticReport,
     backend_requested: String,
     gpu_device_requested: Option<String>,
+}
+
+struct CooperativePostprocessExecution {
+    result: Option<clearra_core_executor::CoreExecutionResult>,
+    response_kind: CooperativeSearchResponseKind,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    validation_report: DiagnosticReport,
 }
 
 enum CooperativeSearchSession {
@@ -295,34 +305,31 @@ impl CooperativeAppExecution {
                     Ok(CooperativeBackendAdvance::Cancelled)
                     | Err(WasmCpuSearchError::Cancelled) => CooperativeAppAdvance::Cancelled,
                     Ok(CooperativeBackendAdvance::CompletedCore(result)) => {
-                        let result = if matches!(
-                            &search.response_kind,
-                            CooperativeSearchResponseKind::Setup
-                        ) {
-                            Ok(result)
+                        if matches!(&search.response_kind, CooperativeSearchResponseKind::Setup) {
+                            let response = response_from_search(search.response_kind, result);
+                            let response = if search.validation_report.is_empty() {
+                                response
+                            } else {
+                                response.with_validation_diagnostics(search.validation_report)
+                            };
+                            CooperativeAppAdvance::Completed(self.context.finalize_response(
+                                response,
+                                search.command_kind,
+                                &search.output_policy,
+                            ))
                         } else {
-                            self.context
-                                .services()
-                                .core_executor()
-                                .postprocess_search_result(result, control)
-                        };
-                        let response = match result {
-                            Ok(result) => response_from_search(search.response_kind, result),
-                            Err(CoreExecutionError::Cancelled) => {
-                                return CooperativeAppAdvance::Cancelled
-                            }
-                            Err(error) => core_execution_error_response(error),
-                        };
-                        let response = if search.validation_report.is_empty() {
-                            response
-                        } else {
-                            response.with_validation_diagnostics(search.validation_report)
-                        };
-                        CooperativeAppAdvance::Completed(self.context.finalize_response(
-                            response,
-                            search.command_kind,
-                            &search.output_policy,
-                        ))
+                            control.report_progress("postprocess", 0, Some(1));
+                            self.state = CooperativeExecutionState::Postprocess(
+                                CooperativePostprocessExecution {
+                                    result: Some(result),
+                                    response_kind: search.response_kind,
+                                    command_kind: search.command_kind,
+                                    output_policy: search.output_policy,
+                                    validation_report: search.validation_report,
+                                },
+                            );
+                            CooperativeAppAdvance::Progress
+                        }
                     }
                     Ok(CooperativeBackendAdvance::CompletedForward(report)) => {
                         let response = match search.response_kind {
@@ -356,6 +363,38 @@ impl CooperativeAppExecution {
                         &search.output_policy,
                     )),
                 }
+            }
+            CooperativeExecutionState::Postprocess(mut postprocess) => {
+                if control.is_cancelled() {
+                    return CooperativeAppAdvance::Cancelled;
+                }
+                let result = self
+                    .context
+                    .services()
+                    .core_executor()
+                    .postprocess_search_result(
+                        postprocess
+                            .result
+                            .take()
+                            .expect("postprocess result exists"),
+                        control,
+                    );
+                control.report_progress("postprocess", 1, Some(1));
+                let response = match result {
+                    Ok(result) => response_from_search(postprocess.response_kind, result),
+                    Err(CoreExecutionError::Cancelled) => return CooperativeAppAdvance::Cancelled,
+                    Err(error) => core_execution_error_response(error),
+                };
+                let response = if postprocess.validation_report.is_empty() {
+                    response
+                } else {
+                    response.with_validation_diagnostics(postprocess.validation_report)
+                };
+                CooperativeAppAdvance::Completed(self.context.finalize_response(
+                    response,
+                    postprocess.command_kind,
+                    &postprocess.output_policy,
+                ))
             }
             CooperativeExecutionState::Finished => {
                 CooperativeAppAdvance::Completed(AppResponse::failed(

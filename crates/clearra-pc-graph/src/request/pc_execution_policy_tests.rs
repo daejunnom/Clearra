@@ -62,6 +62,25 @@ fn worker_policy_reserves_one_logical_processor_unless_explicitly_requested() {
     );
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn native_execution_never_trusts_a_stored_hardware_limit_above_the_host() {
+    let hardware = WorkerPolicy::hardware_worker_limit();
+    let overstated = hardware.saturating_add(8);
+    let policy = PcExecutionPolicy::mvp_default()
+        .with_worker_hardware_limit(overstated)
+        .with_workers(overstated)
+        .with_use_all_logical_processors(true);
+
+    assert_eq!(policy.workers(), hardware);
+
+    let lower_limit = hardware.saturating_sub(1).max(1);
+    assert_eq!(
+        policy.with_worker_hardware_limit(lower_limit).workers(),
+        lower_limit
+    );
+}
+
 #[test]
 fn automatic_worker_limit_caps_auto_policy_without_becoming_a_fixed_request() {
     let default_workers = WorkerPolicy::default_worker_limit();

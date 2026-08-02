@@ -49,6 +49,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         Read-Text "crates/clearra-gui-host/src/request/pc_request_builder.rs"
     ) -join "`n"
     $desktopClient = Read-Text "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts"
+    $desktopEntry = Read-Text "apps/clearra-desktop/src/routes/+page.svelte"
     $desktopStore = Read-Text "packages/clearra-ui/src/lib/stores/desktopJobStore.ts"
     $desktopShell = Read-Text "packages/clearra-ui/src/lib/components/DesktopHostShell.svelte"
     $desktopGate = Read-Text "scripts/desktop-host-check.ps1"
@@ -103,6 +104,23 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     )) {
         if (($tauriMain + "`n" + $tauriCommands) -notlike "*$requiredMarker*") {
             Add-ArchitectureError "U6 Tauri command surface is missing '$requiredMarker'"
+        }
+    }
+    foreach ($requiredMarker in @(
+        "'pc'",
+        "'setup'",
+        "'build-probability'",
+        "'damage'",
+        "'spin-finder'",
+        "'ctk'",
+        '<SolverWorkspace runtime="desktop"',
+        '<SetupFinderWorkspace runtime="desktop"',
+        '<BuildProbabilityWorkspace runtime="desktop"',
+        '<ForwardSearchWorkspace tool={selectedTool} runtime="desktop"',
+        '<CtkDrawerWorkspace'
+    )) {
+        if ($desktopEntry -notlike "*$requiredMarker*") {
+            Add-ArchitectureError "U6 desktop entrypoint is missing product tool route '$requiredMarker'"
         }
     }
     foreach ($requiredMarker in @(

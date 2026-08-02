@@ -16,6 +16,7 @@ pub mod piece_sequence_assembler;
 pub mod profile_assembler;
 pub mod rule_profile_assembler;
 pub mod setup_query_assembler;
+mod setup_resource_budget;
 
 pub(crate) use app_request_assembler::CliAppRequestAssembler;
 pub use cover_query_assembler::CoverQueryAssembler;
@@ -30,6 +31,7 @@ pub use piece_sequence_assembler::{PieceSequenceAssembler, PieceSequenceAssembly
 pub use profile_assembler::{CliProfileSet, ProfileAssembler};
 pub use rule_profile_assembler::{RuleProfileAssembler, RuleProfileAssemblyError};
 pub use setup_query_assembler::{SetupQueryAssembler, SetupQueryAssemblyError};
+pub(crate) use setup_resource_budget::setup_resource_budget;
 
 pub(super) fn parse_hex_mask(mask: &str) -> Result<u64, String> {
     let digits = mask

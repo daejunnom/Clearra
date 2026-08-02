@@ -17,8 +17,19 @@ impl AppResponseRenderer {
         format: RenderFormat,
         default_error: CliErrorCode,
     ) -> CliOutput {
+        Self::render_with_solution_data(response, format, default_error, false)
+    }
+
+    pub fn render_with_solution_data(
+        response: AppResponse,
+        format: RenderFormat,
+        default_error: CliErrorCode,
+        include_solution_data: bool,
+    ) -> CliOutput {
         match response.status() {
-            AppStatus::Success => render_success(response, format, default_error),
+            AppStatus::Success => {
+                render_success(response, format, default_error, include_solution_data)
+            }
             AppStatus::ValidationFailed => CliOutput::validation_failed_with_format(
                 response.diagnostics().validation(),
                 format,
@@ -40,6 +51,7 @@ fn render_success(
     response: AppResponse,
     format: RenderFormat,
     default_error: CliErrorCode,
+    include_solution_data: bool,
 ) -> CliOutput {
     let Some(model) = response.render_model() else {
         return CliOutput::error(default_error, "app response did not include a render model");
@@ -76,6 +88,20 @@ fn render_success(
                         ])
                     })),
                 ));
+            }
+            if include_solution_data {
+                fields.extend([
+                    RenderField::new("solution_data_requested", true),
+                    RenderField::new(
+                        "solution_keys",
+                        RenderFieldValue::array(
+                            result
+                                .normalized_solution_keys()
+                                .iter()
+                                .map(RenderFieldValue::string),
+                        ),
+                    ),
+                ]);
             }
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
@@ -253,6 +279,9 @@ fn render_success(
                     })),
                 ),
             ]);
+            if include_solution_data {
+                fields.push(RenderField::new("solution_data_requested", true));
+            }
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
                 fields,
@@ -330,7 +359,7 @@ fn render_success(
                     ),
                 ])
             }));
-            let fields = vec![
+            let mut fields = vec![
                 RenderField::new("complete", result.complete()),
                 RenderField::new("visited_states", result.visited_states()),
                 RenderField::new("generated_locks", result.generated_locks()),
@@ -345,6 +374,111 @@ fn render_success(
                 ),
                 RenderField::new("outcomes", outcomes),
             ];
+            if include_solution_data {
+                fields.extend([
+                    RenderField::new("solution_data_requested", true),
+                    RenderField::new(
+                        "forward_solution_data",
+                        RenderFieldValue::object([
+                            (
+                                "initial_board",
+                                RenderFieldValue::string(board_mask_hex(result.initial_board())),
+                            ),
+                            (
+                                "outcomes",
+                                RenderFieldValue::array(result.outcomes().iter().map(|outcome| {
+                                    RenderFieldValue::object([
+                                        ("id", RenderFieldValue::from(outcome.id())),
+                                        (
+                                            "source_pattern_index",
+                                            RenderFieldValue::from(outcome.source_pattern_index()),
+                                        ),
+                                        (
+                                            "source_queue",
+                                            RenderFieldValue::string(
+                                                outcome
+                                                    .source_queue()
+                                                    .iter()
+                                                    .map(|piece| piece.as_ascii())
+                                                    .collect::<String>(),
+                                            ),
+                                        ),
+                                        (
+                                            "group",
+                                            outcome
+                                                .group()
+                                                .map_or(RenderFieldValue::Null, |group| {
+                                                    RenderFieldValue::string(group.as_str())
+                                                }),
+                                        ),
+                                        (
+                                            "spin_piece",
+                                            outcome.spin_piece().map_or(
+                                                RenderFieldValue::Null,
+                                                |piece| {
+                                                    RenderFieldValue::string(
+                                                        piece.as_ascii().to_string(),
+                                                    )
+                                                },
+                                            ),
+                                        ),
+                                        ("spin_mini", RenderFieldValue::bool(outcome.spin_mini())),
+                                        (
+                                            "spin_lines",
+                                            RenderFieldValue::from(outcome.spin_lines()),
+                                        ),
+                                        (
+                                            "total_damage",
+                                            RenderFieldValue::from(outcome.total_damage()),
+                                        ),
+                                        (
+                                            "final_board",
+                                            RenderFieldValue::string(board_mask_hex(
+                                                outcome.final_board(),
+                                            )),
+                                        ),
+                                        (
+                                            "path",
+                                            RenderFieldValue::array(outcome.path().iter().map(
+                                                |step| {
+                                                    RenderFieldValue::object([
+                                                        (
+                                                            "piece",
+                                                            RenderFieldValue::string(
+                                                                step.piece().as_ascii().to_string(),
+                                                            ),
+                                                        ),
+                                                        (
+                                                            "placement_mask",
+                                                            RenderFieldValue::string(
+                                                                board_mask_hex(
+                                                                    step.placement_mask(),
+                                                                ),
+                                                            ),
+                                                        ),
+                                                        (
+                                                            "cleared_row_mask",
+                                                            RenderFieldValue::from(
+                                                                step.cleared_row_mask(),
+                                                            ),
+                                                        ),
+                                                        (
+                                                            "board_after",
+                                                            RenderFieldValue::string(
+                                                                board_mask_hex(step.board_after()),
+                                                            ),
+                                                        ),
+                                                    ])
+                                                },
+                                            )),
+                                        ),
+                                    ])
+                                })),
+                            ),
+                        ]),
+                    ),
+                ]);
+            }
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
                 fields,
@@ -370,6 +504,13 @@ fn render_success(
             }
         }
     }
+}
+
+fn board_mask_hex(words: [u64; 4]) -> String {
+    format!(
+        "0x{:016x}{:016x}{:016x}{:016x}",
+        words[3], words[2], words[1], words[0]
+    )
 }
 
 fn cli_error_for_app_error(code: AppErrorCode, default_error: CliErrorCode) -> CliErrorCode {

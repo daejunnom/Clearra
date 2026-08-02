@@ -188,6 +188,7 @@ const en = {
   progressInitializing: 'Preparing search execution',
   progressSearching: 'Searching and verifying',
   progressDraining: 'Finishing remaining verification',
+  progressPostprocessing: 'Processing verified results',
   progressMerging: 'Merging exact results',
   progressFieldPass: 'Field {current}/{total}',
   progressGeometry: 'Geometry {count}',
@@ -213,6 +214,13 @@ const en = {
   progressStageForwardSearch: 'State search',
   progressStageDamage: 'Damage evaluation',
   progressStageSpin: 'Spin classification',
+  progressStageSolutions: 'Solution finalization',
+  progressStageMinimumCover: 'Minimum solution selection',
+  progressStageScore: 'Score calculation',
+  progressStageFailedQueues: 'Failed queue aggregation',
+  progressStageSetupFinalize: 'Setup finalization',
+  progressStageBuildProbability: 'Build probability aggregation',
+  progressStageSpinCoverage: 'Spin probability aggregation',
   progressStageAggregate: 'Result merge',
   progressMetricNodes: 'nodes',
   progressMetricCandidates: 'candidates',
@@ -367,12 +375,12 @@ const en = {
   build_target_not_tileable: 'The target build cell count must be divisible by four.',
   build_target_overlap: 'Existing and target build cells cannot overlap.',
   worker_count_invalid: 'Worker count must be at least one.',
-  initial_b2b_invalid: 'Initial B2B must be a non-negative integer.',
+  initial_b2b_invalid: 'Initial B2B must be an integer from 0 through 65,535.',
   minimum_damage_invalid: 'Minimum damage must be an integer from 0 through 4,294,967,295.',
   forward_queue_invalid: 'Enter a valid fixed queue. Spin finder also accepts queue-pattern expressions.',
   forward_pattern_too_long: 'Spin-search patterns may generate at most 8 pieces. Use a fixed queue for longer input.',
   forward_height_invalid: 'Field height must be an integer from 1 through 24.',
-  initial_combo_invalid: 'Initial combo must be a non-negative integer.',
+  initial_combo_invalid: 'Initial combo must be an integer from 0 through 65,535.',
   gpu_device_invalid: 'GPU device must be Automatic or a numeric adapter index.',
   resultLimited: 'Showing {count} of {total} solutions.',
   showMore: 'Show {count} more',
@@ -614,6 +622,7 @@ const ko: Record<keyof typeof en, string> = {
   progressInitializing: '탐색 실행 준비 중',
   progressSearching: '탐색 및 검증 중',
   progressDraining: '남은 검증 정리 중',
+  progressPostprocessing: '검증 결과 처리 중',
   progressMerging: '정확 결과 병합 중',
   progressFieldPass: '필드 {current}/{total}',
   progressGeometry: 'Geometry {count}',
@@ -639,6 +648,13 @@ const ko: Record<keyof typeof en, string> = {
   progressStageForwardSearch: '상태 탐색',
   progressStageDamage: '데미지 평가',
   progressStageSpin: '스핀 판정',
+  progressStageSolutions: '해법 정리',
+  progressStageMinimumCover: '최소 해법 선택',
+  progressStageScore: '점수 계산',
+  progressStageFailedQueues: '실패 큐 집계',
+  progressStageSetupFinalize: '셋업 정리',
+  progressStageBuildProbability: '구축 확률 집계',
+  progressStageSpinCoverage: '스핀 확률 집계',
   progressStageAggregate: '결과 병합',
   progressMetricNodes: '노드',
   progressMetricCandidates: '후보',
@@ -793,12 +809,12 @@ const ko: Record<keyof typeof en, string> = {
   build_target_not_tileable: '탐색 필드의 칸 수는 4의 배수여야 합니다.',
   build_target_overlap: '기존 필드와 탐색 필드는 겹칠 수 없습니다.',
   worker_count_invalid: '워커 수는 1 이상이어야 합니다.',
-  initial_b2b_invalid: '초기 B2B는 0 이상의 정수여야 합니다.',
+  initial_b2b_invalid: '초기 B2B는 0~65,535 사이의 정수여야 합니다.',
   minimum_damage_invalid: '최소 데미지는 0~4,294,967,295 사이의 정수여야 합니다.',
   forward_queue_invalid: '올바른 고정 큐를 입력해 주세요. 스핀 탐색은 큐 패턴식도 지원합니다.',
   forward_pattern_too_long: '스핀 탐색 패턴은 최대 8개 미노까지만 생성할 수 있습니다. 더 긴 입력은 고정 큐를 사용해 주세요.',
   forward_height_invalid: '필드 높이는 1~24 사이의 정수여야 합니다.',
-  initial_combo_invalid: '초기 콤보는 0 이상의 정수여야 합니다.',
+  initial_combo_invalid: '초기 콤보는 0~65,535 사이의 정수여야 합니다.',
   gpu_device_invalid: 'GPU 장치는 자동 또는 숫자 어댑터 인덱스여야 합니다.',
   resultLimited: '전체 {total}개 중 {count}개를 표시합니다.',
   showMore: '{count}개 더 보기',
@@ -895,6 +911,7 @@ export function workspaceProgressLabel(
       initializing: 'progressInitializing',
       searching: 'progressSearching',
       draining: 'progressDraining',
+      postprocessing: 'progressPostprocessing',
       merging: 'progressMerging'
     } as const)[telemetry.phase]
   );
@@ -957,6 +974,9 @@ export function workspaceProgressDetail(
   }
   if (telemetry.phase === 'draining') {
     return [verification, build].filter(Boolean).join(' · ');
+  }
+  if (telemetry.phase === 'postprocessing') {
+    return [verification, build, coverage].filter(Boolean).join(' · ');
   }
   return [candidateFamilies ?? geometry, build, coverage].join(' · ');
 }

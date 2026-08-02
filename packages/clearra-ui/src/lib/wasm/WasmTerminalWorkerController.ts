@@ -55,15 +55,43 @@ export class WasmTerminalWorkerController {
     this.workerFactory = workerFactory;
   }
 
-  run() {
+  run(): boolean {
+    if (
+      this.runInFlight ||
+      this.cancellingWorker !== null ||
+      this.cancelFallback !== null
+    ) {
+      return false;
+    }
+    let worker: Worker | null;
+    try {
+      worker = this.ensureWorker();
+    } catch (error) {
+      const ownedWorker = this.worker;
+      if (ownedWorker) {
+        this.failClosedWorker(
+          ownedWorker,
+          'E_WASM_WORKER_CREATE_FAILED',
+          errorMessage(error)
+        );
+      } else {
+        this.emitFailure('E_WASM_WORKER_CREATE_FAILED', errorMessage(error));
+      }
+      return false;
+    }
+    if (!worker) {
+      this.emitFailure(
+        'E_WASM_WORKER_UNAVAILABLE',
+        'A browser worker factory is required to start the WASM runtime.'
+      );
+      return false;
+    }
     this.rejectSolutionPages(new Error('a new search replaced the previous solution pages'));
     if (this.worker && this.prewarmingWorker === this.worker) {
-      // The worker awaits in-flight prewarm and preserves its compiled
-      // coordinator module and verifier pool for the requested job.
+      // Foreground execution interrupts incomplete optional warmup inside the
+      // worker; the compiled module itself remains reusable.
       this.prewarmingWorker = null;
     }
-    const worker = this.ensureWorker();
-    if (!worker) return;
     try {
       this.runInFlight = true;
       runWasmCommand(
@@ -72,9 +100,11 @@ export class WasmTerminalWorkerController {
         this.tablebaseRequested,
         ensureWasmWorkerOwnerId(worker)
       );
+      return true;
     } catch (error) {
       this.runInFlight = false;
       this.failClosedWorker(worker, 'E_WASM_WORKER_MESSAGE_FAILED', errorMessage(error));
+      return false;
     }
   }
 
@@ -287,6 +317,11 @@ export class WasmTerminalWorkerController {
     if (this.worker !== worker) return;
     this.runInFlight = false;
     this.releaseWorker(worker, 'worker-failure');
+    this.emitFailure(code, message);
+    this.flushDeferredPrewarm();
+  }
+
+  private emitFailure(code: string, message: string) {
     applyWasmWorkerEvent({
       schema_version: 1,
       runtime: 'clearra-wasm',
@@ -296,7 +331,6 @@ export class WasmTerminalWorkerController {
         diagnostics: [{ code, severity: 'error', message }]
       }
     });
-    this.flushDeferredPrewarm();
   }
 
   private emitForcedTermination(

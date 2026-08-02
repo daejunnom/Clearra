@@ -72,6 +72,7 @@
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
   progressProfile={aggregation === 'tiling' ? 'tiling' : 'build'}
+  progressMode={aggregation === 'spin' ? 'build-spin' : 'buildability'}
   {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}

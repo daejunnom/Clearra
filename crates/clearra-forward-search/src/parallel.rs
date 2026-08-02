@@ -90,7 +90,6 @@ pub struct ForwardParallelCoordinator {
     state: CoordinatorState,
     tail_reachability: ReachabilityWorkspace,
     next_task_id: u64,
-    workers_used: usize,
     progress: ForwardParallelProgress,
 }
 
@@ -174,7 +173,7 @@ impl ForwardParallelCoordinator {
 
     pub fn new(
         query: ForwardSearchQuery,
-        workers_used: usize,
+        worker_count: usize,
     ) -> Result<Self, ForwardParallelError> {
         validate_query(&query)?;
         let config = ForwardSearchConfig::from_query(&query);
@@ -186,7 +185,7 @@ impl ForwardParallelCoordinator {
             let layered = should_layer_pattern_search(
                 query.piece_source().sequence_len(),
                 query.piece_source().pattern_count(),
-                workers_used,
+                worker_count,
             );
             let active_session = layered
                 .then(|| ForwardQueueSession::new(config, query.piece_source().sequence_at(0), 0));
@@ -211,7 +210,6 @@ impl ForwardParallelCoordinator {
             state,
             tail_reachability,
             next_task_id: 1,
-            workers_used: workers_used.max(1),
             progress: ForwardParallelProgress::default(),
         })
     }
@@ -530,7 +528,11 @@ impl ForwardParallelCoordinator {
         Ok(count)
     }
 
-    pub fn finish(mut self) -> Result<ForwardSearchReport, ForwardParallelError> {
+    pub fn finish(
+        mut self,
+        workers_used: usize,
+    ) -> Result<ForwardSearchReport, ForwardParallelError> {
+        let workers_used = workers_used.max(1);
         if self.outstanding_tasks() != 0 {
             return Err(ForwardParallelError::InvalidState(
                 "forward_parallel_finish_with_outstanding_tasks",
@@ -546,7 +548,7 @@ impl ForwardParallelCoordinator {
                 }
                 let mut report = fixed.session.build_report();
                 canonicalize_outcomes(report.outcomes_mut());
-                Ok(report.with_workers_used(self.workers_used))
+                Ok(report.with_workers_used(workers_used))
             }
             CoordinatorState::Pattern(pattern) => {
                 if pattern.layered {
@@ -576,7 +578,7 @@ impl ForwardParallelCoordinator {
                 Ok(ForwardSearchReport::new(
                     true,
                     self.config.board.words(),
-                    self.workers_used,
+                    workers_used,
                     visited_states,
                     generated_locks,
                     peak_frontier,
@@ -1670,7 +1672,10 @@ mod tests {
             .expect("serial search")
     }
 
-    fn run_parallel(query: ForwardSearchQuery) -> ForwardSearchReport {
+    fn run_parallel(
+        query: ForwardSearchQuery,
+        reported_workers_used: usize,
+    ) -> ForwardSearchReport {
         let control = ExecutionControl::new(ExecutionCancellationToken::new());
         let mut coordinator = ForwardParallelCoordinator::new(query, 4).expect("coordinator");
         let initialization = coordinator.worker_initialization();
@@ -1703,12 +1708,14 @@ mod tests {
                 break;
             }
         }
-        coordinator.finish().expect("parallel finish")
+        coordinator
+            .finish(reported_workers_used)
+            .expect("parallel finish")
     }
 
     fn assert_exact_equivalence(query: ForwardSearchQuery) {
         let mut serial = run_serial(query.clone());
-        let parallel = run_parallel(query);
+        let parallel = run_parallel(query, 4);
         canonicalize_outcomes(serial.outcomes_mut());
         assert_eq!(serial.visited_states(), parallel.visited_states());
         assert_eq!(serial.generated_locks(), parallel.generated_locks());
@@ -1716,6 +1723,30 @@ mod tests {
         assert_eq!(serial.maximum_damage(), parallel.maximum_damage());
         assert_eq!(serial.outcomes(), parallel.outcomes());
         assert_eq!(parallel.workers_used(), 4);
+    }
+
+    #[test]
+    fn finish_reports_the_actual_participating_worker_count() {
+        let query = ForwardSearchQuery::new(
+            Board256Mask::from_words([0; 4]),
+            4,
+            vec![PieceKind::O, PieceKind::O],
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::TSpins,
+            None,
+            None,
+            ForwardSearchMode::MaximumDamage,
+        );
+        let expected = run_parallel(query.clone(), 4);
+        let actual = run_parallel(query, 2);
+
+        assert_eq!(actual.workers_used(), 2);
+        assert_eq!(actual.visited_states(), expected.visited_states());
+        assert_eq!(actual.generated_locks(), expected.generated_locks());
+        assert_eq!(actual.peak_frontier(), expected.peak_frontier());
+        assert_eq!(actual.maximum_damage(), expected.maximum_damage());
+        assert_eq!(actual.outcomes(), expected.outcomes());
     }
 
     #[test]

@@ -5,8 +5,11 @@ import {
   type RuleProfile,
   type SpinProfile
 } from './solverWorkspaceModel';
+import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
+import { isValidForwardChain, MAX_FORWARD_CHAIN } from './forwardSearchLimits';
 
 const MAX_DAMAGE = 0xffff_ffff;
+export { MAX_FORWARD_CHAIN } from './forwardSearchLimits';
 
 export type ForwardTool = 'damage' | 'spin-finder';
 export type ForwardDamageAggregation = 'maximum' | 'at-least';
@@ -38,6 +41,7 @@ export type ForwardSearchRequest = {
   preserveB2B: boolean;
   spinLines: ForwardSpinLines;
   spinCategory: ForwardSpinCategory;
+  useAllLogicalProcessors: boolean;
 };
 
 export type ForwardSearchValidationCode =
@@ -63,7 +67,8 @@ export function createDefaultForwardSearchRequest(tool: ForwardTool): ForwardSea
     initialB2B: 0,
     preserveB2B: false,
     spinLines: 'any',
-    spinCategory: 'any'
+    spinCategory: 'any',
+    useAllLogicalProcessors: false
   };
 }
 
@@ -88,10 +93,10 @@ export function forwardSearchValidationCodes(
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('forward_height_invalid');
   }
-  if (!Number.isInteger(request.initialCombo) || request.initialCombo < 0) {
+  if (!isValidForwardChain(request.initialCombo)) {
     errors.push('initial_combo_invalid');
   }
-  if (!Number.isInteger(request.initialB2B) || request.initialB2B < 0) {
+  if (!isValidForwardChain(request.initialB2B)) {
     errors.push('initial_b2b_invalid');
   }
   if (
@@ -106,7 +111,10 @@ export function forwardSearchValidationCodes(
   return errors;
 }
 
-export function buildForwardSearchCommand(request: ForwardSearchRequest): string {
+export function buildForwardSearchCommand(
+  request: ForwardSearchRequest,
+  automaticWorkerLimit?: number
+): string {
   const queue = parseBrowserQueueInput(request.queue);
   const tokens = [
     'clearra',
@@ -134,7 +142,41 @@ export function buildForwardSearchCommand(request: ForwardSearchRequest): string
     tokens.push('--lines', request.spinLines);
     tokens.push('--spin-category', request.spinCategory);
   }
+  if (automaticWorkerLimit !== undefined) {
+    tokens.push('--auto-workers', String(Math.max(1, Math.trunc(automaticWorkerLimit))));
+    if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
+  }
   return tokens.join(' ');
+}
+
+export function forwardSearchRequestForDesktop(
+  request: ForwardSearchRequest,
+  language: 'en' | 'ko',
+  _workers: number
+): ClearraDesktopRequest {
+  const queue = parseBrowserQueueInput(request.queue);
+  return buildDesktopAppRequest({
+    command: request.tool,
+    language,
+    visible_height: request.height,
+    board_mask: boardMaskHex(trimForwardBoardMask(request.boardMask, request.height)),
+    queue: queue?.kind === 'fixed' ? queue.source : '',
+    patterns: queue?.kind === 'pattern' ? queue.source : '',
+    hold_enabled: request.holdEnabled,
+    rule: request.rule,
+    spin_profile: request.spinProfile,
+    preserve_b2b: request.preserveB2B,
+    initial_combo: request.initialCombo,
+    initial_b2b: request.initialB2B,
+    damage_aggregation: request.damageAggregation,
+    minimum_damage: request.minimumDamage,
+    spin_lines: request.spinLines,
+    spin_category: request.spinCategory,
+    workers: 0,
+    use_all_logical_processors: request.useAllLogicalProcessors,
+    backend: 'cpu',
+    allow_backend_fallback: false
+  });
 }
 
 export function forwardSourcePieceCount(request: ForwardSearchRequest): number | null {

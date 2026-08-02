@@ -2,24 +2,41 @@
   import { TriangleAlert } from '@lucide/svelte';
   import { onDestroy, onMount, tick } from 'svelte';
 
-  import { updateWasmCommandText, wasmWorkerState, WasmTerminalWorkerController } from '../wasm';
+  import {
+    cancelDesktopJob,
+    clearDesktopTerminalResult,
+    desktopJobState,
+    disposeDesktopJobPolling,
+    resumeDesktopJobPolling,
+    startDesktopJob,
+    updateDesktopRequest
+  } from '../stores';
+
+  import {
+    clearWasmTerminalResult,
+    updateWasmCommandText,
+    wasmWorkerState,
+    WasmTerminalWorkerController
+  } from '../wasm';
   import BuildProbabilityBoardEditor from './BuildProbabilityBoardEditor.svelte';
   import BuildProbabilityControls from './BuildProbabilityControls.svelte';
   import BuildProbabilityResult from './BuildProbabilityResult.svelte';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
     buildProbabilityCommand,
+    buildProbabilityRequestForDesktop,
     buildProbabilityValidationCodes,
     createDefaultBuildProbabilityRequest,
     trimBuildProbabilityMask,
     trimBuildProbabilityRequest,
     type BuildProbabilityRequest
   } from './buildProbabilityModel';
-  import { defaultWorkerCount } from './solverWorkspaceModel';
+  import { defaultBrowserWorkerCount, defaultWorkerCount } from './solverWorkspaceModel';
   import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
-  import { workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
+  import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let workerFactory: (() => Worker) | null = null;
+  export let runtime: 'web' | 'desktop' = 'web';
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
   let request = createDefaultBuildProbabilityRequest();
@@ -35,7 +52,9 @@
   let workspaceShell: { scrollWorkspaceIntoView: () => void } | null = null;
 
   $: workerController.setWorkerFactory(workerFactory);
-  $: runtimeView = workspaceViewFromWasm($wasmWorkerState);
+  $: runtimeView = runtime === 'web'
+    ? workspaceViewFromWasm($wasmWorkerState)
+    : workspaceViewFromDesktop($desktopJobState);
   $: validationCodes = buildProbabilityValidationCodes(request);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -43,9 +62,10 @@
 
   onMount(() => {
     language = preferredWorkspaceLanguage(localStorage.getItem('clearra-language') ?? navigator.language);
-    const workers = defaultWorkerCount(navigator.hardwareConcurrency);
+    const workers = automaticWorkerCount(request.useAllLogicalProcessors);
     request = { ...request, workers };
-    workerController.prewarm(workers);
+    if (runtime === 'web') workerController.prewarm(workers);
+    else resumeDesktopJobPolling();
     const handlePageHide = () => disposeWorkspace();
     window.addEventListener('pagehide', handlePageHide);
     return () => window.removeEventListener('pagehide', handlePageHide);
@@ -56,6 +76,12 @@
   function disposeWorkspace() {
     stopElapsedTimer();
     workerController.dispose();
+    if (runtime === 'desktop') {
+      disposeDesktopJobPolling();
+      clearDesktopTerminalResult();
+    } else {
+      clearWasmTerminalResult();
+    }
   }
 
   function setLanguage(next: WorkspaceLanguage) {
@@ -97,20 +123,41 @@
     workspaceShell?.scrollWorkspaceIntoView();
   }
 
-  function run() {
+  async function run() {
     if (active || validationCodes.length) return;
     continuationApplied = false;
     resultHeight = request.height;
     resultExistingMask = request.existingMask;
     resultTargetMask = request.targetMask;
     resultAggregation = request.aggregation;
+    if (runtime === 'web') {
+      updateWasmCommandText(buildProbabilityCommand(request));
+      if (workerController.run()) startElapsedTimer();
+      return;
+    }
     startElapsedTimer();
-    updateWasmCommandText(buildProbabilityCommand(request));
-    workerController.run();
+    updateDesktopRequest(buildProbabilityRequestForDesktop(request, language));
+    await startDesktopJob();
   }
 
-  function cancel() {
-    if (active) workerController.cancel();
+  function updateRequest(next: BuildProbabilityRequest) {
+    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    request = useAllChanged
+      ? { ...next, workers: automaticWorkerCount(next.useAllLogicalProcessors) }
+      : next;
+    if (runtime === 'web' && useAllChanged) workerController.prewarm(request.workers);
+  }
+
+  function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
+    return runtime === 'web'
+      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
+      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+  }
+
+  async function cancel() {
+    if (!active) return;
+    if (runtime === 'web') workerController.cancel();
+    else await cancelDesktopJob();
   }
 
   function startElapsedTimer() {
@@ -184,7 +231,7 @@
     on:change={(event) => setMasks(event.detail.existingMask, event.detail.targetMask)}
     on:import={(event) => importExisting(event.detail.existingMask, event.detail.height)}
   />
-  <BuildProbabilityControls slot="controls" {request} {language} {validationCodes} on:change={(event) => (request = event.detail)} />
+  <BuildProbabilityControls slot="controls" {request} {language} {validationCodes} on:change={(event) => updateRequest(event.detail)} />
   <BuildProbabilityResult
     slot="result"
     view={runtimeView}

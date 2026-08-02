@@ -260,7 +260,13 @@ type ClearraWasmWorkerEventBase = {
 };
 
 export type ClearraSearchProgressTelemetry = {
-  phase: 'preparing' | 'initializing' | 'searching' | 'draining' | 'merging';
+  phase:
+    | 'preparing'
+    | 'initializing'
+    | 'searching'
+    | 'draining'
+    | 'postprocessing'
+    | 'merging';
   producer_complete: boolean;
   geometry_nodes: number;
   candidates_emitted: number;

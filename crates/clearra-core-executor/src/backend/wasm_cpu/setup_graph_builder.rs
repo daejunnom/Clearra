@@ -28,6 +28,45 @@ pub(super) enum SetupGraphBuildAdvance {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SetupGraphBuildProgress {
+    pub(super) pass_index: usize,
+    pub(super) pass_count: usize,
+    pub(super) layer_index: usize,
+    pub(super) layer_count: usize,
+    pub(super) layer_done: usize,
+    pub(super) layer_total: usize,
+}
+
+impl SetupGraphBuildProgress {
+    const PASS_COUNT: usize = 4;
+
+    const fn stage(pass_index: usize) -> Self {
+        Self {
+            pass_index,
+            pass_count: Self::PASS_COUNT,
+            layer_index: 0,
+            layer_count: 0,
+            layer_done: 0,
+            layer_total: 0,
+        }
+    }
+
+    const fn with_layer(
+        mut self,
+        layer_index: usize,
+        layer_count: usize,
+        layer_done: usize,
+        layer_total: usize,
+    ) -> Self {
+        self.layer_index = layer_index;
+        self.layer_count = layer_count;
+        self.layer_done = layer_done;
+        self.layer_total = layer_total;
+        self
+    }
+}
+
 pub(super) struct SetupSharedGraph {
     pub(super) query: SetupSearchQuery,
     pub(super) conditions: Vec<SetupSearchCondition>,
@@ -260,6 +299,34 @@ impl SetupGraphBuildSession {
             SetupGraphBuildStage::Cached(None)
             | SetupGraphBuildStage::Geometry(_)
             | SetupGraphBuildStage::Finished => 0,
+        }
+    }
+
+    pub(super) fn progress(&self) -> SetupGraphBuildProgress {
+        match &self.stage {
+            SetupGraphBuildStage::Geometry(_) => SetupGraphBuildProgress::stage(0),
+            SetupGraphBuildStage::PartialBuild(builder) => {
+                let (layer_index, layer_count, layer_done, layer_total) =
+                    builder.frontier_progress();
+                SetupGraphBuildProgress::stage(1).with_layer(
+                    layer_index,
+                    layer_count,
+                    layer_done,
+                    layer_total,
+                )
+            }
+            SetupGraphBuildStage::SuffixCoverage { session, .. } => {
+                let (layer_index, layer_count, layer_done, layer_total) = session.layer_progress();
+                SetupGraphBuildProgress::stage(2).with_layer(
+                    layer_index,
+                    layer_count,
+                    layer_done,
+                    layer_total,
+                )
+            }
+            SetupGraphBuildStage::Cached(_) | SetupGraphBuildStage::Finished => {
+                SetupGraphBuildProgress::stage(3)
+            }
         }
     }
 

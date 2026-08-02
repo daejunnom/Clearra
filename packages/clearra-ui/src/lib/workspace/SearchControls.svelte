@@ -185,6 +185,19 @@
         <span>{label('solutionProbabilities')}</span>
       </label>
     </div>
+    <div class="workspace-switch-row">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.useAllLogicalProcessors}
+          on:change={(event) => patch({
+            useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('useAllThreads')}</span>
+      </label>
+    </div>
     {#if tablebaseControlAvailable}
       <div class="tablebase-control">
         <label class="workspace-switch-label">

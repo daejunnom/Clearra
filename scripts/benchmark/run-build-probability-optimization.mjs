@@ -10,6 +10,12 @@ const repository = resolve(scriptDirectory, '../..');
 const options = parseArgs(process.argv.slice(2));
 const reportRoot = resolve(required(options, 'report'));
 const browserRoot = resolve(required(options, 'browser-root'));
+const browserEntry = resolve(browserRoot, 'index.html');
+if (!fs.existsSync(browserEntry) || !fs.statSync(browserEntry).isFile()) {
+  throw new Error(
+    `browser benchmark root must be a built harness containing index.html: ${browserEntry}`
+  );
+}
 const phase = options.phase ?? 'baseline';
 const repetitions = positiveInteger(options.repetitions ?? '2', 'repetitions');
 const workers = positiveInteger(

@@ -29,6 +29,7 @@ export type SolverWorkspaceRequest = {
   backend: SearchBackend;
   gpuDevice: string;
   workers: number;
+  useAllLogicalProcessors: boolean;
   tablebaseEnabled: boolean;
   precomputeBuildDependencies: boolean;
 };
@@ -60,6 +61,7 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     backend: 'auto',
     gpuDevice: 'auto',
     workers: defaultWorkerCount(),
+    useAllLogicalProcessors: false,
     tablebaseEnabled: false,
     precomputeBuildDependencies: false
   };
@@ -88,12 +90,24 @@ export function normalizeWorkspaceRequest(
   };
 }
 
-export function defaultWorkerCount(hardwareConcurrency?: number): number {
-  const logicalProcessors = Math.max(
-    1,
-    Math.floor(hardwareConcurrency ?? globalThis.navigator?.hardwareConcurrency ?? 1)
-  );
-  return Math.max(1, logicalProcessors - 1);
+export function defaultWorkerCount(
+  hardwareConcurrency?: number,
+  useAllLogicalProcessors = false
+): number {
+  const logicalProcessors = logicalProcessorCount(hardwareConcurrency);
+  return useAllLogicalProcessors ? logicalProcessors : Math.max(1, logicalProcessors - 1);
+}
+
+export function defaultBrowserWorkerCount(
+  hardwareConcurrency?: number,
+  useAllLogicalProcessors = false
+): number {
+  return defaultWorkerCount(hardwareConcurrency, useAllLogicalProcessors);
+}
+
+export function logicalProcessorCount(hardwareConcurrency?: number): number {
+  const reported = hardwareConcurrency ?? globalThis.navigator?.hardwareConcurrency ?? 1;
+  return Number.isFinite(reported) ? Math.max(1, Math.floor(reported)) : 1;
 }
 
 export function normalizeQueueInput(value: string): string {
@@ -404,6 +418,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     String(Math.max(1, Math.trunc(request.workers))),
     '--cpu-warmup'
   );
+  if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
   if (request.backend !== 'cpu') tokens.push('--gpu-warmup');
   return tokens.join(' ');
 }
@@ -438,10 +453,13 @@ export function workspaceRequestForDesktop(
     precompute_build_dependencies: request.precomputeBuildDependencies,
     initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
     solution_probabilities: request.solutionProbabilities,
-    workers: Math.max(1, Math.trunc(request.workers)),
+    // Desktop worker selection is automatic and must use the native host's
+    // logical-processor count rather than the WebView's hardware hint.
+    workers: 0,
+    use_all_logical_processors: request.useAllLogicalProcessors,
     gpu_device: request.gpuDevice,
     allow_backend_fallback: true,
-    memory_budget_mb: 1024,
+    memory_budget_mb: 0,
     candidate_budget: 10_000_000,
     pattern_budget: 5040
   };

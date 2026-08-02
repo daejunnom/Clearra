@@ -5,7 +5,7 @@ import {
 } from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
 
-const FUMEN_PATTERN = /v11(?:0|5)@[A-Za-z0-9+/?]+/g;
+const FUMEN_PATTERN = /(?:v11(?:0|5)|[Ddm]115)@[A-Za-z0-9+/?]+/g;
 const URL_PATTERN = /https?:\/\/[^\s<>()]+/g;
 const CTK_START_PATTERN = /ctk3(?:b_|_|@)/gi;
 const PIECES = new Set(["I", "O", "T", "S", "Z", "J", "L"]);
@@ -45,7 +45,10 @@ export function decodeViewerDocument(source) {
   const normalized = source.trim();
   if (isCtk3(normalized)) return decodeCtk3(normalized);
 
-  const fumen = normalized.match(FUMEN_PATTERN)?.[0];
+  const matchedFumen = normalized.match(FUMEN_PATTERN)?.[0];
+  const fumen = matchedFumen && /^[Ddm]115@/.test(matchedFumen)
+    ? `v${matchedFumen.slice(1)}`
+    : matchedFumen;
   if (!fumen) throw new Error("No Fumen or CTK3 document was found.");
   const pages = fumenDecoder.decode(fumen);
   if (pages.length === 0) throw new Error("The Fumen document has no pages.");

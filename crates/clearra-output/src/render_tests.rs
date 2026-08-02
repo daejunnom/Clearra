@@ -3,6 +3,8 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_replay::{BuildVariantOperation, BuildVariantReplayInput, ReplayEngine};
 
+use crate::model::RenderFieldValue;
+
 #[test]
 fn dispatches_message_to_text_writer() {
     let message = RenderMessage::new("pc").with_field("lines", "2");
@@ -75,6 +77,21 @@ fn dispatches_message_to_json_writer() {
     assert!(rendered.contains("\"kind\":\"pc\""));
     assert!(rendered.contains("\"summary\":{\"lines\":2}"));
     assert!(rendered.contains("\"contract\":{\"command\""));
+}
+
+#[test]
+fn json_exposes_solution_artifacts_only_when_the_host_requests_them() {
+    let exposed = RenderMessage::new("pc")
+        .with_value("solution_data_requested", true)
+        .with_value(
+            "solution_keys",
+            RenderFieldValue::array([RenderFieldValue::string("ctk1|example")]),
+        );
+    let exposed = RenderFormatDispatcher::render(&exposed, RenderFormat::Json);
+    assert!(exposed.contains("\"summary\":{}"));
+    assert!(exposed.contains("\"artifacts\""));
+    assert!(exposed.contains("\"schema_version\":\"clearra.solution-data.v1\""));
+    assert!(exposed.contains("ctk1|example"));
 }
 
 #[test]

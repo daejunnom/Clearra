@@ -4,6 +4,7 @@
   import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
   import {
     buildWorkspaceProgressModel,
+    type WorkspaceProgressMode,
     type WorkspaceProgressProfile,
     type WorkspaceProgressMetric,
     type WorkspaceProgressStage
@@ -15,6 +16,7 @@
   import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let profile: WorkspaceProgressProfile;
+  export let mode: WorkspaceProgressMode = 'default';
   export let status: WorkspaceRuntimeStatus;
   export let language: WorkspaceLanguage;
   export let progressLabel = '';
@@ -27,6 +29,7 @@
 
   $: model = buildWorkspaceProgressModel({
     profile,
+    mode,
     status,
     progressLabel,
     progressDone,

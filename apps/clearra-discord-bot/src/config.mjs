@@ -1,21 +1,41 @@
 import { availableParallelism as nodeAvailableParallelism } from "node:os";
 
 export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
-  const token = required(environment, "DISCORD_TOKEN");
   const ingressMode = discordIngressMode(
     environment.CLEARRA_DISCORD_INGRESS,
     Boolean(environment.K_SERVICE),
   );
-  const jobEndpoint = httpEndpoint(
-    environment.CLEARRA_JOB_URL || "http://127.0.0.1:8787/jobs",
+  const registerCommands = booleanSetting(
+    environment.CLEARRA_REGISTER_COMMANDS,
+    false,
   );
+  const token = ingressMode === "gateway" || registerCommands
+    ? required(environment, "DISCORD_TOKEN")
+    : environment.DISCORD_TOKEN || null;
+  const jobEndpoint = environment.CLEARRA_JOB_URL
+    ? httpEndpoint(environment.CLEARRA_JOB_URL)
+    : ingressMode === "cloud-run"
+      ? null
+      : httpEndpoint("http://127.0.0.1:8787/jobs");
   const workerAuthority = workerAuthoritySetting(
     environment.CLEARRA_WORKER_AUTHORITY,
     environment.CLEARRA_JOB_URL ? "remote" : "gateway",
   );
   const processLogicalProcessors = runtimeLogicalProcessorCount(runtime);
-  const useAllLogicalProcessors =
-    environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS === "1";
+  const useAllLogicalProcessors = booleanSetting(
+    environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS,
+    true,
+  );
+  const searchTimeoutMs = positiveInteger(
+    environment.CLEARRA_SEARCH_TIMEOUT_MS,
+    3 * 60_000,
+  );
+  const interactionDeadlineMs = boundedPositiveInteger(
+    environment.CLEARRA_INTERACTION_DEADLINE_MS,
+    Math.min(14 * 60_000, searchTimeoutMs + 60_000),
+    14 * 60_000,
+    "CLEARRA_INTERACTION_DEADLINE_MS",
+  );
 
   let maxConcurrentSearches;
   let searchWorkersPerSession;
@@ -90,13 +110,21 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     viewerBaseUrl:
       environment.CLEARRA_VIEWER_URL ||
       "https://daejunnom.github.io/Clearra/",
-    registerCommands: booleanSetting(
-      environment.CLEARRA_REGISTER_COMMANDS,
-      ingressMode === "gateway",
+    registerCommands,
+    searchTimeoutMs,
+    interactionDeadlineMs,
+    maxPendingSearches: positiveInteger(
+      environment.CLEARRA_MAX_PENDING_SEARCHES,
+      8,
     ),
-    searchTimeoutMs: positiveInteger(
-      environment.CLEARRA_SEARCH_TIMEOUT_MS,
-      3 * 60_000,
+    executable: environment.CLEARRA_EXECUTABLE || "/usr/local/bin/clearra",
+    maxOutputBytes: positiveInteger(
+      environment.CLEARRA_MAX_OUTPUT_BYTES,
+      4 * 1024 * 1024,
+    ),
+    terminationGraceMs: positiveInteger(
+      environment.CLEARRA_JOB_TERMINATION_GRACE_MS,
+      2_000,
     ),
     maxGifBytes: positiveInteger(
       environment.CLEARRA_MAX_GIF_BYTES,
@@ -117,7 +145,7 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
 export function defaultSearchWorkersPerSession(
   logicalProcessors,
   concurrentSearches = 1,
-  useAllLogicalProcessors = false,
+  useAllLogicalProcessors = true,
 ) {
   const processors = positiveRuntimeInteger(logicalProcessors);
   const sessions = positiveRuntimeInteger(concurrentSearches);
@@ -138,6 +166,14 @@ function positiveInteger(value, fallback) {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     throw new Error("A Clearra Discord numeric setting is invalid.");
+  }
+  return parsed;
+}
+
+function boundedPositiveInteger(value, fallback, maximum, name) {
+  const parsed = positiveInteger(value, fallback);
+  if (parsed > maximum) {
+    throw new Error(`${name} must not exceed ${maximum} milliseconds.`);
   }
   return parsed;
 }

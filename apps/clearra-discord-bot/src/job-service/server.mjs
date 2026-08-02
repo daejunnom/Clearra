@@ -50,7 +50,10 @@ export class ClearraJobService {
   async handle(request, response) {
     this.pruneCompletedJobs();
     const url = new URL(request.url || "/", "http://localhost");
-    if (request.method === "GET" && url.pathname === "/healthz") {
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/health" || url.pathname === "/healthz")
+    ) {
       sendJson(response, 200, {
         status: "ok",
         activeJobs: this.activeJobs,

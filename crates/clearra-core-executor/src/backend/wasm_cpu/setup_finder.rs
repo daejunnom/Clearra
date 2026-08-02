@@ -229,6 +229,24 @@ impl WasmSetupSearchSession {
             )),
         }
     }
+
+    pub(crate) fn coarse_progress(&self) -> (&'static str, u64) {
+        match &self.stage {
+            SetupSearchStage::Building(builder) => {
+                setup_build_progress_phase(builder.progress().pass_index)
+            }
+            SetupSearchStage::Coverage { .. } => ("setup-coverage", 3),
+            SetupSearchStage::Finished => ("setup-finalize", 4),
+        }
+    }
+}
+
+fn setup_build_progress_phase(pass_index: usize) -> (&'static str, u64) {
+    if pass_index == 0 {
+        ("setup-geometry", 1)
+    } else {
+        ("setup-graph", 2)
+    }
 }
 
 pub(super) fn finish_setup_result(

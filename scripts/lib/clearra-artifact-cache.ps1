@@ -1,5 +1,5 @@
 # Bounded lifecycle for generated build/test artifacts outside the repository.
-$script:ClearraArtifactCacheSchemaVersion = 1
+$script:ClearraArtifactCacheSchemaVersion = 2
 $script:ClearraDefaultBuildCacheMaxBytes = [int64](8GB)
 $script:ClearraBuildCacheSessionKey = $null
 $script:ClearraArtifactCacheUsageLock = $null
@@ -232,8 +232,14 @@ function Enter-ClearraArtifactCacheUsageLock([string]$ArtifactRoot) {
 
 function Exit-ClearraBuildArtifactCacheUsage {
     if ($null -ne $script:ClearraArtifactCacheUsageLock) {
-        $script:ClearraArtifactCacheUsageLock.Dispose()
-        $script:ClearraArtifactCacheUsageLock = $null
+        try {
+            Invoke-ClearraBuildArtifactCacheRetention | Out-Null
+        } catch {
+            Write-Warning "Clearra build-cache retention failed: $($_.Exception.Message)"
+        } finally {
+            $script:ClearraArtifactCacheUsageLock.Dispose()
+            $script:ClearraArtifactCacheUsageLock = $null
+        }
     }
 }
 
@@ -255,22 +261,64 @@ function Test-ClearraInheritedArtifactCacheOwner {
 }
 
 function Remove-ClearraStaleTransientArtifacts([string]$ArtifactRoot) {
-    $now = [DateTime]::UtcNow
+    $artifact = [System.IO.Path]::GetFullPath($ArtifactRoot).TrimEnd('\', '/')
+    $comparison = if (Test-StartTestsWindows) {
+        [System.StringComparison]::OrdinalIgnoreCase
+    } else {
+        [System.StringComparison]::Ordinal
+    }
     if (Test-Path -LiteralPath $ArtifactRoot -PathType Container) {
-        foreach ($directory in Get-ChildItem -LiteralPath $ArtifactRoot -Force -Directory) {
-            if ($directory.Name -like 'clearra-*' -and
-                $directory.LastWriteTimeUtc -lt $now.AddHours(-6)) {
-                Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($entry in Get-ChildItem -LiteralPath $ArtifactRoot -Force) {
+            if ($entry.Name -like 'clearra-*' -or $entry.Name -like 'wsl-sync-*') {
+                Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $transientRoot = Join-Path $ArtifactRoot 'transient'
+        if (Test-Path -LiteralPath $transientRoot -PathType Container) {
+            foreach ($entry in Get-ChildItem -LiteralPath $transientRoot -Force) {
+                Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     }
 
     $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
-    foreach ($directory in Get-ChildItem -LiteralPath $tempRoot -Force -Directory -Filter 'clearra-*' -ErrorAction SilentlyContinue) {
-        if ($directory.LastWriteTimeUtc -lt $now.AddDays(-1) -and
-            [System.IO.Path]::GetFullPath($directory.Parent.FullName).TrimEnd('\', '/') -eq $tempRoot) {
-            Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($entry in Get-ChildItem -LiteralPath $tempRoot -Force -Filter 'clearra-*' -ErrorAction SilentlyContinue) {
+        $candidate = [System.IO.Path]::GetFullPath($entry.FullName).TrimEnd('\', '/')
+        $candidatePrefix = $candidate + [System.IO.Path]::DirectorySeparatorChar
+        if ($artifact.Equals($candidate, $comparison) -or
+            $artifact.StartsWith($candidatePrefix, $comparison)) {
+            continue
         }
+        Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ClearraBuildArtifactCacheRetention(
+    [string]$RepositoryRoot = (Resolve-ClearraRoot),
+    [string]$ArtifactRoot = (Get-ClearraArtifactRoot),
+    [int64]$MaxBytes = (Get-ClearraBuildCacheMaxBytes)
+) {
+    $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
+    $artifact = Assert-ClearraPathOutsideRepository $ArtifactRoot $repository
+    if (-not (Test-Path -LiteralPath $artifact -PathType Container)) {
+        return [pscustomobject]@{ action = 'absent'; cache_size_bytes = [int64]0 }
+    }
+
+    $size = Get-ClearraDirectorySizeBytes $artifact
+    if ($size -le $MaxBytes) {
+        return [pscustomobject]@{ action = 'reuse'; cache_size_bytes = $size }
+    }
+
+    $lock = Enter-ClearraArtifactCacheLock $artifact
+    try {
+        $size = Get-ClearraDirectorySizeBytes $artifact
+        if ($size -gt $MaxBytes) {
+            Remove-ClearraDirectorySafely $artifact $artifact $repository
+            return [pscustomobject]@{ action = 'post-run-budget-reset'; cache_size_bytes = $size }
+        }
+        return [pscustomobject]@{ action = 'reuse'; cache_size_bytes = $size }
+    } finally {
+        $lock.Dispose()
     }
 }
 
@@ -311,10 +359,12 @@ function Initialize-ClearraBuildArtifactCache(
 ) {
     $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
     $artifact = Assert-ClearraPathOutsideRepository $ArtifactRoot $repository
+    Remove-ClearraRepositoryLocalBuildArtifacts $repository
     $statePath = Join-Path $artifact '.clearra-cache-state.json'
     $signature = Get-ClearraWorkspaceBuildSignature $repository
     $lock = Enter-ClearraArtifactCacheLock $artifact
     try {
+        Remove-ClearraStaleTransientArtifacts $artifact
         $state = $null
         if (Test-Path -LiteralPath $statePath -PathType Leaf) {
             try {
@@ -332,7 +382,6 @@ function Initialize-ClearraBuildArtifactCache(
         $action = 'reuse'
         $sizeBefore = [int64]0
         if ($sameWorkspace) {
-            Remove-ClearraStaleTransientArtifacts $artifact
             $sizeBefore = Get-ClearraDirectorySizeBytes $artifact
             if ($sizeBefore -gt $MaxBytes) {
                 Remove-ClearraDirectorySafely $artifact $artifact $repository

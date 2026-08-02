@@ -22,18 +22,6 @@ impl GuiBackendValidator {
             return summary;
         }
 
-        if form.workers() == 0 {
-            summary.push(GuiValidationDiagnostic::invalid_form(
-                "workers",
-                "GUI backend form requires at least one worker",
-            ));
-        }
-        if form.memory_budget_mb() == 0 {
-            summary.push(GuiValidationDiagnostic::invalid_form(
-                "memory_budget_mb",
-                "GUI backend form requires a nonzero memory budget",
-            ));
-        }
         if form.candidate_budget() == 0 {
             summary.push(GuiValidationDiagnostic::invalid_form(
                 "candidate_budget",

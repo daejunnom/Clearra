@@ -29,6 +29,7 @@ pub use distributed_wire::{
     DistributedWireError,
 };
 pub use host_contract_bridge::wasm_worker_event_to_host_contract;
+pub use json_event_envelope::serialize_search_report_from_app_response;
 pub use wasm_command_runtime::{
     WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult, WasmForwardPathStep,
     WasmForwardSearchOutcome, WasmSearchPathStep, WasmSearchReport, WasmSetupCandidate,

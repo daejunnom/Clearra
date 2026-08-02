@@ -43,7 +43,7 @@ Assert-ArtifactPathCondition `
 Assert-ClearraRepositoryArtifactPolicy $repository
 Assert-ArtifactPathCondition $true 'default_tasks_do_not_create_repo_local_artifacts'
 
-$transientPrefix = "clearra-core-c-policy-$PID"
+$transientPrefix = 'clearra-generic-policy'
 $firstTransient = New-TransientBuildDir $transientPrefix
 try {
     Set-Content -LiteralPath (Join-Path $firstTransient 'stale.txt') -Value 'stale'
@@ -64,8 +64,7 @@ try {
     Remove-TransientBuildDir $secondTransient
 }
 
-$fakeRepository = Join-Path ([System.IO.Path]::GetTempPath()) `
-    "clearra-artifact-policy-$PID-$([System.Guid]::NewGuid().ToString('N'))"
+$fakeRepository = New-TransientBuildDir 'clearra-artifact-policy-test'
 try {
     $fakeLocal = Join-Path $fakeRepository '_local'
     New-Item -ItemType Directory -Force -Path $fakeLocal | Out-Null
@@ -82,13 +81,10 @@ try {
         (Test-ArtifactPathThrows { Assert-ClearraRepositoryArtifactPolicy $fakeRepository }) `
         'release_acceptance_rejects_unexpected_local_artifact'
 } finally {
-    if (Test-Path -LiteralPath $fakeRepository) {
-        Remove-Item -LiteralPath $fakeRepository -Recurse -Force
-    }
+    Remove-TransientBuildDir $fakeRepository
 }
 
-$cacheTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
-    "clearra-cache-lifecycle-$PID-$([System.Guid]::NewGuid().ToString('N'))"
+$cacheTestRoot = New-TransientBuildDir 'clearra-cache-lifecycle-test'
 try {
     $cacheRepository = Join-Path $cacheTestRoot 'repository'
     $cacheArtifactRoot = Join-Path $cacheTestRoot 'artifacts/build'
@@ -98,6 +94,9 @@ try {
         -Value '[workspace]'
     $sourceFile = Join-Path $sourceRoot 'lib.rs'
     Set-Content -LiteralPath $sourceFile -Value 'pub const CACHE_PROBE: u8 = 1;'
+    $orphanedTempFile = Join-Path ([System.IO.Path]::GetTempPath()) `
+        "clearra-orphaned-artifact-policy-$PID.tmp"
+    Set-Content -LiteralPath $orphanedTempFile -Value 'stale'
 
     $firstGeneration = Initialize-ClearraBuildArtifactCache `
         -RepositoryRoot $cacheRepository `
@@ -106,6 +105,9 @@ try {
     Assert-ArtifactPathCondition `
         ($firstGeneration.action -eq 'fresh') `
         'first_cache_generation_is_fresh'
+    Assert-ArtifactPathCondition `
+        (-not (Test-Path -LiteralPath $orphanedTempFile)) `
+        'next_cache_session_removes_orphaned_clearra_temp_files'
 
     $sentinel = Join-Path $cacheArtifactRoot 'cargo-target/reuse-sentinel.txt'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sentinel) | Out-Null
@@ -140,8 +142,17 @@ try {
         ($budgetReset.action -eq 'budget-reset' -and
             -not (Test-Path -LiteralPath $oversizedFile)) `
         'oversized_cache_is_reset_before_reuse'
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $oversizedFile) | Out-Null
+    [System.IO.File]::WriteAllBytes($oversizedFile, [byte[]]::new(4096))
+    $postRunReset = Invoke-ClearraBuildArtifactCacheRetention `
+        -RepositoryRoot $cacheRepository `
+        -ArtifactRoot $cacheArtifactRoot `
+        -MaxBytes 1024
+    Assert-ArtifactPathCondition `
+        ($postRunReset.action -eq 'post-run-budget-reset' -and
+            -not (Test-Path -LiteralPath $cacheArtifactRoot)) `
+        'oversized_cache_is_reset_after_the_active_run'
 } finally {
-    if (Test-Path -LiteralPath $cacheTestRoot) {
-        Remove-Item -LiteralPath $cacheTestRoot -Recurse -Force
-    }
+    Remove-TransientBuildDir $cacheTestRoot
 }

@@ -236,6 +236,11 @@
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
   progressProfile={tool === 'damage' ? 'damage' : 'spin'}
+  progressMode={tool === 'damage'
+    ? damageAggregation === 'at-least'
+      ? 'damage-at-least'
+      : 'damage-maximum'
+    : 'spin'}
   {language}
   {progressLabel}
   {progressDetail}

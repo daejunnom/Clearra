@@ -61,7 +61,7 @@
       <button type="button" class:active={language === 'ko'} on:click={() => dispatch('language', 'ko')}>KO</button>
     </div>
   </header>
-  <ProductModeTabs active={activeMode} {language} />
+  <ProductModeTabs active={activeMode} {language} busy={active} />
 </div>
 
 <style>

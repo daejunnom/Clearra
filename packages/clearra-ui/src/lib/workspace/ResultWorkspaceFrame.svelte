@@ -7,7 +7,10 @@
   } from '../wasm/wasmCommandClient';
   import WorkspaceProgressStatus from './WorkspaceProgressStatus.svelte';
   import type { WorkspaceLanguage } from './workspaceI18n';
-  import type { WorkspaceProgressProfile } from './workspaceProgressModel';
+  import type {
+    WorkspaceProgressMode,
+    WorkspaceProgressProfile
+  } from './workspaceProgressModel';
   import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let ariaLabel: string;
@@ -16,6 +19,7 @@
   export let elapsedLabel: string;
   export let elapsedText: string;
   export let progressProfile: WorkspaceProgressProfile;
+  export let progressMode: WorkspaceProgressMode = 'default';
   export let language: WorkspaceLanguage;
   export let progressLabel: string;
   export let progressDetail = '';
@@ -70,6 +74,7 @@
 
     <WorkspaceProgressStatus
       profile={progressProfile}
+      mode={progressMode}
       {status}
       {language}
       {progressLabel}

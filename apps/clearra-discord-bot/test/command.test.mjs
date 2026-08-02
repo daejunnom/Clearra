@@ -66,13 +66,13 @@ test("Clearrabot validates and configures the HTTP job service", () => {
   );
 });
 
-test("Clearrabot derives each session's workers from the host-visible CPU limit", () => {
+test("Clearrabot uses every logical processor by default with an explicit reserve-core opt-out", () => {
   const runtime = { availableParallelism: () => 8 };
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" }, runtime);
   assert.equal(config.processLogicalProcessors, 8);
-  assert.equal(config.searchWorkersPerSession, 7);
-  assert.equal(config.useAllLogicalProcessors, false);
-  assert.equal(defaultSearchWorkersPerSession(8, 2), 3);
+  assert.equal(config.searchWorkersPerSession, 8);
+  assert.equal(config.useAllLogicalProcessors, true);
+  assert.equal(defaultSearchWorkersPerSession(8, 2), 4);
   assert.equal(
     loadDiscordBotConfig(
       {
@@ -81,40 +81,72 @@ test("Clearrabot derives each session's workers from the host-visible CPU limit"
       },
       runtime,
     ).searchWorkersPerSession,
-    7,
+    8,
   );
+
+  const reserveCore = loadDiscordBotConfig(
+    {
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "0",
+    },
+    runtime,
+  );
+  assert.equal(reserveCore.searchWorkersPerSession, 7);
+  assert.equal(reserveCore.useAllLogicalProcessors, false);
 
   const shared = loadDiscordBotConfig(
     {
       DISCORD_TOKEN: "test-token",
       CLEARRA_MAX_CONCURRENT_SEARCHES: "2",
-      CLEARRA_SEARCH_WORKERS_PER_SESSION: "3",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "4",
     },
     runtime,
   );
-  assert.equal(shared.searchWorkersPerSession, 3);
+  assert.equal(shared.searchWorkersPerSession, 4);
   assert.throws(
     () =>
       loadDiscordBotConfig(
         {
           DISCORD_TOKEN: "test-token",
           CLEARRA_MAX_CONCURRENT_SEARCHES: "2",
-          CLEARRA_SEARCH_WORKERS_PER_SESSION: "4",
+          CLEARRA_SEARCH_WORKERS_PER_SESSION: "5",
         },
         runtime,
       ),
-    /runtime limit of 3/,
+    /runtime limit of 4/,
   );
   assert.throws(
     () =>
       loadDiscordBotConfig(
         {
           DISCORD_TOKEN: "test-token",
-          CLEARRA_MAX_CONCURRENT_SEARCHES: "8",
+          CLEARRA_MAX_CONCURRENT_SEARCHES: "9",
         },
         runtime,
       ),
-    /runtime CPU capacity of 7/,
+    /runtime CPU capacity of 8/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig(
+        {
+          DISCORD_TOKEN: "test-token",
+          CLEARRA_SEARCH_WORKERS_PER_SESSION: "9",
+        },
+        runtime,
+      ),
+    /runtime limit of 8/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig(
+        {
+          DISCORD_TOKEN: "test-token",
+          CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "yes",
+        },
+        runtime,
+      ),
+    /boolean setting is invalid/,
   );
 });
 
@@ -157,6 +189,22 @@ test("Discord commands always use the Clearra exact product path", () => {
       "--no-tablebase",
       "--format",
       "text",
+    ],
+  );
+  assert.deepEqual(
+    prepareClearraArguments(
+      ["pc", "--lines", "2", "--format", "text", "--include-solution-data"],
+      { outputFormat: "json", includeSolutionData: true },
+    ),
+    [
+      "pc",
+      "--lines",
+      "2",
+      "--no-tablebase",
+      "--no-build-dependency-dag",
+      "--format",
+      "json",
+      "--include-solution-data",
     ],
   );
 });
@@ -213,6 +261,119 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
     prepareClearraArguments(["percent", "--queue", "P7"], { workers: 3 }),
     ["percent", "--queue", "P7", "--format", "text"],
   );
+  assert.deepEqual(
+    prepareClearraArguments(["pc", "--workers=99", "--lines", "2"], { workers: 3 }),
+    [
+      "pc",
+      "--lines",
+      "2",
+      "--no-tablebase",
+      "--no-build-dependency-dag",
+      "--auto-workers",
+      "3",
+      "--format",
+      "text",
+    ],
+  );
+  assert.deepEqual(
+    prepareClearraArguments(
+      [
+        "build-probability",
+        "--base-mask",
+        "0",
+        "--target-mask",
+        "0xf",
+        "--height",
+        "1",
+        "--workers",
+        "99",
+      ],
+      { workers: 3 },
+    ),
+    [
+      "build-probability",
+      "--base-mask",
+      "0",
+      "--target-mask",
+      "0xf",
+      "--height",
+      "1",
+      "--auto-workers",
+      "3",
+      "--format",
+      "text",
+    ],
+  );
+  assert.throws(
+    () =>
+      prepareClearraArguments(["pc", "--lines", "4"], {
+        workers: 9,
+        useAllLogicalProcessors: true,
+        logicalProcessors: 8,
+      }),
+    /hard limit of 8 logical processors/,
+  );
+});
+
+test("Discord exposes curated sfinder commands through native worker policy", () => {
+  const prepared = prepareClearraArguments(
+    [
+      "sfinder",
+      "path",
+      "v115@vhAAgH",
+      "P7P3",
+      "4",
+      "--workers",
+      "99",
+      "--format",
+      "json",
+    ],
+    { workers: 3 },
+  );
+  assert.deepEqual(prepared, [
+    "sfinder",
+    "path",
+    "v115@vhAAgH",
+    "P7P3",
+    "4",
+    "--auto-workers",
+    "3",
+    "--format",
+    "text",
+  ]);
+  assert.deepEqual(
+    prepareClearraArguments(prepared, { workers: 3 }),
+    prepared,
+  );
+  assert.deepEqual(
+    prepareClearraArguments(["sfinder", "verify", "kicks"], { workers: 3 }),
+    ["sfinder", "verify", "kicks", "--format", "text"],
+  );
+  assert.deepEqual(
+    parseClearraMessage("!sfinder pc_setup IOTS", "!", { workers: 2 }),
+    [
+      "sfinder",
+      "pc_setup",
+      "IOTS",
+      "--auto-workers",
+      "2",
+      "--format",
+      "text",
+    ],
+  );
+});
+
+test("Discord rejects unrepresented sfinder contracts", () => {
+  for (const command of ["ren", "util", "parity", "render", "special-minimals"]) {
+    assert.throws(
+      () => prepareClearraArguments(["sfinder", command]),
+      /does not expose the sfinder/,
+    );
+  }
+  assert.throws(
+    () => prepareClearraArguments(["sfinder"]),
+    /require a subcommand/,
+  );
 });
 
 test("tiling-only commands are recognized after Discord argument normalization", () => {
@@ -235,10 +396,18 @@ test("tiling-only commands are recognized after Discord argument normalization",
 test("file-backed and unrelated commands are rejected", () => {
   assert.throws(
     () => prepareClearraArguments(["pc-scenario", "--fixture", "field.json"]),
-    /pc, setup, path, percent, and cover/,
+    /curated Clearra PC, build, setup/,
   );
   assert.throws(
     () => prepareClearraArguments(["pc", "--fixture", "field.json"]),
+    /File and custom-code inputs/,
+  );
+  assert.throws(
+    () => prepareClearraArguments(["cover", "--template-file", "field.json"]),
+    /File and custom-code inputs/,
+  );
+  assert.throws(
+    () => prepareClearraArguments(["cover", "--template-file=field.json"]),
     /File and custom-code inputs/,
   );
 });

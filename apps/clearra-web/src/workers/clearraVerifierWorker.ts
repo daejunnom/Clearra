@@ -26,6 +26,11 @@ type VerifierResponse =
   | { type: 'prewarmed' }
   | { type: 'ready' }
   | {
+      type: 'heartbeat';
+      requestId: number;
+      progress: ClearraDistributedVerifierProgress;
+    }
+  | {
       type: 'consumed';
       requestId: number;
       candidateCount: number;
@@ -40,6 +45,7 @@ let wasm: ClearraWasmModule | null = null;
 let initialized = false;
 let lifecycleOwnerId = '';
 let closeLifecycleListener: (() => void) | null = null;
+const HEARTBEAT_INTERVAL_MS = 1_000;
 
 self.onmessage = (event: MessageEvent<VerifierRequest>) => {
   void handleRequest(event.data);
@@ -68,6 +74,7 @@ async function handleRequest(request: VerifierRequest) {
     }
     if (!wasm || !initialized) throw new Error('distributed verifier is not initialized');
     if (request.type === 'consume') {
+      let lastHeartbeatAt = performance.now();
       let consumed: ClearraDistributedVerifierConsume =
         wasm.distributed_verifier_consume(request.batch);
       const candidateCount = consumed.candidateCount;
@@ -77,6 +84,10 @@ async function handleRequest(request: VerifierRequest) {
             { type: 'partial', requestId: request.requestId, partial: consumed.partial },
             [consumed.partial]
           );
+        }
+        const now = performance.now();
+        if (now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+          lastHeartbeatAt = postHeartbeat(request.requestId, wasm, now);
         }
         await yieldToHost();
         consumed = wasm.distributed_verifier_continue();
@@ -91,6 +102,7 @@ async function handleRequest(request: VerifierRequest) {
       post(response, consumed.partial ? [consumed.partial] : []);
       return;
     }
+    postHeartbeat(request.requestId, wasm);
     const partial = wasm.distributed_verifier_finish();
     initialized = false;
     post({ type: 'finished', requestId: request.requestId, partial }, [partial]);
@@ -109,6 +121,19 @@ async function handleRequest(request: VerifierRequest) {
       message: failure.message
     });
   }
+}
+
+function postHeartbeat(
+  requestId: number,
+  runtime: ClearraWasmModule,
+  now = performance.now()
+): number {
+  post({
+    type: 'heartbeat',
+    requestId,
+    progress: runtime.distributed_verifier_progress()
+  });
+  return now;
 }
 
 function yieldToHost(): Promise<void> {

@@ -7,13 +7,14 @@ license.workspace = true
 [features]
 default = []
 native-c-core = ["clearra-app/native-c-core"]
-wasm-cpu-runtime = []
+wasm-cpu-runtime = ["dep:clearra-wasm", "clearra-app/parallel"]
 webgpu-search = ["clearra-app/webgpu-search"]
 
 [dependencies]
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-forward-search = { path = "../clearra-forward-search" }
 clearra-host-contract = { path = "../clearra-host-contract" }
 clearra-i18n = { path = "../clearra-i18n" }
 clearra-output = { path = "../clearra-output" }
@@ -21,11 +22,14 @@ clearra-objectives = { path = "../clearra-objectives" }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-problem = { path = "../clearra-problem" }
 clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-ui-schema = { path = "../clearra-ui-schema" }
 clearra-validation = { path = "../clearra-validation" }
+clearra-wasm = { path = "../clearra-wasm", optional = true }
+clearra-web-command = { path = "../clearra-web-command" }
 serde = { version = "1", features = ["derive"] }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 
 [lib]
 doctest = false

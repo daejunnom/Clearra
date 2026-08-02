@@ -39,6 +39,25 @@ fn standard_bag_condition_keeps_every_verifier_busy_until_the_tail() {
     assert_exact_condition_ranges(&condition_words, &tasks);
 }
 
+#[test]
+fn high_concurrency_plan_limits_merge_amplification() {
+    let condition_words = [1_890, 473, 473, 473, 473];
+    let tasks = plan_parallel_tasks(&condition_words, 41).expect("high concurrency task plan");
+
+    assert!(tasks.len() >= 40);
+    assert!(tasks.len() <= 100);
+    assert_exact_condition_ranges(&condition_words, &tasks);
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn native_setup_progress_maps_graph_passes_to_stable_ui_phases() {
+    assert_eq!(native_setup_build_progress_phase(0), ("setup-geometry", 1));
+    assert_eq!(native_setup_build_progress_phase(1), ("setup-graph", 2));
+    assert_eq!(native_setup_build_progress_phase(2), ("setup-graph", 2));
+    assert_eq!(native_setup_build_progress_phase(3), ("setup-graph", 2));
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 #[ignore = "full empty-4L serial/multiworker equivalence; run in the release acceptance suite"]

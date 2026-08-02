@@ -42,12 +42,14 @@ export class WasmJobRunner {
           advancesSinceDrain += 1;
           advancesSinceYield += 1;
         }
+        const terminalStatus = status !== 'pending' && status !== 'progress';
         if (
           this.cancellationRequested ||
-          status !== 'pending' ||
+          status === 'progress' ||
+          terminalStatus ||
           advancesSinceDrain >= EVENT_DRAIN_INTERVAL
         ) {
-          if (status !== 'pending' && profilingActive && this.wasm.profile_finish) {
+          if (terminalStatus && profilingActive && this.wasm.profile_finish) {
             searchProfile = this.wasm.profile_finish();
             profilingActive = false;
           }
@@ -58,7 +60,7 @@ export class WasmJobRunner {
         }
         if (
           terminal === null &&
-          status === 'pending' &&
+          (status === 'pending' || status === 'progress') &&
           advancesSinceYield >= HOST_YIELD_INTERVAL
         ) {
           await yieldToWorkerHost();

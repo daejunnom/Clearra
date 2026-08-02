@@ -3,6 +3,19 @@ import type { WorkspaceMessageKey } from './workspaceI18n';
 import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
 export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin';
+export type WorkspaceProgressMode =
+  | 'default'
+  | 'pc-all'
+  | 'pc-minimum-cover'
+  | 'pc-score'
+  | 'pc-failed-queue'
+  | 'setup-oracle'
+  | 'setup-qb'
+  | 'buildability'
+  | 'build-spin'
+  | 'damage-maximum'
+  | 'damage-at-least'
+  | 'spin';
 export type WorkspaceProgressStageStatus = 'pending' | 'running' | 'complete' | 'stopped';
 
 export type WorkspaceProgressStage = {
@@ -31,6 +44,7 @@ export type WorkspaceProgressModel = {
 
 export type WorkspaceProgressInput = {
   profile: WorkspaceProgressProfile;
+  mode?: WorkspaceProgressMode;
   status: WorkspaceRuntimeStatus;
   progressLabel: string;
   progressDone: number;
@@ -47,93 +61,77 @@ const COMMON_PREPARE: StageDefinition = {
   labelKey: 'progressStagePrepare'
 };
 const COMMON_AGGREGATE: StageDefinition = {
-  id: 'aggregate',
+  id: 'finalize',
   labelKey: 'progressStageAggregate'
 };
 
-const PROFILE_STAGES: Record<WorkspaceProgressProfile, StageDefinition[]> = {
-  pc: [
-    COMMON_PREPARE,
-    {
-      id: 'geometry',
-      labelKey: 'progressStageGeometry'
-    },
-    {
-      id: 'verify',
-      labelKey: 'progressStageBuildVerify'
-    },
-    COMMON_AGGREGATE
-  ],
-  tiling: [
-    COMMON_PREPARE,
-    {
-      id: 'geometry',
-      labelKey: 'progressStageGeometry'
-    },
-    COMMON_AGGREGATE
-  ],
-  setup: [
-    COMMON_PREPARE,
-    {
-      id: 'geometry',
-      labelKey: 'progressStageGeometry'
-    },
-    {
-      id: 'graph',
-      labelKey: 'progressStageSetupGraph'
-    },
-    {
-      id: 'tasks',
-      labelKey: 'progressStageSetupCoverage'
-    },
-    COMMON_AGGREGATE
-  ],
-  build: [
-    COMMON_PREPARE,
-    {
-      id: 'geometry',
-      labelKey: 'progressStageGeometry'
-    },
-    {
-      id: 'verify',
-      labelKey: 'progressStageBuildVerify'
-    },
-    COMMON_AGGREGATE
-  ],
-  damage: [
-    COMMON_PREPARE,
-    {
-      id: 'forward',
-      labelKey: 'progressStageForwardSearch'
-    },
-    {
-      id: 'classify',
-      labelKey: 'progressStageDamage'
-    },
-    COMMON_AGGREGATE
-  ],
-  spin: [
-    COMMON_PREPARE,
-    {
-      id: 'patterns',
-      labelKey: 'progressStagePatterns'
-    },
-    {
-      id: 'forward',
-      labelKey: 'progressStageForwardSearch'
-    },
-    {
-      id: 'classify',
-      labelKey: 'progressStageSpin'
-    },
-    COMMON_AGGREGATE
-  ]
+const GEOMETRY_STAGE: StageDefinition = {
+  id: 'geometry',
+  labelKey: 'progressStageGeometry'
 };
+const VERIFY_STAGE: StageDefinition = {
+  id: 'verify',
+  labelKey: 'progressStageBuildVerify'
+};
+
+function profileStages(
+  profile: WorkspaceProgressProfile,
+  mode: WorkspaceProgressMode
+): StageDefinition[] {
+  if (profile === 'tiling') return [COMMON_PREPARE, GEOMETRY_STAGE, COMMON_AGGREGATE];
+  if (profile === 'pc') {
+    const labelKey: WorkspaceMessageKey =
+      mode === 'pc-minimum-cover'
+        ? 'progressStageMinimumCover'
+        : mode === 'pc-score'
+          ? 'progressStageScore'
+          : mode === 'pc-failed-queue'
+            ? 'progressStageFailedQueues'
+            : 'progressStageSolutions';
+    return [COMMON_PREPARE, GEOMETRY_STAGE, VERIFY_STAGE, { id: 'finalize', labelKey }];
+  }
+  if (profile === 'setup') {
+    return [
+      COMMON_PREPARE,
+      GEOMETRY_STAGE,
+      { id: 'graph', labelKey: 'progressStageSetupGraph' },
+      { id: 'tasks', labelKey: 'progressStageSetupCoverage' },
+      { id: 'finalize', labelKey: 'progressStageSetupFinalize' }
+    ];
+  }
+  if (profile === 'build') {
+    return [
+      COMMON_PREPARE,
+      GEOMETRY_STAGE,
+      VERIFY_STAGE,
+      {
+        id: 'finalize',
+        labelKey:
+          mode === 'build-spin'
+            ? 'progressStageSpinCoverage'
+            : 'progressStageBuildProbability'
+      }
+    ];
+  }
+  if (profile === 'damage') {
+    return [
+      COMMON_PREPARE,
+      { id: 'forward', labelKey: 'progressStageForwardSearch' },
+      { id: 'classify', labelKey: 'progressStageDamage' }
+    ];
+  }
+  return [
+    COMMON_PREPARE,
+    { id: 'patterns', labelKey: 'progressStagePatterns' },
+    { id: 'forward', labelKey: 'progressStageForwardSearch' },
+    { id: 'classify', labelKey: 'progressStageSpin' }
+  ];
+}
 
 export function buildWorkspaceProgressModel(
   input: WorkspaceProgressInput
 ): WorkspaceProgressModel {
-  const stages = PROFILE_STAGES[input.profile].map<WorkspaceProgressStage>((definition) => ({
+  const stages = profileStages(input.profile, input.mode ?? 'default').map<WorkspaceProgressStage>((definition) => ({
     ...definition,
     status: 'pending',
     done: null,
@@ -178,9 +176,9 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
 
   const geometry = stage(stages, 'geometry');
   const verify = stage(stages, 'verify');
-  const aggregate = stage(stages, 'aggregate');
+  const finalize = stage(stages, 'finalize');
   const producerDone =
-    telemetry.producer_complete || phase === 'draining' || phase === 'merging';
+    telemetry.producer_complete || isFinalizingPhase(phase) || phase === 'draining';
   const predictedCandidates = predictedCandidateTotal(telemetry);
   const candidateGenerationStarted =
     telemetry.candidates_emitted > 0 || predictedCandidates !== null;
@@ -226,7 +224,7 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   }
   if (verify) {
     verify.status =
-      phase === 'merging'
+      isFinalizingPhase(phase)
         ? 'complete'
         : verificationStarted
           ? 'running'
@@ -247,7 +245,7 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
       );
     }
   }
-  if (aggregate) aggregate.status = phase === 'merging' ? 'running' : 'pending';
+  if (finalize) finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
 }
 
 function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspaceProgressInput) {
@@ -261,19 +259,27 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   const geometry = stage(stages, 'geometry');
   const graph = stage(stages, 'graph');
   const tasks = stage(stages, 'tasks');
-  const aggregate = stage(stages, 'aggregate');
+  const finalize = stage(stages, 'finalize');
   const phase = telemetry.phase;
   const producerDone =
-    telemetry.producer_complete || phase === 'draining' || phase === 'merging';
-  const geometryCompiled =
-    telemetry.geometry_family_count !== null ||
-    telemetry.candidates_emitted > 0 ||
-    producerDone;
+    telemetry.producer_complete || phase === 'draining' || isFinalizingPhase(phase);
+  const exactPipeline = telemetry.pass_count >= 4;
+  const pipelineStage = exactPipeline
+    ? Math.min(telemetry.pass_index, telemetry.pass_count - 1)
+    : null;
+  const geometryCompiled = exactPipeline
+    ? (pipelineStage ?? 0) >= 1 || producerDone
+    : telemetry.candidates_emitted > 0 || producerDone;
   const graphStarted =
+    (pipelineStage !== null && pipelineStage >= 1) ||
     telemetry.producer_build_nodes > 0 ||
     telemetry.candidates_emitted > 0 ||
     producerDone;
+  const graphComplete = exactPipeline
+    ? (pipelineStage ?? 0) >= 3 || producerDone
+    : telemetry.candidates_emitted > 0 || producerDone;
   const tasksStarted =
+    (pipelineStage !== null && pipelineStage >= 3) ||
     telemetry.candidates_emitted > 0 ||
     telemetry.candidates_verified > 0 ||
     producerDone;
@@ -289,17 +295,27 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   }
   if (graph) {
     graph.status =
-      geometryCompiled || tasksStarted
+      graphComplete
         ? 'complete'
         : graphStarted
           ? 'running'
           : 'pending';
-    applyMetric(graph, telemetry.producer_build_nodes, null);
+    if (graph.status === 'running' && telemetry.layer_total > 0) {
+      applyMetric(graph, telemetry.layer_done, telemetry.layer_total);
+      addMetric(
+        graph,
+        'progressMetricLayerWork',
+        telemetry.layer_done,
+        telemetry.layer_total
+      );
+    } else {
+      applyMetric(graph, telemetry.producer_build_nodes, null);
+    }
     addMetric(graph, 'progressMetricBuildNodes', telemetry.producer_build_nodes);
   }
   if (tasks) {
     tasks.status =
-      phase === 'merging'
+      isFinalizingPhase(phase)
         ? 'complete'
         : tasksStarted
           ? 'running'
@@ -330,7 +346,7 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
       );
     }
   }
-  if (aggregate) aggregate.status = phase === 'merging' ? 'running' : 'pending';
+  if (finalize) finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
 }
 
 function applyForwardProgress(stages: WorkspaceProgressStage[], input: WorkspaceProgressInput) {
@@ -338,11 +354,11 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
   const patterns = stage(stages, 'patterns');
   const forward = stage(stages, 'forward');
   const classify = stage(stages, 'classify');
-  const aggregate = stage(stages, 'aggregate');
   const telemetry = input.telemetry;
   const searchStarted =
     telemetry?.phase === 'searching' ||
     telemetry?.phase === 'draining' ||
+    telemetry?.phase === 'postprocessing' ||
     telemetry?.phase === 'merging' ||
     input.progressLabel === 'forward-search' ||
     input.progressLabel === 'forward-search-patterns' ||
@@ -358,6 +374,7 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
     const producerDone =
       telemetry?.producer_complete ||
       telemetry?.phase === 'draining' ||
+      telemetry?.phase === 'postprocessing' ||
       telemetry?.phase === 'merging';
     patterns.status =
       producerDone || (total > 0 && done >= total)
@@ -369,8 +386,13 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
     addMetric(patterns, 'progressMetricPatterns', done, total > 0 ? total : null);
   }
   if (forward) {
+    const forwardDone = telemetry !== null && (
+      telemetry.producer_complete ||
+      telemetry.phase === 'draining' ||
+      isFinalizingPhase(telemetry.phase)
+    );
     forward.status =
-      telemetry?.phase === 'merging'
+      forwardDone
         ? 'complete'
         : searchStarted
           ? 'running'
@@ -420,12 +442,13 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
     }
   }
   if (classify) {
+    const classificationStarted = telemetry
+      ? telemetry.producer_complete ||
+        telemetry.phase === 'draining' ||
+        isFinalizingPhase(telemetry.phase)
+      : searchStarted;
     classify.status =
-      telemetry?.phase === 'merging'
-        ? 'complete'
-        : searchStarted
-          ? 'running'
-          : 'pending';
+      classificationStarted ? 'running' : 'pending';
     if (telemetry) {
       if (input.profile === 'damage') {
         applyMetric(
@@ -444,7 +467,6 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
       addMetric(classify, 'progressMetricLegalLocks', telemetry.coverage_checks);
     }
   }
-  if (aggregate) aggregate.status = telemetry?.phase === 'merging' ? 'running' : 'pending';
 }
 
 function applyWorkerPreparation(
@@ -465,6 +487,25 @@ function applyCoarseProgress(
     return;
   }
 
+  if (input.progressLabel === 'postprocess') {
+    const finalStageIndex = Math.max(
+      0,
+      stages.findIndex((candidate) =>
+        candidate.id === 'finalize' || candidate.id === 'classify'
+      )
+    );
+    for (let index = 0; index < finalStageIndex; index += 1) {
+      stages[index].status = 'complete';
+    }
+    stages[finalStageIndex].status = 'running';
+    applyMetric(
+      stages[finalStageIndex],
+      input.progressDone,
+      input.progressTotal > 0 ? input.progressTotal : null
+    );
+    return;
+  }
+
   const activeIndex = Math.min(
     stages.length - 1,
     Math.max(1, Math.trunc(input.progressDone))
@@ -475,6 +516,12 @@ function applyCoarseProgress(
   const active = stages[activeIndex];
   active.status = 'running';
   applyMetric(active, input.progressDone, input.progressTotal > 0 ? input.progressTotal : null);
+}
+
+function isFinalizingPhase(
+  phase: ClearraSearchProgressTelemetry['phase']
+): boolean {
+  return phase === 'postprocessing' || phase === 'merging';
 }
 
 function stage(

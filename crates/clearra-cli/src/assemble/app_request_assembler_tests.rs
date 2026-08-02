@@ -34,6 +34,47 @@ fn cli_setup_command_assembles_app_request() {
 }
 
 #[test]
+fn cli_setup_assembly_applies_the_shared_host_worker_policy() {
+    let hardware = clearra_pc_graph::request::WorkerPolicy::hardware_worker_limit();
+    let default_workers = clearra_pc_graph::request::WorkerPolicy::default_worker_limit();
+
+    let default_request = CliAppRequestAssembler::assemble(
+        ParsedCliCommand::Setup(SetupArgs::default()),
+        RenderFormat::Text,
+    )
+    .expect("default setup request")
+    .request();
+    assert_eq!(
+        usize::from(default_request.resource_budget().workers()),
+        default_workers.min(usize::from(u16::MAX))
+    );
+
+    let all_request = CliAppRequestAssembler::assemble(
+        ParsedCliCommand::Setup(
+            SetupArgs::default()
+                .with_workers(Some(0))
+                .with_use_all_logical_processors(true),
+        ),
+        RenderFormat::Text,
+    )
+    .expect("all-logical-processors setup request")
+    .request();
+    assert_eq!(
+        usize::from(all_request.resource_budget().workers()),
+        hardware.min(usize::from(u16::MAX))
+    );
+
+    let cap = default_workers.min(3);
+    let capped_request = CliAppRequestAssembler::assemble(
+        ParsedCliCommand::Setup(SetupArgs::default().with_automatic_worker_limit(Some(cap))),
+        RenderFormat::Text,
+    )
+    .expect("capped setup request")
+    .request();
+    assert_eq!(usize::from(capped_request.resource_budget().workers()), cap);
+}
+
+#[test]
 fn cli_failed_queue_command_assembles_coverage_complement_request() {
     let assembly = CliAppRequestAssembler::assemble(
         ParsedCliCommand::FailedQueue(FailedQueueArgs::new(PcArgs::new(2), None, 9)),

@@ -17,7 +17,9 @@ test("Discord interaction signatures are verified against the application key", 
     Buffer.concat([Buffer.from(timestamp), body]),
     keys.privateKey,
   ).toString("hex");
-  const verifier = new DiscordInteractionSignatureVerifier(keys.publicKeyHex);
+  const verifier = new DiscordInteractionSignatureVerifier(keys.publicKeyHex, {
+    now: () => 1_720_000_000_000,
+  });
 
   assert.equal(verifier.verify(body, signature, timestamp), true);
   assert.equal(
@@ -25,6 +27,7 @@ test("Discord interaction signatures are verified against the application key", 
     false,
   );
   assert.equal(verifier.verify(body, "00", timestamp), false);
+  assert.equal(verifier.verify(body, signature, "1719990000"), false);
 });
 
 test("Cloud Run adapter answers Discord PING and defers enabled slash commands", async () => {
@@ -32,7 +35,7 @@ test("Cloud Run adapter answers Discord PING and defers enabled slash commands",
   const accepted = [];
   const ingress = {
     accepts(interaction) {
-      return interaction?.type === 2 && interaction.data?.name === "clearra";
+      return interaction?.type === 2 && interaction.data?.name === "path";
     },
     async accept(interaction, options) {
       await options.acknowledger.defer(interaction);
@@ -50,6 +53,10 @@ test("Cloud Run adapter answers Discord PING and defers enabled slash commands",
   const address = await adapter.listen();
   const endpoint = `http://127.0.0.1:${address.port}/interactions`;
   try {
+    const health = await fetch(`http://127.0.0.1:${address.port}/health`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok" });
+
     const ping = await signedRequest(endpoint, { type: 1 }, keys.privateKey);
     assert.equal(ping.status, 200);
     assert.deepEqual(await ping.json(), { type: 1 });
@@ -59,7 +66,7 @@ test("Cloud Run adapter answers Discord PING and defers enabled slash commands",
       application_id: "application-id",
       token: "interaction-token",
       type: 2,
-      data: { type: 1, name: "clearra", options: [] },
+      data: { type: 1, name: "path", options: [] },
     };
     const deferred = await signedRequest(endpoint, interaction, keys.privateKey);
     assert.equal(deferred.status, 200);
@@ -103,7 +110,7 @@ function discordSigningKeys() {
 
 function signedRequest(endpoint, payload, privateKey) {
   const body = JSON.stringify(payload);
-  const timestamp = "1720000000";
+  const timestamp = String(Math.floor(Date.now() / 1000));
   const signature = sign(
     null,
     Buffer.concat([Buffer.from(timestamp), Buffer.from(body)]),

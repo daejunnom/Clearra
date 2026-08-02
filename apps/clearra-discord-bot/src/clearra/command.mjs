@@ -4,18 +4,78 @@ const JOB_PROTOCOL = "clearra.job.v1";
 const DEFAULT_JOB_ENDPOINT = "http://127.0.0.1:8787/jobs";
 const TERMINAL_JOB_STATES = new Set(["completed", "failed", "cancelled"]);
 
-const ALLOWED_COMMANDS = new Set(["pc", "setup", "path", "percent", "cover"]);
-const PARALLEL_SEARCH_COMMANDS = new Set(["pc", "setup", "path"]);
+const NATIVE_COMMANDS = new Set([
+  "pc",
+  "failed-queue",
+  "setup",
+  "setup-finder",
+  "path",
+  "pc-replay",
+  "percent",
+  "cover",
+  "build-coverage",
+  "build-probability",
+  "damage",
+  "spin-finder",
+]);
+const SFINDER_SEARCH_COMMANDS = new Set([
+  "path",
+  "chance",
+  "percent",
+  "minimals",
+  "score",
+  "score-minimals",
+  "saves",
+  "best-save",
+  "cover",
+  "setup",
+  "congruent",
+  "congruent-cover",
+  "setup-cover",
+  "cover-percent",
+  "special-cover",
+  "spin-cover",
+  "spin",
+  "cat-finder",
+  "pc-setup",
+  "best-setup",
+  "dpc-finder",
+]);
+const SFINDER_COMMANDS = new Set([...SFINDER_SEARCH_COMMANDS, "verify"]);
+const ALLOWED_COMMANDS = new Set([...NATIVE_COMMANDS, "sfinder"]);
+const PARALLEL_SEARCH_COMMANDS = new Set([
+  "pc",
+  "failed-queue",
+  "setup",
+  "setup-finder",
+  "path",
+  "pc-replay",
+  "build-probability",
+  "damage",
+  "spin-finder",
+]);
 const FILE_OPTIONS = new Set([
   "--fixture",
+  "--file",
   "--input",
   "--output",
+  "--output-base",
+  "--template-file",
+  "--field-path",
+  "--patterns-path",
+  "--log-path",
   "--wgsl",
   "--kick-profile-json",
+  "-fp",
+  "-pp",
+  "-lp",
+  "-o",
 ]);
 const CONTROLLED_OPTIONS = new Map([
   ["--tablebase", 0],
   ["--no-tablebase", 0],
+  ["--tb", 0],
+  ["--no-tb", 0],
   ["--build-dependency-dag", 0],
   ["--no-build-dependency-dag", 0],
   ["--workers", 1],
@@ -23,6 +83,7 @@ const CONTROLLED_OPTIONS = new Map([
   ["--cpu-threads", 1],
   ["--use-all-cpu-threads", 0],
   ["--format", 1],
+  ["--include-solution-data", 0],
 ]);
 
 export function parseClearraMessage(content, prefix = "!", execution = {}) {
@@ -44,40 +105,98 @@ export function prepareClearraArguments(tokens, execution = {}) {
   if (tokens.length > 256) throw new Error("The command has too many arguments.");
   const command = tokens[0].toLowerCase();
   if (!ALLOWED_COMMANDS.has(command)) {
-    throw new Error("Discord supports pc, setup, path, percent, and cover searches.");
+    throw new Error(
+      "Discord supports curated Clearra PC, build, setup, coverage, forward, and sfinder searches.",
+    );
   }
+  const sfinderCommand = command === "sfinder"
+    ? validateSfinderCommand(tokens[1])
+    : null;
 
   const output = [command];
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (FILE_OPTIONS.has(token.toLowerCase())) {
+    const normalizedToken = token.toLowerCase();
+    const equalsIndex = normalizedToken.indexOf("=");
+    const optionName = equalsIndex < 0
+      ? normalizedToken
+      : normalizedToken.slice(0, equalsIndex);
+    if (FILE_OPTIONS.has(optionName)) {
       throw new Error("File and custom-code inputs are not available through Discord.");
     }
-    const controlledWidth = CONTROLLED_OPTIONS.get(token.toLowerCase());
+    const controlledWidth = CONTROLLED_OPTIONS.get(optionName);
     if (controlledWidth !== undefined) {
-      index += controlledWidth;
+      if (equalsIndex < 0) index += controlledWidth;
       continue;
     }
     output.push(token);
   }
 
-  if (command === "pc") {
+  if (command === "pc" || command === "failed-queue") {
     output.push("--no-tablebase", "--no-build-dependency-dag");
-  } else if (command === "setup") {
+  } else if (command === "setup" || command === "setup-finder") {
     output.push("--no-tablebase");
   }
-  if (PARALLEL_SEARCH_COMMANDS.has(command) && execution.workers !== undefined) {
+  const parallelSearch = PARALLEL_SEARCH_COMMANDS.has(command) ||
+    (command === "sfinder" && SFINDER_SEARCH_COMMANDS.has(sfinderCommand));
+  if (parallelSearch && execution.workers !== undefined) {
     const workers = Number(execution.workers);
     if (!Number.isSafeInteger(workers) || workers < 1) {
       throw new Error("Clearrabot received an invalid search worker allocation.");
+    }
+    if (execution.logicalProcessors !== undefined) {
+      const logicalProcessors = Number(execution.logicalProcessors);
+      if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 1) {
+        throw new Error("Clearrabot received an invalid logical processor limit.");
+      }
+      if (workers > logicalProcessors) {
+        throw new Error(
+          `Clearrabot worker allocation exceeds the hard limit of ${logicalProcessors} logical processors.`,
+        );
+      }
     }
     output.push("--auto-workers", String(workers));
     if (execution.useAllLogicalProcessors) {
       output.push("--use-all-cpu-threads");
     }
   }
-  output.push("--format", "text");
+  const outputFormat = execution.outputFormat ?? "text";
+  if (outputFormat !== "text" && outputFormat !== "json") {
+    throw new Error("Clearrabot received an invalid output format policy.");
+  }
+  output.push("--format", outputFormat);
+  if (execution.includeSolutionData === true) {
+    output.push("--include-solution-data");
+  }
   return output;
+}
+
+function validateSfinderCommand(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("Discord sfinder searches require a subcommand.");
+  }
+  const command = normalizeSfinderCommand(value);
+  if (!SFINDER_COMMANDS.has(command)) {
+    throw new Error(`Discord does not expose the sfinder '${command}' contract.`);
+  }
+  return command;
+}
+
+function normalizeSfinderCommand(value) {
+  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
+  return ({
+    bestsave: "best-save",
+    bestsetup: "best-setup",
+    catfinder: "cat-finder",
+    congruentcover: "congruent-cover",
+    coverpercent: "cover-percent",
+    dpcfinder: "dpc-finder",
+    pcsetup: "pc-setup",
+    scoreminimals: "score-minimals",
+    setupcover: "setup-cover",
+    specialcover: "special-cover",
+    spincover: "spin-cover",
+  })[normalized] ?? normalized;
 }
 
 export function tilingOnlyRequested(arguments_) {
@@ -164,18 +283,29 @@ export class ClearraJobExecutor {
     }
 
     const controller = new AbortController();
+    const startedAt = Date.now();
+    const requestedDeadlineUnixMs = options.deadlineUnixMs === undefined
+      ? startedAt + this.timeoutMs
+      : validAbsoluteDeadline(options.deadlineUnixMs);
+    const deadlineUnixMs = Math.min(
+      requestedDeadlineUnixMs,
+      startedAt + this.timeoutMs,
+    );
+    const remainingMs = deadlineUnixMs - startedAt;
+    if (remainingMs <= 0) {
+      throw new Error("Clearra interaction deadline expired before submission.");
+    }
     let timedOut = false;
     let submitted = false;
     const abort = () => controller.abort();
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, this.timeoutMs);
+    }, remainingMs);
     options.signal?.addEventListener("abort", abort, { once: true });
 
     try {
       if (options.signal?.aborted) controller.abort();
-      const deadlineUnixMs = Date.now() + this.timeoutMs;
       submitted = true;
       let response = await this.request(this.endpoint, {
         method: "POST",
@@ -310,6 +440,14 @@ function positiveExecutorOption(value, fallback) {
   const parsed = value ?? fallback;
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     throw new Error("Clearrabot received an invalid job executor setting.");
+  }
+  return parsed;
+}
+
+function validAbsoluteDeadline(value) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("Clearrabot received an invalid interaction deadline.");
   }
   return parsed;
 }

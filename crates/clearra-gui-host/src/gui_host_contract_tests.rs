@@ -265,6 +265,54 @@ mod case_gui_domain_model_tracks_screens_backend_and_output_forms {
     }
 }
 
+mod case_gui_default_memory_budget_is_unbounded {
+    use crate::request::BackendRequestBuilder;
+
+    use super::*;
+
+    #[test]
+    fn gui_default_memory_budget_is_unbounded() {
+        let form = GuiBackendForm::default();
+        let policy = BackendRequestBuilder::build_execution_policy(&form)
+            .expect("default GUI execution policy");
+
+        assert_eq!(form.memory_budget_mb(), 0);
+        assert_eq!(policy.max_memory_mib(), None);
+
+        let capped =
+            BackendRequestBuilder::build_execution_policy(&form.with_memory_budget_mb(512))
+                .expect("explicit GUI memory policy");
+        assert_eq!(capped.max_memory_mib(), Some(512));
+    }
+}
+
+mod case_gui_worker_policy_preserves_auto_and_full_cpu_opt_in {
+    use clearra_pc_graph::request::WorkerPolicy;
+
+    use crate::request::BackendRequestBuilder;
+
+    use super::*;
+
+    #[test]
+    fn gui_worker_policy_preserves_auto_and_full_cpu_opt_in() {
+        let hardware = WorkerPolicy::hardware_worker_limit();
+        let automatic = BackendRequestBuilder::build_execution_policy(&GuiBackendForm::default())
+            .expect("automatic GUI execution policy");
+        assert_eq!(automatic.workers(), WorkerPolicy::default_worker_limit());
+        assert_eq!(automatic.workers_requested(), None);
+
+        let all = BackendRequestBuilder::build_execution_policy(
+            &GuiBackendForm::default()
+                .with_workers(0)
+                .with_use_all_logical_processors(true),
+        )
+        .expect("all-logical-processors GUI execution policy");
+        assert_eq!(all.workers(), hardware);
+        assert_eq!(all.workers_requested(), None);
+        assert!(all.use_all_logical_processors());
+    }
+}
+
 mod case_gui_app_state_preserves_execution_job_and_diagnostics {
     use super::*;
 
@@ -390,7 +438,7 @@ mod case_tauri_command_calls_clearra_gui_host_only {
         assert_eq!(render_capability["gif_supported"], true);
         assert_eq!(render_capability["render_exact"], true);
         assert!(render_capability["unsupported_reason"].is_null());
-        #[cfg(not(feature = "native-c-core"))]
+        #[cfg(not(any(feature = "native-c-core", feature = "wasm-cpu-runtime")))]
         {
             assert_eq!(value["command"], "pc");
             assert_eq!(value["status"], "unsupported");
@@ -405,9 +453,10 @@ mod case_tauri_command_calls_clearra_gui_host_only {
                 .iter()
                 .any(|diagnostic| diagnostic["code"] == "E_PRODUCT_RUNTIME_UNSUPPORTED"));
         }
-        #[cfg(feature = "native-c-core")]
+        #[cfg(any(feature = "native-c-core", feature = "wasm-cpu-runtime"))]
         {
             assert_eq!(value["command"], "pc");
+            assert_eq!(value["status"], "success");
             assert_eq!(value["resource_report"]["solver_executed"], true);
             assert!(!value["diagnostics"]
                 .as_array()
@@ -462,6 +511,33 @@ mod case_desktop_job_queue_reports_progress_cancel_result {
         let second_job = bridge
             .start_job(request_json())
             .expect("completed job releases the active slot");
+        assert_ne!(first_job, second_job);
+        let second_events = drain_until_terminal(&mut bridge, second_job);
+        assert_event_order(&second_events, second_job);
+    }
+
+    #[test]
+    fn finished_unpolled_job_is_reaped_before_the_next_job_starts() {
+        let mut bridge = DesktopTauriCommandBridge::default();
+        let first_job = bridge
+            .start_job(request_json())
+            .expect("start orphaned desktop job");
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        let second_job = loop {
+            match bridge.start_job(request_json()) {
+                Ok(job_id) => break job_id,
+                Err(error) if error.message() == "desktop job already active" => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "orphaned desktop job did not finish"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("reap finished orphaned desktop job: {error}"),
+            }
+        };
+
         assert_ne!(first_job, second_job);
         let second_events = drain_until_terminal(&mut bridge, second_job);
         assert_event_order(&second_events, second_job);

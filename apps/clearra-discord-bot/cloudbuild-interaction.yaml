@@ -1,0 +1,19 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - apps/clearra-discord-bot/Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
+      - .
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
+substitutions:
+  _REGION: asia-northeast1
+  _REPOSITORY: clearra
+  _IMAGE_NAME: clearra-interaction
+  _TAG: latest
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 3600s

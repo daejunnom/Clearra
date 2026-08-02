@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const root = resolve(scriptDir, '..', '..');
@@ -15,7 +16,10 @@ const destinationDir = options.destination
 
 await mkdir(dirname(destinationDir), { recursive: true });
 await mkdir(destinationDir, { recursive: true });
-const stagingDir = await mkdtemp(resolve(dirname(destinationDir), '.clearra-wasm-stage-'));
+const stagingLease = await acquireManagedTransientDirectory(
+  resolve(dirname(destinationDir), '.clearra-wasm-stage')
+);
+const stagingDir = stagingLease.path;
 try {
   if (options.environment === 'wsl') {
     if (process.platform !== 'win32') {
@@ -31,7 +35,7 @@ try {
     `staged_wasm=${resolve(destinationDir, manifest.wasm.path)} bytes=${manifest.wasm.bytes} wasm_sha256=${manifest.wasm.sha256} bindings=${resolve(destinationDir, manifest.bindings.path)} bindings_bytes=${manifest.bindings.bytes} manifest=${resolve(destinationDir, 'clearra_wasm.manifest.json')}`
   );
 } finally {
-  await rm(stagingDir, { recursive: true, force: true });
+  await stagingLease.release();
 }
 
 async function buildWithWsl() {

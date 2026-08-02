@@ -5,6 +5,7 @@ import type {
 
 import {
   ClearraVerifierPool,
+  type ClearraVerifierPoolProgress,
   type ClearraVerifierRecoveryMode
 } from './ClearraVerifierPool';
 import type { ClearraDistributedPlan, ClearraWasmModule } from './clearraWasmRuntime';
@@ -35,13 +36,16 @@ export function disposeDistributedWorkers() {
 export class DistributedWasmJobRunner {
   private cancelled = false;
   private released = false;
-  private pool = sharedVerifierPool;
+  private readonly pool: ClearraVerifierPool;
 
   constructor(
     private readonly wasm: ClearraWasmModule,
     private readonly jobId: number,
-    private readonly lifecycleOwnerId: string
-  ) {}
+    private readonly lifecycleOwnerId: string,
+    pool: ClearraVerifierPool = sharedVerifierPool
+  ) {
+    this.pool = pool;
+  }
 
   prepare(commandText: string): ClearraDistributedPlan {
     return this.wasm.distributed_prepare(commandText);
@@ -63,24 +67,29 @@ export class DistributedWasmJobRunner {
     const verifierCount = plan.verificationRequired
       ? Math.max(1, plan.workerCount - 1)
       : 0;
+    let effectiveVerifierCount = verifierCount;
+    let finishedVerifierCount = 0;
     let lastHostYield = performance.now();
     let progressPhase: ClearraSearchProgressTelemetry['phase'] = 'initializing';
     let producerComplete = false;
+    let lastVerifierProgress: ClearraVerifierPoolProgress = {
+      candidatesVerified: 0,
+      buildNodes: 0,
+      coverageChecks: 0,
+      readyWorkers: 0,
+      activeWorkers: 0,
+      workerCount: verifierCount,
+      oldestBatchMs: 0
+    };
     const emitProgress = () => {
       if (this.cancelled) return;
       const producer = this.wasm.distributed_progress();
-      const verifier =
-        progressPhase === 'initializing'
-          ? {
-              candidatesVerified: 0,
-              buildNodes: 0,
-              coverageChecks: 0,
-              readyWorkers: 0,
-              activeWorkers: 0,
-              workerCount: verifierCount,
-              oldestBatchMs: 0
-            }
-          : this.pool.progressSnapshot();
+      let verifier = lastVerifierProgress;
+      if (progressPhase !== 'initializing' && progressPhase !== 'merging') {
+        const snapshot = this.pool.progressSnapshot();
+        if (snapshot.workerCount > 0) lastVerifierProgress = snapshot;
+        verifier = snapshot.workerCount > 0 ? snapshot : lastVerifierProgress;
+      }
       onEvent(
         progressEvent(
           this.jobId,
@@ -155,9 +164,15 @@ export class DistributedWasmJobRunner {
           if (verifierInitialization) {
             throw new Error('distributed worker initialization was produced more than once');
           }
+          effectiveVerifierCount = plan.deferredInitialization
+            ? boundedVerifierCount(
+                verifierCount,
+                this.wasm.distributed_progress().candidateFamilyCount
+              )
+            : verifierCount;
           verifierInitialization = this.pool.initialize(
             produced.initialization,
-            verifierCount,
+            effectiveVerifierCount,
             this.wasm.compiled_module(),
             this.lifecycleOwnerId,
             verifierRecoveryMode(plan)
@@ -207,7 +222,18 @@ export class DistributedWasmJobRunner {
         this.requireActive();
       }
       if (plan.verificationRequired) {
-        await this.pool.finish((partial) => this.wasm.distributed_merge_partial(partial));
+        progressPhase = 'postprocessing';
+        emitProgress();
+        finishedVerifierCount = await this.pool.finish((partial) =>
+          this.wasm.distributed_merge_partial(partial)
+        );
+        lastVerifierProgress = {
+          ...lastVerifierProgress,
+          readyWorkers: finishedVerifierCount,
+          activeWorkers: 0,
+          workerCount: finishedVerifierCount,
+          oldestBatchMs: 0
+        };
         this.requireActive();
       }
       progressPhase = 'merging';
@@ -215,7 +241,7 @@ export class DistributedWasmJobRunner {
       const events = JSON.parse(
         this.wasm.distributed_finish(
           this.jobId,
-          plan.verificationRequired ? plan.workerCount : 1
+          plan.verificationRequired ? finishedVerifierCount + 1 : 1
         )
       ) as ClearraWasmWorkerEvent[];
       if (profilingActive && this.wasm.profile_finish) {
@@ -333,13 +359,27 @@ function progressStep(
   verificationRequired: boolean
 ): number {
   if (!verificationRequired) {
-    return { preparing: 0, initializing: 0, searching: 1, draining: 1, merging: 2 }[phase];
+    return {
+      preparing: 0,
+      initializing: 0,
+      searching: 1,
+      draining: 1,
+      postprocessing: 2,
+      merging: 2
+    }[phase];
   }
-  return { preparing: 0, initializing: 1, searching: 2, draining: 3, merging: 4 }[phase];
+  return {
+    preparing: 0,
+    initializing: 1,
+    searching: 2,
+    draining: 3,
+    postprocessing: 4,
+    merging: 5
+  }[phase];
 }
 
 function progressTotal(verificationRequired: boolean): number {
-  return verificationRequired ? 5 : 3;
+  return verificationRequired ? 6 : 3;
 }
 
 function progressLabel(
@@ -353,6 +393,7 @@ function progressLabel(
       initializing: 'Geometry workers preparing',
       searching: 'Geometry roots searching',
       draining: 'Remaining geometry roots finishing',
+      postprocessing: 'Exact tiling results preparing',
       merging: 'Exact tiling results merging'
     }[phase];
   }
@@ -362,6 +403,7 @@ function progressLabel(
       initializing: 'Runtime preparing',
       searching: 'Geometry and candidates generating',
       draining: 'Geometry and candidates generating',
+      postprocessing: 'Exact tiling results preparing',
       merging: 'Exact tiling results merging'
     }[phase];
   }
@@ -370,14 +412,19 @@ function progressLabel(
     initializing: 'Distributed workers initializing',
     searching: 'Geometry and exact verification running',
     draining: 'Remaining exact verification draining',
+    postprocessing: 'Verified results postprocessing',
     merging: 'Exact results merging'
   }[phase];
 }
 
 function createWorkerHostYield(): () => Promise<void> {
   const channel = new MessageChannel();
+  const nodePort1 = channel.port1 as MessagePort & { unref?: () => void };
+  const nodePort2 = channel.port2 as MessagePort & { unref?: () => void };
   const pending: Array<() => void> = [];
   channel.port1.onmessage = () => pending.shift()?.();
+  nodePort1.unref?.();
+  nodePort2.unref?.();
   return () =>
     new Promise<void>((resolve) => {
       pending.push(resolve);
@@ -391,4 +438,15 @@ function verifierRecoveryMode(plan: ClearraDistributedPlan): ClearraVerifierReco
     return 'atomic-task';
   }
   return 'replay-state';
+}
+
+function boundedVerifierCount(requested: number, taskCount: string | null): number {
+  if (taskCount === null) return requested;
+  try {
+    const tasks = BigInt(taskCount);
+    if (tasks <= 0n) return 1;
+    return Math.max(1, Math.min(requested, Number(tasks)));
+  } catch {
+    return requested;
+  }
 }

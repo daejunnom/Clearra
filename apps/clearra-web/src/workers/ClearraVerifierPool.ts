@@ -7,6 +7,11 @@ type VerifierResponse =
   | { type: 'prewarmed' }
   | { type: 'ready' }
   | {
+      type: 'heartbeat';
+      requestId: number;
+      progress: ClearraDistributedVerifierProgress;
+    }
+  | {
       type: 'consumed';
       requestId: number;
       candidateCount: number;
@@ -21,6 +26,8 @@ type PendingRequest = {
   resolve: (response: VerifierResponse) => void;
   reject: (error: Error) => void;
   onPartial?: (partial: ArrayBuffer) => void;
+  operation: 'consume' | 'finish';
+  stallDeadlineAt: number;
 };
 
 type VerifierConsumeResult = {
@@ -40,6 +47,17 @@ type PoolWaiter = {
 };
 
 type VerifierWorkerFactory = () => Worker;
+
+const VERIFIER_INITIALIZATION_TIMEOUT_MS = 90_000;
+const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 120_000;
+const VERIFIER_FINISH_STALL_TIMEOUT_MS = 600_000;
+const VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS = 1_000;
+
+export type ClearraVerifierPoolOptions = {
+  initializationTimeoutMs?: number;
+  requestStallTimeoutMs?: number;
+  finishStallTimeoutMs?: number;
+};
 
 class VerifierCommitError extends Error {
   constructor(cause: unknown) {
@@ -78,9 +96,19 @@ class VerifierClient {
   private batchStartedAt: number | null = null;
   private initialized = false;
   private lifecycleOwnerId = '';
+  private requestWatchdogScan: ReturnType<typeof setInterval> | null = null;
+  private readonly requestWatchdogScanIntervalMs: number;
   busy = false;
 
-  constructor(private readonly workerFactory: VerifierWorkerFactory) {
+  constructor(
+    private readonly workerFactory: VerifierWorkerFactory,
+    private readonly requestStallTimeoutMs: number,
+    private readonly finishStallTimeoutMs: number
+  ) {
+    this.requestWatchdogScanIntervalMs = watchdogScanInterval(
+      requestStallTimeoutMs,
+      finishStallTimeoutMs
+    );
     this.worker = this.createWorker();
   }
 
@@ -239,10 +267,21 @@ class VerifierClient {
   }
 
   async finish(): Promise<ArrayBuffer> {
-    await this.ready;
-    const response = await this.request({ type: 'finish' });
-    if (response.type !== 'finished') throw new Error('invalid verifier finish response');
-    return response.partial;
+    this.busy = true;
+    this.batchStartedAt = performance.now();
+    try {
+      await this.ready;
+      const response = await this.request({ type: 'finish' });
+      if (response.type !== 'finished') throw new Error('invalid verifier finish response');
+      return response.partial;
+    } finally {
+      this.busy = false;
+      this.batchStartedAt = null;
+    }
+  }
+
+  isReady(): boolean {
+    return this.initialized;
   }
 
   terminate() {
@@ -265,11 +304,19 @@ class VerifierClient {
         reject(new Error('distributed verifier is not initialized'));
         return;
       }
-      this.pending.set(requestId, { resolve, reject, onPartial });
+      const pending: PendingRequest = {
+        resolve,
+        reject,
+        onPartial,
+        operation: message.type,
+        stallDeadlineAt: this.requestStallDeadline(message.type)
+      };
+      this.pending.set(requestId, pending);
+      this.ensureRequestWatchdogScan();
       try {
         worker.postMessage({ ...message, requestId }, transfer);
       } catch (error) {
-        this.pending.delete(requestId);
+        this.deletePendingRequest(requestId);
         reject(
           new VerifierTransportError('distributed verifier request transport failed', {
             cause: error
@@ -289,16 +336,22 @@ class VerifierClient {
       if (requestId === undefined) return;
       const pending = this.pending.get(requestId);
       if (!pending) return;
+      if (response.type === 'heartbeat') {
+        this.progress = response.progress;
+        pending.stallDeadlineAt = this.requestStallDeadline(pending.operation);
+        return;
+      }
       if (response.type === 'partial') {
+        pending.stallDeadlineAt = this.requestStallDeadline(pending.operation);
         try {
           pending.onPartial?.(response.partial);
         } catch (error) {
-          this.pending.delete(requestId);
+          this.deletePendingRequest(requestId);
           pending.reject(asError(error));
         }
         return;
       }
-      this.pending.delete(requestId);
+      this.deletePendingRequest(requestId);
       if (response.type === 'failed') {
         pending.reject(new ClearraWasmRuntimeError(response.code, response.message));
       } else {
@@ -319,7 +372,45 @@ class VerifierClient {
     return worker;
   }
 
+  private requestStallDeadline(operation: PendingRequest['operation']): number {
+    return performance.now() + this.requestStallTimeout(operation);
+  }
+
+  private requestStallTimeout(operation: PendingRequest['operation']): number {
+    return operation === 'finish'
+      ? this.finishStallTimeoutMs
+      : this.requestStallTimeoutMs;
+  }
+
+  private ensureRequestWatchdogScan() {
+    if (this.requestWatchdogScan !== null) return;
+    this.requestWatchdogScan = setInterval(() => {
+      if (this.pending.size === 0) return;
+      const now = performance.now();
+      for (const pending of this.pending.values()) {
+        if (now < pending.stallDeadlineAt) continue;
+        const timeoutMs = this.requestStallTimeout(pending.operation);
+        this.release(
+          new VerifierTransportError(
+            `distributed verifier ${pending.operation} stalled for ${timeoutMs} ms`
+          )
+        );
+        return;
+      }
+    }, this.requestWatchdogScanIntervalMs);
+    const nodeTimer = this.requestWatchdogScan as unknown as { unref?: () => void };
+    nodeTimer.unref?.();
+  }
+
+  private deletePendingRequest(requestId: number) {
+    this.pending.delete(requestId);
+  }
+
   private release(error: Error) {
+    if (this.requestWatchdogScan !== null) {
+      clearInterval(this.requestWatchdogScan);
+      this.requestWatchdogScan = null;
+    }
     const worker = this.worker;
     this.worker = null;
     if (worker) {
@@ -357,11 +448,32 @@ export class ClearraVerifierPool {
   private compiledModule: WebAssembly.Module | undefined;
   private lifecycleOwnerId = '';
   private recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task';
+  private targetWorkerCount = 0;
   private generation = 0;
   private active = false;
   private failure: Error | null = null;
 
-  constructor(private readonly workerFactory: VerifierWorkerFactory = createVerifierWorker) {}
+  private readonly initializationTimeoutMs: number;
+  private readonly requestStallTimeoutMs: number;
+  private readonly finishStallTimeoutMs: number;
+
+  constructor(
+    private readonly workerFactory: VerifierWorkerFactory = createVerifierWorker,
+    options: ClearraVerifierPoolOptions = {}
+  ) {
+    this.initializationTimeoutMs = positiveTimeout(
+      options.initializationTimeoutMs,
+      VERIFIER_INITIALIZATION_TIMEOUT_MS
+    );
+    this.requestStallTimeoutMs = positiveTimeout(
+      options.requestStallTimeoutMs,
+      VERIFIER_REQUEST_STALL_TIMEOUT_MS
+    );
+    this.finishStallTimeoutMs = positiveTimeout(
+      options.finishStallTimeoutMs,
+      VERIFIER_FINISH_STALL_TIMEOUT_MS
+    );
+  }
 
   async prewarm(
     size: number,
@@ -371,7 +483,13 @@ export class ClearraVerifierPool {
     const generation = ++this.generation;
     try {
       while (this.clients.length < size) {
-        this.clients.push(new VerifierClient(this.workerFactory));
+        this.clients.push(
+          new VerifierClient(
+            this.workerFactory,
+            this.requestStallTimeoutMs,
+            this.finishStallTimeoutMs
+          )
+        );
       }
       while (this.clients.length > size) this.clients.pop()?.dispose();
       await Promise.all(
@@ -399,16 +517,28 @@ export class ClearraVerifierPool {
     this.compiledModule = compiledModule;
     this.lifecycleOwnerId = lifecycleOwnerId;
     this.recoveryMode = recoveryMode;
+    this.targetWorkerCount = size;
     this.histories.clear();
     this.leasedClients.clear();
     try {
-      while (this.clients.length < size) {
-        this.clients.push(new VerifierClient(this.workerFactory));
-      }
+      if (size < 1) throw new Error('distributed verifier pool requires a worker');
       while (this.clients.length > size) this.clients.pop()?.dispose();
+      while (this.clients.length < size) {
+        this.clients.push(
+          new VerifierClient(
+            this.workerFactory,
+            this.requestStallTimeoutMs,
+            this.finishStallTimeoutMs
+          )
+        );
+      }
       await Promise.all(
         this.clients.map((client) =>
-          client.initialize(initialization, compiledModule, lifecycleOwnerId)
+          withTimeout(
+            client.initialize(initialization, compiledModule, lifecycleOwnerId),
+            this.initializationTimeoutMs,
+            'distributed verifier initialization'
+          )
         )
       );
       for (const client of this.clients) this.histories.set(client, []);
@@ -445,12 +575,12 @@ export class ClearraVerifierPool {
     void operation.then(succeeded, failed);
   }
 
-  async finish(consumePartial: (partial: ArrayBuffer) => void): Promise<void> {
+  async finish(consumePartial: (partial: ArrayBuffer) => void): Promise<number> {
     const generation = this.generation;
     await this.waitForIdle();
     this.assertActive(generation);
     const finished = await Promise.all(
-      [...this.clients].map((client) => this.finishClient(client, generation))
+      this.clients.map((client) => this.finishClient(client, generation))
     );
     for (const value of finished) {
       if (value.byteLength > 0) consumePartial(value);
@@ -459,6 +589,7 @@ export class ClearraVerifierPool {
     this.active = false;
     this.histories.clear();
     this.initialization = null;
+    return finished.length;
   }
 
   async waitForIdle(): Promise<void> {
@@ -468,7 +599,9 @@ export class ClearraVerifierPool {
   }
 
   progressSnapshot(now = performance.now()): ClearraVerifierPoolProgress {
+    if (!this.active) return emptyPoolProgress();
     const snapshots = this.clients.map((client) => client.progressSnapshot(now));
+    const readySnapshots = snapshots.filter((snapshot) => snapshot.ready);
     return {
       candidatesVerified: snapshots.reduce(
         (total, snapshot) => total + snapshot.candidatesVerified,
@@ -479,9 +612,9 @@ export class ClearraVerifierPool {
         (total, snapshot) => total + snapshot.coverageChecks,
         0
       ),
-      readyWorkers: snapshots.filter((snapshot) => snapshot.ready).length,
-      activeWorkers: snapshots.filter((snapshot) => snapshot.active).length,
-      workerCount: snapshots.length,
+      readyWorkers: readySnapshots.length,
+      activeWorkers: readySnapshots.filter((snapshot) => snapshot.active).length,
+      workerCount: this.targetWorkerCount,
       oldestBatchMs: snapshots.reduce(
         (oldest, snapshot) => Math.max(oldest, snapshot.batchAgeMs),
         0
@@ -499,13 +632,15 @@ export class ClearraVerifierPool {
     this.leasedClients.clear();
     this.histories.clear();
     this.initialization = null;
+    this.targetWorkerCount = 0;
     const error = new Error('distributed verifier pool cancelled');
     for (const waiter of this.waiters.splice(0)) waiter.reject(error);
   }
 
   private findAvailableClient(): VerifierClient | undefined {
     return this.clients.find(
-      (candidate) => !candidate.busy && !this.leasedClients.has(candidate)
+      (candidate) =>
+        candidate.isReady() && !candidate.busy && !this.leasedClients.has(candidate)
     );
   }
 
@@ -590,13 +725,21 @@ export class ClearraVerifierPool {
     this.histories.delete(failedClient);
     failedClient.terminate();
 
-    const replacement = new VerifierClient(this.workerFactory);
+    const replacement = new VerifierClient(
+      this.workerFactory,
+      this.requestStallTimeoutMs,
+      this.finishStallTimeoutMs
+    );
     this.leasedClients.add(replacement);
     try {
-      await replacement.initialize(
-        this.initialization,
-        this.compiledModule,
-        this.lifecycleOwnerId
+      await withTimeout(
+        replacement.initialize(
+          this.initialization,
+          this.compiledModule,
+          this.lifecycleOwnerId
+        ),
+        this.initializationTimeoutMs,
+        'distributed verifier replacement initialization'
       );
       this.assertActive(generation);
       if (this.recoveryMode === 'replay-state') {
@@ -633,6 +776,7 @@ export class ClearraVerifierPool {
     this.leasedClients.clear();
     this.histories.clear();
     this.initialization = null;
+    this.targetWorkerCount = 0;
     for (const waiter of this.waiters.splice(0)) waiter.reject(this.failure);
   }
 
@@ -652,6 +796,18 @@ function emptyVerifierProgress(): ClearraDistributedVerifierProgress {
   return { candidateCount: 0, buildNodes: 0, coverageChecks: 0 };
 }
 
+function emptyPoolProgress(): ClearraVerifierPoolProgress {
+  return {
+    candidatesVerified: 0,
+    buildNodes: 0,
+    coverageChecks: 0,
+    readyWorkers: 0,
+    activeWorkers: 0,
+    workerCount: 0,
+    oldestBatchMs: 0
+  };
+}
+
 function createVerifierWorker(): Worker {
   return new Worker(new URL('./clearraVerifierWorker.ts', import.meta.url), {
     type: 'module'
@@ -664,6 +820,37 @@ function asError(error: unknown): Error {
 
 function cloneInitialization(value: string | ArrayBuffer): string | ArrayBuffer {
   return typeof value === 'string' ? value : value.slice(0);
+}
+
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.max(1, Math.floor(value));
+}
+
+function watchdogScanInterval(
+  requestStallTimeoutMs: number,
+  finishStallTimeoutMs: number
+): number {
+  const shortestTimeoutMs = Math.min(requestStallTimeoutMs, finishStallTimeoutMs);
+  return Math.min(
+    VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS,
+    Math.max(1, Math.floor(shortestTimeoutMs / 4))
+  );
+}
+
+function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    operation,
+    new Promise<never>((_, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error(`${label} timed out after ${timeoutMs} ms`)),
+        timeoutMs
+      );
+    })
+  ]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
+  });
 }
 
 function isRetryableVerifierFailure(error: unknown): boolean {

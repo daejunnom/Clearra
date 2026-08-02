@@ -19,6 +19,7 @@ pub struct ParsedCliInvocation {
     language: LanguageId,
     output_verbosity: OutputVerbosity,
     verbose_paths: bool,
+    include_solution_data: bool,
     command: ParsedCliCommand,
 }
 
@@ -29,6 +30,7 @@ impl ParsedCliInvocation {
             language,
             output_verbosity: OutputVerbosity::Default,
             verbose_paths: false,
+            include_solution_data: false,
             command,
         }
     }
@@ -42,6 +44,12 @@ impl ParsedCliInvocation {
 impl ParsedCliInvocation {
     pub fn with_verbose_paths(mut self, verbose_paths: bool) -> Self {
         self.verbose_paths = verbose_paths;
+        self
+    }
+}
+impl ParsedCliInvocation {
+    pub fn with_solution_data(mut self, include_solution_data: bool) -> Self {
+        self.include_solution_data = include_solution_data;
         self
     }
 }
@@ -63,6 +71,11 @@ impl ParsedCliInvocation {
 impl ParsedCliInvocation {
     pub fn verbose_paths(&self) -> bool {
         self.verbose_paths
+    }
+}
+impl ParsedCliInvocation {
+    pub fn include_solution_data(&self) -> bool {
+        self.include_solution_data
     }
 }
 impl ParsedCliInvocation {
@@ -119,7 +132,7 @@ impl CliHelpTopic {
             "{title}\n{}",
             match self {
                 Self::TopLevel => {
-                    "usage: clearra [--format text|json|fumen-like] [--lang en|ko] [--verbose] [--diagnostics] [--verbose-paths] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build-probability|damage|spin-finder|build-coverage|rules|scoring|convert|continue|verify|sfinder> [options]\nglobal options may appear before or after the command\nlegacy Clearra aliases: path=pc-replay, setup=setup-finder, cover=build-coverage\nSfinder-compatible path/setup/cover meanings are isolated under: clearra sfinder <command>\ntry opening preset: clearra pc --lines 2"
+                    "usage: clearra [--format text|json|fumen-like] [--lang en|ko] [--verbose] [--diagnostics] [--verbose-paths] [--include-solution-data] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build-probability|damage|spin-finder|build-coverage|rules|scoring|convert|continue|verify|sfinder> [options]\nglobal options may appear before or after the command\n--include-solution-data is a JSON-only host integration surface for exact CTK3 export data\nlegacy Clearra aliases: path=pc-replay, setup=setup-finder, cover=build-coverage\nSfinder-man-style native mappings are isolated under: clearra sfinder <command>; they are not complete solution-finder 1.43 CLI parity\ntry opening preset: clearra pc --lines 2"
                 }
                 Self::Pc => {
                     "usage: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]\n--auto-workers caps adaptive CPU parallelism without forcing small searches onto the parallel path\n--tiling-only enumerates exact geometry tilings without BuildUp or probability calculation; results may include solutions that cannot be built, hold still determines the reachable supply multiset, and rule, scoring, B2B, visible-7, tablebase, dependency-DAG, and per-solution probability options are unavailable"
@@ -154,7 +167,7 @@ impl CliHelpTopic {
                 Self::Continue => "usage: clearra continue <token>",
                 Self::Verify => "usage: clearra verify [pc|setup|cover|kicks]",
                 Self::Sfinder => {
-                    "usage: clearra sfinder <command> [legacy positional arguments] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads]\nsearch mappings: path, chance, minimals, score, score-minimals, saves, best-save, cover, setup, congruent, congruent-cover, cover-percent, special-cover, spin-cover, setup-cover, cat-finder, pc-setup, best-setup, dpc-finder, verify\nClearra path/setup/cover keep their historical Clearra meanings; use this namespace for Sfinder meanings\nSfinder queue spellings such as *p4, *!, and [OISZ]p2 are normalized at this boundary\n--auto-workers limits adaptive parallelism without forcing small searches into the worker path; --workers explicitly requests a fixed pool"
+                    "usage: clearra sfinder <command> [legacy positional arguments] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads]\nClearra-native mappings: path, chance, percent, minimals, score, score-minimals, saves, best-save, cover, setup, congruent, congruent-cover, cover-percent, special-cover, spin-cover, spin, setup-cover, cat-finder, pc-setup, best-setup, dpc-finder, verify\nThis is a limited Sfinder-man-style dialect, not complete solution-finder 1.43 CLI parity; unsupported legacy parameters fail explicitly\nClearra path/setup/cover keep their historical Clearra meanings; use this namespace for the mapped legacy meanings\nSfinder queue spellings such as *p4, *!, and [OISZ]p2 are normalized at this boundary\n--auto-workers limits adaptive parallelism without forcing small searches into the worker path; --workers explicitly requests a fixed pool"
                 }
             }
         ))
@@ -221,7 +234,7 @@ impl CliParser {
         let mut raw_args = args.into_iter().map(Into::into);
         let _binary_name = raw_args.next();
 
-        let (format, language, output_verbosity, verbose_paths, args) =
+        let (format, language, output_verbosity, verbose_paths, include_solution_data, args) =
             extract_global_options(raw_args.collect())?;
         let Some((command, command_args)) = args.split_first() else {
             return Ok(ParsedCliInvocation::new(
@@ -230,24 +243,37 @@ impl CliParser {
                 ParsedCliCommand::Help(CliHelpTopic::TopLevel),
             )
             .with_output_verbosity(output_verbosity)
-            .with_verbose_paths(verbose_paths));
+            .with_verbose_paths(verbose_paths)
+            .with_solution_data(include_solution_data));
         };
 
         let parsed_command = cli_command_parser::parse_command(command, command_args)?;
 
         Ok(ParsedCliInvocation::new(format, language, parsed_command)
             .with_output_verbosity(output_verbosity)
-            .with_verbose_paths(verbose_paths))
+            .with_verbose_paths(verbose_paths)
+            .with_solution_data(include_solution_data))
     }
 }
 
 fn extract_global_options(
     args: Vec<String>,
-) -> Result<(RenderFormat, LanguageId, OutputVerbosity, bool, Vec<String>), CliParseError> {
+) -> Result<
+    (
+        RenderFormat,
+        LanguageId,
+        OutputVerbosity,
+        bool,
+        bool,
+        Vec<String>,
+    ),
+    CliParseError,
+> {
     let mut format = None;
     let mut selected_language = None;
     let mut output_verbosity = OutputVerbosity::Default;
     let mut verbose_paths = false;
+    let mut include_solution_data = false;
     let mut routed_args = Vec::with_capacity(args.len());
     let mut index = 0;
 
@@ -260,6 +286,10 @@ fn extract_global_options(
             }
             "--verbose-paths" => {
                 verbose_paths = true;
+                index += 1;
+            }
+            "--include-solution-data" => {
+                include_solution_data = true;
                 index += 1;
             }
             "--verbose" => {
@@ -288,11 +318,20 @@ fn extract_global_options(
         }
     }
 
+    let format = format.unwrap_or_default();
+    if include_solution_data && format != RenderFormat::Json {
+        return Err(CliParseError::InvalidValue {
+            option: "--include-solution-data",
+            value: "requires --format json".to_owned(),
+        });
+    }
+
     Ok((
-        format.unwrap_or_default(),
+        format,
         LanguageResolver::resolve_from_selected(selected_language),
         output_verbosity,
         verbose_paths,
+        include_solution_data,
         routed_args,
     ))
 }
