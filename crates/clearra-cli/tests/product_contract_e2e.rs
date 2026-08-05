@@ -317,6 +317,47 @@ mod case_library_route_product_e2e_setup_family_probability_matches_golden {
     }
 }
 
+mod case_library_route_max_score_materializes_profile_specific_nonzero_matrix {
+    use super::*;
+
+    #[test]
+    fn library_route_max_score_materializes_profile_specific_nonzero_matrix() {
+        let json = json_value(&[
+            "--format",
+            "json",
+            "pc",
+            "--lines",
+            "2",
+            "--queue",
+            "IIOOO",
+            "--fixed",
+            "--no-hold",
+            "--objective",
+            "all",
+            "--score",
+            "--score-profile",
+            "jstris-ultra",
+            "--backend",
+            "cpu",
+        ]);
+
+        assert_eq!(
+            product_contract_json_assert::string_field(&json, "route"),
+            "search-problem-core-executor"
+        );
+        assert_eq!(
+            product_contract_json_assert::string_field(&json, "score_matrix_profile_id"),
+            "jstris-ultra-pc-t-spins"
+        );
+        assert!(product_contract_json_assert::bool_field(
+            &json,
+            "score_matrix_materialized"
+        ));
+        assert!(product_contract_json_assert::number_field(&json, "score_matrix_cell_count") > 0.0);
+        assert!(product_contract_json_assert::number_field(&json, "score_best_score") > 0.0);
+    }
+}
+
 mod case_pc_command_uses_search_problem_core_executor {
     use super::*;
 
