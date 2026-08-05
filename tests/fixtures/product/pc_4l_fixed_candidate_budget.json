@@ -1,8 +1,20 @@
 {
   "schema_version": 1,
   "kind": "mvp1-product-command-fixture",
-  "fixture_id": "pc_4l_bag_pattern",
-  "command": ["pc", "--lines", "4", "--queue", "IOT"],
+  "fixture_id": "pc_4l_fixed_candidate_budget",
+  "command": [
+    "pc",
+    "--lines",
+    "4",
+    "--queue",
+    "IIOOOIIOOO",
+    "--fixed",
+    "--no-hold",
+    "--max-patterns",
+    "1",
+    "--max-candidates",
+    "1"
+  ],
   "expected": {
     "status": "searched",
     "route": "search-problem-core-executor",

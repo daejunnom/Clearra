@@ -1,7 +1,7 @@
 function Invoke-ProductGoldenTestsContractValidation() {
 $requiredFixtureFiles = @(
         "tests/fixtures/product/pc_2l_fixed_queue.json",
-        "tests/fixtures/product/pc_4l_bag_pattern.json",
+        "tests/fixtures/product/pc_4l_fixed_candidate_budget.json",
         "tests/fixtures/product/scenario_clear_to_empty.json",
         "tests/fixtures/product/path_representative.json",
         "tests/fixtures/product/percent_uniform_bag.json",
@@ -12,7 +12,7 @@ $requiredFixtureFiles = @(
     )
 $requiredGoldenFiles = @(
         "tests/golden/product/pc_2l_fixed_queue.json",
-        "tests/golden/product/pc_4l_bag_pattern.json",
+        "tests/golden/product/pc_4l_fixed_candidate_budget.json",
         "tests/golden/product/scenario_clear_to_empty.json",
         "tests/golden/product/path_representative.json",
         "tests/golden/product/percent_uniform_bag.json",
@@ -20,7 +20,7 @@ $requiredGoldenFiles = @(
         "tests/golden/product/continue_token_basic.json",
         "tests/golden/product/rules_verify_basic.json",
         "tests/golden/ux/product_pc_2l_fixed_queue.txt",
-        "tests/golden/ux/product_pc_4l_bag_pattern.txt",
+        "tests/golden/ux/product_pc_4l_fixed_candidate_budget.txt",
         "tests/golden/ux/product_scenario_clear_to_empty.txt",
         "tests/golden/ux/product_path_representative.txt",
         "tests/golden/ux/product_percent_uniform_bag.txt",
@@ -45,6 +45,76 @@ foreach ($relativePath in @($requiredFixtureFiles + $requiredGoldenFiles + $requ
             Add-ArchitectureError "T4 Product E2E / Golden required file is missing: $relativePath"
         }
     }
+$hasPositiveCommandLimit = {
+        param(
+            [object[]]$Command,
+            [string]$Option
+        )
+
+        $optionIndex = -1
+        for ($index = 0; $index -lt $Command.Count; $index += 1) {
+            if ([string]$Command[$index] -eq $Option) {
+                $optionIndex = $index
+            }
+        }
+        if ($optionIndex -lt 0 -or $optionIndex + 1 -ge $Command.Count) {
+            return $false
+        }
+
+        [uint64]$limit = 0
+        return [uint64]::TryParse(
+            [string]$Command[$optionIndex + 1],
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$limit
+        ) -and $limit -gt 0
+    }
+$productFixtureRoot = Join-Path $Root "tests/fixtures/product"
+foreach ($fixtureFile in @(Get-ChildItem -LiteralPath $productFixtureRoot -File -Filter "*.json")) {
+        $fixture = Get-Content -LiteralPath $fixtureFile.FullName -Raw | ConvertFrom-Json
+        if (-not ($fixture.PSObject.Properties.Name -contains "command")) {
+            continue
+        }
+
+        $expectedText = if ($fixture.PSObject.Properties.Name -contains "expected") {
+            $fixture.expected | ConvertTo-Json -Depth 32 -Compress
+        } else {
+            ""
+        }
+        $goldenPath = Join-Path `
+            (Join-Path $Root "tests/golden/product") `
+            $fixtureFile.Name
+        $goldenMarkers = if (Test-Path -LiteralPath $goldenPath -PathType Leaf) {
+            $golden = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json
+            if ($golden.PSObject.Properties.Name -contains "required_markers") {
+                @($golden.required_markers | ForEach-Object { [string]$_ })
+            } else {
+                @()
+            }
+        } else {
+            @()
+        }
+        $expectsCandidateBudget =
+            $expectedText -match '"candidate_budget_exceeded"' -or
+            @($goldenMarkers | Where-Object {
+                    $_ -match '(^|=)candidate_budget_exceeded$'
+                }).Count -gt 0
+        $expectsPatternBudget =
+            $expectedText -match '"(materialized_)?pattern_budget_exceeded"' -or
+            @($goldenMarkers | Where-Object {
+                    $_ -match '(^|=)(materialized_)?pattern_budget_exceeded$'
+                }).Count -gt 0
+        $command = @($fixture.command)
+
+        if ($expectsCandidateBudget -and
+            -not (& $hasPositiveCommandLimit $command "--max-candidates")) {
+            Add-ArchitectureError "T4 product fixture '$($fixtureFile.Name)' expects candidate_budget_exceeded and must specify a positive --max-candidates value"
+        }
+        if ($expectsPatternBudget -and
+            -not (& $hasPositiveCommandLimit $command "--max-patterns")) {
+            Add-ArchitectureError "T4 product fixture '$($fixtureFile.Name)' expects a pattern budget truncation and must specify a positive --max-patterns value"
+        }
+    }
 $productContractTests = @(
         Read-Text "crates/clearra-cli/tests/product_contract_e2e.rs"
         Read-Text "crates/clearra-cli/tests/product_golden_t4_contract.rs"
@@ -52,7 +122,7 @@ $productContractTests = @(
     ) -join "`n"
 foreach ($requiredMarker in @(
         "pc_command_uses_search_problem_core_executor",
-        "pc_4l_bag_pattern_golden_contract_is_stable",
+        "pc_4l_fixed_candidate_budget_golden_contract_is_stable",
         "scenario_clear_to_empty_golden_contract_is_stable",
         "path_reports_representative_trace",
         "percent_uniform_bag_golden_contract_is_stable",
@@ -72,11 +142,11 @@ $productE2E = @(
         Read-Text "scripts/lib/product-e2e-t4-golden-cases.ps1"
     ) -join "`n"
 foreach ($requiredMarker in @(
-        "T4 pc 4L bag pattern golden contract",
+        "T4 pc 4L fixed candidate budget golden contract",
         "T4 scenario clear-to-empty golden contract",
         "T4 percent uniform bag golden contract",
         "T4 rules verify basic golden contract",
-        "tests/fixtures/product/pc_4l_bag_pattern.json",
+        "tests/fixtures/product/pc_4l_fixed_candidate_budget.json",
         "tests/fixtures/product/scenario_clear_to_empty.json",
         "tests/fixtures/product/percent_uniform_bag.json",
         "tests/fixtures/product/rules_verify_basic.json",
@@ -90,7 +160,8 @@ foreach ($requiredMarker in @(
     }
 foreach ($golden in @(
         @{ Path = "tests/golden/product/pc_2l_fixed_queue.json"; Marker = "route=search-problem-core-executor" },
-        @{ Path = "tests/golden/product/pc_4l_bag_pattern.json"; Marker = "route=search-problem-core-executor" },
+        @{ Path = "tests/golden/product/pc_4l_fixed_candidate_budget.json"; Marker = "route=search-problem-core-executor" },
+        @{ Path = "tests/golden/product/pc_4l_fixed_candidate_budget.json"; Marker = "coverage_source=pattern-specific-exact-buildability" },
         @{ Path = "tests/golden/product/scenario_clear_to_empty.json"; Marker = "completion_goal=clear-to-empty" },
         @{ Path = "tests/golden/product/path_representative.json"; Marker = "representative_trace_source=retained-trace" },
         @{ Path = "tests/golden/product/percent_uniform_bag.json"; Marker = "coverage_reducer=pattern-bitset-union" },
@@ -107,7 +178,7 @@ foreach ($golden in @(
     }
 foreach ($uxGolden in @(
         "tests/golden/ux/product_pc_2l_fixed_queue.txt",
-        "tests/golden/ux/product_pc_4l_bag_pattern.txt",
+        "tests/golden/ux/product_pc_4l_fixed_candidate_budget.txt",
         "tests/golden/ux/product_scenario_clear_to_empty.txt",
         "tests/golden/ux/product_path_representative.txt",
         "tests/golden/ux/product_percent_uniform_bag.txt",
@@ -156,7 +227,7 @@ foreach ($requiredMarker in @(
 $testPolicyDoc = Read-Text "docs/test-policy.md"
 foreach ($requiredMarker in @(
         "T4 product E2E golden tests",
-        "pc_4l_bag_pattern",
+        "pc_4l_fixed_candidate_budget",
         "scenario_clear_to_empty",
         "render_capability_exact",
         "DesktopHost"

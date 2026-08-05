@@ -142,20 +142,20 @@ fn assert_markers(case_name: &str, marker_text: &str, golden: &str) {
 }
 
 #[test]
-fn pc_4l_bag_pattern_golden_contract_is_stable() {
-    let fixture = read_workspace_json("tests/fixtures/product/pc_4l_bag_pattern.json");
+fn pc_4l_fixed_candidate_budget_golden_contract_is_stable() {
+    let fixture = read_workspace_json("tests/fixtures/product/pc_4l_fixed_candidate_budget.json");
     let mut args = vec!["--format".to_owned(), "json".to_owned()];
     args.extend(fixture_command(&fixture, "command"));
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = cli_output(&refs);
 
     assert_markers(
-        "T4 pc 4L bag pattern command",
-        &output_marker_text(output.stderr()),
-        include_str!("../../../tests/golden/product/pc_4l_bag_pattern.json"),
+        "T4 pc 4L fixed candidate budget command",
+        &output_marker_text(output.stdout()),
+        include_str!("../../../tests/golden/product/pc_4l_fixed_candidate_budget.json"),
     );
-    assert_eq!(output.exit_code(), ExitCode::Unsupported);
-    assert!(output.stdout().is_empty());
+    assert_eq!(output.exit_code(), ExitCode::Success);
+    assert!(output.stderr().is_empty());
 }
 
 #[test]

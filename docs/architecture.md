@@ -646,7 +646,7 @@ User-facing output is guarded by product fixtures and marker goldens rather than
 by brittle full-stdout byte snapshots. The T4 fixture set is:
 
 - `pc_2l_fixed_queue`
-- `pc_4l_bag_pattern`
+- `pc_4l_fixed_candidate_budget`
 - `scenario_clear_to_empty`
 - `path_representative`
 - `percent_uniform_bag`

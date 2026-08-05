@@ -1,10 +1,10 @@
 {
-  "fixture": "pc_4l_bag_pattern",
+  "fixture": "pc_4l_fixed_candidate_budget",
   "required_markers": [
     "status=searched",
     "compiled_piece_window=10",
     "route=search-problem-core-executor",
-    "coverage_source=pattern-specific-enumerate-variants",
+    "coverage_source=pattern-specific-exact-buildability",
     "resource_truncation_reason=candidate_budget_exceeded",
     "probability_complete=false"
   ]

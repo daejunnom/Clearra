@@ -1,9 +1,9 @@
 function Invoke-ProductE2ET4GoldenCases {
     Invoke-ProductE2ECommandCase `
-        -Name "T4 pc 4L bag pattern golden contract" `
-        -FixturePath "tests/fixtures/product/pc_4l_bag_pattern.json" `
-        -GoldenPath "tests/golden/product/pc_4l_bag_pattern.json" `
-        -CommandArgs (Get-FixtureCommandArgs "tests/fixtures/product/pc_4l_bag_pattern.json")
+        -Name "T4 pc 4L fixed candidate budget golden contract" `
+        -FixturePath "tests/fixtures/product/pc_4l_fixed_candidate_budget.json" `
+        -GoldenPath "tests/golden/product/pc_4l_fixed_candidate_budget.json" `
+        -CommandArgs (Get-FixtureCommandArgs "tests/fixtures/product/pc_4l_fixed_candidate_budget.json")
 
     Invoke-ProductE2ECommandCase `
         -Name "T4 scenario clear-to-empty golden contract" `

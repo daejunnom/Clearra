@@ -179,7 +179,7 @@ probability union source.
 
 ### T4 product E2E golden tests
 
-Trusted ProductE2E covers `pc_2l_fixed_queue`, `pc_4l_bag_pattern`,
+Trusted ProductE2E covers `pc_2l_fixed_queue`, `pc_4l_fixed_candidate_budget`,
 `scenario_clear_to_empty`, path, percent, setup, cover, continuation, rules,
 diagnostics, `render_capability_exact`, and the `DesktopHost` product boundary.
 JSON and text goldens remain separate.
