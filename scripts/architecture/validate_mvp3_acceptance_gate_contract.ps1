@@ -1,4 +1,4 @@
-# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
+﻿# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
 
 function Invoke-Mvp3AcceptanceGateContractValidation() {
 foreach ($requiredFile in @(

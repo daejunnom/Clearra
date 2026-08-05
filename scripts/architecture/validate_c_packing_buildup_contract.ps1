@@ -1,4 +1,4 @@
-# This file is dot-sourced by an architecture validation wrapper.
+﻿# This file is dot-sourced by an architecture validation wrapper.
 # Keep the grouped validation functions side-effect free at load time.
 function Invoke-CGeometryPackingValidation() {
 foreach ($requiredPath in @(

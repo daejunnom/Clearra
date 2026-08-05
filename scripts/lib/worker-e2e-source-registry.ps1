@@ -1,4 +1,4 @@
-# This file is dot-sourced by scripts/worker-e2e.ps1.
+﻿# This file is dot-sourced by scripts/worker-e2e.ps1.
 function Test-WorkerE2EObjectProperty(
     [Parameter(Mandatory)]
     [object]$Object,

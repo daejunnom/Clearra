@@ -1,4 +1,4 @@
-function Invoke-SecurityArchitectureValidation() {
+﻿function Invoke-SecurityArchitectureValidation() {
 $securityFixMapPath = "docs/security-fix-map.md"
 if (-not (Test-Path -LiteralPath (Join-Path $Root $securityFixMapPath))) {
         Add-ArchitectureError "S0 security inventory is missing: $securityFixMapPath"

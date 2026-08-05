@@ -1,4 +1,4 @@
-# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
+﻿# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
 # X0 keeps MVP2 expansion guarded by capability state and exact-claim gates.
 
 function Invoke-Mvp2ScopeGateContractValidation() {

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [int]$Minutes = 60,
 
     [int]$MaxEventsPerLog = 50,

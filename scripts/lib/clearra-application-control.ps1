@@ -1,4 +1,4 @@
-function ConvertTo-ClearraPolicyState([AllowNull()][object]$Value) {
+﻿function ConvertTo-ClearraPolicyState([AllowNull()][object]$Value) {
     if ($null -eq $Value) {
         return "unknown"
     }

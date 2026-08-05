@@ -1,4 +1,4 @@
-# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
+﻿# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
 # Keep functions side-effect free at load time; validation runs only when invoked.
 function Invoke-ScoringPostProcessingValidation() {
 foreach ($requiredPath in @(

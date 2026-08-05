@@ -1,4 +1,4 @@
-# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
+﻿# This file is dot-sourced by scripts/lib/architecture-validation.ps1.
 # G0 keeps MVP3 generalization out of the standard tetromino fast path.
 
 function Invoke-Mvp3ScopeGateContractValidation() {

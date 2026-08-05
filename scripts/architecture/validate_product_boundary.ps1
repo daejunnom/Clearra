@@ -1,4 +1,4 @@
-function Assert-ProductBoundaryTextContains(
+﻿function Assert-ProductBoundaryTextContains(
     [string]$Path,
     [string[]]$Markers,
     [string]$ErrorPrefix
