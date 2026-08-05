@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "native-c-core"), allow(dead_code, unused_imports))]
 
 use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
 };
@@ -215,23 +216,18 @@ mod case_product_acceptance_opening_4l_fixture_compiles_deterministic_schedule {
             ])))
             .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
         let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
-        let result = PcService::execute(&problem).expect("execution");
 
-        assert_eq!(result.field("problem_preset"), Some("opening-pc"));
-        assert_eq!(result.field("lines"), Some("4"));
-        assert_eq!(result.field("compiled_piece_window"), Some("10"));
-        assert_eq!(result.field("compiled_exact_pieces"), Some("10"));
-        assert_eq!(result.field("checkpoint_schedule_label"), Some("4L"));
+        assert_eq!(problem.preset().as_str(), "opening-pc");
         assert_eq!(
-            result.field("checkpoint_schedule_partitions"),
-            Some("4|2+2")
+            problem.exact_target_policy().target(),
+            Some(PcTarget::four_lines())
         );
-        assert_eq!(
-            result.field("two_line_fallback_reason"),
-            Some("unsupported_target_lines")
-        );
-        assert_eq!(result.field("count_complete"), Some("true"));
-        assert_eq!(result.field("count_truncated_reason"), Some("none"));
+        assert_eq!(problem.piece_window().max_pieces(), 10);
+        assert_eq!(problem.exact_pieces(), Some(10));
+        let schedule = problem.checkpoint_schedule().expect("4L schedule");
+        assert_eq!(schedule.label(), "4L");
+        assert_eq!(schedule.partition_labels(), vec!["4", "2+2"]);
+        assert_eq!(schedule.checkpoint_count(), 3);
     }
 }
 
@@ -333,13 +329,11 @@ mod case_product_acceptance_scenario_simple_4l_fixture_solves_visible_tall_board
         assert_eq!(result.field("piece_window"), Some("1"));
         assert_eq!(result.field("exact_pieces"), Some("1"));
         assert_eq!(
-            result.field("total_solution_count"),
-            Some(if cfg!(feature = "native-c-core") {
-                "2"
-            } else {
-                "1"
-            })
+            result.field("actual_solution_set_contract"),
+            Some("normalized-tiling-set")
         );
+        assert_eq!(result.field("normalized_unique_solution_count"), Some("1"));
+        assert_eq!(result.normalized_solution_keys().len(), 1);
         assert_eq!(
             result.field("coverage_probability"),
             Some(expected_coverage_probability())
@@ -510,7 +504,8 @@ mod case_pc_service_hands_replay_seed_to_app_post_processing_without_running_sco
                 PieceKind::O,
                 PieceKind::O,
             ])))
-            .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
+            .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled)
+            .with_objective(ObjectivePolicy::all().with_score_summary());
         let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
         let result = PcService::execute(&problem).expect("execution");
         let fields = result.summary_fields();

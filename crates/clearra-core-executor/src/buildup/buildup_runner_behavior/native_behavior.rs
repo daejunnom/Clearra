@@ -17,7 +17,7 @@ fn expected_opening_count_complete() -> bool {
 }
 
 fn expected_setup_coverage_probability() -> &'static str {
-    "0.0"
+    "1.0"
 }
 
 fn expected_build_foundation_solution_found() -> bool {
@@ -105,14 +105,22 @@ mod case_setup_preset_promotes_packing_candidates_to_buildup_variants {
     fn setup_preset_promotes_packing_candidates_to_buildup_variants() {
         let query = clearra_problem::query::SetupSearchQuery::default()
             .with_queue(clearra_problem::query::SetupQueueInput::fixed_sequence(
-                FixedSequence::new(vec![PieceKind::I, PieceKind::O, PieceKind::T]),
+                FixedSequence::new(vec![
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::O,
+                ]),
             ))
             .with_piece_budget(
-                clearra_problem::query::PieceBudget::new(
-                    vec![PieceKind::I, PieceKind::O, PieceKind::T],
-                    3,
-                )
-                .expect("piece budget"),
+                clearra_problem::query::PieceBudget::new(vec![PieceKind::I, PieceKind::O], 10)
+                    .expect("piece budget"),
             );
         let problem = ProblemCompiler::compile_setup(&query).expect("setup problem");
         let packing = PackingRunner::run(&problem).expect("packing");
@@ -120,7 +128,14 @@ mod case_setup_preset_promotes_packing_candidates_to_buildup_variants {
         let buildup = BuildUpRunner::run(&problem, &packing).expect("buildup");
 
         assert_eq!(buildup.candidate_result_count(), packing.candidate_count());
-        assert_eq!(buildup.build_variant_count(), packing.candidate_count());
+        let retained_limit = problem.trace_policy().retained_trace_limit();
+        assert!(packing.candidate_count() > retained_limit);
+        assert_eq!(buildup.build_variant_count(), retained_limit);
+        assert_eq!(buildup.retained_trace_count(), retained_limit);
+        assert!(buildup.trace_retention_truncated());
+        assert_eq!(buildup.trace_retention_reason(), "retained_trace_limit");
+        assert!(buildup.count_complete());
+        assert_eq!(buildup.count_truncated_reason(), "none");
         assert_eq!(
             buildup.coverage_row_count(),
             expected_setup_coverage_row_count(packing.candidate_count())

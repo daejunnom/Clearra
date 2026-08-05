@@ -322,9 +322,14 @@ fn setup_preset_builds_c_packing_candidate_buffer() {
                 PieceKind::O,
                 PieceKind::O,
                 PieceKind::O,
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
             ]),
         ))
-        .with_piece_budget(clearra_problem::query::PieceBudget::standard_7_bag(5));
+        .with_piece_budget(clearra_problem::query::PieceBudget::standard_7_bag(10));
     let problem = ProblemCompiler::compile_setup(&query).expect("setup problem");
 
     let result = PackingRunner::run(&problem).expect("packing");
@@ -339,7 +344,7 @@ fn setup_preset_builds_c_packing_candidate_buffer() {
     );
     assert_eq!(
         usize::from(result.compact_problem().piece_multiset_window.total_count),
-        5
+        10
     );
     assert!(result.candidate_count() > 0);
     if let Some(candidate) = result.candidate_at(0) {

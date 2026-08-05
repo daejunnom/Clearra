@@ -24,6 +24,9 @@
   boundary so recognized text commands use the same operational command name
   as their slash equivalent, including aliases and recoverable malformed
   argument forms, without retaining raw message text.
+- Aligned native APDP support compilation with the WASM contract so inverse
+  line-clear skeletons without a static support pair remain valid, preventing
+  false failures in four-row packing and setup searches.
 
 ## 0.6.3 - 2026-08-05
 

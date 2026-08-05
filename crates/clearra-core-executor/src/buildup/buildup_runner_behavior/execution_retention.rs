@@ -1,18 +1,18 @@
 use super::*;
 
-fn expected_oooo_count_complete() -> bool {
+fn expected_opening_count_complete() -> bool {
     true
 }
 
-fn expected_oooo_count_truncated_reason() -> &'static str {
+fn expected_opening_count_truncated_reason() -> &'static str {
     "none"
 }
 
-fn expected_oooo_scenario_trace_retention_truncated() -> bool {
+fn expected_opening_trace_retention_truncated() -> bool {
     true
 }
 
-fn expected_oooo_scenario_trace_retention_reason() -> &'static str {
+fn expected_opening_trace_retention_reason() -> &'static str {
     "retained_trace_limit"
 }
 
@@ -23,15 +23,18 @@ mod case_retained_trace_limit_does_not_truncate_solution_count {
     #[test]
     fn retained_trace_limit_does_not_truncate_solution_count() {
         let query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(2, 0b11 | (0b11 << 10)),
+            PcScenarioBoard::standard_10(2, 0),
             PcQueueInput::fixed_sequence(FixedSequence::new(vec![
-                PieceKind::O,
+                PieceKind::I,
+                PieceKind::I,
                 PieceKind::O,
                 PieceKind::O,
                 PieceKind::O,
             ])),
-            PieceWindow::new(4),
+            PieceWindow::new(5),
         )
+        .with_exact_pieces(Some(5))
+        .with_allow_hold(false)
         .with_retained_trace_limit(1);
         let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
         let packing = PackingRunner::run(&problem).expect("packing");
@@ -40,18 +43,18 @@ mod case_retained_trace_limit_does_not_truncate_solution_count {
 
         assert!(buildup.total_solution_count() > buildup.retained_trace_count());
         assert_eq!(buildup.retained_trace_count(), 1);
-        assert_eq!(buildup.count_complete(), expected_oooo_count_complete());
+        assert_eq!(buildup.count_complete(), expected_opening_count_complete());
         assert_eq!(
             buildup.count_truncated_reason(),
-            expected_oooo_count_truncated_reason()
+            expected_opening_count_truncated_reason()
         );
         assert_eq!(
             buildup.trace_retention_truncated(),
-            expected_oooo_scenario_trace_retention_truncated()
+            expected_opening_trace_retention_truncated()
         );
         assert_eq!(
             buildup.trace_retention_reason(),
-            expected_oooo_scenario_trace_retention_reason()
+            expected_opening_trace_retention_reason()
         );
     }
 }

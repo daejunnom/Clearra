@@ -1,4 +1,5 @@
 #include "packing_tests_support.h"
+#include "../src/apdp/geometry_apdp.h"
 #include "../src/buildup/realization_feasibility.h"
 #include "../src/buildup/buildup_worker.h"
 #include "../src/buildup/buildup_workspace.h"
@@ -606,6 +607,23 @@ void residual_memo_requires_exact_piece_counts(void) {
     EXPECT_FALSE(clearra_geometry_residual_memo_lookup(
         &memo, UINT64_C(0x1235), UINT32_C(0x001001), &family));
     clearra_geometry_residual_memo_release(&memo);
+}
+
+void geometry_apdp_marks_inverse_clear_skeleton_non_static(void) {
+    ClearraBoard64Layout layout;
+    EXPECT_U64(
+        clearra_board64_make_layout(10u, 4u, &layout),
+        CLEARRA_BOARD64_OK);
+    const uint64_t skeleton_masks[2] = {
+        UINT64_C(0x300003),
+        UINT64_C(0x000C03),
+    };
+    uint8_t support_flags[2] = {UINT8_MAX, UINT8_MAX};
+
+    EXPECT_TRUE(clearra_geometry_apdp_compile_support_flags(
+        layout, skeleton_masks, 2u, support_flags));
+    EXPECT_U64(support_flags[0], 0u);
+    EXPECT_TRUE(support_flags[1] != 0u);
 }
 
 void frontier_hash_collision_does_not_merge_distinct_partial_states(void) {

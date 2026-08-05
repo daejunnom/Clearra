@@ -116,9 +116,7 @@ bool clearra_geometry_apdp_compile_support_flags(
     for (uint32_t row_id = 0u; row_id < skeleton_count; ++row_id) {
         uint8_t flags = support_flags_for_row(
             layout, skeleton_cell_masks[row_id]);
-        if (flags == 0u) {
-            return false;
-        }
+        /* Zero means APDP is not applicable to this valid skeleton. */
         out_support_flags[row_id] = flags;
     }
     return true;
