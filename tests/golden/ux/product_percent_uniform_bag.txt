@@ -1,4 +1,4 @@
 kind: percent
 route: search-problem-core-executor
-probability_complete: false
+probability_complete: true
 renormalized: false

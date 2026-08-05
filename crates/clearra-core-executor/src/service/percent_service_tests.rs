@@ -55,6 +55,17 @@ fn percent_reports_pattern_counts_probability_and_c_buildup_rows() {
         result.field("weighted_probability_reducer"),
         Some("union_probability")
     );
+    assert_eq!(result.coverage_pattern_words().len(), 1);
+    assert_eq!(
+        result
+            .coverage_pattern_words()
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>(),
+        result
+            .usize_field("covered_pattern_count")
+            .unwrap_or_default()
+    );
 }
 
 #[test]

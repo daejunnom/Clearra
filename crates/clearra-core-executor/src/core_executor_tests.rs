@@ -92,6 +92,27 @@ fn scenario_pc_native_result_uses_native_trace_key() {
     )));
 }
 
+#[cfg(feature = "native-c-core")]
+#[test]
+fn scenario_coverage_summary_routes_to_percent_service() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_retained_trace_limit(0);
+    let problem = ProblemCompiler::compile_scenario_percent(&query).expect("problem");
+    let result = CoreExecutor::execute(&problem).expect("percent execution");
+
+    assert_eq!(result.field("status"), Some("percent-executed"));
+    assert_eq!(
+        result.field("coverage_reducer"),
+        Some("pattern-bitset-union")
+    );
+    assert_eq!(result.coverage_pattern_words(), &[1]);
+}
+
 fn expected_solver_backend() -> &'static str {
     "core-c-cpu-packing-cpu-buildup"
 }

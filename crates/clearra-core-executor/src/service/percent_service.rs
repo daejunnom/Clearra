@@ -1,5 +1,5 @@
 use clearra_core_domain::{
-    execution_cancellation::ExecutionCancellationToken,
+    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     resource::{ResourceReport, ResourceTruncationReason},
 };
 use clearra_core_ffi::NativeCoreError;
@@ -72,6 +72,13 @@ impl PercentService {
         problem: &SearchProblem,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<CoreExecutionResult, PercentServiceError> {
+        Self::execute_with_control(problem, &ExecutionControl::new(cancellation.clone()))
+    }
+
+    pub fn execute_with_control(
+        problem: &SearchProblem,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, PercentServiceError> {
         if problem.preset() != SearchProblemPreset::ScenarioPc {
             return Err(PercentServiceError::UnsupportedPreset);
         }
@@ -83,9 +90,9 @@ impl PercentService {
             return Err(PercentServiceError::EmptyPatternUniverse);
         }
 
-        let packing = PackingRunner::run_with_cancellation(problem, cancellation)
+        let packing = PackingRunner::run_with_control(problem, control)
             .map_err(PercentServiceError::Packing)?;
-        let buildup = BuildUpRunner::run_with_cancellation(problem, &packing, cancellation)
+        let buildup = BuildUpRunner::run_with_control(problem, &packing, control)
             .map_err(PercentServiceError::BuildUp)?;
         let probability_complete = problem.piece_source().complete()
             && packing.count_complete()
@@ -217,7 +224,12 @@ fn build_result(
     if let Some(observed) = source.observed_window_descriptor() {
         fields.push(field("observed_pattern_budget", observed.budget()));
     }
-    Ok(CoreExecutionResult::new(fields, Vec::new()))
+    let coverage_pattern_words = buildup
+        .objective_result()
+        .map(|result| result.coverage().covered_patterns().words().to_vec())
+        .unwrap_or_else(|| vec![0; universe.pattern_count().div_ceil(u64::BITS as usize)]);
+    Ok(CoreExecutionResult::new(fields, Vec::new())
+        .with_coverage_pattern_words(coverage_pattern_words))
 }
 
 fn truncation_reason(

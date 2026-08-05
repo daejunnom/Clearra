@@ -972,6 +972,14 @@ belong to the typed app/executor path, not to the CLI command file. The browser
 WASM command parser exposes the same percent arguments and does not route through
 a native-only service.
 
+The default one-line percent query separates geometry from supply observation:
+it places exactly one piece into the four-cell gap while `--min-len` controls the
+materialized source window. Native `ScenarioPc + coverage-summary` execution
+routes to `PercentService`; opening-PC coverage summaries remain on `PcService`
+until the percent service explicitly supports that preset. Conflating the source
+window with the exact placement count makes otherwise valid multi-piece percent
+queues fail at the native packing boundary.
+
 `failed-queue` is a reverse-search output policy over that same exact coverage
 result. It returns the complement of the covered `PatternBitSet`, never runs a
 separate forward solver, and fails closed when probability coverage is

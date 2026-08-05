@@ -11,7 +11,7 @@ use clearra_objectives::policy::score_objective_policy::{
 };
 use clearra_pc_graph::request::{
     GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
-    PcScenarioQuery, PieceWindow, RequestedSearchBackend, WorkerPolicy,
+    PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
 };
 use clearra_problem::BuildProbabilityAggregation;
 use clearra_rules::profile::{
@@ -410,6 +410,8 @@ fn parse_percent_command(
         queue,
         PieceWindow::new(minimum_len),
     )
+    .with_exact_pieces(Some(1))
+    .with_supply_window_size(SupplyWindowSize::new(minimum_len))
     .with_count_policy(PcCountPolicy::CountUnique)
     .with_retained_trace_limit(0)
     .with_execution_policy(

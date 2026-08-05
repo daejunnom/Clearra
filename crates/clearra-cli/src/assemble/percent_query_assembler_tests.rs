@@ -11,6 +11,11 @@ fn assembles_observed_percent_query_as_scenario_problem_input() {
 
     assert_eq!(assembly.query().remaining_queue().mode(), "observed");
     assert_eq!(assembly.query().piece_window().max_pieces(), 5);
+    assert_eq!(assembly.query().exact_pieces(), Some(1));
+    assert_eq!(
+        assembly.query().supply_window_size(),
+        Some(SupplyWindowSize::new(5))
+    );
     assert_eq!(assembly.query().execution_policy().max_patterns(), 0);
     assert_eq!(assembly.query().initial_board().occupied_mask(), 0x3f0);
     assert_eq!(assembly.query().initial_board().visible_height(), 1);
@@ -40,4 +45,10 @@ fn assembles_fixed_percent_query_without_bag_boundary_contract() {
 
     assert_eq!(assembly.query().remaining_queue().mode(), "fixed");
     assert_eq!(assembly.query().remaining_queue().len(), 2);
+    assert_eq!(assembly.query().piece_window().max_pieces(), 2);
+    assert_eq!(assembly.query().exact_pieces(), Some(1));
+    assert_eq!(
+        assembly.query().supply_window_size(),
+        Some(SupplyWindowSize::new(2))
+    );
 }

@@ -40,7 +40,26 @@ fn percent_command_compiles_to_coverage_summary_request() {
     let query = command.query().expect("scenario percent query");
     assert_eq!(query.initial_board().visible_height(), 1);
     assert_eq!(query.piece_window().max_pieces(), 1);
+    assert_eq!(query.exact_pieces(), Some(1));
+    assert_eq!(query.supply_window_size(), Some(SupplyWindowSize::new(1)));
     assert_eq!(query.execution_policy().max_patterns(), 8);
+}
+
+#[test]
+fn percent_command_keeps_queue_materialization_separate_from_one_piece_geometry() {
+    let request = WebCommandParser::parse("clearra percent IOT --bag-aligned --min-len 3")
+        .expect("web percent command")
+        .to_app_request()
+        .expect("percent AppRequest");
+
+    let AppCommand::Percent(command) = request.command() else {
+        panic!("expected AppCommand::Percent");
+    };
+    let query = command.query().expect("scenario percent query");
+    assert_eq!(query.initial_board().visible_height(), 1);
+    assert_eq!(query.piece_window().max_pieces(), 3);
+    assert_eq!(query.exact_pieces(), Some(1));
+    assert_eq!(query.supply_window_size(), Some(SupplyWindowSize::new(3)));
 }
 
 #[test]

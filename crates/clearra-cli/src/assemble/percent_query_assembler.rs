@@ -1,5 +1,6 @@
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    SupplyWindowSize,
 };
 use clearra_supply::queue::queue_parser::{
     parse_bag_aligned_pattern, parse_fixed_sequence, parse_observed_queue,
@@ -54,6 +55,8 @@ impl PercentQueryAssembler {
             queue,
             PieceWindow::new(minimum_len.max(1)),
         )
+        .with_exact_pieces(Some(1))
+        .with_supply_window_size(SupplyWindowSize::new(minimum_len.max(1)))
         .with_count_policy(PcCountPolicy::CountUnique)
         .with_retained_trace_limit(0)
         .with_execution_policy(
