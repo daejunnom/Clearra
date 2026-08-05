@@ -1,5 +1,8 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+use clearra_pc_graph::request::{
+    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    SupplyWindowSize,
+};
 use clearra_problem::ProblemCompiler;
 use clearra_supply::queue::{fixed_sequence::FixedSequence, observed_queue::ObservedQueue};
 
@@ -11,7 +14,9 @@ fn percent_reports_pattern_counts_probability_and_c_buildup_rows() {
         PcScenarioBoard::standard_10(2, 0x3f0),
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
         PieceWindow::new(1),
-    );
+    )
+    .with_exact_pieces(Some(1))
+    .with_count_policy(PcCountPolicy::CountUnique);
     let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
 
     let result = PercentService::execute(&problem).expect("percent");
@@ -65,6 +70,58 @@ fn percent_reports_pattern_counts_probability_and_c_buildup_rows() {
         result
             .usize_field("covered_pattern_count")
             .unwrap_or_default()
+    );
+}
+
+#[test]
+fn complete_percent_with_no_solution_returns_an_exact_zero_coverage_set() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_count_policy(PcCountPolicy::CountUnique);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+
+    let result = PercentService::execute(&problem).expect("percent");
+
+    assert_eq!(result.field("covered_pattern_count"), Some("0"));
+    assert_eq!(result.field("probability"), Some("0"));
+    assert_eq!(result.field("probability_complete"), Some("true"));
+    assert_eq!(result.coverage_pattern_words(), &[0]);
+}
+
+#[test]
+fn truncated_observed_percent_reports_verified_materialized_patterns_without_claiming_completion() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        PcQueueInput::observed(ObservedQueue::new(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+        ])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_supply_window_size(SupplyWindowSize::new(3))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_patterns(1));
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+
+    let packing = PackingRunner::run(&problem).expect("packing");
+    let buildup = BuildUpRunner::run_for_coverage(&problem, &packing).expect("buildup");
+    assert!(!buildup.coverage_complete());
+    assert!(buildup.materialized_coverage_complete());
+
+    let result = PercentService::execute(&problem).expect("percent");
+
+    assert_eq!(result.field("materialized_pattern_count"), Some("1"));
+    assert_eq!(result.field("verified_pattern_count"), Some("1"));
+    assert_eq!(result.field("probability_complete"), Some("false"));
+    assert_eq!(
+        result.field("truncation_reason"),
+        Some("observed_universe_truncated")
     );
 }
 

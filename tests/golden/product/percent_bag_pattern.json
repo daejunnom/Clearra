@@ -9,11 +9,11 @@
     "coverage_row_source=c-coverage-row-view",
     "rust_objective_reducer=ObjectiveReducer::reduce",
     "total_pattern_count=1",
-    "covered_pattern_count=0",
+    "covered_pattern_count=1",
     "renormalized=false",
     "percent_reports_total_pattern_count=true",
     "percent_reports_covered_pattern_count=true",
     "percent_reports_probability_complete=true",
-    "coverage_probability=0"
+    "coverage_probability=1"
   ]
 }

@@ -44,6 +44,7 @@ pub struct BuildUpRunResult {
     coverage_probability: String,
     execution_mode: BuildUpExecutionMode,
     coverage_source: &'static str,
+    materialized_coverage_complete: bool,
     objective_complete: bool,
     objective_incomplete_reason: Option<&'static str>,
     solution_coverages: Vec<SolutionCoverage>,
@@ -76,6 +77,7 @@ impl BuildUpRunResult {
         coverage_probability: String,
         execution_mode: BuildUpExecutionMode,
         coverage_source: &'static str,
+        materialized_coverage_complete: bool,
         objective_complete: bool,
         objective_incomplete_reason: Option<&'static str>,
         solution_coverages: Vec<SolutionCoverage>,
@@ -115,6 +117,7 @@ impl BuildUpRunResult {
             coverage_probability,
             execution_mode,
             coverage_source,
+            materialized_coverage_complete,
             objective_complete,
             objective_incomplete_reason,
             solution_coverages,
@@ -336,6 +339,10 @@ impl BuildUpRunResult {
 impl BuildUpRunResult {
     pub const fn coverage_complete(&self) -> bool {
         self.execution_mode.can_source_coverage() && self.count_complete
+    }
+
+    pub const fn materialized_coverage_complete(&self) -> bool {
+        self.materialized_coverage_complete
     }
 }
 impl BuildUpRunResult {

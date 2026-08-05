@@ -25,6 +25,24 @@ fn assembles_observed_percent_query_as_scenario_problem_input() {
 }
 
 #[test]
+fn treats_observed_minimum_len_as_a_lower_bound_below_the_known_queue() {
+    let assembly = PercentQueryAssembler::assemble(
+        &PercentArgs::new("IOT")
+            .with_mode(PercentQueueMode::Observed)
+            .with_minimum_len(Some(1)),
+    )
+    .expect("observed percent query");
+
+    assert_eq!(assembly.query().piece_window().max_pieces(), 1);
+    assert_eq!(
+        assembly.query().supply_window_size(),
+        Some(SupplyWindowSize::new(3))
+    );
+    clearra_problem::ProblemCompiler::compile_scenario_percent(assembly.query())
+        .expect("observed percent problem");
+}
+
+#[test]
 fn carries_failed_pattern_output_limit_without_changing_search_universe() {
     let assembly =
         PercentQueryAssembler::assemble(&PercentArgs::new("I,O,T").with_failed_pattern_limit(17))

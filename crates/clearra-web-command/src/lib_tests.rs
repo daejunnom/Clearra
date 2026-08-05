@@ -63,6 +63,23 @@ fn percent_command_keeps_queue_materialization_separate_from_one_piece_geometry(
 }
 
 #[test]
+fn percent_observed_minimum_len_below_queue_length_still_compiles() {
+    let request = WebCommandParser::parse("clearra percent IOT --observed --min-len 1")
+        .expect("web percent command")
+        .to_app_request()
+        .expect("percent AppRequest");
+
+    let AppCommand::Percent(command) = request.command() else {
+        panic!("expected AppCommand::Percent");
+    };
+    let query = command.query().expect("scenario percent query");
+    assert_eq!(query.piece_window().max_pieces(), 1);
+    assert_eq!(query.supply_window_size(), Some(SupplyWindowSize::new(3)));
+    clearra_problem::ProblemCompiler::compile_scenario_percent(query)
+        .expect("observed percent problem");
+}
+
+#[test]
 fn failed_queue_command_reuses_the_reverse_scenario_contract() {
     let request = WebCommandParser::parse(
         "clearra failed-queue --lines 4 --board-mask 0 --height 4 --pieces 10 \

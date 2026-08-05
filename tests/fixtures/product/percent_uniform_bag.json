@@ -7,6 +7,8 @@
     "kind": "percent",
     "route": "search-problem-core-executor",
     "coverage_reducer": "pattern-bitset-union",
+    "covered_pattern_count": 1,
+    "probability": 1,
     "probability_complete": true
   }
 }

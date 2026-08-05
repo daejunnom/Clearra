@@ -79,7 +79,10 @@ impl PercentService {
         problem: &SearchProblem,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, PercentServiceError> {
-        if problem.preset() != SearchProblemPreset::ScenarioPc {
+        if !matches!(
+            problem.preset(),
+            SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc
+        ) {
             return Err(PercentServiceError::UnsupportedPreset);
         }
         let universe = problem
@@ -92,11 +95,12 @@ impl PercentService {
 
         let packing = PackingRunner::run_with_control(problem, control)
             .map_err(PercentServiceError::Packing)?;
-        let buildup = BuildUpRunner::run_with_control(problem, &packing, control)
+        let buildup = BuildUpRunner::run_for_coverage_with_control(problem, &packing, control)
             .map_err(PercentServiceError::BuildUp)?;
         let probability_complete = problem.piece_source().complete()
             && packing.count_complete()
-            && buildup.count_complete();
+            && buildup.count_complete()
+            && buildup.objective_complete();
         let truncation_reason = truncation_reason(problem, &packing, &buildup);
         let mut resource_report = packing.resource_report().clone();
         resource_report.coverage_rows_emitted = buildup.coverage_row_count();
@@ -150,7 +154,7 @@ fn build_result(
         .map_err(|_| PercentServiceError::InvalidCoverageProbability)?;
     let materialized_probability_mass =
         format_probability(universe.materialized_probability_mass().get());
-    let verified_pattern_count = if packing.count_complete() && buildup.count_complete() {
+    let verified_pattern_count = if buildup.materialized_coverage_complete() {
         universe.pattern_count()
     } else {
         0
@@ -224,12 +228,29 @@ fn build_result(
     if let Some(observed) = source.observed_window_descriptor() {
         fields.push(field("observed_pattern_budget", observed.budget()));
     }
-    let coverage_pattern_words = buildup
-        .objective_result()
-        .map(|result| result.coverage().covered_patterns().words().to_vec())
-        .unwrap_or_else(|| vec![0; universe.pattern_count().div_ceil(u64::BITS as usize)]);
+    let coverage_pattern_words = coverage_pattern_words(buildup, universe.pattern_count());
     Ok(CoreExecutionResult::new(fields, Vec::new())
         .with_coverage_pattern_words(coverage_pattern_words))
+}
+
+fn coverage_pattern_words(
+    buildup: &crate::buildup::BuildUpRunResult,
+    pattern_count: usize,
+) -> Vec<u64> {
+    if let Some(result) = buildup.objective_result() {
+        return result.coverage().covered_patterns().words().to_vec();
+    }
+    if buildup.objective_complete() {
+        return vec![0; pattern_count.div_ceil(u64::BITS as usize)];
+    }
+
+    let mut words = vec![0; pattern_count.div_ceil(u64::BITS as usize)];
+    for row in buildup.coverage_rows() {
+        for (target, source) in words.iter_mut().zip(row.coverage_bits().words()) {
+            *target |= *source;
+        }
+    }
+    words
 }
 
 fn truncation_reason(

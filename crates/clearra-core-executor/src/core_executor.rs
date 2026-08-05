@@ -56,12 +56,11 @@ impl CoreExecutor {
         }
         control.report_progress("core-executor", 0, None);
         match (problem.preset(), problem.output_policy()) {
-            // Opening coverage summaries stay on PcService until PercentService
-            // explicitly supports the OpeningPc preset.
-            (SearchProblemPreset::ScenarioPc, SearchOutputPolicy::CoverageSummary) => {
-                PercentService::execute_with_control(problem, control)
-                    .map_err(core_error_from_percent)
-            }
+            (
+                SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc,
+                SearchOutputPolicy::CoverageSummary,
+            ) => PercentService::execute_with_control(problem, control)
+                .map_err(core_error_from_percent),
             (SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc, _) => {
                 PcService::execute_with_control(problem, control).map_err(core_error_from_pc)
             }

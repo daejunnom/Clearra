@@ -2142,6 +2142,9 @@ and exact/estimated capability before product execution.
 
 Coverage-producing BuildUp must use `BuildUpExecutionMode::EnumerateVariants`.
 `VerifyFirst` may provide a visual witness, but it is not a coverage source.
+`SearchOutputPolicy::CoverageSummary` therefore makes an explicit coverage
+request to BuildUp even when the query count policy is `CountUnique`; ordinary
+`CountUnique` PC execution keeps the `VerifyFirst` fast path.
 
 Static architecture authority is defined in `docs/architecture-validation.md`.
 Implementation marker presence is advisory only and cannot establish runtime

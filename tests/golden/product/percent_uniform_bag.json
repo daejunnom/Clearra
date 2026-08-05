@@ -8,9 +8,9 @@
     "coverage_reducer=pattern-bitset-union",
     "coverage_row_source=c-coverage-row-view",
     "total_pattern_count=1",
-    "covered_pattern_count=0",
+    "covered_pattern_count=1",
     "probability_complete=true",
     "renormalized=false",
-    "coverage_probability=0"
+    "coverage_probability=1"
   ]
 }

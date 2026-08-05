@@ -19,7 +19,8 @@ use clearra_coverage::{
     },
 };
 use clearra_pc_graph::request::{
-    OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    OpeningPcSearchQuery, PcCountPolicy, PcHoldPolicy, PcQueueInput, PcScenarioBoard,
+    PcScenarioQuery, PieceWindow,
 };
 use clearra_problem::ProblemCompiler;
 use clearra_replay::ReplayEvent;

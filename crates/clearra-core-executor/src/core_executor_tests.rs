@@ -113,6 +113,27 @@ fn scenario_coverage_summary_routes_to_percent_service() {
     assert_eq!(result.coverage_pattern_words(), &[1]);
 }
 
+#[cfg(feature = "native-c-core")]
+#[test]
+fn opening_coverage_summary_routes_to_percent_service() {
+    let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+        .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+        ])))
+        .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
+    let problem = ProblemCompiler::compile_opening_percent(&query).expect("problem");
+    let result = CoreExecutor::execute(&problem).expect("percent execution");
+
+    assert_eq!(result.field("status"), Some("percent-executed"));
+    assert_eq!(result.field("problem_preset"), Some("opening-pc"));
+    assert_eq!(result.field("probability_complete"), Some("true"));
+    assert_eq!(result.coverage_pattern_words(), &[1]);
+}
+
 fn expected_solver_backend() -> &'static str {
     "core-c-cpu-packing-cpu-buildup"
 }

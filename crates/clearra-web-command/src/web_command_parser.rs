@@ -378,40 +378,50 @@ fn parse_percent_command(
         }
     }
 
-    let queue = match mode {
-        QueueMode::Observed => {
+    let (queue, observed_queue) = match mode {
+        QueueMode::Observed => (
             PcQueueInput::observed(parse_observed_queue(&queue_text).map_err(|_| {
                 WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
                     "invalid observed percent queue",
                 )
-            })?)
-        }
-        QueueMode::BagAligned => PcQueueInput::bag_aligned_pattern(
-            parse_bag_aligned_pattern(&queue_text).map_err(|_| {
-                WebCommandError::new(
-                    WebCommandErrorCode::InvalidValue,
-                    "invalid bag-aligned percent pattern",
-                )
-            })?,
+            })?),
+            true,
         ),
-        QueueMode::Fixed => {
+        QueueMode::BagAligned => (
+            PcQueueInput::bag_aligned_pattern(parse_bag_aligned_pattern(&queue_text).map_err(
+                |_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "invalid bag-aligned percent pattern",
+                    )
+                },
+            )?),
+            false,
+        ),
+        QueueMode::Fixed => (
             PcQueueInput::fixed_sequence(parse_fixed_sequence(&queue_text).map_err(|_| {
                 WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
                     "invalid fixed percent sequence",
                 )
-            })?)
-        }
+            })?),
+            false,
+        ),
     };
     let minimum_len = minimum_len.unwrap_or(queue.len()).max(1);
+    let supply_window_len = if observed_queue {
+        minimum_len.max(queue.len())
+    } else {
+        minimum_len
+    };
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(1, 0x3f0),
         queue,
         PieceWindow::new(minimum_len),
     )
     .with_exact_pieces(Some(1))
-    .with_supply_window_size(SupplyWindowSize::new(minimum_len))
+    .with_supply_window_size(SupplyWindowSize::new(supply_window_len))
     .with_count_policy(PcCountPolicy::CountUnique)
     .with_retained_trace_limit(0)
     .with_execution_policy(

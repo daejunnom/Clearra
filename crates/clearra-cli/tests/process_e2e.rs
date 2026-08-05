@@ -29,11 +29,11 @@ fn expected_retained_trace_key_prefix() -> &'static str {
 }
 
 fn expected_percent_covered_pattern_count() -> usize {
-    0
+    1
 }
 
 fn expected_percent_probability() -> &'static str {
-    "0%"
+    "100%"
 }
 
 fn expected_path_solution_count() -> usize {

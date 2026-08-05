@@ -44,3 +44,6 @@ clearra-validation = { path = "../clearra-validation" }
 clearra-web-command = { path = "../clearra-web-command" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+clearra-problem = { path = "../clearra-problem" }

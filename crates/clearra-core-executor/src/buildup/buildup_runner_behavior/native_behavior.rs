@@ -41,6 +41,39 @@ fn expected_build_coverage_row_count(candidate_count: usize) -> usize {
 }
 
 #[cfg(feature = "native-c-core")]
+mod case_coverage_request_preserves_the_count_unique_fast_path_boundary {
+    use super::*;
+
+    #[test]
+    fn coverage_request_preserves_the_count_unique_fast_path_boundary() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+        let packing = PackingRunner::run(&problem).expect("packing");
+
+        let default = BuildUpRunner::run(&problem, &packing).expect("default buildup");
+        let coverage =
+            BuildUpRunner::run_for_coverage(&problem, &packing).expect("coverage buildup");
+
+        assert_eq!(default.execution_mode(), BuildUpExecutionMode::VerifyFirst);
+        assert_eq!(default.coverage_row_count(), 0);
+        assert!(!default.objective_complete());
+        assert_eq!(
+            coverage.execution_mode(),
+            BuildUpExecutionMode::EnumerateVariants
+        );
+        assert_eq!(coverage.coverage_row_count(), 1);
+        assert!(coverage.objective_complete());
+        assert_eq!(coverage.covered_pattern_count(), 1);
+    }
+}
+
+#[cfg(feature = "native-c-core")]
 mod case_buildup_runner_promotes_packing_candidates_to_coverage_and_objectives {
     use super::*;
 

@@ -214,7 +214,7 @@ fn percent_reports_total_and_covered_pattern_count() {
     );
     assert_eq!(string_field(&json, "route"), "search-problem-core-executor");
     assert_eq!(number_field(&json, "total_pattern_count"), 1.0);
-    assert_eq!(number_field(&json, "covered_pattern_count"), 0.0);
+    assert_eq!(number_field(&json, "covered_pattern_count"), 1.0);
     assert_eq!(
         bool_field(&json, "probability_complete"),
         cfg!(feature = "native-c-core")

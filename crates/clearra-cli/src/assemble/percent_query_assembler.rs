@@ -50,13 +50,18 @@ impl PercentQueryAssembler {
             ),
         };
         let minimum_len = args.minimum_len().unwrap_or(queue.len());
+        let supply_window_len = match args.mode() {
+            PercentQueueMode::Observed => minimum_len.max(queue.len()),
+            PercentQueueMode::BagAligned | PercentQueueMode::Fixed => minimum_len,
+        }
+        .max(1);
         let query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(1, 0x3f0),
             queue,
             PieceWindow::new(minimum_len.max(1)),
         )
         .with_exact_pieces(Some(1))
-        .with_supply_window_size(SupplyWindowSize::new(minimum_len.max(1)))
+        .with_supply_window_size(SupplyWindowSize::new(supply_window_len))
         .with_count_policy(PcCountPolicy::CountUnique)
         .with_retained_trace_limit(0)
         .with_execution_policy(

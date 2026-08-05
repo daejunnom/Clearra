@@ -402,4 +402,38 @@ mod tests {
             Some(pattern_count)
         );
     }
+
+    #[cfg(feature = "native-c-core")]
+    #[test]
+    fn opening_failed_queue_runs_with_exact_coverage_words() {
+        use clearra_core_domain::pc::pc_target::PcTarget;
+        use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+        use crate::{AppCommand, AppContext, AppRequest, AppStatus};
+
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])))
+            .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
+
+        let response = AppContext::default().run(AppRequest::new(AppCommand::Percent(
+            PercentAppCommand::failed_queue_opening(query),
+        )));
+
+        assert_eq!(response.status(), AppStatus::Success, "{response:#?}");
+        let Some(AppRenderModel::Percent(result)) = response.render_model() else {
+            panic!("percent render model");
+        };
+        assert_eq!(result.field("result_mode"), Some("failed-queue"));
+        assert_eq!(result.field("problem_preset"), Some("opening-pc"));
+        assert_eq!(result.field("probability_complete"), Some("true"));
+        assert_eq!(result.field("failed_pattern_count"), Some("0"));
+        assert_eq!(result.field("failed_queue_probability"), Some("0"));
+        assert_eq!(result.coverage_pattern_words(), &[1]);
+    }
 }

@@ -180,6 +180,7 @@ dependencies = [
  "clearra-objectives",
  "clearra-output",
  "clearra-pc-graph",
+ "clearra-problem",
  "clearra-profiles",
  "clearra-rules",
  "clearra-scoring",

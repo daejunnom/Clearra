@@ -1,4 +1,7 @@
-use clearra_core_domain::execution_cancellation::{ExecutionCancellationToken, ExecutionControl};
+use clearra_core_domain::{
+    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+    resource::ResourceTruncationReason,
+};
 use clearra_problem::SearchProblem;
 
 use crate::{
@@ -33,6 +36,19 @@ use crate::{
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BuildUpRunner;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum BuildUpExecutionRequest {
+    #[default]
+    QueryDefault,
+    CoverageSummary,
+}
+
+impl BuildUpExecutionRequest {
+    const fn requires_coverage(self) -> bool {
+        matches!(self, Self::CoverageSummary)
+    }
+}
+
 impl BuildUpRunner {
     pub fn run(
         problem: &SearchProblem,
@@ -53,17 +69,55 @@ impl BuildUpRunner {
         )
     }
 
+    pub fn run_for_coverage(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+    ) -> Result<BuildUpRunResult, BuildUpRunnerError> {
+        Self::run_for_coverage_with_control(
+            problem,
+            packing,
+            &ExecutionControl::new(ExecutionCancellationToken::new()),
+        )
+    }
+
     pub fn run_with_control(
         problem: &SearchProblem,
         packing: &PackingRunResult,
         control: &ExecutionControl,
     ) -> Result<BuildUpRunResult, BuildUpRunnerError> {
+        Self::run_with_control_for_request(
+            problem,
+            packing,
+            control,
+            BuildUpExecutionRequest::QueryDefault,
+        )
+    }
+
+    pub fn run_for_coverage_with_control(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        control: &ExecutionControl,
+    ) -> Result<BuildUpRunResult, BuildUpRunnerError> {
+        Self::run_with_control_for_request(
+            problem,
+            packing,
+            control,
+            BuildUpExecutionRequest::CoverageSummary,
+        )
+    }
+
+    fn run_with_control_for_request(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        control: &ExecutionControl,
+        request: BuildUpExecutionRequest,
+    ) -> Result<BuildUpRunResult, BuildUpRunnerError> {
         control.report_progress("buildup", 0, Some(packing.candidate_count() as u64));
         ensure_not_cancelled(control)?;
         let native_execution_span =
             SearchStageSpan::begin(ExecutorSearchStage::BuildUpNativeExecution);
-        let c_execution = if problem.count_policy()
-            == clearra_pc_graph::request::PcCountPolicy::CountUnique
+        let c_execution = if !request.requires_coverage()
+            && problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
             && !problem.solution_probability_policy().requested()
         {
             c_buildup_unique_solution_results(problem, packing, &control.cancellation, control)?
@@ -134,6 +188,11 @@ impl BuildUpRunner {
             Some(coverage_rows.len() as u64),
         );
         let count_complete = packing.count_complete() && c_execution.count_complete;
+        let materialized_coverage_complete = c_execution.execution_mode.can_source_coverage()
+            && c_execution.count_complete
+            && (packing.count_complete()
+                || packing.truncation_reason()
+                    == Some(ResourceTruncationReason::ObservedUniverseTruncated));
         let count_truncated_reason = packing
             .truncation_reason()
             .map(|reason| reason.as_str())
@@ -244,6 +303,7 @@ impl BuildUpRunner {
             coverage_probability,
             c_execution.execution_mode,
             c_execution.coverage_source,
+            materialized_coverage_complete,
             objective_complete,
             objective_incomplete_reason,
             solution_coverages,
