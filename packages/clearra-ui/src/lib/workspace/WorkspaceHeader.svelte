@@ -10,6 +10,7 @@
   export let activeMode: WorkspaceMode;
   export let language: WorkspaceLanguage;
   export let active = false;
+  export let statusActive: boolean | undefined = undefined;
   export let statusLabel: string;
 
   const dispatch = createEventDispatcher<{ language: WorkspaceLanguage }>();
@@ -19,6 +20,7 @@
   let frame = 0;
 
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: if (typeof document !== 'undefined') document.documentElement.lang = language;
 
   onMount(() => {
     lastScrollY = window.scrollY;
@@ -52,13 +54,13 @@
         <span>{label('pcSolver')}</span>
       </a>
     {/if}
-    <div class="header-status">
-      <span class:running={active}><i></i>{statusLabel}</span>
+    <div class="header-status" role="status" aria-live="polite" aria-atomic="true">
+      <span class:running={statusActive ?? active}><i></i>{statusLabel}</span>
     </div>
-    <div class="language-control" aria-label={label('language')}>
+    <div class="language-control" role="group" aria-label={label('language')}>
       <Languages size={16} strokeWidth={1.8} />
-      <button type="button" class:active={language === 'en'} on:click={() => dispatch('language', 'en')}>EN</button>
-      <button type="button" class:active={language === 'ko'} on:click={() => dispatch('language', 'ko')}>KO</button>
+      <button type="button" class:active={language === 'en'} aria-pressed={language === 'en'} on:click={() => dispatch('language', 'en')}>EN</button>
+      <button type="button" class:active={language === 'ko'} aria-pressed={language === 'ko'} on:click={() => dispatch('language', 'ko')}>KO</button>
     </div>
   </header>
   <ProductModeTabs active={activeMode} {language} busy={active} />
@@ -112,12 +114,21 @@
 
   @media (prefers-reduced-motion: reduce) {
     .header-shell { transition: none; }
+    .header-status span.running i { animation: none; opacity: 1; }
   }
 
   @media (max-width: 720px) {
     .app-header { grid-template-columns: 1fr auto; }
     .app-header.has-solver-link { grid-template-columns: 1fr auto auto; }
-    .header-status { display: none; }
+    .header-status {
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      height: 1px;
+      overflow: hidden;
+      position: absolute;
+      white-space: nowrap;
+      width: 1px;
+    }
     .pc-solver-link { justify-content: center; padding: 0; width: 34px; }
     .pc-solver-link span { display: none; }
   }

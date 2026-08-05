@@ -4,4 +4,5 @@ export type WorkspaceMode =
   | 'build-probability'
   | 'damage'
   | 'spin-finder'
-  | 'ctk';
+  | 'ctk'
+  | 'player';

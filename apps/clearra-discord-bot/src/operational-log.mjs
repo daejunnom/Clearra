@@ -97,8 +97,12 @@ export function canonicalOperationalCommand(value) {
     if (DISCORD_COMMAND_PATHS.has(canonical)) return canonical;
   }
   if (DISCORD_COMMAND_PATHS.has(candidate)) return candidate;
-  // score-finder retains the established internal engine subcommand, but that
-  // implementation detail must never split its public telemetry identity.
-  if (candidate === "sfinder.score-finder") return "score-finder";
+  // Compatibility routes retain an internal sfinder prefix. Public telemetry
+  // uses the same identity as the equivalent slash command so one operation is
+  // never split into transport-specific rows.
+  if (candidate.startsWith("sfinder.")) {
+    const publicCommand = candidate.slice("sfinder.".length);
+    if (DISCORD_ROOT_COMMANDS.has(publicCommand)) return publicCommand;
+  }
   return canonicalClearraOperationalCommand(candidate);
 }

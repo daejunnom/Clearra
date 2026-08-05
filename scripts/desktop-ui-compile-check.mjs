@@ -17,6 +17,13 @@ const svelteSources = [
   'packages/clearra-ui/src/lib/workspace/WorkspaceHeader.svelte',
   'packages/clearra-ui/src/lib/workspace/CtkDrawerWorkspace.svelte',
   'packages/clearra-ui/src/lib/workspace/CtkColorBoardEditor.svelte',
+  'packages/clearra-ui/src/lib/workspace/PlayerWorkspace.svelte',
+  'packages/clearra-ui/src/lib/workspace/player/PlayerFinderDrawer.svelte',
+  'packages/clearra-ui/src/lib/workspace/player/PlayerBoard.svelte',
+  'packages/clearra-ui/src/lib/workspace/player/PlayerControls.svelte',
+  'packages/clearra-ui/src/lib/workspace/player/PlayerSettingsDrawer.svelte',
+  'packages/clearra-ui/src/lib/workspace/player/PlayerKeyBindingEditor.svelte',
+  'packages/clearra-ui/src/lib/workspace/player/PlayerPiecePreview.svelte',
   'packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte',
   'packages/clearra-ui/src/lib/workspace/SearchControls.svelte',
   'packages/clearra-ui/src/lib/workspace/PcSolverStandalone.svelte',
@@ -40,6 +47,15 @@ const typescriptSources = [
   'packages/clearra-ui/src/lib/wasm/wasmWorkerStore.ts',
   'packages/clearra-ui/src/lib/workspace/setupFinderModel.ts',
   'packages/clearra-ui/src/lib/workspace/ctkAutoColor.ts',
+  'packages/clearra-ui/src/lib/workspace/ctkBoardTheme.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerEngine.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerGarbage.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerInput.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerFinderModel.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerRenderer.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerRules.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerSettings.ts',
+  'packages/clearra-ui/src/lib/workspace/player/playerUiModel.ts',
   'packages/clearra-ui/src/lib/workspace/ctk3File.ts',
   'packages/clearra-ui/src/lib/workspace/documentPaste.ts',
   'packages/clearra-ui/src/lib/workspace/buildProbabilityModel.ts',
@@ -79,11 +95,13 @@ for (const requiredMarker of [
   "'damage'",
   "'spin-finder'",
   "'ctk'",
+  "'player'",
   '<SolverWorkspace runtime="desktop"',
   '<SetupFinderWorkspace runtime="desktop"',
   '<BuildProbabilityWorkspace runtime="desktop"',
   '<ForwardSearchWorkspace tool={selectedTool} runtime="desktop"',
-  '<CtkDrawerWorkspace'
+  '<CtkDrawerWorkspace',
+  '<PlayerWorkspace'
 ]) {
   if (!desktopEntrySource.includes(requiredMarker)) {
     throw new Error(`desktop tool route is missing ${requiredMarker}`);
@@ -91,5 +109,5 @@ for (const requiredMarker of [
 }
 
 console.log(
-  `desktop_ui_in_memory_compile=passed svelte=${svelteSources.length} typescript=${typescriptSources.length} tool_routes=6 artifact_write=${artifactWrite}`
+  `desktop_ui_in_memory_compile=passed svelte=${svelteSources.length} typescript=${typescriptSources.length} tool_routes=7 artifact_write=${artifactWrite}`
 );

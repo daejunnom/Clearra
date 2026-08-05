@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { Blocks, Flame, Grid3X3, Layers3, Palette, RotateCw } from '@lucide/svelte';
+  import { Blocks, Flame, Gamepad2, Grid3X3, Layers3, Palette, RotateCw } from '@lucide/svelte';
 
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import type { WorkspaceMode } from './workspaceMode';
@@ -85,6 +85,16 @@
   >
     <Palette size={16} strokeWidth={1.8} />{label('ctkDrawer')}
   </a>
+  <a
+    href="?tool=player"
+    class:active={active === 'player'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'player' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Gamepad2 size={16} strokeWidth={1.8} />{label('player')}
+  </a>
 </nav>
 
 <div class="product-mode-select">
@@ -97,6 +107,7 @@
       <option value="?tool=damage">{label('maximumDamage')}</option>
       <option value="?tool=spin-finder">{label('spinFinder')}</option>
       <option value="?tool=ctk">{label('ctkDrawer')}</option>
+      <option value="?tool=player">{label('player')}</option>
     </select>
   </label>
 </div>

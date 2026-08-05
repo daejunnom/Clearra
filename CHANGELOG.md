@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-08-06
+
+- Added a clean-room Player workspace to the browser and Tauri products. It
+  keeps a compact retained simulation and Canvas2D render state, uses the CTK
+  palette, supports 48 hidden rows, and avoids rebuilding board state on every
+  presentation frame.
+- Added configurable Player handling, gravity and force-placement timing,
+  kick/spin and scoring profiles, key bindings, garbage generation, clutch
+  clears, unlimited hold, long explicit NEXT queues, and deterministic
+  placement undo/redo. Resetting random play now advances to a fresh seven-bag
+  rather than replaying the previous one.
+- Embedded PC and setup finder entry points in the Player settings drawer. PC
+  search distinguishes known seven-piece state from order-unknown bag residue,
+  preserves field and hold provenance, and supports up to six rows; setup
+  search is offered only for an empty locked field.
+- Extended the shared product shell, navigation, page metadata, and English and
+  Korean UI strings for the Player while retaining the existing CTK and search
+  workspaces unchanged.
+- Canonicalized compatible `$` and `>` command identities at the Discord
+  boundary so recognized text commands use the same operational command name
+  as their slash equivalent, including aliases and recoverable malformed
+  argument forms, without retaining raw message text.
+
 ## 0.6.3 - 2026-08-05
 
 - Consolidated Discord ingress behind one Gateway process and delegated heavy

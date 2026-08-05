@@ -28,6 +28,9 @@
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
   $: solutionPageAvailable = summaryFields.solution_page_available === 'true';
   $: solutionCount = report?.unique_solution_count ?? solutionKeys.length;
+  $: resultIncomplete = view.status === 'completed' && (
+    report?.count_complete === false || view.resourceReport?.truncated === true
+  );
   $: exportKeySource = solutionPageAvailable && loadSolutionPage
     ? createExportKeySource(solutionCount, loadSolutionPage)
     : null;
@@ -125,6 +128,9 @@
         {#each failureMessages as message}<p>{message}</p>{/each}
       </div>
     {:else if view.status === 'completed'}
+      {#if resultIncomplete}
+        <p class="incomplete" role="status">{label('playerFinderResultsIncomplete')}</p>
+      {/if}
       <div class="result-summary">
         <div><strong>{number(solutionCount)}</strong><span>{label('solutions')}</span></div>
         <div><strong>{workspaceProbability(language, report?.coverage_probability)}</strong><span>{label('coverage')}</span></div>
@@ -148,7 +154,7 @@
           {copyFormat}
         />
       {:else}
-        <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('noSolutions')}</span></div>
+        <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
       {/if}
     {/if}
   </section>
@@ -167,6 +173,7 @@
   .failure { background: #fff1ed; border-left: 3px solid #c45635; color: #8d3026; margin-top: 16px; padding: 10px 13px; }
   .failure p { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
   .failure p + p { margin-top: 4px; }
+  .incomplete { background: #fff7df; border-left: 3px solid #c89b2f; color: #654a0e; font-size: 11px; line-height: 1.5; margin: 16px 0 0; padding: 9px 11px; }
   .result-summary { border-bottom: 1px solid #e0e5e2; gap: 28px; margin: 18px 0; padding-bottom: 16px; }
   .result-summary > div { gap: 7px; }
   .result-summary strong { color: #17211e; font-size: 21px; }

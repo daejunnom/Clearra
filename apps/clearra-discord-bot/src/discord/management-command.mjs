@@ -90,6 +90,48 @@ export function readTextManagementRequest(content, prefix) {
   return Object.freeze({ scope, action, locale });
 }
 
+/**
+ * Returns only an allow-listed management command path. Argument validation is
+ * intentionally separate: a recognised command that later fails validation
+ * must retain the same operational identity as its slash-command equivalent.
+ */
+export function classifyTextManagementCommand(content, prefix) {
+  const source = String(content ?? "").trim();
+  if (!isTextManagementCandidate(source, prefix)) return null;
+  const tokens = source
+    .slice(prefix.length)
+    .trim()
+    .split(/\s+/u, 4)
+    .map((value) => value.toLowerCase());
+  if (tokens[0] !== "bot-control") return null;
+  if (tokens[1] === "help") return "help";
+
+  const scope = tokens[1] === "channel"
+    ? "channel-settings"
+    : tokens[1] === "server"
+      ? "server-settings"
+      : null;
+  if (!scope) return null;
+  if (tokens[2] === "language") {
+    return ["show", "set", "reset"].includes(tokens[3])
+      ? `${scope}.language-${tokens[3]}`
+      : null;
+  }
+  if (
+    scope === "channel-settings" &&
+    ["disable", "enable"].includes(tokens[2])
+  ) {
+    return `${scope}.${tokens[2]}`;
+  }
+  if (
+    scope === "server-settings" &&
+    ["pause", "resume"].includes(tokens[2])
+  ) {
+    return `${scope}.${tokens[2]}`;
+  }
+  return null;
+}
+
 export function isTextManagementCandidate(content, prefix) {
   if (typeof prefix !== "string" || prefix.length === 0) return false;
   const source = String(content ?? "").trim();

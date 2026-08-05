@@ -24,7 +24,8 @@ test("text command classification shares parser aliases without retaining argume
     ["$path --field PRIVATE --next PRIVATE", "$", "path"],
     [">score-finder PRIVATE PRIVATE", ">", "score-finder"],
     ["$sfinder score-finder PRIVATE PRIVATE", "$", "score-finder"],
-    [">sfinder bestsave PRIVATE", ">", "sfinder.best-save"],
+    [">sfinder bestsave PRIVATE", ">", "best-save"],
+    ["$clearra sfinder path PRIVATE", "$", "path"],
     ["$clearra pc --field PRIVATE", "$", "pc"],
     ["$pc --field PRIVATE", "$", null],
     [">cat-finder PRIVATE", ">", null],
@@ -34,6 +35,49 @@ test("text command classification shares parser aliases without retaining argume
 
   for (const [content, prefix, expected] of cases) {
     assert.equal(classifyClearraTextCommand(content, prefix), expected);
+  }
+});
+
+test("text command classification keeps an exact identity when arguments are malformed", () => {
+  const privateTail = "PRIVATE_FIELD";
+  const cases = [
+    [`$path --field \"${privateTail}`, "$", "path"],
+    [`>score-finder \`${privateTail}`, ">", "score-finder"],
+    [`$sfinder bestsave \"${privateTail}`, "$", "best-save"],
+    [`$clearra pc \"${privateTail}`, "$", "pc"],
+  ];
+
+  for (const [content, prefix, expected] of cases) {
+    assert.equal(classifyClearraTextCommand(content, prefix), expected);
+  }
+});
+
+test("sfinder compatibility spellings share their slash-command identities", () => {
+  const cases = [
+    ["bestsave", "best-save"],
+    ["bestsetup", "best-setup"],
+    ["congruentcover", "congruent-cover"],
+    ["coverpercent", "cover-percent"],
+    ["dpcfinder", "dpc-finder"],
+    ["pcsetup", "pc-setup"],
+    ["scoreminimals", "score-minimals"],
+    ["setupcover", "setup-cover"],
+    ["specialcover", "special-cover"],
+    ["spincover", "spin-cover"],
+  ];
+
+  for (const [compatibilityName, slashName] of cases) {
+    assert.equal(
+      classifyClearraTextCommand(`$sfinder ${compatibilityName} PRIVATE`, "$"),
+      slashName,
+    );
+    assert.equal(
+      classifyClearraTextCommand(
+        `>clearra sfinder ${compatibilityName} PRIVATE`,
+        ">",
+      ),
+      slashName,
+    );
   }
 });
 

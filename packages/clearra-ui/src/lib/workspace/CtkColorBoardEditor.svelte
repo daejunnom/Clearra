@@ -23,6 +23,12 @@
     Ctk3Rotation
   } from './ctk3Codec';
   import {
+    CTK_BOARD_WIDTH,
+    CTK_BOARD_THEME,
+    CTK_COLOR_HEX,
+    CTK_PALETTE_COLORS
+  } from './ctkBoardTheme';
+  import {
     isOperationPlaceable,
     operationCells
   } from './ctkPageTools';
@@ -41,16 +47,13 @@
     clear: void;
     operation: Ctk3Operation | undefined;
   }>();
-  const palette: Array<Exclude<Ctk3Color, null>> = [
-    'G',
-    'I',
-    'O',
-    'T',
-    'S',
-    'Z',
-    'J',
-    'L'
-  ];
+  const palette = CTK_PALETTE_COLORS;
+  const boardThemeStyle = [
+    `--ctk-columns:${CTK_BOARD_WIDTH}`,
+    `--ctk-board:${CTK_BOARD_THEME.board}`,
+    `--ctk-empty:${CTK_BOARD_THEME.empty}`,
+    ...palette.map((color) => `--ctk-${color.toLowerCase()}:${CTK_COLOR_HEX[color]}`)
+  ].join(';');
   const pieces: Ctk3Piece[] = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
   const rotations: Ctk3Rotation[] = ['spawn', 'right', 'reverse', 'left'];
   const rotationSymbols: Record<Ctk3Rotation, string> = {
@@ -113,20 +116,20 @@
     ? isOperationPlaceable(
         previewOperation,
         normalizedCells,
-        10,
+        CTK_BOARD_WIDTH,
         height
       )
     : false;
   $: previewIndexes = new Set(
     previewOperation
       ? operationCells(previewOperation)
-          .filter(({ x, y }) => x >= 0 && x < 10 && y >= 0 && y < height)
-          .map(({ x, y }) => y * 10 + x)
+          .filter(({ x, y }) => x >= 0 && x < CTK_BOARD_WIDTH && y >= 0 && y < height)
+          .map(({ x, y }) => y * CTK_BOARD_WIDTH + x)
       : []
   );
   $: axisIndex =
     placingOperation && hoverAnchor
-      ? hoverAnchor.y * 10 + hoverAnchor.x
+      ? hoverAnchor.y * CTK_BOARD_WIDTH + hoverAnchor.x
       : -1;
   $: label = (key: Parameters<typeof workspaceMessage>[1]) =>
     workspaceMessage(language, key);
@@ -144,7 +147,7 @@
     lastCell = -1;
     workingCells = normalizedCells.slice();
     dragColor =
-      workingCells[y * 10 + x] === null
+      workingCells[y * CTK_BOARD_WIDTH + x] === null
         ? selected
         : null;
     board?.setPointerCapture(event.pointerId);
@@ -165,11 +168,11 @@
     if (!board) return null;
     const bounds = board.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return null;
-    const x = Math.floor(((event.clientX - bounds.left) / bounds.width) * 10);
+    const x = Math.floor(((event.clientX - bounds.left) / bounds.width) * CTK_BOARD_WIDTH);
     const displayY = Math.floor(
       ((event.clientY - bounds.top) / bounds.height) * height
     );
-    if (x < 0 || x >= 10 || displayY < 0 || displayY >= height) return null;
+    if (x < 0 || x >= CTK_BOARD_WIDTH || displayY < 0 || displayY >= height) return null;
     return { x, y: height - displayY - 1 };
   }
 
@@ -189,7 +192,7 @@
       return;
     }
     if (!paintMode) return;
-    const index = y * 10 + x;
+    const index = y * CTK_BOARD_WIDTH + x;
     workingCells = normalizedCells.slice();
     lastCell = -1;
     dragColor = workingCells[index] === null ? selected : null;
@@ -198,7 +201,7 @@
   }
 
   function paint(x: number, y: number) {
-    const index = y * 10 + x;
+    const index = y * CTK_BOARD_WIDTH + x;
     if (index === lastCell) return;
     lastCell = index;
     if (dragColor === 'auto') {
@@ -286,10 +289,10 @@
       x,
       y
     };
-    if (!isOperationPlaceable(candidate, normalizedCells, 10, height)) return;
+    if (!isOperationPlaceable(candidate, normalizedCells, CTK_BOARD_WIDTH, height)) return;
     const next = normalizedCells.slice();
     for (const { x: cellX, y: cellY } of operationCells(candidate)) {
-      next[cellY * 10 + cellX] = candidate.piece;
+      next[cellY * CTK_BOARD_WIDTH + cellX] = candidate.piece;
     }
     paintMode = false;
     hoverAnchor = null;
@@ -299,10 +302,10 @@
   function commitStoredOperation() {
     const stored = localOperation;
     if (!stored) return;
-    if (isOperationPlaceable(stored, normalizedCells, 10, height)) {
+    if (isOperationPlaceable(stored, normalizedCells, CTK_BOARD_WIDTH, height)) {
       const next = normalizedCells.slice();
       for (const { x, y } of operationCells(stored)) {
-        next[y * 10 + x] = stored.piece;
+        next[y * CTK_BOARD_WIDTH + x] = stored.piece;
       }
       emitCells(next);
     }
@@ -336,7 +339,7 @@
   }
 
   function normalizeCells(source: Ctk3Color[], rows: number): Ctk3Color[] {
-    const result = Array<Ctk3Color>(rows * 10).fill(null);
+    const result = Array<Ctk3Color>(rows * CTK_BOARD_WIDTH).fill(null);
     result.splice(
       0,
       Math.min(result.length, source.length),
@@ -384,7 +387,7 @@
   on:keydown={handleShortcut}
 />
 
-<div class="board-editor">
+<div class="board-editor" style={boardThemeStyle}>
 
 <div class="palette" role="toolbar" aria-label={label('ctkPalette')}>
   <button
@@ -524,7 +527,7 @@
     class="board"
     class:operation-placement={placingOperation}
     class:operation-idle={!paintMode && !placingOperation}
-    style={`--rows:${height};aspect-ratio:${10 / height}`}
+    style={`--rows:${height};aspect-ratio:${CTK_BOARD_WIDTH / height}`}
     role="grid"
     tabindex="0"
     aria-label={label('ctkDrawerBoard')}
@@ -532,8 +535,8 @@
     on:pointerleave={() => (hoverAnchor = null)}
   >
     {#each rows as y}
-      {#each Array.from({ length: 10 }, (_, index) => index) as x}
-        {@const index = y * 10 + x}
+      {#each Array.from({ length: CTK_BOARD_WIDTH }, (_, index) => index) as x}
+        {@const index = y * CTK_BOARD_WIDTH + x}
         {@const color = workingCells[index] ?? null}
         <button
           type="button"
@@ -610,7 +613,7 @@
   .auto-color {
     background:
       linear-gradient(135deg, rgba(255, 255, 255, .78), rgba(255, 255, 255, .2)),
-      conic-gradient(from 30deg, #55cbd3, #f3cf4d, #b66ad0, #65c778, #e96e6e, #628ae0, #ef9c4d, #55cbd3);
+      conic-gradient(from 30deg, var(--ctk-i), var(--ctk-o), var(--ctk-t), var(--ctk-s), var(--ctk-z), var(--ctk-j), var(--ctk-l), var(--ctk-i));
     color: #17211e;
   }
 
@@ -757,7 +760,7 @@
   }
 
   .board-frame {
-    background: #101817;
+    background: var(--ctk-board);
     border: 1px solid #253330;
     border-radius: 6px;
     padding: 14px;
@@ -765,7 +768,7 @@
 
   .board {
     display: grid;
-    grid-template-columns: repeat(10, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--ctk-columns), minmax(0, 1fr));
     grid-template-rows: repeat(var(--rows), minmax(0, 1fr));
     margin: 0 auto;
     max-height: 640px;
@@ -793,7 +796,7 @@
   }
 
   .cell.empty {
-    background: #1e2927;
+    background: var(--ctk-empty);
     box-shadow: inset 0 0 0 1px rgba(216, 226, 222, .2);
   }
 
@@ -848,22 +851,22 @@
     z-index: 2;
   }
 
-  .piece-G { background: #7b8581; }
-  .piece-I { background: #55cbd3; }
-  .piece-O { background: #f3cf4d; }
-  .piece-T { background: #b66ad0; }
-  .piece-S { background: #65c778; }
-  .piece-Z { background: #e96e6e; }
-  .piece-J { background: #628ae0; }
-  .piece-L { background: #ef9c4d; }
+  .piece-G { background: var(--ctk-g); }
+  .piece-I { background: var(--ctk-i); }
+  .piece-O { background: var(--ctk-o); }
+  .piece-T { background: var(--ctk-t); }
+  .piece-S { background: var(--ctk-s); }
+  .piece-Z { background: var(--ctk-z); }
+  .piece-J { background: var(--ctk-j); }
+  .piece-L { background: var(--ctk-l); }
 
-  .operation-piece-I { --operation-color: #55cbd3; }
-  .operation-piece-O { --operation-color: #f3cf4d; }
-  .operation-piece-T { --operation-color: #b66ad0; }
-  .operation-piece-S { --operation-color: #65c778; }
-  .operation-piece-Z { --operation-color: #e96e6e; }
-  .operation-piece-J { --operation-color: #628ae0; }
-  .operation-piece-L { --operation-color: #ef9c4d; }
+  .operation-piece-I { --operation-color: var(--ctk-i); }
+  .operation-piece-O { --operation-color: var(--ctk-o); }
+  .operation-piece-T { --operation-color: var(--ctk-t); }
+  .operation-piece-S { --operation-color: var(--ctk-s); }
+  .operation-piece-Z { --operation-color: var(--ctk-z); }
+  .operation-piece-J { --operation-color: var(--ctk-j); }
+  .operation-piece-L { --operation-color: var(--ctk-l); }
 
   @media (max-width: 620px) {
     .operation-tools {

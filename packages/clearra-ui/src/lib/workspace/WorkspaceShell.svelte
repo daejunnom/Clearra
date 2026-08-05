@@ -9,6 +9,7 @@
   export let activeMode: WorkspaceMode;
   export let language: WorkspaceLanguage;
   export let active = false;
+  export let statusActive: boolean | undefined = undefined;
   export let statusLabel: string;
   export let workspaceLabel: string;
   export let dimensionLabel: string;
@@ -20,6 +21,7 @@
   export let runLabel: string;
   export let runDisabled = false;
   export let singlePanel = false;
+  export let editorOnly = false;
   export let showActions = true;
 
   const dispatch = createEventDispatcher<{
@@ -40,6 +42,7 @@
     {activeMode}
     {language}
     {active}
+    statusActive={statusActive ?? active}
     {statusLabel}
     on:language={(event) => dispatch('language', event.detail)}
   />
@@ -77,7 +80,7 @@
 
   <section class="workspace-band" bind:this={workspaceRegion}>
     <slot name="notice" />
-    <div class="workspace-grid" class:single-panel={singlePanel}>
+    <div class="workspace-grid" class:single-panel={singlePanel} class:editor-only={editorOnly}>
       <div class="workspace-editor"><slot name="editor" /></div>
       <div class="workspace-controls"><slot name="controls" /></div>
     </div>
@@ -122,6 +125,9 @@
     border-left: 0;
     padding-left: 0;
   }
+  .workspace-grid.editor-only { grid-template-columns: minmax(0, 1fr); }
+  .workspace-grid.editor-only .workspace-editor { padding-right: 0; }
+  .workspace-grid.editor-only .workspace-controls { display: none; }
 
   @media (max-width: 980px) {
     .workspace-grid { grid-template-columns: 1fr; }

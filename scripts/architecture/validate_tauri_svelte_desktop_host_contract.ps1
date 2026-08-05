@@ -12,6 +12,8 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         "apps/clearra-desktop/src-tauri/src/main.rs",
         "apps/clearra-desktop/src-tauri/src/commands.rs",
         "packages/clearra-ui/src/lib/components/DesktopHostShell.svelte",
+        "packages/clearra-ui/src/lib/workspace/PlayerWorkspace.svelte",
+        "packages/clearra-ui/src/lib/workspace/ctkBoardTheme.ts",
         "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts",
         "packages/clearra-ui/src/lib/stores/desktopJobStore.ts",
         "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs",
@@ -117,11 +119,13 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         "'damage'",
         "'spin-finder'",
         "'ctk'",
+        "'player'",
         '<SolverWorkspace runtime="desktop"',
         '<SetupFinderWorkspace runtime="desktop"',
         '<BuildProbabilityWorkspace runtime="desktop"',
         '<ForwardSearchWorkspace tool={selectedTool} runtime="desktop"',
-        '<CtkDrawerWorkspace'
+        '<CtkDrawerWorkspace',
+        '<PlayerWorkspace'
     )) {
         if ($desktopEntry -notlike "*$requiredMarker*") {
             Add-ArchitectureError "U6 desktop entrypoint is missing product tool route '$requiredMarker'"

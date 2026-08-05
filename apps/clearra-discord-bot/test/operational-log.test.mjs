@@ -51,7 +51,8 @@ test("operational command labels must resolve through a canonical product catalo
 
   assert.equal(canonicalOperationalCommand("cat-finder"), null);
   assert.equal(canonicalOperationalCommand("sfinder.score-finder"), "score-finder");
-  assert.equal(canonicalOperationalCommand("sfinder.path"), "sfinder.path");
+  assert.equal(canonicalOperationalCommand("sfinder.path"), "path");
+  assert.equal(canonicalOperationalCommand("sfinder.best-save"), "best-save");
   assert.equal(canonicalOperationalCommand("spin-structure"), "spin-structure");
   assert.equal(canonicalOperationalCommand("spin_structure"), "spin-structure");
   assert.equal(canonicalOperationalCommand(unknown), null);

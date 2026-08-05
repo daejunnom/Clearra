@@ -12,12 +12,15 @@ export type SpinProfile =
   | 'all-mini-plus';
 export type SearchBackend = 'auto' | 'cpu' | 'gpu' | 'hybrid';
 export type QueueKnowledge = 'oracle' | 'visible-7';
+export type SolverHoldPiece = 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
 
 export type SolverWorkspaceRequest = {
   lines: number;
   boardMask: bigint;
   queue: string;
   holdEnabled: boolean;
+  /** Omitted callers keep the historical empty-hold scenario. */
+  holdPiece?: SolverHoldPiece;
   queueKnowledge: QueueKnowledge;
   scoreMode: ScoreMode;
   scoreProfile: ScoreProfile;
@@ -32,6 +35,8 @@ export type SolverWorkspaceRequest = {
   useAllLogicalProcessors: boolean;
   tablebaseEnabled: boolean;
   precomputeBuildDependencies: boolean;
+  /** Exact pattern-universe ceiling for generated factorized inputs. */
+  maxPatterns?: number;
 };
 
 export type WorkspaceValidationCode =
@@ -374,7 +379,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     String(pieceWindow ?? 1)
   );
   if (request.scoreMode === 'tiling') tokens.push('--tiling-only');
-  if (request.holdEnabled) tokens.push('--hold', 'empty');
+  if (request.holdEnabled) tokens.push('--hold', request.holdPiece ?? 'empty');
   else tokens.push('--no-hold');
   if (request.queue) {
     tokens.push(
@@ -420,6 +425,9 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   );
   if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
   if (request.backend !== 'cpu') tokens.push('--gpu-warmup');
+  if (request.maxPatterns !== undefined) {
+    tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+  }
   return tokens.join(' ');
 }
 
@@ -438,7 +446,7 @@ export function workspaceRequestForDesktop(
     patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
     hold_enabled: request.holdEnabled,
     queue_knowledge: request.queueKnowledge,
-    hold_piece: 'empty' as const,
+    hold_piece: request.holdEnabled ? request.holdPiece ?? 'empty' : 'empty',
     backend: request.backend,
     rule: request.rule,
     board_mask: boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
@@ -461,6 +469,8 @@ export function workspaceRequestForDesktop(
     allow_backend_fallback: true,
     memory_budget_mb: 0,
     candidate_budget: 10_000_000,
-    pattern_budget: 5040
+    pattern_budget: request.maxPatterns === undefined
+      ? 5040
+      : Math.max(1, Math.trunc(request.maxPatterns))
   };
 }

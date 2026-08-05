@@ -25,11 +25,13 @@ converts the form to `AppRequest`, validates it, calls `AppContext::run`, and
 serializes the resulting host `AppResponse`. It never builds CLI text, launches
 `clearra.exe`, or parses CLI output.
 
-The desktop entry exposes all six product modes: PC search, setup finder,
-build probability, damage, spin finder, and the CTK drawer. The five search
-modes share the typed request/job boundary; CTK remains a local document and
-rendering tool. Setup solution-path expansion uses the same typed setup request
-with explicit setup and condition identifiers.
+The desktop entry exposes seven product modes: PC search, setup finder, build
+probability, damage, spin finder, the CTK drawer, and Player. The five primary
+search modes share the typed request/job boundary; CTK remains a local document
+and rendering tool. Player keeps local simulation state and can submit bounded
+PC or setup requests through the existing typed finder boundary without a route
+change. Setup solution-path expansion uses the same typed setup request with
+explicit setup and condition identifiers.
 
 The product build does not contain a native C GUI shell, shell-preview desktop
 binary, or fixture response generator. It executes the exact WASM CPU backend
@@ -71,6 +73,20 @@ Clicking a preview preserves that preview's viewport position across the page
 change, the reactive preview-window update, and the next paint. The strip uses
 stable page keys and disables browser scroll anchoring; this prevents the main
 workspace from jumping vertically when a distant frame is selected.
+
+## Player
+
+Player owns a retained fixed-step simulation rather than rebuilding a Svelte
+cell tree each frame. Canvas2D rendering uses the shared CTK palette, while
+settings, status, and finder results update at lower frequency. Input state is
+scoped to the focused Player surface and is released on blur, visibility loss,
+route destruction, and page hide.
+
+The settings drawer exposes validated movement, gravity, force-placement,
+kick/spin, scoring, key-binding, queue, hold, clutch-clear, and garbage options.
+Its finder drawer reuses the current field, hold, and NEXT state: PC search can
+use known queue order or order-unknown bag residue for heights up to six rows,
+and setup search appears only when the locked field is empty.
 
 ## Verification
 

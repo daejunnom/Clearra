@@ -39,6 +39,7 @@
   export let elapsedMs = 0;
   export let searchMode: SetupSearchMode = 'oracle';
   export let pathDetails: Record<string, SetupPathDetailState> = {};
+  export let enablePathDetails = true;
 
   const PAGE_SIZE = 100;
   const dispatch = createEventDispatcher<{ loadPaths: SetupPathDetailRequest }>();
@@ -70,6 +71,12 @@
     (total, condition) => total + condition.candidate_count,
     0
   ) ?? 0;
+  $: resultIncomplete = report !== null && (
+    !report.complete || report.hold_conditions.some((condition) => !condition.complete)
+  );
+  $: resultTruncated = report !== null && report.hold_conditions.some((condition) =>
+    condition.result_truncated || condition.candidate_count > condition.candidates.length
+  );
   $: visibleCandidateCount = Math.min(visibleCandidateCount, retainedCandidateCount);
   $: preparedCandidateCount = Math.min(
     retainedCandidateCount,
@@ -283,6 +290,11 @@
     <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSetupResult')}</p></div>
   {:else if report && view.status !== 'failed' && view.status !== 'terminated'}
     <div class="setup-content">
+      {#if resultIncomplete}
+        <p class="incomplete" role="status">{label('playerFinderSetupIncomplete')}</p>
+      {:else if resultTruncated}
+        <p class="incomplete" role="status">{label('playerFinderSetupTruncated')}</p>
+      {/if}
       <section class="setup-overview" aria-label={label('overview')}>
         <div class="overview-lead">
           <span>{label(report.search_mode === 'qb' ? 'setupModeQb' : 'pcCycle')}</span>
@@ -325,7 +337,9 @@
       >
         <div class="solutions-heading">
           <h2>{label('setups')}</h2>
-          <span>{number(retainedCandidateCount)}</span>
+          <span>{resultIncomplete || resultTruncated
+            ? `${number(retainedCandidateCount)} / ${number(totalCandidateCount)}`
+            : number(retainedCandidateCount)}</span>
         </div>
         {#if renderedGroups.length}
           {#each renderedGroups as condition}
@@ -371,6 +385,7 @@
                         ? label('lockCount', { count: result.candidate.min_locks })
                         : label('lockRange', { min: result.candidate.min_locks, max: result.candidate.max_locks })}</span>
                     </div>
+                    {#if enablePathDetails}
                     <details
                       class="setup-path"
                       on:toggle={(event) => requestPaths(
@@ -453,6 +468,7 @@
                         <p class="path-status">{label('loadExactBuildSolutions')}</p>
                       {/if}
                     </details>
+                    {/if}
                   </li>
                 {/each}
               </ol>
@@ -476,6 +492,7 @@
 <style>
   .empty-state { align-items: center; color: #87918d; display: flex; flex-direction: column; justify-content: center; min-height: 220px; text-align: center; }
   .empty-state p { font-size: 13px; margin: 12px 0 0; }
+  .incomplete { background: #fff7df; border-left: 3px solid #c89b2f; color: #654a0e; font-size: 11px; line-height: 1.5; margin: 0; padding: 9px 11px; }
   .setup-content { display: grid; gap: 32px; }
   .setup-overview { border-bottom: 1px solid #dce2de; display: grid; gap: 18px; padding-bottom: 28px; }
   .overview-lead { border-bottom: 1px solid #dce2de; display: grid; gap: 4px; padding-bottom: 16px; }

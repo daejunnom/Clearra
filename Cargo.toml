@@ -44,7 +44,7 @@ members = [
 exclude = ["apps/clearra-desktop/src-tauri"]
 
 [workspace.package]
-version = "0.6.3"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 

@@ -48,6 +48,7 @@ artifact hash는 연구 기록이며 장기 제품 계약이 아니다. 같은 �
 - [`suffix-sharing-optimization.md`](research/suffix-sharing-optimization.md)
 - [`forward-spin-optimization.md`](research/forward-spin-optimization.md)
 - [`spin-structure-search-2026-08.md`](research/spin-structure-search-2026-08.md)
+- [`player-gui-clean-room-2026-08.md`](research/player-gui-clean-room-2026-08.md)
 - [`tsar-half-geometry-bottleneck.md`](research/tsar-half-geometry-bottleneck.md)
 
 대화에 첨부되었던 `APDP English.md`, `APDP 한국어.md`, 역방향 탐색

@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, PC_SOLVER_HREF_CONTEXT, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
+  import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
   import { onMount, setContext } from 'svelte';
   import { resolveCtkViewerQuery } from '../lib/ctkViewerQuery';
 
@@ -19,7 +19,7 @@
     $page.url.searchParams.get('tool') ?? (ctkViewer.document ? 'ctk' : null);
 
   onMount(() => {
-    if (!['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk'].includes(selectedTool ?? '')) {
+    if (!['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk', 'player'].includes(selectedTool ?? '')) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
   });
@@ -34,6 +34,8 @@
     initialDocument={ctkViewer.document ?? undefined}
     viewerMode={ctkViewer.viewer}
   />
+{:else if selectedTool === 'player'}
+  <PlayerWorkspace {workerFactory} />
 {:else if selectedTool === 'damage' || selectedTool === 'spin-finder'}
   {#key selectedTool}
     <ForwardSearchWorkspace tool={selectedTool} {workerFactory} />

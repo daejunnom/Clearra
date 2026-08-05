@@ -57,10 +57,12 @@ clearra sfinder setup <colored-target-fumen> <pattern>
 clearra sfinder --help
 ```
 
-The same product capabilities remain available in the six GUI tools: PC search,
-setup finder, build probability, maximum damage, spin finder, and CTK. The
-compatibility boundary translates input and output contracts; it does not run a
-Java process or bundle another solver.
+The product GUI exposes seven tools: PC search, setup finder, build probability,
+maximum damage, spin finder, CTK, and a local Player. The Player can invoke PC
+or setup search from its own drawer without changing pages; those requests still
+use the existing typed search boundary. The compatibility boundary translates
+input and output contracts; it does not run a Java process or bundle another
+solver.
 
 Global options such as `--format text|json|fumen-like`, `--lang en|ko`,
 `--verbose`, `--diagnostics`, and `--verbose-paths` may appear before or after
@@ -173,18 +175,18 @@ base and target-delta masks to the existing build-probability command.
 Discord search solution documents are emitted only as CTK3. Generated pieces
 retain their tetromino colors and cells that were occupied in the input field
 are `G`; the active Discord result path does not emit Fumen. This presentation
-contract does not change PC/build candidate generation or pruning. Discord
-sends those commands directly to one public Cloud Run interaction service in
-Tokyo (`asia-northeast1`). That service verifies the Discord Ed25519 signature,
-acknowledges within Discord's three-second window, runs the current-source
-Clearra CLI serially per instance, and edits the deferred interaction.
+contract does not change PC/build candidate generation or pruning. One Gateway
+process receives Discord slash, Modal, Message-command, `$`, and `>` events,
+acknowledges interactions within Discord's deadline, renders bounded previews,
+and owns response delivery. Heavy searches are sent to the Tokyo
+(`asia-northeast1`) `clearra-current-job` service; that compute service receives
+neither Discord credentials nor interaction delivery tokens.
 
-Oracle is not part of the slash-command path. Prefix/ordinary-message commands,
-Gateway-delivered slash commands, `/clearra`, and `/view` are disabled. CTK3 and
-Fumen normalization is active only for compute fields; the GIF renderer remains
-unregistered and has no active ingress. Future length-bounded text/image requests
-may use Oracle as a proxy after separate testing; that deferred path must not
-reroute the active slash catalog.
+There is no active `/clearra` catch-all or `/view` command. Ordinary-message
+commands pass through the same curated command policy and resource limits as
+their slash equivalents. Standalone CTK3/Fumen documents and strict `#`/`_`
+grids can use the bounded image path, while search-command fields are rendered
+inside their command.
 
 The raw CLI compatibility form remains available as a separate legacy boundary:
 `clearra sfinder cover <solution-fumen> <pattern> [lines]`. It is not the
@@ -197,12 +199,11 @@ disabled. The native hard limit remains authoritative if the container's
 effective Linux parallelism is lower than its configured vCPU count. The
 service can therefore run four searches across four instances; it is not
 globally serial. Cloud Run's eight-vCPU per-instance maximum rules out a single
-16-vCPU instance. Slash
-command registration is a trusted local one-shot operation; the deployed service
-does not need `DISCORD_TOKEN`. See
+16-vCPU instance. Slash command registration is a separate trusted operation;
+the compute service does not need `DISCORD_TOKEN`. See
 [apps/clearra-discord-bot/README.md](apps/clearra-discord-bot/README.md) for
 the command catalog, Discord timing boundary, Cloud Run settings, and the
-future Oracle/job-service seams.
+active Gateway/job-service boundaries.
 
 ## Published Products
 

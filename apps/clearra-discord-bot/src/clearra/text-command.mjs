@@ -107,16 +107,61 @@ export function parseClearraTextRequest(
  * routes cannot drift away from private operational telemetry.
  */
 export function classifyClearraTextCommand(content, prefix = "!") {
-  const resolution = resolveTextCommand(content, prefix);
+  let resolution;
+  try {
+    resolution = resolveTextCommand(content, prefix);
+  } catch {
+    // Command identity is independent from argument validity. In particular,
+    // an unterminated quote or code block in a field must still be recorded as
+    // the same allow-listed command that will return the validation error.
+    resolution = resolveTextCommandHead(content, prefix);
+  }
   if (!resolution) return null;
+  return commandIdentityFromResolution(resolution);
+}
+
+function commandIdentityFromResolution(resolution) {
   const { tokens, first, explicitSfinder, command } = resolution;
   if (first === "clearra") {
-    return canonicalClearraOperationalCommand(tokens.slice(1));
+    return publicTextCommandIdentity(
+      canonicalClearraOperationalCommand(tokens.slice(1)),
+    );
   }
   if (explicitSfinder && !command) {
-    return canonicalClearraOperationalCommand(tokens);
+    return publicTextCommandIdentity(
+      canonicalClearraOperationalCommand(tokens),
+    );
   }
   return command?.name ?? null;
+}
+
+function publicTextCommandIdentity(value) {
+  return typeof value === "string" && value.startsWith("sfinder.")
+    ? value.slice("sfinder.".length)
+    : value;
+}
+
+function resolveTextCommandHead(content, prefix) {
+  if (typeof prefix !== "string" || prefix.length === 0) return null;
+  const trimmed = String(content ?? "").trim();
+  if (!trimmed.startsWith(prefix)) return null;
+  const body = trimmed.slice(prefix.length).trim();
+  if (!body) return null;
+
+  // Only command-path tokens are read here. Values after that boundary are
+  // deliberately ignored, so this fallback cannot retain fields, queues, or
+  // other user input in operational telemetry.
+  const tokens = body.split(/\s+/u, 3);
+  if (usesRetiredCatFinderName(tokens)) return null;
+  const first = tokens[0]?.toLowerCase();
+  const explicitSfinder = first === "sfinder";
+  const commandName = explicitSfinder ? tokens[1] : first;
+  return {
+    tokens,
+    first,
+    explicitSfinder,
+    command: findSlashCommand(normalizeCatalogName(commandName)),
+  };
 }
 
 function resolveTextCommand(content, prefix) {

@@ -6,12 +6,13 @@
     BuildProbabilityWorkspace,
     CtkDrawerWorkspace,
     ForwardSearchWorkspace,
+    PlayerWorkspace,
     SetupFinderWorkspace,
     SolverWorkspace
   } from '@clearra/ui/workspace';
   import { onMount } from 'svelte';
 
-  const tools = ['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk'] as const;
+  const tools = ['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk', 'player'] as const;
 
   $: selectedTool = $page.url.searchParams.get('tool') ?? 'pc';
 
@@ -28,6 +29,8 @@
   <SetupFinderWorkspace runtime="desktop" />
 {:else if selectedTool === 'ctk'}
   <CtkDrawerWorkspace />
+{:else if selectedTool === 'player'}
+  <PlayerWorkspace runtime="desktop" />
 {:else if selectedTool === 'damage' || selectedTool === 'spin-finder'}
   {#key selectedTool}
     <ForwardSearchWorkspace tool={selectedTool} runtime="desktop" />
