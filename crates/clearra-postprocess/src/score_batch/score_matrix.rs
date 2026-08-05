@@ -129,12 +129,14 @@ impl ScoreMatrix {
         } else {
             Some("score_materialized_cell_identity_invalid")
         };
+        let materialized =
+            score_matrix_materialized(pattern_count, source_complete, !cells.is_empty());
         Self {
             cells,
             pattern_count,
             profile_id: profile.id().to_owned(),
             accuracy_level: profile.accuracy_level().as_str().to_owned(),
-            materialized: source_complete && pattern_count > 0,
+            materialized,
             complete,
             incomplete_reason,
         }
@@ -274,12 +276,14 @@ impl ScoreMatrix {
             aggregates.len() as u64,
             Some(aggregates.len() as u64),
         );
+        let materialized =
+            score_matrix_materialized(pattern_count, source_complete, !cells.is_empty());
         Ok(Self {
             cells,
             pattern_count,
             profile_id: profile.id().to_owned(),
             accuracy_level: profile.accuracy_level().as_str().to_owned(),
-            materialized: source_complete && pattern_count > 0,
+            materialized,
             complete,
             incomplete_reason: (!complete)
                 .then_some(incomplete_reason.unwrap_or("score_matrix_incomplete")),
@@ -387,6 +391,10 @@ impl ScoreMatrix {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScoreMatrixCancelled;
+
+fn score_matrix_materialized(pattern_count: usize, source_complete: bool, has_cells: bool) -> bool {
+    pattern_count > 0 && (source_complete || has_cells)
+}
 
 fn trace_satisfies_requirement(events: &[ReplayEvent], requirement: TraceRequirement) -> bool {
     match requirement {
@@ -497,4 +505,91 @@ fn score_cell_order(left: &ScoreCell, right: &ScoreCell) -> std::cmp::Ordering {
         .cmp(&(right.score, right.attack))
         .then_with(|| right.candidate_id.cmp(&left.candidate_id))
         .then_with(|| right.trace_identity.cmp(&left.trace_identity))
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+    use clearra_geometry::layout::board64_layout::Board64Layout;
+    use clearra_replay::{BuildVariantOperation, BuildVariantReplayInput, ReplayEngine};
+
+    use super::*;
+    use crate::{CandidateExecution, CandidateExecutionAggregate};
+
+    #[test]
+    fn partial_replay_matrix_is_materialized_but_incomplete() {
+        let profile = ScoreProfile::new("partial", "Partial");
+        let input = BuildVariantReplayInput::new(
+            "partial-trace",
+            Board64Layout::standard_10_by_lines(2).expect("layout"),
+            0,
+            vec![BuildVariantOperation::new(
+                PieceKind::O,
+                RotationState::Zero,
+                0,
+                0,
+            )],
+        );
+        let trace = ReplayEngine::build_variant_to_trace(&input).expect("replay");
+        let aggregates = [CandidateExecutionAggregate::new(
+            1,
+            vec![CandidateExecution::new(0, "partial-trace", trace)],
+        )];
+
+        let matrix = ScoreMatrix::materialize(&aggregates, &profile, 1, false);
+
+        assert!(matrix.materialized());
+        assert!(!matrix.complete());
+        assert_eq!(matrix.cell_count(), 1);
+        assert_eq!(
+            matrix.incomplete_reason(),
+            Some("score_execution_source_incomplete")
+        );
+    }
+
+    #[test]
+    fn partial_precomputed_matrix_is_materialized_but_incomplete() {
+        let profile = ScoreProfile::new("partial", "Partial");
+        let matrix = ScoreMatrix::from_materialized_cells(
+            vec![ScoreCell::new(
+                1,
+                0,
+                "partial-cell",
+                100,
+                0,
+                profile.accuracy_level().as_str(),
+            )],
+            &profile,
+            1,
+            false,
+        );
+
+        assert!(matrix.materialized());
+        assert!(!matrix.complete());
+        assert_eq!(matrix.cell_count(), 1);
+        assert_eq!(
+            matrix.incomplete_reason(),
+            Some("score_execution_source_incomplete")
+        );
+    }
+
+    #[test]
+    fn incomplete_empty_matrix_is_not_materialized() {
+        let profile = ScoreProfile::new("empty", "Empty");
+        let matrix = ScoreMatrix::from_materialized_cells(Vec::new(), &profile, 1, false);
+
+        assert!(!matrix.materialized());
+        assert!(!matrix.complete());
+        assert_eq!(matrix.cell_count(), 0);
+    }
+
+    #[test]
+    fn complete_empty_matrix_remains_materialized() {
+        let profile = ScoreProfile::new("empty", "Empty");
+        let matrix = ScoreMatrix::from_materialized_cells(Vec::new(), &profile, 1, true);
+
+        assert!(matrix.materialized());
+        assert!(matrix.complete());
+        assert_eq!(matrix.cell_count(), 0);
+    }
 }
