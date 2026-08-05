@@ -608,6 +608,64 @@ void residual_memo_requires_exact_piece_counts(void) {
     clearra_geometry_residual_memo_release(&memo);
 }
 
+void frontier_hash_collision_does_not_merge_distinct_partial_states(void) {
+    const uint64_t left_remaining_cells = UINT64_C(0x1234);
+    const uint32_t left_packed_piece_counts = UINT32_C(0x001001);
+    const uint32_t left_family = UINT32_C(17);
+    const uint32_t right_family = UINT32_C(29);
+    bool collision_found = false;
+
+    /*
+     * Exercise the memo through its public operations instead of duplicating
+     * the private hash function here. With only two entries in each fresh
+     * table, a probe longer than one proves that their initial buckets
+     * collided. Both exact partial-state keys must remain independently
+     * addressable after that collision.
+     */
+    for (uint32_t candidate = 1u;
+         candidate <= UINT32_C(4096) && !collision_found;
+         ++candidate) {
+        ClearraGeometryResidualMemo memo;
+        const uint64_t right_remaining_cells =
+            UINT64_C(0x100000) + (uint64_t)candidate;
+        const uint32_t right_packed_piece_counts =
+            UINT32_C(0x002000) + candidate;
+
+        clearra_geometry_residual_memo_init(&memo, 1u, 1024u * 1024u);
+        clearra_geometry_residual_memo_insert(
+            &memo,
+            left_remaining_cells,
+            left_packed_piece_counts,
+            left_family);
+        clearra_geometry_residual_memo_insert(
+            &memo,
+            right_remaining_cells,
+            right_packed_piece_counts,
+            right_family);
+
+        if (memo.max_probe_length > 1u) {
+            uint32_t family = 0u;
+            collision_found = true;
+            EXPECT_U64(memo.count, 2u);
+            EXPECT_TRUE(clearra_geometry_residual_memo_lookup(
+                &memo,
+                left_remaining_cells,
+                left_packed_piece_counts,
+                &family));
+            EXPECT_U64(family, left_family);
+            EXPECT_TRUE(clearra_geometry_residual_memo_lookup(
+                &memo,
+                right_remaining_cells,
+                right_packed_piece_counts,
+                &family));
+            EXPECT_U64(family, right_family);
+        }
+        clearra_geometry_residual_memo_release(&memo);
+    }
+
+    EXPECT_TRUE(collision_found);
+}
+
 void residual_memo_saturation_keeps_search_authority(void) {
     ClearraGeometryResidualMemo memo;
     uint32_t family = 0u;

@@ -41,6 +41,7 @@ void geometry_catalog_view_is_pointer_stable_across_search(void);
 void geometry_catalog_identity_is_independent_of_piece_multiset(void);
 void exact_cover_partition_union_matches_serial(void);
 void residual_memo_requires_exact_piece_counts(void);
+void frontier_hash_collision_does_not_merge_distinct_partial_states(void);
 void residual_memo_saturation_keeps_search_authority(void);
 void solution_family_uses_stable_row_id_dag(void);
 void solution_family_product_streams_cartesian_paths_lazily(void);
@@ -94,6 +95,7 @@ int main(void) {
     geometry_catalog_identity_is_independent_of_piece_multiset();
     exact_cover_partition_union_matches_serial();
     residual_memo_requires_exact_piece_counts();
+    frontier_hash_collision_does_not_merge_distinct_partial_states();
     residual_memo_saturation_keeps_search_authority();
     solution_family_uses_stable_row_id_dag();
     solution_family_product_streams_cartesian_paths_lazily();
