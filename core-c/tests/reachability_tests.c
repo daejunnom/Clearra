@@ -115,13 +115,14 @@ static ClearraBoard64Layout standard_10x4(void) {
     table.clockwise_offsets = clockwise_offsets;
     table.clockwise_count = 1;
     return table;
-}static ClearraReachabilityKickTable srs_plus_kick_table(uint8_t piece) {
-    ClearraReachabilityKickTable table = {0};
-    EXPECT_TRUE(clearra_srs_plus_kick_table(&table.owned_compact_table) ==
+}static void srs_plus_kick_table(
+    uint8_t piece,
+    ClearraReachabilityKickTable *out_table) {
+    *out_table = (ClearraReachabilityKickTable){0};
+    EXPECT_TRUE(clearra_srs_plus_kick_table(&out_table->owned_compact_table) ==
                 CLEARRA_RULE_OK);
-    table.compact_table = &table.owned_compact_table;
-    table.piece = piece;
-    return table;
+    out_table->compact_table = &out_table->owned_compact_table;
+    out_table->piece = piece;
 }static void collision_free_but_unreachable_fixture(void) {
     ClearraBoard64Layout layout = standard_10x4();
     bool reachable = true;
@@ -265,8 +266,8 @@ static ClearraBoard64Layout standard_10x4(void) {
     EXPECT_U64(report.result_y, 0);
 }static void spawn_space_prevents_late_kick_false_accept(void) {
     ClearraBoard64Layout layout = standard_10x4();
-    ClearraReachabilityKickTable table =
-        srs_plus_kick_table(CLEARRA_CANDIDATE_PIECE_J);
+    ClearraReachabilityKickTable table;
+    srs_plus_kick_table(CLEARRA_CANDIDATE_PIECE_J, &table);
     ClearraReachabilityReport report;
 
     EXPECT_REACH_STATUS(clearra_reachability_check(
@@ -279,8 +280,8 @@ static ClearraBoard64Layout standard_10x4(void) {
     EXPECT_FALSE(report.reachable);
 }static void spawn_space_preserves_pco_jtsz_source_path(void) {
     ClearraBoard64Layout layout = standard_10x4();
-    ClearraReachabilityKickTable table =
-        srs_plus_kick_table(CLEARRA_CANDIDATE_PIECE_S);
+    ClearraReachabilityKickTable table;
+    srs_plus_kick_table(CLEARRA_CANDIDATE_PIECE_S, &table);
     ClearraReachabilityReport report;
 
     EXPECT_REACH_STATUS(clearra_reachability_check(
@@ -305,8 +306,8 @@ static ClearraBoard64Layout standard_10x4(void) {
                CLEARRA_REACHABILITY_POLICY_LOCKED_180_REVERSE_GRAPH);
 }static void one_eighty_reachable_fixture(void) {
     ClearraBoard64Layout layout = standard_10x4();
-    ClearraReachabilityKickTable table =
-        srs_plus_kick_table(CLEARRA_CANDIDATE_PIECE_T);
+    ClearraReachabilityKickTable table;
+    srs_plus_kick_table(CLEARRA_CANDIDATE_PIECE_T, &table);
     ClearraReachabilityReport report;
     uint64_t board = half_turn_only_board(layout);
 
