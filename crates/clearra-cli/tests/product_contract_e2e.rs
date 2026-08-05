@@ -354,7 +354,7 @@ mod case_pc_command_uses_search_problem_core_executor {
 }
 
 mod case_setup_command_assembles_exact_residue_request {
-    use clearra_problem::SetupCycleResetBorrowPolicy;
+    use clearra_setup_search::query::SetupCycleResetBorrowPolicy;
 
     use super::*;
 
