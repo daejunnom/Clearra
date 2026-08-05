@@ -83,18 +83,19 @@ mod case_native_buildup_exports_actual_first_success_kick_evidence {
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use crate::{
-        problem::C_PIECE_T, CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits,
-        CPackingCandidate, CPackingOperation, CoreCNative, C_BUILDUP_STATUS_OK,
+        problem::{C_PIECE_O, C_PIECE_S},
+        CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits, CPackingCandidate,
+        CPackingOperation, CoreCNative, C_BUILDUP_STATUS_OK,
     };
 
     #[test]
     fn native_buildup_exports_actual_first_success_kick_evidence() {
-        let right_mask = 0x20_1802u64;
-        let spawn_mask = 0x201cu64;
-        let initial_mask = ((1u64 << 30) - 1) & !(right_mask | spawn_mask);
+        let o_mask = 0x0c03u64;
+        let s_mask = 0x600cu64;
+        let initial_mask = 0x0f_93f0u64;
         let query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(4, initial_mask),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::T, PieceKind::T])),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O, PieceKind::S])),
             PieceWindow::new(2),
         )
         .with_exact_pieces(Some(2))
@@ -107,22 +108,22 @@ mod case_native_buildup_exports_actual_first_success_kick_evidence {
             ..Default::default()
         };
         candidate.operations[0] = CPackingOperation {
-            piece: C_PIECE_T,
-            rotation: 1,
-            x: 1,
+            piece: C_PIECE_O,
+            rotation: 0,
+            x: 0,
             y: 0,
-            operation_id: 9,
+            operation_id: 4,
             required_deleted_row_mask: 0,
-            mask: right_mask,
+            mask: o_mask,
         };
         candidate.operations[1] = CPackingOperation {
-            piece: C_PIECE_T,
+            piece: C_PIECE_S,
             rotation: 0,
             x: 2,
             y: 0,
-            operation_id: 8,
+            operation_id: 12,
             required_deleted_row_mask: 0,
-            mask: spawn_mask,
+            mask: s_mask,
         };
         let buildup = CBuildUpProblemBuilder::from_packing_candidate(&problem, &candidate, 0, 0)
             .expect("buildup");
@@ -133,17 +134,17 @@ mod case_native_buildup_exports_actual_first_success_kick_evidence {
         .expect("native enumerate");
 
         assert_eq!(outcome.status, C_BUILDUP_STATUS_OK);
-        assert!(outcome.buffer.count > 0);
-        assert!(outcome.buffer.variants[0].kick_evidence_count > 0);
+        assert_eq!(outcome.buffer.count, 1);
+        assert_eq!(outcome.buffer.variants[0].kick_evidence_count, 1);
         let evidence = outcome.buffer.kick_evidence_storage[0][0];
         assert_eq!(evidence.has_kick_evidence, 1);
         assert_eq!(evidence.from_rotation, 2);
         assert_eq!(evidence.to_rotation, 0);
         assert_eq!(evidence.rotation_request, 3);
-        assert_eq!(evidence.kick_index, 4);
+        assert_eq!(evidence.kick_index, 1);
         assert_eq!((evidence.kick_dx, evidence.kick_dy), (0, -1));
         assert_eq!(evidence.first_success_confirmed, 1);
-        assert_eq!((evidence.predecessor_x, evidence.predecessor_y), (2, 1));
+        assert_eq!((evidence.predecessor_x, evidence.predecessor_y), (2, 0));
         assert_eq!((evidence.result_x, evidence.result_y), (2, 0));
         assert_eq!(
             outcome.buffer.trace_step_storage[0][0].kick_evidence_index,

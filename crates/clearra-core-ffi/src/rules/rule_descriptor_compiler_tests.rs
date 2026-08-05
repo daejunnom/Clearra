@@ -110,15 +110,13 @@ fn unverified_extension_profile_is_rejected_before_c_execution() {
 }
 
 #[test]
-fn unsupported_profile_reports_disabled_reason_before_c_execution() {
+fn srs_x_capability_and_unverified_c_boundary_are_distinct() {
     let rule = srs_x();
     let capability = RuleCapability::from_rule(rule);
     let problem = opening_problem_with_rule(rule, None);
 
-    assert_eq!(
-        capability.unsupported_reason(),
-        Some("srs_x_profile_requires_imported_kick_table")
-    );
+    assert!(capability.search_backend_supported());
+    assert_eq!(capability.unsupported_reason(), None);
     assert_eq!(
         RuleDescriptorCompiler::compile(&problem),
         Err(FfiProblemError::UnverifiedRuleProfileRejected {

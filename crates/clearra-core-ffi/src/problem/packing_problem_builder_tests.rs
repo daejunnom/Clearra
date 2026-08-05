@@ -10,18 +10,23 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 use crate::board::C_BOARD_BACKEND_BOARD64;
 use crate::problem::{
     C_BACKEND_AUTO, C_BACKEND_CPU, C_BAG_STANDARD_7_BAG, C_GOAL_CLEAR_TO_EMPTY,
-    C_KICK_SRS_PLUS_180, C_PIECE_I, C_PIECE_O, C_PIECE_SET_STANDARD_TETROMINOES, C_PIECE_T,
-    C_RULE_SRS_PLUS, C_RULE_SRS_X, C_SPAWN_STANDARD_10,
+    C_KICK_SRS_PLUS_180, C_PIECE_I, C_PIECE_O, C_PIECE_S, C_PIECE_SET_STANDARD_TETROMINOES,
+    C_PIECE_T, C_PIECE_Z, C_RULE_SRS_PLUS, C_RULE_SRS_X, C_SPAWN_STANDARD_10,
 };
 
 use super::*;
 
 #[test]
 fn opening_search_problem_converts_to_c_packing_problem() {
-    let query =
-        OpeningPcSearchQuery::new(PcTarget::two_lines()).with_queue(PcQueueInput::fixed_sequence(
-            FixedSequence::new(vec![PieceKind::I, PieceKind::O, PieceKind::T]),
-        ));
+    let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_queue(
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+        ])),
+    );
     let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
     let compact = CPackingProblemBuilder::from_search_problem(&problem).expect("compact");
 
@@ -42,15 +47,15 @@ fn opening_search_problem_converts_to_c_packing_problem() {
     assert_eq!(compact.piece_window.exact_pieces, 5);
     assert_eq!(compact.piece_window.has_exact_pieces, 1);
     assert_eq!(compact.piece_source.source_kind, 1);
-    assert_eq!(compact.piece_source.fixed_sequence_len, 3);
-    assert_eq!(compact.piece_source_pattern_len, 3);
+    assert_eq!(compact.piece_source.fixed_sequence_len, 5);
+    assert_eq!(compact.piece_source_pattern_len, 5);
     assert_eq!(compact.piece_source_pattern_complete, 1);
     assert_eq!(
-        &compact.piece_source_pattern_pieces[..3],
-        &[C_PIECE_I, C_PIECE_O, C_PIECE_T]
+        &compact.piece_source_pattern_pieces[..5],
+        &[C_PIECE_I, C_PIECE_O, C_PIECE_T, C_PIECE_S, C_PIECE_Z]
     );
-    assert_eq!(compact.piece_multiset_window.total_count, 3);
-    assert_eq!(compact.piece_multiset_window.exact_count, 0);
+    assert_eq!(compact.piece_multiset_window.total_count, 5);
+    assert_eq!(compact.piece_multiset_window.exact_count, 5);
     assert_ne!(compact.piece_source.provenance_id, 0);
     assert_eq!(
         compact.piece_multiset_window.counts[usize::from(C_PIECE_I)],
@@ -62,6 +67,14 @@ fn opening_search_problem_converts_to_c_packing_problem() {
     );
     assert_eq!(
         compact.piece_multiset_window.counts[usize::from(C_PIECE_T)],
+        1
+    );
+    assert_eq!(
+        compact.piece_multiset_window.counts[usize::from(C_PIECE_S)],
+        1
+    );
+    assert_eq!(
+        compact.piece_multiset_window.counts[usize::from(C_PIECE_Z)],
         1
     );
     assert_eq!(compact.rule.rule_profile_id, C_RULE_SRS_PLUS);

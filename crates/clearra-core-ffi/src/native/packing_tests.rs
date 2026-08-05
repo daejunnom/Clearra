@@ -28,7 +28,9 @@ fn native_packing_capacity_preserves_partial_candidates_and_resource_report() {
     use clearra_core_domain::{
         pc::pc_target::PcTarget, piece::piece_kind::PieceKind, resource::ResourceTruncationReason,
     };
-    use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput};
+    use clearra_pc_graph::request::{
+        OpeningPcSearchQuery, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
+    };
     use clearra_problem::{ProblemCompiler, SearchProblem};
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
@@ -40,7 +42,8 @@ fn native_packing_capacity_preserves_partial_candidates_and_resource_report() {
             PieceKind::O,
             PieceKind::O,
         ])))
-        .with_hold_policy(PcHoldPolicy::Disabled);
+        .with_hold_policy(PcHoldPolicy::Disabled)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_candidates(2));
     let problem: SearchProblem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
     let compact = crate::problem::CPackingProblemBuilder::from_search_problem(&problem)
         .expect("compact problem");
@@ -52,7 +55,10 @@ fn native_packing_capacity_preserves_partial_candidates_and_resource_report() {
     .expect("partial outcome");
 
     assert_eq!(outcome.status, super::C_PACKING_STATUS_CAPACITY_EXCEEDED);
-    assert_eq!(outcome.candidates.len(), problem.budget().max_results());
+    assert_eq!(
+        outcome.candidates.len(),
+        compact.budget.max_results as usize
+    );
     assert!(!outcome.count_complete());
     assert!(outcome.resource_report.truncated);
     assert_eq!(
@@ -66,14 +72,16 @@ fn native_packing_capacity_preserves_partial_candidates_and_resource_report() {
 #[test]
 fn native_incomplete_observed_source_returns_truncated_empty_preview() {
     use clearra_core_domain::{pc::pc_target::PcTarget, resource::ResourceTruncationReason};
-    use clearra_pc_graph::request::OpeningPcSearchQuery;
+    use clearra_pc_graph::request::{OpeningPcSearchQuery, PcExecutionPolicy};
     use clearra_problem::ProblemCompiler;
 
-    let problem =
-        ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::two_lines()))
-            .expect("problem");
+    let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_patterns(1));
+    let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
     let compact = crate::problem::CPackingProblemBuilder::from_search_problem(&problem)
         .expect("compact problem");
+    assert_eq!(compact.piece_source.complete, 0);
+    assert_ne!(compact.piece_source.truncation_reason, 0);
 
     let outcome = super::generate_packing_candidates(
         &compact,
@@ -119,20 +127,11 @@ fn native_packing_pruning_e2e_records_problem_identity_and_collision_proof() {
     .expect("native outcome");
 
     assert_eq!(outcome.status, super::C_PACKING_STATUS_OK);
-    assert_eq!(outcome.candidates.len(), 2);
+    assert_eq!(outcome.candidates.len(), 1);
     let first = outcome.candidates.candidate_at(0).expect("first candidate");
-    let second = outcome
-        .candidates
-        .candidate_at(1)
-        .expect("second candidate");
     assert_eq!(first.final_board, 0);
-    assert_eq!(second.final_board, 0);
     assert_eq!(first.cleared_lines, 1);
-    assert_eq!(second.cleared_lines, 1);
-    assert_ne!(
-        first.operations[0].operation_id,
-        second.operations[0].operation_id
-    );
+    assert_eq!(first.geometry_variant_domains, 1);
     assert!(!outcome.pruning_ledger.entries.is_empty());
     let batch_id = outcome.pruning_ledger.entries[0].batch_id;
     assert_ne!(batch_id.0, 0);

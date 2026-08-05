@@ -12,10 +12,12 @@ use super::*;
 
 #[test]
 fn fixed_sequence_passed_to_c_queue_view() {
-    let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_queue(
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0),
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I, PieceKind::O])),
+        PieceWindow::new(2),
     );
-    let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
 
     let compact = SupplyDescriptorCompiler::compile(&problem).expect("compact supply");
 
@@ -53,14 +55,16 @@ fn piece_source_and_hold_automaton_share_compact_provenance_identity() {
 
 #[test]
 fn bag_pattern_passed_to_c_queue_view() {
-    let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_queue(
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0),
         PcQueueInput::bag_aligned_pattern(BagAlignedPattern::new(vec![
             PieceKind::I,
             PieceKind::O,
             PieceKind::T,
         ])),
+        PieceWindow::new(3),
     );
-    let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
 
     let compact = SupplyDescriptorCompiler::compile(&problem).expect("compact supply");
     let bag_window =
