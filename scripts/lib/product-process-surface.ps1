@@ -32,7 +32,7 @@ function Ensure-ClearraBuiltBinary([string]$Root) {
     $previousCargoTargetDir = $env:CARGO_TARGET_DIR
     $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
     $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $builtCargoTargetDir
-    Sync-ClearraNativeCargoLinkState `
+    $null = Sync-ClearraNativeCargoLinkState `
         -LibraryDirectory $nativeLibraryDir `
         -CargoTargetDirectory $env:CARGO_TARGET_DIR `
         -CargoPath $CargoPath `

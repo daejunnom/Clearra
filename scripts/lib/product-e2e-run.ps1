@@ -34,7 +34,7 @@ function Invoke-ProductE2EClearra {
                 Assert-ClearraCanonicalCargoTargetDir $previousCargoTargetDir | Out-Null
             }
             $nativeLibraryDir = Resolve-ProductE2ENativeLibraryDir
-            Sync-ClearraNativeCargoLinkState `
+            $null = Sync-ClearraNativeCargoLinkState `
                 -LibraryDirectory $nativeLibraryDir `
                 -CargoTargetDirectory $env:CARGO_TARGET_DIR `
                 -CargoPath 'cargo' `

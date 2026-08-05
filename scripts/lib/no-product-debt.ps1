@@ -187,6 +187,12 @@ function Invoke-NoProductDebtGate {
     }
     Write-Output 'no_product_debt_evidence=artifact_path_policy status=passed source=powershell-test'
 
+    & (Join-Path $Root 'scripts/test_product_process_contract.ps1') -RepositoryRoot $Root
+    if (-not $?) {
+        throw 'NoProductDebt product process contract tests failed'
+    }
+    Write-Output 'no_product_debt_evidence=product_process_contract status=passed source=powershell-test'
+
     Invoke-NoProductDebtStaticGate $Root $PowerShellPath
 
     $previousCargoTargetDir = $env:CARGO_TARGET_DIR
