@@ -71,6 +71,10 @@ Thumbs.db
 /*.local.*
 /packages/ctk3/dist/
 
+# Local deployment overlay
+/apps/clearra-discord-bot/src/admin/
+/apps/clearra-discord-bot/test/admin-*.test.mjs
+
 # Root handoff/design notes
 /Clearra 핸드오프.md
 /Clearra 체크리스트.md

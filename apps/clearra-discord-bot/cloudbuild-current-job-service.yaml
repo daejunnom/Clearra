@@ -3,7 +3,7 @@ steps:
     args:
       - build
       - -f
-      - apps/clearra-discord-bot/Dockerfile
+      - apps/clearra-discord-bot/Dockerfile.current-job-service
       - -t
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
       - .
@@ -12,7 +12,7 @@ images:
 substitutions:
   _REGION: asia-northeast1
   _REPOSITORY: clearra
-  _IMAGE_NAME: clearra-interaction
+  _IMAGE_NAME: clearra-current-job
   _TAG: latest
 options:
   logging: CLOUD_LOGGING_ONLY

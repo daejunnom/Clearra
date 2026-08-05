@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { selectDocumentPastePayload } from '../src/lib/workspace/documentPaste.ts';
+import {
+  selectDocumentPastePayload,
+  selectSingleDocumentDropFile
+} from '../src/lib/workspace/documentPaste.ts';
 
 test('CTK3 file items take priority over clipboard text', () => {
   const file = { name: 'opening.ctk3', type: 'application/vnd.clearra.ctk3' };
@@ -38,4 +41,18 @@ test('clipboard text remains available when no CTK3 file exists', () => {
   );
 
   assert.deepEqual(payload, { kind: 'text', source: 'ctk3_text_document' });
+});
+
+test('document drop accepts exactly one matching file', () => {
+  const ctk3 = { name: 'opening.ctk3' };
+  const text = { name: 'notes.txt' };
+  const matches = (file) => file.name.endsWith('.ctk3');
+
+  assert.equal(selectSingleDocumentDropFile({ files: [ctk3] }, matches), ctk3);
+  assert.equal(selectSingleDocumentDropFile({ files: [text] }, matches), null);
+  assert.equal(
+    selectSingleDocumentDropFile({ files: [ctk3, text] }, matches),
+    null
+  );
+  assert.equal(selectSingleDocumentDropFile(null, matches), null);
 });

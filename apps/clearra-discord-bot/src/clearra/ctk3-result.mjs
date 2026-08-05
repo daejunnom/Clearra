@@ -30,6 +30,13 @@ const RESULT_COMPLETENESS_FIELDS = new Set([
   "objective_search_complete",
   "objective_complete",
 ]);
+const SOLUTION_COUNT_FIELDS = Object.freeze([
+  "result_count",
+  "total_solution_count",
+  "unique_solution_count",
+  "normalized_unique_solution_count",
+  "actual_normalized_unique_solution_count",
+]);
 
 const PAGE_FLAGS = Object.freeze({
   lock: true,
@@ -99,12 +106,17 @@ export function buildCtk3Result(jsonOrObject) {
 
   const { artifacts, summary } = located;
   validateArtifactSchema(artifacts);
+  // A zero count from the authoritative search summary wins over stale or
+  // synthetic solution artifacts. In particular, an initial-only key must not
+  // turn the input field into a one-page "solution" document.
+  if (summaryReportsZeroSolutions(summary)) return null;
   const plan = buildPlan(artifacts);
 
   const warnings = [];
   const state = { complete: true, warnings };
   collectSummaryCompleteness(summary, state);
   const probabilityComments = solutionProbabilityComments(plan, state);
+  const classComments = solutionClassComments(plan);
   if (plan.pageCount === 0) return null;
   const encoder = createSegmentEncoder();
 
@@ -113,7 +125,10 @@ export function buildCtk3Result(jsonOrObject) {
       solutionKeyPage(
         plan.solutionKeys[index],
         `artifacts.solution_keys[${index}]`,
-        probabilityComments?.get(plan.solutionKeys[index]),
+        combinePageComments(
+          classComments?.[index],
+          probabilityComments?.get(plan.solutionKeys[index]),
+        ),
       ),
     );
   }
@@ -158,6 +173,13 @@ export function buildCtk3Result(jsonOrObject) {
   };
 }
 
+function summaryReportsZeroSolutions(summary) {
+  if (!isRecord(summary)) return false;
+  return SOLUTION_COUNT_FIELDS.some((key) =>
+    summary[key] === 0 || summary[key] === "0"
+  );
+}
+
 function locateArtifacts(jsonOrObject) {
   let value = jsonOrObject;
   if (typeof value === "string") {
@@ -198,6 +220,7 @@ function locateArtifacts(jsonOrObject) {
   if (
     hasOwn(value, "schema_version") ||
     hasOwn(value, "solution_keys") ||
+    hasOwn(value, "solution_classes") ||
     hasOwn(value, "solution_probabilities") ||
     hasOwn(value, "setup_conditions") ||
     hasOwn(value, "forward")
@@ -225,6 +248,12 @@ function buildPlan(artifacts) {
     artifacts,
     "solution_keys",
     "artifacts.solution_keys",
+  );
+  const hasSolutionClasses = hasOwn(artifacts, "solution_classes");
+  const solutionClasses = optionalArray(
+    artifacts,
+    "solution_classes",
+    "artifacts.solution_classes",
   );
   const hasSolutionProbabilities = hasOwn(artifacts, "solution_probabilities");
   const solutionProbabilities = optionalArray(
@@ -271,12 +300,41 @@ function buildPlan(artifacts) {
 
   return {
     solutionKeys,
+    solutionClasses,
+    hasSolutionClasses,
     solutionProbabilities,
     hasSolutionProbabilities,
     setupConditions,
     forward,
     pageCount,
   };
+}
+
+function solutionClassComments(plan) {
+  if (!plan.hasSolutionClasses) return null;
+  if (plan.solutionClasses.length !== plan.solutionKeys.length) {
+    fail(
+      "solution-class-key-mismatch",
+      "artifacts.solution_classes",
+      "class entries must match solution_keys one-to-one",
+    );
+  }
+  return plan.solutionClasses.map((value, index) => {
+    if (value === "regular") return "Spin: Regular";
+    if (value === "mini") return "Spin: Mini";
+    fail(
+      "invalid-solution-class",
+      `artifacts.solution_classes[${index}]`,
+      "expected regular or mini",
+    );
+  });
+}
+
+function combinePageComments(...comments) {
+  const retained = comments.filter(
+    (comment) => typeof comment === "string" && comment.length > 0,
+  );
+  return retained.length === 0 ? undefined : retained.join(" | ");
 }
 
 function checkedPageCount(current, additional) {

@@ -58,6 +58,20 @@ Render controls consume the connected exact capability and validated default
 PNG-atlas skin. An enabled render request is rejected only when its selected
 skin manifest or provenance is invalid. Runtime raw SVG remains forbidden.
 
+## CTK Drawer Navigation
+
+The drawer keeps the current page plus as many as 100 pages on either side in
+its preview strip, retaining document endpoints when the middle window is
+truncated. Left and Right move exactly one page unless focus is in an editable
+control, text composition is active, a modifier is pressed, or another page is
+still loading. Preview pages are cached by index so adjacent navigation does not
+decode the whole window again.
+
+Clicking a preview preserves that preview's viewport position across the page
+change, the reactive preview-window update, and the next paint. The strip uses
+stable page keys and disables browser scroll anchoring; this prevents the main
+workspace from jumping vertically when a distant frame is selected.
+
 ## Verification
 
 Run:

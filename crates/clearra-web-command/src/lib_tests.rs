@@ -3,6 +3,7 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_forward_search::{ForwardSearchMode, ForwardSpinCategory};
 use clearra_pc_graph::request::SupplyWindowSize;
 use clearra_scoring::profile::SpinProfileId;
+use clearra_spin_structure_search::{MinimalityPolicy, SpinLineRequirement, SpinStructureMode};
 use clearra_supply::QueueObservationPolicy;
 
 use super::*;
@@ -1101,6 +1102,57 @@ fn damage_command_preserves_minimum_damage_enumeration_policy() {
 }
 
 #[test]
+fn damage_command_accepts_the_canonical_empty_board_mask_at_height_eight() {
+    let mask = "0".repeat(60);
+    let request = WebCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
+        .expect("canonical empty damage board");
+    let query = request.forward_search_query().expect("forward query");
+
+    assert_eq!(query.board().words(), [0; 4]);
+    assert_eq!(query.height(), 8);
+}
+
+#[test]
+fn damage_command_preserves_the_top_bit_of_the_twenty_fourth_row() {
+    let mask = format!("8{}", "0".repeat(59));
+    let request = WebCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
+        .expect("canonical 24-row damage board");
+    let query = request.forward_search_query().expect("forward query");
+
+    assert_eq!(query.board().words(), [0, 0, 0, 1_u64 << 47]);
+    assert_eq!(query.height(), 24);
+}
+
+#[test]
+fn damage_command_rejects_noncanonical_and_conflicting_board_masks() {
+    for mask in ["0".repeat(59), format!("{}A", "0".repeat(59))] {
+        let error = WebCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
+            .expect_err("noncanonical damage mask");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
+
+    let canonical = "0".repeat(60);
+    for command in [
+        format!("damage --board-mask 0x0 --board-mask-v1 {canonical} --queue I"),
+        format!("damage --board-mask-v1 {canonical} --board-mask-v1 {canonical} --queue I"),
+    ] {
+        let error = WebCommandParser::parse(&command).expect_err("conflicting damage masks");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
+fn canonical_damage_mask_rejects_an_explicit_height_below_its_visible_rows() {
+    let mask = format!("8{}", "0".repeat(59));
+    let error = WebCommandParser::parse(&format!(
+        "damage --board-mask-v1 {mask} --height 23 --queue I"
+    ))
+    .expect_err("height below canonical field");
+
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+}
+
+#[test]
 fn spin_finder_command_preserves_profile_and_target_group() {
     let request = WebCommandParser::parse(
         "clearra spin-finder --board-mask 0x0 --height 8 --queue J --hold --rule srs-x --spin-profile all-mini-plus --lines 2 --spin-category other",
@@ -1154,6 +1206,72 @@ fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
         damage_pattern.code(),
         WebCommandErrorCode::UnsupportedCommand
     );
+}
+
+#[test]
+fn spin_structure_compiles_to_an_independent_typed_command() {
+    let request = WebCommandParser::parse_with_worker_limit(
+        "clearra spin-structure --pieces iOtSz --height 7 --fill-bottom 0 --fill-top 5 --spin-profile t-spins --lines 1+ --rule srs --minimality subset-minimal --workers 8 --use-all-cpu-threads",
+        8,
+    )
+    .expect("spin-structure command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::SpinStructure(command) = request.command() else {
+        panic!("expected AppCommand::SpinStructure");
+    };
+    let query = command.query();
+    assert_eq!(query.inventory.total(), 5);
+    assert_eq!(query.inventory.count(PieceKind::T), 1);
+    assert_eq!(query.mode, SpinStructureMode::TSpins);
+    assert_eq!(query.line_requirement, SpinLineRequirement::AtLeast(1));
+    assert_eq!(query.height, 7);
+    assert_eq!((query.fill_bottom, query.fill_top), (0, 5));
+    assert_eq!(query.minimality, MinimalityPolicy::SubsetMinimal);
+    assert_eq!(request.resource_budget().workers(), 8);
+}
+
+#[test]
+fn spin_structure_accepts_all_six_profiles_without_using_forward_mode() {
+    for mode in SpinStructureMode::ALL {
+        let parsed = WebCommandParser::parse(&format!(
+            "spin-structure --pieces TIO --spin-profile {}",
+            mode.as_str()
+        ))
+        .expect("profile");
+        assert!(parsed.forward_search_query().is_none());
+        assert_eq!(
+            parsed.spin_structure_query().expect("structure query").mode,
+            mode
+        );
+    }
+
+    for invalid in ["disabled", "t-spin-simple", "unknown"] {
+        let error = WebCommandParser::parse(&format!(
+            "spin-structure --pieces T --spin-profile {invalid}"
+        ))
+        .expect_err("invalid structure profile");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
+fn spin_structure_preserves_a_canonical_wide_board_and_rejects_conflicts() {
+    let mask = format!("8{}", "0".repeat(59));
+    let request =
+        WebCommandParser::parse(&format!("spin-structure --board-mask-v1 {mask} --pieces T"))
+            .expect("wide structure board");
+    let query = request.spin_structure_query().expect("structure query");
+    assert_eq!(query.height, 24);
+    assert_eq!(query.initial_board.words(), [0, 0, 0, 1_u64 << 47]);
+
+    let error = WebCommandParser::parse(&format!(
+        "spin-structure --board-mask 0 --board-mask-v1 {} --pieces T",
+        "0".repeat(60)
+    ))
+    .expect_err("conflicting board options");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
 }
 // SRP rationale: this module has one behavior-level change reason: verifying the complete public
 // web command grammar reaches the intended typed Clearra request contracts.

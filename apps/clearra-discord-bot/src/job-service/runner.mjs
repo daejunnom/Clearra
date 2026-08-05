@@ -33,10 +33,14 @@ export class ClearraCommandRunner {
     return new Promise((resolve, reject) => {
       let child;
       try {
+        const childEnvironment = expectedVcpuEnvironment(
+          this.config.expectedVcpus,
+        );
         child = this.spawn(this.config.executable, arguments_, {
           shell: false,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
+          ...(childEnvironment ? { env: childEnvironment } : {}),
         });
       } catch (error) {
         reject(clearraStartError(error));
@@ -122,6 +126,15 @@ export class ClearraCommandRunner {
       if (options.signal?.aborted) abort();
     });
   }
+}
+
+function expectedVcpuEnvironment(value) {
+  const expected = Number(value);
+  if (!Number.isSafeInteger(expected) || expected < 1) return null;
+  return {
+    ...process.env,
+    CLEARRA_EXPECTED_VCPUS: String(expected),
+  };
 }
 
 function clearraStartError(error) {

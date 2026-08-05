@@ -28,5 +28,7 @@ fn percent_command_reports_bag_aligned_pattern_as_certain_single_pattern() {
 
     assert_eq!(output.exit_code(), ExitCode::Success);
     assert!(output.stdout().contains("queue_mode: bag-aligned"));
-    assert!(output.stdout().contains("materialized_probability_mass: 1"));
+    assert!(output
+        .stdout()
+        .contains("materialized_probability_mass: 100%"));
 }

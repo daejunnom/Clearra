@@ -171,9 +171,8 @@ impl<const STATE_WORDS: usize> ExactFrontierReduceStage<STATE_WORDS> {
         host_workers: usize,
         expected_record_count: usize,
     ) -> Result<Self, FrontierReduceError> {
-        let available_workers = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .max(1);
+        let available_workers =
+            clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit();
         let worker_count = host_workers
             .max(1)
             .min(available_workers)

@@ -15,7 +15,7 @@
     Trash2,
     Upload
   } from '@lucide/svelte';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
 
   import { writeClipboardText } from './clipboardText';
   import CtkColorBoardEditor from './CtkColorBoardEditor.svelte';
@@ -36,11 +36,17 @@
     operationCells
   } from './ctkPageTools';
   import {
+    ctkPageIndexFromArrowKey,
+    ctkPageStripItems,
+    type CtkPageStripItem
+  } from './ctkPageNavigation';
+  import {
     encodeFieldDocumentAsync,
     openFieldDocument
   } from './fieldInterchange';
   import {
     CTK3_FILE_ACCEPT,
+    installGlobalDocumentDrop,
     installGlobalDocumentPaste,
     saveCtk3Source,
     sourceFromCtk3File
@@ -53,10 +59,6 @@
   } from './workspaceI18n';
 
   type CopyState = 'idle' | 'loading' | 'copied' | 'failed';
-  type PageStripItem =
-    | { kind: 'page'; index: number }
-    | { kind: 'gap'; key: string };
-
   export let initialDocument: string | undefined = undefined;
   export let viewerMode = false;
 
@@ -87,13 +89,15 @@
   let previewRequestKey = '';
   let mounted = false;
   let closed = false;
+  let documentDragActive = false;
+  let pageStripElement: HTMLDivElement;
 
   $: currentHeight = Math.max(1, currentPage?.height ?? 1);
   $: hasImport = pendingImportSource !== null || importValue.trim().length > 0;
-  $: pageStrip = pageStripItems(pageCount, pageIndex);
+  $: pageStrip = ctkPageStripItems(pageCount, pageIndex);
   $: {
     const nextPreviewKey = pageStrip
-      .filter((item): item is Extract<PageStripItem, { kind: 'page' }> => item.kind === 'page')
+      .filter((item): item is Extract<CtkPageStripItem, { kind: 'page' }> => item.kind === 'page')
       .map((item) => item.index)
       .join(',');
     if (mounted && nextPreviewKey !== previewRequestKey) {
@@ -132,10 +136,16 @@
       importSource: importPastedDocument,
       importFailed: () => (importFailed = true)
     });
+    const removeDocumentDrop = installGlobalDocumentDrop({
+      importSource: importPastedDocument,
+      importFailed: () => (importFailed = true),
+      dragActive: (active) => (documentDragActive = active)
+    });
     return () => {
       window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('pageshow', handlePageShow);
       removeDocumentPaste();
+      removeDocumentDrop();
     };
   });
 
@@ -219,6 +229,50 @@
 
   function nextPage() {
     void selectPage(pageIndex + 1);
+  }
+
+  function handlePageArrow(event: KeyboardEvent) {
+    const target = event.target;
+    if (
+      event.defaultPrevented ||
+      event.isComposing ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.shiftKey ||
+      !(target instanceof HTMLElement) ||
+      isEditableElement(target)
+    ) {
+      return;
+    }
+    const nextIndex = ctkPageIndexFromArrowKey(event.key, pageIndex, pageCount);
+    if (nextIndex === null || pageLoading) return;
+    event.preventDefault();
+    void selectPage(nextIndex);
+  }
+
+  async function selectPageFromPreview(index: number, anchor: HTMLButtonElement) {
+    const anchorTop = anchor.getBoundingClientRect().top;
+    await selectPage(index);
+    await tick();
+    await nextPaint();
+    if (closed) return;
+    const nextAnchor = pageStripElement?.querySelector<HTMLButtonElement>(
+      `[data-page-index="${index}"]`
+    );
+    if (!nextAnchor) return;
+    const offset = nextAnchor.getBoundingClientRect().top - anchorTop;
+    if (Math.abs(offset) >= 0.5) window.scrollBy(0, offset);
+    nextAnchor.focus({ preventScroll: true });
+  }
+
+  function isEditableElement(target: HTMLElement): boolean {
+    return (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      target.isContentEditable
+    );
   }
 
   function addPage() {
@@ -520,15 +574,20 @@
     if (closed) return;
     const token = ++previewLoadToken;
     const indices = pageStrip
-      .filter((item): item is Extract<PageStripItem, { kind: 'page' }> => item.kind === 'page')
+      .filter((item): item is Extract<CtkPageStripItem, { kind: 'page' }> => item.kind === 'page')
       .map((item) => item.index)
       .sort((left, right) => left - right);
     const next = new Map<number, Ctk3Page>();
+    for (const index of indices) {
+      const cached = previewPages.get(index);
+      if (cached) next.set(index, cached);
+    }
+    const missing = indices.filter((index) => !next.has(index));
     try {
-      for (let cursor = 0; cursor < indices.length;) {
-        const start = indices[cursor];
+      for (let cursor = 0; cursor < missing.length;) {
+        const start = missing[cursor];
         let end = cursor + 1;
-        while (end < indices.length && indices[end] === indices[end - 1] + 1) end += 1;
+        while (end < missing.length && missing[end] === missing[end - 1] + 1) end += 1;
         const pages = await documentModel.readPages(
           start,
           end - cursor,
@@ -565,33 +624,6 @@
       display.push(...cells.slice(y * 10, y * 10 + 10));
     }
     return display;
-  }
-
-  function pageStripItems(total: number, current: number): PageStripItem[] {
-    const nearbyPageRadius = 10;
-    if (total <= nearbyPageRadius * 2 + 5) {
-      return Array.from({ length: total }, (_, index) => ({
-        kind: 'page' as const,
-        index
-      }));
-    }
-    const indices = new Set<number>([0, total - 1]);
-    for (
-      let index = Math.max(0, current - nearbyPageRadius);
-      index <= Math.min(total - 1, current + nearbyPageRadius);
-      index += 1
-    ) {
-      indices.add(index);
-    }
-    const sorted = [...indices].sort((left, right) => left - right);
-    const items: PageStripItem[] = [];
-    for (let index = 0; index < sorted.length; index += 1) {
-      if (index > 0 && sorted[index] - sorted[index - 1] > 1) {
-        items.push({ kind: 'gap', key: `${sorted[index - 1]}-${sorted[index]}` });
-      }
-      items.push({ kind: 'page', index: sorted[index] });
-    }
-    return items;
   }
 
   function blankPage(height: number): Ctk3Page {
@@ -646,6 +678,8 @@
   {/if}
 </svelte:head>
 
+<svelte:window on:keydown={handlePageArrow} />
+
 <WorkspaceShell
   activeMode="ctk"
   {language}
@@ -662,7 +696,18 @@
   on:language={(event) => setLanguage(event.detail)}
   on:dimension={(event) => setHeight(event.detail)}
 >
-  <section slot="editor" class="drawer-board">
+  <section
+    slot="editor"
+    class="drawer-board"
+    class:document-drag-active={documentDragActive}
+  >
+    {#if documentDragActive}
+      <div class="document-drop-overlay" role="status" aria-live="polite">
+        <FileUp size={22} />
+        <strong>{label('ctkDropDocument')}</strong>
+        <span>{label('ctkDropDocumentHelp')}</span>
+      </div>
+    {/if}
     <header class="section-heading">
       <div>
         <span>{label('ctkPage')}</span>
@@ -700,8 +745,8 @@
       on:operation={(event) => updateOperation(event.detail)}
     />
 
-    <div class="page-strip" aria-label={label('ctkPages')}>
-      {#each pageStrip as item}
+    <div bind:this={pageStripElement} class="page-strip" aria-label={label('ctkPages')}>
+      {#each pageStrip as item (item.kind === 'page' ? `page-${item.index}` : `gap-${item.key}`)}
         {#if item.kind === 'gap'}
           <span class="page-gap" aria-hidden="true">…</span>
         {:else}
@@ -712,8 +757,12 @@
             class:active={item.index === pageIndex}
             aria-current={item.index === pageIndex ? 'page' : undefined}
             disabled={pageLoading}
+            data-page-index={item.index}
             title={`${label('ctkPage')} ${item.index + 1}`}
-            on:click={() => selectPage(item.index)}
+            on:click={(event) => void selectPageFromPreview(
+              item.index,
+              event.currentTarget as HTMLButtonElement
+            )}
           >
             <span class="page-number">{item.index + 1}</span>
             {#if preview}
@@ -876,6 +925,26 @@
 
 <style>
   .drawer-board, .drawer-controls { min-width: 0; }
+  .drawer-board { position: relative; }
+  .document-drag-active { isolation: isolate; }
+  .document-drop-overlay {
+    align-content: center;
+    background: rgba(232, 247, 244, .96);
+    border: 2px dashed #16877d;
+    border-radius: 8px;
+    color: #075f58;
+    display: grid;
+    gap: 6px;
+    inset: 0;
+    justify-items: center;
+    min-height: 220px;
+    padding: 24px;
+    position: absolute;
+    text-align: center;
+    z-index: 8;
+  }
+  .document-drop-overlay strong { font-size: 14px; }
+  .document-drop-overlay span { color: #42645e; font-size: 11px; }
   .section-heading {
     align-items: center;
     display: flex;
@@ -908,6 +977,7 @@
     margin-top: 14px;
     max-width: 100%;
     min-width: 0;
+    overflow-anchor: none;
     padding: 2px;
   }
   .page-preview {

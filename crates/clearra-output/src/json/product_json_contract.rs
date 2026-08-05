@@ -84,6 +84,7 @@ fn solution_artifacts_contract(fields: &[JsonField]) -> JsonValue {
         JsonValue::string("clearra.solution-data.v1"),
     )];
     push_existing(fields, &mut members, "solution_keys", "solution_keys");
+    push_existing(fields, &mut members, "solution_classes", "solution_classes");
     push_existing(
         fields,
         &mut members,

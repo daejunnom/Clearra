@@ -30,11 +30,18 @@ impl ProblemCompiler {
     pub fn compile_scenario_pc(
         query: &PcScenarioQuery,
     ) -> Result<SearchProblem, ProblemCompileError> {
+        let query = normalize_standard_pc_initial_board(query);
         SearchProblem::new(
             SearchProblemPreset::ScenarioPc,
-            ScenarioPreset::from_query(query.clone()).into_scenario_query(),
+            ScenarioPreset::from_query(query).into_scenario_query(),
         )
     }
+}
+
+fn normalize_standard_pc_initial_board(query: &PcScenarioQuery) -> PcScenarioQuery {
+    query
+        .clone()
+        .with_initial_board(query.initial_board().after_initial_line_clear())
 }
 impl ProblemCompiler {
     pub fn compile_scenario_percent(

@@ -36,7 +36,7 @@ completeness 계약으로 다시 검증한다. hash는 비교용 색인일 뿐 e
 | rule, kick, spin, score | [`rules-and-kicks.md`](rules-and-kicks.md), [`scoring.md`](scoring.md), [`scoring-profiles.md`](scoring-profiles.md) | `crates/clearra-rules`, `crates/clearra-spin`, `crates/clearra-scoring`, `crates/clearra-forward-search` |
 | CTK3/Fumen과 렌더링 | [`ctk3.md`](ctk3.md), [`output-formats.md`](output-formats.md) | `packages/ctk3`, `crates/clearra-fumen`, `crates/clearra-render`, `packages/clearra-ui/src/lib/workspace/ctk3*` |
 | 제품 API와 GUI | [`app-boundary.md`](app-boundary.md), [`gui.md`](gui.md), [`gui-host.md`](gui-host.md), [`i18n.md`](i18n.md) | `crates/clearra-app`, `crates/clearra-gui-host`, `packages/clearra-ui`, `apps/clearra-web` |
-| Clearrabot, direct Cloud Run, 선택적 원격 job | [`apps/clearra-discord-bot/README.md`](../apps/clearra-discord-bot/README.md), [`CLOUD_RUN_JOB_SERVICE.md`](../apps/clearra-discord-bot/CLOUD_RUN_JOB_SERVICE.md) | `apps/clearra-discord-bot/src/cloud-run`, `apps/clearra-discord-bot/src/clearra`, `apps/clearra-discord-bot/src/discord`, `apps/clearra-discord-bot/src/ingress`, `apps/clearra-discord-bot/src/job-service` |
+| Clearrabot Oracle Gateway ingress, 원격 Cloud Run job | [`apps/clearra-discord-bot/README.md`](../apps/clearra-discord-bot/README.md), [`CLOUD_RUN_JOB_SERVICE.md`](../apps/clearra-discord-bot/CLOUD_RUN_JOB_SERVICE.md) | `apps/clearra-discord-bot/src/clearra`, `apps/clearra-discord-bot/src/discord`, `apps/clearra-discord-bot/src/ingress`, `apps/clearra-discord-bot/src/job-service` |
 | 외부 PC fixture | [`external-pc-fixtures.md`](external-pc-fixtures.md), [`source_registry.json`](../tests/fixtures/external-pc/source_registry.json) | `tests/fixtures/external-pc` |
 
 `docs/research`의 문서는 특정 실험과 채택/반려 근거를 보존한다. 수치와
@@ -47,6 +47,7 @@ artifact hash는 연구 기록이며 장기 제품 계약이 아니다. 같은 �
 - [`build-probability-optimization.md`](research/build-probability-optimization.md)
 - [`suffix-sharing-optimization.md`](research/suffix-sharing-optimization.md)
 - [`forward-spin-optimization.md`](research/forward-spin-optimization.md)
+- [`spin-structure-search-2026-08.md`](research/spin-structure-search-2026-08.md)
 - [`tsar-half-geometry-bottleneck.md`](research/tsar-half-geometry-bottleneck.md)
 
 대화에 첨부되었던 `APDP English.md`, `APDP 한국어.md`, 역방향 탐색
@@ -63,16 +64,21 @@ parity, bumper, separator/MITM, setup family-quotient 계약은 루트 핸드오
 - Clearra audit 기준 commit:
   [`0e7c935a5399159a3d9c42fb8721e3c6842ae17d`](https://github.com/knewjade/solution-finder/commit/0e7c935a5399159a3d9c42fb8721e3c6842ae17d)
 - 기준 제품 버전: `1.43`.
+- `1.43` 구조 탐색 이식 감사 기준 commit:
+  [`e8b291b47702cd08daf982bd52ef946902354848`](https://github.com/knewjade/solution-finder/commit/e8b291b47702cd08daf982bd52ef946902354848).
 - License: MIT (`Copyright (c) 2020 knewjade`). 언어만 바꾼 실질적 포트도
   원 저작권·허가문과 provenance를 보존하며, 포함된 Apache Commons CLI의
   attribution을 별도로 유지한다.
 - 사용한 범위: command별 결과 계약, perfect packing, BuildUp, fixed-queue
-  operation 선택, property kick format, Fumen 기반 입출력 관례.
+  operation 선택, property kick format, Fumen 기반 입출력 관례. 독립된
+  unordered-inventory spin structure 이식 경계는
+  `crates/clearra-spin-structure-search/`에 한정한다.
 - Clearra 경계: `percent`, `path`, `cover`, `setup`, `spin`은 서로 다른
   retained-evidence 계약으로 해석한다. strip/profile packing, DFS, I 전용
   경로, SRS 전용 가정은 Clearra의 inverse lock-clear exact-cover 주력
   backend로 복제하지 않는다.
-- 상세 결정: [`sfinder-command-role-audit.md`](research/sfinder-command-role-audit.md)
+- 상세 결정: [`sfinder-command-role-audit.md`](research/sfinder-command-role-audit.md),
+  [`spin-structure-search-2026-08.md`](research/spin-structure-search-2026-08.md)
 
 ### wirelyre/tetra-tools
 

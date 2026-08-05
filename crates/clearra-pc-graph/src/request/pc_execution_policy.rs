@@ -449,9 +449,7 @@ mod worker_policy {
     }
     impl WorkerPolicy {
         pub fn hardware_worker_limit() -> usize {
-            std::thread::available_parallelism()
-                .map_or(1, usize::from)
-                .max(1)
+            clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit()
         }
     }
     impl WorkerPolicy {

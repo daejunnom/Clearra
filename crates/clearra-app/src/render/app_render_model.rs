@@ -1,6 +1,7 @@
 use clearra_core_executor::CoreExecutionResult;
 use clearra_forward_search::ForwardSearchReport;
 use clearra_output::model::RenderField;
+use clearra_spin_structure_search::SpinStructureReport;
 
 use super::AppResultKind;
 
@@ -54,6 +55,7 @@ pub enum AppRenderModel {
     BuildProbability(CoreExecutionResult),
     Damage(ForwardSearchReport),
     SpinFinder(ForwardSearchReport),
+    SpinStructure(SpinStructureReport),
     Cover(CoreExecutionResult),
     CoverMessage(AppMessage),
     Percent(CoreExecutionResult),
@@ -75,6 +77,7 @@ impl AppRenderModel {
             Self::BuildProbability(_) => AppResultKind::BuildProbability,
             Self::Damage(_) => AppResultKind::Damage,
             Self::SpinFinder(_) => AppResultKind::SpinFinder,
+            Self::SpinStructure(_) => AppResultKind::SpinStructure,
             Self::Cover(_) => AppResultKind::Cover,
             Self::Percent(_) => AppResultKind::Percent,
             Self::CoverMessage(message) => message.kind(),
@@ -91,6 +94,14 @@ impl AppRenderModel {
     pub fn forward_search_result(&self) -> Option<&ForwardSearchReport> {
         match self {
             Self::Damage(result) | Self::SpinFinder(result) => Some(result),
+            _ => None,
+        }
+    }
+}
+impl AppRenderModel {
+    pub fn spin_structure_result(&self) -> Option<&SpinStructureReport> {
+        match self {
+            Self::SpinStructure(result) => Some(result),
             _ => None,
         }
     }

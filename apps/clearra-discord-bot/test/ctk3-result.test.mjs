@@ -136,6 +136,40 @@ test("solution probability comments require a complete one-to-one key match", ()
   assert.equal(decodeCtk3(result.source).pages[0].comment, "P=25%");
 });
 
+test("spin solution classes are preserved as per-page CTK3 comments", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SIMPLE_KEY, SIMPLE_KEY],
+    solution_classes: ["regular", "mini"],
+  });
+  assert.ok(result);
+  assert.deepEqual(
+    decodeCtk3(result.source).pages.map((page) => page.comment),
+    ["Spin: Regular", "Spin: Mini"],
+  );
+
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SIMPLE_KEY],
+      solution_classes: [],
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "solution-class-key-mismatch",
+  );
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SIMPLE_KEY],
+      solution_classes: ["unknown"],
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "invalid-solution-class",
+  );
+});
+
 test("setup representative paths are replayed, colored, and marked incomplete without truncation", () => {
   const result = buildCtk3Result({
     schema_version: ARTIFACT_SCHEMA,
@@ -305,6 +339,31 @@ test("the CTK3 bundle page limit is rejected before reading page values", () => 
 
 test("results without solution artifacts return null", () => {
   assert.equal(buildCtk3Result({ schema_version: 2, contract: {} }), null);
+});
+
+test("zero-solution summaries suppress stale initial-only CTK3 artifacts", () => {
+  const initialOnlyKey =
+    "ctk1|initial=000000000000003f|placements=";
+  for (const [field, value] of [
+    ["result_count", 0],
+    ["total_solution_count", 0],
+    ["unique_solution_count", "0"],
+    ["normalized_unique_solution_count", 0],
+  ]) {
+    assert.equal(buildCtk3Result({
+      schema_version: 2,
+      summary: {
+        count_complete: true,
+        [field]: value,
+      },
+      contract: {
+        artifacts: {
+          schema_version: ARTIFACT_SCHEMA,
+          solution_keys: [initialOnlyKey],
+        },
+      },
+    }), null, field);
+  }
 });
 
 function words(mask) {

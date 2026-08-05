@@ -1,12 +1,14 @@
 import { EventEmitter } from "node:events";
 
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
+const FATAL_GATEWAY_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
 
 export class DiscordGateway extends EventEmitter {
   constructor(token, options = {}) {
     super();
     this.token = token;
     this.intents = options.intents ?? 0;
+    this.createWebSocket = options.createWebSocket ?? defaultWebSocket;
     this.stopped = false;
     this.socket = null;
     this.sequence = null;
@@ -23,7 +25,7 @@ export class DiscordGateway extends EventEmitter {
         await this.connectOnce();
         backoff = 500;
       } catch (error) {
-        if (!this.stopped) this.emit("error", error);
+        this.emit("error", error);
       }
       if (!this.stopped) {
         await sleep(backoff);
@@ -41,11 +43,8 @@ export class DiscordGateway extends EventEmitter {
 
   connectOnce() {
     return new Promise((resolve, reject) => {
-      if (typeof WebSocket !== "function") {
-        reject(new Error("This Node.js runtime does not provide WebSocket."));
-        return;
-      }
-      const socket = new WebSocket(this.resumeUrl || GATEWAY_URL);
+      this.heartbeatAcknowledged = true;
+      const socket = this.createWebSocket(this.resumeUrl || GATEWAY_URL);
       this.socket = socket;
       let connected = false;
       let closed = false;
@@ -74,8 +73,9 @@ export class DiscordGateway extends EventEmitter {
         finish(new Error("Discord Gateway connection failed."));
       });
       socket.addEventListener("close", (event) => {
-        if (event.code === 4004 || event.code === 4014) {
+        if (FATAL_GATEWAY_CLOSE_CODES.has(event.code)) {
           this.stopped = true;
+          this.resetSession();
           finish(new Error(`Discord Gateway rejected the bot (${event.code}).`));
           return;
         }
@@ -181,6 +181,13 @@ export class DiscordGateway extends EventEmitter {
     this.resumeUrl = null;
     this.sequence = null;
   }
+}
+
+function defaultWebSocket(url) {
+  if (typeof WebSocket !== "function") {
+    throw new Error("This Node.js runtime does not provide WebSocket.");
+  }
+  return new WebSocket(url);
 }
 
 function sleep(milliseconds) {

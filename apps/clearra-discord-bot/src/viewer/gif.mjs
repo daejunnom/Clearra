@@ -3,18 +3,25 @@ import { operationCells } from "ctk3";
 const DEFAULT_TILE_SIZE = 20;
 const DEFAULT_DELAY_MS = 500;
 const DEFAULT_MAX_BYTES = 24 * 1024 * 1024;
+const DEFAULT_MAX_FRAMES = 128;
 const MIN_VIEW_ROWS = 4;
+const TOP_EDGE = 1;
+const LEFT_EDGE = 2;
+const BOTTOM_EDGE = 4;
+const RIGHT_EDGE = 8;
+const ALL_EDGES = TOP_EDGE | LEFT_EDGE | BOTTOM_EDGE | RIGHT_EDGE;
+// Matches the default field palette in CtkColorBoardEditor.svelte.
 const PALETTE = [
-  [22, 31, 29],
-  [54, 67, 63],
-  [132, 143, 139],
-  [74, 194, 214],
-  [244, 211, 74],
-  [178, 91, 204],
-  [91, 194, 118],
-  [232, 91, 102],
-  [83, 128, 216],
-  [238, 153, 75],
+  [30, 41, 39],
+  [63, 74, 72],
+  [123, 133, 129],
+  [85, 203, 211],
+  [243, 207, 77],
+  [182, 106, 208],
+  [101, 199, 120],
+  [233, 110, 110],
+  [98, 138, 224],
+  [239, 156, 77],
   [38, 50, 46],
   [103, 116, 111],
   [255, 255, 255],
@@ -42,7 +49,13 @@ export class GifRenderLimitError extends Error {
 }
 
 export function renderDocumentGif(document, options = {}) {
-  validateDocument(document);
+  const maxFrames = integerOption(
+    options.maxFrames,
+    DEFAULT_MAX_FRAMES,
+    1,
+    4096,
+  );
+  validateDocument(document, maxFrames);
   const tileSize = integerOption(options.tileSize, DEFAULT_TILE_SIZE, 8, 48);
   const delayMs = integerOption(options.delayMs, DEFAULT_DELAY_MS, 20, 60_000);
   const maxBytes = integerOption(
@@ -71,7 +84,7 @@ export function renderDocumentGif(document, options = {}) {
   return writer.finish();
 }
 
-function validateDocument(document) {
+function validateDocument(document, maxFrames) {
   if (
     !document ||
     !Number.isInteger(document.width) ||
@@ -81,6 +94,24 @@ function validateDocument(document) {
     document.pages.length === 0
   ) {
     throw new Error("The viewer document is invalid.");
+  }
+  if (document.pages.length > maxFrames) {
+    throw new GifRenderLimitError(
+      `The viewer document exceeds the ${maxFrames}-frame GIF limit.`,
+    );
+  }
+  for (const page of document.pages) {
+    if (
+      !page ||
+      !Number.isInteger(page.height) ||
+      page.height < 0 ||
+      page.height > 31 ||
+      !Array.isArray(page.cells) ||
+      page.cells.length !== document.width * page.height ||
+      page.cells.some((cell) => !COLOR_INDEX.has(cell))
+    ) {
+      throw new Error("A viewer document page is invalid.");
+    }
   }
 }
 
@@ -106,63 +137,116 @@ function renderPage(width, rows, tileSize, page) {
   const pixelWidth = width * tileSize;
   const pixelHeight = rows * tileSize;
   const pixels = new Uint8Array(pixelWidth * pixelHeight);
+  const cells = Array(width * rows).fill(null);
+  const owners = new Uint8Array(width * rows);
 
-  for (let y = 0; y < rows; y += 1) {
+  for (let y = 0; y < Math.min(rows, page.height); y += 1) {
     for (let x = 0; x < width; x += 1) {
-      paintCell(pixels, pixelWidth, rows, tileSize, x, y, cellAt(page, width, x, y));
+      cells[y * width + x] = page.cells[y * width + x] ?? null;
     }
   }
   if (page.operation) {
     for (const cell of operationCells(page.operation)) {
       if (cell.x < 0 || cell.x >= width || cell.y < 0 || cell.y >= rows) continue;
-      paintCell(
-        pixels,
-        pixelWidth,
-        rows,
-        tileSize,
-        cell.x,
-        cell.y,
-        page.operation.piece,
-      );
+      cells[cell.y * width + cell.x] = page.operation.piece;
+      owners[cell.y * width + cell.x] = 1;
+    }
+  }
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      paintCell(pixels, pixelWidth, rows, tileSize, cells, owners, width, x, y);
     }
   }
   return pixels;
 }
 
-function cellAt(page, width, x, y) {
-  if (y >= page.height) return null;
-  return page.cells[y * width + x] ?? null;
-}
-
-function paintCell(pixels, pixelWidth, rows, tileSize, x, boardY, color) {
+function paintCell(
+  pixels,
+  pixelWidth,
+  rows,
+  tileSize,
+  cells,
+  owners,
+  width,
+  x,
+  boardY,
+) {
+  const color = cells[boardY * width + x];
+  const owner = owners[boardY * width + x];
   const screenY = rows - boardY - 1;
   const left = x * tileSize;
   const top = screenY * tileSize;
   const fill = COLOR_INDEX.get(color) ?? 2;
-  const border = color === null ? 1 : 10;
-  const highlight = color === null ? 1 : 11;
 
   fillRectangle(pixels, pixelWidth, left, top, tileSize, tileSize, fill);
-  fillRectangle(pixels, pixelWidth, left, top, tileSize, 1, highlight);
-  fillRectangle(pixels, pixelWidth, left, top, 1, tileSize, highlight);
-  fillRectangle(
-    pixels,
-    pixelWidth,
-    left,
-    top + tileSize - 1,
-    tileSize,
-    1,
-    border,
-  );
-  fillRectangle(
-    pixels,
-    pixelWidth,
-    left + tileSize - 1,
-    top,
-    1,
-    tileSize,
-    border,
-  );
+  if (color === null) {
+    paintEdges(pixels, pixelWidth, left, top, tileSize, 1, 1, ALL_EDGES);
+    return;
+  }
+
+  let edgeMask = 0;
+  if (!samePlacement(cells, owners, width, rows, x, boardY + 1, color, owner)) {
+    edgeMask |= TOP_EDGE;
+  }
+  if (!samePlacement(cells, owners, width, rows, x - 1, boardY, color, owner)) {
+    edgeMask |= LEFT_EDGE;
+  }
+  if (!samePlacement(cells, owners, width, rows, x, boardY - 1, color, owner)) {
+    edgeMask |= BOTTOM_EDGE;
+  }
+  if (!samePlacement(cells, owners, width, rows, x + 1, boardY, color, owner)) {
+    edgeMask |= RIGHT_EDGE;
+  }
+  paintEdges(pixels, pixelWidth, left, top, tileSize, 11, 10, edgeMask);
+}
+
+function samePlacement(cells, owners, width, rows, x, y, color, owner) {
+  return x >= 0 &&
+    x < width &&
+    y >= 0 &&
+    y < rows &&
+    cells[y * width + x] === color &&
+    owners[y * width + x] === owner;
+}
+
+function paintEdges(
+  pixels,
+  pixelWidth,
+  left,
+  top,
+  tileSize,
+  highlight,
+  border,
+  edgeMask,
+) {
+  if (edgeMask & TOP_EDGE) {
+    fillRectangle(pixels, pixelWidth, left, top, tileSize, 1, highlight);
+  }
+  if (edgeMask & LEFT_EDGE) {
+    fillRectangle(pixels, pixelWidth, left, top, 1, tileSize, highlight);
+  }
+  if (edgeMask & BOTTOM_EDGE) {
+    fillRectangle(
+      pixels,
+      pixelWidth,
+      left,
+      top + tileSize - 1,
+      tileSize,
+      1,
+      border,
+    );
+  }
+  if (edgeMask & RIGHT_EDGE) {
+    fillRectangle(
+      pixels,
+      pixelWidth,
+      left + tileSize - 1,
+      top,
+      1,
+      tileSize,
+      border,
+    );
+  }
 }
 
 function fillRectangle(pixels, width, x, y, rectWidth, rectHeight, value) {
@@ -250,7 +334,7 @@ function lzwEncode(input, minimumCodeSize) {
     if (nextCode < 4096) {
       dictionary.set(key, nextCode);
       nextCode += 1;
-      if (nextCode === 1 << codeSize && codeSize < 12) codeSize += 1;
+      if (nextCode > 1 << codeSize && codeSize < 12) codeSize += 1;
     } else {
       output.write(clearCode, codeSize);
       reset();
@@ -296,14 +380,14 @@ class BitWriter {
 class ByteWriter {
   constructor(limit) {
     this.limit = limit;
-    this.output = [];
+    this.length = 0;
+    this.output = new Uint8Array(Math.min(limit, 64 * 1024));
   }
 
   byte(value) {
-    if (this.output.length >= this.limit) {
-      throw new GifRenderLimitError("The rendered GIF exceeds the Discord attachment limit.");
-    }
-    this.output.push(value & 0xff);
+    this.ensureCapacity(1);
+    this.output[this.length] = value & 0xff;
+    this.length += 1;
   }
 
   word(value) {
@@ -312,10 +396,9 @@ class ByteWriter {
   }
 
   bytes(values) {
-    if (this.output.length + values.length > this.limit) {
-      throw new GifRenderLimitError("The rendered GIF exceeds the Discord attachment limit.");
-    }
-    for (const value of values) this.output.push(value);
+    this.ensureCapacity(values.length);
+    this.output.set(values, this.length);
+    this.length += values.length;
   }
 
   ascii(value) {
@@ -323,6 +406,21 @@ class ByteWriter {
   }
 
   finish() {
-    return Uint8Array.from(this.output);
+    return this.output.slice(0, this.length);
+  }
+
+  ensureCapacity(additionalLength) {
+    const required = this.length + additionalLength;
+    if (required > this.limit) {
+      throw new GifRenderLimitError("The rendered GIF exceeds the Discord attachment limit.");
+    }
+    if (required <= this.output.length) return;
+    const nextLength = Math.min(
+      this.limit,
+      Math.max(required, this.output.length * 2),
+    );
+    const expanded = new Uint8Array(nextLength);
+    expanded.set(this.output.subarray(0, this.length));
+    this.output = expanded;
   }
 }

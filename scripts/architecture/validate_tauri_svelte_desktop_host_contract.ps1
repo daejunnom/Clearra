@@ -41,6 +41,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     $rootCargo = Read-Text "Cargo.toml"
     $rootCmake = Read-Text "CMakeLists.txt"
     $tauriCargo = Read-Text "apps/clearra-desktop/src-tauri/Cargo.toml"
+    $tauriConfig = Read-Text "apps/clearra-desktop/src-tauri/tauri.conf.json"
     $tauriMain = Read-Text "apps/clearra-desktop/src-tauri/src/main.rs"
     $tauriCommands = Read-Text "apps/clearra-desktop/src-tauri/src/commands.rs"
     $desktopBridge = @(
@@ -61,6 +62,9 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     }
     if ($tauriCargo -notmatch '(?m)^clearra-gui-host\s*=') {
         Add-ArchitectureError "U6 Tauri crate must depend on clearra-gui-host"
+    }
+    if ($tauriConfig -notmatch '"dragDropEnabled"\s*:\s*false') {
+        Add-ArchitectureError "U6 Windows desktop must preserve frontend HTML5 document drag and drop"
     }
     $guiHostDependency = [regex]::Match(
         $tauriCargo,

@@ -1,6 +1,7 @@
 const API_ROOT = "https://discord.com/api/v10";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RATE_LIMIT_DELAY_MS = 30_000;
+const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
 export class DiscordRestClient {
   constructor(token = null, fetchImplementation = fetch, options = {}) {
@@ -17,16 +18,39 @@ export class DiscordRestClient {
   }
 
   async registerGlobalCommands(applicationId, commands) {
-    return this.request("PUT", `/applications/${applicationId}/commands`, commands);
+    return this.request(
+      "PUT",
+      `/applications/${applicationId}/commands`,
+      commands,
+      [],
+      true,
+      { retryServerErrors: false },
+    );
   }
 
-  async deferInteraction(interaction) {
+  async getGlobalCommands(applicationId) {
+    return this.request(
+      "GET",
+      `/applications/${applicationId}/commands?with_localizations=true`,
+    );
+  }
+
+  async deferInteraction(interaction, options = {}) {
+    const response = { type: 5 };
+    if (options.ephemeral === true) {
+      response.data = { flags: 1 << 6 };
+    }
+    return this.createInteractionResponse(interaction, response);
+  }
+
+  async createInteractionResponse(interaction, response) {
     return this.request(
       "POST",
       `/interactions/${interaction.id}/${interaction.token}/callback`,
-      { type: 5 },
+      response,
       [],
       false,
+      { retryServerErrors: false },
     );
   }
 
@@ -47,6 +71,7 @@ export class DiscordRestClient {
       message.payload,
       message.files,
       false,
+      { retryServerErrors: false },
     );
   }
 
@@ -56,6 +81,42 @@ export class DiscordRestClient {
       `/channels/${channelId}/messages`,
       message.payload,
       message.files,
+      true,
+      { retryServerErrors: false },
+    );
+  }
+
+  async editChannelMessage(channelId, messageId, message) {
+    return this.request(
+      "PATCH",
+      `/channels/${channelId}/messages/${messageId}`,
+      message.payload,
+      message.files,
+    );
+  }
+
+  async getChannelMessage(channelId, messageId) {
+    const channel = discordSnowflake(channelId, "channel ID");
+    const message = discordSnowflake(messageId, "message ID");
+    return this.request("GET", `/channels/${channel}/messages/${message}`);
+  }
+
+  async getChannelMessages(channelId, options = {}) {
+    const channel = discordSnowflake(channelId, "channel ID");
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Discord channel-message limit must be from 1 through 100.");
+    }
+    const parameters = new URLSearchParams({ limit: String(limit) });
+    if (options.before !== undefined && options.before !== null) {
+      parameters.set(
+        "before",
+        discordSnowflake(options.before, "before message ID"),
+      );
+    }
+    return this.request(
+      "GET",
+      `/channels/${channel}/messages?${parameters.toString()}`,
     );
   }
 
@@ -81,15 +142,17 @@ export class DiscordRestClient {
       throw discordNetworkError(error);
     }
     if (!response.ok) {
-      throw new Error(`Discord attachment ${response.status}.`);
+      const error = new Error(`Discord attachment ${response.status}.`);
+      error.discordStatus = response.status;
+      throw error;
     }
     const declaredLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > limit) {
-      throw new Error("The CTK3 attachment is too large.");
+      throw new Error("The Discord attachment is too large.");
     }
     if (!response.body) {
       const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > limit) throw new Error("The CTK3 attachment is too large.");
+      if (bytes.byteLength > limit) throw new Error("The Discord attachment is too large.");
       return bytes;
     }
 
@@ -103,7 +166,7 @@ export class DiscordRestClient {
         length += value.byteLength;
         if (length > limit) {
           await reader.cancel();
-          throw new Error("The CTK3 attachment is too large.");
+          throw new Error("The Discord attachment is too large.");
         }
         chunks.push(value);
       }
@@ -119,7 +182,14 @@ export class DiscordRestClient {
     return bytes;
   }
 
-  async request(method, path, payload, files = [], authenticate = true) {
+  async request(
+    method,
+    path,
+    payload,
+    files = [],
+    authenticate = true,
+    options = {},
+  ) {
     if (authenticate && !this.token) {
       throw new Error("DISCORD_TOKEN is required for this Discord API request.");
     }
@@ -132,14 +202,20 @@ export class DiscordRestClient {
       let body;
       if (files.length > 0) {
         const form = new FormData();
-        const attachments = files.map((file, index) => ({
+        const retainedAttachments = Array.isArray(payload?.attachments)
+          ? payload.attachments
+          : [];
+        const uploadedAttachments = files.map((file, index) => ({
           id: index,
           filename: file.name,
           description: file.description,
         }));
         form.set(
           "payload_json",
-          JSON.stringify({ ...payload, attachments }),
+          JSON.stringify({
+            ...payload,
+            attachments: [...retainedAttachments, ...uploadedAttachments],
+          }),
         );
         files.forEach((file, index) => {
           form.set(
@@ -175,14 +251,23 @@ export class DiscordRestClient {
         attempt += 1;
         continue;
       }
-      if (response.status >= 500 && attempt < 3) {
+      if (
+        response.status >= 500 &&
+        attempt < 3 &&
+        options.retryServerErrors !== false
+      ) {
         await sleep(250 * 2 ** attempt);
         attempt += 1;
         continue;
       }
       if (!response.ok) {
         const detail = (await response.text()).slice(0, 1000);
-        throw new Error(`Discord API ${response.status}: ${detail}`);
+        const error = new Error(`Discord API ${response.status}: ${detail}`);
+        error.discordStatus = response.status;
+        const discordCode = discordApiErrorCode(detail);
+        if (discordCode !== null) error.discordCode = discordCode;
+        error.discordAmbiguous = response.status >= 500;
+        throw error;
       }
       if (response.status === 204) return null;
       return response.json();
@@ -207,6 +292,23 @@ export function attachmentMessage(content, files) {
       allowed_mentions: { parse: [] },
     },
     files,
+  };
+}
+
+export function fileComponentMessage(file) {
+  if (!file || typeof file.name !== "string" || !file.name) {
+    throw new Error("A Discord file component requires a filename.");
+  }
+  return {
+    payload: {
+      flags: 1 << 15,
+      allowed_mentions: { parse: [] },
+      components: [{
+        type: 13,
+        file: { url: `attachment://${file.name}` },
+      }],
+    },
+    files: [file],
   };
 }
 
@@ -236,17 +338,37 @@ function positiveInteger(value, fallback) {
   return parsed;
 }
 
+function discordSnowflake(value, name) {
+  if (typeof value !== "string" || !DISCORD_SNOWFLAKE.test(value)) {
+    throw new Error(`Discord ${name} must be a 17-20 digit snowflake.`);
+  }
+  return value;
+}
+
 function discordNetworkError(error) {
+  let output;
   if (
     error?.name === "TimeoutError" ||
     error?.name === "AbortError"
   ) {
-    return new Error("Discord API request timed out.");
+    output = new Error("Discord API request timed out.");
+  } else {
+    const detail = error instanceof Error && error.message
+      ? `: ${error.message}`
+      : "";
+    output = new Error(`Discord API request failed${detail}`);
   }
-  const detail = error instanceof Error && error.message
-    ? `: ${error.message}`
-    : "";
-  return new Error(`Discord API request failed${detail}`);
+  output.discordAmbiguous = true;
+  return output;
+}
+
+function discordApiErrorCode(detail) {
+  try {
+    const code = JSON.parse(detail)?.code;
+    return Number.isSafeInteger(code) ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 function discordAttachmentUrl(value) {

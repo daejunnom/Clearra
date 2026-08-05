@@ -1,7 +1,7 @@
 use clearra_app::{
     AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand, PcAppCommand,
     PercentAppCommand, ResourceBudget, ScenarioAppCommand, SetupAppCommand, SpinFinderAppCommand,
-    VerifyAppCommand,
+    SpinStructureAppCommand, VerifyAppCommand,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -17,6 +17,7 @@ use clearra_problem::{
     SetupSearchMode, SetupSearchQuery,
 };
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
+use clearra_spin_structure_search::SpinStructureQuery;
 use clearra_supply::{
     queue::{queue_parser, queue_pattern_expression::QueuePatternExpression},
     QueueObservationPolicy,
@@ -43,6 +44,7 @@ pub struct WebCommandRequest {
     scenario: Option<WebPcScenarioInput>,
     build_probability: Option<WebBuildProbabilityInput>,
     forward_search: Option<ForwardSearchQuery>,
+    spin_structure: Option<SpinStructureQuery>,
     percent_query: Option<PcScenarioQuery>,
     percent_failed_pattern_limit: usize,
     setup_remaining: Option<Vec<PieceKind>>,
@@ -92,6 +94,7 @@ impl WebCommandRequest {
             scenario: None,
             build_probability: None,
             forward_search: None,
+            spin_structure: None,
             percent_query: None,
             percent_failed_pattern_limit: 100,
             setup_remaining: None,
@@ -142,6 +145,7 @@ impl WebCommandRequest {
             scenario: None,
             build_probability: None,
             forward_search: None,
+            spin_structure: None,
             percent_query: None,
             percent_failed_pattern_limit: 100,
             setup_remaining: None,
@@ -250,6 +254,15 @@ impl WebCommandRequest {
         request.command_kind = command_kind.to_owned();
         request.allow_backend_fallback = false;
         request.forward_search = Some(query);
+        request
+    }
+}
+impl WebCommandRequest {
+    pub fn spin_structure(query: SpinStructureQuery) -> Self {
+        let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
+        request.command_kind = "spin-structure".to_owned();
+        request.allow_backend_fallback = false;
+        request.spin_structure = Some(query);
         request
     }
 }
@@ -448,6 +461,25 @@ impl WebCommandRequest {
             };
             return Ok(
                 AppRequest::new(command).with_resource_budget(ResourceBudget::new(
+                    u16::try_from(workers).unwrap_or(u16::MAX),
+                    None,
+                    None,
+                )),
+            );
+        }
+        if self.command_kind == "spin-structure" {
+            let query = self.spin_structure.clone().ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "spin-structure command is missing its typed query",
+                )
+            })?;
+            let workers = self.resolved_worker_budget();
+            return Ok(
+                AppRequest::new(AppCommand::SpinStructure(SpinStructureAppCommand::new(
+                    query,
+                )))
+                .with_resource_budget(ResourceBudget::new(
                     u16::try_from(workers).unwrap_or(u16::MAX),
                     None,
                     None,
@@ -763,6 +795,10 @@ impl WebCommandRequest {
 
     pub fn forward_search_query(&self) -> Option<&ForwardSearchQuery> {
         self.forward_search.as_ref()
+    }
+
+    pub fn spin_structure_query(&self) -> Option<&SpinStructureQuery> {
+        self.spin_structure.as_ref()
     }
 }
 impl WebCommandRequest {

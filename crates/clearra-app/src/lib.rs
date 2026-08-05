@@ -17,6 +17,10 @@ mod execution_constraint_postprocess;
 pub mod gui_bridge;
 pub mod io;
 pub mod language;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_forward_execution;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_spin_structure_execution;
 mod objective_contract;
 pub mod render;
 pub mod request;
@@ -51,7 +55,7 @@ pub use commands::{
     DamageAppCommand, InspectUnsupportedAppCommand, PathAppCommand, PcAppCommand,
     PercentAppCommand, RulesAppCommand, ScenarioAppCommand, ScenarioAppExpected,
     ScenarioAppRenderContract, ScoringAppCommand, SetupAppCommand, SpinFinderAppCommand,
-    VerifyAppCommand,
+    SpinStructureAppCommand, VerifyAppCommand,
 };
 pub use cooperative_execution::{CooperativeAppAdvance, CooperativeAppExecution};
 pub use distributed_forward_execution::{

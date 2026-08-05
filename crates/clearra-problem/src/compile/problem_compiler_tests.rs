@@ -184,6 +184,42 @@ mod case_scenario_compiles_to_search_problem {
     }
 
     #[test]
+    fn completed_initial_rows_compile_as_the_explicitly_normalized_pc_problem() {
+        let raw = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0x0000_0000_0003_ffff),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::O,
+                PieceKind::I,
+                PieceKind::I,
+            ])),
+            PieceWindow::new(3),
+        )
+        .with_exact_pieces(Some(3))
+        .with_retained_trace_limit(1);
+        let normalized = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xff),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::O,
+                PieceKind::I,
+                PieceKind::I,
+            ])),
+            PieceWindow::new(3),
+        )
+        .with_exact_pieces(Some(3))
+        .with_retained_trace_limit(1);
+
+        let raw_problem = ProblemCompiler::compile_scenario_pc(&raw).expect("raw problem");
+        let normalized_problem =
+            ProblemCompiler::compile_scenario_pc(&normalized).expect("normalized problem");
+
+        assert_eq!(raw_problem, normalized_problem);
+        assert_eq!(raw_problem.initial_board().width(), 10);
+        assert_eq!(raw_problem.initial_board().visible_height(), 2);
+        assert_eq!(raw_problem.initial_board().occupied_mask(), 0xff);
+        assert_eq!(raw_problem.core_query(), &normalized);
+    }
+
+    #[test]
     fn colored_solution_allow_list_preserves_repeated_piece_ambiguity() {
         let horizontal = StandardBoard64TilingIdentity::from_placements(
             0,

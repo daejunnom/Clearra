@@ -10,6 +10,7 @@ stage-profiling = ["dep:wasm-bindgen"]
 
 [dependencies]
 bytemuck = "1"
+clearra-core-domain = { path = "../clearra-core-domain" }
 futures-channel = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]

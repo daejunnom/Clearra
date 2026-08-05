@@ -4,47 +4,28 @@ import test from "node:test";
 import { ClearraDirectExecutor } from "../src/clearra/direct-executor.mjs";
 import { loadDiscordBotConfig } from "../src/config.mjs";
 
-test("Cloud Run interactions default to bounded in-process execution without a bot token", () => {
-  const config = loadDiscordBotConfig(
-    {
-      K_SERVICE: "clearra-interactions",
-      DISCORD_PUBLIC_KEY: "01".repeat(32),
-    },
-    { availableParallelism: () => 4 },
-  );
-
-  assert.equal(config.ingressMode, "cloud-run");
-  assert.equal(config.registerCommands, false);
-  assert.equal(config.token, null);
-  assert.equal(config.jobEndpoint, null);
-  assert.equal(config.executable, "/usr/local/bin/clearra");
-  assert.equal(config.maxOutputBytes, 4 * 1024 * 1024);
-  assert.equal(config.maxPendingSearches, 8);
-  assert.equal(config.interactionDeadlineMs, 4 * 60_000);
-  assert.equal(config.searchWorkersPerSession, undefined);
-  assert.equal(config.useAllLogicalProcessors, true);
-});
-
-test("gateway ingress and Cloud Run command registration still require a bot token", () => {
-  assert.throws(
-    () => loadDiscordBotConfig({}),
-    /DISCORD_TOKEN is required/,
-  );
+test("Discord Gateway startup fails closed on Cloud Run", () => {
   assert.throws(
     () => loadDiscordBotConfig({
-      K_SERVICE: "clearra-interactions",
-      DISCORD_PUBLIC_KEY: "01".repeat(32),
-      CLEARRA_REGISTER_COMMANDS: "1",
-    }),
+      K_SERVICE: "stale-interaction-service",
+      DISCORD_TOKEN: "test-token",
+    }, { availableParallelism: () => 4 }),
+    /must run on Oracle, not Cloud Run/,
+  );
+});
+
+test("Oracle Gateway ingress requires a bot token", () => {
+  assert.throws(
+    () => loadDiscordBotConfig({}),
     /DISCORD_TOKEN is required/,
   );
 });
 
 test("an explicit job URL preserves the remote execution seam", () => {
   const config = loadDiscordBotConfig({
-    K_SERVICE: "clearra-interactions",
-    DISCORD_PUBLIC_KEY: "01".repeat(32),
+    DISCORD_TOKEN: "test-token",
     CLEARRA_JOB_URL: "https://oracle.example.test/jobs",
+    CLEARRA_JOB_TOKEN: "job-token",
   });
 
   assert.equal(config.jobEndpoint, "https://oracle.example.test/jobs");
@@ -55,8 +36,7 @@ test("an explicit job URL preserves the remote execution seam", () => {
 test("interaction deadlines are capped below the Discord interaction-token window", () => {
   assert.throws(
     () => loadDiscordBotConfig({
-      K_SERVICE: "clearra-interactions",
-      DISCORD_PUBLIC_KEY: "01".repeat(32),
+      DISCORD_TOKEN: "test-token",
       CLEARRA_INTERACTION_DEADLINE_MS: String(14 * 60_000 + 1),
     }),
     /must not exceed 840000 milliseconds/,

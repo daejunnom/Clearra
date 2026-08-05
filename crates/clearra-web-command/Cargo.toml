@@ -15,6 +15,7 @@ clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-problem = { path = "../clearra-problem" }
 clearra-rules = { path = "../clearra-rules" }
 clearra-scoring = { path = "../clearra-scoring" }
+clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 
 [lib]

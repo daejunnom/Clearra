@@ -24,9 +24,10 @@ use crate::{
 const INIT_MAGIC: u32 = u32::from_le_bytes(*b"FWIN");
 const TASK_MAGIC: u32 = u32::from_le_bytes(*b"FWTK");
 const RESULT_MAGIC: u32 = u32::from_le_bytes(*b"FWRS");
-const WIRE_VERSION: u32 = 7;
+const WIRE_VERSION: u32 = 8;
 const MAX_WIRE_ITEMS: usize = 10_000_000;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
+const MAX_REORDER_BATCHES_PER_WORKER: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForwardParallelProduce {
@@ -90,6 +91,9 @@ pub struct ForwardParallelCoordinator {
     state: CoordinatorState,
     tail_reachability: ReachabilityWorkspace,
     next_task_id: u64,
+    next_absorb_task_id: u64,
+    buffered_results: BTreeMap<u64, WireResult>,
+    max_outstanding_tasks: usize,
     progress: ForwardParallelProgress,
 }
 
@@ -142,6 +146,14 @@ enum WireResult {
         id: u64,
         report: ForwardSearchReport,
     },
+}
+
+impl WireResult {
+    const fn id(&self) -> u64 {
+        match self {
+            Self::Expansion { id, .. } | Self::Pattern { id, .. } => *id,
+        }
+    }
 }
 
 pub struct ForwardParallelWorker {
@@ -205,11 +217,22 @@ impl ForwardParallelCoordinator {
                 pending: HashMap::new(),
             })
         };
+        let parallel_workers = worker_count.saturating_sub(1).max(1);
+        let tasks_per_batch = match &state {
+            CoordinatorState::Pattern(pattern) if !pattern.layered => 1,
+            CoordinatorState::Fixed(_) | CoordinatorState::Pattern(_) => MAX_FIXED_TASKS_PER_BATCH,
+        };
+        let max_outstanding_tasks = parallel_workers
+            .saturating_mul(tasks_per_batch)
+            .saturating_mul(MAX_REORDER_BATCHES_PER_WORKER);
         Ok(Self {
             config,
             state,
             tail_reachability,
             next_task_id: 1,
+            next_absorb_task_id: 1,
+            buffered_results: BTreeMap::new(),
+            max_outstanding_tasks,
             progress: ForwardParallelProgress::default(),
         })
     }
@@ -271,40 +294,26 @@ impl ForwardParallelCoordinator {
         if control.is_cancelled() {
             return Ok((ForwardParallelProduce::Cancelled, Vec::new()));
         }
+        let available_capacity = self
+            .max_outstanding_tasks
+            .saturating_sub(self.outstanding_tasks());
+        if available_capacity == 0 {
+            return Ok((ForwardParallelProduce::Pending, Vec::new()));
+        }
         let capacity = match &self.state {
             CoordinatorState::Fixed(_) => capacity.clamp(1, MAX_FIXED_TASKS_PER_BATCH),
             CoordinatorState::Pattern(pattern) if pattern.layered => {
                 capacity.clamp(1, MAX_FIXED_TASKS_PER_BATCH)
             }
             CoordinatorState::Pattern(_) => 1,
-        };
+        }
+        .min(available_capacity);
         let mut tasks = Vec::with_capacity(capacity);
         match &mut self.state {
             CoordinatorState::Fixed(fixed) => {
                 seal_fixed_layer(fixed);
                 if fixed.session.completed {
                     return Ok((ForwardParallelProduce::Completed, Vec::new()));
-                }
-                if fixed.pending.is_empty() && fixed.session.terminal_fusion_active() {
-                    return match fixed.session.advance(
-                        capacity,
-                        control,
-                        &mut self.tail_reachability,
-                    )? {
-                        crate::search::ForwardSearchAdvance::Pending => {
-                            self.progress.visited_states = fixed.session.visited_states;
-                            self.progress.generated_locks = fixed.session.generated_locks;
-                            Ok((ForwardParallelProduce::Pending, Vec::new()))
-                        }
-                        crate::search::ForwardSearchAdvance::Completed(_) => {
-                            self.progress.visited_states = fixed.session.visited_states;
-                            self.progress.generated_locks = fixed.session.generated_locks;
-                            Ok((ForwardParallelProduce::Completed, Vec::new()))
-                        }
-                        crate::search::ForwardSearchAdvance::Cancelled => {
-                            Ok((ForwardParallelProduce::Cancelled, Vec::new()))
-                        }
-                    };
                 }
                 while tasks.len() < capacity
                     && fixed.session.current_cursor < fixed.session.current.len()
@@ -328,27 +337,6 @@ impl ForwardParallelCoordinator {
                     let Some(session) = pattern.active_session.as_mut() else {
                         return Ok((ForwardParallelProduce::Completed, Vec::new()));
                     };
-                    if pattern.pending.is_empty() && session.terminal_fusion_active() {
-                        return match session.advance(
-                            capacity,
-                            control,
-                            &mut self.tail_reachability,
-                        )? {
-                            crate::search::ForwardSearchAdvance::Pending => {
-                                self.progress.visited_states = session.visited_states;
-                                self.progress.generated_locks = session.generated_locks;
-                                Ok((ForwardParallelProduce::Pending, Vec::new()))
-                            }
-                            crate::search::ForwardSearchAdvance::Completed(_) => {
-                                self.progress.visited_states = session.visited_states;
-                                self.progress.generated_locks = session.generated_locks;
-                                Ok((ForwardParallelProduce::Pending, Vec::new()))
-                            }
-                            crate::search::ForwardSearchAdvance::Cancelled => {
-                                Ok((ForwardParallelProduce::Cancelled, Vec::new()))
-                            }
-                        };
-                    }
                     let pattern_index =
                         pattern
                             .active_pattern
@@ -409,123 +397,166 @@ impl ForwardParallelCoordinator {
         input: &[u8],
         control: &ExecutionControl,
     ) -> Result<usize, ForwardParallelError> {
+        if control.is_cancelled() {
+            return Err(ForwardSearchError::Cancelled.into());
+        }
         let results = decode_results(input)?;
         let count = results.len();
         for result in results {
-            match (&mut self.state, result) {
-                (
-                    CoordinatorState::Fixed(fixed),
-                    WireResult::Expansion {
-                        id,
-                        generated_locks,
-                        actions,
-                    },
-                ) => {
-                    let index =
-                        fixed
-                            .pending
-                            .remove(&id)
-                            .ok_or(ForwardParallelError::InvalidState(
-                                "forward_parallel_task_not_pending",
-                            ))?;
-                    let parents = fixed.session.current[index].traces;
-                    fixed.session.visited_states = fixed.session.visited_states.saturating_add(1);
-                    fixed.session.generated_locks = fixed
-                        .session
-                        .generated_locks
-                        .saturating_add(generated_locks);
-                    for action in actions {
-                        fixed.session.absorb_expanded_action(
-                            parents,
-                            action,
-                            control,
-                            &mut self.tail_reachability,
-                        )?;
-                    }
-                    self.progress.visited_states = fixed.session.visited_states;
-                    self.progress.generated_locks = fixed.session.generated_locks;
-                }
-                (
-                    CoordinatorState::Pattern(pattern),
-                    WireResult::Expansion {
-                        id,
-                        generated_locks,
-                        actions,
-                    },
-                ) if pattern.layered => {
-                    let index =
-                        pattern
-                            .pending
-                            .remove(&id)
-                            .ok_or(ForwardParallelError::InvalidState(
-                                "forward_parallel_pattern_task_not_pending",
-                            ))?;
-                    let session = pattern.active_session.as_mut().ok_or(
-                        ForwardParallelError::InvalidState(
-                            "forward_parallel_pattern_session_missing",
-                        ),
-                    )?;
-                    let parents = session.current[index].traces;
-                    session.visited_states = session.visited_states.saturating_add(1);
-                    session.generated_locks =
-                        session.generated_locks.saturating_add(generated_locks);
-                    for action in actions {
-                        session.absorb_expanded_action(
-                            parents,
-                            action,
-                            control,
-                            &mut self.tail_reachability,
-                        )?;
-                    }
-                    self.progress.visited_states = session.visited_states;
-                    self.progress.generated_locks = session.generated_locks;
-                }
-                (CoordinatorState::Pattern(pattern), WireResult::Pattern { id, report }) => {
-                    if pattern.layered {
-                        return Err(ForwardParallelError::InvalidWire(
-                            "forward_parallel_layered_pattern_result_kind_mismatch",
-                        ));
-                    }
-                    let pattern_index =
-                        pattern
-                            .pending
-                            .remove(&id)
-                            .ok_or(ForwardParallelError::InvalidState(
-                                "forward_parallel_pattern_not_pending",
-                            ))?;
-                    if report
-                        .outcomes()
-                        .iter()
-                        .any(|outcome| outcome.source_pattern_index() as usize != pattern_index)
-                    {
-                        return Err(ForwardParallelError::InvalidWire(
-                            "forward_parallel_pattern_identity_mismatch",
-                        ));
-                    }
-                    self.progress.visited_states = self
-                        .progress
-                        .visited_states
-                        .saturating_add(report.visited_states());
-                    self.progress.generated_locks = self
-                        .progress
-                        .generated_locks
-                        .saturating_add(report.generated_locks());
-                    if pattern.reports.insert(pattern_index, report).is_some() {
-                        return Err(ForwardParallelError::InvalidState(
-                            "forward_parallel_pattern_duplicate",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(ForwardParallelError::InvalidWire(
-                        "forward_parallel_result_kind_mismatch",
-                    ));
-                }
+            let id = result.id();
+            if id < self.next_absorb_task_id || !self.task_is_pending(id) {
+                return Err(ForwardParallelError::InvalidState(
+                    "forward_parallel_task_not_pending",
+                ));
             }
+            if self.buffered_results.insert(id, result).is_some() {
+                return Err(ForwardParallelError::InvalidState(
+                    "forward_parallel_task_result_duplicate",
+                ));
+            }
+        }
+        while self
+            .buffered_results
+            .contains_key(&self.next_absorb_task_id)
+        {
+            if control.is_cancelled() {
+                return Err(ForwardSearchError::Cancelled.into());
+            }
+            let result = self
+                .buffered_results
+                .remove(&self.next_absorb_task_id)
+                .expect("checked buffered forward result");
+            self.absorb_ready_result(result, control)?;
+            self.next_absorb_task_id = self.next_absorb_task_id.saturating_add(1);
             self.progress.tasks_completed = self.progress.tasks_completed.saturating_add(1);
         }
         self.progress.outstanding_tasks = self.outstanding_tasks();
         Ok(count)
+    }
+
+    fn task_is_pending(&self, id: u64) -> bool {
+        match &self.state {
+            CoordinatorState::Fixed(fixed) => fixed.pending.contains_key(&id),
+            CoordinatorState::Pattern(pattern) => pattern.pending.contains_key(&id),
+        }
+    }
+
+    fn absorb_ready_result(
+        &mut self,
+        result: WireResult,
+        control: &ExecutionControl,
+    ) -> Result<(), ForwardParallelError> {
+        match (&mut self.state, result) {
+            (
+                CoordinatorState::Fixed(fixed),
+                WireResult::Expansion {
+                    id,
+                    generated_locks,
+                    actions,
+                },
+            ) => {
+                let index = fixed
+                    .pending
+                    .remove(&id)
+                    .ok_or(ForwardParallelError::InvalidState(
+                        "forward_parallel_task_not_pending",
+                    ))?;
+                let parents = fixed.session.current[index].traces;
+                fixed.session.visited_states = fixed.session.visited_states.saturating_add(1);
+                fixed.session.generated_locks = fixed
+                    .session
+                    .generated_locks
+                    .saturating_add(generated_locks);
+                for action in actions {
+                    fixed.session.absorb_expanded_action(
+                        parents,
+                        action,
+                        control,
+                        &mut self.tail_reachability,
+                    )?;
+                }
+                self.progress.visited_states = fixed.session.visited_states;
+                self.progress.generated_locks = fixed.session.generated_locks;
+            }
+            (
+                CoordinatorState::Pattern(pattern),
+                WireResult::Expansion {
+                    id,
+                    generated_locks,
+                    actions,
+                },
+            ) if pattern.layered => {
+                let index =
+                    pattern
+                        .pending
+                        .remove(&id)
+                        .ok_or(ForwardParallelError::InvalidState(
+                            "forward_parallel_pattern_task_not_pending",
+                        ))?;
+                let session =
+                    pattern
+                        .active_session
+                        .as_mut()
+                        .ok_or(ForwardParallelError::InvalidState(
+                            "forward_parallel_pattern_session_missing",
+                        ))?;
+                let parents = session.current[index].traces;
+                session.visited_states = session.visited_states.saturating_add(1);
+                session.generated_locks = session.generated_locks.saturating_add(generated_locks);
+                for action in actions {
+                    session.absorb_expanded_action(
+                        parents,
+                        action,
+                        control,
+                        &mut self.tail_reachability,
+                    )?;
+                }
+                self.progress.visited_states = session.visited_states;
+                self.progress.generated_locks = session.generated_locks;
+            }
+            (CoordinatorState::Pattern(pattern), WireResult::Pattern { id, report }) => {
+                if pattern.layered {
+                    return Err(ForwardParallelError::InvalidWire(
+                        "forward_parallel_layered_pattern_result_kind_mismatch",
+                    ));
+                }
+                let pattern_index =
+                    pattern
+                        .pending
+                        .remove(&id)
+                        .ok_or(ForwardParallelError::InvalidState(
+                            "forward_parallel_pattern_not_pending",
+                        ))?;
+                if report
+                    .outcomes()
+                    .iter()
+                    .any(|outcome| outcome.source_pattern_index() as usize != pattern_index)
+                {
+                    return Err(ForwardParallelError::InvalidWire(
+                        "forward_parallel_pattern_identity_mismatch",
+                    ));
+                }
+                self.progress.visited_states = self
+                    .progress
+                    .visited_states
+                    .saturating_add(report.visited_states());
+                self.progress.generated_locks = self
+                    .progress
+                    .generated_locks
+                    .saturating_add(report.generated_locks());
+                if pattern.reports.insert(pattern_index, report).is_some() {
+                    return Err(ForwardParallelError::InvalidState(
+                        "forward_parallel_pattern_duplicate",
+                    ));
+                }
+            }
+            _ => {
+                return Err(ForwardParallelError::InvalidWire(
+                    "forward_parallel_result_kind_mismatch",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn finish(
@@ -536,6 +567,11 @@ impl ForwardParallelCoordinator {
         if self.outstanding_tasks() != 0 {
             return Err(ForwardParallelError::InvalidState(
                 "forward_parallel_finish_with_outstanding_tasks",
+            ));
+        }
+        if !self.buffered_results.is_empty() {
+            return Err(ForwardParallelError::InvalidState(
+                "forward_parallel_finish_with_buffered_results",
             ));
         }
         match &mut self.state {
@@ -1186,7 +1222,7 @@ fn encode_action(output: &mut Vec<u8>, action: &ExpandedAction) {
         } => {
             output.push(0);
             encode_state(output, *key, *damage_state);
-            encode_step(output, step);
+            encode_action_step(output, step);
         }
         ExpandedAction::DamageTerminal {
             board,
@@ -1196,7 +1232,7 @@ fn encode_action(output: &mut Vec<u8>, action: &ExpandedAction) {
             output.push(1);
             encode_board(output, *board);
             put_u32(output, *total_damage);
-            encode_step(output, step);
+            encode_action_step(output, step);
         }
         ExpandedAction::Spin {
             board,
@@ -1218,7 +1254,7 @@ fn encode_action(output: &mut Vec<u8>, action: &ExpandedAction) {
             output.push(u8::from(*mini));
             output.push(*lines);
             put_u32(output, *total_damage);
-            encode_step(output, step);
+            encode_action_step(output, step);
         }
     }
 }
@@ -1230,13 +1266,13 @@ fn decode_action(reader: &mut Reader<'_>) -> Result<ExpandedAction, ForwardParal
             Ok(ExpandedAction::Child {
                 key,
                 damage_state,
-                step: decode_step(reader)?,
+                step: decode_action_step(reader)?,
             })
         }
         1 => Ok(ExpandedAction::DamageTerminal {
             board: decode_board(reader)?,
             total_damage: reader.u32()?,
-            step: decode_step(reader)?,
+            step: decode_action_step(reader)?,
         }),
         2 => Ok(ExpandedAction::Spin {
             board: decode_board(reader)?,
@@ -1248,7 +1284,7 @@ fn decode_action(reader: &mut Reader<'_>) -> Result<ExpandedAction, ForwardParal
             mini: reader.bool()?,
             lines: reader.u8()?,
             total_damage: reader.u32()?,
-            step: decode_step(reader)?,
+            step: decode_action_step(reader)?,
         }),
         _ => Err(ForwardParallelError::InvalidWire(
             "forward_action_tag_invalid",
@@ -1384,6 +1420,31 @@ fn encode_step(output: &mut Vec<u8>, step: &ForwardPathStep) {
     }
 }
 
+fn encode_action_step(output: &mut Vec<u8>, step: &ForwardPathStep) {
+    output.push(piece_code(step.piece()));
+    output.push(step.placement_rotation().quarter_turns());
+    output.push(step.x() as u8);
+    output.push(step.y() as u8);
+    output.push(match step.hold_decision() {
+        "none" => 0,
+        "store" => 1,
+        "swap" => 2,
+        _ => u8::MAX,
+    });
+    output.push(step.cleared_lines());
+    match step.spin() {
+        None => output.push(0),
+        Some((piece, mini)) => {
+            output.push(1);
+            output.push(piece_code(
+                PieceKind::from_ascii(piece).expect("standard spin piece"),
+            ));
+            output.push(u8::from(mini));
+        }
+    }
+    put_u32(output, step.damage());
+}
+
 fn decode_step(reader: &mut Reader<'_>) -> Result<ForwardPathStep, ForwardParallelError> {
     let piece = piece_from_code(reader.u8()?)?;
     let rotation = RotationState::from_quarter_turns(reader.u8()?)
@@ -1431,6 +1492,46 @@ fn decode_step(reader: &mut Reader<'_>) -> Result<ForwardPathStep, ForwardParall
         placement_mask,
         cleared_row_mask,
         board_after,
+    ))
+}
+
+fn decode_action_step(reader: &mut Reader<'_>) -> Result<ForwardPathStep, ForwardParallelError> {
+    let piece = piece_from_code(reader.u8()?)?;
+    let rotation = RotationState::from_quarter_turns(reader.u8()?)
+        .map_err(|_| ForwardParallelError::InvalidWire("forward_step_rotation_invalid"))?;
+    let x = reader.u8()? as i8;
+    let y = reader.u8()? as i8;
+    let hold = match reader.u8()? {
+        0 => "none",
+        1 => "store",
+        2 => "swap",
+        _ => return Err(ForwardParallelError::InvalidWire("forward_hold_invalid")),
+    };
+    let cleared_lines = reader.u8()?;
+    let spin = match reader.u8()? {
+        0 => None,
+        1 => Some((piece_from_code(reader.u8()?)?.as_ascii(), reader.bool()?)),
+        _ => {
+            return Err(ForwardParallelError::InvalidWire(
+                "forward_spin_flag_invalid",
+            ))
+        }
+    };
+    let damage = reader.u32()?;
+    Ok(ForwardPathStep::new(
+        piece,
+        rotation,
+        rotation,
+        x,
+        y,
+        hold,
+        cleared_lines,
+        spin,
+        damage,
+        0,
+        [0; 4],
+        0,
+        [0; 4],
     ))
 }
 
@@ -1717,12 +1818,67 @@ mod tests {
         let mut serial = run_serial(query.clone());
         let parallel = run_parallel(query, 4);
         canonicalize_outcomes(serial.outcomes_mut());
+        assert_eq!(serial.initial_board(), parallel.initial_board());
         assert_eq!(serial.visited_states(), parallel.visited_states());
         assert_eq!(serial.generated_locks(), parallel.generated_locks());
         assert_eq!(serial.peak_frontier(), parallel.peak_frontier());
         assert_eq!(serial.maximum_damage(), parallel.maximum_damage());
         assert_eq!(serial.outcomes(), parallel.outcomes());
         assert_eq!(parallel.workers_used(), 4);
+    }
+
+    fn assert_same_search_semantics(mut left: ForwardSearchReport, mut right: ForwardSearchReport) {
+        canonicalize_outcomes(left.outcomes_mut());
+        canonicalize_outcomes(right.outcomes_mut());
+        assert_eq!(left.complete(), right.complete());
+        assert_eq!(left.initial_board(), right.initial_board());
+        assert_eq!(left.visited_states(), right.visited_states());
+        assert_eq!(left.generated_locks(), right.generated_locks());
+        assert_eq!(left.peak_frontier(), right.peak_frontier());
+        assert_eq!(left.maximum_damage(), right.maximum_damage());
+        assert_eq!(left.outcomes(), right.outcomes());
+    }
+
+    #[test]
+    fn serial_and_partitioned_boundaries_normalize_completed_initial_rows() {
+        let full = 0x3ff_u64;
+        let raw_board = full | (0x003 << 10) | (full << 20) | (0x004 << 30);
+        let normalized_board = 0x003 | (0x004 << 10);
+        let query = |board, mode| {
+            ForwardSearchQuery::new(
+                Board256Mask::from_words([board, 0, 0, 0]),
+                4,
+                vec![PieceKind::T],
+                false,
+                RuleProfileId::SrsPlus,
+                SpinProfileId::TSpins,
+                None,
+                None,
+                mode,
+            )
+        };
+
+        for mode in [
+            ForwardSearchMode::MaximumDamage,
+            ForwardSearchMode::SpinFinder(ForwardSpinTarget::default()),
+        ] {
+            let raw_serial = run_serial(query(raw_board, mode));
+            let normalized_serial = run_serial(query(normalized_board, mode));
+            let raw_parallel = run_parallel(query(raw_board, mode), 4);
+            let normalized_parallel = run_parallel(query(normalized_board, mode), 4);
+
+            for report in [
+                &raw_serial,
+                &normalized_serial,
+                &raw_parallel,
+                &normalized_parallel,
+            ] {
+                assert_eq!(report.initial_board(), [normalized_board, 0, 0, 0]);
+            }
+            assert_same_search_semantics(raw_serial.clone(), normalized_serial);
+            assert_same_search_semantics(raw_parallel.clone(), normalized_parallel);
+            assert_same_search_semantics(raw_serial, raw_parallel);
+        }
     }
 
     #[test]
@@ -1835,5 +1991,96 @@ mod tests {
 
         assert_eq!(rule_from_code(rule_code(id)).expect("Jstris rule code"), id);
     }
+
+    #[test]
+    fn compact_action_wire_preserves_the_actual_placement_rotation() {
+        let step = ForwardPathStep::new(
+            PieceKind::I,
+            RotationState::Zero,
+            RotationState::Two,
+            2,
+            3,
+            "swap",
+            1,
+            None,
+            4,
+            9,
+            [1, 2, 3, 4],
+            5,
+            [6, 7, 8, 9],
+        );
+        let mut wire = Vec::new();
+        encode_action_step(&mut wire, &step);
+
+        let mut reader = Reader::new(&wire);
+        let decoded = decode_action_step(&mut reader).expect("compact action step");
+        reader.finish().expect("complete compact action step");
+
+        assert_eq!(decoded.piece(), PieceKind::I);
+        assert_eq!(decoded.rotation(), RotationState::Two);
+        assert_eq!(decoded.placement_rotation(), RotationState::Two);
+        assert_eq!(decoded.x(), 2);
+        assert_eq!(decoded.y(), 3);
+        assert_eq!(decoded.hold_decision(), "swap");
+        assert_eq!(decoded.cleared_lines(), 1);
+        assert_eq!(decoded.damage(), 4);
+    }
+
+    #[test]
+    fn coordinator_backpressures_a_full_reorder_window() {
+        let query = ForwardSearchQuery::new(
+            Board256Mask::EMPTY,
+            4,
+            vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S],
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::TSpins,
+            None,
+            None,
+            ForwardSearchMode::MaximumDamage,
+        );
+        let mut coordinator = ForwardParallelCoordinator::new(query, 4).expect("coordinator");
+        let max_outstanding_tasks = coordinator.max_outstanding_tasks;
+        assert_eq!(max_outstanding_tasks, 3 * 32 * 4);
+        let CoordinatorState::Fixed(fixed) = &mut coordinator.state else {
+            panic!("fixed coordinator");
+        };
+        for id in 1..=max_outstanding_tasks as u64 {
+            fixed.pending.insert(id, 0);
+        }
+
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let (status, batch) = coordinator
+            .produce(256, &control)
+            .expect("backpressure result");
+        assert_eq!(status, ForwardParallelProduce::Pending);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn cancelled_absorb_short_circuits_before_wire_decoding() {
+        let query = ForwardSearchQuery::new(
+            Board256Mask::EMPTY,
+            4,
+            vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S],
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::TSpins,
+            None,
+            None,
+            ForwardSearchMode::MaximumDamage,
+        );
+        let mut coordinator = ForwardParallelCoordinator::new(query, 4).expect("coordinator");
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.handle().cancel();
+        let control = ExecutionControl::new(cancellation);
+
+        assert_eq!(
+            coordinator
+                .absorb(&[0xff], &control)
+                .expect_err("cancelled absorb"),
+            ForwardParallelError::Search(ForwardSearchError::Cancelled)
+        );
+    }
 }
-// SRP rationale: this module has one behavior-level change reason: deterministic multi-worker scheduling for exact forward search.
+// SRP rationale: this module has one behavior-level change reason: the exact coordinator/worker protocol and its bounded, deterministic multi-worker scheduling.

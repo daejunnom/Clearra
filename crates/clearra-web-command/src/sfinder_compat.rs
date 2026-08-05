@@ -1,4 +1,5 @@
 use clearra_fumen::{SourceFumenBoard, SourceFumenColoredFieldSet};
+use clearra_pc_graph::request::PcScenarioBoard;
 
 use crate::{
     ctk3_mask_input::{parse_ctk3_board_mask, parse_ctk3_field_mask, Ctk3FieldMask},
@@ -19,6 +20,54 @@ enum PcPreset {
 enum CompatibilityFieldInput {
     Fumen(String),
     OccupiedMask(String),
+    BoardMask(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompatibilityRule {
+    id: &'static str,
+    requested: bool,
+}
+
+impl CompatibilityRule {
+    const DEFAULT_ID: &'static str = "srs-plus";
+
+    fn extract(args: &[String]) -> Result<(Vec<String>, Self), WebCommandError> {
+        let mut remaining = Vec::with_capacity(args.len());
+        let mut selected = None;
+        let mut cursor = 0usize;
+        while cursor < args.len() {
+            if args[cursor] != "--rule" {
+                remaining.push(args[cursor].clone());
+                cursor += 1;
+                continue;
+            }
+            if selected.is_some() {
+                return Err(invalid("--rule may be specified only once"));
+            }
+            let value = next(args, &mut cursor, "--rule")?;
+            selected = Some(Self::parse(value)?);
+        }
+        Ok((
+            remaining,
+            Self {
+                id: selected.unwrap_or(Self::DEFAULT_ID),
+                requested: selected.is_some(),
+            },
+        ))
+    }
+
+    fn parse(value: &str) -> Result<&'static str, WebCommandError> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "srs-plus" => Ok("srs-plus"),
+            "srs" => Ok("srs"),
+            "srs-x" => Ok("srs-x"),
+            "jstris-180" => Ok("jstris-180"),
+            _ => Err(invalid(format!(
+                "unsupported Sfinder compatibility rule '{value}'; expected srs-plus, srs, srs-x, or jstris-180"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,6 +120,20 @@ impl CompatibilityBoard {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct ColoredTargetBoard {
+    base_mask: String,
+    target_mask: String,
+    target_count: u32,
+    visible_height: u8,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ForwardBoard {
+    mask: String,
+    visible_height: u8,
+}
+
 pub(crate) fn translate_command(tokens: &[String]) -> Result<Vec<String>, WebCommandError> {
     let mut command_index = usize::from(tokens.first().map(String::as_str) == Some("clearra"));
     let Some(command) = tokens.get(command_index) else {
@@ -93,26 +156,32 @@ pub(crate) fn translate_command(tokens: &[String]) -> Result<Vec<String>, WebCom
     }
 
     let (args, worker_options) = CompatibilityWorkerOptions::extract(&tokens[command_index..])?;
+    let (args, rule) = CompatibilityRule::extract(&args)?;
     if command == "verify" && worker_options.requested() {
         return Err(invalid("verify does not run a search worker pool"));
     }
+    if command == "verify" && rule.requested {
+        return Err(invalid("verify does not accept --rule"));
+    }
     let mut output = match command.as_str() {
-        "path" => translate_pc(PcPreset::Path, &args),
-        "chance" | "percent" => translate_pc(PcPreset::Chance, &args),
-        "minimals" => translate_pc(PcPreset::Minimals, &args),
-        "score" => translate_pc(PcPreset::Score, &args),
-        "score-minimals" => translate_pc(PcPreset::ScoreMinimals, &args),
-        "saves" | "best-save" => translate_pc(PcPreset::Saves, &args),
+        "path" => translate_pc(PcPreset::Path, &args, rule.id),
+        "chance" | "percent" => translate_pc(PcPreset::Chance, &args, rule.id),
+        "minimals" => translate_pc(PcPreset::Minimals, &args, rule.id),
+        "score" => translate_pc(PcPreset::Score, &args, rule.id),
+        "score-minimals" => translate_pc(PcPreset::ScoreMinimals, &args, rule.id),
+        "saves" | "best-save" => translate_pc(PcPreset::Saves, &args, rule.id),
         "congruent" | "congruent-cover" | "setup-cover" | "cover-percent" => {
-            translate_colored_target(&command, &args, false)
+            translate_colored_target(&command, &args, false, rule.id)
         }
-        "special-cover" => translate_colored_target(&command, &args, true),
-        "spin-cover" | "spin" => translate_spin_cover(&args),
-        "cat-finder" => translate_cat_finder(&args),
-        "pc-setup" | "best-setup" | "dpc-finder" => translate_setup_finder(&command, &args),
+        "special-cover" => translate_colored_target(&command, &args, true, rule.id),
+        "spin-cover" | "spin" => translate_spin_cover(&args, rule.id),
+        "score-finder" => translate_score_finder(&args, rule.id),
+        "pc-setup" | "best-setup" | "dpc-finder" => {
+            translate_setup_finder(&command, &args, rule.id)
+        }
         "verify" => translate_verify(&args),
-        "cover" => translate_cover(&args),
-        "setup" => translate_colored_target(&command, &args, false),
+        "cover" => translate_cover(&args, rule.id),
+        "setup" => translate_colored_target(&command, &args, false, rule.id),
         "ren" | "util" | "parity" | "to-gray" | "to-fumen" | "render" | "special-minimals" => {
             Err(not_yet_representable(&command))
         }
@@ -214,7 +283,6 @@ fn normalized_command(command: &str) -> String {
     match normalized.as_str() {
         "bestsave" => "best-save".to_owned(),
         "bestsetup" => "best-setup".to_owned(),
-        "catfinder" => "cat-finder".to_owned(),
         "congruentcover" => "congruent-cover".to_owned(),
         "coverpercent" => "cover-percent".to_owned(),
         "dpcfinder" => "dpc-finder".to_owned(),
@@ -244,7 +312,7 @@ fn is_compatibility_command(command: &str) -> bool {
             | "cover-percent"
             | "saves"
             | "best-save"
-            | "cat-finder"
+            | "score-finder"
             | "spin-cover"
             | "setup-cover"
             | "pc-setup"
@@ -265,17 +333,32 @@ struct LegacyPcInput {
     hold: bool,
 }
 
-fn translate_pc(preset: PcPreset, args: &[String]) -> Result<Vec<String>, WebCommandError> {
+#[derive(Debug)]
+struct ScoreFinderInput {
+    field: CompatibilityFieldInput,
+    queue: String,
+    clear: u8,
+    initial_b2b: bool,
+    initial_combo: u32,
+    b2b_end_bonus: i64,
+}
+
+fn translate_pc(
+    preset: PcPreset,
+    args: &[String],
+    rule: &str,
+) -> Result<Vec<String>, WebCommandError> {
     let input = parse_legacy_pc_input(args)?;
     let board = decode_board(&input.field)?;
     let target = target_mask(input.clear)?;
-    if board.occupied_mask() & !target != 0 {
+    let normalized_board_mask = normalized_pc_board_mask(board);
+    if normalized_board_mask & !target != 0 {
         return Err(invalid(format!(
             "the input field has cells above the requested {} clear lines",
             input.clear
         )));
     }
-    let empty = target & !board.occupied_mask();
+    let empty = target & !normalized_board_mask;
     if empty.count_ones() % 4 != 0 {
         return Err(invalid(
             "the target field does not contain a whole number of tetrominoes",
@@ -288,7 +371,7 @@ fn translate_pc(preset: PcPreset, args: &[String]) -> Result<Vec<String>, WebCom
         "--lines".to_owned(),
         input.clear.to_string(),
         "--board-mask".to_owned(),
-        format!("0x{:x}", board.occupied_mask()),
+        format!("0x{normalized_board_mask:x}"),
         "--height".to_owned(),
         input.clear.to_string(),
         "--pieces".to_owned(),
@@ -296,7 +379,7 @@ fn translate_pc(preset: PcPreset, args: &[String]) -> Result<Vec<String>, WebCom
         "--patterns".to_owned(),
         normalize_sfinder_pattern(&input.pattern)?,
         "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        rule.to_owned(),
     ];
     if !input.hold {
         output.push("--no-hold".to_owned());
@@ -407,6 +490,7 @@ fn translate_colored_target(
     command: &str,
     args: &[String],
     spin: bool,
+    rule: &str,
 ) -> Result<Vec<String>, WebCommandError> {
     let (field, pattern, trailing) = first_field_and_pattern(args, command)?;
     if !trailing.is_empty() {
@@ -414,28 +498,28 @@ fn translate_colored_target(
             "{command} received unsupported legacy parameters"
         )));
     }
-    let board = decode_board(&field)?;
-    if board.colored_mask() == 0 {
+    let board = colored_target_board(&field)?;
+    if board.target_count == 0 {
         return Err(invalid(format!(
             "{command} requires at least one target cell"
         )));
     }
-    if board.colored_mask().count_ones() % 4 != 0 {
+    if board.target_count % 4 != 0 {
         return Err(invalid("colored target cells must have tetromino area"));
     }
     let mut output = vec![
         "clearra".to_owned(),
         "build-probability".to_owned(),
         "--base-mask".to_owned(),
-        format!("0x{:x}", board.grey_mask()),
+        board.base_mask,
         "--target-mask".to_owned(),
-        format!("0x{:x}", board.colored_mask()),
+        board.target_mask,
         "--height".to_owned(),
-        board.visible_height().max(1).to_string(),
+        board.visible_height.max(1).to_string(),
         "--patterns".to_owned(),
         normalize_sfinder_pattern(&pattern)?,
         "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        rule.to_owned(),
         "--no-mirror".to_owned(),
     ];
     if spin {
@@ -445,17 +529,20 @@ fn translate_colored_target(
     Ok(output)
 }
 
-fn translate_cover(args: &[String]) -> Result<Vec<String>, WebCommandError> {
+fn translate_cover(args: &[String], rule: &str) -> Result<Vec<String>, WebCommandError> {
     if args
         .iter()
         .any(|arg| matches!(arg.as_str(), "--base-mask-v1" | "--target-mask-v1"))
     {
-        return translate_build_probability_cover(args);
+        return translate_build_probability_cover(args, rule);
     }
-    translate_legacy_solution_cover(args)
+    translate_legacy_solution_cover(args, rule)
 }
 
-fn translate_build_probability_cover(args: &[String]) -> Result<Vec<String>, WebCommandError> {
+fn translate_build_probability_cover(
+    args: &[String],
+    rule: &str,
+) -> Result<Vec<String>, WebCommandError> {
     let mut base = None;
     let mut target = None;
     let mut pattern = None;
@@ -543,7 +630,7 @@ fn translate_build_probability_cover(args: &[String]) -> Result<Vec<String>, Web
         "--patterns".to_owned(),
         normalize_sfinder_pattern(&pattern)?,
         "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        rule.to_owned(),
         "--no-mirror".to_owned(),
     ];
     if !hold {
@@ -552,7 +639,10 @@ fn translate_build_probability_cover(args: &[String]) -> Result<Vec<String>, Web
     Ok(output)
 }
 
-fn translate_legacy_solution_cover(args: &[String]) -> Result<Vec<String>, WebCommandError> {
+fn translate_legacy_solution_cover(
+    args: &[String],
+    rule: &str,
+) -> Result<Vec<String>, WebCommandError> {
     let mut fumen = None;
     let mut pattern = None;
     let mut clear = 4u8;
@@ -651,7 +741,7 @@ fn translate_legacy_solution_cover(args: &[String]) -> Result<Vec<String>, WebCo
         "--objective".to_owned(),
         "all".to_owned(),
         "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        rule.to_owned(),
     ];
     output.push("--solution-fumen".to_owned());
     output.push(fumen);
@@ -661,25 +751,25 @@ fn translate_legacy_solution_cover(args: &[String]) -> Result<Vec<String>, WebCo
     Ok(output)
 }
 
-fn translate_spin_cover(args: &[String]) -> Result<Vec<String>, WebCommandError> {
+fn translate_spin_cover(args: &[String], rule: &str) -> Result<Vec<String>, WebCommandError> {
     let (field, pattern, trailing) = first_field_and_pattern(args, "spin-cover")?;
     let spin_type = trailing.first().map(String::as_str).unwrap_or("TSS");
     if trailing.len() > 1 {
         return Err(invalid("spin-cover received unsupported legacy parameters"));
     }
     let (lines, category) = parse_spin_type(spin_type)?;
-    let board = decode_board(&field)?;
+    let board = forward_board(&field)?;
     Ok(vec![
         "clearra".to_owned(),
         "spin-finder".to_owned(),
         "--board-mask".to_owned(),
-        format!("0x{:x}", board.occupied_mask()),
+        board.mask,
         "--height".to_owned(),
-        board.visible_height().max(8).to_string(),
+        board.visible_height.max(8).to_string(),
         "--patterns".to_owned(),
         normalize_sfinder_pattern(&pattern)?,
         "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        rule.to_owned(),
         "--spin-profile".to_owned(),
         "t-spins".to_owned(),
         "--spin-category".to_owned(),
@@ -689,35 +779,210 @@ fn translate_spin_cover(args: &[String]) -> Result<Vec<String>, WebCommandError>
     ])
 }
 
-fn translate_cat_finder(args: &[String]) -> Result<Vec<String>, WebCommandError> {
-    let (field, queue, trailing) = first_field_and_pattern(args, "cat-finder")?;
-    if !trailing.is_empty() {
-        return Err(invalid("cat-finder received unsupported legacy parameters"));
-    }
-    if queue
+fn translate_score_finder(args: &[String], rule: &str) -> Result<Vec<String>, WebCommandError> {
+    let input = parse_score_finder_input(args)?;
+    if input
+        .queue
         .chars()
         .any(|character| !"IOTSZJLioszjlt".contains(character))
     {
-        return Err(invalid("cat-finder requires an exact fixed queue"));
+        return Err(invalid("score-finder requires an exact fixed queue"));
     }
-    let board = decode_board(&field)?;
-    Ok(vec![
+    if input.initial_combo != 0 {
+        return Err(invalid(
+            "score-finder currently supports only initial_combo=0",
+        ));
+    }
+    if input.b2b_end_bonus != 0 {
+        return Err(invalid(
+            "score-finder currently supports only b2b_end_bonus=0",
+        ));
+    }
+
+    let board = decode_board(&input.field)?;
+    let target = target_mask(input.clear)?;
+    let normalized_board_mask = normalized_pc_board_mask(board);
+    if normalized_board_mask & !target != 0 {
+        return Err(invalid(format!(
+            "the score-finder field has cells above the requested {} clear lines",
+            input.clear
+        )));
+    }
+    let empty = target & !normalized_board_mask;
+    if empty.count_ones() == 0 || empty.count_ones() % 4 != 0 {
+        return Err(invalid(
+            "the score-finder target must require a positive whole number of tetrominoes",
+        ));
+    }
+
+    let mut output = vec![
         "clearra".to_owned(),
-        "damage".to_owned(),
+        "pc".to_owned(),
+        "--lines".to_owned(),
+        input.clear.to_string(),
         "--board-mask".to_owned(),
-        format!("0x{:x}", board.occupied_mask()),
+        format!("0x{normalized_board_mask:x}"),
         "--height".to_owned(),
-        board.visible_height().max(8).to_string(),
+        input.clear.to_string(),
+        "--pieces".to_owned(),
+        (empty.count_ones() / 4).to_string(),
         "--queue".to_owned(),
-        queue.to_ascii_uppercase(),
-        "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        input.queue.to_ascii_uppercase(),
+        "--objective".to_owned(),
+        "all".to_owned(),
+        "--score".to_owned(),
+        "--score-profile".to_owned(),
+        "jstris-ultra".to_owned(),
         "--spin-profile".to_owned(),
         "t-spins".to_owned(),
-    ])
+        "--backend".to_owned(),
+        "cpu".to_owned(),
+        "--rule".to_owned(),
+        rule.to_owned(),
+    ];
+    if input.initial_b2b {
+        push_pair(&mut output, "--initial-b2b", "1");
+    }
+    Ok(output)
 }
 
-fn translate_setup_finder(command: &str, args: &[String]) -> Result<Vec<String>, WebCommandError> {
+fn parse_score_finder_input(args: &[String]) -> Result<ScoreFinderInput, WebCommandError> {
+    let mut field = None;
+    let mut queue = None;
+    let mut clear = None;
+    let mut initial_b2b = None;
+    let mut initial_combo = None;
+    let mut b2b_end_bonus = None;
+    let mut positional = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < args.len() {
+        match args[cursor].as_str() {
+            "-t" | "--tetfu" | "--fumen" => {
+                let value = next(args, &mut cursor, "--fumen")?.to_owned();
+                set_field_input(&mut field, CompatibilityFieldInput::Fumen(value), "--fumen")?;
+            }
+            "--field-mask-v1" => {
+                let value = next(args, &mut cursor, "--field-mask-v1")?.to_owned();
+                set_field_input(
+                    &mut field,
+                    CompatibilityFieldInput::OccupiedMask(value),
+                    "--field-mask-v1",
+                )?;
+            }
+            "--board-mask-v1" => {
+                return Err(invalid(
+                    "score-finder perfect-clear search accepts fields up to six rows; use --field-mask-v1",
+                ));
+            }
+            "-p" | "--pattern" | "--patterns" | "--queue" => {
+                let value = next(args, &mut cursor, "--queue")?.to_owned();
+                set_unique_value(&mut queue, value, "--queue")?;
+            }
+            "-c" | "--clear" | "--lines" => {
+                if clear.is_some() {
+                    return Err(invalid(
+                        "score-finder clear lines may be specified only once",
+                    ));
+                }
+                clear = Some(parse_lines(next(args, &mut cursor, "--lines")?)?);
+            }
+            "--initial-b2b" => {
+                if initial_b2b.is_some() {
+                    return Err(invalid("--initial-b2b may be specified only once"));
+                }
+                initial_b2b = Some(parse_bool(
+                    next(args, &mut cursor, "--initial-b2b")?,
+                    "--initial-b2b",
+                )?);
+            }
+            "--initial-combo" => {
+                if initial_combo.is_some() {
+                    return Err(invalid("--initial-combo may be specified only once"));
+                }
+                initial_combo = Some(parse_nonnegative_u32(
+                    next(args, &mut cursor, "--initial-combo")?,
+                    "--initial-combo",
+                )?);
+            }
+            "--b2b-end-bonus" | "--b2b-bonus" => {
+                if b2b_end_bonus.is_some() {
+                    return Err(invalid("--b2b-end-bonus may be specified only once"));
+                }
+                b2b_end_bonus = Some(parse_i64(
+                    next(args, &mut cursor, "--b2b-end-bonus")?,
+                    "--b2b-end-bonus",
+                )?);
+            }
+            flag if flag.starts_with('-') => {
+                return Err(invalid(format!(
+                    "unsupported score-finder compatibility option '{flag}'"
+                )));
+            }
+            value => {
+                positional.push(value.to_owned());
+                cursor += 1;
+            }
+        }
+    }
+
+    let mut positional_index = 0usize;
+    if field.is_none() {
+        if let Some(value) = positional.get(positional_index) {
+            field = Some(CompatibilityFieldInput::Fumen(value.clone()));
+            positional_index += 1;
+        }
+    }
+    if queue.is_none() {
+        if let Some(value) = positional.get(positional_index) {
+            queue = Some(value.clone());
+            positional_index += 1;
+        }
+    }
+    if clear.is_none() {
+        if let Some(value) = positional.get(positional_index) {
+            clear = Some(parse_lines(value)?);
+            positional_index += 1;
+        }
+    }
+    if initial_b2b.is_none() {
+        if let Some(value) = positional.get(positional_index) {
+            initial_b2b = Some(parse_bool(value, "initial_b2b")?);
+            positional_index += 1;
+        }
+    }
+    if initial_combo.is_none() {
+        if let Some(value) = positional.get(positional_index) {
+            initial_combo = Some(parse_nonnegative_u32(value, "initial_combo")?);
+            positional_index += 1;
+        }
+    }
+    if b2b_end_bonus.is_none() {
+        if let Some(value) = positional.get(positional_index) {
+            b2b_end_bonus = Some(parse_i64(value, "b2b_end_bonus")?);
+            positional_index += 1;
+        }
+    }
+    if positional.len() > positional_index {
+        return Err(invalid(
+            "score-finder received unsupported legacy parameters",
+        ));
+    }
+
+    Ok(ScoreFinderInput {
+        field: field.ok_or_else(|| missing("score-finder requires a Fumen or CTK3 field"))?,
+        queue: queue.ok_or_else(|| missing("score-finder requires an exact fixed queue"))?,
+        clear: clear.unwrap_or(4),
+        initial_b2b: initial_b2b.unwrap_or(false),
+        initial_combo: initial_combo.unwrap_or(0),
+        b2b_end_bonus: b2b_end_bonus.unwrap_or(0),
+    })
+}
+
+fn translate_setup_finder(
+    command: &str,
+    args: &[String],
+    rule: &str,
+) -> Result<Vec<String>, WebCommandError> {
     if args.len() != 1 || args[0].starts_with('-') {
         return Err(invalid(format!(
             "{command} accepts exactly one unordered remaining-piece inventory"
@@ -745,7 +1010,7 @@ fn translate_setup_finder(command: &str, args: &[String]) -> Result<Vec<String>,
         "--priority".to_owned(),
         priority.to_owned(),
         "--rule".to_owned(),
-        "jstris-180".to_owned(),
+        rule.to_owned(),
     ])
 }
 
@@ -780,6 +1045,14 @@ fn first_field_and_pattern(
                     &mut field,
                     CompatibilityFieldInput::OccupiedMask(value),
                     "--field-mask-v1",
+                )?;
+            }
+            "--board-mask-v1" => {
+                let value = next(args, &mut cursor, "--board-mask-v1")?.to_owned();
+                set_field_input(
+                    &mut field,
+                    CompatibilityFieldInput::BoardMask(value),
+                    "--board-mask-v1",
                 )?;
             }
             "-p" | "--pattern" | "--patterns" | "--queue" => {
@@ -830,12 +1103,51 @@ fn parse_spin_type(value: &str) -> Result<(&'static str, &'static str), WebComma
     }
 }
 
+fn colored_target_board(
+    source: &CompatibilityFieldInput,
+) -> Result<ColoredTargetBoard, WebCommandError> {
+    if let CompatibilityFieldInput::BoardMask(source) = source {
+        let mask = parse_ctk3_board_mask(source, "--board-mask-v1")?;
+        return Ok(ColoredTargetBoard {
+            base_mask: "0x0".to_owned(),
+            target_mask: mask.cli_hex(),
+            target_count: mask.count_ones(),
+            visible_height: mask.visible_height(),
+        });
+    }
+    let board = decode_board(source)?;
+    Ok(ColoredTargetBoard {
+        base_mask: format!("0x{:x}", board.grey_mask()),
+        target_mask: format!("0x{:x}", board.colored_mask()),
+        target_count: board.colored_mask().count_ones(),
+        visible_height: board.visible_height(),
+    })
+}
+
+fn forward_board(source: &CompatibilityFieldInput) -> Result<ForwardBoard, WebCommandError> {
+    if let CompatibilityFieldInput::BoardMask(source) = source {
+        let mask = parse_ctk3_board_mask(source, "--board-mask-v1")?;
+        return Ok(ForwardBoard {
+            mask: mask.cli_hex(),
+            visible_height: mask.visible_height(),
+        });
+    }
+    let board = decode_board(source)?;
+    Ok(ForwardBoard {
+        mask: format!("0x{:x}", board.occupied_mask()),
+        visible_height: board.visible_height(),
+    })
+}
+
 fn decode_board(source: &CompatibilityFieldInput) -> Result<CompatibilityBoard, WebCommandError> {
     match source {
         CompatibilityFieldInput::Fumen(source) => CompatibilityBoard::from_fumen(source),
         CompatibilityFieldInput::OccupiedMask(source) => {
             parse_ctk3_field_mask(source).map(CompatibilityBoard::from_occupied_mask)
         }
+        CompatibilityFieldInput::BoardMask(_) => Err(invalid(
+            "--board-mask-v1 is unavailable for this Sfinder compatibility command",
+        )),
     }
 }
 
@@ -845,6 +1157,12 @@ fn target_mask(lines: u8) -> Result<u64, WebCommandError> {
     }
     let bits = u32::from(lines) * 10;
     Ok((1u64 << bits) - 1)
+}
+
+fn normalized_pc_board_mask(board: CompatibilityBoard) -> u64 {
+    PcScenarioBoard::standard_10(u16::from(board.visible_height), board.occupied_mask())
+        .after_initial_line_clear()
+        .occupied_mask()
 }
 
 fn normalize_sfinder_pattern(source: &str) -> Result<String, WebCommandError> {
@@ -901,6 +1219,18 @@ fn parse_bool(value: &str, option: &str) -> Result<bool, WebCommandError> {
         "false" | "no" | "off" | "avoid" => Ok(false),
         _ => Err(invalid(format!("invalid {option} value '{value}'"))),
     }
+}
+
+fn parse_nonnegative_u32(value: &str, option: &str) -> Result<u32, WebCommandError> {
+    value
+        .parse::<u32>()
+        .map_err(|_| invalid(format!("invalid {option} value '{value}'")))
+}
+
+fn parse_i64(value: &str, option: &str) -> Result<i64, WebCommandError> {
+    value
+        .parse::<i64>()
+        .map_err(|_| invalid(format!("invalid {option} value '{value}'")))
 }
 
 fn set_field_input(
@@ -980,6 +1310,13 @@ mod tests {
 
     use super::{normalize_sfinder_pattern, translate_command};
 
+    fn option_value<'a>(tokens: &'a [String], option: &str) -> Option<&'a str> {
+        tokens
+            .windows(2)
+            .find(|pair| pair[0] == option)
+            .map(|pair| pair[1].as_str())
+    }
+
     #[test]
     fn normalizes_only_sfinder_pattern_spelling() {
         assert_eq!(normalize_sfinder_pattern("I,*p4").unwrap(), "IP4");
@@ -1011,6 +1348,99 @@ mod tests {
         assert!(translated
             .windows(2)
             .any(|pair| pair == ["--objective", "unique"]));
+    }
+
+    #[test]
+    fn six_line_pc_uses_field_occupancy_to_derive_the_exact_piece_window() {
+        let input = [
+            "clearra",
+            "sfinder",
+            "path",
+            "--field-mask-v1",
+            "00000f0000000000",
+            "--patterns",
+            "iotszjliotszjl",
+            "--lines",
+            "6",
+        ]
+        .map(str::to_owned);
+        let translated = translate_command(&input).expect("six-line scenario translation");
+
+        assert!(translated.windows(2).any(|pair| pair == ["--lines", "6"]));
+        assert!(translated.windows(2).any(|pair| pair == ["--height", "6"]));
+        assert!(translated.windows(2).any(|pair| pair == ["--pieces", "14"]));
+        assert!(translated
+            .windows(2)
+            .any(|pair| pair == ["--patterns", "IOTSZJLIOTSZJL"]));
+    }
+
+    #[test]
+    fn pc_compacts_completed_input_rows_before_deriving_the_piece_window() {
+        let raw = [
+            "clearra",
+            "sfinder",
+            "path",
+            "--field-mask-v1",
+            "000000003ff000ff",
+            "--patterns",
+            "oii",
+            "--lines",
+            "2",
+        ]
+        .map(str::to_owned);
+        let normalized = [
+            "clearra",
+            "sfinder",
+            "path",
+            "--field-mask-v1",
+            "00000000000000ff",
+            "--patterns",
+            "oii",
+            "--lines",
+            "2",
+        ]
+        .map(str::to_owned);
+
+        let raw_translation = translate_command(&raw).expect("raw completed-row translation");
+        let normalized_translation =
+            translate_command(&normalized).expect("explicit normalized translation");
+
+        assert_eq!(raw_translation, normalized_translation);
+        assert_eq!(option_value(&raw_translation, "--lines"), Some("2"));
+        assert_eq!(option_value(&raw_translation, "--height"), Some("2"));
+        assert_eq!(option_value(&raw_translation, "--pieces"), Some("3"));
+        assert_eq!(option_value(&raw_translation, "--board-mask"), Some("0xff"));
+    }
+
+    #[test]
+    fn scenario_pc_accepts_explicit_odd_heights_from_one_through_five() {
+        for (lines, pieces, pattern) in [
+            ("1", "2", "IO"),
+            ("3", "7", "IOTSZJL"),
+            ("5", "12", "IOTSZJLIOTSZ"),
+        ] {
+            let input = [
+                "clearra",
+                "sfinder",
+                "path",
+                "--field-mask-v1",
+                "0000000000000003",
+                "--patterns",
+                pattern,
+                "--lines",
+                lines,
+            ]
+            .map(str::to_owned);
+            let translated = translate_command(&input).expect("odd-height scenario translation");
+
+            assert!(translated.windows(2).any(|pair| pair == ["--lines", lines]));
+            assert!(translated
+                .windows(2)
+                .any(|pair| pair == ["--height", lines]));
+            assert!(translated
+                .windows(2)
+                .any(|pair| pair == ["--pieces", pieces]));
+        }
     }
 
     #[test]
@@ -1086,6 +1516,257 @@ mod tests {
         let error = translate_command(&input).expect_err("verify has no worker pool");
 
         assert_eq!(error.code(), crate::WebCommandErrorCode::InvalidValue);
+    }
+
+    #[test]
+    fn compatibility_rule_is_common_to_every_search_translation() {
+        let base = "0".repeat(60);
+        let target = format!("{}f", "0".repeat(59));
+        let cases = vec![
+            (
+                [
+                    "clearra",
+                    "sfinder",
+                    "path",
+                    "--field-mask-v1",
+                    "0000000000000000",
+                    "--patterns",
+                    "IOTSZJLIOT",
+                    "--lines",
+                    "4",
+                    "--rule",
+                    "srs-plus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                "srs-plus",
+            ),
+            (
+                [
+                    "clearra",
+                    "sfinder",
+                    "setup",
+                    "--field-mask-v1",
+                    "000000000000000f",
+                    "--patterns",
+                    "I",
+                    "--rule",
+                    "srs",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                "srs",
+            ),
+            (
+                [
+                    "clearra",
+                    "sfinder",
+                    "spin-cover",
+                    "--field-mask-v1",
+                    "000000000000000f",
+                    "--patterns",
+                    "I",
+                    "TSS",
+                    "--rule",
+                    "srs-x",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                "srs-x",
+            ),
+            (
+                [
+                    "clearra",
+                    "sfinder",
+                    "score-finder",
+                    "--field-mask-v1",
+                    "000000000000000f",
+                    "--patterns",
+                    "I",
+                    "--rule",
+                    "jstris-180",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                "jstris-180",
+            ),
+            (
+                [
+                    "clearra",
+                    "sfinder",
+                    "best-setup",
+                    "IOTS",
+                    "--rule",
+                    "srs-plus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                "srs-plus",
+            ),
+            (
+                vec![
+                    "clearra".to_owned(),
+                    "sfinder".to_owned(),
+                    "cover".to_owned(),
+                    "--base-mask-v1".to_owned(),
+                    base,
+                    "--target-mask-v1".to_owned(),
+                    target,
+                    "--patterns".to_owned(),
+                    "I".to_owned(),
+                    "--rule".to_owned(),
+                    "srs".to_owned(),
+                ],
+                "srs",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let translated = translate_command(&input).expect("rule-aware translation");
+            assert_eq!(option_value(&translated, "--rule"), Some(expected));
+        }
+
+        let defaulted = ["clearra", "sfinder", "pc-setup", "IOTS"].map(str::to_owned);
+        let translated = translate_command(&defaulted).expect("default rule translation");
+        assert_eq!(option_value(&translated, "--rule"), Some("srs-plus"));
+    }
+
+    #[test]
+    fn compatibility_rule_rejects_unknown_duplicate_and_verify_usage() {
+        let invalid_cases = [
+            ["clearra", "sfinder", "pc-setup", "IOTS", "--rule", "custom"]
+                .map(str::to_owned)
+                .to_vec(),
+            [
+                "clearra", "sfinder", "pc-setup", "IOTS", "--rule", "srs", "--rule", "srs-plus",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            ["clearra", "sfinder", "verify", "kicks", "--rule", "srs"]
+                .map(str::to_owned)
+                .to_vec(),
+        ];
+
+        for input in invalid_cases {
+            let error = translate_command(&input).expect_err("rule input must fail closed");
+            assert_eq!(error.code(), crate::WebCommandErrorCode::InvalidValue);
+        }
+    }
+
+    #[test]
+    fn score_finder_maps_the_fixed_queue_score_contract_to_pc() {
+        let input = [
+            "clearra",
+            "sfinder",
+            "score-finder",
+            "v115@9gB8HeB8HeC8EeH8AeC8JeAgH",
+            "SIJSTLZO",
+            "5",
+            "true",
+        ]
+        .map(str::to_owned);
+        let translated = translate_command(&input).expect("score-finder translation");
+
+        assert_eq!(translated[1], "pc");
+        assert_eq!(option_value(&translated, "--lines"), Some("5"));
+        assert_eq!(option_value(&translated, "--height"), Some("5"));
+        assert_eq!(option_value(&translated, "--queue"), Some("SIJSTLZO"));
+        assert_eq!(option_value(&translated, "--objective"), Some("all"));
+        assert_eq!(
+            option_value(&translated, "--score-profile"),
+            Some("jstris-ultra")
+        );
+        assert_eq!(option_value(&translated, "--spin-profile"), Some("t-spins"));
+        assert_eq!(option_value(&translated, "--backend"), Some("cpu"));
+        assert_eq!(option_value(&translated, "--initial-b2b"), Some("1"));
+        assert!(!translated.iter().any(|value| value == "damage"));
+        WebCommandParser::parse_tokens(&input).expect("typed score-finder PC request");
+    }
+
+    #[test]
+    fn score_finder_compacts_completed_input_rows_before_piece_validation() {
+        let raw = [
+            "clearra",
+            "sfinder",
+            "score-finder",
+            "--field-mask-v1",
+            "000000003ff000ff",
+            "--queue",
+            "OII",
+            "--lines",
+            "2",
+            "--initial-b2b",
+            "false",
+        ]
+        .map(str::to_owned);
+        let normalized = [
+            "clearra",
+            "sfinder",
+            "score-finder",
+            "--field-mask-v1",
+            "00000000000000ff",
+            "--queue",
+            "OII",
+            "--lines",
+            "2",
+            "--initial-b2b",
+            "false",
+        ]
+        .map(str::to_owned);
+
+        let raw_translation = translate_command(&raw).expect("raw completed-row score-finder");
+        let normalized_translation =
+            translate_command(&normalized).expect("explicit normalized score-finder");
+
+        assert_eq!(raw_translation, normalized_translation);
+        assert_eq!(option_value(&raw_translation, "--pieces"), Some("3"));
+        assert_eq!(option_value(&raw_translation, "--board-mask"), Some("0xff"));
+    }
+
+    #[test]
+    fn score_finder_accepts_named_inputs_and_rejects_unrepresented_scoring() {
+        let supported = [
+            "clearra",
+            "sfinder",
+            "score-finder",
+            "--field-mask-v1",
+            "00000000000000ff",
+            "--queue",
+            "IOTSZJLI",
+            "--lines",
+            "4",
+            "--initial-b2b",
+            "false",
+            "--initial-combo",
+            "0",
+            "--b2b-end-bonus",
+            "0",
+        ]
+        .map(str::to_owned);
+        let translated = translate_command(&supported).expect("supported score-finder options");
+        assert_eq!(translated[1], "pc");
+        assert_eq!(option_value(&translated, "--lines"), Some("4"));
+        assert_eq!(option_value(&translated, "--initial-b2b"), None);
+
+        for (option, value) in [("--initial-combo", "1"), ("--b2b-end-bonus", "100")] {
+            let mut unsupported = supported.to_vec();
+            let index = unsupported
+                .iter()
+                .position(|token| token == option)
+                .expect("option in fixture");
+            unsupported[index + 1] = value.to_owned();
+            let error = translate_command(&unsupported).expect_err("unsupported scoring input");
+            assert_eq!(error.code(), crate::WebCommandErrorCode::InvalidValue);
+        }
+    }
+
+    #[test]
+    fn retired_cat_finder_spellings_are_rejected() {
+        for command in ["cat-finder", "cat_finder", "catfinder"] {
+            let input = ["clearra", "sfinder", command, "v115@vhAAgH", "I"].map(str::to_owned);
+            let error = translate_command(&input).expect_err("retired command must be rejected");
+            assert_eq!(error.code(), crate::WebCommandErrorCode::UnsupportedCommand);
+        }
     }
 
     #[test]
@@ -1248,7 +1929,7 @@ mod tests {
         for (command, next, trailing) in [
             ("spin-cover", "I", Some("TSS")),
             ("spin", "I", Some("TSS")),
-            ("cat-finder", "I", None),
+            ("score-finder", "I", None),
         ] {
             let mut input = vec![
                 "clearra".to_owned(),
@@ -1270,6 +1951,123 @@ mod tests {
     }
 
     #[test]
+    fn board240_masks_reach_colored_target_and_forward_native_commands() {
+        let board_mask = format!("8{}7", "0".repeat(58));
+        let native_mask = format!("0x{board_mask}");
+        assert_eq!(board_mask.len(), 60);
+
+        for command in [
+            "setup",
+            "congruent",
+            "congruent-cover",
+            "setup-cover",
+            "cover-percent",
+            "special-cover",
+        ] {
+            let input = vec![
+                "clearra".to_owned(),
+                "sfinder".to_owned(),
+                command.to_owned(),
+                "--board-mask-v1".to_owned(),
+                board_mask.clone(),
+                "--patterns".to_owned(),
+                "I".to_owned(),
+                "--rule".to_owned(),
+                "srs-plus".to_owned(),
+            ];
+            let translated = translate_command(&input).expect("Board240 target translation");
+            assert_eq!(option_value(&translated, "--base-mask"), Some("0x0"));
+            assert_eq!(
+                option_value(&translated, "--target-mask"),
+                Some(native_mask.as_str())
+            );
+            assert_eq!(option_value(&translated, "--height"), Some("24"));
+            WebCommandParser::parse_tokens(&input).expect("typed build-probability request");
+        }
+
+        for command in ["spin-cover", "spin"] {
+            let input = vec![
+                "clearra".to_owned(),
+                "sfinder".to_owned(),
+                command.to_owned(),
+                "--board-mask-v1".to_owned(),
+                board_mask.clone(),
+                "--patterns".to_owned(),
+                "I".to_owned(),
+                "TSS".to_owned(),
+                "--rule".to_owned(),
+                "srs-x".to_owned(),
+            ];
+            let translated = translate_command(&input).expect("Board240 spin translation");
+            assert_eq!(
+                option_value(&translated, "--board-mask"),
+                Some(native_mask.as_str())
+            );
+            assert_eq!(option_value(&translated, "--height"), Some("24"));
+            WebCommandParser::parse_tokens(&input).expect("typed spin-finder request");
+        }
+
+        let score = vec![
+            "clearra".to_owned(),
+            "sfinder".to_owned(),
+            "score-finder".to_owned(),
+            "--board-mask-v1".to_owned(),
+            board_mask,
+            "--patterns".to_owned(),
+            "I".to_owned(),
+            "--rule".to_owned(),
+            "srs".to_owned(),
+        ];
+        let error = translate_command(&score).expect_err("score-finder is a six-row PC search");
+        assert_eq!(error.code(), crate::WebCommandErrorCode::InvalidValue);
+    }
+
+    #[test]
+    fn board240_compatibility_input_is_canonical_and_scoped() {
+        for malformed in ["0".repeat(59), format!("{}A", "0".repeat(59))] {
+            let input = vec![
+                "clearra".to_owned(),
+                "sfinder".to_owned(),
+                "setup".to_owned(),
+                "--board-mask-v1".to_owned(),
+                malformed,
+                "--patterns".to_owned(),
+                "I".to_owned(),
+            ];
+            let error = translate_command(&input).expect_err("noncanonical Board240 input");
+            assert_eq!(error.code(), crate::WebCommandErrorCode::InvalidValue);
+        }
+
+        let board_mask = format!("{}f", "0".repeat(59));
+        let conflicting = vec![
+            "clearra".to_owned(),
+            "sfinder".to_owned(),
+            "setup".to_owned(),
+            "--field-mask-v1".to_owned(),
+            "000000000000000f".to_owned(),
+            "--board-mask-v1".to_owned(),
+            board_mask.clone(),
+            "--patterns".to_owned(),
+            "I".to_owned(),
+        ];
+        assert!(translate_command(&conflicting).is_err());
+
+        let pc = vec![
+            "clearra".to_owned(),
+            "sfinder".to_owned(),
+            "path".to_owned(),
+            "--board-mask-v1".to_owned(),
+            board_mask,
+            "--patterns".to_owned(),
+            "IOTSZJLIOT".to_owned(),
+            "--lines".to_owned(),
+            "4".to_owned(),
+        ];
+        let error = translate_command(&pc).expect_err("PC keeps the field-mask-v1 contract");
+        assert_eq!(error.code(), crate::WebCommandErrorCode::InvalidValue);
+    }
+
+    #[test]
     fn two_field_cover_reaches_the_typed_build_probability_request() {
         let base = format!("{:060x}", 0x300u64);
         let target = format!("{:060x}", 0xffu64);
@@ -1278,10 +2076,34 @@ mod tests {
         ))
         .expect("two-field cover request");
         let native_request = WebCommandParser::parse(
-            "clearra build-probability --base-mask 0x300 --target-mask 0xff --height 1 --patterns II --rule jstris-180 --no-mirror --no-hold",
+            "clearra build-probability --base-mask 0x300 --target-mask 0xff --height 1 --patterns II --rule srs-plus --no-mirror --no-hold",
         )
         .expect("native build-probability request");
         assert_eq!(cover_request, native_request);
+    }
+
+    #[test]
+    fn two_field_cover_preserves_completed_target_rows_until_build_completion() {
+        let base = "0".repeat(60);
+        let target = format!("{:060x}", 0x000f_ffffu64);
+        let input = vec![
+            "clearra".to_owned(),
+            "sfinder".to_owned(),
+            "cover".to_owned(),
+            "--base-mask-v1".to_owned(),
+            base,
+            "--target-mask-v1".to_owned(),
+            target,
+            "--patterns".to_owned(),
+            "IOTSZ".to_owned(),
+        ];
+
+        let translated = translate_command(&input).expect("two completed target rows");
+
+        assert_eq!(option_value(&translated, "--base-mask"), Some("0x0"));
+        assert_eq!(option_value(&translated, "--target-mask"), Some("0xfffff"));
+        assert_eq!(option_value(&translated, "--height"), Some("2"));
+        WebCommandParser::parse_tokens(&input).expect("typed completed-row cover request");
     }
 
     #[test]

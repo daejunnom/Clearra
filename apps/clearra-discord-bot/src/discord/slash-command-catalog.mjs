@@ -1,57 +1,78 @@
+import { normalizeDiscordLocale } from "./i18n.mjs";
+import {
+  DISCORD_PC_FIELD_MAX_ROWS,
+  DISCORD_WIDE_FIELD_MAX_ROWS,
+} from "./slash-command-input.mjs";
+
+const SUB_COMMAND_OPTION = 1;
 const STRING_OPTION = 3;
+const INTEGER_OPTION = 4;
+const CHAT_INPUT_COMMAND = 1;
+const MESSAGE_COMMAND = 3;
+const GUILD_CONTEXT = 0;
+const GUILD_INSTALL = 0;
+const MANAGE_CHANNELS_PERMISSION = String(1n << 4n);
+const MANAGE_GUILD_PERMISSION = String(1n << 5n);
 const FIELD_MAX_LENGTH = 6000;
 const NEXT_MAX_LENGTH = 2048;
 const OPTIONAL_SETTINGS_MAX_LENGTH = 256;
 
+export const BUILTIN_KICKTABLES = Object.freeze([
+  Object.freeze({ name: "SRS+ (default)", value: "srs-plus" }),
+  Object.freeze({ name: "SRS", value: "srs" }),
+  Object.freeze({ name: "SRS-X", value: "srs-x" }),
+  Object.freeze({ name: "Jstris 180", value: "jstris-180" }),
+]);
+
 const PC_COMMANDS = Object.freeze([
-  command("path", "Find exact PC paths", "pc", "pc"),
-  command("percent", "Measure PC success probability", "pc", "pc", {
-    note: "This currently uses the same Clearra calculation as /chance.",
+  command("path", "Find every represented perfect-clear path", "pc", "pc"),
+  command("percent", "Calculate exact perfect-clear success probability", "pc", "pc", {
+    note: "Equivalent to /chance.",
   }),
-  command("chance", "Measure PC success probability", "pc", "pc", {
-    note: "This currently uses the same Clearra calculation as /percent.",
+  command("chance", "Calculate exact perfect-clear success probability", "pc", "pc", {
+    note: "Equivalent to /percent.",
   }),
-  command("minimals", "Find a minimum-cover PC solution set", "pc", "pc"),
-  command("score", "Score PC solutions with the supported Jstris profile", "pc", "pc"),
+  command("minimals", "Find a minimum-cover perfect-clear solution set", "pc", "pc"),
+  command("score", "Score perfect-clear solutions with the Jstris profile", "pc", "pc"),
   command(
     "score-minimals",
-    "Score a minimum-cover PC solution set",
+    "Score a minimum-cover perfect-clear solution set",
     "pc",
     "pc",
   ),
-  command("saves", "Analyze probabilities for each PC solution", "pc", "pc", {
-    note: "This currently uses the same Clearra calculation as /best-save.",
+  command("saves", "Analyze success probability for each PC solution", "pc", "pc", {
+    note: "Equivalent to /best-save.",
   }),
-  command("best-save", "Analyze probabilities for each PC solution", "pc", "pc", {
-    note: "This currently uses the same Clearra calculation as /saves.",
+  command("best-save", "Analyze success probability for each PC solution", "pc", "pc", {
+    note: "Equivalent to /saves.",
   }),
 ]);
 
-const COLORED_TARGET_COMMANDS = Object.freeze([
-  command("setup", "Measure a target shape's build probability", "target", "colored"),
-  command("congruent", "Measure a target shape's build probability", "target", "colored", {
-    note: "This currently matches /setup and does not expose sfinder-man's garbage option.",
+const TARGET_COMMANDS = Object.freeze([
+  command("setup", "Measure build probability for a target shape", "target", "colored"),
+  command("congruent", "Measure build probability for a target shape", "target", "colored", {
+    note: "Equivalent to /setup.",
   }),
   command(
     "congruent-cover",
-    "Measure a target shape's build probability",
+    "Measure build probability for a target shape",
     "target",
     "colored",
-    { note: "This currently matches /setup and does not expose sfinder-man's mode/mirror/garbage options." },
+    { note: "Uses the same target-shape calculation as /setup." },
   ),
   command(
     "setup-cover",
-    "Measure a target shape's build probability",
+    "Measure build probability for a target occupancy mask",
     "target",
     "colored",
-    { note: "This is Clearra's represented colored-target contract, not sfinder-man's two-queue form." },
+    { note: "The field represents the target occupancy mask." },
   ),
   command(
     "cover-percent",
-    "Measure a target shape's build probability",
+    "Measure build probability for a target occupancy mask",
     "target",
     "colored",
-    { note: "This is Clearra's represented colored-target contract, not sfinder-man's multi-queue form." },
+    { note: "The field represents the target occupancy mask." },
   ),
   command(
     "special-cover",
@@ -69,51 +90,146 @@ const SEARCH_COMMAND_DEFINITIONS = Object.freeze([
     "cover",
     "cover",
   ),
-  ...COLORED_TARGET_COMMANDS,
+  ...TARGET_COMMANDS,
   command("spin-cover", "Find forward T-spin completions", "spin", "spin", {
     note: "T-spin mini (TSM) is intentionally unavailable.",
   }),
   command("spin", "Find forward T-spin completions", "spin", "spin", {
-    note: "This currently uses the same Clearra calculation as /spin-cover; TSM is unavailable.",
+    note: "This uses the same calculation as /spin-cover; TSM is intentionally unavailable.",
   }),
-  command("cat-finder", "Find damage for one exact next queue", "damage", "fixed-next"),
-  command("pc-setup", "Rank setup candidates by joint coverage", "setup", "remaining", {
-    note: "This is Clearra's remaining-piece setup contract, not sfinder-man's -sp/-p form.",
+  command(
+    "score-finder",
+    "Find the highest-Jstris-score perfect clear for one exact next queue",
+    "pc",
+    "score-fixed-next",
+  ),
+  command(
+    "damage",
+    "Find maximum damage for one exact next queue",
+    "damage",
+    "fixed-next",
+    { argvPrefix: Object.freeze(["damage"]) },
+  ),
+  command(
+    "spin-structure",
+    "Find subset-minimal spin structures from an unordered piece inventory",
+    "spin",
+    "spin-structure",
+    { argvPrefix: Object.freeze(["spin-structure"]) },
+  ),
+  command("pc-setup", "Rank setup candidates by joint build and PC coverage", "setup", "remaining", {
+    note: "Ranks candidates by both build and perfect-clear coverage.",
   }),
   command("best-setup", "Rank setup candidates by build coverage", "setup", "remaining", {
-    note: "This is Clearra's remaining-piece setup contract, not sfinder-man's PC-number form.",
+    note: "Ranks candidates by build coverage.",
   }),
-  command("dpc-finder", "Rank setup candidates by PC coverage", "setup", "remaining", {
-    note: "This is Clearra's remaining-piece priority=pc contract, not sfinder-man's exact-queue form.",
+  command("dpc-finder", "Rank setup candidates by perfect-clear coverage", "setup", "remaining", {
+    note: "Ranks candidates by perfect-clear coverage.",
   }),
-  command("verify", "Run Clearra verification checks", "verify", "verify"),
+  command("verify", "Run one group of Clearra verification checks", "verify", "verify"),
 ]);
 
-const HELP_CHOICES = Object.freeze(
-  SEARCH_COMMAND_DEFINITIONS.map(({ name }) => Object.freeze({ name, value: name })),
-);
+const RENDER_FILE_COMMAND = Object.freeze({
+  name: "render-file",
+  kind: "render-file",
+  input: "render-file",
+  description: "Download an original GIF from a recent Clearra field preview",
+  registration: Object.freeze({
+    name: "render-file",
+    description: "Download an original GIF from a recent Clearra field preview",
+    options: Object.freeze([
+      stringOption(
+        "image",
+        "Clearra preview message link or ID; omit for your latest, then channel latest",
+        false,
+        512,
+      ),
+    ]),
+  }),
+});
+
+const RENDER_FILE_MESSAGE_COMMAND = Object.freeze({
+  name: "get-original-gif",
+  kind: "render-file-message",
+  registration: Object.freeze({
+    type: MESSAGE_COMMAND,
+    name: "Get original GIF",
+    integration_types: Object.freeze([GUILD_INSTALL]),
+    contexts: Object.freeze([GUILD_CONTEXT]),
+  }),
+});
 
 const HELP_COMMAND = Object.freeze({
   name: "help",
   kind: "help",
   registration: Object.freeze({
     name: "help",
-    description: "Show Clearra slash-command syntax",
+    description: "Show the exact syntax and limits for a Clearra command",
     options: Object.freeze([
       Object.freeze({
         type: STRING_OPTION,
         name: "arguments",
-        description: "Command name to explain; omit it to list all commands",
+        description: "Command to explain; omit it to list every command group",
         required: false,
-        choices: HELP_CHOICES,
       }),
+    ]),
+  }),
+});
+
+const CHANNEL_SETTINGS_COMMAND = Object.freeze({
+  name: "channel-settings",
+  kind: "management",
+  scope: "channel",
+  registration: Object.freeze({
+    name: "channel-settings",
+    description: "Manage Clearra in the current channel",
+    contexts: Object.freeze([GUILD_CONTEXT]),
+    integration_types: Object.freeze([GUILD_INSTALL]),
+    default_member_permissions: MANAGE_CHANNELS_PERMISSION,
+    options: Object.freeze([
+      managementSubcommand("language-show", "Show the effective channel language"),
+      managementSubcommand(
+        "language-set",
+        "Set the channel response language",
+        [languageOption()],
+      ),
+      managementSubcommand("language-reset", "Remove the channel language override"),
+      managementSubcommand("disable", "Disable Clearra commands in this channel"),
+      managementSubcommand("enable", "Enable Clearra commands in this channel"),
+    ]),
+  }),
+});
+
+const SERVER_SETTINGS_COMMAND = Object.freeze({
+  name: "server-settings",
+  kind: "management",
+  scope: "guild",
+  registration: Object.freeze({
+    name: "server-settings",
+    description: "Manage Clearra across this server",
+    contexts: Object.freeze([GUILD_CONTEXT]),
+    integration_types: Object.freeze([GUILD_INSTALL]),
+    default_member_permissions: MANAGE_GUILD_PERMISSION,
+    options: Object.freeze([
+      managementSubcommand("language-show", "Show the effective server language"),
+      managementSubcommand(
+        "language-set",
+        "Set the server response language",
+        [languageOption()],
+      ),
+      managementSubcommand("language-reset", "Remove the server language override"),
+      managementSubcommand("pause", "Disable every command except server resume"),
+      managementSubcommand("resume", "Resume Clearra commands in this server"),
     ]),
   }),
 });
 
 const SEARCH_COMMANDS = Object.freeze(
   SEARCH_COMMAND_DEFINITIONS.map((definition) => {
-    const argvPrefix = Object.freeze(["sfinder", definition.name]);
+    const argvPrefix = definition.argvPrefix ?? Object.freeze([
+      "sfinder",
+      definition.sfinderName ?? definition.name,
+    ]);
     return Object.freeze({
       ...definition,
       kind: "search",
@@ -131,36 +247,84 @@ export const representedSfinderCommandNames = Object.freeze(
   SEARCH_COMMANDS.map(({ name }) => name),
 );
 
-export const slashCommandCatalog = Object.freeze([HELP_COMMAND, ...SEARCH_COMMANDS]);
+export const slashCommandCatalog = Object.freeze([
+  HELP_COMMAND,
+  RENDER_FILE_COMMAND,
+  CHANNEL_SETTINGS_COMMAND,
+  SERVER_SETTINGS_COMMAND,
+  ...SEARCH_COMMANDS,
+]);
+
+export const messageCommandCatalog = Object.freeze([
+  RENDER_FILE_MESSAGE_COMMAND,
+]);
 
 const COMMANDS_BY_NAME = new Map(
   slashCommandCatalog.map((entry) => [entry.name, entry]),
 );
-
-export const globalCommands = Object.freeze(
-  slashCommandCatalog.map(({ registration }) => registration),
+const MESSAGE_COMMANDS_BY_NAME = new Map(
+  messageCommandCatalog.map((entry) => [entry.registration.name, entry]),
 );
 
 export function findSlashCommand(name) {
-  return typeof name === "string" ? COMMANDS_BY_NAME.get(name) ?? null : null;
+  if (typeof name !== "string") return null;
+  return COMMANDS_BY_NAME.get(name) ?? null;
 }
 
-export function formatSlashCommandHelp(requestedName) {
-  const normalized = normalizeHelpTarget(requestedName);
-  if (!normalized) return commandListHelp();
-  const entry = COMMANDS_BY_NAME.get(normalized);
-  if (!entry || entry.kind !== "search") {
-    return `Unknown Clearra command \`${requestedName}\`. Use \`/help\` to list commands.`;
-  }
+export function findMessageCommand(name) {
+  return typeof name === "string"
+    ? MESSAGE_COMMANDS_BY_NAME.get(name) ?? null
+    : null;
+}
 
+export function findApplicationCommand(type, name) {
+  if (type === CHAT_INPUT_COMMAND) return findSlashCommand(name);
+  if (type === MESSAGE_COMMAND) return findMessageCommand(name);
+  return null;
+}
+
+export function formatSlashCommandHelp(requestedName, locale = "en") {
+  const language = normalizeDiscordLocale(locale);
+  const normalized = normalizeHelpTarget(requestedName);
+  if (!normalized) return commandListHelp(language);
+  const entry = findSlashCommand(normalized);
+  if (!entry || !["search", "render-file"].includes(entry.kind)) {
+    return language === "ko"
+      ? `알 수 없는 Clearra 명령어 \`${requestedName}\`입니다. \`/help\`에서 명령어 목록을 확인하세요.`
+      : `Unknown Clearra command \`${requestedName}\`. Use \`/help\` to list commands.`;
+  }
   const lines = [
-    `**/${entry.name}** — ${entry.description}`,
-    `Syntax: \`${syntax(entry)}\``,
-    ...inputHelp(entry.input),
+    `**/${entry.name}** — ${localizedCommandDescription(entry, language)}`,
+    language === "ko"
+      ? `직접 입력 문법: \`${syntax(entry, language)}\``
+      : `Direct syntax: \`${syntax(entry)}\``,
+    language === "ko"
+      ? "필수 입력을 모두 넣지 않고 명령어를 실행하면 안내 입력 창이 열립니다."
+      : "Invoke the command without all required inputs to open its guided Modal form.",
   ];
-  if (entry.note) lines.push(`Note: ${entry.note}`);
-  lines.push("Use `/help` without arguments to list every command group.");
+  if (entry.kind === "search" && ["field", "base", "target"].some((name) =>
+    entry.registration.options.some((option) => option.name === name)
+  )) {
+    lines.push(language === "ko"
+      ? "여러 줄 `#`/`_` 격자는 필드 옵션을 생략하고 입력 창에서 작성하세요. 직접 입력은 `grid:윗줄/다음줄` 형식입니다."
+      : "For a multiline `#`/`_` grid, omit the board option and use the Modal. Direct input uses `grid:top-row/next-row`.");
+  }
+  lines.push(...inputHelp(entry, language));
+  if (entry.note) {
+    lines.push(language === "ko" ? `참고: ${localizedNote(entry, language)}` : `Note: ${entry.note}`);
+  }
+  lines.push(language === "ko"
+    ? "전체 명령어 그룹을 보려면 인수 없이 `/help`를 사용하세요."
+    : "Use `/help` without arguments to list every command group.");
   return lines.join("\n");
+}
+
+export function localizedSlashCommandName(name, locale = "en") {
+  const command = findSlashCommand(name);
+  if (!command) return String(name ?? "");
+  return normalizeDiscordLocale(locale) === "ko"
+    ? KOREAN_COMMAND_NAMES[command.name] ?? command.name
+    : command.name;
 }
 
 function command(name, description, group, input, extras = {}) {
@@ -171,90 +335,260 @@ function registrationOptions(input) {
   switch (input) {
     case "pc":
       return Object.freeze([
-        fieldOption(false),
         nextOption(false),
-        settingsOption("Optional settings: clear=1..6 hold=use|avoid"),
+        fieldOption(input),
+        linesOption(),
+        kicktableOption(),
+        settingsOption(input),
       ]);
     case "cover":
       return Object.freeze([
+        nextOption(false),
         boardOption(
           "base",
-          "Colorless starting field as single-page CTK3/v115 Fumen or a payload URL",
+          `Base (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`,
         ),
         boardOption(
           "target",
-          "Colorless cells to add as single-page CTK3/v115 Fumen or a payload URL",
+          `Target (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`,
         ),
-        nextOption(false),
-        settingsOption("Optional setting: hold=use|avoid"),
+        kicktableOption(),
+        settingsOption(input),
       ]);
     case "colored":
-      return Object.freeze([fieldOption(false, true), nextOption(false)]);
+      return Object.freeze([nextOption(false), fieldOption(input), kicktableOption()]);
     case "spin":
       return Object.freeze([
-        fieldOption(false),
         nextOption(false),
-        settingsOption("Optional setting: type=TSS|TSD|TST|TSPIN|T-SPIN|ANY"),
+        fieldOption(input),
+        kicktableOption(),
+        settingsOption(input),
       ]);
     case "fixed-next":
-      return Object.freeze([fieldOption(false), nextOption(true)]);
+      return Object.freeze([nextOption(true), fieldOption(input), kicktableOption()]);
+    case "score-fixed-next":
+      return Object.freeze([
+        nextOption(true),
+        fieldOption(input),
+        catLinesOption(),
+        kicktableOption(),
+        catSettingsOption(),
+      ]);
     case "remaining":
       return Object.freeze([
         stringOption(
           "remaining",
-          "Unordered remaining-piece inventory using IOTSZJL",
-          true,
+          "Unordered 1–7-piece inventory; only IOTSZJL, with at most one duplicate kind",
+          false,
           64,
         ),
+        kicktableOption(),
+      ]);
+    case "spin-structure":
+      return Object.freeze([
+        stringOption(
+          "pieces",
+          "Unordered IOTSZJL inventory; repeated letters preserve multiplicity",
+          false,
+          64,
+        ),
+        fieldOption(input),
+        spinStructureLinesOption(),
+        spinStructureProfileOption(),
+        kicktableOption(),
       ]);
     case "verify":
-      return Object.freeze([
-        Object.freeze({
-          type: STRING_OPTION,
-          name: "scope",
-          description: "Optional verification scope; omit it to run all checks",
-          required: false,
-          choices: Object.freeze(
-            ["pc", "setup", "cover", "build", "kicks"].map((value) =>
-              Object.freeze({ name: value, value }),
-            ),
-          ),
-        }),
-      ]);
+      return Object.freeze([verifyScopeOption()]);
     default:
       throw new Error(`Unknown slash-command input contract: ${input}`);
   }
 }
 
-function fieldOption(_multiplePages, colored = false) {
-  const description = colored
-    ? "Colorless target shape as single-page CTK3/v115 Fumen or a payload URL"
-    : "Colorless field as single-page CTK3/v115 Fumen or a payload URL";
+function fieldOption(input) {
+  const description = input === "pc" || input === "score-fixed-next"
+    ? `PC field (1–${DISCORD_PC_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`
+    : input === "colored"
+      ? `Target (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`
+      : `Field (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`;
   return boardOption("field", description);
 }
 
 function boardOption(name, description) {
-  return stringOption(name, description, true, FIELD_MAX_LENGTH);
+  return stringOption(name, description, false, FIELD_MAX_LENGTH);
+}
+
+function linesOption() {
+  return Object.freeze({
+    type: INTEGER_OPTION,
+    name: "lines",
+    description: `PC target height 1–${DISCORD_PC_FIELD_MAX_ROWS}; omit to evaluate every height through ${DISCORD_PC_FIELD_MAX_ROWS}`,
+    required: false,
+    min_value: 1,
+    max_value: DISCORD_PC_FIELD_MAX_ROWS,
+    choices: Object.freeze(
+      Array.from(
+        { length: DISCORD_PC_FIELD_MAX_ROWS },
+        (_, index) => index + 1,
+      ).map((value) => Object.freeze({ name: `${value} line`, value })),
+    ),
+  });
+}
+
+function catLinesOption() {
+  return Object.freeze({
+    type: INTEGER_OPTION,
+    name: "lines",
+    description: `Perfect-clear target height 1–${DISCORD_PC_FIELD_MAX_ROWS}`,
+    required: false,
+    min_value: 1,
+    max_value: DISCORD_PC_FIELD_MAX_ROWS,
+    choices: Object.freeze(
+      Array.from(
+        { length: DISCORD_PC_FIELD_MAX_ROWS },
+        (_, index) => index + 1,
+      ).map((value) => Object.freeze({ name: `${value} line`, value })),
+    ),
+  });
+}
+
+function spinStructureLinesOption() {
+  const choices = [
+    ["Any line count", "any"],
+    ...Array.from({ length: 5 }, (_, lines) => [`Exactly ${lines} lines`, String(lines)]),
+    ...Array.from({ length: 4 }, (_, index) => {
+      const lines = index + 1;
+      return [`At least ${lines} lines`, `${lines}+`];
+    }),
+  ];
+  return Object.freeze({
+    ...stringOption(
+      "lines",
+      "Lines cleared by the terminal spin; defaults to at least one",
+      false,
+      8,
+    ),
+    choices: Object.freeze(
+      choices.map(([name, value]) => Object.freeze({ name, value })),
+    ),
+  });
+}
+
+function spinStructureProfileOption() {
+  return Object.freeze({
+    ...stringOption(
+      "profile",
+      "Spin recognition profile; Regular and Mini remain separate",
+      false,
+      32,
+    ),
+    choices: Object.freeze([
+      ["T-Spins", "t-spins"],
+      ["T-Spins+", "t-spins-plus"],
+      ["All-Mini", "all-mini"],
+      ["All-Mini+", "all-mini-plus"],
+      ["All-Spin", "all-spin"],
+      ["All-Spin+", "all-spin-plus"],
+    ].map(([name, value]) => Object.freeze({ name, value }))),
+  });
 }
 
 function nextOption(fixed) {
   return stringOption(
     "next",
     fixed
-      ? "Exact next queue using only IOTSZJL pieces; pattern grammar is not used"
-      : "Sfinder next-pattern expression such as *! or [IOSZ]p2",
-    true,
+      ? "Exact queue using only IOTSZJL; omit it to enter the queue in the Modal"
+      : "Queue/pattern such as *!, *p4, or [IOSZ]p2; omit it to use the Modal",
+    false,
     NEXT_MAX_LENGTH,
   );
 }
 
-function settingsOption(description) {
-  return stringOption(
-    "options",
+function kicktableOption() {
+  return Object.freeze({
+    ...stringOption(
+      "kicktable",
+      "Built-in kick table; defaults to SRS+ across Clearra",
+      false,
+      32,
+    ),
+    choices: BUILTIN_KICKTABLES,
+  });
+}
+
+function settingsOption(input) {
+  const choices = input === "spin"
+    ? [
+        ["T-spin single", "type=TSS"],
+        ["T-spin double", "type=TSD"],
+        ["T-spin triple", "type=TST"],
+        ["Any T-spin", "type=ANY"],
+      ]
+    : [
+        ["Use hold", "hold=use"],
+        ["Avoid hold", "hold=avoid"],
+      ];
+  return Object.freeze({
+    ...stringOption(
+      "options",
+      input === "spin" ? "T-spin target type; TSM is unavailable" : "Hold policy",
+      false,
+      OPTIONAL_SETTINGS_MAX_LENGTH,
+    ),
+    choices: Object.freeze(
+      choices.map(([name, value]) => Object.freeze({ name, value })),
+    ),
+  });
+}
+
+function catSettingsOption() {
+  return Object.freeze({
+    ...stringOption(
+      "options",
+      "Initial back-to-back state; defaults to false",
+      false,
+      OPTIONAL_SETTINGS_MAX_LENGTH,
+    ),
+    choices: Object.freeze([
+      Object.freeze({ name: "Initial B2B disabled (default)", value: "initial_b2b=false" }),
+      Object.freeze({ name: "Initial B2B enabled", value: "initial_b2b=true" }),
+    ]),
+  });
+}
+
+function verifyScopeOption() {
+  return Object.freeze({
+    type: STRING_OPTION,
+    name: "scope",
+    description: "Verification group; omit or choose All in the Modal to run every check",
+    required: false,
+    choices: Object.freeze(
+      ["pc", "setup", "cover", "build", "kicks"].map((value) =>
+        Object.freeze({ name: value, value }),
+      ),
+    ),
+  });
+}
+
+function managementSubcommand(name, description, options = []) {
+  return Object.freeze({
+    type: SUB_COMMAND_OPTION,
+    name,
     description,
-    false,
-    OPTIONAL_SETTINGS_MAX_LENGTH,
-  );
+    ...(options.length > 0 ? { options: Object.freeze(options) } : {}),
+  });
+}
+
+function languageOption() {
+  return Object.freeze({
+    type: STRING_OPTION,
+    name: "language",
+    description: "Language to use for ClearraBot responses and input forms",
+    required: true,
+    choices: Object.freeze([
+      Object.freeze({ name: "English", value: "en" }),
+      Object.freeze({ name: "Korean", value: "ko" }),
+    ]),
+  });
 }
 
 function stringOption(name, description, required, maxLength) {
@@ -272,33 +606,81 @@ function normalizeHelpTarget(value) {
   return String(value).trim().toLowerCase().replace(/^\//, "").replaceAll("_", "-");
 }
 
-function commandListHelp() {
+function commandListHelp(locale) {
+  if (locale === "ko") {
+    return [
+      "**Clearra 슬래시 명령어**",
+      "렌더 파일: `/render-file` 또는 미리보기 메시지의 `앱 → 원본 GIF 받기` (명령어 필드는 해당 명령 안에서 자동 렌더링)",
+      "퍼펙트 클리어: `/path`, `/percent`, `/chance`, `/minimals`, `/score`, `/score-minimals`, `/saves`, `/best-save`, `/score-finder`",
+      "구축 확률: `/cover`, `/setup`, `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`, `/special-cover`",
+      "전방 탐색: `/spin-cover`, `/spin`, `/damage`",
+      "스핀 구조 탐색: `/spin-structure`",
+      "셋업 순위: `/pc-setup`, `/best-setup`, `/dpc-finder`",
+      "검증: `/verify`",
+      "정확한 문법은 `/help arguments:<명령어>`로 확인하세요. 여러 줄 격자는 필드 옵션을 생략하고 입력 창에서 작성하며, 직접 입력은 `grid:윗줄/다음줄` 형식을 사용합니다.",
+      `PC 탐색은 1–${DISCORD_PC_FIELD_MAX_ROWS}줄의 모든 목표 높이를 지원하며, 구축·전방 탐색 필드는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 지원합니다. 정적 CTK3, v115 Fumen, 문서 링크도 지원하며 입력 색상은 모두 채워진 칸으로 처리합니다.`,
+    ].join("\n");
+  }
   return [
     "**Clearra slash commands**",
-    "PC: `/path`, `/percent`, `/chance`, `/minimals`, `/score`, `/score-minimals`, `/saves`, `/best-save`",
-    "Solutions: `/cover`",
-    "Target shapes: `/setup`, `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`, `/special-cover`",
-    "Forward search: `/spin-cover`, `/spin`, `/cat-finder`",
+    "Render files: `/render-file` or `Apps → Get original GIF` on a preview message (command fields render inside their own command)",
+    "Perfect clears: `/path`, `/percent`, `/chance`, `/minimals`, `/score`, `/score-minimals`, `/saves`, `/best-save`, `/score-finder`",
+    "Build probability: `/cover`, `/setup`, `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`, `/special-cover`",
+    "Forward search: `/spin-cover`, `/spin`, `/damage`",
+    "Spin structures: `/spin-structure`",
     "Setup ranking: `/pc-setup`, `/best-setup`, `/dpc-finder`",
     "Checks: `/verify`",
-    "Use `/help arguments:<command>` for exact syntax. Board inputs accept 10-column CTK3 or v115 Fumen text, or a URL containing one value; input colors are treated only as occupied cells.",
+    "Use `/help arguments:<command>` for exact syntax. Omit a board option to enter a multiline grid in the guided form; direct grids use `grid:top-row/next-row`.",
+    `PC search supports every target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows; build/forward fields support 1 through ${DISCORD_WIDE_FIELD_MAX_ROWS} rows. Static CTK3, v115 Fumen, and document links are also accepted; input colors mean occupied cells.`,
   ].join("\n");
 }
 
-function syntax(entry) {
+function syntax(entry, locale = "en") {
+  if (normalizeDiscordLocale(locale) === "ko") {
+    switch (entry.input) {
+      case "render-file":
+        return "/render-file [image:<같은 채널의 미리보기 메시지 링크|메시지 ID>]";
+      case "pc":
+        return `/${entry.name} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:hold=use]`;
+      case "cover":
+        return `/${entry.name} next:<패턴> base:<기존 필드> target:<추가할 칸> [kicktable:<내장 프로필>] [options:hold=use]`;
+      case "colored":
+        return `/${entry.name} next:<패턴> field:<목표 필드> [kicktable:<내장 프로필>]`;
+      case "spin":
+        return `/${entry.name} next:<패턴> field:<격자|CTK3|v115 Fumen|URL> [kicktable:<내장 프로필>] [options:type=TSS]`;
+      case "fixed-next":
+        return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [kicktable:<내장 프로필>]`;
+      case "score-fixed-next":
+        return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:initial_b2b=false]`;
+      case "remaining":
+        return `/${entry.name} remaining:<순서 없는 IOTSZJL 목록> [kicktable:<내장 프로필>]`;
+      case "spin-structure":
+        return `/${entry.name} pieces:<순서 없는 IOTSZJL 목록> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<내장 프로필>]`;
+      case "verify":
+        return `/${entry.name} [scope:<pc|setup|cover|build|kicks>]`;
+      default:
+        throw new Error(`Unknown slash-command input contract: ${entry.input}`);
+    }
+  }
   switch (entry.input) {
+    case "render-file":
+      return "/render-file [image:<same-channel preview message link|message ID>]";
     case "pc":
-      return `/${entry.name} field:<CTK3|Fumen> next:<pattern> [options:\"clear=4 hold=use\"]`;
+      return `/${entry.name} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:hold=use]`;
     case "cover":
-      return `/${entry.name} base:<CTK3|Fumen> target:<CTK3|Fumen> next:<pattern> [options:\"hold=use\"]`;
+      return `/${entry.name} next:<pattern> base:<field> target:<delta> [kicktable:<built-in>] [options:hold=use]`;
     case "colored":
-      return `/${entry.name} field:<CTK3|Fumen> next:<pattern>`;
+      return `/${entry.name} next:<pattern> field:<target> [kicktable:<built-in>]`;
     case "spin":
-      return `/${entry.name} field:<CTK3|Fumen> next:<pattern> [options:\"type=TSS\"]`;
+      return `/${entry.name} next:<pattern> field:<grid|document|URL> [kicktable:<built-in>] [options:type=TSS]`;
     case "fixed-next":
-      return `/${entry.name} field:<CTK3|Fumen> next:<fixed queue>`;
+      return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [kicktable:<built-in>]`;
+    case "score-fixed-next":
+      return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:initial_b2b=false]`;
     case "remaining":
-      return `/${entry.name} remaining:<unordered IOTSZJL inventory>`;
+      return `/${entry.name} remaining:<unordered IOTSZJL inventory> [kicktable:<built-in>]`;
+    case "spin-structure":
+      return `/${entry.name} pieces:<unordered IOTSZJL inventory> field:<grid:top-row/next-row|document|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<built-in>]`;
     case "verify":
       return `/${entry.name} [scope:<pc|setup|cover|build|kicks>]`;
     default:
@@ -306,47 +688,426 @@ function syntax(entry) {
   }
 }
 
-function inputHelp(input) {
-  switch (input) {
+function inputHelp(entry, locale = "en") {
+  if (locale === "ko") return koreanInputHelp(entry);
+  const kickHelp = "`kicktable` is one of `srs-plus`, `srs`, `srs-x`, or `jstris-180`; Clearra defaults to `srs-plus`.";
+  switch (entry.input) {
+    case "render-file":
+      return [
+        "For the simplest exact selection, open a Clearra preview message's Apps menu and choose `Get original GIF`. No message ID is needed.",
+        "For text commands, reply to the preview with `$render-file` or `>render-file`; the replied-to message becomes the exact source.",
+        "`image` accepts a Clearra preview message ID or a Discord message link from the current channel.",
+        "When omitted, Clearra checks recent channel history for your newest preview first, then the newest preview from anyone. Deleted or unavailable attachments cannot be recovered.",
+        "The result is the original `.gif` file without a reply reference. CTK3, Fumen, and plain field inputs on search commands are rendered inside those commands.",
+      ];
     case "pc":
       return [
-        "`field` is one operation-free page. `next` supports fixed queues, `*pN`/`*!`, piece groups/complements, and `;` alternatives.",
-        "`options` allows only `clear=1..6` (default 4) and `hold=use|avoid` (default use).",
-        "The represented compatibility contract uses the Jstris-180 rotation rule.",
+        `\`field\` is a top-first 10-column grid of 1–${DISCORD_PC_FIELD_MAX_ROWS} rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty.`,
+        "`next` accepts fixed IOTSZJL queues, `*pN`/`*!`, `P<N>`, piece groups/complements, and `;` alternatives. Letters are case-insensitive; automatic PC alternatives must have equal length.",
+        `\`lines\` accepts every height 1–${DISCORD_PC_FIELD_MAX_ROWS}, including odd values. Input-form \`Auto\` evaluates all 1–${DISCORD_PC_FIELD_MAX_ROWS}-row targets from the field and queue, then searches the valid targets serially. \`options\` selects \`hold=use|avoid\`.`,
+        kickHelp,
       ];
     case "cover":
       return [
-        "`base` is the existing field. `target` contains only the new cells to build, not the final `base ∪ target` board; the two masks must not overlap.",
-        "Both board inputs require one operation-free 10-column CTK3/v115 Fumen page. CTK3 and Fumen may be mixed, and every input color (including Fumen grey) means the same occupied cell.",
-        "`next` supports the represented fixed/group/bag pattern subset.",
-        "`options` allows only `hold=use|avoid` (default use).",
-        "The represented compatibility contract uses the Jstris-180 rotation rule.",
-        "Colored solution documents are emitted as CTK3 by default; input documents are never converted to Fumen.",
+        "`base` is the existing field; `target` contains only cells to add. They must not overlap. Target must be non-empty with a block count divisible by four, and base must not contain a completed row.",
+        `Both fields accept 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first grid rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty.`,
+        "`next` accepts the supported fixed/group/bag patterns. `options` selects `hold=use|avoid`. Colored CTK3 solution output remains the default.",
+        kickHelp,
       ];
     case "colored":
       return [
-        "`field` is one operation-free colorless target shape. Every CTK3/Fumen color is treated as the same occupied cell; `next` supports the represented fixed/group/bag pattern subset.",
-        "The represented compatibility contract uses Jstris-180 and disables horizontal mirror.",
+        "`field` is a non-empty target occupancy mask whose block count is divisible by four. All CTK3/Fumen colors are treated as occupied cells.",
+        `A plain grid accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows; use \`#\` for filled and \`_\` for empty. \`next\` uses the supported fixed/group/bag pattern grammar.`,
+        kickHelp,
       ];
     case "spin":
       return [
-        "`field` is one operation-free page. `next` supports the represented fixed/group/bag pattern subset.",
-        "`options` allows only `type=TSS|TSD|TST|TSPIN|T-SPIN|ANY` (default TSS); TSM is unavailable.",
-        "The represented compatibility contract uses the Jstris-180 rotation rule.",
+        `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty. \`next\` uses the supported fixed/group/bag grammar.`,
+        "`options` selects TSS, TSD, TST, or any T-spin; TSM is intentionally unavailable.",
+        kickHelp,
       ];
     case "fixed-next":
       return [
-        "`field` is one operation-free page. `next` must be an exact IOTSZJL queue, not a pattern.",
-        "The represented compatibility contract uses the Jstris-180 rotation rule.",
+        `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows or one static document/URL. In a grid, use \`#\` for filled and \`_\` for empty. \`next\` must be one exact IOTSZJL queue, not a pattern.`,
+        kickHelp,
+      ];
+    case "score-fixed-next":
+      return [
+        `\`field\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} top-first rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty. \`next\` must be one exact IOTSZJL queue, not a pattern.`,
+        `\`lines\` accepts every perfect-clear target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS}. \`options\` selects whether the initial back-to-back state is enabled and defaults to \`initial_b2b=false\`.`,
+        kickHelp,
       ];
     case "remaining":
       return [
-        "`remaining` is an unordered inventory containing only IOTSZJL pieces.",
-        "The represented compatibility contract uses the Jstris-180 rotation rule.",
+        "`remaining` is an unordered inventory of 1–7 IOTSZJL pieces. At most one piece kind may appear twice; that duplicate becomes the initial hold. Three copies or multiple duplicated kinds are rejected.",
+        kickHelp,
+      ];
+    case "spin-structure":
+      return [
+        "`pieces` is an unordered IOTSZJL inventory. Repeated letters are multiplicities, not a queue, and hold is not used.",
+        `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty.`,
+        "`profile` selects T-Spins, T-Spins+, All-Mini(+), or All-Spin(+). Regular and Mini results are always reported separately; `+` adds the exact immobile-T fallback.",
+        "`lines` applies to the terminal spin and defaults to `1+`. Results are subset-minimal across the supplied inventory.",
+        kickHelp,
       ];
     case "verify":
-      return ["Omit `scope` to run all checks. This command does not use a search worker pool."];
+      return [
+        "Choose `pc`, `setup`, `cover`, `build`, or `kicks`. Choose input-form `All` or omit `scope` to run every check.",
+      ];
     default:
-      throw new Error(`Unknown slash-command input contract: ${input}`);
+      throw new Error(`Unknown slash-command input contract: ${entry.input}`);
   }
 }
+
+function koreanInputHelp(entry) {
+  const kickHelp = "`kicktable`은 `srs-plus`, `srs`, `srs-x`, `jstris-180` 중 하나이며 기본값은 `srs-plus`입니다.";
+  switch (entry.input) {
+    case "render-file":
+      return [
+        "가장 간단하게 정확히 지정하려면 Clearra 미리보기 메시지의 앱 메뉴에서 `원본 GIF 받기`를 선택합니다. 메시지 ID는 필요하지 않습니다.",
+        "텍스트 명령어는 미리보기에 답장하면서 `$render-file` 또는 `>render-file`을 입력하면 답장 대상을 정확한 원본으로 사용합니다.",
+        "`image`에는 현재 채널에 있는 Clearra 미리보기 메시지 ID 또는 Discord 메시지 링크를 입력합니다.",
+        "생략하면 최근 채널 기록에서 본인의 최신 미리보기를 먼저 찾고, 없으면 전체 최신 미리보기를 찾습니다. 삭제되었거나 사용할 수 없게 된 첨부 파일은 복구할 수 없습니다.",
+        "결과는 답글 참조가 없는 원본 `.gif` 파일입니다. 탐색 명령어에 입력한 CTK3, Fumen, 일반 필드는 해당 명령어 내부에서 렌더링됩니다.",
+      ];
+    case "pc":
+      return [
+        `\`field\`에는 위쪽 줄부터 적은 10열 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력합니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸입니다.`,
+        "`next`에는 고정 IOTSZJL 큐, `*pN`/`*!`, `P<N>`, 미노 그룹·여집합, `;` 대안을 사용할 수 있습니다. 영문 대소문자를 구분하지 않으며 자동 PC 대안의 길이는 같아야 합니다.",
+        `\`lines\`에는 홀수를 포함해 1–${DISCORD_PC_FIELD_MAX_ROWS} 중 원하는 높이를 지정할 수 있습니다. 입력 창의 \`자동\`은 필드와 넥스트를 바탕으로 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체를 판정한 뒤 성립하는 목표를 직렬 탐색합니다. \`options\`에서는 홀드 사용 여부를 선택합니다.`,
+        kickHelp,
+      ];
+    case "cover":
+      return [
+        "`base`는 기존 필드이고 `target`에는 추가할 칸만 입력합니다. 두 필드는 겹칠 수 없고, 목표 필드는 비어 있지 않으며 블록 수가 4의 배수여야 하고, 기존 필드에는 완성된 줄이 없어야 합니다.",
+        `두 필드는 위쪽 줄부터 적은 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 받습니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸입니다.`,
+        "`next`에는 지원되는 고정·그룹·가방 패턴을 사용합니다. `options`에서는 홀드 사용 여부를 선택합니다. 색상을 보존한 CTK3 결과가 기본 출력입니다.",
+        kickHelp,
+      ];
+    case "colored":
+      return [
+        "`field`는 비어 있지 않고 블록 수가 4의 배수인 목표 점유 필드입니다. CTK3/Fumen의 모든 색상은 채워진 칸으로 처리합니다.",
+        `일반 격자는 위쪽 줄부터 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 받습니다. \`#\`은 채움, \`_\`는 빈칸이며, \`next\`에는 지원되는 고정·그룹·가방 패턴을 사용합니다.`,
+        kickHelp,
+      ];
+    case "spin":
+      return [
+        `\`field\`는 위쪽 줄부터 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 또는 정적 CTK3/v115 Fumen/URL 하나를 받습니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸이며 \`next\`에는 지원되는 고정·그룹·가방 패턴을 사용합니다.`,
+        "`options`에서 TSS, TSD, TST 또는 모든 T-spin을 선택합니다. TSM은 지원하지 않습니다.",
+        kickHelp,
+      ];
+    case "fixed-next":
+      return [
+        `\`field\`는 위쪽 줄부터 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 또는 정적 문서/URL 하나를 받습니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력해야 합니다.`,
+        kickHelp,
+      ];
+    case "score-fixed-next":
+      return [
+        `\`field\`는 위쪽 줄부터 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 또는 정적 CTK3/v115 Fumen/URL 하나를 받습니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력해야 합니다.`,
+        `\`lines\`에는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 중 원하는 퍼펙트 클리어 목표 높이를 지정할 수 있습니다. \`options\`에서는 초기 B2B 상태를 선택하며 기본값은 \`initial_b2b=false\`입니다.`,
+        kickHelp,
+      ];
+    case "remaining":
+      return [
+        "`remaining`은 순서 없는 IOTSZJL 미노 1–7개입니다. 한 종류만 두 번 나올 수 있으며 중복 미노가 초기 홀드가 됩니다. 세 개 이상 또는 여러 종류의 중복은 허용하지 않습니다.",
+        kickHelp,
+      ];
+    case "spin-structure":
+      return [
+        "`pieces`는 순서 없는 IOTSZJL 미노 목록입니다. 반복 문자는 수량을 뜻하며 큐나 홀드로 해석하지 않습니다.",
+        `\`field\`에는 위쪽 줄부터 적은 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력합니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸입니다.`,
+        "`profile`은 T-Spins, T-Spins+, All-Mini(+), All-Spin(+) 중 하나입니다. Regular와 Mini는 항상 따로 출력하며 `+`는 정확한 immobile T 판정을 추가합니다.",
+        "`lines`는 마지막 스핀이 지우는 줄에 적용되며 기본값은 `1+`입니다. 결과는 입력 미노 안에서 부분집합 최소 구조입니다.",
+        kickHelp,
+      ];
+    case "verify":
+      return ["`pc`, `setup`, `cover`, `build`, `kicks` 중 하나를 고르세요. 모든 검증을 실행하려면 입력 창에서 `전체`를 고르거나 `scope`를 생략하세요."];
+    default:
+      throw new Error(`Unknown slash-command input contract: ${entry.input}`);
+  }
+}
+
+function localizedRegistration(entry) {
+  const registration = entry.registration;
+  const koreanName = KOREAN_COMMAND_NAMES[entry.name] ?? registration.name;
+  const hasDescription = typeof registration.description === "string";
+  const koreanDescription = hasDescription
+    ? localizedCommandDescription(entry, "ko")
+    : null;
+  return Object.freeze({
+    ...registration,
+    ...localizationProperty("name_localizations", registration.name, koreanName),
+    ...(hasDescription
+      ? localizationProperty(
+          "description_localizations",
+          registration.description,
+          koreanDescription,
+        )
+      : {}),
+    ...(registration.options
+      ? { options: Object.freeze(registration.options.map((option) =>
+          localizeRegistrationOption(option, entry.name)
+        )) }
+      : {}),
+  });
+}
+
+function localizeRegistrationOption(option, commandName) {
+  const path = `${commandName}.${option.name}`;
+  const koreanName = KOREAN_OPTION_NAMES[path] ??
+    KOREAN_OPTION_NAMES[option.name] ?? option.name;
+  const koreanDescription = KOREAN_OPTION_DESCRIPTIONS[path] ??
+    koreanRangeOptionDescription(option) ??
+    KOREAN_OPTION_DESCRIPTIONS[option.name] ?? option.description;
+  return Object.freeze({
+    ...option,
+    ...localizationProperty("name_localizations", option.name, koreanName),
+    ...localizationProperty(
+      "description_localizations",
+      option.description,
+      koreanDescription,
+    ),
+    ...(option.options
+      ? { options: Object.freeze(option.options.map((nested) =>
+          localizeRegistrationOption(nested, path)
+        )) }
+      : {}),
+    ...(option.choices
+      ? { choices: Object.freeze(option.choices.map((choice) => Object.freeze({
+          ...choice,
+          ...localizationProperty(
+            "name_localizations",
+            choice.name,
+            koreanChoiceName(choice.name, choice.value, path),
+          ),
+        }))) }
+      : {}),
+  });
+}
+
+function koreanRangeOptionDescription(option) {
+  if (option?.name !== "field" || typeof option.description !== "string") {
+    return null;
+  }
+  if (option.description.includes(`1–${DISCORD_PC_FIELD_MAX_ROWS} rows`)) {
+    return `10열 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 필드, CTK3/v115 Fumen 또는 문서 링크`;
+  }
+  if (option.description.includes(`1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows`)) {
+    return `10열 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 필드, CTK3/v115 Fumen 또는 문서 링크`;
+  }
+  return null;
+}
+
+function localizationProperty(property, original, localized) {
+  return typeof localized === "string" && localized !== original
+    ? { [property]: Object.freeze({ ko: localized }) }
+    : {};
+}
+
+function localizedCommandDescription(entry, locale) {
+  if (locale !== "ko") return entry.description ?? entry.registration.description;
+  return KOREAN_COMMAND_DESCRIPTIONS[entry.name] ??
+    entry.description ?? entry.registration.description;
+}
+
+function localizedNote(entry, locale) {
+  if (locale !== "ko") return entry.note;
+  return KOREAN_COMMAND_NOTES[entry.name] ?? entry.note;
+}
+
+function koreanChoiceName(name, value, path = "") {
+  if (path === "help.arguments" && typeof value === "string") {
+    const localized = KOREAN_COMMAND_NAMES[value];
+    return localized && localized !== value
+      ? `${value} — ${localized}`
+      : value;
+  }
+  if (typeof value === "string" && KOREAN_COMMAND_NAMES[value]) {
+    return KOREAN_COMMAND_NAMES[value];
+  }
+  if (path === "spin-structure.lines" && typeof value === "string") {
+    if (value === "any") return "모든 줄 수";
+    if (/^[0-4]$/.test(value)) return `정확히 ${value}줄`;
+    if (/^[1-4]\+$/.test(value)) return `최소 ${value.slice(0, -1)}줄`;
+  }
+  if (path === "spin-structure.profile" && typeof value === "string") {
+    return ({
+      "t-spins": "T 스핀",
+      "t-spins-plus": "T 스핀+",
+      "all-mini": "전체 Mini",
+      "all-mini-plus": "전체 Mini+",
+      "all-spin": "전체 스핀",
+      "all-spin-plus": "전체 스핀+",
+    })[value] ?? name;
+  }
+  if (value === "en") return "영어";
+  if (value === "ko") return "한국어";
+  if (value === "channel") return "채널";
+  if (value === "guild") return "서버";
+  if (value === "all") return "전체";
+  if (value === "auto") {
+    return `자동 — 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체 판정`;
+  }
+  if (typeof value === "number" && / line$/.test(name)) return `${value}줄`;
+  if (typeof value === "string" && /^hold=use$/.test(value)) return "홀드 사용";
+  if (typeof value === "string" && /^hold=avoid$/.test(value)) return "홀드 사용 안 함";
+  if (typeof value === "string" && /^type=TSS$/.test(value)) return "T-spin 싱글";
+  if (typeof value === "string" && /^type=TSD$/.test(value)) return "T-spin 더블";
+  if (typeof value === "string" && /^type=TST$/.test(value)) return "T-spin 트리플";
+  if (typeof value === "string" && /^type=ANY$/.test(value)) return "모든 T-spin";
+  if (value === "initial_b2b=false") return "초기 B2B 사용 안 함 (기본값)";
+  if (value === "initial_b2b=true") return "초기 B2B 사용";
+  if (value === "pc") return "퍼펙트 클리어";
+  if (value === "build") return "빌드";
+  if (value === "kicks") return "킥";
+  if (name === "SRS+ (default)") return "SRS+ (기본값)";
+  return name;
+}
+
+const KOREAN_COMMAND_NAMES = Object.freeze({
+  help: "도움말",
+  "render-file": "렌더-파일",
+  "get-original-gif": "원본 GIF 받기",
+  "channel-settings": "채널-설정",
+  "server-settings": "서버-설정",
+  path: "경로",
+  percent: "퍼센트",
+  chance: "확률",
+  minimals: "최소집합",
+  score: "점수",
+  "score-minimals": "최소집합-점수",
+  saves: "세이브",
+  "best-save": "최적-세이브",
+  cover: "커버",
+  setup: "셋업",
+  congruent: "합동",
+  "congruent-cover": "합동-커버",
+  "setup-cover": "셋업-커버",
+  "cover-percent": "커버-퍼센트",
+  "special-cover": "특수-커버",
+  "spin-cover": "스핀-커버",
+  spin: "스핀",
+  "score-finder": "score-finder",
+  damage: "대미지",
+  "spin-structure": "스핀-구조",
+  "pc-setup": "pc-셋업",
+  "best-setup": "최적-셋업",
+  "dpc-finder": "dpc-탐색",
+  verify: "검증",
+});
+
+const KOREAN_OPTION_NAMES = Object.freeze({
+  arguments: "명령어",
+  image: "이미지",
+  next: "넥스트",
+  field: "필드",
+  lines: "줄",
+  kicktable: "킥테이블",
+  options: "옵션",
+  pieces: "미노",
+  profile: "프로필",
+  base: "기존필드",
+  target: "목표필드",
+  remaining: "남은미노",
+  scope: "범위",
+  language: "언어",
+  "channel-settings.language-show": "언어-확인",
+  "channel-settings.language-set": "언어-설정",
+  "channel-settings.language-reset": "언어-초기화",
+  "channel-settings.disable": "비활성화",
+  "channel-settings.enable": "활성화",
+  "server-settings.language-show": "언어-확인",
+  "server-settings.language-set": "언어-설정",
+  "server-settings.language-reset": "언어-초기화",
+  "server-settings.pause": "일시정지",
+  "server-settings.resume": "재개",
+});
+
+const KOREAN_COMMAND_DESCRIPTIONS = Object.freeze({
+  help: "Clearra 명령어의 정확한 문법과 제한을 표시합니다",
+  "render-file": "최근 필드 미리보기의 원본 GIF 파일을 받습니다",
+  "channel-settings": "현재 채널의 Clearra 설정을 관리합니다",
+  "server-settings": "이 서버의 Clearra 설정을 관리합니다",
+  path: "표현되는 모든 퍼펙트 클리어 경로를 찾습니다",
+  percent: "정확한 퍼펙트 클리어 성공 확률을 계산합니다",
+  chance: "정확한 퍼펙트 클리어 성공 확률을 계산합니다",
+  minimals: "퍼펙트 클리어를 최소 집합으로 커버하는 해법을 찾습니다",
+  score: "Jstris 프로필로 퍼펙트 클리어 해법의 점수를 계산합니다",
+  "score-minimals": "최소 커버 퍼펙트 클리어 해법 집합의 점수를 계산합니다",
+  saves: "각 PC 해법의 성공 확률을 분석합니다",
+  "best-save": "각 PC 해법의 성공 확률을 분석합니다",
+  cover: "기존 필드에서 목표 칸까지의 구축 확률을 계산합니다",
+  setup: "목표 모양의 구축 확률을 계산합니다",
+  congruent: "목표 모양의 구축 확률을 계산합니다",
+  "congruent-cover": "목표 모양의 구축 확률을 계산합니다",
+  "setup-cover": "목표 점유 필드의 구축 확률을 계산합니다",
+  "cover-percent": "목표 점유 필드의 구축 확률을 계산합니다",
+  "special-cover": "목표 모양의 T-spin 커버리지를 계산합니다",
+  "spin-cover": "전방 T-spin 완성 경로를 찾습니다",
+  spin: "전방 T-spin 완성 경로를 찾습니다",
+  "score-finder": "고정 넥스트 큐에서 Jstris 점수가 가장 높은 퍼펙트 클리어를 찾습니다",
+  damage: "정확한 넥스트 큐 하나에서 최대 대미지를 찾습니다",
+  "spin-structure": "순서 없는 미노 목록에서 부분집합 최소 스핀 구조를 찾습니다",
+  "pc-setup": "구축 및 PC 커버리지로 셋업 후보의 순위를 정합니다",
+  "best-setup": "구축 커버리지로 셋업 후보의 순위를 정합니다",
+  "dpc-finder": "퍼펙트 클리어 커버리지로 셋업 후보의 순위를 정합니다",
+  verify: "Clearra 검증 항목 한 그룹을 실행합니다",
+});
+
+const KOREAN_COMMAND_NOTES = Object.freeze({
+  percent: "/chance와 같은 기능입니다.",
+  chance: "/percent와 같은 기능입니다.",
+  saves: "/best-save와 같은 기능입니다.",
+  "best-save": "/saves와 같은 기능입니다.",
+  congruent: "/setup과 같은 기능입니다.",
+  "congruent-cover": "/setup과 같은 목표 모양 계산을 사용합니다.",
+  "setup-cover": "필드는 목표 점유 마스크를 나타냅니다.",
+  "cover-percent": "필드는 목표 점유 마스크를 나타냅니다.",
+  "spin-cover": "T-spin mini(TSM)는 지원하지 않습니다.",
+  spin: "/spin-cover와 같은 계산을 사용하며 TSM은 지원하지 않습니다.",
+  "pc-setup": "구축과 퍼펙트 클리어 커버리지를 함께 기준으로 삼습니다.",
+  "best-setup": "구축 커버리지를 기준으로 삼습니다.",
+  "dpc-finder": "퍼펙트 클리어 커버리지를 기준으로 삼습니다.",
+});
+
+const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
+  arguments: "설명을 볼 명령어이며 생략하면 전체 명령어 그룹을 표시합니다",
+  "render-file.image": "현재 채널의 Clearra 미리보기 메시지 링크 또는 ID이며 생략하면 최근 파일을 찾습니다",
+  "score-finder.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",
+  "score-finder.field": `1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 필드: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
+  "score-finder.lines": `퍼펙트 클리어 목표 높이는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 중 하나를 지정할 수 있습니다`,
+  "score-finder.options": "초기 B2B 상태이며 기본값은 사용 안 함입니다",
+  "damage.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",
+  "spin-structure.pieces": "순서 없는 IOTSZJL 미노 목록이며 반복 문자는 수량을 보존합니다",
+  "spin-structure.field": `1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 필드: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
+  "spin-structure.lines": "마지막 스핀이 지우는 줄 수이며 기본값은 한 줄 이상입니다",
+  "spin-structure.profile": "Regular와 Mini를 분리하는 스핀 판정 프로필입니다",
+  next: "넥스트 큐 또는 패턴이며 생략하면 입력 창에서 작성합니다",
+  field: "10열 필드: grid:줄/줄 또는 CTK3/Fumen/문서, 여러 줄은 입력 창 사용",
+  lines: `PC 목표 높이 1–${DISCORD_PC_FIELD_MAX_ROWS}이며 생략하면 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체를 자동 판정합니다`,
+  kicktable: "내장 킥테이블이며 기본값은 SRS+입니다",
+  options: "추가 선택 설정",
+  base: `기존 필드 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
+  target: `목표 칸 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
+  remaining: "순서 없는 IOTSZJL 미노 1–7개",
+  scope: "검증 범위",
+  "verify.scope": "실행할 검증 그룹이며 생략하면 모든 검증을 실행합니다",
+  language: "ClearraBot 응답과 입력 창에 사용할 언어",
+  "channel-settings.language-show": "현재 채널에 적용되는 언어를 표시합니다",
+  "channel-settings.language-set": "현재 채널의 응답 언어를 설정합니다",
+  "channel-settings.language-reset": "현재 채널의 언어 설정을 삭제합니다",
+  "channel-settings.disable": "현재 채널에서 Clearra 명령을 비활성화합니다",
+  "channel-settings.enable": "현재 채널에서 Clearra 명령을 다시 활성화합니다",
+  "server-settings.language-show": "이 서버에 적용되는 언어를 표시합니다",
+  "server-settings.language-set": "이 서버의 응답 언어를 설정합니다",
+  "server-settings.language-reset": "이 서버의 언어 설정을 삭제합니다",
+  "server-settings.pause": "서버 재개를 제외한 모든 Clearra 명령을 비활성화합니다",
+  "server-settings.resume": "이 서버의 Clearra 명령을 다시 활성화합니다",
+});
+
+export const globalCommands = Object.freeze(
+  [
+    ...slashCommandCatalog.map(localizedRegistration),
+    ...messageCommandCatalog.map(localizedRegistration),
+  ],
+);

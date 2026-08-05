@@ -38,6 +38,7 @@ clearra-profiles = { path = "../clearra-profiles" }
 clearra-rules = { path = "../clearra-rules" }
 clearra-scoring = { path = "../clearra-scoring" }
 clearra-setup-search = { path = "../clearra-setup-search" }
+clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-validation = { path = "../clearra-validation" }
 clearra-web-command = { path = "../clearra-web-command" }

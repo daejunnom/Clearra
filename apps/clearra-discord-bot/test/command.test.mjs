@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canonicalClearraOperationalCommand,
   ClearraJobExecutor,
   parseClearraMessage,
   prepareClearraArguments,
@@ -20,30 +21,66 @@ test("Clearrabot defaults each search session to a three-minute timeout", () => 
   assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
   assert.equal(config.jobPollIntervalMs, 250);
   assert.equal(config.jobCancelTimeoutMs, 2_000);
+  assert.equal(config.accessStorePath, null);
 });
 
-test("Cloud Run ingress requires the Discord application public key", () => {
+test("Discord locale and access persistence paths stay independently configurable", () => {
+  const config = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_DISCORD_LOCALE_STORE: " /state/locale.json ",
+    CLEARRA_DISCORD_ACCESS_STORE: " /state/access.json ",
+  });
+  assert.equal(config.localeStorePath, "/state/locale.json");
+  assert.equal(config.accessStorePath, "/state/access.json");
+});
+
+test("Discord bot administrator IDs are an immutable validated allow-list", () => {
+  const config = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_DISCORD_ADMIN_USER_IDS:
+      "123456789012345678, 223456789012345678 123456789012345678",
+  });
+  assert.deepEqual(config.discordAdminUserIds, [
+    "123456789012345678",
+    "223456789012345678",
+  ]);
+  assert.equal(Object.isFrozen(config.discordAdminUserIds), true);
+  assert.throws(
+    () => loadDiscordBotConfig({
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_DISCORD_ADMIN_USER_IDS: "not-a-snowflake",
+    }),
+    /CLEARRA_DISCORD_ADMIN_USER_IDS is invalid/,
+  );
+});
+
+test("Discord HTTP interaction ingress is retired in favor of Oracle Gateway", () => {
   assert.throws(
     () =>
       loadDiscordBotConfig({
         DISCORD_TOKEN: "test-token",
         CLEARRA_DISCORD_INGRESS: "cloud-run",
       }),
-    /DISCORD_PUBLIC_KEY is required/,
+    /no longer supports HTTP interaction ingress/,
   );
   const config = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",
     DISCORD_PUBLIC_KEY: "01".repeat(32),
     DISCORD_APPLICATION_ID: "application-id",
-    CLEARRA_DISCORD_INGRESS: "cloud-run",
-    CLEARRA_DISCORD_INTERACTION_PATH: "/discord/interactions",
-    PORT: "9090",
   });
-  assert.equal(config.ingressMode, "cloud-run");
+  assert.equal(config.ingressMode, "gateway");
   assert.equal(config.registerCommands, false);
   assert.equal(config.applicationId, "application-id");
-  assert.equal(config.port, 9090);
-  assert.equal(config.interactionPath, "/discord/interactions");
+  assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
+  assert.equal("publicKey" in config, false);
+  assert.equal("interactionPath" in config, false);
+  assert.throws(
+    () => loadDiscordBotConfig({
+      K_SERVICE: "stale-interaction-service",
+      DISCORD_TOKEN: "test-token",
+    }),
+    /must run on Oracle, not Cloud Run/,
+  );
 });
 
 test("Clearrabot validates and configures the HTTP job service", () => {
@@ -64,12 +101,113 @@ test("Clearrabot validates and configures the HTTP job service", () => {
       }),
     /must use HTTP or HTTPS/,
   );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+      }),
+    /CLEARRA_JOB_TOKEN is required/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "http://jobs.example.test/jobs",
+        CLEARRA_JOB_TOKEN: "job-token",
+      }),
+    /must use HTTPS unless it targets loopback/,
+  );
+});
+
+test("Oracle rendering is explicit while ambient text stays allow-listed and remote", () => {
+  const defaults = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
+  assert.equal(defaults.oracleRenderEnabled, false);
+  assert.equal(defaults.oracleTextEnabled, false);
+  assert.deepEqual(defaults.oracleAllowedChannelIds, []);
+
+  const automaticRenderer = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_ORACLE_RENDER_ENABLED: "1",
+  });
+  assert.equal(automaticRenderer.oracleRenderEnabled, true);
+  assert.deepEqual(automaticRenderer.oracleAllowedChannelIds, []);
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_ORACLE_TEXT_ENABLED: "1",
+      }),
+    /requires CLEARRA_ORACLE_RENDER_ENABLED=1/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_ORACLE_RENDER_ENABLED: "1",
+        CLEARRA_ORACLE_TEXT_ENABLED: "1",
+        CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS: "123456789012345678",
+      }),
+    /requires an explicit CLEARRA_JOB_URL/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_ORACLE_RENDER_ENABLED: "1",
+        CLEARRA_ORACLE_TEXT_ENABLED: "1",
+        CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+        CLEARRA_JOB_TOKEN: "opaque-job-token",
+      }),
+    /requires CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS or explicit CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1/,
+  );
+  const renderer = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_ORACLE_RENDER_ENABLED: "1",
+    CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS:
+      "123456789012345678, 234567890123456789 123456789012345678",
+  });
+  assert.equal(renderer.oracleRenderEnabled, true);
+  assert.equal(renderer.oracleTextEnabled, false);
+  assert.deepEqual(renderer.oracleAllowedChannelIds, [
+    "123456789012345678",
+    "234567890123456789",
+  ]);
+  assert.equal(renderer.oracleMaxInputChars, 2_000);
+  assert.equal(renderer.oracleMaxPages, 128);
+  assert.equal(renderer.oracleMaxCtk3FileBytes, 8 * 1024 * 1024);
+  assert.equal(renderer.oracleMaxGifBytes, 8 * 1024 * 1024);
+  assert.equal(renderer.oracleMaxPendingSelfMessages, 4);
+
+  const textProxy = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_ORACLE_RENDER_ENABLED: "1",
+    CLEARRA_ORACLE_TEXT_ENABLED: "1",
+    CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS: "123456789012345678",
+    CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+    CLEARRA_JOB_TOKEN: "opaque-job-token",
+  });
+  assert.equal(textProxy.oracleTextEnabled, true);
+  assert.equal(textProxy.workerAuthority, "remote");
+  assert.deepEqual(textProxy.oracleCommandPrefixes, ["$", ">"]);
+
+  const globalTextProxy = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_ORACLE_RENDER_ENABLED: "1",
+    CLEARRA_ORACLE_TEXT_ENABLED: "1",
+    CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS: "1",
+    CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+    CLEARRA_JOB_TOKEN: "opaque-job-token",
+  });
+  assert.equal(globalTextProxy.oracleAllowAllTextChannels, true);
+  assert.deepEqual(globalTextProxy.oracleAllowedChannelIds, []);
 });
 
 test("Clearrabot uses every logical processor by default with an explicit reserve-core opt-out", () => {
   const runtime = { availableParallelism: () => 8 };
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" }, runtime);
   assert.equal(config.processLogicalProcessors, 8);
+  assert.equal("expectedVcpus" in config, false);
   assert.equal(config.searchWorkersPerSession, undefined);
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(defaultSearchWorkersPerSession(8, 2), 4);
@@ -171,10 +309,13 @@ test("Clearrabot uses every logical processor by default with an explicit reserv
 });
 
 test("command tokenizer preserves quoted queue syntax", () => {
-  assert.deepEqual(
-    tokenizeCommand('pc --lines 4 --patterns "[LOJ]!P7"'),
-    ["pc", "--lines", "4", "--patterns", "[LOJ]!P7"],
-  );
+  assert.deepEqual(tokenizeCommand('pc --lines 4 --patterns "[LOJ]!P7"'), [
+    "pc",
+    "--lines",
+    "4",
+    "--patterns",
+    "[LOJ]!P7",
+  ]);
 });
 
 test("Discord commands always use the Clearra exact product path", () => {
@@ -198,19 +339,16 @@ test("Discord commands always use the Clearra exact product path", () => {
       "text",
     ],
   );
-  assert.deepEqual(
-    parseClearraMessage("!setup --remaining SZ --priority pc"),
-    [
-      "setup",
-      "--remaining",
-      "SZ",
-      "--priority",
-      "pc",
-      "--no-tablebase",
-      "--format",
-      "text",
-    ],
-  );
+  assert.deepEqual(parseClearraMessage("!setup --remaining SZ --priority pc"), [
+    "setup",
+    "--remaining",
+    "SZ",
+    "--priority",
+    "pc",
+    "--no-tablebase",
+    "--format",
+    "text",
+  ]);
   assert.deepEqual(
     prepareClearraArguments(
       ["pc", "--lines", "2", "--format", "text", "--include-solution-data"],
@@ -253,14 +391,7 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
   );
   assert.deepEqual(
     prepareClearraArguments(
-      [
-        "pc",
-        "--lines",
-        "4",
-        "--workers",
-        "99",
-        "--use-all-cpu-threads",
-      ],
+      ["pc", "--lines", "4", "--workers", "99", "--use-all-cpu-threads"],
       { workers: 3 },
     ),
     [
@@ -303,7 +434,9 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
     ["percent", "--queue", "P7", "--format", "text"],
   );
   assert.deepEqual(
-    prepareClearraArguments(["pc", "--workers=99", "--lines", "2"], { workers: 3 }),
+    prepareClearraArguments(["pc", "--workers=99", "--lines", "2"], {
+      workers: 3,
+    }),
     [
       "pc",
       "--lines",
@@ -382,30 +515,67 @@ test("Discord exposes curated sfinder commands through native worker policy", ()
     "--format",
     "text",
   ]);
-  assert.deepEqual(
-    prepareClearraArguments(prepared, { workers: 3 }),
-    prepared,
-  );
+  assert.deepEqual(prepareClearraArguments(prepared, { workers: 3 }), prepared);
   assert.deepEqual(
     prepareClearraArguments(["sfinder", "verify", "kicks"], { workers: 3 }),
     ["sfinder", "verify", "kicks", "--format", "text"],
   );
   assert.deepEqual(
     parseClearraMessage("!sfinder pc_setup IOTS", "!", { workers: 2 }),
+    ["sfinder", "pc_setup", "IOTS", "--auto-workers", "2", "--format", "text"],
+  );
+});
+
+test("spin-structure uses the native parallel policy and a canonical operational label", () => {
+  const prepared = prepareClearraArguments(
     [
-      "sfinder",
-      "pc_setup",
-      "IOTS",
-      "--auto-workers",
-      "2",
-      "--format",
-      "text",
+      "spin-structure",
+      "--board-mask-v1",
+      "0",
+      "--pieces",
+      "TTIO",
+      "--lines",
+      "1+",
+      "--spin-profile",
+      "all-mini",
+      "--workers",
+      "99",
     ],
+    { workers: 3 },
+  );
+  assert.deepEqual(prepared, [
+    "spin-structure",
+    "--board-mask-v1",
+    "0",
+    "--pieces",
+    "TTIO",
+    "--lines",
+    "1+",
+    "--spin-profile",
+    "all-mini",
+    "--auto-workers",
+    "3",
+    "--format",
+    "text",
+  ]);
+  assert.equal(
+    canonicalClearraOperationalCommand(prepared),
+    "spin-structure",
+  );
+  assert.equal(
+    canonicalClearraOperationalCommand("spin-structure"),
+    "spin-structure",
   );
 });
 
 test("Discord rejects unrepresented sfinder contracts", () => {
-  for (const command of ["ren", "util", "parity", "render", "special-minimals"]) {
+  for (const command of [
+    "ren",
+    "util",
+    "parity",
+    "render",
+    "special-minimals",
+  ]) {
     assert.throws(
       () => prepareClearraArguments(["sfinder", command]),
       /does not expose the sfinder/,
@@ -419,7 +589,9 @@ test("Discord rejects unrepresented sfinder contracts", () => {
 
 test("tiling-only commands are recognized after Discord argument normalization", () => {
   assert.equal(
-    tilingOnlyRequested(prepareClearraArguments(["pc", "--lines", "4", "--tiling-only"])),
+    tilingOnlyRequested(
+      prepareClearraArguments(["pc", "--lines", "4", "--tiling-only"]),
+    ),
     true,
   );
   assert.equal(
@@ -457,6 +629,7 @@ test("Clearra executor submits an idempotent POST job without shell interpretati
   const requests = [];
   const executor = new ClearraJobExecutor({
     endpoint: "https://jobs.example.test/v1/jobs",
+    authorizationToken: "job-token",
     timeoutMs: 5_000,
     createJobId: () => "job-literal-1",
     fetch: async (url, request) => {
@@ -484,17 +657,38 @@ test("Clearra executor submits an idempotent POST job without shell interpretati
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "https://jobs.example.test/v1/jobs");
   assert.equal(requests[0].request.method, "POST");
+  assert.equal(requests[0].request.headers.authorization, "Bearer job-token");
   assert.equal(requests[0].request.headers["idempotency-key"], "job-literal-1");
   const job = JSON.parse(requests[0].request.body);
   assert.equal(job.protocol, "clearra.job.v1");
   assert.equal(job.id, "job-literal-1");
   assert.equal(job.kind, "clearra.command");
-  assert.deepEqual(job.arguments, [
-    "pc",
-    "queue with spaces",
-    "literal;&|$()",
-  ]);
+  assert.deepEqual(job.arguments, ["pc", "queue with spaces", "literal;&|$()"]);
   assert.equal(job.deadlineUnixMs > Date.now(), true);
+});
+
+test("remote Clearra job endpoints fail closed without HTTPS and application auth", () => {
+  assert.throws(
+    () =>
+      new ClearraJobExecutor({ endpoint: "https://jobs.example.test/jobs" }),
+    /requires an authorization token/,
+  );
+  assert.throws(
+    () =>
+      new ClearraJobExecutor({
+        endpoint: "http://jobs.example.test/jobs",
+        authorizationToken: "job-token",
+      }),
+    /must use HTTPS unless it targets loopback/,
+  );
+  assert.throws(
+    () =>
+      new ClearraJobExecutor({
+        endpoint: "https://user:password@jobs.example.test/jobs",
+        authorizationToken: "job-token",
+      }),
+    /must not contain credentials/,
+  );
 });
 
 test("Clearra executor polls an accepted POST job to its terminal result", async () => {
@@ -505,11 +699,17 @@ test("Clearra executor polls an accepted POST job to its terminal result", async
     jobResponse({
       id: "job-poll-1",
       state: "completed",
-      result: { exitCode: 2, signal: null, stdout: "", stderr: "invalid queue" },
+      result: {
+        exitCode: 2,
+        signal: null,
+        stdout: "",
+        stderr: "invalid queue",
+      },
     }),
   ];
   const executor = new ClearraJobExecutor({
     endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
     pollIntervalMs: 1,
     createJobId: () => "job-poll-1",
     fetch: async (url, request) => {
@@ -532,12 +732,14 @@ test("Clearra executor cancels the remote job when the Clearrabot timeout expire
   const requests = [];
   const executor = new ClearraJobExecutor({
     endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
     timeoutMs: 50,
     cancelTimeoutMs: 100,
     createJobId: () => "job-timeout-1",
     fetch: async (url, request) => {
       requests.push([String(url), request.method]);
-      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      if (request.method === "DELETE")
+        return new Response(null, { status: 204 });
       return await pendingUntilAbort(request.signal);
     },
   });
@@ -557,11 +759,13 @@ test("Clearra executor forwards caller cancellation to the remote job", async ()
   const requests = [];
   const executor = new ClearraJobExecutor({
     endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
     timeoutMs: 5_000,
     createJobId: () => "job-cancel-1",
     fetch: async (url, request) => {
       requests.push([String(url), request.method]);
-      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      if (request.method === "DELETE")
+        return new Response(null, { status: 204 });
       return await pendingUntilAbort(request.signal);
     },
   });
@@ -578,13 +782,10 @@ test("Clearra executor forwards caller cancellation to the remote job", async ()
 });
 
 function jobResponse(job, status = 200) {
-  return new Response(
-    JSON.stringify({ protocol: "clearra.job.v1", ...job }),
-    {
-      status,
-      headers: { "content-type": "application/json" },
-    },
-  );
+  return new Response(JSON.stringify({ protocol: "clearra.job.v1", ...job }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 function pendingUntilAbort(signal) {

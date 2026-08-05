@@ -15,8 +15,8 @@ mod tests {
 
     #[test]
     fn worker_count_reserves_one_logical_processor_by_default() {
-        let logical_processors = std::thread::available_parallelism().map_or(1, usize::from);
-        let expected_limit = logical_processors.max(1);
+        let expected_limit =
+            clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit();
         let expected_default = expected_limit.saturating_sub(1).max(1);
         assert!(clamp_requested_workers(usize::MAX, false) >= 1);
         assert_eq!(hardware_worker_limit(), expected_limit);

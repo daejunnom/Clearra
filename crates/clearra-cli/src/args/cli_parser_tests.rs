@@ -442,6 +442,17 @@ fn parses_command_specific_help_as_help_topic() {
 }
 
 #[test]
+fn parses_spin_structure_help_without_executing_the_search() {
+    for flag in ["--help", "-h"] {
+        let invocation = CliParser::parse(["clearra", "spin-structure", flag]).expect("help");
+        assert_eq!(
+            invocation.into_command(),
+            ParsedCliCommand::Help(CliHelpTopic::SpinStructure)
+        );
+    }
+}
+
+#[test]
 fn canonical_clearra_commands_match_legacy_aliases() {
     let canonical_path = CliParser::parse(["clearra", "pc-replay", "--lines", "2"])
         .expect("canonical replay command")
@@ -490,6 +501,19 @@ fn sfinder_namespace_does_not_collide_with_clearra_legacy_aliases() {
             .into_command(),
         ParsedCliCommand::Help(CliHelpTopic::Sfinder)
     );
+
+    let score_finder = CliParser::parse(["clearra", "score-finder"])
+        .expect("score-finder product command")
+        .into_command();
+    assert!(matches!(score_finder, ParsedCliCommand::Product(_)));
+    for retired in ["cat-finder", "cat_finder", "catfinder"] {
+        assert_eq!(
+            CliParser::parse(["clearra", retired]),
+            Err(CliParseError::UnknownCommand {
+                command: retired.to_owned()
+            })
+        );
+    }
 }
 
 #[test]

@@ -1,53 +1,203 @@
 # Clearrabot
 
 Clearrabot exposes the represented Sfinder-compatible command contracts as
-Discord slash commands. The active production path is one public Cloud Run
-interaction service, autoscaled from zero to four instances, that verifies
-Discord requests, runs the current Clearra CLI in the same container, and edits
-the deferred Discord interaction directly.
+Discord slash commands. Oracle Gateway is the single Discord-facing runtime: it
+owns slash commands, Modals, Message commands, `$`/`>` text commands, standalone
+renders, acknowledgements, and result delivery. Heavy searches are proxied to
+Tokyo `clearra-current-job`; that service never receives the Discord token,
+interaction token, webhook URL, or channel credential.
 
 ## Active Discord surface
 
-The registered commands are `/path`, `/percent`, `/chance`, `/minimals`,
+The registered slash commands are `/render-file`, `/path`, `/percent`, `/chance`, `/minimals`,
 `/score`, `/score-minimals`, `/saves`, `/best-save`, `/cover`, `/setup`,
 `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`,
-`/special-cover`, `/spin-cover`, `/spin`, `/cat-finder`, `/pc-setup`,
+`/special-cover`, `/spin-cover`, `/spin`, `/spin-structure`, `/score-finder`, `/damage`, `/pc-setup`,
 `/best-setup`, `/dpc-finder`, `/verify`, and `/help`. `/help` accepts an
 optional command name in `arguments`; without it, the command lists the active
 groups. Search commands use structured primary inputs instead of one raw argv
 string. For example:
 
+The registered Message command is `Apps -> Get original GIF` (localized as
+`앱 -> 원본 GIF 받기`). Right-click or long-press a Clearra preview message and
+select it to retrieve that exact original GIF without copying a message link or
+ID.
+
 ```text
-/path field:<CTK3 or Fumen> next:<pattern> options:"clear=4 hold=use"
-/cover base:<CTK3 or Fumen> target:<CTK3 or Fumen> next:<pattern> options:"hold=use"
-/spin-cover field:<CTK3 or Fumen> next:<pattern> options:"type=TSD"
-/pc-setup remaining:<unordered piece inventory>
+/render-file [image:<same-channel Clearra preview message link or message ID>]
+/path next:<pattern> field:<grid, CTK3, or Fumen> [lines:<1..6>] [kicktable:<built-in>] [options:<hold=use>]
+/cover next:<pattern> base:<grid, CTK3, or Fumen> target:<grid, CTK3, or Fumen> [kicktable:<built-in>] [options:<hold=use>]
+/spin-cover next:<pattern> field:<grid, CTK3, or Fumen> [kicktable:<built-in>] [options:<type=TSD>]
+/spin-structure pieces:<unordered inventory> field:<grid, CTK3, or Fumen> [lines:<any|0..4|0+..4+>] [profile:<t-spins|t-spins-plus|all-mini|all-mini-plus|all-spin|all-spin-plus>] [kicktable:<built-in>]
+/score-finder next:<exact queue> field:<grid, CTK3, or Fumen> [lines:<1..6>] [kicktable:<built-in>] [options:<initial_b2b=false>]
+/damage next:<exact queue> field:<grid, CTK3, or Fumen> [kicktable:<built-in>]
+/pc-setup remaining:<unordered piece inventory> [kicktable:<built-in>]
 /verify scope:<pc|setup|cover|build|kicks>
 ```
 
-Board options accept raw CTK3/Fumen or a URL containing one of those values.
-Each value must decode to one operation-free, static, 10-column page. CTK3 is
-read directly with the npm `ctk3` package and is never re-encoded as Fumen;
-Fumen is decoded independently at the Discord boundary. For both formats every
-non-empty color becomes the same occupancy bit. Ordinary field inputs use a
-canonical Board64 mask. `/cover` accepts `base` plus a non-overlapping `target`
-delta containing only cells to add, uses canonical 24-row masks, and compiles to
-the existing build-probability request with `next`.
+Board options accept raw CTK3/Fumen, a URL containing one of those values, or a
+plain text grid with exactly 10 columns. Grid rows are written top first; use
+`#` for a filled cell and `_` for an empty cell. Both are easy keyboard inputs,
+visually separate occupied space from the low empty marker, and carry no
+tetromino color. Older grid spellings remain parser-compatible but are not part
+of the displayed syntax. Piece letters and fixed queues are case-insensitive.
+PC commands, including `/score-finder`, support every height from one through
+six rows. Build-probability, forward-search, and `/spin-structure` board
+commands support one through 24 input rows; the structure-search height is
+validated separately by its engine. `/cover` keeps independent `base` and
+`target` editors in one Modal. Longer fields scroll inside the text area, so
+the full 24-row range remains available without retaining page state on the
+Gateway.
+
+Invoking any search command without all of its required runtime inputs opens a
+stateless command-specific Modal. Besides fields, the forms expose `next`, PC
+height, initial B2B state, the built-in kick table, hold policy, T-spin type, remaining pieces, or
+verification scope as applicable. Discord does not permit buttons inside a
+Modal or another Modal as a Modal-submit response, so native previous/next page
+buttons and a draggable grid cannot be implemented in this surface. Dragging
+remains available in Clearra's web board editor; a future Discord Activity or
+bounded external editor can reuse it.
+
+Each search CTK3/Fumen value must decode to one operation-free, static,
+10-column page.
+CTK3 is read directly with the npm `ctk3` package and is never re-encoded as
+Fumen; Fumen is decoded independently at the Discord boundary. For both formats
+every non-empty color becomes the same occupancy bit. PC field inputs use a
+canonical Board64 mask. The non-PC target, spin, damage, and `/cover` fields use
+canonical Board240 masks so rows 7–24 are not truncated. `/cover` accepts
+`base` plus a non-overlapping `target` delta containing only cells to add and
+compiles to the existing build-probability request with `next`.
+
+There is no explicit image-generation command. CTK3, Fumen, and plain fields
+accepted by a search command are rendered inside that command while its search
+runs. The renderer preserves CTK3/Fumen colors, uses neutral gray for generic
+occupancy, keeps the empty grid, and joins touching cells of the same tetromino
+color with the GUI-style outer bevel. A page operation retains its own boundary
+even when it touches the same field color. Distinct touching static pieces of
+the same color cannot be separated when the source contains only cell colors
+and no placement identity.
+
+`/render-file` does not generate an image. With `image`, it accepts only a
+Clearra preview message link or message ID from the current channel. Without
+`image`, it reads at most the newest 500 messages in that channel and selects
+the invoking user's newest valid preview first, then the channel's newest valid
+preview. Before downloading, it retrieves the selected message again so an
+expired signed attachment URL is replaced by the current URL. A successful
+response exposes only the original GIF as a Discord File component: it has no
+text content, embed, reply, forward, or `message_reference`. Deleted or
+otherwise unavailable source attachments produce an error instead of a
+substitute image.
+
+For exact selection, the Message command is the primary slash-side UX:
+right-click or long-press the preview, then choose `Apps -> Get original GIF`.
+Discord does not reliably attach a replied-to message to a slash-command
+interaction, so `/render-file image:` remains the explicit fallback rather than
+pretending a slash command can inherit reply context.
+
+`/path` and the other PC commands accept any explicit `lines` value from 1
+through 6, including 1L/3L/5L as in the GUI's manual dimension input. When it is
+omitted, the Discord boundary considers every height from 1L through 6L and
+runs each valid target in ascending order. A target is valid only when
+the highest occupied cell fits,
+`10 * lines - occupied_blocks` is a positive multiple of four, and `next`
+contains at least that many tetrominoes. The exact target set is therefore
+derived from the occupied-cell count and available queue length; partially
+occupied fields can select either odd or even heights. Results are executed
+serially in one per-instance search slot and delivered as soon as each target
+finishes. This selection mirrors the PC compatibility layer's exact piece
+window; it does not alter search generation or pruning.
 
 Search results expose solution documents only as CTK3. Generated pieces
 preserve their tetromino colors, while occupancy inherited from the input board
 is encoded as `G`. The active Discord result path does not emit Fumen. The
 legacy raw CLI Fumen form of `clearra sfinder cover` remains available outside
 the slash ingress and keeps its existing exact colored-solution boundary.
-Optional `options` text is a command-specific, space-separated `key=value`
-allow-list. It cannot replace primary board/`next` inputs or select workers,
-files, custom profiles, or output formats.
+Human-readable CLI and Discord summary probabilities are multiplied by 100 and
+shown with `%`. Structured JSON keeps canonical `0..1` numeric probabilities so
+the GUI and CTK3 result formatter do not multiply an already converted value.
+`kicktable` is available on each rule-aware Discord command and accepts exactly
+`srs-plus`, `srs`, `srs-x`, or `jstris-180`; omission selects `srs-plus` across
+the Discord and Sfinder-compatibility boundaries.
+`options` is a command-specific choice: PC commands and `/cover` select
+`hold=use|avoid`, while spin commands select `type=TSS|TSD|TST|ANY`. These
+choices cannot replace primary field/`next` inputs or select workers, files,
+custom profiles, or output formats.
 
 There is no active `/clearra` catch-all command and no active `/view` command.
-Prefix forms such as `$...` and `>...`, ordinary-message command detection,
-automatic document viewing, and Gateway-delivered slash commands are disabled.
-The compute ingress now uses CTK3/Fumen normalization, but the renderer and GIF
-implementation remain dormant: no registered command can invoke image output.
+Oracle receives every slash, Modal, Message-command, `$...`, and `>...` event
+through Discord Gateway. It can provide one bounded Fumen/CTK3 GIF for supported
+inputs. The committed service makes all-channel text coverage explicit; these
+message forms are not registered as slash commands and still pass through the
+same curated command policy and hard limits.
+
+`$render-file [image]` and `>render-file [image]` are the text equivalents of
+`/render-file`; `image` has the same current-channel message-link-or-ID
+contract. When either command is sent as a reply with no `image`, the replied-to
+message is selected exactly; otherwise omission uses the same newest-500,
+caller-first lookup. A successful text response is likewise a file-only message
+without a reply reference.
+
+A standalone message containing a valid CTK3 or Fumen document is rendered
+automatically. Plain `#`/`_` fields auto-render only when the complete trimmed
+message is exactly 10 columns by 1–24 rows and contains no character other than
+`#`, `_`, and row breaks. The same strict field may occupy the whole triple-
+backtick block, optionally labelled `text` or `field`; prose outside the block,
+partial fences, spaces, extra columns, and a 25th row prevent automatic
+rendering. Search-command fields continue to render within their own command,
+not through a separate image command, and are never forwarded to ambient
+standalone detection.
+
+Text commands accept the same plain grid, CTK3, Fumen, and payload-URL field
+values as slash commands. A quoted field can span multiple rows. Discord code
+blocks are also preserved as one field argument, so a field can be pasted
+without quotes; `$cover` and `>cover` accept two independent code blocks for
+`base` and `target`. For example:
+
+~~~~text
+$path --field ```text
+__________
+______####
+``` --next I --lines 2
+
+>spin-structure ```text
+__________
+____#_____
+``` TIO 1+ all-mini srs-plus
+~~~~
+
+For the `spin-structure` shorthand, positional values are `field`, `pieces`,
+`lines`, `profile`, then `kicktable`. Named forms may use `--pieces` or
+`--inventory`, and `--profile` or `--spin-profile`. Its generated CTK3 pages
+retain a `Spin: Regular` or `Spin: Mini` page comment so the two result
+partitions remain identifiable after download.
+
+Two guild-only administrative commands are intentionally omitted from `/help`:
+
+- `/channel-settings` requires the invoking member's **Manage Channels**
+  permission by default. It shows, sets, or resets the current channel language
+  and disables or enables Clearra in that channel.
+- `/server-settings` requires **Manage Server** by default. It shows, sets, or
+  resets the server language and pauses or resumes Clearra across the server.
+
+Discord's `default_member_permissions` hides these commands from ordinary
+members. Both are also pinned to the guild-install and guild-interaction
+surfaces, and every response is ephemeral. A paused server admits only
+`/server-settings resume`; a disabled channel admits only
+`/channel-settings enable`. The gate runs before a Modal opens, again on Modal
+submit, and before text/document work enters a queue. Work already admitted is
+allowed to finish so a settings change cannot strand a deferred reply.
+
+The immutable application owner and configured bot-administrator IDs retain a
+role-independent, unlisted text recovery path: `$bot-control` or `>bot-control`
+followed by `help`, `server resume`, `channel enable`, or the corresponding
+management action. This path is parsed only for that exact prefix and never
+appears in `/help`. An administrator can use `$bot-control help` or
+`>bot-control help` in a DM with the bot to see the complete private syntax.
+It enters a one-active/two-pending recovery lane only after bot-
+administrator authorization; unauthorized attempts are discarded without a
+reply. Ordinary help/search/render traffic performs no application-owner or
+permission lookup. Access state is persisted atomically in the separately
+configured `CLEARRA_DISCORD_ACCESS_STORE`.
 
 The compatibility boundary owns worker, output-format, tablebase, and
 dependency-DAG policy. It rejects native file/output paths, custom WGSL, custom
@@ -59,55 +209,102 @@ only; PC/build engines and pruning are unchanged.
 ## Active topology
 
 ```text
-Discord slash command
-  -> public Cloud Run POST /interactions
-  -> Discord Ed25519 verification and immediate deferred ACK
-  -> bounded per-instance serial Clearra CLI execution in the same container
-  -> Discord interaction webhook edit
+Discord slash command or Modal submit
+  -> Discord Gateway INTERACTION_CREATE on Oracle
+  -> incomplete runtime input: Oracle returns a Modal without starting work
+  -> complete input: Oracle defers the response
+  -> Oracle renders the command field and calls clearra-current-job /jobs
+     for heavy work
+  -> Oracle edits the original interaction response
+
+$... or >... Discord message
+  -> Oracle applies the same typed command policy
+  -> the command's CTK3/Fumen/plain field renders inside that command
+  -> Oracle proxies heavy search to clearra-current-job /jobs
+  -> Oracle creates or edits its own channel reply
+
+/render-file
+  -> Oracle performs the authenticated current-channel lookup
+  -> selected message is fetched again and its original GIF is reattached
+
+Apps -> Get original GIF on a preview message
+  -> Oracle validates the selected message target
+  -> selected message is fetched again and its original GIF is reattached
+
+$render-file or >render-file
+  -> when sent as a reply, Oracle selects that replied-to preview exactly
+  -> otherwise Oracle performs the same lookup and reattachment contract
+
+standalone CTK3/Fumen or strict 10-column #/_ field message
+  -> Oracle validates and renders the complete message
+
+Both render-file paths
+  -> newest 500 messages maximum, caller's newest then channel newest
+  -> file-only response with no reply or message reference
 ```
 
-The Oracle Gateway is not in the slash-command path. With no
-`CLEARRA_JOB_URL`, Cloud Run uses `ClearraDirectExecutor` and the source-built
-`/usr/local/bin/clearra`. Each instance executes one search at a time, with its
-own bounded pending queue. Cloud Run may create up to four instances, so the
-service is not globally serial: at full scale it can run four searches in
-parallel, one per instance, without making two CPU-heavy searches compete for
-the same instance's CPU allocation.
+Only `clearra-current-job` remains in the active Cloud Run request topology.
+Oracle uses it for heavy slash and text searches. A job request contains only
+curated Clearra arguments, an idempotency key, a deadline, and the separate job
+bearer; it contains no Discord token, interaction token, webhook URL, raw user
+ID, or channel credential.
 
-`CLEARRA_JOB_URL` remains an explicit remote-execution seam for later testing;
-it is not the Cloud Run default. The older `clearra.job.v1` service and Oracle
-proxy boundary are documented in
+The current-source and released-v0.5.1 `clearra.job.v1` images remain separate;
+the current-source `clearra-current-job` serves Oracle's active slash and text
+paths.
+The compute artifact, protocol, scaling, and authentication boundary are in
 [CLOUD_RUN_JOB_SERVICE.md](./CLOUD_RUN_JOB_SERVICE.md).
+
+The Discord application's **Interactions Endpoint URL must be empty**. An empty
+value selects Gateway delivery. Do not replace it with an Oracle HTTP URL or the
+`clearra-current-job` URL.
 
 ## Discord timing and lifecycle boundary
 
 Discord requires the initial interaction response within three seconds. The
-HTTP adapter therefore validates the signature and returns interaction response
-type `5` (deferred channel message) before starting the search. The interaction
-token remains usable for 15 minutes. Clearra caps
+Oracle Gateway handler therefore returns response type `9` for an
+incomplete-command Modal or type `5` (deferred channel message) before starting
+a complete command or Modal submission. Opening a Modal starts no work. Clearra caps
 `CLEARRA_INTERACTION_DEADLINE_MS` at 14 minutes so completion and error edits do
 not intentionally consume the full token window.
 
-The default search limit is three minutes and the default total interaction
-deadline is four minutes, including time spent in the local pending queue. The
-queue defaults to eight waiting searches per instance; at four instances there
-can therefore be up to four active searches and 32 instance-local queued
-searches. Cloud Run routing does not provide a global queue order. Expired,
-cancelled, or overflow work fails closed instead of starting after its useful
-Discord lifetime.
+The default search limit is three minutes. A complete slash request starts the
+remote job and, when a static field is available, one bounded worker-thread GIF
+concurrently. If rendering wins, Oracle posts the GIF then retains its attachment
+in the final edit. If searching wins, Oracle waits for bounded rendering and
+sends one combined response. A render failure never cancels or invalidates the
+authoritative search.
 
-The computation continues after the HTTP ACK has ended. The Cloud Run service
-therefore requires instance-based CPU allocation (`--no-cpu-throttling`). The
-approved minimum of zero permits scale-to-zero and therefore accepts cold-start
-latency. An in-memory background task is not a durable queue: Cloud Run can still
-terminate an instance. A future durable delivery design must add an explicit
-queue/idempotency contract rather than silently treating the current process as
-durable.
+For slash and text commands, `clearra-current-job` keeps `POST /jobs` open until
+Clearra finishes. Each instance accepts one request and has no durable
+distributed queue. The approved minimum of zero accepts cold-start latency;
+expired, cancelled, overflowed, or terminated work fails closed instead of
+starting after its useful Discord lifetime.
 
-## One-shot slash-command registration
+## Global slash-command synchronization
 
-Register commands from a trusted local terminal, once per catalog change. On
-Windows PowerShell 5.1 or newer, use the masked compatibility wrapper:
+The synchronizer first reads the global catalog with complete localization
+dictionaries. An exact match is a no-op so routine releases do not churn
+Discord command versions or client caches. A mismatch causes exactly one global
+bulk overwrite, never one request per guild; the write response is verified,
+then bounded readback polling must return the same command IDs, versions,
+localizations, options, and choices before the sync reports success. A stale
+readback never causes a second write. The transport also never replays an
+ambiguous 5xx/network PUT: bounded GET readback decides whether that one write
+landed. If an unmanaged USER or MESSAGE command exists, synchronization stops
+instead of silently erasing it with Discord's all-types bulk-overwrite API.
+
+Discord propagates a successful global update to every existing and future
+installation. Its documented global-command read-repair handles commands a
+client already knows about, but Discord exposes no API with which a bot can
+invalidate a desktop client's local list of newly added commands. If one client
+still shows an old list after API readback succeeds, retry an existing command
+or reload that Discord client (`Ctrl+R` on desktop). Do not delete and recreate
+commands, mirror them into every guild, or repeat the bulk overwrite; those
+paths increase version churn, command duplication, and permission drift.
+
+For a manual sync from a trusted local terminal, use the masked compatibility
+wrapper on Windows PowerShell 5.1 or newer:
 
 ```powershell
 $env:DISCORD_APPLICATION_ID = "1533373054309371924"
@@ -137,64 +334,151 @@ Oracle Gateway or other deployment that still uses the old token before relying
 on a reset token.
 
 Do not enable registration in the deployed service. Keep
-`CLEARRA_REGISTER_COMMANDS=0` (the default) and do not deploy `DISCORD_TOKEN` to
-Cloud Run. Normal HTTP interaction handling needs only the public application
-key; Discord's interaction ID and token authorize the deferred response edit.
-The bot token is required locally only for the one-shot registration request.
+`CLEARRA_REGISTER_COMMANDS=0` (the default). The Discord bot token is required
+by the isolated registration step and Oracle Gateway. Bind it from each
+deployment's secret manager rather than a literal environment value.
+`clearra-current-job` receives its separate application bearer, not the Discord
+token. Discord interaction IDs/tokens and both secret values are never part of a
+job request.
+
+For release automation, use `cloudbuild-command-sync.yaml` only after the new
+runtime is deployed, healthy, and serving traffic. It reads `DISCORD_TOKEN`
+from the latest `discord-bot-token` Secret Manager version in that isolated
+build step. Dependency installation and the CTK3 package build run in preceding
+secret-free steps; only the final registration process receives the token. Run
+the config with the dedicated `clearra-command-sync` service account; do not
+grant that account Cloud Run deployment or Artifact Registry write access. A
+release must preserve this order:
+
+```text
+Oracle release -> Gateway/Modal/job verification -> command sync
+```
+
+Do not rebuild or redeploy `clearra-current-job` as part of command sync.
+
+## Command picker language and server installation
+
+The registered command schema keeps English as its default and supplies Korean
+`name_localizations` and `description_localizations` for commands, subcommands,
+options, and choices. Discord therefore shows `/경로`, `필드`, or `넥스트`
+when that user's Discord client language is Korean. The interaction payload
+still carries the default names such as `path`, `field`, and `next`.
+
+The stored administrator language settings override the user's command-picker
+language. ClearraBot's guided Modal and responses use
+`explicit -> channel -> server -> Discord interaction locale -> global English`
+preference resolution. Thus a Korean client gets a Korean Modal when no stored
+override exists, while an English-configured channel remains English.
+
+The full Gateway text/image feature set needs only these bot-role permissions:
+
+- `VIEW_CHANNEL`;
+- `SEND_MESSAGES`;
+- `ATTACH_FILES`;
+- `READ_MESSAGE_HISTORY` (`/render-file` history lookup, message hydration, and
+  replies);
+- `SEND_MESSAGES_IN_THREADS` (same behavior in threads).
+
+Their combined permission integer is `274878008320`. Install ClearraBot for a
+server with:
+
+<https://discord.com/oauth2/authorize?client_id=1533373054309371924&scope=bot%20applications.commands&permissions=274878008320&integration_type=0>
+
+The bot does not need Administrator, Manage Server, Manage Channels, Manage
+Messages, or Manage Webhooks. Manage Channels/Manage Server/Administrator are
+checked on the member invoking `/channel-settings` or `/server-settings`, not
+granted to the bot.
+`MESSAGE_CONTENT` is a separate privileged Gateway intent required for `$` and
+`>` channel text commands; it is not an OAuth permission bit.
+
+## Settings authorization
+
+The two management commands enforce Discord's resolved interaction permissions
+at execution time in addition to their registration defaults:
+
+- channel scope requires `MANAGE_CHANNELS`;
+- server scope requires `MANAGE_GUILD`;
+- `ADMINISTRATOR` satisfies either scope;
+- the Discord application owner is also a ClearraBot administrator by immutable
+  user ID, independent of roles in the current server.
+
+The Discord runtime does not resolve application ownership at startup. A valid
+management request first uses the permissions already carried by the Discord
+interaction. Only when those native permissions are insufficient does it
+lazily request Discord's authenticated current application object; the result
+is cached for at most five minutes and refreshed only by another privileged
+check. An expired value is never used after a failed refresh. Help, search,
+rendering, access-state admission, invalid settings requests, DMs, and native-
+permission successes make no ownership request. For an additional tightly
+controlled operator, `CLEARRA_DISCORD_ADMIN_USER_IDS` accepts a comma/space-
+separated list of immutable Discord user snowflakes; usernames are rejected.
+Configured IDs are checked without a network request. All slash settings
+responses, including failures and status reads, are ephemeral.
+
+`/channel-settings` registers `default_member_permissions=16` and
+`/server-settings` registers `default_member_permissions=32`, both with only the
+guild interaction context and the guild-install integration type. Discord
+therefore omits them from an ordinary member's picker and from user-installed
+contexts. Because Discord's registration permission gate cannot grant an
+application owner a special cross-server exception, the exact unlisted
+`$bot-control`/`>bot-control` recovery path preserves that role-independent bot-
+administrator authority without per-guild registration or OAuth overwrites.
+Authorization happens before a bounded one-active/two-pending recovery lane;
+failed authorization is silent.
+Discord's picker cannot see Clearra's internal bot-administrator list. A bot
+administrator who also needs the slash entries must be granted a user/role
+override by a server administrator under **Server Settings -> Integrations ->
+ClearraBot**; Discord does not accept a bot token for that overwrite. The DM
+`$bot-control help` path remains available without that per-server override.
+Search/help/verification commands remain available through ordinary Discord
+channel and application-command permissions.
+
+Oracle owns the Discord token and performs the same lazy owner lookup for the
+small set of operations that actually require it.
 
 ## Cloud Run configuration
 
-Required for the deployed interaction service:
+One Tokyo Cloud Run service is active in the request path:
+
+- `clearra-current-job` owns authenticated `/jobs` execution for Oracle's heavy
+  slash and `$`/`>` searches. It does not receive the Discord token.
+
+The job-service contract is:
 
 ```text
-CLEARRA_DISCORD_INGRESS=cloud-run
-DISCORD_PUBLIC_KEY=<Discord application public key>
-CLEARRA_REGISTER_COMMANDS=0
-```
-
-`DISCORD_APPLICATION_ID` may also be supplied as non-secret metadata. Normal
-requests carry the application ID, so the runtime does not require it.
-
-`DISCORD_PUBLIC_KEY` is public application metadata, not an SSH key. GitHub or
-deployment SSH private keys must never be mounted in the container or used to
-verify Discord requests.
-
-Recommended initial execution settings:
-
-```text
-CLEARRA_MAX_CONCURRENT_SEARCHES=1
-CLEARRA_MAX_PENDING_SEARCHES=8
-CLEARRA_SEARCH_TIMEOUT_MS=180000
-CLEARRA_INTERACTION_DEADLINE_MS=240000
+CLEARRA_EXECUTABLE=/usr/local/bin/clearra
+CLEARRA_SEARCH_TIMEOUT_MS=170000
 CLEARRA_SEARCH_WORKERS_PER_SESSION=auto
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1
+CLEARRA_MAX_CONCURRENT_JOBS=1
 CLEARRA_MAX_OUTPUT_BYTES=4194304
-CLEARRA_JOB_TERMINATION_GRACE_MS=2000
-CLEARRA_DISCORD_INTERACTION_PATH=/interactions
-CLEARRA_MAX_INTERACTION_BODY_BYTES=1048576
 ```
 
-Automatic Discord execution uses every logical processor visible in the Cloud
-Run container. The approved eight-vCPU instance therefore runs one search with
-eight workers. At the four-instance maximum, the service can run four searches
-and up to 32 search workers in aggregate. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0`
-reserves one processor per instance. Explicit worker values above the
-container-visible logical processor count are rejected. Users cannot override
-the service policy with `--workers`, `--auto-workers`, `--cpu-threads`, or
-`--use-all-cpu-threads`.
+The managed job bearer is bound separately as `CLEARRA_JOB_TOKEN`. Oracle loads
+the matching bearer from OCI Vault; no plaintext value belongs in either
+deployment command or settings file.
 
-The HTTP adapter listens on `0.0.0.0:$PORT`, exposes `GET /health`, and accepts
-Discord requests at `POST /interactions`. It verifies the raw body with
-`X-Signature-Ed25519`, `X-Signature-Timestamp`, and the Discord public key before
-parsing JSON. Invalid signatures receive HTTP 401; Discord PING receives PONG.
-`/healthz` remains a local compatibility alias, but external Cloud Run probes
-must use `/health` because Cloud Run reserves some paths ending in `z`.
+Automatic job execution uses every logical processor visible to the Node host.
+On Cloud Run, native Clearra may accept that eight-worker ceiling only after
+validating the Linux affinity mask; a failed validation falls back to the
+standard quota-aware probe. This fixes the observed Node=8/Rust=6 split without
+permitting workers above the assigned eight vCPUs. At four instances the
+service can run at most four searches and 32 workers in aggregate, although the
+current Oracle caller intentionally admits only one remote job at a time.
+`CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0` reserves one processor per instance.
+Users cannot override the service policy with `--workers`, `--auto-workers`,
+`--cpu-threads`, or `--use-all-cpu-threads`.
 
-The service must be publicly reachable because Discord cannot attach a Google
-Cloud IAM identity token. Request authenticity is enforced at the application
-boundary by the Discord Ed25519 signature.
+The service exposes `GET /health` and authenticated `POST /jobs`. The current
+Oracle caller does not mint a Google identity token, so Cloud Run platform
+invocation is public and the application bearer gates `/jobs`. The worker
+re-applies command policy and starts Clearra with `shell: false`.
 
-## Tokyo build and deployment shape
+## Tokyo job build and deployment shape
+
+This section is a reference for a future job-service release. The existing job
+revision remains active for Oracle slash and text commands until an independently
+verified compute deployment replaces it.
 
 The selected region is Tokyo, `asia-northeast1`. Build the current source with
 the supplied Cloud Build configuration:
@@ -207,12 +491,12 @@ gcloud builds submit `
   --project=$projectId `
   --region=asia-northeast1 `
   --service-account=$buildServiceAccount `
-  --config=apps/clearra-discord-bot/cloudbuild-interaction.yaml `
-  --substitutions=_REGION=asia-northeast1,_REPOSITORY=clearra,_IMAGE_NAME=clearra-interaction,_TAG=latest `
+  --config=apps/clearra-discord-bot/cloudbuild-current-job-service.yaml `
+  --substitutions=_REGION=asia-northeast1,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-<git-commit> `
   .
 ```
 
-The interaction Dockerfile uses the Rust 1.96 Bookworm image and the same
+The current-job Dockerfile uses the Rust 1.96 Bookworm image and the same
 `wasm-cpu-runtime,webgpu-search` features as the Linux CLI release contract. It
 builds the current checkout rather than downloading the v0.5.1 release binary.
 The root `.gcloudignore` deliberately reuses root-anchored `.gitignore` rules.
@@ -237,7 +521,7 @@ Startup CPU boost:      enabled
 
 Cloud Run's per-instance CPU maximum is eight vCPUs. A single 16-vCPU instance
 is not available; use the approved 0--4 instances at eight vCPUs each.
-Concurrency 1 and `CLEARRA_MAX_CONCURRENT_SEARCHES=1` make
+Concurrency 1 and `CLEARRA_MAX_CONCURRENT_JOBS=1` make
 execution serial only within each instance, not across the service. Each
 instance owns its own in-memory queue and there is no global FIFO ordering.
 
@@ -245,11 +529,11 @@ A deployment template is:
 
 ```powershell
 $projectId = gcloud config get-value project
-$publicKey = Read-Host "Discord application public key"
-$image = "asia-northeast1-docker.pkg.dev/$projectId/clearra/clearra-interaction:latest"
-$runtimeServiceAccount = "clearra-interaction@$projectId.iam.gserviceaccount.com"
+$image = "asia-northeast1-docker.pkg.dev/$projectId/clearra/clearra-current-job:source-<git-commit>"
+$runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
+$jobBearerSecret = "<Google Secret Manager job-bearer Secret name>"
 
-gcloud run deploy clearra-interaction `
+gcloud run deploy clearra-current-job `
   --project=$projectId `
   --region=asia-northeast1 `
   --image=$image `
@@ -259,60 +543,92 @@ gcloud run deploy clearra-interaction `
   --port=8080 `
   --concurrency=1 `
   --min=0 `
+  --min-instances=0 `
   --max=4 `
   --max-instances=4 `
   --cpu=8 `
   --memory=16Gi `
   --no-cpu-throttling `
   --cpu-boost `
-  --timeout=60s `
-  --set-env-vars="CLEARRA_DISCORD_INGRESS=cloud-run,CLEARRA_REGISTER_COMMANDS=0,CLEARRA_MAX_CONCURRENT_SEARCHES=1,CLEARRA_MAX_PENDING_SEARCHES=8,CLEARRA_SEARCH_TIMEOUT_MS=180000,CLEARRA_INTERACTION_DEADLINE_MS=240000,CLEARRA_SEARCH_WORKERS_PER_SESSION=auto,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,DISCORD_PUBLIC_KEY=$publicKey"
+  --timeout=180s `
+  --set-secrets="CLEARRA_JOB_TOKEN=${jobBearerSecret}:latest" `
+  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_SEARCH_WORKERS_PER_SESSION=auto,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
 ```
 
-Both maximum flags are intentional: `--max=4` is the service-wide cost ceiling,
-while `--max-instances=4` prevents Cloud Run's lower revision default from
-silently limiting the active revision to three instances.
+Both scale pairs are intentional. `--min=0` and `--max=4` set service-level
+limits; `--min-instances=0` and `--max-instances=4` set revision-level limits.
+Setting only `--max=4` can leave the active revision capped at three. Verify the
+service and active revision separately after every deployment.
 
 Keep `CLEARRA_SEARCH_WORKERS_PER_SESSION=auto` for the single-session Cloud Run
-service. The Discord host passes the full-use policy but leaves the final count
-to the native Clearra hard limit. Node's affinity-visible count can be higher
-than Rust's effective Linux parallelism estimate when container affinity or
-cgroup limits differ; forcing the advertised vCPU count can therefore fail
-before a search starts. Explicit numeric allocations and configurations with
-multiple concurrent searches continue to use the bounded per-session number.
+service. The job-service host passes the full-use policy and its observed
+processor count only on Cloud Run, while native Clearra validates the Linux
+affinity ceiling at each worker-pool boundary.
+No deployment-only processor-count variable is required. Explicit numeric
+allocations and configurations with multiple concurrent searches continue to
+use the bounded per-session number.
 
-Set the deployed URL plus `/interactions` as the Discord application's
-Interaction Endpoint URL. Do not point Discord at the Oracle Gateway or the
-optional `/jobs` service.
+Set Oracle's `CLEARRA_JOB_URL` to the `clearra-current-job` URL plus `/jobs`.
+Leave the Discord application's **Interactions Endpoint URL empty** so all
+application interactions arrive through Oracle Gateway. Never point it at the
+job service.
 
-## Deferred text and image paths
+## Oracle text and image path
 
-Ordinary text commands are intentionally inactive. After separate load and
-security testing, they may use either the Oracle Gateway as a proxy or a
-dedicated Cloud Run interaction ingress. Adding them must not reroute the active
-slash catalog through Oracle.
+Oracle owns slash, Modal, Message-command, `$`/`>` message ingress, and standalone
+document rendering. For search commands, Oracle starts the bounded command-field
+render and the proxied `clearra-current-job` search concurrently. Render-first
+delivery posts the preview and later retains it in the final edit; search-first
+delivery waits for the bounded render and posts one combined response. Rendering
+failure cannot fail the search.
 
-Image rendering is also intentionally unavailable as a Discord command. A
-future small-image path may send a length-bounded render request directly to the
-Oracle Gateway. Large render requests must be bounded separately and can move
-to Cloud Run if Oracle load testing shows that isolation is needed. Existing
-renderer code is dormant capability, not an advertised endpoint.
+There is no explicit image-generation command. Static CTK3, v115 Fumen, and
+plain fields are rendered inside their search command and never enter ambient
+standalone detection. Standalone CTK3/Fumen
+messages also render automatically; a standalone plain field must be the whole
+plain message or whole fenced block and contain exactly 10 `#`/`_` cells per
+row for 1–24 rows.
 
-## Local and optional remote execution
+`/render-file [image:<same-channel message link|ID>]`, `Apps -> Get original
+GIF`, `$render-file [image]`, and `>render-file [image]` are handled by Oracle. A
+no-image text command sent as a reply selects that replied-to preview. All forms
+only recover an existing preview GIF. Non-reply omission
+scans at most 500 recent messages, preferring the caller's latest preview and
+then the channel's latest. The selected message is fetched again before its
+signed URL is downloaded, and success returns the GIF as a file-only, non-reply
+message.
 
-Outside Cloud Run, the process defaults to Gateway mode, but the current Gateway
-ingress accepts neither slash commands nor ordinary messages. It is retained as
-an integration seam for future text/image proxy work.
+Oracle GIF encoding runs in a bounded worker thread rather than the Gateway
+event loop for slash, text, and standalone fields. A live image-display failure
+pointed to Discord's media-proxy layer rather than GIF generation or Clearra computation, so rendering
+stays beside the Discord owner instead of moving to `clearra-current-job`.
+Large-image rendering is still disabled pending separate load tests.
 
-For a deliberate remote job-service test, set:
+The committed unit enables text commands in all accessible channels with the
+explicit `CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1` safety switch. Unknown
+commands, external bots/webhooks, oversized inputs, user worker switches,
+duplicate work, and excess queue work remain rejected. `$help`/`>help` share the
+slash help pages, and omitted PC lines retain and serially execute every
+valid automatic target from 1L through 6L. An Oracle ingress slot is held
+through the complete
+render/search/send lifecycle, and integrated automatic followups are not sent
+back through the legacy self-result renderer. Text mode requires the Developer
+Portal's privileged Message Content Intent.
+
+## Oracle and remote execution settings
+
+The active Oracle settings are:
 
 ```text
-CLEARRA_JOB_URL=https://<tested-service>/jobs
-CLEARRA_JOB_TOKEN=<shared opaque bearer token>
+CLEARRA_ORACLE_RENDER_ENABLED=1
+CLEARRA_ORACLE_TEXT_ENABLED=1
+CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1
+CLEARRA_JOB_URL=https://<clearra-current-job service>/jobs
 CLEARRA_WORKER_AUTHORITY=remote
-CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=4
+CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
 ```
 
-When this URL is absent in Cloud Run, direct execution is mandatory. When it is
-present, the job service owns worker allocation and the interaction service
-retains only the bounded remote-request slot.
+The root-owned Oracle settings file contains only OCI Vault Secret identifiers
+and non-secret runtime settings. The wrapper fetches the Discord bot token, job
+bearer, and private administration keys at `CURRENT`, decodes them only in
+memory, exports them to Node, and writes or prints none of their values.

@@ -23,6 +23,7 @@ command contracts are independently represented by the typed Clearra engines.
 |---|---|---|
 | `percent` | Tests each queue family for existence, builds success/failure coverage, and reports probability plus failed queues. It does not need a normalized set of every tiling. | `percent` uses an exact `PatternBitSet` union with `SearchOutputPolicy::CoverageSummary`. It omits solution identities, hashes, candidate digests, and traces. |
 | `path` | Enumerates perfect-pack candidates, validates build orders, groups legal piece sequences, and attaches coverage to each surviving solution. | Direct `clearra path` remains the historical alias of `pc-replay`. Sfinder semantics are isolated at `clearra sfinder path` and compile into the complete PC result surface. |
+| sfinder-man `cat-finder` | Expands one exact queue into its unique hold reorderings, asks solution-finder `path` for an exact perfect clear at the selected height, and ranks the paths with Jstris scoring plus the supplied initial state. | Clearra exposes this contract only as `score-finder` (including Discord `/score-finder`); the former raw name is retired. Clearra compiles it to fixed-queue `pc --objective all --score --score-profile jstris-ultra`, not forward `damage`. Nonzero initial combo and B2B end bonus fail closed until the typed scoring contract can represent them. |
 | `cover` | Consumes supplied operation or fumen solutions and evaluates which queues can build them. It does not run perfect-pack search. | Direct `clearra cover` remains the historical alias of typed `build-coverage`. Active Discord `/cover` accepts a colorless base plus a target delta and compiles to build probability. The raw CLI `clearra sfinder cover <solution-fumen> ...` form remains a separate legacy exact-solution boundary. |
 | `setup` | Searches placements satisfying required-area and margin constraints. It is not a PC-family setup policy finder. | Direct `clearra setup` remains the historical alias of the PC-family `setup-finder`. Sfinder's colored required-area contract is isolated at `clearra sfinder setup` and maps to the build-probability surface. |
 | `spin` | Uses a specialized T-spin structure search and SRS reachability. | Clearra uses the selected kick and spin profiles in its separate forward spin finder. SRS-only assumptions are not imported. |
@@ -83,12 +84,12 @@ contracts have a Clearra-native representation. The boundary normalizes legacy
 queue syntax and compiles a typed request; it never starts Java or another solver.
 
 - PC search: `path`, `chance`, `minimals`, `score`, `score-minimals`, `saves`,
-  and `best-save`;
+  `best-save`, and `score-finder`;
 - two-field buildability coverage on Discord, and legacy supplied-solution
   coverage on the raw CLI: `cover`;
 - colored target/build analysis: `setup`, `congruent`, `congruent-cover`,
   `setup-cover`, `cover-percent`, and `special-cover`;
-- forward search: `spin-cover`, `spin`, and `cat-finder`;
+- forward search: `spin-cover`, `spin`, and native Discord `/damage`;
 - PC-family setup ranking: `pc-setup`, `best-setup`, and `dpc-finder`;
 - validation: `verify`.
 
@@ -103,7 +104,8 @@ The remaining differences are product-contract differences, not spelling bugs:
 
 - solution-finder defaults to SRS and softdrop behavior, while the Sfinder-man
   `chance`/common `cover` wrappers use Jstris 180 and other wrappers do not use
-  one global kick rule; the current dialect still selects Jstris 180 broadly;
+  one global kick rule; Clearra now defaults every omitted compatibility rule
+  to SRS+, while Jstris 180 remains an explicit built-in selection;
 - solution-finder `cover` consumes one or more supplied operation/Fumen pages
   directly and supports B2B, spin, Tetris, line, and softdrop modes; active
   Discord `/cover` maps one base/target-delta pair to build probability, while
@@ -115,7 +117,7 @@ The remaining differences are product-contract differences, not spelling bugs:
 - solution-finder `spin` is an SRS T-spin structure search, whereas Clearra's
   mapping uses its profile-aware forward-search contract;
 - the official solution-finder percent fixture reports 4,374 / 5,040 under its
-  SRS contract; the current Jstris-180 dialect reports 4,408 / 5,040. This is a
+  SRS contract; the measured Jstris-180 dialect reports 4,408 / 5,040. This is a
   deliberate rule-contract difference and must not be advertised as parity.
 
 ## Worker Routing
@@ -123,8 +125,9 @@ The remaining differences are product-contract differences, not spelling bugs:
 Every represented Sfinder search command uses the worker path of its typed
 Clearra target instead of maintaining a second pool:
 
-- `path`, `percent`, `chance`, `minimals`, score variants, and saves use the
-  PC/scenario distributed geometry and verification coordinator;
+- `path`, `percent`, `chance`, `minimals`, score variants, saves, and
+  `score-finder` use the PC/scenario distributed geometry and
+  verification coordinator;
 - Discord `/cover` and target setup/cover variants use distributed build
   probability; legacy raw CLI colored-Fumen cover retains the PC/scenario path;
 - spin and damage variants use the forward-search coordinator;
@@ -247,6 +250,9 @@ bounded `options` string, parsed only as a space-separated `key=value`
 allow-list:
 
 - PC-family: `clear=1..6` (or `lines`) and `hold=use|avoid`;
+- `/score-finder`: `lines=1..6` plus `initial_b2b=true|false`; the raw
+  sfinder-man positional form also accepts combo and B2B end-bonus positions,
+  but both must remain zero until the typed scoring contract represents them;
 - `/cover`: `hold=use|avoid` only; its height is derived from the two fields;
 - `/spin-cover` and `/spin`: `type=TSS|TSD|TST|TSPIN|T-SPIN|ANY`;
 - all other represented commands: no bundled settings.
@@ -285,7 +291,7 @@ tetromino cells preserve their piece colors, while occupancy inherited from the
 input board is encoded as `G`. This is an output representation rule, not an
 authorization to recover piece identities from input colors.
 
-This recorded seam is complete. Do not reapply the discarded CTK input
+This seam was complete for that revision. Do not reapply the discarded CTK input
 piece-color identity, grey/colored pair, or multi-page `/cover` design, and do
 not reimplement the projection in the Rust search engines. The PC/build engines,
 candidate generation, and pruning code remain unchanged. `.ctk3` attachment
@@ -396,7 +402,7 @@ and [Discord application commands](https://docs.discord.com/developers/interacti
 Do not retry the following routing change without a new representative corpus or
 a different coverage data structure. Mapping `sfinder chance/percent` directly to
 `failed-queue --failed-count 0` looked attractive because it retains less output
-evidence. On the official percent field with the current Jstris-180 rule, however,
+evidence. On the official percent field with the measured Jstris-180 rule, however,
 the candidate route took 42.5893 ms versus 37.7679 ms for retained
 `pc --objective unique` (+12.8%), used 6,639,029 versus 6,337,325 peak engine
 bytes (+4.8%), and grew WASM memory from 7,995,392 to 9,043,968 bytes (+13.1%).
@@ -431,9 +437,78 @@ setup delta is below 1%, so neither is a justification for micro-optimization.
 All result identities, counts, completeness flags, and memory sizes match across
 versions. Setup's 330 MiB family graph is the clear memory priority, but this
 audit did not find a safe representation change; trading correctness for a lower
-graph is not permitted. External solution-finder and sfinder-man binaries are not
-ranked: the requested SSH clone could not authenticate without inspecting the
-user's key, and sfinder-man's bundled JAR lacks pinned provenance and a license.
+graph is not permitted. That earlier v0.5.1 table did not rank external
+solution-finder or sfinder-man artifacts. The later fixed-queue benchmark below
+uses the user-supplied local solution-finder artifact as a read-only performance
+reference without copying it into Clearra.
+
+### Fixed-queue score-finder correction and reference benchmark (2026-08-03)
+
+Sfinder-man's `cat-finder` is not an unrestricted forward-damage search. Its
+audited positional contract is `cat-finder <fumen> <queue> [clear=4]
+[initial_b2b=false] [initial_combo=0] [b2b_end_bonus=0]`. It expands the exact
+queue into unique hold reorderings, asks solution-finder `path` for exact perfect
+clears with hold already represented by those queues, and applies its Jstris
+scoring stage with the requested initial state.
+
+Clearra retains the audited behavior under `score-finder` only; the former raw
+compatibility spelling is rejected. The translator validates a one-through-six-row exact
+PC target, derives the required piece count from target occupancy, preserves the
+fixed queue, hold behavior, rule, and initial B2B state, and lowers to the
+existing PC enumeration and Jstris-Ultra scoring pipeline. It selects the CPU
+backend for this single fixed-queue workload so WebGPU initialization cannot
+dominate it. It no longer lowers to generic `damage`; public `/damage` remains a
+separate forward-search command. Initial combo and B2B end bonus currently accept
+only zero and otherwise fail closed. This correction reuses the existing typed
+PC/scoring engines: it does not port Sfinder DFS, change inverse lock-clear
+generation, or add pruning.
+
+The reference input was `v115@9gB8HeB8HeC8EeH8AeC8JeAgH SIJSTLZO 5 true`,
+with omitted combo and end bonus both zero. The eight-piece queue produced 112
+unique hold reorderings. After a separate warmup, the user-supplied
+solution-finder 1.43 JAR took 1,653.353 ms and 1,247.152 ms wall time (mean
+1,450.253 ms). Both runs found 14 paths, covered 88/112 reordered queues, and
+produced canonicalized mapping SHA-256
+`3932AF3D5523921AEF831B4F510C30622A28E8247FA38BA8D2A600BA3CB060EE`.
+Raw CSV order differed, so only the canonicalized mapping is identity evidence.
+These timings include JVM startup and path CSV/log output but exclude the
+Python/Discord wrapper and Node scoring wrapper; they are therefore a strict
+path-stage reference, not an end-to-end sfinder-man score time. The launcher hid
+the spawned JVM child from the sampler, so no valid Java peak-memory value is
+reported.
+
+After the same separate-warmup protocol, the rebuilt Clearra release used its
+normal adaptive ceiling of 11 workers and reported
+`parallel-immutable-family-queue` in every measured run. Rows are sorted by mean
+wall time; SRS is the reference-parity rule, while SRS+ is the omitted-rule
+Clearra product default and has a distinct reachable solution set.
+
+| Rank | Engine and rule | Two measured runs | Mean | Engine peak CPU memory | Exact result |
+|---:|---|---:|---:|---:|---|
+| 1 | Clearra, SRS | 82.856, 73.401 ms | 78.129 ms (18.56x faster than the path-stage reference) | 85.781, 86.215 MiB | 14 solutions, `cts1:d46c226074e08437`, best score 5,250 |
+| 2 | Clearra, product-default SRS+ | 130.446, 109.720 ms | 120.083 ms (12.08x faster than the path-stage reference) | 86.749, 88.861 MiB | 15 solutions, `cts1:f38f04765e781dea`, best score 5,250 |
+| 3 | solution-finder 1.43 path stage, SRS | 1,653.353, 1,247.152 ms | 1,450.253 ms | unavailable | 14 paths, 88/112 reordered queues, canonical mapping SHA-256 above |
+
+Every Clearra run reported complete counting and scoring, no truncation, the
+same per-rule solution hash, and the same best score. The SRS count also matches
+the 14-path reference. The 14-versus-15 difference between SRS and SRS+ is a
+rotation-rule difference and must not be presented as cross-rule identity.
+
+A core heuristic that automatically forced one worker for this single-fixed-
+queue score state was evaluated and rejected. With SRS, two runs took 90.359 and
+94.292 ms, retained the same 14 solutions and score, and peaked at 9.173 MiB.
+With SRS+, two runs took 128.640 and 115.535 ms, retained the same 15 solutions
+and score, and peaked at 9.267 MiB. The memory reduction did not justify the SRS
+time regression: automatic worker serialization was removed, and normal bounded
+worker-ready dispatch remains authoritative. Do not reapply that heuristic
+without new representative evidence. This rejection is separate from the
+accepted serial sequencing of multiple Discord automatic-height PC requests.
+
+Before this semantic correction, the old Clearra compatibility route expanded
+the request into generic forward damage and did not finish within 166 seconds;
+its working set reached 5.76 GiB before the diagnostic was stopped. It is not a
+valid result-equivalent benchmark and is recorded only to prevent that incorrect
+mapping from being restored.
 
 ## WASM Evidence
 

@@ -52,6 +52,47 @@ impl PcScenarioBoard {
     pub fn occupied_mask(&self) -> u64 {
         self.occupied_mask
     }
+
+    /// Applies the standard line clear that occurs before a 10-column PC search.
+    ///
+    /// The requested search height is a target boundary, so completed input rows
+    /// are removed and the remaining rows are compacted without shrinking it.
+    pub fn after_initial_line_clear(&self) -> Self {
+        const STANDARD_WIDTH: u16 = 10;
+        if self.width != STANDARD_WIDTH
+            || self.visible_height == 0
+            || usize::from(self.width) * usize::from(self.visible_height) > u64::BITS as usize
+        {
+            return self.clone();
+        }
+
+        let visible_bits = u32::from(self.width) * u32::from(self.visible_height);
+        let visible_mask = if visible_bits == u64::BITS {
+            u64::MAX
+        } else {
+            (1_u64 << visible_bits) - 1
+        };
+        if self.occupied_mask & !visible_mask != 0 {
+            return self.clone();
+        }
+
+        let row_mask = (1_u64 << STANDARD_WIDTH) - 1;
+        let mut compacted_mask = 0_u64;
+        let mut destination_row = 0_u16;
+        for source_row in 0..self.visible_height {
+            let row = (self.occupied_mask >> (source_row * STANDARD_WIDTH)) & row_mask;
+            if row == row_mask {
+                continue;
+            }
+            compacted_mask |= row << (destination_row * STANDARD_WIDTH);
+            destination_row += 1;
+        }
+
+        if destination_row == self.visible_height {
+            return self.clone();
+        }
+        Self::standard_10(self.visible_height, compacted_mask)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,6 +229,11 @@ impl<B> PcScenarioQuery<B> {
 
     pub fn initial_board(&self) -> &B {
         &self.initial_board
+    }
+
+    pub fn with_initial_board(mut self, initial_board: B) -> Self {
+        self.initial_board = initial_board;
+        self
     }
 
     pub fn remaining_queue(&self) -> &PcQueueInput {

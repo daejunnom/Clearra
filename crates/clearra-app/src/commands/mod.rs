@@ -20,6 +20,7 @@ pub mod scenario_app_render_contract;
 mod scenario_app_validation_fields;
 pub mod scoring_app_command;
 pub mod setup_app_command;
+pub mod spin_structure_app_command;
 pub mod verify_app_command;
 
 pub use build_probability_app_command::BuildProbabilityAppCommand;
@@ -37,6 +38,7 @@ pub use scenario_app_expected::ScenarioAppExpected;
 pub use scenario_app_render_contract::ScenarioAppRenderContract;
 pub use scoring_app_command::ScoringAppCommand;
 pub use setup_app_command::SetupAppCommand;
+pub use spin_structure_app_command::SpinStructureAppCommand;
 pub use verify_app_command::VerifyAppCommand;
 
 pub(crate) fn string_field(

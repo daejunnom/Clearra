@@ -43,9 +43,12 @@ impl JsonContract {
                         || !matches!(
                             field.key(),
                             "solution_keys"
+                                | "solution_classes"
                                 | "solution_probabilities"
                                 | "hold_conditions"
                                 | "outcomes"
+                                | "regular"
+                                | "mini"
                                 | "forward_solution_data"
                         ))
             })

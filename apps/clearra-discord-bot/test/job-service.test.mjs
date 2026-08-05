@@ -14,6 +14,7 @@ test("remote job execution is not capped by the Oracle gateway CPU count", () =>
     {
       DISCORD_TOKEN: "test-token",
       CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+      CLEARRA_JOB_TOKEN: "job-token",
       CLEARRA_MAX_CONCURRENT_REMOTE_JOBS: "4",
     },
     { availableParallelism: () => 2 },
@@ -44,6 +45,7 @@ test("gateway worker authority preserves host-local CPU allocation", () => {
     {
       DISCORD_TOKEN: "test-token",
       CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+      CLEARRA_JOB_TOKEN: "job-token",
       CLEARRA_WORKER_AUTHORITY: "gateway",
       CLEARRA_MAX_CONCURRENT_SEARCHES: "2",
     },
@@ -58,6 +60,7 @@ test("gateway worker authority preserves host-local CPU allocation", () => {
 test("job service uses every Cloud Run logical processor by default", () => {
   const config = loadClearraJobServiceConfig(
     {
+      K_SERVICE: "clearra-job-service",
       CLEARRA_JOB_TOKEN: "job-token",
       CLEARRA_SEARCH_WORKERS_PER_SESSION: "auto",
     },
@@ -65,6 +68,7 @@ test("job service uses every Cloud Run logical processor by default", () => {
   );
 
   assert.equal(config.processLogicalProcessors, 6);
+  assert.equal(config.expectedVcpus, 6);
   assert.equal(config.searchWorkersPerSession, 6);
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(config.maxConcurrentJobs, 1);
@@ -80,6 +84,7 @@ test("job service uses every Cloud Run logical processor by default", () => {
   );
   assert.equal(reserveCore.searchWorkersPerSession, 5);
   assert.equal(reserveCore.useAllLogicalProcessors, false);
+  assert.equal(reserveCore.expectedVcpus, undefined);
 
   assert.throws(
     () => loadClearraJobServiceConfig(
@@ -149,6 +154,7 @@ test("job runner sends curated sfinder argv without shell interpretation", async
     {
       executable: "clearra",
       processLogicalProcessors: 6,
+      expectedVcpus: 6,
       searchWorkersPerSession: 6,
       useAllLogicalProcessors: true,
       searchTimeoutMs: 5_000,
@@ -192,6 +198,7 @@ test("job runner sends curated sfinder argv without shell interpretation", async
   assert.equal(result.exitCode, 0);
   assert.equal(invocation.executable, "clearra");
   assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.env.CLEARRA_EXPECTED_VCPUS, "6");
   assert.deepEqual(invocation.arguments_, [
     "sfinder",
     "chance",
@@ -298,7 +305,7 @@ test("job service executes an authenticated synchronous idempotent job", async (
     deadlineUnixMs: Date.now() + 5_000,
     maxOutputBytes: 1024 * 1024,
   };
-  const request = () =>
+  const request = (overrides = {}) =>
     fetch(endpoint, {
       method: "POST",
       headers: {
@@ -306,7 +313,7 @@ test("job service executes an authenticated synchronous idempotent job", async (
         "content-type": "application/json",
         "idempotency-key": body.id,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, ...overrides }),
     });
 
   const first = await request();
@@ -316,9 +323,15 @@ test("job service executes an authenticated synchronous idempotent job", async (
   assert.equal(firstJob.result.exitCode, 0);
   assert.match(firstJob.result.stdout, /pc --lines 4/);
 
-  const second = await request();
+  const second = await request({
+    deadlineUnixMs: body.deadlineUnixMs + 1_000,
+  });
   assert.equal(second.status, 200);
   assert.equal((await second.json()).state, "completed");
+  assert.equal(executions, 1);
+
+  const conflicting = await request({ arguments: ["pc", "--lines", "2"] });
+  assert.equal(conflicting.status, 409);
   assert.equal(executions, 1);
 });
 

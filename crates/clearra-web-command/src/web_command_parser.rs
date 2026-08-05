@@ -19,6 +19,10 @@ use clearra_rules::profile::{
     rule_profile::{RuleProfile, RuleProfileId},
 };
 use clearra_scoring::profile::SpinProfileId;
+use clearra_spin_structure_search::{
+    MinimalityPolicy, PieceInventory, SpinLineRequirement, SpinStructureMode, SpinStructureQuery,
+    StructureBoard,
+};
 use clearra_supply::{
     queue::{
         queue_parser::{parse_bag_aligned_pattern, parse_fixed_sequence, parse_observed_queue},
@@ -28,8 +32,9 @@ use clearra_supply::{
 };
 
 use crate::{
-    web_virtual_file::reject_native_path_semantics, WebBuildProbabilityInput, WebCommandError,
-    WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput, WebVirtualFileHandle,
+    ctk3_mask_input::parse_ctk3_board_mask, web_virtual_file::reject_native_path_semantics,
+    WebBuildProbabilityInput, WebCommandError, WebCommandErrorCode, WebCommandRequest,
+    WebPcScenarioInput, WebVirtualFileHandle,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -87,6 +92,9 @@ impl WebCommandParser {
             "spin-finder" => {
                 parse_forward_command(&tokens[cursor..], true, worker_hardware_limit.max(1))
             }
+            "spin-structure" => {
+                parse_spin_structure_command(&tokens[cursor..], worker_hardware_limit.max(1))
+            }
             "verify" => parse_verify_command(&tokens[cursor..]),
             _ => Err(WebCommandError::new(
                 WebCommandErrorCode::UnsupportedCommand,
@@ -94,6 +102,215 @@ impl WebCommandParser {
             )),
         }
     }
+}
+
+fn parse_spin_structure_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    let mut board = StructureBoard::EMPTY;
+    let mut board_option = None;
+    let mut height = 8_u8;
+    let mut height_was_explicit = false;
+    let mut canonical_minimum_height = None;
+    let mut inventory = None;
+    let mut mode = SpinStructureMode::TSpins;
+    let mut line_requirement = SpinLineRequirement::AtLeast(1);
+    let mut fill_bottom = 0_u8;
+    let mut fill_top = 5_u8;
+    let mut fill_top_was_explicit = false;
+    let mut rule_profile = RuleProfileId::SrsPlus;
+    let mut max_placements = None;
+    let mut minimality = MinimalityPolicy::SubsetMinimal;
+    let mut workers = None;
+    let mut automatic_worker_limit = None;
+    let mut use_all_logical_processors = false;
+    let mut cursor = 0_usize;
+
+    while cursor < tokens.len() {
+        match tokens[cursor].as_str() {
+            "--board-mask" => {
+                set_spin_structure_board_option(&mut board_option, "--board-mask")?;
+                let value = next_value(tokens, &mut cursor, "--board-mask")?;
+                board = StructureBoard::from_words(parse_board_words(value, "--board-mask")?);
+            }
+            "--board-mask-v1" => {
+                set_spin_structure_board_option(&mut board_option, "--board-mask-v1")?;
+                let value = next_value(tokens, &mut cursor, "--board-mask-v1")?;
+                let mask = parse_ctk3_board_mask(value, "--board-mask-v1")?;
+                board = StructureBoard::from_words(mask.words());
+                canonical_minimum_height = Some(mask.visible_height().max(4));
+            }
+            "--height" => {
+                height = parse_positive(next_value(tokens, &mut cursor, "--height")?, "--height")?;
+                height_was_explicit = true;
+            }
+            "--pieces" | "--inventory" => {
+                if inventory.is_some() {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "spin-structure piece inventory may be specified only once",
+                    ));
+                }
+                let option = tokens[cursor].clone();
+                let value = next_value(tokens, &mut cursor, &option)?;
+                inventory = Some(PieceInventory::parse(value).map_err(|error| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid spin-structure inventory: {error}"),
+                    )
+                })?);
+            }
+            "--spin-profile" | "--profile" => {
+                let option = tokens[cursor].clone();
+                let value = next_value(tokens, &mut cursor, &option)?;
+                mode = SpinStructureMode::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid {option} value '{value}'"),
+                    )
+                })?;
+            }
+            "--lines" => {
+                let value = next_value(tokens, &mut cursor, "--lines")?;
+                line_requirement = SpinLineRequirement::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --lines value '{value}'"),
+                    )
+                })?;
+            }
+            "--fill-bottom" => {
+                let value = next_value(tokens, &mut cursor, "--fill-bottom")?;
+                fill_bottom = parse_u8_allow_zero(value, "--fill-bottom")?;
+            }
+            "--fill-top" => {
+                fill_top =
+                    parse_positive(next_value(tokens, &mut cursor, "--fill-top")?, "--fill-top")?;
+                fill_top_was_explicit = true;
+            }
+            "--rule" => {
+                rule_profile = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?.id();
+            }
+            "--max-placements" => {
+                max_placements = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--max-placements")?,
+                    "--max-placements",
+                )?);
+            }
+            "--minimality" => {
+                let value = next_value(tokens, &mut cursor, "--minimality")?;
+                minimality = MinimalityPolicy::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --minimality value '{value}'"),
+                    )
+                })?;
+            }
+            "--workers" => {
+                workers = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--workers")?,
+                    "--workers",
+                )?);
+            }
+            "--auto-workers" => {
+                automatic_worker_limit = Some(parse_positive(
+                    next_value(tokens, &mut cursor, "--auto-workers")?,
+                    "--auto-workers",
+                )?);
+            }
+            "--use-all-cpu-threads" => {
+                use_all_logical_processors = true;
+                cursor += 1;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::UnsupportedCommand,
+                    format!("unsupported spin-structure option '{flag}'"),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected spin-structure token '{value}'"),
+                ));
+            }
+        }
+    }
+
+    if let Some(minimum_height) = canonical_minimum_height {
+        if height_was_explicit && height < minimum_height {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "--height {height} is below the --board-mask-v1 minimum height {minimum_height}"
+                ),
+            ));
+        }
+        height = height.max(minimum_height);
+    }
+    if !fill_top_was_explicit {
+        fill_top = fill_top.min(height);
+    }
+    let inventory = inventory.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "spin-structure requires --pieces",
+        )
+    })?;
+    let mut query = SpinStructureQuery::new(inventory, mode);
+    query.initial_board = board;
+    query.height = height;
+    query.line_requirement = line_requirement;
+    query.fill_bottom = fill_bottom;
+    query.fill_top = fill_top;
+    query.rule_profile = rule_profile;
+    query.max_placements = max_placements;
+    query.minimality = minimality;
+    query.validate().map_err(|error| {
+        WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("invalid spin-structure request: {error}"),
+        )
+    })?;
+
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
+    let mut request = WebCommandRequest::spin_structure(query)
+        .with_worker_hardware_limit(worker_hardware_limit)
+        .with_use_all_logical_processors(use_all_logical_processors);
+    if let Some(workers) = workers {
+        request = request.with_workers(workers);
+    } else if let Some(workers) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(workers);
+    }
+    Ok(request)
+}
+
+fn set_spin_structure_board_option(
+    target: &mut Option<&'static str>,
+    option: &'static str,
+) -> Result<(), WebCommandError> {
+    if let Some(previous) = target.replace(option) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("spin-structure cannot combine {previous} with {option}"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_u8_allow_zero(value: &str, option: &str) -> Result<u8, WebCommandError> {
+    value.parse::<u8>().map_err(|_| {
+        WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("invalid {option} value '{value}'"),
+        )
+    })
 }
 
 fn parse_percent_command(
@@ -455,6 +672,9 @@ fn parse_forward_command(
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut board = Board256Mask::EMPTY;
     let mut height = 8_u8;
+    let mut board_option = None;
+    let mut height_was_explicit = false;
+    let mut canonical_minimum_height = None;
     let mut piece_source: Option<ForwardPieceSource> = None;
     let mut hold_enabled = true;
     let mut rule = RuleProfileId::SrsPlus;
@@ -472,11 +692,20 @@ fn parse_forward_command(
     while cursor < tokens.len() {
         match tokens[cursor].as_str() {
             "--board-mask" => {
+                set_forward_board_option(&mut board_option, "--board-mask")?;
                 let value = next_value(tokens, &mut cursor, "--board-mask")?;
                 board = Board256Mask::from_words(parse_board_words(value, "--board-mask")?);
             }
+            "--board-mask-v1" => {
+                set_forward_board_option(&mut board_option, "--board-mask-v1")?;
+                let value = next_value(tokens, &mut cursor, "--board-mask-v1")?;
+                let mask = parse_ctk3_board_mask(value, "--board-mask-v1")?;
+                board = Board256Mask::from_words(mask.words());
+                canonical_minimum_height = Some(mask.visible_height().max(8));
+            }
             "--height" => {
                 height = parse_positive(next_value(tokens, &mut cursor, "--height")?, "--height")?;
+                height_was_explicit = true;
             }
             "--queue" => {
                 let value = next_value(tokens, &mut cursor, "--queue")?;
@@ -632,6 +861,17 @@ fn parse_forward_command(
             }
         }
     }
+    if let Some(minimum_height) = canonical_minimum_height {
+        if height_was_explicit && height < minimum_height {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "--height {height} is below the --board-mask-v1 minimum height {minimum_height}"
+                ),
+            ));
+        }
+        height = height.max(minimum_height);
+    }
     let piece_source = piece_source.ok_or_else(|| {
         WebCommandError::new(
             WebCommandErrorCode::MissingValue,
@@ -680,6 +920,19 @@ fn parse_forward_command(
         request = request.with_automatic_worker_limit(workers);
     }
     Ok(request)
+}
+
+fn set_forward_board_option(
+    target: &mut Option<&'static str>,
+    option: &'static str,
+) -> Result<(), WebCommandError> {
+    if let Some(previous) = target.replace(option) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("forward search cannot combine {previous} with {option}"),
+        ));
+    }
+    Ok(())
 }
 
 fn set_forward_piece_source(

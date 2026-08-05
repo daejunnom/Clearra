@@ -14,6 +14,7 @@ export class ClearraDirectExecutor {
     this.runner = options.runner ?? new ClearraCommandRunner({
       executable: config.executable,
       processLogicalProcessors: config.processLogicalProcessors,
+      expectedVcpus: config.expectedVcpus,
       searchWorkersPerSession: config.searchWorkersPerSession,
       useAllLogicalProcessors: config.useAllLogicalProcessors,
       searchTimeoutMs: config.searchTimeoutMs,

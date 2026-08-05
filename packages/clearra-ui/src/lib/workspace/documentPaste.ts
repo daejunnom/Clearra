@@ -28,6 +28,14 @@ export function selectDocumentPastePayload<TFile>(
   return matchesText(source) ? { kind: 'text', source } : null;
 }
 
+export function selectSingleDocumentDropFile<TFile>(
+  transfer: Pick<PasteTransfer<TFile>, 'files'> | null | undefined,
+  matchesFile: (file: TFile) => boolean
+): TFile | null {
+  const files = values(transfer?.files);
+  return files.length === 1 && matchesFile(files[0]) ? files[0] : null;
+}
+
 function firstMatchingFile<TFile>(
   items: ArrayLike<PasteTransferItem<TFile>> | Iterable<PasteTransferItem<TFile>> | undefined,
   matches: (file: TFile) => boolean

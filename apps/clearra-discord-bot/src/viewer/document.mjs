@@ -1,7 +1,8 @@
 import {
+  ctk3FileSource,
   decodeCtk3,
+  inspectCtk3,
   isCtk3,
-  parseCtk3File,
 } from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
 
@@ -10,7 +11,8 @@ const URL_PATTERN = /https?:\/\/[^\s<>()]+/g;
 const CTK_START_PATTERN = /ctk3(?:b_|_|@)/gi;
 const PIECES = new Set(["I", "O", "T", "S", "Z", "J", "L"]);
 
-export function extractViewerDocuments(text) {
+export function extractViewerDocuments(text, options = {}) {
+  const limits = viewerLimits(options);
   const candidates = [];
   for (const match of text.matchAll(URL_PATTERN)) {
     collectUrlCandidates(match[0], candidates);
@@ -25,12 +27,18 @@ export function extractViewerDocuments(text) {
 
   const unique = new Map();
   for (const candidate of candidates) {
+    if (
+      limits.maxDocuments !== null &&
+      unique.size >= limits.maxDocuments
+    ) {
+      break;
+    }
     try {
       const source =
         candidate.format === "ctk3"
           ? normalizeCtkSource(candidate.source)
           : candidate.source;
-      const document = decodeViewerDocument(source);
+      const document = decodeViewerDocument(source, options);
       const key = `${candidate.format}:${source}`;
       if (!unique.has(key)) unique.set(key, { ...candidate, source, document });
     } catch {
@@ -41,17 +49,27 @@ export function extractViewerDocuments(text) {
   return [...unique.values()];
 }
 
-export function decodeViewerDocument(source) {
+export function decodeViewerDocument(source, options = {}) {
+  const limits = viewerLimits(options);
   const normalized = source.trim();
-  if (isCtk3(normalized)) return decodeCtk3(normalized);
+  if (isCtk3(normalized)) {
+    enforceSourceLimit(normalized, limits.maxSourceChars);
+    const info = inspectCtk3(normalized);
+    enforcePageLimit(info.pageCount, limits.maxPages);
+    return decodeCtk3(normalized);
+  }
 
   const matchedFumen = normalized.match(FUMEN_PATTERN)?.[0];
+  if (matchedFumen) {
+    enforceSourceLimit(matchedFumen, limits.maxSourceChars);
+  }
   const fumen = matchedFumen && /^[Ddm]115@/.test(matchedFumen)
     ? `v${matchedFumen.slice(1)}`
     : matchedFumen;
   if (!fumen) throw new Error("No Fumen or CTK3 document was found.");
   const pages = fumenDecoder.decode(fumen);
   if (pages.length === 0) throw new Error("The Fumen document has no pages.");
+  enforcePageLimit(pages.length, limits.maxPages);
 
   return {
     width: 10,
@@ -91,13 +109,67 @@ export function decodeViewerDocument(source) {
   };
 }
 
-export function decodeViewerFile(data) {
-  const { source, document } = parseCtk3File(data);
+export function decodeViewerFile(data, options = {}) {
+  const limits = viewerLimits(options);
+  enforceFileSizeLimit(data, limits.maxFileBytes);
+  const source = ctk3FileSource(data);
+  enforceSourceLimit(source, limits.maxSourceChars);
+  const info = inspectCtk3(source);
+  enforcePageLimit(info.pageCount, limits.maxPages);
   return {
     format: "ctk3",
     source,
-    document,
+    document: decodeCtk3(source),
   };
+}
+
+function viewerLimits(options) {
+  return {
+    maxDocuments: optionalPositiveInteger(options.maxDocuments, "maxDocuments"),
+    maxPages: optionalPositiveInteger(options.maxPages, "maxPages"),
+    maxSourceChars: optionalPositiveInteger(
+      options.maxSourceChars,
+      "maxSourceChars",
+    ),
+    maxFileBytes: optionalPositiveInteger(
+      options.maxFileBytes ?? options.maxBytes,
+      "maxFileBytes",
+    ),
+  };
+}
+
+function optionalPositiveInteger(value, name) {
+  if (value === undefined || value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`Viewer option ${name} must be a positive integer.`);
+  }
+  return value;
+}
+
+function enforceSourceLimit(source, maximum) {
+  if (maximum !== null && source.length > maximum) {
+    throw new Error(`The viewer document exceeds the ${maximum}-character limit.`);
+  }
+}
+
+function enforcePageLimit(pageCount, maximum) {
+  if (maximum !== null && pageCount > maximum) {
+    throw new Error(`The viewer document exceeds the ${maximum}-page limit.`);
+  }
+}
+
+function enforceFileSizeLimit(data, maximum) {
+  if (maximum === null) return;
+  const size =
+    typeof data === "string"
+      ? new TextEncoder().encode(data).byteLength
+      : data?.byteLength;
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error("The CTK3 file data is invalid.");
+  }
+  if (size > maximum) {
+    throw new Error(`The CTK3 file exceeds the ${maximum}-byte limit.`);
+  }
 }
 
 function collectUrlCandidates(rawUrl, output) {

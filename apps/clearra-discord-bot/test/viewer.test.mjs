@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { encodeCtk3 } from "ctk3";
+import { encodeCtk3, encodeCtk3File } from "ctk3";
 
 import {
   decodeViewerDocument,
+  decodeViewerFile,
   extractViewerDocuments,
 } from "../src/viewer/document.mjs";
 import { renderDocumentGif } from "../src/viewer/gif.mjs";
@@ -57,6 +58,41 @@ test("Fumen values and query URLs decode through the same viewer document", () =
   assert.equal(direct.pages.length, 1);
 });
 
+test("viewer limits preflight CTK3, Fumen, files, and document extraction", () => {
+  const source = encodeCtk3(document);
+  assert.throws(
+    () => decodeViewerDocument(source, { maxPages: 1 }),
+    /1-page limit/,
+  );
+  assert.throws(
+    () => decodeViewerDocument(source, { maxSourceChars: source.length - 1 }),
+    /character limit/,
+  );
+
+  const fumen = "v115@7gB8HeC8BeB8BeG8CeH8AeD8JeAgH";
+  assert.throws(
+    () => decodeViewerDocument(fumen, { maxSourceChars: fumen.length - 1 }),
+    /character limit/,
+  );
+
+  const file = encodeCtk3File(document);
+  assert.throws(
+    () => decodeViewerFile(file, { maxFileBytes: file.byteLength - 1 }),
+    /byte limit/,
+  );
+  assert.throws(
+    () => decodeViewerFile(file, { maxPages: 1 }),
+    /1-page limit/,
+  );
+
+  const secondSource = encodeCtk3({ width: 10, pages: [document.pages[0]] });
+  const extracted = extractViewerDocuments(`${source} ${secondSource}`, {
+    maxDocuments: 1,
+  });
+  assert.equal(extracted.length, 1);
+  assert.equal(extracted[0].source, source);
+});
+
 test("internal GIF encoder emits one decodable image frame per page", () => {
   const gif = renderDocumentGif(document, {
     tileSize: 8,
@@ -70,6 +106,192 @@ test("internal GIF encoder emits one decodable image frame per page", () => {
   assert.equal(parsed.frames.length, 2);
   assert.equal(parsed.frames[0].pixels.length, 80 * 32);
   assert.notDeepEqual(parsed.frames[0].pixels, parsed.frames[1].pixels);
+  assert.deepEqual(parsed.palette.slice(0, 10), [
+    [30, 41, 39],
+    [63, 74, 72],
+    [123, 133, 129],
+    [85, 203, 211],
+    [243, 207, 77],
+    [182, 106, 208],
+    [101, 199, 120],
+    [233, 110, 110],
+    [98, 138, 224],
+    [239, 156, 77],
+  ]);
+
+  const firstFrame = parsed.frames[0].pixels;
+  const pixelWidth = parsed.width;
+  const occupiedTop = 2 * 8;
+  assert.equal(firstFrame[occupiedTop * pixelWidth], 11);
+  assert.equal(firstFrame[(occupiedTop + 1) * pixelWidth + 1], 8);
+  assert.equal(firstFrame[72], 1);
+  assert.equal(firstFrame[pixelWidth + 73], 0);
+});
+
+test("GIF interior pixels use the GUI field editor's default mino colors", () => {
+  const colors = ["G", "I", "O", "T", "S", "Z", "J", "L"];
+  const expectedRgb = [
+    [123, 133, 129],
+    [85, 203, 211],
+    [243, 207, 77],
+    [182, 106, 208],
+    [101, 199, 120],
+    [233, 110, 110],
+    [98, 138, 224],
+    [239, 156, 77],
+  ];
+  const gif = renderDocumentGif({
+    width: colors.length,
+    pages: [{ height: 1, cells: colors }],
+  }, {
+    tileSize: 8,
+    maxBytes: 1024 * 1024,
+  });
+  const parsed = parseGif(gif);
+  const interiorY = parsed.height - 4;
+  const actualRgb = colors.map((_, x) => {
+    const colorIndex = parsed.frames[0].pixels[
+      interiorY * parsed.width + x * 8 + 4
+    ];
+    return parsed.palette[colorIndex];
+  });
+
+  assert.deepEqual(actualRgb, expectedRgb);
+});
+
+test("GIF joins a placed tetromino's cells and keeps only its outer bevel", () => {
+  const gif = renderDocumentGif({
+    width: 4,
+    pages: [{
+      height: 2,
+      cells: [
+        "T", "T", "T", null,
+        null, "T", null, null,
+      ],
+    }],
+  }, {
+    tileSize: 8,
+    maxBytes: 1024 * 1024,
+  });
+  const parsed = parseGif(gif);
+  const pixels = parsed.frames[0].pixels;
+  const at = (x, y) => pixels[y * parsed.width + x];
+
+  assert.deepEqual(parsed.palette.slice(10, 12), [
+    [38, 50, 46],
+    [103, 116, 111],
+  ]);
+  assert.equal(at(7, 25), 5, "horizontal internal edge on the left cell");
+  assert.equal(at(8, 25), 5, "horizontal internal edge on the right cell");
+  assert.equal(at(9, 23), 5, "vertical internal edge on the upper cell");
+  assert.equal(at(9, 24), 5, "vertical internal edge on the lower cell");
+  assert.equal(at(9, 16), 11, "top outer highlight");
+  assert.equal(at(0, 25), 11, "left outer highlight");
+  assert.equal(at(23, 25), 10, "right outer shadow");
+  assert.equal(at(9, 31), 10, "bottom outer shadow");
+  assert.equal(at(25, 25), 0, "empty-cell interior remains the board background");
+  assert.equal(at(24, 24), 1, "empty-cell grid remains visible");
+});
+
+test("GIF joins adjacent garbage cells and keeps only their outer bevel", () => {
+  const gif = renderDocumentGif({
+    width: 4,
+    pages: [{
+      height: 2,
+      cells: [
+        "G", "G", null, null,
+        "G", "G", null, null,
+      ],
+    }],
+  }, {
+    tileSize: 8,
+    maxBytes: 1024 * 1024,
+  });
+  const parsed = parseGif(gif);
+  const pixels = parsed.frames[0].pixels;
+  const at = (x, y) => pixels[y * parsed.width + x];
+
+  assert.equal(at(7, 25), 2, "garbage has no right edge inside the region");
+  assert.equal(at(8, 25), 2, "adjacent garbage has no left edge inside the region");
+  assert.equal(at(1, 23), 2, "garbage has no bottom edge inside the region");
+  assert.equal(at(1, 24), 2, "adjacent garbage has no top edge inside the region");
+  assert.equal(at(1, 16), 11, "garbage region keeps its top highlight");
+  assert.equal(at(0, 25), 11, "garbage region keeps its left highlight");
+  assert.equal(at(15, 25), 10, "garbage region keeps its right shadow");
+  assert.equal(at(1, 31), 10, "garbage region keeps its bottom shadow");
+  assert.equal(at(17, 25), 0, "empty-cell interior remains the board background");
+  assert.equal(at(16, 24), 1, "empty-cell grid remains visible");
+});
+
+test("GIF keeps an operation's bevel when it touches the same field color", () => {
+  const gif = renderDocumentGif({
+    width: 4,
+    pages: [{
+      height: 2,
+      cells: [
+        null, null, null, null,
+        null, null, "T", null,
+      ],
+      operation: { piece: "T", rotation: "spawn", x: 1, y: 0 },
+    }],
+  }, {
+    tileSize: 8,
+    maxBytes: 1024 * 1024,
+  });
+  const parsed = parseGif(gif);
+  const pixels = parsed.frames[0].pixels;
+  const at = (x, y) => pixels[y * parsed.width + x];
+
+  assert.equal(at(15, 20), 10, "operation right edge remains a shadow");
+  assert.equal(at(16, 20), 11, "same-color field cell keeps its left highlight");
+  assert.equal(at(20, 23), 10, "field cell bottom edge remains a shadow");
+  assert.equal(at(20, 24), 11, "operation top edge remains a highlight");
+  assert.equal(at(7, 28), 5, "operation cells still share their internal edge");
+  assert.equal(at(8, 28), 5, "operation neighbor remains one joined piece");
+});
+
+test("GIF LZW code widths remain compatible across dictionary boundaries", () => {
+  const colors = [null, "G", "I", "O", "T", "S", "Z", "J", "L"];
+  const cells = Array.from(
+    { length: 10 * 4 },
+    (_, index) => colors[(index * 7 + 3) % colors.length],
+  );
+  const gif = renderDocumentGif({
+    width: 10,
+    pages: [{ height: 4, cells }],
+  }, {
+    tileSize: 20,
+    maxBytes: 1024 * 1024,
+  });
+
+  const parsed = parseGif(gif);
+  assert.equal(parsed.width, 200);
+  assert.equal(parsed.height, 80);
+  assert.equal(parsed.frames.length, 1);
+  assert.equal(parsed.frames[0].pixels.length, 200 * 80);
+});
+
+test("GIF rendering rejects excessive frames and malformed page cells", () => {
+  assert.throws(
+    () => renderDocumentGif(document, { maxFrames: 1 }),
+    /1-frame GIF limit/,
+  );
+  assert.throws(
+    () =>
+      renderDocumentGif({
+        width: 10,
+        pages: [{ height: 1, cells: ["I"] }],
+      }),
+    /page is invalid/,
+  );
+  assert.throws(
+    () =>
+      renderDocumentGif({
+        width: 1,
+        pages: [{ height: 1, cells: ["X"] }],
+      }),
+    /page is invalid/,
+  );
 });
 
 function parseGif(bytes) {
@@ -87,7 +309,13 @@ function parseGif(bytes) {
   const packed = byte();
   byte();
   byte();
-  if (packed & 0x80) offset += 3 * (1 << ((packed & 7) + 1));
+  const palette = [];
+  if (packed & 0x80) {
+    const colorCount = 1 << ((packed & 7) + 1);
+    for (let index = 0; index < colorCount; index += 1) {
+      palette.push([byte(), byte(), byte()]);
+    }
+  }
 
   const frames = [];
   while (offset < bytes.length) {
@@ -111,7 +339,7 @@ function parseGif(bytes) {
       pixels: decodeLzw(compressed, minimumCodeSize, frameWidth * frameHeight),
     });
   }
-  return { signature, width, height, frames };
+  return { signature, width, height, palette, frames };
 
   function skipBlocks() {
     while (true) {
@@ -176,7 +404,7 @@ function decodeLzw(bytes, minimumCodeSize, expectedLength) {
     output.push(...entry);
     if (previous && nextCode < 4096) {
       dictionary[nextCode++] = [...previous, entry[0]];
-      if (nextCode === (1 << codeSize) - 1 && codeSize < 12) codeSize += 1;
+      if (nextCode === 1 << codeSize && codeSize < 12) codeSize += 1;
     }
     previous = entry;
   }

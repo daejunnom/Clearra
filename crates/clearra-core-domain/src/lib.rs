@@ -13,4 +13,5 @@ pub mod placement;
 pub mod probability;
 pub mod pruning;
 pub mod resource;
+pub mod runtime_cpu_capacity;
 pub mod solution;

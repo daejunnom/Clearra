@@ -6,10 +6,16 @@
     Eraser,
     FlipHorizontal2,
     Layers2,
-    SquareX
+    SquareX,
+    WandSparkles
   } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
+  import {
+    ctkPaintSelectionFromShortcut,
+    inferCtkAutoColorPiece,
+    type CtkPaintSelection
+  } from './ctkAutoColor';
   import type {
     Ctk3Color,
     Ctk3Operation,
@@ -53,12 +59,16 @@
     reverse: '2',
     left: 'L'
   };
-  let selected: Ctk3Color = 'G';
+  let selected: CtkPaintSelection = 'auto';
   let board: HTMLDivElement | null = null;
   let activePointer: number | null = null;
   let workingCells = cells;
+  let observedExternalCells = cells;
+  let expectedExternalCells: Ctk3Color[] | null = null;
   let lastCell = -1;
-  let dragColor: Ctk3Color = 'G';
+  let dragColor: CtkPaintSelection = 'auto';
+  let autoColorIndexes: number[] = [];
+  let autoColorInvalid = false;
   let paintMode = true;
   let placingOperation = false;
   let localOperation = operation ? { ...operation } : undefined;
@@ -73,8 +83,15 @@
     ? rotationsForPiece(operationPiece)
     : [];
   $: if (activePointer === null) workingCells = normalizedCells;
+  $: if (cells !== observedExternalCells) {
+    const expectedChange = cells === expectedExternalCells;
+    observedExternalCells = cells;
+    expectedExternalCells = null;
+    if (!expectedChange) resetAutoColorGroup();
+  }
   $: externalOperationKey = operationKey(operation);
   $: if (externalOperationKey !== observedExternalOperationKey) {
+    resetAutoColorGroup();
     observedExternalOperationKey = externalOperationKey;
     localOperation = operation ? { ...operation } : undefined;
     operationPiece = operation?.piece ?? null;
@@ -122,6 +139,7 @@
       return;
     }
     if (!paintMode) return;
+    board?.focus({ preventScroll: true });
     activePointer = event.pointerId;
     lastCell = -1;
     workingCells = normalizedCells.slice();
@@ -172,21 +190,61 @@
     }
     if (!paintMode) return;
     const index = y * 10 + x;
-    const next = normalizedCells.slice();
-    next[index] = next[index] === null ? selected : null;
-    dispatch('change', next);
+    workingCells = normalizedCells.slice();
+    lastCell = -1;
+    dragColor = workingCells[index] === null ? selected : null;
+    paint(x, y);
+    lastCell = -1;
   }
 
   function paint(x: number, y: number) {
     const index = y * 10 + x;
-    if (index === lastCell || workingCells[index] === dragColor) return;
+    if (index === lastCell) return;
     lastCell = index;
+    if (dragColor === 'auto') {
+      paintAutoColor(index);
+      return;
+    }
+    if (workingCells[index] === dragColor) return;
+    if (dragColor === null && autoColorIndexes.includes(index)) {
+      autoColorIndexes = autoColorIndexes.filter((candidate) => candidate !== index);
+      autoColorInvalid = false;
+    }
     workingCells[index] = dragColor;
-    workingCells = workingCells.slice();
-    dispatch('change', workingCells);
+    emitCells(workingCells.slice());
   }
 
-  function activatePaint(color: Ctk3Color) {
+  function paintAutoColor(index: number) {
+    if (workingCells[index] !== null) return;
+    if (autoColorIndexes.length === 4) resetAutoColorGroup();
+    workingCells[index] = 'G';
+    autoColorIndexes = [...autoColorIndexes, index];
+    autoColorInvalid = false;
+    if (autoColorIndexes.length === 4) {
+      const piece = inferCtkAutoColorPiece(autoColorIndexes);
+      if (piece) {
+        for (const candidate of autoColorIndexes) workingCells[candidate] = piece;
+        resetAutoColorGroup();
+      } else {
+        autoColorInvalid = true;
+      }
+    }
+    emitCells(workingCells.slice());
+  }
+
+  function emitCells(next: Ctk3Color[]) {
+    workingCells = next;
+    expectedExternalCells = next;
+    dispatch('change', next);
+  }
+
+  function resetAutoColorGroup() {
+    autoColorIndexes = [];
+    autoColorInvalid = false;
+  }
+
+  function activatePaint(color: CtkPaintSelection) {
+    if (color !== selected || !paintMode) resetAutoColorGroup();
     selected = color;
     paintMode = true;
     placingOperation = false;
@@ -194,6 +252,7 @@
   }
 
   function chooseOperationPiece(piece: Ctk3Piece | null) {
+    resetAutoColorGroup();
     paintMode = false;
     if (!piece) {
       operationPiece = null;
@@ -212,6 +271,7 @@
 
   function chooseOperationRotation(rotation: Ctk3Rotation) {
     if (!operationPiece) return;
+    resetAutoColorGroup();
     paintMode = false;
     placingOperation = true;
     operationRotation = rotation;
@@ -231,10 +291,9 @@
     for (const { x: cellX, y: cellY } of operationCells(candidate)) {
       next[cellY * 10 + cellX] = candidate.piece;
     }
-    workingCells = next;
     paintMode = false;
     hoverAnchor = null;
-    dispatch('change', next);
+    emitCells(next);
   }
 
   function commitStoredOperation() {
@@ -245,8 +304,7 @@
       for (const { x, y } of operationCells(stored)) {
         next[y * 10 + x] = stored.piece;
       }
-      workingCells = next;
-      dispatch('change', next);
+      emitCells(next);
     }
     localOperation = undefined;
     dispatch('operation', undefined);
@@ -286,21 +344,73 @@
     );
     return result;
   }
+
+  function handleShortcut(event: KeyboardEvent) {
+    const target = event.target;
+    if (
+      event.defaultPrevented ||
+      event.isComposing ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      !(target instanceof HTMLElement) ||
+      isEditable(target)
+    ) {
+      return;
+    }
+    const selection = ctkPaintSelectionFromShortcut(event.key, event.code);
+    if (selection === undefined) return;
+    event.preventDefault();
+    activatePaint(selection);
+  }
+
+  function isEditable(target: HTMLElement): boolean {
+    return (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      target.isContentEditable
+    );
+  }
+
+  function shortcutLabel(action: string, key: string): string {
+    return workspaceMessage(language, 'ctkShortcutLabel', { action, key });
+  }
 </script>
 
-<svelte:window on:pointerup={finishPaint} on:pointercancel={finishPaint} />
+<svelte:window
+  on:pointerup={finishPaint}
+  on:pointercancel={finishPaint}
+  on:keydown={handleShortcut}
+/>
+
+<div class="board-editor">
 
 <div class="palette" role="toolbar" aria-label={label('ctkPalette')}>
+  <button
+    type="button"
+    class="swatch auto-color"
+    class:active={selected === 'auto' && paintMode}
+    title={shortcutLabel(label('ctkAutoColor'), 'A')}
+    aria-label={shortcutLabel(label('ctkAutoColor'), 'A')}
+    aria-keyshortcuts="A"
+    aria-pressed={selected === 'auto' && paintMode}
+    on:click={() => activatePaint('auto')}
+  >
+    <WandSparkles size={16} strokeWidth={1.8} />
+    <kbd class="corner-key">A</kbd>
+  </button>
   {#each palette as color}
     <button
       type="button"
       class:active={selected === color && paintMode}
       class={`swatch piece-${color}`}
-      title={color === 'G' ? label('ctkFieldColor') : color}
-      aria-label={color === 'G' ? label('ctkFieldColor') : color}
+      title={shortcutLabel(color === 'G' ? label('ctkFieldColor') : color, color)}
+      aria-label={shortcutLabel(color === 'G' ? label('ctkFieldColor') : color, color)}
+      aria-keyshortcuts={color}
       aria-pressed={selected === color && paintMode}
       on:click={() => activatePaint(color)}
-    ><span>{color === 'G' ? '' : color}</span></button>
+    ><kbd class="swatch-key">{color}</kbd></button>
   {/each}
   <span class="palette-divider" aria-hidden="true"></span>
   <button
@@ -342,11 +452,24 @@
     type="button"
     class="swatch eraser"
     class:active={selected === null && paintMode}
-    title={label('ctkEraser')}
-    aria-label={label('ctkEraser')}
+    title={shortcutLabel(label('ctkEraser'), 'E')}
+    aria-label={shortcutLabel(label('ctkEraser'), 'E')}
+    aria-keyshortcuts="E Delete Backspace"
     aria-pressed={selected === null && paintMode}
     on:click={() => activatePaint(null)}
-  ><Eraser size={16} strokeWidth={1.8} /></button>
+  >
+    <Eraser size={16} strokeWidth={1.8} />
+    <kbd class="corner-key">E</kbd>
+  </button>
+</div>
+
+<div class="palette-help">
+  <span>{label('ctkColorShortcuts')}</span>
+  {#if selected === 'auto' && paintMode}
+    <span class:invalid={autoColorInvalid} aria-live="polite">
+      {autoColorInvalid ? label('ctkAutoColorInvalid') : label('ctkAutoColorHelp')}
+    </span>
+  {/if}
 </div>
 
 <div class="operation-tools">
@@ -420,6 +543,8 @@
           class:operation-invalid={previewIndexes.has(index) && !previewValid}
           class:operation-placed={previewIndexes.has(index) && localOperation !== undefined && !placingOperation}
           class:operation-axis={index === axisIndex}
+          class:auto-pending={autoColorIndexes.includes(index)}
+          class:auto-invalid={autoColorInvalid && autoColorIndexes.includes(index)}
           class={`cell piece-${color ?? 'empty'} operation-piece-${previewOperation?.piece ?? 'none'}`}
           aria-label={`${x + 1}, ${y + 1}`}
           on:pointerdown={(event) => beginPaint(event, x, y)}
@@ -429,14 +554,19 @@
     {/each}
   </div>
 </div>
+</div>
 
 <style>
+  .board-editor {
+    min-width: 0;
+  }
+
   .palette {
     align-items: center;
     display: flex;
     flex-wrap: wrap;
     gap: 7px;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
   }
 
   .swatch, .tool-button {
@@ -457,6 +587,7 @@
   .swatch {
     border: 2px solid transparent;
     box-shadow: inset 2px 2px 0 rgba(255, 255, 255, .15), inset -2px -2px 0 rgba(0, 0, 0, .16);
+    position: relative;
   }
 
   .swatch.active {
@@ -474,6 +605,63 @@
     background: #e4f1ee;
     border-color: #36847c;
     color: #075f58;
+  }
+
+  .auto-color {
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, .78), rgba(255, 255, 255, .2)),
+      conic-gradient(from 30deg, #55cbd3, #f3cf4d, #b66ad0, #65c778, #e96e6e, #628ae0, #ef9c4d, #55cbd3);
+    color: #17211e;
+  }
+
+  .swatch-key {
+    color: #101817;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 11px;
+    font-style: normal;
+    font-weight: 900;
+    line-height: 1;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, .28);
+  }
+
+  .corner-key {
+    background: rgba(255, 255, 255, .78);
+    border: 1px solid rgba(23, 33, 30, .34);
+    border-radius: 3px;
+    box-shadow: 0 1px 0 rgba(23, 33, 30, .2);
+    color: #101817;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-style: normal;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .corner-key {
+    bottom: 1px;
+    font-size: 7px;
+    padding: 1px 2px;
+    position: absolute;
+    right: 1px;
+  }
+
+  .palette-help {
+    align-items: baseline;
+    color: #66726e;
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 10px;
+    gap: 4px 14px;
+    line-height: 1.4;
+    margin-bottom: 10px;
+  }
+
+  .palette-help span:last-child {
+    color: #42645e;
+  }
+
+  .palette-help span.invalid {
+    color: #a33a2b;
+    font-weight: 700;
   }
 
   .palette-divider {
@@ -611,6 +799,19 @@
 
   .cell:not(.empty) {
     box-shadow: inset 2px 2px 0 rgba(255,255,255,.14), inset -2px -2px 0 rgba(20,26,24,.22);
+  }
+
+  .cell.auto-pending {
+    box-shadow:
+      inset 0 0 0 2px rgba(238, 247, 244, .82),
+      inset 2px 2px 0 rgba(255,255,255,.14),
+      inset -2px -2px 0 rgba(20,26,24,.22);
+  }
+
+  .cell.auto-invalid {
+    box-shadow:
+      inset 0 0 0 2px #ffd1c8,
+      inset 0 0 0 4px rgba(171, 58, 39, .75);
   }
 
   .cell.operation-preview::after {

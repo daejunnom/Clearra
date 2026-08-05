@@ -1,3 +1,4 @@
+// SRP rationale: this module has one behavior-level change reason: the complete workspace localization catalog and its typed lookup contract.
 import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
 
 export type WorkspaceLanguage = 'en' | 'ko';
@@ -389,6 +390,11 @@ const en = {
   solutionBoard: 'Rendered solution {number}',
   invalidSolutionKey: 'This solution key could not be rendered.',
   ctkPalette: 'Field palette',
+  ctkAutoColor: 'Automatic piece color',
+  ctkAutoColorHelp: 'Draw four cells to detect and color a tetromino automatically.',
+  ctkAutoColorInvalid: 'Those four cells are not a tetromino. Erase a cell to adjust them.',
+  ctkColorShortcuts: 'Shortcuts: A Auto · G Gray · I/O/T/S/Z/J/L Piece colors · E Erase',
+  ctkShortcutLabel: '{action} (shortcut: {key})',
   ctkFieldColor: 'Field color',
   ctkEraser: 'Eraser',
   ctkClearLines: 'Clear completed rows into a new page',
@@ -404,6 +410,8 @@ const en = {
   duplicatePage: 'Duplicate page',
   deletePage: 'Delete page',
   ctkImport: 'Import',
+  ctkDropDocument: 'Drop the CTK3 document to open it',
+  ctkDropDocumentHelp: 'One .ctk3 file is accepted.',
   loadDocument: 'Load document',
   downloadCtk3File: 'Download CTK3 file',
   ctkPageMetadata: 'Page information',
@@ -823,6 +831,11 @@ const ko: Record<keyof typeof en, string> = {
   solutionBoard: '해법 {number} 렌더링',
   invalidSolutionKey: '이 해법 키를 렌더링할 수 없습니다.',
   ctkPalette: '필드 팔레트',
+  ctkAutoColor: '미노 자동 색칠',
+  ctkAutoColorHelp: '네 칸을 그리면 미노 형태를 판별해 자동으로 색칠합니다.',
+  ctkAutoColorInvalid: '이 네 칸은 미노 형태가 아닙니다. 한 칸을 지워 조정하세요.',
+  ctkColorShortcuts: '단축키: A 자동 · G 회색 · I/O/T/S/Z/J/L 미노 색 · E 지우기',
+  ctkShortcutLabel: '{action} (단축키: {key})',
   ctkFieldColor: '필드 색상',
   ctkEraser: '지우개',
   ctkClearLines: '완성된 줄을 지운 다음 페이지 만들기',
@@ -838,6 +851,8 @@ const ko: Record<keyof typeof en, string> = {
   duplicatePage: '페이지 복제',
   deletePage: '페이지 삭제',
   ctkImport: '불러오기',
+  ctkDropDocument: 'CTK3 문서를 놓아 불러오기',
+  ctkDropDocumentHelp: '.ctk3 파일 하나만 받을 수 있습니다.',
   loadDocument: '문서 불러오기',
   downloadCtk3File: 'CTK3 파일 다운로드',
   ctkPageMetadata: '페이지 정보',

@@ -33,7 +33,7 @@ fn expected_percent_covered_pattern_count() -> usize {
 }
 
 fn expected_percent_probability() -> &'static str {
-    "0"
+    "0%"
 }
 
 fn expected_path_solution_count() -> usize {
@@ -81,7 +81,7 @@ fn expected_setup_covered_pattern_count() -> &'static str {
 }
 
 fn expected_setup_coverage_probability() -> &'static str {
-    "coverage_probability: 0.0"
+    "coverage_probability: 0%"
 }
 
 fn expected_scenario_coverage_probability_json() -> &'static str {

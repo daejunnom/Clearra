@@ -485,8 +485,10 @@ pub(crate) struct ForwardSearchConfig {
 
 impl ForwardSearchConfig {
     pub(crate) fn from_query(query: &ForwardSearchQuery) -> Self {
+        let (board, _, _) =
+            place_and_clear(10, query.height(), ForwardBoard::from_mask(query.board()));
         Self {
-            board: ForwardBoard::from_mask(query.board()),
+            board,
             height: query.height(),
             hold_enabled: query.hold_enabled(),
             rule_profile: query.rule_profile(),
@@ -724,12 +726,6 @@ impl ForwardQueueSession {
         }
         control.report_progress("forward-search", self.visited_states, None);
         Ok(ForwardSearchAdvance::Pending)
-    }
-
-    pub(crate) fn terminal_fusion_active(&self) -> bool {
-        self.current.len() >= TERMINAL_FUSION_MIN_PARENT_STATES
-            && self.current_cursor < self.current.len()
-            && usize::from(self.current[self.current_cursor].key.cursor) >= self.queue.len()
     }
 
     pub(crate) fn absorb_expanded_action(

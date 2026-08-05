@@ -1,4 +1,5 @@
 use clearra_app::{AppErrorCode, AppRenderModel, AppResponse, AppStatus};
+use clearra_spin_structure_search::{SpinStructureOutcome, SpinStructureQuery, StructureOperation};
 
 use crate::{
     error::CliErrorCode,
@@ -361,6 +362,7 @@ fn render_success(
             }));
             let mut fields = vec![
                 RenderField::new("complete", result.complete()),
+                RenderField::new("workers_used", result.workers_used()),
                 RenderField::new("visited_states", result.visited_states()),
                 RenderField::new("generated_locks", result.generated_locks()),
                 RenderField::new("peak_frontier", result.peak_frontier()),
@@ -485,6 +487,284 @@ fn render_success(
                 format,
             ))
         }
+        AppRenderModel::SpinStructure(result) => {
+            let render_structure_operation = |operation: StructureOperation| {
+                RenderFieldValue::object([
+                    (
+                        "piece",
+                        RenderFieldValue::string(operation.piece().as_ascii().to_string()),
+                    ),
+                    (
+                        "rotation",
+                        RenderFieldValue::number(operation.rotation().quarter_turns().to_string()),
+                    ),
+                    ("x", RenderFieldValue::number(operation.x().to_string())),
+                    ("y", RenderFieldValue::number(operation.y().to_string())),
+                    (
+                        "logical_mask",
+                        RenderFieldValue::string(board_mask_hex(operation.mask().words())),
+                    ),
+                    (
+                        "need_deleted_rows",
+                        RenderFieldValue::number(operation.need_deleted_rows().to_string()),
+                    ),
+                ])
+            };
+            let render_bucket = |mini: bool| {
+                let outcomes = if mini { &result.mini } else { &result.regular };
+                RenderFieldValue::array(outcomes.iter().map(|outcome| {
+                    RenderFieldValue::object([
+                        (
+                            "class",
+                            RenderFieldValue::string(if mini { "mini" } else { "regular" }),
+                        ),
+                        (
+                            "placement_count",
+                            RenderFieldValue::number(outcome.placement_count().to_string()),
+                        ),
+                        (
+                            "board_before_spin",
+                            RenderFieldValue::string(board_mask_hex(
+                                outcome.board_before_spin.words(),
+                            )),
+                        ),
+                        (
+                            "final_board",
+                            RenderFieldValue::string(board_mask_hex(outcome.final_board.words())),
+                        ),
+                        (
+                            "spin",
+                            RenderFieldValue::object([
+                                (
+                                    "piece",
+                                    RenderFieldValue::string(
+                                        outcome.spin.piece.as_ascii().to_string(),
+                                    ),
+                                ),
+                                (
+                                    "rotation",
+                                    RenderFieldValue::number(
+                                        outcome.spin.rotation.quarter_turns().to_string(),
+                                    ),
+                                ),
+                                ("x", RenderFieldValue::number(outcome.spin.x.to_string())),
+                                ("y", RenderFieldValue::number(outcome.spin.y.to_string())),
+                                (
+                                    "cleared_lines",
+                                    RenderFieldValue::number(
+                                        outcome.spin.cleared_lines.to_string(),
+                                    ),
+                                ),
+                                (
+                                    "structure",
+                                    render_structure_operation(outcome.logical_spin()),
+                                ),
+                                (
+                                    "logical_cleared_rows",
+                                    RenderFieldValue::number(
+                                        outcome.logical_spin_cleared_rows().to_string(),
+                                    ),
+                                ),
+                            ]),
+                        ),
+                        (
+                            "structure",
+                            RenderFieldValue::array(
+                                outcome
+                                    .logical_operations()
+                                    .iter()
+                                    .copied()
+                                    .map(render_structure_operation),
+                            ),
+                        ),
+                        (
+                            "build",
+                            RenderFieldValue::array(outcome.build.iter().map(|placement| {
+                                RenderFieldValue::object([
+                                    (
+                                        "piece",
+                                        RenderFieldValue::string(
+                                            placement.piece.as_ascii().to_string(),
+                                        ),
+                                    ),
+                                    (
+                                        "rotation",
+                                        RenderFieldValue::number(
+                                            placement.rotation.quarter_turns().to_string(),
+                                        ),
+                                    ),
+                                    ("x", RenderFieldValue::number(placement.x.to_string())),
+                                    ("y", RenderFieldValue::number(placement.y.to_string())),
+                                    (
+                                        "placement_mask",
+                                        RenderFieldValue::string(board_mask_hex(
+                                            placement.mask_before_clear.words(),
+                                        )),
+                                    ),
+                                    (
+                                        "cleared_rows",
+                                        RenderFieldValue::number(
+                                            placement.cleared_rows.to_string(),
+                                        ),
+                                    ),
+                                ])
+                            })),
+                        ),
+                    ])
+                }))
+            };
+            let query = result.query.as_ref();
+            let mut fields = vec![
+                RenderField::new("complete", result.complete),
+                RenderField::new("workers_used", result.workers_used()),
+                RenderField::new(
+                    "spin_profile",
+                    query.map_or(RenderFieldValue::Null, |query| {
+                        RenderFieldValue::string(query.mode.as_str())
+                    }),
+                ),
+                RenderField::new(
+                    "minimality",
+                    query.map_or(RenderFieldValue::Null, |query| {
+                        RenderFieldValue::string(query.minimality.as_str())
+                    }),
+                ),
+                RenderField::new(
+                    "line_requirement",
+                    query.map_or(RenderFieldValue::Null, |query| {
+                        RenderFieldValue::string(query.line_requirement.as_str())
+                    }),
+                ),
+                RenderField::new(
+                    "minimum_placements",
+                    result
+                        .minimum_placements
+                        .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+                ),
+                RenderField::new("result_count", result.outcome_count()),
+                RenderField::new("regular_count", result.regular.len()),
+                RenderField::new("mini_count", result.mini.len()),
+                RenderField::new("regular", render_bucket(false)),
+                RenderField::new("mini", render_bucket(true)),
+                RenderField::new(
+                    "stages",
+                    RenderFieldValue::object([
+                        (
+                            "build_states",
+                            RenderFieldValue::number(result.stages.build_states.to_string()),
+                        ),
+                        (
+                            "fill_checks",
+                            RenderFieldValue::number(result.stages.fill_checks.to_string()),
+                        ),
+                        (
+                            "support_locks",
+                            RenderFieldValue::number(result.stages.support_locks.to_string()),
+                        ),
+                        (
+                            "corner_checks",
+                            RenderFieldValue::number(result.stages.corner_checks.to_string()),
+                        ),
+                        (
+                            "entry_states",
+                            RenderFieldValue::number(result.stages.entry_states.to_string()),
+                        ),
+                        (
+                            "verification_checks",
+                            RenderFieldValue::number(result.stages.verification_checks.to_string()),
+                        ),
+                    ]),
+                ),
+                RenderField::new(
+                    "layers",
+                    RenderFieldValue::array(result.layers.iter().map(|layer| {
+                        RenderFieldValue::object([
+                            ("depth", RenderFieldValue::from(layer.depth)),
+                            (
+                                "input_states",
+                                RenderFieldValue::number(layer.input_states.to_string()),
+                            ),
+                            (
+                                "piece_choices",
+                                RenderFieldValue::number(layer.piece_choices.to_string()),
+                            ),
+                            (
+                                "reachable_locks",
+                                RenderFieldValue::number(layer.reachable_locks.to_string()),
+                            ),
+                            (
+                                "generated_states",
+                                RenderFieldValue::number(layer.generated_states.to_string()),
+                            ),
+                            (
+                                "accepted_regular",
+                                RenderFieldValue::number(layer.accepted_regular.to_string()),
+                            ),
+                            (
+                                "accepted_mini",
+                                RenderFieldValue::number(layer.accepted_mini.to_string()),
+                            ),
+                        ])
+                    })),
+                ),
+            ];
+            if include_solution_data {
+                let encode_solution_key =
+                    |outcome: &SpinStructureOutcome, query: &SpinStructureQuery| {
+                        let mut operations = outcome.logical_operations().to_vec();
+                        operations.sort_unstable();
+                        let mut key = format!(
+                            "ctk2|height={}|initial={}|placements=",
+                            query.height,
+                            board_mask_hex(query.initial_board.words()).trim_start_matches("0x"),
+                        );
+                        for (index, operation) in operations.into_iter().enumerate() {
+                            if index != 0 {
+                                key.push(',');
+                            }
+                            key.push(operation.piece().as_ascii());
+                            key.push(':');
+                            key.push_str(
+                                board_mask_hex(operation.mask().words()).trim_start_matches("0x"),
+                            );
+                        }
+                        key
+                    };
+                let solution_keys = query.map_or_else(Vec::new, |query| {
+                    result
+                        .outcomes()
+                        .map(|outcome| encode_solution_key(outcome, query))
+                        .collect::<Vec<_>>()
+                });
+                let solution_classes = result
+                    .regular
+                    .iter()
+                    .map(|_| "regular")
+                    .chain(result.mini.iter().map(|_| "mini"))
+                    .collect::<Vec<_>>();
+                fields.extend([
+                    RenderField::new("solution_data_requested", true),
+                    RenderField::new(
+                        "solution_keys",
+                        RenderFieldValue::array(solution_keys.iter().map(RenderFieldValue::string)),
+                    ),
+                    RenderField::new(
+                        "solution_classes",
+                        RenderFieldValue::array(
+                            solution_classes
+                                .iter()
+                                .copied()
+                                .map(RenderFieldValue::string),
+                        ),
+                    ),
+                ]);
+            }
+            CliOutput::success(CommandRenderer::render(
+                model.kind().as_str(),
+                fields,
+                format,
+            ))
+        }
         AppRenderModel::CoverMessage(message)
         | AppRenderModel::ScenarioMessage(message)
         | AppRenderModel::Path(message)
@@ -539,3 +819,7 @@ fn cli_error_for_app_error(code: AppErrorCode, default_error: CliErrorCode) -> C
         _ => default_error,
     }
 }
+
+#[cfg(test)]
+#[path = "app_response_renderer_tests.rs"]
+mod tests;

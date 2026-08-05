@@ -290,9 +290,8 @@ impl MaterializedPatternUniverse {
         requested_workers: usize,
     ) -> Result<Vec<PackingMultisetGroup>, PackingMultisetBuildError> {
         const PARALLEL_PATTERN_THRESHOLD: usize = 256;
-        let available_workers = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .max(1);
+        let available_workers =
+            clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit();
         let worker_count = requested_workers
             .max(1)
             .min(available_workers)

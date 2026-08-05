@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 0.6.3 - 2026-08-05
+
+- Consolidated Discord ingress behind one Gateway process and delegated heavy
+  searches to the bounded Cloud Run job service, removing the extra relay hop.
+  Private administration code, credentials, and deployment overlays remain
+  excluded from the public source and release artifacts.
+- Reworked Discord commands around localized English and Korean help, structured
+  per-command Modals, CTK3/Fumen field inputs, permission-gated server and
+  channel controls, and compatible ordinary-message commands. Improved command
+  registration recovery so stale Discord command caches fail closed and refresh
+  without exposing unrelated runtime details to users.
+- Improved Discord CTK3 and GIF presentation with GUI-matched piece colors,
+  connected garbage rendering, reply-based original-file retrieval, bounded
+  attachment lifetimes, and consistent no-solution responses that omit
+  unnecessary files.
+- Added dedicated structural searches for T-Spins, T-Spin Minis, All-Mini(+),
+  and All-Spin(+), together with additional forward-search command surfaces.
+  Accelerated their shared traversal and result paths while retaining the
+  existing highest-damage, general-spin, PC, build, and setup search semantics
+  and exact pruning boundaries.
+- Applied complete-row normalization once at search ingress so initially full
+  rows are cleared before search and exported CTK3 results reflect the normalized
+  field. Image rendering intentionally preserves the supplied rows rather than
+  applying gameplay line clears.
+- Extended the native CLI with the same bounded multi-worker execution contract
+  used by the WASM runtime, including automatic allocation, explicit full-CPU
+  use, and a hard cap at the logical processors available to the host.
+- Improved the CTK GUI drawer with automatic tetromino color inference,
+  discoverable color shortcuts, working `.ctk3` drag-and-drop and keyboard
+  controls, up to 100 preview frames in either direction, and stable frame
+  navigation that no longer shifts the surrounding page.
+- Hardened the public operational boundary with resolved command and timing
+  fields plus bounded diagnostic detail, while keeping credentials, private
+  management policy, and administrator-only implementation outside public logs
+  and release artifacts.
+
 ## 0.6.2 - 2026-08-02
 
 - Fixed the Discord/Cloud Run worker-authority boundary so a single automatic

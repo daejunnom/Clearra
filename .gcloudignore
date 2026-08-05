@@ -17,6 +17,9 @@ id_ed25519*
 id_rsa*
 *credentials*.json
 *service-account*.json
+# Local deployment overlay
+/apps/clearra-discord-bot/src/admin/
+/apps/clearra-discord-bot/test/admin-*.test.mjs
 /models/
 /checkpoints/
 *.benchmark.json

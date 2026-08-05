@@ -351,6 +351,55 @@ mod case_product_acceptance_scenario_simple_4l_fixture_solves_visible_tall_board
     }
 }
 
+#[cfg(feature = "native-c-core")]
+mod case_completed_initial_row_pc_equivalence {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use crate::service::pc_service::PcService;
+
+    #[test]
+    fn raw_completed_row_matches_normalized_result_and_ctk_initial_board() {
+        let query = |board| {
+            PcScenarioQuery::new(
+                board,
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                    PieceKind::O,
+                    PieceKind::I,
+                    PieceKind::I,
+                ])),
+                PieceWindow::new(3),
+            )
+            .with_exact_pieces(Some(3))
+            .with_retained_trace_limit(1)
+        };
+        let raw = query(PcScenarioBoard::standard_10(2, 0x0000_0000_0003_ffff));
+        let normalized = query(PcScenarioBoard::standard_10(2, 0xff));
+        let raw_problem = ProblemCompiler::compile_scenario_pc(&raw).expect("raw problem");
+        let normalized_problem =
+            ProblemCompiler::compile_scenario_pc(&normalized).expect("normalized problem");
+
+        assert_eq!(raw_problem, normalized_problem);
+        let raw_result = PcService::execute(&raw_problem).expect("raw execution");
+        let normalized_result =
+            PcService::execute(&normalized_problem).expect("normalized execution");
+
+        assert_eq!(raw_result, normalized_result);
+        assert_eq!(raw_result.field("visible_height"), Some("2"));
+        assert_eq!(
+            raw_result.field("initial_board_mask"),
+            Some("0x00000000000000ff")
+        );
+        assert!(!raw_result.normalized_solution_keys().is_empty());
+        assert!(raw_result
+            .normalized_solution_keys()
+            .iter()
+            .all(|key| key.starts_with("ctk1|initial=00000000000000ff|placements=")));
+    }
+}
+
 #[cfg(not(feature = "native-c-core"))]
 mod case_pc_service_preserves_scenario_fixture_trace_key_contract {
     use super::*;

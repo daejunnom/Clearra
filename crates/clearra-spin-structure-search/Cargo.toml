@@ -1,0 +1,19 @@
+[package]
+name = "clearra-spin-structure-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-piece-registry = { path = "../clearra-piece-registry" }
+clearra-replay = { path = "../clearra-replay" }
+clearra-rules = { path = "../clearra-rules" }
+clearra-scoring = { path = "../clearra-scoring" }
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

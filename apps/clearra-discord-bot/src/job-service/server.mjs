@@ -1,6 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
+import { canonicalClearraOperationalCommand } from "../clearra/command.mjs";
+import { writeOperationalLog } from "../operational-log.mjs";
+
 const JOB_PROTOCOL = "clearra.job.v1";
 const JOB_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -9,6 +12,8 @@ export class ClearraJobService {
     this.config = config;
     this.runner = runner;
     this.now = options.now ?? Date.now;
+    this.logger = options.logger ?? console;
+    this.operationalScope = options.operationalScope ?? null;
     this.jobs = new Map();
     this.activeJobs = 0;
     this.server = createServer((request, response) => {
@@ -168,6 +173,20 @@ export class ClearraJobService {
     } finally {
       entry.completedAt = this.now();
       this.activeJobs = Math.max(0, this.activeJobs - 1);
+      if (this.operationalScope) {
+        writeOperationalLog(this.logger, {
+          scope: this.operationalScope,
+          kind: "search",
+          command: canonicalClearraOperationalCommand(job.arguments),
+          status:
+            entry.state === "completed"
+              ? "succeeded"
+              : entry.state === "cancelled"
+                ? "cancelled"
+                : "failed",
+          durationMs: entry.completedAt - entry.createdAt,
+        });
+      }
     }
     return entry.terminal;
   }
@@ -303,8 +322,11 @@ function jobIdFromPath(pathname) {
 }
 
 function jobDigest(job) {
+  // A retry may have less time remaining, but it must still join the original
+  // semantic command. The first accepted request continues to own its deadline.
+  const { deadlineUnixMs: _deadlineUnixMs, ...identity } = job;
   return createHash("sha256")
-    .update(JSON.stringify(job))
+    .update(JSON.stringify(identity))
     .digest("hex");
 }
 

@@ -81,6 +81,9 @@ fn backend_report_from_render_model(render_model: &AppRenderModel) -> BackendRep
     if render_model.forward_search_result().is_some() {
         return BackendReport::new("cpu", "wasm-cpu-forward-search", None::<String>);
     }
+    if render_model.spin_structure_result().is_some() {
+        return BackendReport::new("cpu", "cpu-spin-structure", None::<String>);
+    }
     let Some(result) = render_model.core_result() else {
         return BackendReport::default();
     };

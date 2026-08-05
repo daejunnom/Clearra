@@ -35,13 +35,28 @@ fn pc_text_default_is_human_sized() {
     assert!(rendered.contains("status: searched"));
     assert!(rendered.contains("lines: 2"));
     assert!(rendered.contains("queue_len: 7"));
-    assert!(rendered.contains("coverage_probability: 1.0"));
+    assert!(rendered.contains("coverage_probability: 100%"));
     assert!(!rendered.contains("executor_flow"));
     assert!(!rendered.contains("compact_problem_descriptor"));
     assert!(!rendered.contains("gpu_backend_scope"));
     assert!(!rendered.contains("hybrid_scheduler"));
     assert!(!rendered.contains("score_event_basis"));
     assert!(!rendered.contains("coverage_row_view"));
+}
+
+#[test]
+fn probability_is_percent_only_at_the_human_text_boundary() {
+    let message = RenderMessage::new("percent")
+        .with_value("coverage_probability", RenderFieldValue::number("0.625"))
+        .with_value("probability_complete", true);
+
+    let text = RenderFormatDispatcher::render(&message, RenderFormat::Text);
+    let json = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+
+    assert!(text.contains("coverage_probability: 62.5%"));
+    assert!(text.contains("probability_complete: true"));
+    assert!(json.contains("\"coverage_probability\":0.625"));
+    assert!(message.fumen_pages()[0].contains("coverage_probability=0.625"));
 }
 
 #[test]
@@ -84,14 +99,29 @@ fn json_exposes_solution_artifacts_only_when_the_host_requests_them() {
     let exposed = RenderMessage::new("pc")
         .with_value("solution_data_requested", true)
         .with_value(
+            "regular",
+            RenderFieldValue::array([RenderFieldValue::string("large-regular-payload")]),
+        )
+        .with_value(
+            "mini",
+            RenderFieldValue::array([RenderFieldValue::string("large-mini-payload")]),
+        )
+        .with_value(
             "solution_keys",
             RenderFieldValue::array([RenderFieldValue::string("ctk1|example")]),
+        )
+        .with_value(
+            "solution_classes",
+            RenderFieldValue::array([RenderFieldValue::string("regular")]),
         );
     let exposed = RenderFormatDispatcher::render(&exposed, RenderFormat::Json);
     assert!(exposed.contains("\"summary\":{}"));
     assert!(exposed.contains("\"artifacts\""));
     assert!(exposed.contains("\"schema_version\":\"clearra.solution-data.v1\""));
     assert!(exposed.contains("ctk1|example"));
+    assert!(exposed.contains("\"solution_classes\":[\"regular\"]"));
+    assert!(!exposed.contains("large-regular-payload"));
+    assert!(!exposed.contains("large-mini-payload"));
 }
 
 #[test]

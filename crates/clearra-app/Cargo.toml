@@ -35,6 +35,7 @@ clearra-problem = { path = "../clearra-problem" }
 clearra-replay = { path = "../clearra-replay" }
 clearra-rules = { path = "../clearra-rules" }
 clearra-scoring = { path = "../clearra-scoring" }
+clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-validation = { path = "../clearra-validation" }
 
 [dev-dependencies]

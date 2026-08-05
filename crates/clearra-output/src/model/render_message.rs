@@ -62,10 +62,28 @@ impl RenderMessage {
                 self.fields
                     .iter()
                     .filter(|field| include_in_text_profile(&self.kind, field.key(), profile))
-                    .map(|field| TextWriter::line(field.key(), field.value().as_text())),
+                    .map(|field| TextWriter::line(field.key(), text_field_value(field))),
             )
             .collect()
     }
+}
+
+fn text_field_value(field: &RenderField) -> String {
+    let raw = field.value().as_text();
+    if field.key() != "probability"
+        && !field.key().ends_with("_probability")
+        && !field.key().ends_with("_probability_mass")
+    {
+        return raw;
+    }
+    let Ok(probability) = raw.parse::<f64>() else {
+        return raw;
+    };
+    if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
+        return raw;
+    }
+    let rendered = format!("{:.12}", probability * 100.0);
+    format!("{}%", rendered.trim_end_matches('0').trim_end_matches('.'))
 }
 impl RenderMessage {
     pub fn json_contract(&self) -> JsonContract {

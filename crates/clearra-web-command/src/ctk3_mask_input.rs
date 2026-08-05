@@ -11,6 +11,10 @@ pub(crate) struct Ctk3BoardMask {
 }
 
 impl Ctk3BoardMask {
+    pub(crate) const fn words(self) -> [u64; 4] {
+        self.words
+    }
+
     pub(crate) const fn is_empty(self) -> bool {
         self.words[0] == 0 && self.words[1] == 0 && self.words[2] == 0 && self.words[3] == 0
     }

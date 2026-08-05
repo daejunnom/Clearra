@@ -8,11 +8,26 @@ const NEXT_MAX_LENGTH = 2048;
 const SETTINGS_MAX_LENGTH = 256;
 const VERIFY_SCOPES = new Set(["pc", "setup", "cover", "build", "kicks"]);
 const SPIN_TYPES = new Set(["TSS", "TSD", "TST", "TSPIN", "T-SPIN", "ANY"]);
+const SPIN_STRUCTURE_PROFILES = new Set([
+  "t-spins",
+  "t-spins-plus",
+  "all-mini",
+  "all-mini-plus",
+  "all-spin",
+  "all-spin-plus",
+]);
+const BUILTIN_KICKTABLES = new Set(["srs-plus", "srs", "srs-x", "jstris-180"]);
 const FUMEN_PAYLOAD_PATTERN = /^(?:v115|[Ddm]115)@[A-Za-z0-9+/?]+$/;
 const FUMEN_V110_PATTERN = /v110@[A-Za-z0-9+/?]+/i;
 const CTK3_PREFIX_PATTERN = /^ctk3(?:b_|_|@)/i;
+const COMPACT_GRID_PREFIX_PATTERN = /^grid:/i;
 const CTK3_COLORS = new Set(["G", "I", "O", "T", "S", "Z", "J", "L"]);
 const FUMEN_COLORS = new Set(["X", "GRAY", "I", "O", "T", "S", "Z", "J", "L"]);
+const GRID_OCCUPIED_PATTERN = /^[+■#1XGIOTSZJL]$/i;
+const GRID_EMPTY_PATTERN = /^[C~□._0]$/i;
+
+export const DISCORD_PC_FIELD_MAX_ROWS = 6;
+export const DISCORD_WIDE_FIELD_MAX_ROWS = 24;
 
 export function buildSlashCommandArguments(command, rawOptions = []) {
   if (!command || command.kind !== "search") {
@@ -22,20 +37,41 @@ export function buildSlashCommandArguments(command, rawOptions = []) {
 
   switch (command.input) {
     case "pc":
-      return fieldAndNextArguments(command, values, pcSettings(command, values));
+      return fieldAndNextArguments(command, values, [
+        ...pcSettings(command, values),
+        ...kicktableArguments(values),
+      ]);
     case "cover":
       return coverArguments(command, values);
     case "colored":
-      return fieldAndNextArguments(command, values);
+      return fieldAndNextArguments(command, values, kicktableArguments(values), {
+        wideField: true,
+      });
     case "spin":
-      return fieldAndNextArguments(command, values, spinSettings(command, values));
+      return fieldAndNextArguments(command, values, [
+        ...spinSettings(command, values),
+        ...kicktableArguments(values),
+      ], { wideField: true });
     case "fixed-next":
-      return fieldAndNextArguments(command, values, [], { fixedNext: true });
+      return fieldAndNextArguments(command, values, kicktableArguments(values), {
+        fixedNext: true,
+        wideField: true,
+      });
+    case "score-fixed-next":
+      return fieldAndNextArguments(command, values, [
+        ...catFinderSettings(command, values),
+        ...kicktableArguments(values),
+      ], {
+        fixedNext: true,
+      });
     case "remaining":
       return [
         ...command.argvPrefix,
         pieceInventory(requiredText(values, "remaining", 64)),
+        ...kicktableArguments(values),
       ];
+    case "spin-structure":
+      return spinStructureArguments(command, values);
     case "verify": {
       const scope = optionalText(values, "scope", 16)?.toLowerCase();
       if (scope && !VERIFY_SCOPES.has(scope)) {
@@ -48,6 +84,37 @@ export function buildSlashCommandArguments(command, rawOptions = []) {
   }
 }
 
+export function buildSlashCommandArgumentSets(command, rawOptions = []) {
+  return buildSlashCommandArgumentPlan(command, rawOptions).argumentSets;
+}
+
+export function buildSlashCommandArgumentPlan(command, rawOptions = []) {
+  const arguments_ = buildSlashCommandArguments(command, rawOptions);
+  if (command?.input !== "pc" || arguments_.includes("--lines")) {
+    return Object.freeze({
+      argumentSets: Object.freeze([Object.freeze(arguments_)]),
+      automaticPcTargets: false,
+    });
+  }
+
+  const values = optionValues(rawOptions, allowedOptionNames(command.input));
+  const next = requiredText(values, "next", NEXT_MAX_LENGTH);
+  const pieceCount = queuePatternPieceCount(next);
+  const maskIndex = arguments_.indexOf("--field-mask-v1");
+  const occupied = BigInt(`0x${arguments_[maskIndex + 1]}`);
+  const lines = automaticPcLines({ occupied, pieceCount });
+  return Object.freeze({
+    argumentSets: Object.freeze(
+      lines.map((lineCount) => Object.freeze([
+        ...arguments_,
+        "--lines",
+        String(lineCount),
+      ])),
+    ),
+    automaticPcTargets: true,
+  });
+}
+
 export function readHelpArgument(rawOptions = []) {
   const values = optionValues(rawOptions, new Set(["arguments"]));
   return optionalText(values, "arguments", 64) ?? "";
@@ -56,19 +123,44 @@ export function readHelpArgument(rawOptions = []) {
 export function normalizeSearchField(source, options = {}) {
   const name = options.name ?? "field";
   const maxBits = options.maxBits ?? 64;
+  const maxRows = options.maxRows ?? (
+    maxBits > 64 ? DISCORD_WIDE_FIELD_MAX_ROWS : DISCORD_PC_FIELD_MAX_ROWS
+  );
   const value = requiredString(source, name, FIELD_MAX_LENGTH);
   const input = extractSlashFieldSource(value);
-  return input.format === "fumen"
-    ? readFumenSearchField(input.source, { maxBits, name })
-    : readCtk3SearchField(input.source, { maxBits, name });
+  switch (input.format) {
+    case "grid":
+      return readGridSearchField(input.source, { maxBits, maxRows, name });
+    case "fumen":
+      return readFumenSearchField(input.source, { maxBits, maxRows, name });
+    case "ctk3":
+      return readCtk3SearchField(input.source, { maxBits, maxRows, name });
+    default:
+      throw new Error(`${name} has an unsupported field format.`);
+  }
+}
+
+// Discord's slash-command composer is a rich-text editor. A pasted multi-line
+// #/_ board can therefore be interpreted as message formatting before the
+// interaction is submitted. Those boards are collected in the plain-text
+// Modal instead; compact `grid:row/row` values remain safe for direct slash
+// options and are decoded by the same authoritative grid parser.
+export function requiresDiscordFieldModal(source) {
+  return typeof source === "string" && /[\r\n]/.test(source);
 }
 
 function fieldAndNextArguments(command, values, trailing = [], options = {}) {
-  const field = normalizeSearchField(values.get("field"));
+  const wideField = options.wideField === true;
+  const field = normalizeSearchField(values.get("field"), {
+    maxBits: wideField ? 240 : 64,
+    maxRows: wideField
+      ? DISCORD_WIDE_FIELD_MAX_ROWS
+      : DISCORD_PC_FIELD_MAX_ROWS,
+  });
   const next = validatedNext(values, options.fixedNext);
   return [
     ...command.argvPrefix,
-    "--field-mask-v1",
+    wideField ? "--board-mask-v1" : "--field-mask-v1",
     field.mask,
     options.fixedNext ? "--queue" : "--patterns",
     next,
@@ -80,10 +172,12 @@ function coverArguments(command, values) {
   const base = normalizeSearchField(values.get("base"), {
     name: "base",
     maxBits: 240,
+    maxRows: DISCORD_WIDE_FIELD_MAX_ROWS,
   });
   const target = normalizeSearchField(values.get("target"), {
     name: "target",
     maxBits: 240,
+    maxRows: DISCORD_WIDE_FIELD_MAX_ROWS,
   });
   if (target.occupied === 0n) {
     throw new Error("target must contain at least one occupied cell.");
@@ -107,6 +201,40 @@ function coverArguments(command, values) {
     "--patterns",
     next,
     ...coverSettings(command, values),
+    ...kicktableArguments(values),
+  ];
+}
+
+function spinStructureArguments(command, values) {
+  const pieces = pieceInventory(
+    requiredText(values, "pieces", 64),
+    "pieces",
+  );
+  const field = normalizeSearchField(values.get("field"), {
+    maxBits: 240,
+    maxRows: DISCORD_WIDE_FIELD_MAX_ROWS,
+  });
+  const lines = (optionalText(values, "lines", 8) ?? "1+").toLowerCase();
+  if (!/^(?:any|[0-4]|[1-4]\+)$/.test(lines)) {
+    throw new Error("lines must be any, 0 through 4, or 1+ through 4+.");
+  }
+  const profile = (optionalText(values, "profile", 32) ?? "t-spins")
+    .toLowerCase()
+    .replaceAll("_", "-");
+  if (!SPIN_STRUCTURE_PROFILES.has(profile)) {
+    throw new Error("profile must be T-Spins, T-Spins+, All-Mini(+), or All-Spin(+).");
+  }
+  return [
+    ...command.argvPrefix,
+    "--board-mask-v1",
+    field.mask,
+    "--pieces",
+    pieces,
+    "--lines",
+    lines,
+    "--spin-profile",
+    profile,
+    ...kicktableArguments(values),
   ];
 }
 
@@ -118,12 +246,22 @@ function validatedNext(values, fixed) {
   if (fixed && !/^[IOTSZJL]+$/i.test(next)) {
     throw new Error("next must be an exact queue containing only IOTSZJL pieces.");
   }
-  return next;
+  return fixed ? next.toUpperCase() : next;
 }
 
 function extractSlashFieldSource(value) {
   if (/^https?:\/\//i.test(value)) return extractSourceFromUrl(value);
-  return classifyDocumentSource(value);
+  const source = String(value).trim();
+  if (CTK3_PREFIX_PATTERN.test(source) || /^(?:v11[05]|[Ddm]115)@/i.test(source)) {
+    return classifyDocumentSource(source);
+  }
+  if (COMPACT_GRID_PREFIX_PATTERN.test(source)) {
+    return Object.freeze({
+      format: "grid",
+      source: source.slice(source.indexOf(":") + 1).split("/").join("\n"),
+    });
+  }
+  return Object.freeze({ format: "grid", source });
 }
 
 function extractSourceFromUrl(value) {
@@ -201,7 +339,11 @@ function readCtk3SearchField(source, options) {
     if (reader.pageCount !== 1) {
       throw new Error(`${options.name} CTK3 must contain exactly one page.`);
     }
-    const occupied = ctk3PageOccupiedMask(reader.readPage(0), 0, options.maxBits);
+    const page = reader.readPage(0);
+    if (page.height > options.maxRows) {
+      throw new Error(`${options.name} CTK3 exceeds the ${options.maxRows}-row limit.`);
+    }
+    const occupied = ctk3PageOccupiedMask(page, 0, options.maxBits);
     return Object.freeze({
       format: "occupied-field",
       sourceFormat: "ctk3",
@@ -263,6 +405,52 @@ function readFumenSearchField(source, options) {
   });
 }
 
+function readGridSearchField(source, options) {
+  const rows = source.replaceAll("\r\n", "\n").split("\n");
+  if (rows.length < 1 || rows.length > options.maxRows) {
+    throw new Error(
+      `${options.name} grid must contain from one through ${rowLimitName(options.maxRows)} rows.`,
+    );
+  }
+  if (rows.some((row) => row.length !== 10)) {
+    throw new Error(`${options.name} grid rows must be exactly 10 columns wide.`);
+  }
+
+  let occupied = 0n;
+  for (let displayY = 0; displayY < rows.length; displayY += 1) {
+    const boardY = rows.length - displayY - 1;
+    for (let x = 0; x < 10; x += 1) {
+      const cell = rows[displayY][x];
+      if (GRID_EMPTY_PATTERN.test(cell)) continue;
+      if (!GRID_OCCUPIED_PATTERN.test(cell)) {
+        throw new Error(
+          `${options.name} grid contains '${cell}' at column ${x + 1}; use # for filled cells and _ for empty cells.`,
+        );
+      }
+      const bitIndex = boardY * 10 + x;
+      if (bitIndex >= options.maxBits) {
+        throw new Error(
+          `${options.name} grid has a cell outside Clearra's ${options.maxBits}-bit field range at (${x}, ${boardY}).`,
+        );
+      }
+      occupied |= 1n << BigInt(bitIndex);
+    }
+  }
+  return Object.freeze({
+    format: "occupied-field",
+    sourceFormat: "grid",
+    occupied,
+    mask: hexMask(occupied, options.maxBits),
+    height: occupiedHeight(occupied),
+  });
+}
+
+function rowLimitName(rows) {
+  if (rows === 6) return "six";
+  if (rows === 24) return "twenty-four";
+  return String(rows);
+}
+
 function ctk3PageOccupiedMask(page, pageIndex, maxBits) {
   if (
     !page ||
@@ -314,6 +502,175 @@ function occupiedHeight(mask) {
   return Math.ceil(bits / 10);
 }
 
+export function automaticPcLines({ occupied, pieceCount }) {
+  if (typeof occupied !== "bigint" || occupied < 0n) {
+    throw new Error("Clearra received an invalid PC field mask.");
+  }
+  const height = occupiedHeight(occupied);
+  if (
+    !Number.isSafeInteger(height) ||
+    height < 0 ||
+    height > DISCORD_PC_FIELD_MAX_ROWS
+  ) {
+    throw new Error("Automatic PC search supports fields up to six rows high.");
+  }
+  if (!Number.isSafeInteger(pieceCount) || pieceCount < 1) {
+    throw new Error("Automatic PC search requires a finite next-pattern length.");
+  }
+  const lines = Array.from(
+    { length: DISCORD_PC_FIELD_MAX_ROWS },
+    (_, index) => index + 1,
+  ).filter((lineCount) => {
+    if (lineCount < height) return false;
+    const target = (1n << BigInt(lineCount * 10)) - 1n;
+    if ((occupied & ~target) !== 0n) return false;
+    const missingCellCount = popcount(target & ~occupied);
+    return missingCellCount > 0 &&
+      missingCellCount % 4 === 0 &&
+      missingCellCount / 4 <= pieceCount;
+  });
+  if (lines.length === 0) {
+    throw new Error(
+      "The field and next length produce no valid automatic PC target from one through six lines.",
+    );
+  }
+  return Object.freeze(lines);
+}
+
+export function queuePatternPieceCount(source) {
+  const normalized = normalizeSfinderPatternForLength(
+    requiredString(source, "next", NEXT_MAX_LENGTH),
+  );
+  const lengths = normalized.split(";").map(patternAlternativeLength);
+  if (lengths.some((length) => length !== lengths[0])) {
+    throw new Error("next pattern alternatives must have the same piece count.");
+  }
+  return lengths[0];
+}
+
+function normalizeSfinderPatternForLength(source) {
+  const characters = [...source];
+  let output = "";
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index];
+    if (/\s/.test(character) || character === ",") continue;
+    if (character === "*") {
+      if (characters[index + 1] === "!") {
+        output += "P7";
+        index += 1;
+        continue;
+      }
+      if (/^[pP]$/.test(characters[index + 1] ?? "")) {
+        output += "P";
+        index += 1;
+        continue;
+      }
+      throw new Error("next '*' must be followed immediately by ! or pN.");
+    }
+    if (/^[pP]$/.test(character) && index > 0 && characters[index - 1] === "]") {
+      continue;
+    }
+    output += asciiUppercase(character);
+  }
+  return output;
+}
+
+function asciiUppercase(character) {
+  const code = character.codePointAt(0);
+  return code >= 0x61 && code <= 0x7a
+    ? String.fromCodePoint(code - 0x20)
+    : character;
+}
+
+function patternAlternativeLength(source) {
+  if (!source) throw new Error("next pattern contains an empty alternative.");
+  let count = 0;
+  let cursor = 0;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (/[IOTSZJL]/.test(character)) {
+      count += 1;
+      cursor += 1;
+      continue;
+    }
+    if (character === "*") {
+      if (source[cursor + 1] === "!") {
+        count += 7;
+        cursor += 2;
+        continue;
+      }
+      if (source[cursor + 1] !== "P") {
+        throw new Error("next '*' must be followed by ! or pN.");
+      }
+      const parsed = readPatternCount(source, cursor + 2);
+      if (parsed.value > 7) {
+        throw new Error("next standard-bag draws may not exceed seven pieces per group.");
+      }
+      count += parsed.value;
+      cursor = parsed.cursor;
+      continue;
+    }
+    if (character === "P") {
+      const parsed = readPatternCount(source, cursor + 1);
+      if (parsed.value > 7) {
+        throw new Error("next standard-bag draws may not exceed seven pieces per group.");
+      }
+      count += parsed.value;
+      cursor = parsed.cursor;
+      continue;
+    }
+    if (character === "[") {
+      const close = source.indexOf("]", cursor + 1);
+      if (close < 0) throw new Error("next pattern has an unterminated piece group.");
+      const group = source.slice(cursor + 1, close);
+      const complement = group.startsWith("^");
+      const pieces = complement ? group.slice(1) : group;
+      if (!pieces || !/^[IOTSZJL]+$/.test(pieces)) {
+        throw new Error("next pattern contains an invalid piece group.");
+      }
+      const unique = new Set(pieces);
+      const groupSize = complement ? 7 - unique.size : unique.size;
+      if (groupSize < 1) {
+        throw new Error("next pattern piece group must leave at least one choice.");
+      }
+      cursor = close + 1;
+      if (source[cursor] === "!") {
+        count += groupSize;
+        cursor += 1;
+        continue;
+      }
+      if (source[cursor] === "P") {
+        throw new Error("next pattern has an unexpected bag token after a piece group.");
+      }
+      if (!/\d/.test(source[cursor] ?? "")) {
+        count += 1;
+        continue;
+      }
+      const parsed = readPatternCount(source, cursor);
+      if (parsed.value > groupSize) {
+        throw new Error("next pattern draws more pieces than its group contains.");
+      }
+      count += parsed.value;
+      cursor = parsed.cursor;
+      continue;
+    }
+    throw new Error(`next pattern contains unsupported token '${character}'.`);
+  }
+  if (count < 1) throw new Error("next pattern must contain at least one piece.");
+  return count;
+}
+
+function readPatternCount(source, cursor) {
+  const start = cursor;
+  while (cursor < source.length && /\d/.test(source[cursor])) cursor += 1;
+  if (cursor === start) throw new Error("next pattern draw count is missing.");
+  const value = Number(source.slice(start, cursor));
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error("next pattern draw count must be a positive integer.");
+  }
+  return { value, cursor };
+}
+
 function popcount(mask) {
   let count = 0;
   while (mask !== 0n) {
@@ -346,7 +703,18 @@ function pcSettings(command, values) {
     ["hold", "hold"],
   ]));
   const output = [];
-  if (settings.has("clear")) {
+  const selectedLines = optionalInteger(
+    values,
+    "lines",
+    1,
+    DISCORD_PC_FIELD_MAX_ROWS,
+  );
+  if (selectedLines !== null && settings.has("clear")) {
+    throw new Error("lines and legacy options clear/lines may not be specified together.");
+  }
+  if (selectedLines !== null) {
+    output.push("--lines", String(selectedLines));
+  } else if (settings.has("clear")) {
     const clear = settings.get("clear");
     if (!/^[1-6]$/.test(clear)) {
       throw new Error("options clear must be an integer from 1 through 6.");
@@ -373,6 +741,26 @@ function spinSettings(command, values) {
     throw new Error("options type must be TSS, TSD, TST, TSPIN, T-SPIN, or ANY; TSM is unavailable.");
   }
   return [type];
+}
+
+function catFinderSettings(command, values) {
+  const settings = parseSettings(command, values, new Map([
+    ["initial_b2b", "initial_b2b"],
+    ["initial-b2b", "initial_b2b"],
+    ["b2b", "initial_b2b"],
+  ]));
+  const output = [];
+  const selectedLines = optionalInteger(values, "lines", 1, 6);
+  if (selectedLines !== null) {
+    output.push("--lines", String(selectedLines));
+  }
+  if (settings.has("initial_b2b")) {
+    output.push(
+      "--initial-b2b",
+      booleanSetting(settings.get("initial_b2b"), "initial_b2b"),
+    );
+  }
+  return output;
 }
 
 function parseSettings(command, values, aliases) {
@@ -416,9 +804,9 @@ function booleanSetting(value, name) {
   }
 }
 
-function pieceInventory(value) {
+function pieceInventory(value, name = "remaining") {
   if (!/^[IOTSZJL]+$/i.test(value)) {
-    throw new Error("remaining must contain only IOTSZJL pieces.");
+    throw new Error(`${name} must contain only IOTSZJL pieces.`);
   }
   return value.toUpperCase();
 }
@@ -426,20 +814,37 @@ function pieceInventory(value) {
 function allowedOptionNames(input) {
   switch (input) {
     case "pc":
+      return new Set(["field", "next", "lines", "options", "kicktable"]);
     case "spin":
-      return new Set(["field", "next", "options"]);
+      return new Set(["field", "next", "options", "kicktable"]);
     case "cover":
-      return new Set(["base", "target", "next", "options"]);
+      return new Set(["base", "target", "next", "options", "kicktable"]);
     case "colored":
     case "fixed-next":
-      return new Set(["field", "next"]);
+      return new Set(["field", "next", "kicktable"]);
+    case "score-fixed-next":
+      return new Set(["field", "next", "lines", "options", "kicktable"]);
     case "remaining":
-      return new Set(["remaining"]);
+      return new Set(["remaining", "kicktable"]);
+    case "spin-structure":
+      return new Set(["pieces", "field", "lines", "profile", "kicktable"]);
     case "verify":
       return new Set(["scope"]);
     default:
       throw new Error(`Unknown slash-command input contract: ${input}`);
   }
+}
+
+function kicktableArguments(values) {
+  const selected = optionalText(values, "kicktable", 32);
+  if (!selected) return [];
+  const normalized = selected.toLowerCase();
+  if (!BUILTIN_KICKTABLES.has(normalized)) {
+    throw new Error(
+      "kicktable must be srs-plus, srs, srs-x, or jstris-180; custom kick tables are unavailable.",
+    );
+  }
+  return ["--rule", normalized];
 }
 
 function optionValues(rawOptions, allowedNames) {
@@ -468,6 +873,18 @@ function requiredText(values, name, maxLength) {
 function optionalText(values, name, maxLength) {
   if (!values.has(name)) return null;
   return requiredString(values.get(name), name, maxLength);
+}
+
+function optionalInteger(values, name, minimum, maximum) {
+  if (!values.has(name)) return null;
+  const raw = values.get(name);
+  const value = typeof raw === "string" && /^\d+$/.test(raw.trim())
+    ? Number(raw.trim())
+    : raw;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} through ${maximum}.`);
+  }
+  return value;
 }
 
 function requiredString(value, name, maxLength) {

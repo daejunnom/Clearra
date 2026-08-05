@@ -83,6 +83,9 @@ export function loadClearraJobServiceConfig(
       64,
     ),
     processLogicalProcessors,
+    expectedVcpus: environment.K_SERVICE
+      ? processLogicalProcessors
+      : undefined,
     searchWorkersPerSession,
     useAllLogicalProcessors:
       useAllLogicalProcessors &&

@@ -4,7 +4,9 @@ import { ClearraJobService } from "./server.mjs";
 
 const config = loadClearraJobServiceConfig();
 const runner = new ClearraCommandRunner(config);
-const service = new ClearraJobService(config, runner);
+const service = new ClearraJobService(config, runner, {
+  operationalScope: "job",
+});
 const address = await service.listen();
 const port = typeof address === "object" && address ? address.port : config.port;
 console.info(
@@ -20,8 +22,8 @@ async function stop() {
   stopping = true;
   try {
     await service.close();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
+  } catch {
+    console.error("Clearra job service shutdown failed.");
     process.exitCode = 1;
   }
 }

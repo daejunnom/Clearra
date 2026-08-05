@@ -17,6 +17,7 @@ const NATIVE_COMMANDS = new Set([
   "build-probability",
   "damage",
   "spin-finder",
+  "spin-structure",
 ]);
 const SFINDER_SEARCH_COMMANDS = new Set([
   "path",
@@ -36,7 +37,7 @@ const SFINDER_SEARCH_COMMANDS = new Set([
   "special-cover",
   "spin-cover",
   "spin",
-  "cat-finder",
+  "score-finder",
   "pc-setup",
   "best-setup",
   "dpc-finder",
@@ -53,7 +54,32 @@ const PARALLEL_SEARCH_COMMANDS = new Set([
   "build-probability",
   "damage",
   "spin-finder",
+  "spin-structure",
 ]);
+
+/**
+ * Returns the canonical, input-free command path that is safe to retain in an
+ * operational record. The array form accepts a prepared Clearra argv; the
+ * string form accepts only an already reduced command path.
+ */
+export function canonicalClearraOperationalCommand(value) {
+  const pathInput = typeof value === "string";
+  const tokens = Array.isArray(value)
+    ? value
+    : pathInput
+      ? value.split(".")
+      : [];
+  const command = normalizedOperationalPart(tokens[0]);
+  if (!command) return null;
+  if (NATIVE_COMMANDS.has(command)) {
+    return !pathInput || tokens.length === 1 ? command : null;
+  }
+  if (command !== "sfinder" || (pathInput && tokens.length !== 2)) return null;
+  const subcommand = normalizedOperationalPart(tokens[1]);
+  if (!subcommand) return null;
+  const canonical = normalizeSfinderCommand(subcommand);
+  return SFINDER_COMMANDS.has(canonical) ? `sfinder.${canonical}` : null;
+}
 const FILE_OPTIONS = new Set([
   "--fixture",
   "--file",
@@ -189,7 +215,6 @@ function normalizeSfinderCommand(value) {
   return ({
     bestsave: "best-save",
     bestsetup: "best-setup",
-    catfinder: "cat-finder",
     congruentcover: "congruent-cover",
     coverpercent: "cover-percent",
     dpcfinder: "dpc-finder",
@@ -199,6 +224,14 @@ function normalizeSfinderCommand(value) {
     specialcover: "special-cover",
     spincover: "spin-cover",
   })[normalized] ?? normalized;
+}
+
+function normalizedOperationalPart(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
+  return /^[a-z0-9][a-z0-9-]{0,31}$/.test(normalized)
+    ? normalized
+    : null;
 }
 
 export function tilingOnlyRequested(arguments_) {
@@ -263,6 +296,9 @@ export class ClearraJobExecutor {
       options.endpoint ?? DEFAULT_JOB_ENDPOINT,
     );
     this.authorizationToken = options.authorizationToken ?? null;
+    if (!this.authorizationToken && !isLoopbackHostname(this.endpoint.hostname)) {
+      throw new Error("A remote Clearra job endpoint requires an authorization token.");
+    }
     this.timeoutMs = positiveExecutorOption(options.timeoutMs, 3 * 60_000);
     this.maxOutputBytes = positiveExecutorOption(
       options.maxOutputBytes,
@@ -434,8 +470,22 @@ function normalizeJobEndpoint(value) {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("Clearra job endpoint must use HTTP or HTTPS.");
   }
+  if (url.username || url.password) {
+    throw new Error("Clearra job endpoint must not contain credentials.");
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new Error("Clearra job endpoint must use HTTPS unless it targets loopback.");
+  }
   url.hash = "";
   return url;
+}
+
+function isLoopbackHostname(hostname) {
+  const normalized = String(hostname).toLowerCase();
+  return normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized);
 }
 
 function positiveExecutorOption(value, fallback) {

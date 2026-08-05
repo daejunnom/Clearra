@@ -1,22 +1,61 @@
 import { availableParallelism as nodeAvailableParallelism } from "node:os";
 
+import { normalizeDiscordLocale } from "./discord/i18n.mjs";
+
 export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
-  const ingressMode = discordIngressMode(
-    environment.CLEARRA_DISCORD_INGRESS,
-    Boolean(environment.K_SERVICE),
-  );
+  assertOracleGatewayHost(environment.K_SERVICE);
+  assertGatewayIngress(environment.CLEARRA_DISCORD_INGRESS);
   const registerCommands = booleanSetting(
     environment.CLEARRA_REGISTER_COMMANDS,
     false,
   );
-  const token = ingressMode === "gateway" || registerCommands
-    ? required(environment, "DISCORD_TOKEN")
-    : environment.DISCORD_TOKEN || null;
+  const token = required(environment, "DISCORD_TOKEN");
   const jobEndpoint = environment.CLEARRA_JOB_URL
     ? httpEndpoint(environment.CLEARRA_JOB_URL)
-    : ingressMode === "cloud-run"
-      ? null
-      : httpEndpoint("http://127.0.0.1:8787/jobs");
+    : httpEndpoint("http://127.0.0.1:8787/jobs");
+  const jobToken = environment.CLEARRA_JOB_TOKEN || null;
+  if (environment.CLEARRA_JOB_URL && !jobToken) {
+    throw new Error("CLEARRA_JOB_TOKEN is required with CLEARRA_JOB_URL.");
+  }
+  const oracleRenderEnabled = booleanSetting(
+    environment.CLEARRA_ORACLE_RENDER_ENABLED,
+    false,
+  );
+  const oracleTextEnabled = booleanSetting(
+    environment.CLEARRA_ORACLE_TEXT_ENABLED,
+    false,
+  );
+  if (oracleTextEnabled && !oracleRenderEnabled) {
+    throw new Error(
+      "CLEARRA_ORACLE_TEXT_ENABLED requires CLEARRA_ORACLE_RENDER_ENABLED=1.",
+    );
+  }
+  if (oracleTextEnabled && !environment.CLEARRA_JOB_URL) {
+    throw new Error(
+      "CLEARRA_ORACLE_TEXT_ENABLED requires an explicit CLEARRA_JOB_URL.",
+    );
+  }
+  const oracleAllowedChannelIds = snowflakeList(
+    environment.CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS,
+    "CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS",
+  );
+  const discordAdminUserIds = snowflakeList(
+    environment.CLEARRA_DISCORD_ADMIN_USER_IDS,
+    "CLEARRA_DISCORD_ADMIN_USER_IDS",
+  );
+  const oracleAllowAllTextChannels = booleanSetting(
+    environment.CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS,
+    false,
+  );
+  if (
+    oracleTextEnabled &&
+    oracleAllowedChannelIds.length === 0 &&
+    !oracleAllowAllTextChannels
+  ) {
+    throw new Error(
+      "Oracle text ingress requires CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS or explicit CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1.",
+    );
+  }
   const workerAuthority = workerAuthoritySetting(
     environment.CLEARRA_WORKER_AUTHORITY,
     environment.CLEARRA_JOB_URL ? "remote" : "gateway",
@@ -35,8 +74,8 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     Math.min(14 * 60_000, searchTimeoutMs + 60_000),
     14 * 60_000,
     "CLEARRA_INTERACTION_DEADLINE_MS",
+    " milliseconds",
   );
-
   let maxConcurrentSearches;
   let searchWorkersPerSession;
   let effectiveUseAllLogicalProcessors;
@@ -87,22 +126,9 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
   return {
     token,
     applicationId: environment.DISCORD_APPLICATION_ID || null,
-    publicKey:
-      ingressMode === "cloud-run"
-        ? required(environment, "DISCORD_PUBLIC_KEY")
-        : environment.DISCORD_PUBLIC_KEY || null,
-    ingressMode,
-    listenHost: environment.CLEARRA_LISTEN_HOST || "0.0.0.0",
-    port: positiveInteger(environment.PORT, 8080),
-    interactionPath: httpPath(
-      environment.CLEARRA_DISCORD_INTERACTION_PATH || "/interactions",
-    ),
-    maxInteractionBodyBytes: positiveInteger(
-      environment.CLEARRA_MAX_INTERACTION_BODY_BYTES,
-      1024 * 1024,
-    ),
+    ingressMode: "gateway",
     jobEndpoint,
-    jobToken: environment.CLEARRA_JOB_TOKEN || null,
+    jobToken,
     jobPollIntervalMs: positiveInteger(
       environment.CLEARRA_JOB_POLL_INTERVAL_MS,
       250,
@@ -112,8 +138,15 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
       2_000,
     ),
     viewerBaseUrl:
-      environment.CLEARRA_VIEWER_URL ||
-      "https://daejunnom.github.io/Clearra/",
+      environment.CLEARRA_VIEWER_URL || "https://daejunnom.github.io/Clearra/",
+    defaultLocale: discordLocaleSetting(
+      environment.CLEARRA_DISCORD_DEFAULT_LOCALE,
+    ),
+    localeStorePath:
+      environment.CLEARRA_DISCORD_LOCALE_STORE?.trim() || null,
+    accessStorePath:
+      environment.CLEARRA_DISCORD_ACCESS_STORE?.trim() || null,
+    discordAdminUserIds,
     registerCommands,
     searchTimeoutMs,
     interactionDeadlineMs,
@@ -137,6 +170,66 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     maxCtk3FileBytes: positiveInteger(
       environment.CLEARRA_MAX_CTK3_FILE_BYTES,
       24 * 1024 * 1024,
+    ),
+    oracleRenderEnabled,
+    oracleTextEnabled,
+    oracleAllowedChannelIds,
+    oracleAllowAllTextChannels,
+    oracleCommandPrefixes: Object.freeze(["$", ">"]),
+    oracleMaxInputChars: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_INPUT_CHARS,
+      2_000,
+      2_000,
+      "CLEARRA_ORACLE_MAX_INPUT_CHARS",
+    ),
+    oracleMaxPages: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_PAGES,
+      128,
+      128,
+      "CLEARRA_ORACLE_MAX_PAGES",
+    ),
+    oracleMaxCtk3FileBytes: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_CTK3_FILE_BYTES,
+      8 * 1024 * 1024,
+      10 * 1024 * 1024,
+      "CLEARRA_ORACLE_MAX_CTK3_FILE_BYTES",
+    ),
+    oracleMaxGifBytes: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_GIF_BYTES,
+      8 * 1024 * 1024,
+      10 * 1024 * 1024,
+      "CLEARRA_ORACLE_MAX_GIF_BYTES",
+    ),
+    oracleRenderTimeoutMs: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_RENDER_TIMEOUT_MS,
+      10_000,
+      30_000,
+      "CLEARRA_ORACLE_RENDER_TIMEOUT_MS",
+      " milliseconds",
+    ),
+    oracleMaxConcurrentMessages: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_CONCURRENT_MESSAGES,
+      2,
+      8,
+      "CLEARRA_ORACLE_MAX_CONCURRENT_MESSAGES",
+    ),
+    oracleMaxPendingMessages: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_PENDING_MESSAGES,
+      4,
+      32,
+      "CLEARRA_ORACLE_MAX_PENDING_MESSAGES",
+    ),
+    oracleMaxPendingSelfMessages: boundedPositiveInteger(
+      environment.CLEARRA_ORACLE_MAX_PENDING_SELF_MESSAGES,
+      4,
+      32,
+      "CLEARRA_ORACLE_MAX_PENDING_SELF_MESSAGES",
+    ),
+    oracleUserCooldownMs: boundedNonNegativeInteger(
+      environment.CLEARRA_ORACLE_USER_COOLDOWN_MS,
+      5_000,
+      60_000,
+      "CLEARRA_ORACLE_USER_COOLDOWN_MS",
     ),
     workerAuthority,
     maxConcurrentSearches,
@@ -174,17 +267,29 @@ function positiveInteger(value, fallback) {
   return parsed;
 }
 
-function boundedPositiveInteger(value, fallback, maximum, name) {
+function boundedPositiveInteger(value, fallback, maximum, name, unit = "") {
   const parsed = positiveInteger(value, fallback);
   if (parsed > maximum) {
-    throw new Error(`${name} must not exceed ${maximum} milliseconds.`);
+    throw new Error(`${name} must not exceed ${maximum}${unit}.`);
+  }
+  return parsed;
+}
+
+function boundedNonNegativeInteger(value, fallback, maximum, name) {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+    throw new Error(`${name} must be between 0 and ${maximum}.`);
   }
   return parsed;
 }
 
 function automaticWorkerSetting(value) {
-  return value === undefined || value === "" ||
-    (typeof value === "string" && value.toLowerCase() === "auto");
+  return (
+    value === undefined ||
+    value === "" ||
+    (typeof value === "string" && value.toLowerCase() === "auto")
+  );
 }
 
 function booleanSetting(value, fallback) {
@@ -202,26 +307,24 @@ function workerAuthoritySetting(value, fallback) {
   return authority;
 }
 
-function discordIngressMode(value, runningOnCloudRun) {
-  const mode = value || (runningOnCloudRun ? "cloud-run" : "gateway");
-  if (mode !== "cloud-run" && mode !== "gateway") {
-    throw new Error(
-      "CLEARRA_DISCORD_INGRESS must be cloud-run or gateway.",
-    );
-  }
-  return mode;
+function assertGatewayIngress(value) {
+  if (value === undefined || value === "" || value === "gateway") return;
+  throw new Error(
+    "CLEARRA_DISCORD_INGRESS no longer supports HTTP interaction ingress; use gateway.",
+  );
 }
 
-function httpPath(value) {
+function assertOracleGatewayHost(cloudRunService) {
   if (
-    typeof value !== "string" ||
-    !value.startsWith("/") ||
-    value.includes("?") ||
-    value.includes("#")
+    cloudRunService === undefined ||
+    cloudRunService === null ||
+    String(cloudRunService).trim() === ""
   ) {
-    throw new Error("CLEARRA_DISCORD_INTERACTION_PATH is invalid.");
+    return;
   }
-  return value;
+  throw new Error(
+    "The Discord Gateway runtime must run on Oracle, not Cloud Run.",
+  );
 }
 
 function httpEndpoint(value) {
@@ -234,8 +337,44 @@ function httpEndpoint(value) {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("CLEARRA_JOB_URL must use HTTP or HTTPS.");
   }
+  if (url.username || url.password) {
+    throw new Error("CLEARRA_JOB_URL must not contain credentials.");
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new Error(
+      "CLEARRA_JOB_URL must use HTTPS unless it targets loopback.",
+    );
+  }
   url.hash = "";
   return url.href;
+}
+
+function isLoopbackHostname(hostname) {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized)
+  );
+}
+
+function snowflakeList(value, settingName) {
+  if (value === undefined || value.trim() === "") return Object.freeze([]);
+  const ids = value.split(/[\s,]+/).filter(Boolean);
+  if (ids.some((id) => !/^\d{17,20}$/.test(id))) {
+    throw new Error(`${settingName} is invalid.`);
+  }
+  return Object.freeze([...new Set(ids)]);
+}
+
+function discordLocaleSetting(value) {
+  if (value === undefined || value === "") return "en";
+  const candidate = String(value).trim().toLowerCase().replaceAll("_", "-");
+  if (!/^(?:en|ko)(?:-|$)/.test(candidate)) {
+    throw new Error("CLEARRA_DISCORD_DEFAULT_LOCALE must be en or ko.");
+  }
+  return normalizeDiscordLocale(candidate);
 }
 
 function runtimeLogicalProcessorCount(runtime) {

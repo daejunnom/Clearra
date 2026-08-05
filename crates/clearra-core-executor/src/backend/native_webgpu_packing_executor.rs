@@ -803,9 +803,8 @@ mod tests {
             .expect("connected WebGPU session");
         let (batches, catalog) =
             geometry_exact_cover_batches(&compact, &policy, &cancellation).expect("WebGPU batches");
-        let host_workers = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1);
+        let host_workers =
+            clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit();
         let gpu = run_webgpu_batches(&batches, catalog, session, &cancellation, host_workers)
             .expect("WebGPU packing");
         let mut materializer = NativeCandidateReducer::new(&compact).expect("candidate reducer");

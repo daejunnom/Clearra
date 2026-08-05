@@ -2,7 +2,7 @@ use crate::commands::{
     BuildProbabilityAppCommand, ContinueAppCommand, ConvertAppCommand, CoverAppCommand,
     DamageAppCommand, InspectUnsupportedAppCommand, PathAppCommand, PcAppCommand,
     PercentAppCommand, RulesAppCommand, ScenarioAppCommand, ScoringAppCommand, SetupAppCommand,
-    SpinFinderAppCommand, VerifyAppCommand,
+    SpinFinderAppCommand, SpinStructureAppCommand, VerifyAppCommand,
 };
 use crate::{app_context::AppExecutionContext, app_response::AppResponse};
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;
@@ -40,6 +40,7 @@ pub enum AppCommand {
     BuildProbability(BuildProbabilityAppCommand),
     Damage(DamageAppCommand),
     SpinFinder(SpinFinderAppCommand),
+    SpinStructure(SpinStructureAppCommand),
     Cover(CoverAppCommand),
     Rules(RulesAppCommand),
     Scoring(ScoringAppCommand),
@@ -60,6 +61,7 @@ impl AppCommand {
             Self::BuildProbability(_) => AppCommandKind::BuildProbability,
             Self::Damage(_) => AppCommandKind::Damage,
             Self::SpinFinder(_) => AppCommandKind::SpinFinder,
+            Self::SpinStructure(_) => AppCommandKind::SpinStructure,
             Self::Cover(_) => AppCommandKind::Cover,
             Self::Rules(_) => AppCommandKind::Rules,
             Self::Scoring(_) => AppCommandKind::Scoring,
@@ -88,6 +90,7 @@ impl AppCommand {
             Self::BuildProbability(_) => QueryEnvelope::BuildProbability,
             Self::Damage(_) => QueryEnvelope::Damage,
             Self::SpinFinder(_) => QueryEnvelope::SpinFinder,
+            Self::SpinStructure(_) => QueryEnvelope::SpinStructure,
             Self::Cover(_) => QueryEnvelope::BuildCoverage,
             Self::Rules(_) => QueryEnvelope::Rules,
             Self::Scoring(_) => QueryEnvelope::Scoring,
@@ -141,7 +144,9 @@ impl AppCommand {
                     .execution_policy()
                     .allow_backend_fallback(),
             ),
-            Self::Damage(_) | Self::SpinFinder(_) => BackendPolicy::new("cpu", false),
+            Self::Damage(_) | Self::SpinFinder(_) | Self::SpinStructure(_) => {
+                BackendPolicy::new("cpu", false)
+            }
             Self::Path(command) => BackendPolicy::new(
                 command
                     .query()
@@ -205,7 +210,7 @@ impl AppCommand {
             ),
             Self::BuildProbability(command) => !command.query().aggregation().is_tiling_only(),
             Self::Percent(_) => true,
-            Self::Damage(_) | Self::SpinFinder(_) => false,
+            Self::Damage(_) | Self::SpinFinder(_) | Self::SpinStructure(_) => false,
             _ => false,
         }
     }
@@ -220,7 +225,9 @@ impl RunnableAppCommand for AppCommand {
             Self::Percent(command) => command.validate(),
             Self::Setup(command) => validate_setup_search_query(command.query()),
             Self::BuildProbability(_) => DiagnosticReport::new(),
-            Self::Damage(_) | Self::SpinFinder(_) => DiagnosticReport::new(),
+            Self::Damage(_) | Self::SpinFinder(_) | Self::SpinStructure(_) => {
+                DiagnosticReport::new()
+            }
             Self::Cover(command) => validate_build_coverage_query(command.query()),
             Self::Rules(command) => command.validate(),
             Self::Scoring(command) => command.validate(),
@@ -249,6 +256,7 @@ impl RunnableAppCommand for AppCommand {
             Self::BuildProbability(command) => command.run(context),
             Self::Damage(command) => command.run(context),
             Self::SpinFinder(command) => command.run(context),
+            Self::SpinStructure(command) => command.run(context),
             Self::Cover(command) => command.run(context),
             Self::Rules(command) => command.run(context),
             Self::Scoring(command) => command.run(context),
