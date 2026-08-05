@@ -406,12 +406,12 @@ void full_placement_domain_rejects_overlapping_exact_owner_sets(void) {
             UINT64_C(0xff),
             &propagation),
         CLEARRA_GEOMETRY_DOMAIN_EMPTY);
-    EXPECT_TRUE(propagation.same_tile_certificate_count > 1u);
-    EXPECT_TRUE(
-        (propagation.pivot_required_cells & UINT64_C(0x04)) != 0u);
-    EXPECT_TRUE(
-        (propagation.pivot_required_cells & UINT64_C(0x08)) != 0u);
-    EXPECT_TRUE(propagation.pivot_support_count == 0u);
+    EXPECT_U64(propagation.same_tile_certificate_count, 1u);
+    EXPECT_U64(propagation.pivot_required_cells, UINT64_C(0xff));
+    EXPECT_U64(propagation.pivot_cell, 0u);
+    EXPECT_U64(propagation.pivot_support_count, 0u);
+    EXPECT_U64(propagation.pivot_filtered_row_count, 2u);
+    EXPECT_U64(propagation.pivot_piece_mask, 0u);
     EXPECT_TRUE(propagation.evidence_digest != 0u);
 }
 
