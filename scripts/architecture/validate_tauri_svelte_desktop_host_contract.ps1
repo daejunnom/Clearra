@@ -70,7 +70,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     }
     $guiHostDependency = [regex]::Match(
         $tauriCargo,
-        '(?m)^clearra-gui-host\s*=\s*\{[^\r\n]*$'
+        '(?m)^clearra-gui-host\s*=\s*\{[^\r\n]*(?=\r?$)'
     ).Value
     if ($guiHostDependency -notmatch '"wasm-cpu-runtime"') {
         Add-ArchitectureError "U6 desktop product must enable the exact WASM CPU execution backend"

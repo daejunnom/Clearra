@@ -27,6 +27,11 @@ $result = Invoke-ArchitectureValidation `
     -WarningDetailLimit $WarningDetailLimit
 
 if ($result.Status -eq "Failed") {
+    if (-not [string]::IsNullOrWhiteSpace($TaskName)) {
+        foreach ($errorMessage in @($result.Errors)) {
+            [Console]::Error.WriteLine("architecture error: $errorMessage")
+        }
+    }
     exit 1
 }
 
