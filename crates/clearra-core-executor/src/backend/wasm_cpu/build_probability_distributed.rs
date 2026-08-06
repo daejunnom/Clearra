@@ -536,6 +536,7 @@ fn apply_backend_execution(
 ) -> CoreExecutionResult {
     use super::distributed::WasmDistributedBackendExecution;
 
+    let hybrid_requested = result.field("backend_requested") == Some("hybrid");
     let cpu_backend = if result.field("board_storage") == Some("board256-canonical") {
         "wasm-cpu-build-probability-extended"
     } else {
@@ -554,8 +555,12 @@ fn apply_backend_execution(
             field("backend_selected", cpu_backend),
             field("actual_backend", cpu_backend),
             field("backend_fallback_used", true),
+            field("fallback_used", true),
             field("backend_fallback_reason", reason),
             field("fallback_backend", cpu_backend),
+            field("gpu_available", false),
+            field("gpu_disabled_reason", reason),
+            field("gpu_trust_state", "fallback-used"),
             field("gpu_failure_class", failure_class),
             field("gpu_failure_stage", failure_stage),
             field("discarded_partial_gpu_result", discarded_partial_gpu_result),
@@ -578,8 +583,21 @@ fn apply_backend_execution(
             field("backend_selected", "webgpu"),
             field("actual_backend", "webgpu"),
             field("backend_fallback_used", false),
+            field("fallback_used", false),
             field("backend_fallback_reason", "none"),
             field("fallback_backend", "none"),
+            field("gpu_available", true),
+            field("gpu_disabled_reason", "none"),
+            field("gpu_trust_state", "gpu-computed-cpu-confirmed"),
+            field(
+                "hybrid_status",
+                if hybrid_requested {
+                    "gpu-ready"
+                } else {
+                    "not-requested"
+                },
+            ),
+            field("hybrid_disabled_reason", "none"),
             field("gpu_failure_class", "none"),
             field("gpu_failure_stage", "none"),
             field("discarded_partial_gpu_result", false),

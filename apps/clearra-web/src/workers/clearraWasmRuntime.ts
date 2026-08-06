@@ -566,6 +566,10 @@ function wrapRawModule(
       const labels = ['serial', 'cpu-multi', 'gpu-multi'] as const;
       const requestedLabels = ['auto', 'cpu', 'gpu', 'hybrid'] as const;
       const fallbackReasonCode = raw.clearra_wasm_distributed_preparation_fallback_reason();
+      const fallbackReasonLabels = {
+        1: 'gpu_kernel_unavailable',
+        2: 'gpu_device_not_found'
+      } as const;
       const selectedMode = labels[mode] ?? 'serial';
       requireOk(raw.clearra_wasm_distributed_worker_initialization());
       const initialization = outputBytes();
@@ -576,7 +580,8 @@ function wrapRawModule(
           requestedLabels[raw.clearra_wasm_distributed_requested_backend()] ?? 'auto',
         selectedBackend: selectedMode === 'gpu-multi' ? 'webgpu' : 'wasm-cpu',
         fallbackUsed: fallbackReasonCode !== 0,
-        fallbackReason: fallbackReasonCode === 1 ? 'gpu_kernel_unavailable' : null,
+        fallbackReason:
+          fallbackReasonLabels[fallbackReasonCode as keyof typeof fallbackReasonLabels] ?? null,
         workerInitialization: initialization.byteLength === 0 ? null : initialization,
         deferredInitialization:
           raw.clearra_wasm_distributed_worker_initialization_deferred() !== 0,

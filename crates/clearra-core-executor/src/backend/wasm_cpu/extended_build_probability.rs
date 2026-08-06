@@ -793,15 +793,47 @@ impl ExtendedBuildProbabilitySession {
         } else {
             "board256"
         };
+        let backend_requested = self.problem.backend_policy().requested_backend().as_str();
+        let gpu_capability_requested = matches!(backend_requested, "gpu" | "hybrid");
+        let hybrid_requested = backend_requested == "hybrid";
         let fields = vec![
-            field(
-                "backend_requested",
-                self.problem.backend_policy().requested_backend().as_str(),
-            ),
+            field("backend_requested", backend_requested),
             field("backend_selected", "wasm-cpu-build-probability-extended"),
             field("actual_backend", "wasm-cpu-build-probability-extended"),
+            field(
+                "backend_fallback_allowed",
+                self.problem.backend_policy().allow_backend_fallback(),
+            ),
             field("backend_fallback_used", false),
+            field("fallback_used", false),
             field("backend_fallback_reason", "none"),
+            field("fallback_backend", "none"),
+            field("gpu_available", false),
+            field(
+                "gpu_disabled_reason",
+                if gpu_capability_requested {
+                    "gpu_kernel_unavailable"
+                } else {
+                    "not_requested"
+                },
+            ),
+            field("gpu_trust_state", "not-used"),
+            field(
+                "hybrid_status",
+                if hybrid_requested {
+                    "cpu-selected"
+                } else {
+                    "not-requested"
+                },
+            ),
+            field(
+                "hybrid_disabled_reason",
+                if hybrid_requested {
+                    "gpu_kernel_unavailable"
+                } else {
+                    "not_requested"
+                },
+            ),
             field("workers_requested", self.problem.backend_policy().workers()),
             field("workers_used", self.workers_used),
             field("cpu_parallel_execution", self.workers_used > 1),

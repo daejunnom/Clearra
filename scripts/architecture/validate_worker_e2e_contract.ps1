@@ -339,7 +339,8 @@ foreach ($requiredMarker in @(
             "Add-WorkerE2EJsonFieldValues",
             "Get-WorkerE2EJsonFieldScalar",
             "Assert-WorkerE2EJsonFieldEquals",
-            "Assert-WorkerE2EJsonFieldSame"
+            "Assert-WorkerE2EJsonFieldSame",
+            "reported inconsistent values"
         )) {
         if ($workerE2EJsonAssertions -notlike "*$requiredMarker*") {
             Add-ArchitectureError "scripts/lib/worker-e2e-json-assertions.ps1 must enforce WorkerE2E JSON marker '$requiredMarker'"
@@ -350,6 +351,9 @@ foreach ($requiredMarker in @(
             "Assert-WorkerE2EBackendEquivalence",
             "Assert-WorkerE2EBackendSolutionSetMatchesSource",
             "Assert-WorkerE2EBackendGateIsNotSilentlyEnabled",
+            "Assert-WorkerE2EGpuUnavailableReason",
+            "Assert-WorkerE2EHybridUnavailableReason",
+            "Assert-WorkerE2ENoFallbackReason",
             "backend_fallback_reason",
             "actual_solution_set_contract",
             "normalized_solution_key_algorithm",
@@ -357,7 +361,12 @@ foreach ($requiredMarker in @(
             "normalized_solution_set_hash",
             "actual_normalized_unique_solution_count",
             "actual_normalized_solution_set_hash",
-            "gpu_kernel_unavailable"
+            "gpu_backend_not_connected",
+            "gpu_device_not_found",
+            "gpu_kernel_unavailable",
+            "gpu_transient_before_commit",
+            "gpu_resource_incomplete",
+            "cpu-selected"
         )) {
         if ($workerE2EBackendAssertions -notlike "*$requiredMarker*") {
             Add-ArchitectureError "scripts/lib/worker-e2e-backend-assertions.ps1 must enforce WorkerE2E backend marker '$requiredMarker'"

@@ -260,10 +260,10 @@ pub(super) fn assert_stage_d_backend_equivalence(
         product_contract_json_assert::bool_field(gpu_with_fallback, "backend_fallback_used"),
         true
     );
-    assert_eq!(
-        product_contract_json_assert::string_field(gpu_with_fallback, "backend_fallback_reason"),
-        "gpu_kernel_unavailable"
-    );
+    assert_gpu_unavailable_reason(product_contract_json_assert::string_field(
+        gpu_with_fallback,
+        "backend_fallback_reason",
+    ));
 
     assert_eq!(
         product_contract_json_assert::string_field(hybrid_with_fallback, "backend_requested"),
@@ -273,13 +273,13 @@ pub(super) fn assert_stage_d_backend_equivalence(
         product_contract_json_assert::string_field(hybrid_with_fallback, "backend_selected"),
         "cpu"
     );
+    assert!(!product_contract_json_assert::bool_field(
+        hybrid_with_fallback,
+        "backend_fallback_used",
+    ));
     assert_eq!(
-        product_contract_json_assert::bool_field(hybrid_with_fallback, "backend_fallback_used"),
-        true
-    );
-    assert_eq!(
-        product_contract_json_assert::string_field(hybrid_with_fallback, "backend_fallback_reason"),
-        "gpu_kernel_unavailable"
+        backend_report_optional_string(hybrid_with_fallback, "backend_fallback_reason"),
+        None
     );
 }
 

@@ -58,6 +58,7 @@ pub enum WasmDistributedRequestedBackend {
 pub enum WasmDistributedFallbackReason {
     None = 0,
     GpuKernelUnavailable = 1,
+    GpuDeviceNotFound = 2,
 }
 
 pub enum WasmDistributedPreparation {
@@ -273,30 +274,40 @@ impl WasmDistributedCoordinator {
         }
         let requested_backend = problem.backend_policy().requested_backend();
         let distributed_requested_backend = requested_backend.into();
-        let explicit_gpu = matches!(
-            requested_backend,
-            RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid
-        );
+        let explicit_gpu = requested_backend == RequestedSearchBackend::Gpu;
         let webgpu_connected = build_probability_request.is_none()
             && problem.backend_policy().runtime_webgpu_available()
             && cfg!(feature = "webgpu-search");
         if explicit_gpu && !webgpu_connected && !problem.backend_policy().allow_backend_fallback() {
             return Ok(WasmDistributedPreparation::Serial);
         }
-        let backend_execution_override = (explicit_gpu && !webgpu_connected).then_some(
+        let unavailable_gpu = (explicit_gpu && !webgpu_connected).then(|| {
+            if build_probability_request.is_some()
+                || problem.backend_policy().runtime_webgpu_available()
+            {
+                (
+                    "gpu_kernel_unavailable",
+                    WasmDistributedFallbackReason::GpuKernelUnavailable,
+                )
+            } else {
+                (
+                    "gpu_device_not_found",
+                    WasmDistributedFallbackReason::GpuDeviceNotFound,
+                )
+            }
+        });
+        let backend_execution_override = unavailable_gpu.map(|(reason, _)| {
             clearra_core_executor::WasmDistributedBackendExecution::CpuFallback {
-                reason: "gpu_kernel_unavailable",
+                reason,
                 failure_class: "unavailable",
                 failure_stage: "capability-query",
                 discarded_partial_gpu_result: false,
                 original_gpu_result_incomplete: false,
-            },
-        );
-        let preparation_fallback_reason = if backend_execution_override.is_some() {
-            WasmDistributedFallbackReason::GpuKernelUnavailable
-        } else {
-            WasmDistributedFallbackReason::None
-        };
+            }
+        });
+        let preparation_fallback_reason = unavailable_gpu
+            .map(|(_, reason)| reason)
+            .unwrap_or(WasmDistributedFallbackReason::None);
         let selected_product_backend = build_probability_request
             .is_none()
             .then(|| WasmCpuSearchBackend::selected_product_backend(problem));

@@ -63,6 +63,55 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn unavailable_gpu_and_hybrid_keep_distinct_cpu_selection_semantics() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+
+    let gpu = runtime
+        .run_command_text(
+            "clearra pc --lines 2 --backend gpu --allow-backend-fallback \
+             --workers 1 --queue IIOOO",
+        )
+        .expect("explicit GPU fallback result");
+    assert_eq!(gpu.app_response().status(), AppStatus::Success);
+    assert!(gpu.app_response().backend_report().fallback_used());
+    assert_eq!(
+        gpu.app_response()
+            .backend_report()
+            .backend_fallback_reason(),
+        Some("gpu_device_not_found")
+    );
+    assert!(gpu.webgpu_backend().fallback_used);
+    assert_eq!(
+        gpu.webgpu_backend().fallback_backend.as_deref(),
+        Some("wasm-cpu")
+    );
+    assert_eq!(
+        gpu.webgpu_backend().webgpu_unavailable_reason.as_deref(),
+        Some("gpu_device_not_found")
+    );
+
+    let hybrid = runtime
+        .run_command_text(
+            "clearra pc --lines 2 --backend hybrid --no-backend-fallback \
+             --workers 1 --queue IIOOO",
+        )
+        .expect("hybrid CPU selection result");
+    assert_eq!(hybrid.app_response().status(), AppStatus::Success);
+    assert_eq!(
+        hybrid.app_response().backend_report().backend_selected(),
+        "wasm-cpu"
+    );
+    assert!(!hybrid.app_response().backend_report().fallback_used());
+    assert!(!hybrid.webgpu_backend().fallback_used);
+    assert_eq!(hybrid.webgpu_backend().fallback_backend, None);
+    assert_eq!(
+        hybrid.webgpu_backend().webgpu_unavailable_reason.as_deref(),
+        Some("gpu_device_not_found")
+    );
+}
+
+#[test]
 fn tiling_only_returns_exact_geometry_without_buildup_or_probability() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
@@ -229,6 +278,105 @@ fn build_probability_tiling_only_returns_geometry_without_buildup_or_coverage() 
     assert_eq!(report.total_build_order_nodes, 0);
     assert_eq!(report.coverage_product_edge_checks, 0);
     assert!(report.count_complete);
+}
+
+#[test]
+fn build_probability_explicit_gpu_fallback_is_reported_as_an_unsupported_kernel() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, true, false));
+    let result = runtime
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+             --queue I --hold empty --no-mirror --tiling-only --backend gpu \
+             --allow-backend-fallback --workers 1",
+        )
+        .expect("build-probability CPU fallback result");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    assert_eq!(
+        result.app_response().backend_report().backend_selected(),
+        "wasm-cpu-build-probability"
+    );
+    assert!(result.app_response().backend_report().fallback_used());
+    assert_eq!(
+        result
+            .app_response()
+            .backend_report()
+            .backend_fallback_reason(),
+        Some("gpu_kernel_unavailable")
+    );
+    assert_eq!(
+        result.app_response().backend_report().fallback_backend(),
+        Some("wasm-cpu-build-probability")
+    );
+    assert!(result.webgpu_backend().fallback_used);
+    assert_eq!(
+        result.webgpu_backend().webgpu_unavailable_reason.as_deref(),
+        Some("gpu_kernel_unavailable")
+    );
+}
+
+#[test]
+fn build_probability_explicit_gpu_without_fallback_is_unsupported() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, true, false));
+    let result = runtime
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+             --queue I --hold empty --no-mirror --tiling-only --backend gpu \
+             --no-backend-fallback --workers 1",
+        )
+        .expect("unsupported build-probability response");
+
+    assert_eq!(result.app_response().status(), AppStatus::Unsupported);
+    let diagnostic = result
+        .app_response()
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code() == "E_PRODUCT_RUNTIME_UNSUPPORTED")
+        .expect("unsupported build-probability diagnostic");
+    assert!(diagnostic.message().contains("webgpu_backend_unavailable"));
+    assert!(!result.app_response().backend_report().fallback_used());
+    assert_eq!(
+        result.app_response().backend_report().backend_selected(),
+        "none"
+    );
+}
+
+#[test]
+fn build_probability_hybrid_unavailable_selects_cpu_without_fallback() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, true, false));
+    let result = runtime
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+             --queue I --hold empty --no-mirror --tiling-only --backend hybrid \
+             --no-backend-fallback --workers 1",
+        )
+        .expect("hybrid build-probability CPU result");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    assert_eq!(
+        result.app_response().backend_report().backend_selected(),
+        "wasm-cpu-build-probability"
+    );
+    assert!(!result.app_response().backend_report().fallback_used());
+    assert_eq!(
+        result
+            .app_response()
+            .backend_report()
+            .backend_fallback_reason(),
+        None
+    );
+    assert_eq!(
+        result.app_response().backend_report().fallback_backend(),
+        None
+    );
+    assert!(!result.webgpu_backend().fallback_used);
+    assert_eq!(
+        result.webgpu_backend().webgpu_unavailable_reason.as_deref(),
+        Some("gpu_kernel_unavailable")
+    );
 }
 
 #[test]
@@ -657,6 +805,152 @@ fn visible_seven_pc_uses_the_global_serial_policy_finalizer() {
     .expect("visible-seven distributed preparation");
 
     assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+}
+
+#[test]
+fn unavailable_gpu_distributed_preparation_is_an_explicit_cpu_fallback() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra pc --lines 4 --count unique --backend gpu \
+                   --allow-backend-fallback --workers 2 --queue IOTSZJLIOTS";
+    let preparation =
+        WasmDistributedCoordinator::prepare(&runtime, command).expect("GPU CPU fallback");
+
+    match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => {
+            assert_eq!(coordinator.mode(), WasmDistributedMode::CpuMulti);
+            assert_eq!(
+                coordinator.requested_backend(),
+                WasmDistributedRequestedBackend::Gpu
+            );
+            assert_eq!(
+                coordinator.preparation_fallback_reason(),
+                WasmDistributedFallbackReason::GpuDeviceNotFound
+            );
+        }
+        _ => panic!("fallback-enabled GPU request must preserve the distributed CPU path"),
+    }
+
+    let result = run_distributed_cpu(&runtime, command);
+    assert!(result.app_response().backend_report().fallback_used());
+    assert_eq!(
+        result
+            .app_response()
+            .backend_report()
+            .backend_fallback_reason(),
+        Some("gpu_device_not_found")
+    );
+    assert!(result.webgpu_backend().fallback_used);
+    assert_eq!(
+        result.webgpu_backend().webgpu_unavailable_reason.as_deref(),
+        Some("gpu_device_not_found")
+    );
+}
+
+#[test]
+fn unavailable_hybrid_distributed_preparation_selects_cpu_without_fallback() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra pc --lines 4 --count unique --backend hybrid \
+                   --no-backend-fallback --workers 2 --queue IOTSZJLIOTS";
+    let preparation =
+        WasmDistributedCoordinator::prepare(&runtime, command).expect("hybrid CPU selection");
+
+    match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => {
+            assert_eq!(coordinator.mode(), WasmDistributedMode::CpuMulti);
+            assert_eq!(
+                coordinator.requested_backend(),
+                WasmDistributedRequestedBackend::Hybrid
+            );
+            assert_eq!(
+                coordinator.preparation_fallback_reason(),
+                WasmDistributedFallbackReason::None
+            );
+        }
+        _ => panic!("hybrid request must preserve the distributed CPU path"),
+    }
+
+    let result = run_distributed_cpu(&runtime, command);
+    assert_eq!(
+        result.app_response().backend_report().backend_selected(),
+        "wasm-cpu"
+    );
+    assert!(!result.app_response().backend_report().fallback_used());
+    assert!(!result.webgpu_backend().fallback_used);
+    assert_eq!(result.webgpu_backend().fallback_backend, None);
+    assert_eq!(
+        result.webgpu_backend().webgpu_unavailable_reason.as_deref(),
+        Some("gpu_device_not_found")
+    );
+}
+
+#[test]
+fn build_probability_gpu_distributed_preparation_uses_kernel_fallback() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, true, false));
+    let command = "clearra build-probability --base-mask 0x0 \
+                   --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI \
+                   --no-hold --no-mirror --tiling-only --backend gpu \
+                   --allow-backend-fallback --workers 2";
+    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
+        .expect("build-probability GPU fallback preparation");
+
+    match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => {
+            assert_eq!(coordinator.mode(), WasmDistributedMode::CpuMulti);
+            assert_eq!(
+                coordinator.requested_backend(),
+                WasmDistributedRequestedBackend::Gpu
+            );
+            assert_eq!(
+                coordinator.preparation_fallback_reason(),
+                WasmDistributedFallbackReason::GpuKernelUnavailable
+            );
+        }
+        _ => panic!("fallback-enabled build-probability must preserve the CPU distributed path"),
+    }
+}
+
+#[test]
+fn build_probability_gpu_distributed_preparation_defers_denied_fallback_to_serial_contract() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, true, false));
+    let command = "clearra build-probability --base-mask 0x0 \
+                   --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI \
+                   --no-hold --no-mirror --tiling-only --backend gpu \
+                   --no-backend-fallback --workers 2";
+    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
+        .expect("serial unsupported contract preparation");
+
+    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+}
+
+#[test]
+fn build_probability_hybrid_distributed_preparation_selects_cpu_without_fallback() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, true, false));
+    let command = "clearra build-probability --base-mask 0x0 \
+                   --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI \
+                   --no-hold --no-mirror --tiling-only --backend hybrid \
+                   --no-backend-fallback --workers 2";
+    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
+        .expect("hybrid build-probability preparation");
+
+    match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => {
+            assert_eq!(coordinator.mode(), WasmDistributedMode::CpuMulti);
+            assert_eq!(
+                coordinator.requested_backend(),
+                WasmDistributedRequestedBackend::Hybrid
+            );
+            assert_eq!(
+                coordinator.preparation_fallback_reason(),
+                WasmDistributedFallbackReason::None
+            );
+        }
+        _ => panic!("hybrid build-probability must preserve the CPU distributed path"),
+    }
 }
 
 #[cfg(feature = "webgpu-search")]

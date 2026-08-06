@@ -10,7 +10,9 @@ mod product_backend_capability_assert;
 mod product_contract_json_assert;
 
 use product_backend_capability_assert::{
-    assert_u0_backend_capability_report, backend_report_bool, backend_report_string,
+    assert_gpu_unavailable_reason, assert_hybrid_unavailable_reason,
+    assert_u0_backend_capability_report, backend_report_bool, backend_report_optional_string,
+    backend_report_string,
 };
 
 #[path = "product_contract_e2e/support.rs"]
@@ -81,14 +83,11 @@ mod case_gpu_unavailable_reports_reason {
     fn gpu_unavailable_reports_reason() {
         let (_, gpu_with_fallback, _) = opening_2l_backend_values();
 
-        assert_eq!(
-            backend_report_string(&gpu_with_fallback, "gpu_disabled_reason"),
-            "gpu_kernel_unavailable"
-        );
-        assert_eq!(
-            backend_report_string(&gpu_with_fallback, "backend_fallback_reason"),
-            "gpu_kernel_unavailable"
-        );
+        let disabled_reason = backend_report_string(&gpu_with_fallback, "gpu_disabled_reason");
+        let fallback_reason = backend_report_string(&gpu_with_fallback, "backend_fallback_reason");
+        assert_gpu_unavailable_reason(disabled_reason);
+        assert_gpu_unavailable_reason(fallback_reason);
+        assert_eq!(fallback_reason, disabled_reason);
     }
 }
 
@@ -101,12 +100,15 @@ mod case_hybrid_disabled_reports_reason {
 
         assert_eq!(
             backend_report_string(&hybrid_with_fallback, "hybrid_status"),
-            "disabled"
+            "cpu-selected"
         );
-        assert_eq!(
-            backend_report_string(&hybrid_with_fallback, "hybrid_disabled_reason"),
-            "gpu_kernel_unavailable"
-        );
+        let gpu_disabled_reason =
+            backend_report_string(&hybrid_with_fallback, "gpu_disabled_reason");
+        let hybrid_disabled_reason =
+            backend_report_string(&hybrid_with_fallback, "hybrid_disabled_reason");
+        assert_hybrid_unavailable_reason(gpu_disabled_reason);
+        assert_hybrid_unavailable_reason(hybrid_disabled_reason);
+        assert_eq!(gpu_disabled_reason, hybrid_disabled_reason);
     }
 }
 
@@ -117,17 +119,25 @@ mod case_fallback_used_reports_reason {
     fn fallback_used_reports_reason() {
         let (_, gpu_with_fallback, hybrid_with_fallback) = opening_2l_backend_values();
 
-        for (value, expected_reason) in [
-            (&gpu_with_fallback, "gpu_kernel_unavailable"),
-            (&hybrid_with_fallback, "gpu_kernel_unavailable"),
-        ] {
-            assert!(backend_report_bool(value, "fallback_used"));
-            assert_eq!(backend_report_string(value, "fallback_backend"), "cpu");
-            assert_eq!(
-                backend_report_string(value, "backend_fallback_reason"),
-                expected_reason
-            );
-        }
+        assert!(backend_report_bool(&gpu_with_fallback, "fallback_used"));
+        assert_eq!(
+            backend_report_string(&gpu_with_fallback, "fallback_backend"),
+            "cpu"
+        );
+        assert_gpu_unavailable_reason(backend_report_string(
+            &gpu_with_fallback,
+            "backend_fallback_reason",
+        ));
+
+        assert!(!backend_report_bool(&hybrid_with_fallback, "fallback_used"));
+        assert_eq!(
+            backend_report_string(&hybrid_with_fallback, "fallback_backend"),
+            "none"
+        );
+        assert_eq!(
+            backend_report_optional_string(&hybrid_with_fallback, "backend_fallback_reason"),
+            None
+        );
     }
 }
 

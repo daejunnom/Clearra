@@ -41,7 +41,15 @@ function ConvertFrom-WorkerE2EJsonOutput([string]$Text) {
     if ($values.Count -eq 0) {
         throw "expected field '$FieldName' to exist"
     }
-    return ConvertTo-WorkerE2EScalar $values[0]
+    $actualValues = @(
+        $values.ToArray() |
+            ForEach-Object { ConvertTo-WorkerE2EScalar $_ } |
+            Sort-Object -Unique
+    )
+    if ($actualValues.Count -ne 1) {
+        throw "field '$FieldName' reported inconsistent values '$($actualValues -join ', ')'"
+    }
+    return $actualValues[0]
 }function Assert-WorkerE2EJsonFieldEquals(
     [object]$Json,
     [string]$FieldName,

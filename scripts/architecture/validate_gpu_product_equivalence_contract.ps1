@@ -1,10 +1,13 @@
 # This file is dot-sourced by scripts/lib/architecture-validation.ps1.
-# Native GPU has no connected default implementation. Product equivalence is
-# therefore CPU-vs-explicit-fallback plus no-fallback rejection.
+# Native GPU availability depends on both the runtime device and the connected
+# kernel implementation. Product equivalence therefore accepts either explicit
+# unavailable reason while still requiring CPU parity and no-fallback rejection.
 
 function Invoke-GpuProductEquivalenceContractValidation() {
     $e2e = @(
         Read-Text 'scripts/product-e2e.ps1'
+        Read-Text 'scripts/lib/product-e2e-run.ps1'
+        Read-Text 'scripts/lib/product-e2e-typed-assertions.ps1'
         Read-Text 'crates/clearra-cli/tests/product_contract_e2e.rs'
         Read-Text 'crates/clearra-cli/tests/product_contract_e2e/support.rs'
     ) -join "`n"
@@ -13,7 +16,15 @@ function Invoke-GpuProductEquivalenceContractValidation() {
         'product_backend_cpu_gpu_hybrid_same_scenario_4l',
         'product_gpu_no_fallback_returns_error_when_unavailable',
         'product_gpu_allow_fallback_reports_reason',
-        'backend_fallback_used', 'gpu_kernel_unavailable'
+        'backend_fallback_used',
+        'Assert-ProductE2EJsonFieldGpuUnavailableReason',
+        'Assert-ProductE2EJsonFieldHybridUnavailableReason',
+        'Assert-ProductE2EJsonFieldNoFallbackReason',
+        'Assert-ProductE2EJsonFieldUniqueEquals',
+        'Assert-ProductE2EGpuCpuFallbackReport',
+        'Assert-ProductE2EHybridCpuSelectionReport',
+        'gpu_backend_not_connected', 'gpu_device_not_found', 'gpu_kernel_unavailable',
+        'cpu-selected', 'reported inconsistent values'
     )) {
         if ($e2e -notlike "*$required*") {
             Add-ArchitectureError "GPU unavailable/fallback ProductE2E is missing '$required'"

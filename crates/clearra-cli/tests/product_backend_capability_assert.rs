@@ -21,6 +21,34 @@ pub fn backend_report_bool(json: &Value, field: &str) -> bool {
         .unwrap_or_else(|| panic!("backend_report.{field} bool must be present"))
 }
 
+pub fn backend_report_optional_string<'a>(json: &'a Value, field: &str) -> Option<&'a str> {
+    let value = backend_report(json)
+        .get(field)
+        .unwrap_or_else(|| panic!("backend_report.{field} must be present"));
+    match value {
+        Value::Null => None,
+        Value::String(value) => Some(value.as_str()),
+        _ => panic!("backend_report.{field} must be a string or null"),
+    }
+}
+
+pub fn assert_gpu_unavailable_reason(reason: &str) {
+    assert!(
+        matches!(reason, "gpu_device_not_found" | "gpu_kernel_unavailable"),
+        "unsupported GPU unavailable reason: {reason}"
+    );
+}
+
+pub fn assert_hybrid_unavailable_reason(reason: &str) {
+    assert!(
+        matches!(
+            reason,
+            "gpu_backend_not_connected" | "gpu_device_not_found" | "gpu_kernel_unavailable"
+        ),
+        "unsupported hybrid unavailable reason: {reason}"
+    );
+}
+
 pub fn assert_backend_report_has_u0_surface(json: &Value) {
     let report = backend_report(json);
     for field in [
@@ -62,6 +90,10 @@ pub fn assert_u0_backend_capability_report(cpu: &Value, gpu_with_fallback: &Valu
     assert!(!backend_report_bool(cpu, "gpu_available"));
     assert!(!backend_report_bool(cpu, "fallback_used"));
     assert_eq!(backend_report_string(cpu, "fallback_backend"), "none");
+    assert_eq!(
+        backend_report_optional_string(cpu, "backend_fallback_reason"),
+        None
+    );
     assert_eq!(backend_report_string(cpu, "hybrid_status"), "not-requested");
 
     assert_eq!(
@@ -73,31 +105,58 @@ pub fn assert_u0_backend_capability_report(cpu: &Value, gpu_with_fallback: &Valu
         "cpu"
     );
     assert!(!backend_report_bool(gpu_with_fallback, "gpu_available"));
-    assert_eq!(
-        backend_report_string(gpu_with_fallback, "gpu_disabled_reason"),
-        "gpu_kernel_unavailable"
-    );
+    let gpu_disabled_reason = backend_report_string(gpu_with_fallback, "gpu_disabled_reason");
+    assert_gpu_unavailable_reason(gpu_disabled_reason);
     assert!(backend_report_bool(gpu_with_fallback, "fallback_used"));
     assert_eq!(
         backend_report_string(gpu_with_fallback, "fallback_backend"),
         "cpu"
     );
-    assert_eq!(
-        backend_report_string(gpu_with_fallback, "backend_fallback_reason"),
-        "gpu_kernel_unavailable"
-    );
+    let gpu_fallback_reason = backend_report_string(gpu_with_fallback, "backend_fallback_reason");
+    assert_gpu_unavailable_reason(gpu_fallback_reason);
+    assert_eq!(gpu_fallback_reason, gpu_disabled_reason);
 
     assert_eq!(backend_report_string(hybrid, "backend_requested"), "hybrid");
     assert_eq!(backend_report_string(hybrid, "backend_selected"), "cpu");
-    assert!(backend_report_bool(hybrid, "fallback_used"));
-    assert_eq!(backend_report_string(hybrid, "fallback_backend"), "cpu");
-    assert_eq!(backend_report_string(hybrid, "hybrid_status"), "disabled");
+    assert!(!backend_report_bool(hybrid, "fallback_used"));
+    assert_eq!(backend_report_string(hybrid, "fallback_backend"), "none");
     assert_eq!(
-        backend_report_string(hybrid, "hybrid_disabled_reason"),
-        "gpu_kernel_unavailable"
+        backend_report_optional_string(hybrid, "backend_fallback_reason"),
+        None
     );
     assert_eq!(
-        backend_report_string(hybrid, "backend_fallback_reason"),
-        "gpu_kernel_unavailable"
+        backend_report_string(hybrid, "hybrid_status"),
+        "cpu-selected"
     );
+    let gpu_disabled_reason = backend_report_string(hybrid, "gpu_disabled_reason");
+    let hybrid_disabled_reason = backend_report_string(hybrid, "hybrid_disabled_reason");
+    assert_hybrid_unavailable_reason(gpu_disabled_reason);
+    assert_hybrid_unavailable_reason(hybrid_disabled_reason);
+    assert_eq!(gpu_disabled_reason, hybrid_disabled_reason);
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::backend_report_optional_string;
+
+    #[test]
+    fn optional_backend_report_string_distinguishes_null_from_wrong_json_types() {
+        let null_reason = json!({
+            "contract": { "pc": { "backend_report": { "backend_fallback_reason": null } } }
+        });
+        assert_eq!(
+            backend_report_optional_string(&null_reason, "backend_fallback_reason"),
+            None
+        );
+
+        let wrong_type = json!({
+            "contract": { "pc": { "backend_report": { "backend_fallback_reason": false } } }
+        });
+        assert!(std::panic::catch_unwind(|| {
+            backend_report_optional_string(&wrong_type, "backend_fallback_reason")
+        })
+        .is_err());
+    }
 }

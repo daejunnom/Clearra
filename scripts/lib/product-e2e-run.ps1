@@ -234,17 +234,9 @@ function Invoke-ProductE2EBackendParityCase {
                 Assert-ProductE2EJsonFieldSame $json["cpu"] $json["hybrid"] $field
             }
 
-            Assert-ProductE2EJsonFieldEquals $json["cpu"] "backend_requested" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["cpu"] "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["cpu"] "backend_fallback_used" "false"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_requested" "gpu"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_fallback_used" "true"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_fallback_reason" "gpu_kernel_unavailable"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_requested" "hybrid"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_fallback_used" "true"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_fallback_reason" "gpu_kernel_unavailable"
+            Assert-ProductE2ECpuSelectionReport $json["cpu"]
+            Assert-ProductE2EGpuCpuFallbackReport $json["gpu"]
+            Assert-ProductE2EHybridCpuSelectionReport $json["hybrid"]
         } catch {
             $status = "failed"
             $errorMessage = New-ProductE2EFailureMessage `
@@ -377,17 +369,9 @@ function Invoke-ProductE2EBackendEquivalenceCase(
                 Assert-ProductE2EJsonFieldSame $json["cpu"] $json["hybrid"] $field
             }
 
-            Assert-ProductE2EJsonFieldEquals $json["cpu"] "backend_requested" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["cpu"] "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["cpu"] "backend_fallback_used" "false"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_requested" "gpu"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_fallback_used" "true"
-            Assert-ProductE2EJsonFieldEquals $json["gpu"] "backend_fallback_reason" "gpu_kernel_unavailable"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_requested" "hybrid"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_fallback_used" "true"
-            Assert-ProductE2EJsonFieldEquals $json["hybrid"] "backend_fallback_reason" "gpu_kernel_unavailable"
+            Assert-ProductE2ECpuSelectionReport $json["cpu"]
+            Assert-ProductE2EGpuCpuFallbackReport $json["gpu"]
+            Assert-ProductE2EHybridCpuSelectionReport $json["hybrid"]
         } catch {
             $status = "failed"
             $errorMessage = New-ProductE2EFailureMessage `
@@ -450,9 +434,7 @@ function Invoke-ProductE2EGpuNoFallbackCase {
             if ($result.Output -notlike "*E_BACKEND_GPU_UNAVAILABLE*") {
                 throw "missing diagnostic code E_BACKEND_GPU_UNAVAILABLE"
             }
-            if ($result.Output -notlike "*gpu_kernel_unavailable*") {
-                throw "missing diagnostic reason gpu_kernel_unavailable"
-            }
+            $null = Assert-ProductE2EOutputGpuUnavailableReason $result.Output
             if ($result.Output -like "*backend_selected=cpu*" -or $result.Output -like "*selected_backend=cpu-geometry-exact-cover*") {
                 throw "GPU no-fallback output must not report CPU selection"
             }
@@ -500,9 +482,7 @@ function Invoke-ProductE2EGpuNoFallbackUnavailableCase {
             if ($result.Output -notlike "*E_BACKEND_GPU_UNAVAILABLE*") {
                 throw "missing diagnostic code E_BACKEND_GPU_UNAVAILABLE"
             }
-            if ($result.Output -notlike "*gpu_kernel_unavailable*") {
-                throw "missing diagnostic reason gpu_kernel_unavailable"
-            }
+            $null = Assert-ProductE2EOutputGpuUnavailableReason $result.Output
             if ($result.Output -like "*backend_selected=cpu*" -or $result.Output -like "*selected_backend=cpu-geometry-exact-cover*") {
                 throw "GPU no-fallback output must not report CPU selection"
             }
@@ -548,10 +528,7 @@ function Invoke-ProductE2EGpuAllowFallbackReasonCase {
                 throw "expected exit 0 but got $($result.ExitCode)"
             }
             $json = ConvertFrom-ProductE2EJsonOutput $result.Output
-            Assert-ProductE2EJsonFieldEquals $json "backend_requested" "gpu"
-            Assert-ProductE2EJsonFieldEquals $json "backend_selected" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json "backend_fallback_used" "true"
-            Assert-ProductE2EJsonFieldEquals $json "backend_fallback_reason" "gpu_kernel_unavailable"
+            Assert-ProductE2EGpuCpuFallbackReport $json
         } catch {
             $status = "failed"
             $errorMessage = New-ProductE2EFailureMessage `
@@ -594,10 +571,10 @@ function Invoke-ProductE2EGpuBackendTrustStateCase {
                 throw "expected exit 0 but got $($result.ExitCode)"
             }
             $json = ConvertFrom-ProductE2EJsonOutput $result.Output
+            Assert-ProductE2EGpuCpuFallbackReport $json
             Assert-ProductE2EJsonFieldEquals $json "gpu_trust_state" "fallback-used"
             Assert-ProductE2EJsonFieldEquals $json "gpu_failure_class" "unavailable"
             Assert-ProductE2EJsonFieldEquals $json "fallback_backend" "cpu"
-            Assert-ProductE2EJsonFieldEquals $json "backend_fallback_reason" "gpu_kernel_unavailable"
         } catch {
             $status = "failed"
             $errorMessage = New-ProductE2EFailureMessage `

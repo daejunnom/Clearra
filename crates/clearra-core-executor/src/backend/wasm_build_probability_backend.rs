@@ -1,4 +1,5 @@
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
 
 use crate::CoreExecutionResult;
@@ -17,6 +18,7 @@ pub enum WasmBuildProbabilityAdvance {
 
 pub struct WasmBuildProbabilitySession {
     inner: InnerSession,
+    cpu_fallback_reason: Option<&'static str>,
 }
 
 impl WasmBuildProbabilitySession {
@@ -25,8 +27,16 @@ impl WasmBuildProbabilitySession {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmCpuSearchError> {
+        let explicit_gpu =
+            problem.backend_policy().requested_backend() == RequestedSearchBackend::Gpu;
+        if explicit_gpu && !problem.backend_policy().allow_backend_fallback() {
+            return Err(WasmCpuSearchError::Unsupported {
+                reason: "webgpu_backend_unavailable",
+            });
+        }
         Ok(Self {
             inner: InnerSession::new(problem, field, aggregation).map_err(map_error)?,
+            cpu_fallback_reason: explicit_gpu.then_some("gpu_kernel_unavailable"),
         })
     }
 
@@ -41,9 +51,12 @@ impl WasmBuildProbabilitySession {
             .map_err(map_error)?
         {
             BuildProbabilityAdvance::Pending => Ok(WasmBuildProbabilityAdvance::Pending),
-            BuildProbabilityAdvance::Completed(result) => {
-                Ok(WasmBuildProbabilityAdvance::Completed(result))
-            }
+            BuildProbabilityAdvance::Completed(result) => Ok(
+                WasmBuildProbabilityAdvance::Completed(match self.cpu_fallback_reason {
+                    Some(reason) => mark_cpu_fallback(result, reason),
+                    None => result,
+                }),
+            ),
             BuildProbabilityAdvance::Cancelled => Ok(WasmBuildProbabilityAdvance::Cancelled),
         }
     }
@@ -70,6 +83,30 @@ impl WasmBuildProbabilityBackend {
             }
         }
     }
+}
+
+fn mark_cpu_fallback(result: CoreExecutionResult, reason: &'static str) -> CoreExecutionResult {
+    let fallback_backend = result
+        .field("backend_selected")
+        .unwrap_or("wasm-cpu-build-probability")
+        .to_owned();
+    result.with_replaced_fields(vec![
+        field("backend_fallback_used", true),
+        field("fallback_used", true),
+        field("backend_fallback_reason", reason),
+        field("fallback_backend", fallback_backend),
+        field("gpu_available", false),
+        field("gpu_disabled_reason", reason),
+        field("gpu_trust_state", "fallback-used"),
+        field("gpu_failure_class", "unavailable"),
+        field("gpu_failure_stage", "capability-query"),
+        field("discarded_partial_gpu_result", false),
+        field("gpu_original_result_incomplete", false),
+    ])
+}
+
+fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
+    (key.into(), value.to_string())
 }
 
 fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError {

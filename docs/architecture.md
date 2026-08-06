@@ -2252,6 +2252,14 @@ map to `E_CORE_MEMORY_SCOPE_INVALID`, double-release maps to
 `E_CORE_MEMORY_CONTEXT_DOUBLE_RELEASE`, and memory leak report maps to diagnostic
 with `E_CORE_MEMORY_LEAK_DETECTED`.
 
+Backend intent remains distinct across every runtime. An explicit `gpu` request
+uses a CPU fallback only when fallback is allowed, and records one canonical GPU
+unavailable reason. A `hybrid` request with no usable GPU selects CPU normally:
+`fallback_used=false`, `backend_fallback_reason=null`, and
+`hybrid_status=cpu-selected`; `hybrid_disabled_reason` retains the unavailable
+capability detail. Only a failure after GPU execution has begun is a true hybrid
+fallback. Native, WASM serial, and WASM distributed paths share this contract.
+
 Invalid C result buffers are rejected before coverage/objective reduction.
 Coverage row views must check word counts, input length, tail bits outside the
 pattern universe, and candidate id range. PackingCandidate as solution attempt

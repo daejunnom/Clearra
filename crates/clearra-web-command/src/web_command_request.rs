@@ -267,6 +267,11 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    pub fn with_backend(mut self, backend: RequestedSearchBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
     pub fn with_gpu_device(mut self, gpu_device: GpuDeviceSelection) -> Self {
         self.gpu_device = gpu_device;
         self
@@ -814,12 +819,14 @@ impl WebCommandRequest {
     }
 
     pub fn requests_webgpu(&self) -> bool {
-        matches!(self.command_kind.as_str(), "pc" | "failed-queue")
-            && matches!(
-                self.backend,
-                RequestedSearchBackend::Auto
-                    | RequestedSearchBackend::Gpu
-                    | RequestedSearchBackend::Hybrid
-            )
+        matches!(
+            self.command_kind.as_str(),
+            "pc" | "failed-queue" | "build-probability"
+        ) && matches!(
+            self.backend,
+            RequestedSearchBackend::Auto
+                | RequestedSearchBackend::Gpu
+                | RequestedSearchBackend::Hybrid
+        )
     }
 }

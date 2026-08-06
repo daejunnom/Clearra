@@ -163,6 +163,13 @@ The JSON contract is implemented by `backend_gpu_worker_contract` and pinned by
 visibility contract. GPU unavailable visibility is pinned by
 `json_backend_report_includes_gpu_worker_unavailable_reason`.
 
+An unavailable explicit `gpu` request reports a CPU fallback when fallback is
+allowed. An unavailable `hybrid` capability instead reports normal CPU
+selection with `fallback_used=false`, a null `backend_fallback_reason`,
+`hybrid_status=cpu-selected`, and the capability detail in
+`hybrid_disabled_reason`. A hybrid fallback is reserved for failures after GPU
+execution has started.
+
 `memory_report` includes `memory_leak_report_clean`, `live_scopes`,
 `live_allocations`, `live_gpu_buffers`, `pending_release_queue`, and
 `memory_pressure_level`.

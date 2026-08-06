@@ -18,6 +18,7 @@ use clearra_coverage::{
     cover::exact_minimum_cover::exact_minimum_cover, pattern::pattern_bitset::PatternBitSet,
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
+use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::SearchProblem;
 use clearra_replay::ExactScoringExecutionBatch;
 use clearra_supply::pattern_universe::PackingPatternMembershipKind;
@@ -2269,6 +2270,52 @@ impl WasmExactSearchSession {
             &mut reachability_metrics,
             self.parallel_reachability_metrics,
         );
+        let requested_backend = self.problem.backend_policy().requested_backend();
+        let runtime_webgpu_available = self.problem.backend_policy().runtime_webgpu_available();
+        let explicit_gpu_backend = matches!(
+            requested_backend,
+            RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid
+        );
+        let gpu_available = self.backend_selected == "webgpu"
+            || (explicit_gpu_backend
+                && runtime_webgpu_available
+                && cfg!(feature = "webgpu-search"));
+        let gpu_disabled_reason = if self.backend_selected == "webgpu" {
+            "none"
+        } else if self.backend_fallback_used {
+            self.backend_fallback_reason
+        } else if explicit_gpu_backend && !runtime_webgpu_available {
+            "gpu_device_not_found"
+        } else if explicit_gpu_backend && !cfg!(feature = "webgpu-search") {
+            "gpu_kernel_unavailable"
+        } else if explicit_gpu_backend {
+            "gpu_backend_not_connected"
+        } else {
+            "not_requested"
+        };
+        let gpu_trust_state = if self.backend_selected == "webgpu" {
+            "gpu-computed-cpu-confirmed"
+        } else if self.backend_fallback_used {
+            "fallback-used"
+        } else {
+            "not-used"
+        };
+        let hybrid_status = if requested_backend != RequestedSearchBackend::Hybrid {
+            "not-requested"
+        } else if self.backend_selected == "webgpu" {
+            "gpu-ready"
+        } else if self.backend_selected == "wasm-cpu" {
+            "cpu-selected"
+        } else {
+            "unavailable"
+        };
+        let hybrid_disabled_reason = if requested_backend != RequestedSearchBackend::Hybrid {
+            "not_requested"
+        } else if self.backend_selected == "webgpu" {
+            "none"
+        } else {
+            gpu_disabled_reason
+        };
         let fields = vec![
             field(
                 "backend_requested",
@@ -2276,9 +2323,19 @@ impl WasmExactSearchSession {
             ),
             field("backend_selected", self.backend_selected),
             field("actual_backend", self.backend_selected),
+            field(
+                "backend_fallback_allowed",
+                self.problem.backend_policy().allow_backend_fallback(),
+            ),
             field("backend_fallback_used", self.backend_fallback_used),
+            field("fallback_used", self.backend_fallback_used),
             field("backend_fallback_reason", self.backend_fallback_reason),
             field("fallback_backend", self.fallback_backend.unwrap_or("none")),
+            field("gpu_available", gpu_available),
+            field("gpu_disabled_reason", gpu_disabled_reason),
+            field("gpu_trust_state", gpu_trust_state),
+            field("hybrid_status", hybrid_status),
+            field("hybrid_disabled_reason", hybrid_disabled_reason),
             field(
                 "gpu_failure_class",
                 self.gpu_failure_class.unwrap_or("none"),

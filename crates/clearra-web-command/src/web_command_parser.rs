@@ -979,6 +979,8 @@ fn parse_build_probability_command(
     let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut cpu_warmup = false;
+    let mut backend = RequestedSearchBackend::Cpu;
+    let mut allow_backend_fallback = false;
     let mut include_horizontal_mirror = true;
     let mut aggregation = BuildProbabilityAggregation::Buildability;
     let mut tiling_only = false;
@@ -1064,6 +1066,24 @@ fn parse_build_probability_command(
             }
             "--cpu-warmup" => {
                 cpu_warmup = true;
+                cursor += 1;
+            }
+            "--backend" => {
+                let value = next_value(tokens, &mut cursor, "--backend")?;
+                backend = RequestedSearchBackend::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --backend value '{value}'"),
+                    )
+                })?;
+                allow_backend_fallback = matches!(backend, RequestedSearchBackend::Auto);
+            }
+            "--allow-backend-fallback" => {
+                allow_backend_fallback = true;
+                cursor += 1;
+            }
+            "--no-backend-fallback" => {
+                allow_backend_fallback = false;
                 cursor += 1;
             }
             "--include-mirror" => {
@@ -1191,6 +1211,8 @@ fn parse_build_probability_command(
         input = input.with_source_piece_count(source_piece_count);
     }
     let mut request = WebCommandRequest::build_probability(input)
+        .with_backend(backend)
+        .with_allow_backend_fallback(allow_backend_fallback)
         .with_rule(rule)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_hold_enabled(hold_enabled)

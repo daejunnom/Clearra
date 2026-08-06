@@ -166,8 +166,13 @@ impl WebGpuBackendReport {
         }
         let fallback_used = result.bool_field("backend_fallback_used").unwrap_or(false);
         let reason = result
-            .field("backend_fallback_reason")
-            .filter(|reason| *reason != "none")
+            .field("gpu_disabled_reason")
+            .filter(|reason| !matches!(*reason, "none" | "not_requested"))
+            .or_else(|| {
+                result
+                    .field("backend_fallback_reason")
+                    .filter(|reason| *reason != "none")
+            })
             .unwrap_or("webgpu_not_selected");
         let mut report = Self::search_unavailable(reason, fallback_used);
         report.gpu_warmup_requested = result.bool_field("gpu_warmup_requested").unwrap_or(false);
