@@ -20,7 +20,8 @@ export function wasmArtifactGuard(): Plugin {
   return {
     name: 'clearra-wasm-artifact-guard',
     async configResolved(config) {
-      const root = resolve(config.root, 'static', 'wasm');
+      const publicDir = process.env.CLEARRA_WEB_PUBLIC_DIR || 'static';
+      const root = resolve(config.root, publicDir, 'wasm');
       const manifestPath = resolve(root, 'clearra_wasm.manifest.json');
       let manifest: WasmArtifactManifest;
       try {
