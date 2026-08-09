@@ -85,6 +85,7 @@ impl NativeForwardExecutionError {
     pub(crate) const fn reason(self) -> &'static str {
         match self {
             Self::Search(ForwardSearchError::EmptyQueue) => "forward_search_empty_queue",
+            Self::Search(ForwardSearchError::QueueTooLong) => "forward_search_queue_too_long",
             Self::Search(ForwardSearchError::InvalidHeight) => "forward_search_invalid_height",
             Self::Search(ForwardSearchError::BoardOutsideField) => {
                 "forward_search_board_outside_field"
@@ -254,7 +255,7 @@ fn drive_parallel_coordinator(
         if producer_complete {
             debug_assert_eq!(in_flight, 0);
             return coordinator
-                .finish(total_workers)
+                .finish_with_control(total_workers, control)
                 .map_err(NativeForwardExecutionError::from);
         }
         if control.is_cancelled() {

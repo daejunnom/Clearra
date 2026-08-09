@@ -64,6 +64,7 @@ impl PatternPiecePositionIndex {
         universe: &MaterializedPatternUniverse,
         local_pattern_ids: Vec<u32>,
     ) -> Result<Self, PatternPiecePositionIndexError> {
+        debug_assert!(local_pattern_ids.windows(2).all(|ids| ids[0] < ids[1]));
         let sequence_len = local_pattern_ids
             .iter()
             .map(|pattern_id| universe.sequence_len_at(*pattern_id as usize))
@@ -125,6 +126,12 @@ impl PatternPiecePositionIndex {
             .get(local_pattern_index)
             .copied()
             .map(|pattern_id| pattern_id as usize)
+    }
+
+    /// Returns the dense local bit index for a canonical global pattern id.
+    pub fn local_pattern_index(&self, global_pattern_index: usize) -> Option<usize> {
+        let pattern_id = u32::try_from(global_pattern_index).ok()?;
+        self.local_pattern_ids.binary_search(&pattern_id).ok()
     }
 
     pub fn active_word(&self, word_index: usize) -> u64 {
@@ -239,4 +246,26 @@ pub enum PatternPiecePositionIndexError {
     CoverageWordCountMismatch,
     StorageOverflow,
     StorageUnavailable,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PatternPiecePositionIndex;
+
+    #[test]
+    fn global_pattern_lookup_uses_the_dense_sorted_subset_index() {
+        let index = PatternPiecePositionIndex {
+            global_pattern_count: 12,
+            local_pattern_ids: vec![1, 4, 7, 11],
+            sequence_len: 0,
+            word_count: 1,
+            position_piece_words: Vec::new(),
+        };
+
+        assert_eq!(index.local_pattern_index(1), Some(0));
+        assert_eq!(index.local_pattern_index(7), Some(2));
+        assert_eq!(index.local_pattern_index(11), Some(3));
+        assert_eq!(index.local_pattern_index(6), None);
+        assert_eq!(index.local_pattern_index(usize::MAX), None);
+    }
 }

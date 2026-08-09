@@ -23,7 +23,8 @@ const SHORT_TEXT_INPUT = 1;
 const PARAGRAPH_TEXT_INPUT = 2;
 const MODAL_TEXT_LIMIT = 4000;
 const MODAL_COMPONENT_LIMIT = 5;
-const MODAL_ID_PREFIX = "clearra:search:v3:";
+const MODAL_ID_PREFIX = "clearra:search:v4:";
+const V3_MODAL_ID_PREFIX = "clearra:search:v3:";
 const V2_MODAL_ID_PREFIX = "clearra:search:v2:";
 const LEGACY_MODAL_ID_PREFIX = "clearra:board:v1:";
 const PC_TARGET_ROWS = Object.freeze(Array.from(
@@ -43,7 +44,11 @@ const INPUT_SCHEMAS = Object.freeze({
     ["pieces", "field"],
     ["field"],
   ),
-  remaining: schema(["remaining", "kicktable"], ["remaining"], []),
+  remaining: schema(
+    ["remaining", "kicktable", "priority", "max-setup-pieces", "queue-knowledge"],
+    ["remaining"],
+    [],
+  ),
   verify: schema(["scope"], [], [], true),
   "finesse-search": schema(
     ["target", "next", "base", "kicktable", "options"],
@@ -56,6 +61,11 @@ const INPUT_SCHEMAS = Object.freeze({
     [],
   ),
 });
+const V3_REMAINING_SCHEMA = schema(
+  ["remaining", "kicktable"],
+  ["remaining"],
+  [],
+);
 
 export function buildCommandModalResponse(interaction, locale = "en") {
   if (
@@ -76,6 +86,15 @@ export function buildCommandModalResponse(interaction, locale = "en") {
   const richTextBoard = inputSchema.boards.some((name) =>
     supplied.has(name) && requiresDiscordFieldModal(supplied.get(name))
   );
+  if (
+    command.input === "remaining" &&
+    missingRequired &&
+    ["next-cycle-remaining", "setup-length"].some((name) => supplied.has(name))
+  ) {
+    throw new Error(
+      "When next-cycle-remaining or setup-length is set, remaining must also be supplied directly.",
+    );
+  }
   if (
     !missingRequired &&
     !richTextBoard &&
@@ -120,7 +139,7 @@ export function readCommandModalOptions(interaction, command) {
   if (modalCommandKey(route?.command) !== modalCommandKey(command)) {
     throw new Error("Discord supplied an unknown or outdated Clearra command Modal.");
   }
-  const inputSchema = INPUT_SCHEMAS[command.input];
+  const inputSchema = inputSchemaForVersion(command, route.version);
   const expected = new Map(
     command.registration.options.map((option) => [option.name, option]),
   );
@@ -174,7 +193,7 @@ export function readCommandModalOptions(interaction, command) {
 export function readCommandModalLocale(interaction) {
   const route = commandModalRoute(interaction);
   if (!route || route.version < 3) return null;
-  const inputSchema = INPUT_SCHEMAS[route.command.input];
+  const inputSchema = inputSchemaForVersion(route.command, route.version);
   if (!inputSchema.localeSelector) return null;
   const locales = flattenModalComponents(interaction.data?.components)
     .filter((component) => component?.custom_id === "locale");
@@ -217,8 +236,11 @@ function commandModalRoute(interaction) {
   let version;
   let name;
   if (customId.startsWith(MODAL_ID_PREFIX)) {
-    version = 3;
+    version = 4;
     name = customId.slice(MODAL_ID_PREFIX.length);
+  } else if (customId.startsWith(V3_MODAL_ID_PREFIX)) {
+    version = 3;
+    name = customId.slice(V3_MODAL_ID_PREFIX.length);
   } else if (customId.startsWith(V2_MODAL_ID_PREFIX)) {
     version = 2;
     name = customId.slice(V2_MODAL_ID_PREFIX.length);
@@ -237,14 +259,14 @@ function commandModalRoute(interaction) {
       ? root.subcommands?.[subcommand] ?? null
       : null
     : root;
-  const inputSchema = inputSchemaFor(command);
+  const inputSchema = inputSchemaForVersion(command, version);
   if (!command || !inputSchema) return null;
   if (version === 1 && inputSchema.boards.length === 0) return null;
   return Object.freeze({ command, version });
 }
 
 function modalLabel(command, option, supplied, inputSchema, locale) {
-  const select = modalSelectSpec(command.input, option.name, locale);
+  const select = modalSelectSpec(command, option.name, locale);
   const component = select
     ? selectComponent(command, option, supplied, select)
     : textComponent(command, option, supplied, inputSchema);
@@ -360,7 +382,7 @@ function readSubmittedComponent(command, option, component) {
     if (typeof value !== "string" || value.length > 100) {
       throw new Error(`Discord Modal select '${option.name}' contains an invalid value.`);
     }
-    const spec = modalSelectSpec(command.input, option.name);
+    const spec = modalSelectSpec(command, option.name);
     if (!spec || !spec.options.some((choice) => choice.value === value)) {
       throw new Error(`Discord Modal select '${option.name}' contains unsupported value '${value}'.`);
     }
@@ -381,7 +403,8 @@ function readSubmittedLocale(component) {
   return component.values[0];
 }
 
-function modalSelectSpec(input, name, locale = "en") {
+function modalSelectSpec(command, name, locale = "en") {
+  const input = command?.input ?? "";
   const korean = normalizeDiscordLocale(locale) === "ko";
   if (input === "spin-structure" && name === "lines") {
     return selectSpec(
@@ -457,6 +480,54 @@ function modalSelectSpec(input, name, locale = "en") {
         label: korean && value === "srs-plus" ? "SRS+ (기본값)" : label,
         value,
       })),
+    );
+  }
+  if (input === "remaining" && name === "priority") {
+    const defaultValue = command.setupPriority ?? "all";
+    return selectSpec(
+      defaultValue,
+      korean ? "셋업 정렬 기준 선택" : "Choose setup ordering",
+      [
+        [korean ? "구축 × PC 종합" : "Joint build × PC", "all"],
+        [korean ? "구축 확률 우선" : "Build probability first", "build"],
+        [korean ? "PC 확률 우선" : "PC probability first", "pc"],
+      ].map(([label, value]) => ({
+        label: value === defaultValue
+          ? `${label}${korean ? " (기본값)" : " (default)"}`
+          : label,
+        value,
+      })),
+    );
+  }
+  if (input === "remaining" && name === "max-setup-pieces") {
+    return selectSpec(
+      "9",
+      korean ? "최대 구축 미노 수 선택" : "Choose maximum setup pieces",
+      Array.from({ length: 10 }, (_, index) => {
+        const value = index + 1;
+        return {
+          label: korean
+            ? `${value}개${value === 9 ? " (기본값)" : ""}`
+            : `${value} piece${value === 1 ? "" : "s"}${value === 9 ? " (default)" : ""}`,
+          value: String(value),
+        };
+      }),
+    );
+  }
+  if (input === "remaining" && name === "queue-knowledge") {
+    return selectSpec(
+      "oracle",
+      korean ? "큐 공개 범위 선택" : "Choose queue knowledge",
+      [
+        {
+          label: korean ? "전체 미래 큐 (기본값)" : "Full future queue (default)",
+          value: "oracle",
+        },
+        {
+          label: korean ? "공개 7개" : "Visible 7 pieces",
+          value: "visible-7",
+        },
+      ],
     );
   }
   if (name === "options" && input === "spin") {
@@ -622,6 +693,9 @@ function modalLabelText(input, name, locale = "en") {
             ? "홀드 및 큐 공개 정책"
             : "홀드 정책",
       remaining: "남은 미노",
+      priority: "셋업 정렬",
+      "max-setup-pieces": "최대 구축 미노",
+      "queue-knowledge": "큐 공개 범위",
       pieces: "순서 없는 미노 목록",
       profile: "스핀 판정 프로필",
       scope: "검증 범위",
@@ -643,6 +717,9 @@ function modalLabelText(input, name, locale = "en") {
           ? "Hold and queue knowledge"
           : "Hold policy",
     remaining: "Remaining-piece inventory",
+    priority: "Setup ordering",
+    "max-setup-pieces": "Maximum setup pieces",
+    "queue-knowledge": "Queue knowledge",
     pieces: "Unordered piece inventory",
     profile: "Spin-recognition profile",
     scope: "Verification scope",
@@ -674,6 +751,9 @@ function modalDescription(input, name, locale = "en") {
           ? "홀드 사용 여부와 전체 큐/공개 7개 계산 범위를 선택합니다."
           : "홀드 사용 여부를 선택합니다.";
     if (name === "remaining") return "IOTSZJL 미노 1–7개를 입력하며 한 종류만 두 번 사용할 수 있습니다.";
+    if (name === "priority") return "구축 × PC 종합, 구축 확률 우선, PC 확률 우선 중 하나로 정렬합니다.";
+    if (name === "max-setup-pieces") return "1–10개이며 기본값은 9개입니다. 10개는 완성된 PC도 포함합니다.";
+    if (name === "queue-knowledge") return "전체 미래 큐 또는 실제로 공개되는 7개만 사용합니다.";
     return "범위 하나를 선택하거나 전체를 선택해 모든 검증을 실행합니다.";
   }
   if (["field", "base", "target"].includes(name)) {
@@ -699,6 +779,9 @@ function modalDescription(input, name, locale = "en") {
         ? "Choose hold and full-queue/visible-7 calculation scope."
         : "Use or avoid hold.";
   if (name === "remaining") return "Use 1–7 IOTSZJL pieces; at most one piece kind may occur twice.";
+  if (name === "priority") return "Order by joint build × PC, build probability first, or PC probability first.";
+  if (name === "max-setup-pieces") return "Choose 1–10; the default is 9, while 10 includes complete PCs.";
+  if (name === "queue-knowledge") return "Use the full future queue or only the 7 pieces visible during play.";
   return "Choose one scope, or All to run every verification group.";
 }
 
@@ -733,6 +816,13 @@ function inputSchemaFor(command) {
   return command?.kind === "search"
     ? INPUT_SCHEMAS[command.input] ?? null
     : null;
+}
+
+function inputSchemaForVersion(command, version) {
+  if ((version === 2 || version === 3) && command?.input === "remaining") {
+    return V3_REMAINING_SCHEMA;
+  }
+  return inputSchemaFor(command);
 }
 
 function validateModalResponse(response) {

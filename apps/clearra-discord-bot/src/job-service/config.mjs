@@ -69,6 +69,14 @@ export function loadClearraJobServiceConfig(
       environment.CLEARRA_SEARCH_TIMEOUT_MS,
       170_000,
     ),
+    reverseSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
+      5 * 60_000,
+    ),
+    forwardSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+      15 * 60_000,
+    ),
     terminationGraceMs: positiveInteger(
       environment.CLEARRA_JOB_TERMINATION_GRACE_MS,
       2_000,

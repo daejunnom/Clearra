@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::{
     SetupCandidatePriority, SetupLengthPreference, SetupSearchCondition, SetupTerminalSupplyTarget,
 };
@@ -264,13 +265,19 @@ impl<'a> SetupRepresentativeResolver<'a> {
         })
     }
 
-    pub(super) fn paths(
+    pub(super) fn paths_with_control(
         &self,
         targets: &[(usize, SetupWitness)],
+        control: &ExecutionControl,
     ) -> Result<Vec<Vec<CorePathStep>>, WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut cancellation_work = 0_usize;
         let mut paths = vec![Vec::new(); targets.len()];
         let mut groups = HashMap::<u32, Vec<(usize, usize)>>::new();
         for (output_index, (shape_index, witness)) in targets.iter().copied().enumerate() {
+            check_representative_cancel(control, &mut cancellation_work)?;
             groups
                 .entry(witness.pattern_id)
                 .or_default()
@@ -285,6 +292,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 ))?;
             let mut completion = CoverageCompletionScratch::new(state_capacity)?;
             for (pattern_id, pattern_targets) in groups {
+                check_representative_cancel(control, &mut cancellation_work)?;
                 completion.clear();
                 let word_index = pattern_id as usize / u64::BITS as usize;
                 let pattern_bit = 1_u64 << (pattern_id % u64::BITS);
@@ -294,7 +302,35 @@ impl<'a> SetupRepresentativeResolver<'a> {
                     &pattern_targets,
                     &mut paths,
                     &mut completion,
+                    control,
+                    &mut cancellation_work,
                 )?;
+                #[cfg(test)]
+                if compact_path_equivalence_check_enabled()
+                    && compact_path_equivalence_comparison_count() == 0
+                    && pattern_targets.len() >= 2
+                {
+                    for (output_index, shape_index) in pattern_targets.iter().copied().take(2) {
+                        let mut singleton_paths = vec![Vec::new()];
+                        self.prefix_paths_for_pattern(
+                            word_index,
+                            pattern_bit,
+                            &[(0, shape_index)],
+                            &mut singleton_paths,
+                            &mut completion,
+                            control,
+                            &mut cancellation_work,
+                        )?;
+                        assert_eq!(
+                            paths[output_index], singleton_paths[0],
+                            "shared compact representative path differs from singleton traversal"
+                        );
+                        record_compact_path_equivalence_comparison();
+                    }
+                }
+            }
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
             }
             return Ok(paths);
         }
@@ -306,7 +342,18 @@ impl<'a> SetupRepresentativeResolver<'a> {
             ))?;
         let mut scratch = RepresentativeScratch::new(state_capacity)?;
         for (pattern_id, pattern_targets) in groups {
-            self.paths_for_pattern(pattern_id, &pattern_targets, &mut paths, &mut scratch)?;
+            check_representative_cancel(control, &mut cancellation_work)?;
+            self.paths_for_pattern(
+                pattern_id,
+                &pattern_targets,
+                &mut paths,
+                &mut scratch,
+                control,
+                &mut cancellation_work,
+            )?;
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
         }
         Ok(paths)
     }
@@ -317,6 +364,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
         targets: &[(usize, usize)],
         paths: &mut [Vec<CorePathStep>],
         scratch: &mut RepresentativeScratch,
+        control: &ExecutionControl,
+        cancellation_work: &mut usize,
     ) -> Result<(), WasmExactSearchError> {
         scratch.clear();
         let word_index = pattern_id as usize / u64::BITS as usize;
@@ -337,6 +386,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
         for depth in 0..scratch.depth_records.len() {
             let mut cursor = 0;
             while cursor < scratch.depth_records[depth].len() {
+                check_representative_cancel(control, cancellation_work)?;
                 let record_index = scratch.depth_records[depth][cursor];
                 cursor += 1;
                 let state_index = scratch.records[record_index as usize].state as usize;
@@ -349,6 +399,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 let edge_start = node.edge_start as usize;
                 let edge_end = edge_start + node.edge_count as usize;
                 for edge_index in edge_start..edge_end {
+                    check_representative_cancel(control, cancellation_work)?;
                     let edge = self.graph.edges[edge_index];
                     let transitions = self.original_transitions(
                         node,
@@ -377,6 +428,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
         }
 
         for record in &mut scratch.records {
+            check_representative_cancel(control, cancellation_work)?;
             let (node_index, extra_draw, hold_code) =
                 self.state_layout.decode(record.state as usize);
             let node = self.graph.nodes[node_index];
@@ -396,6 +448,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
         }
         for depth in (0..scratch.depth_records.len()).rev() {
             for cursor in 0..scratch.depth_records[depth].len() {
+                check_representative_cancel(control, cancellation_work)?;
                 let record_index = scratch.depth_records[depth][cursor];
                 let record = scratch.records[record_index as usize];
                 let (node_index, extra_draw, state_hold_code) =
@@ -408,6 +461,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 let edge_end = edge_start + node.edge_count as usize;
                 let mut can_complete = false;
                 'edges: for edge_index in edge_start..edge_end {
+                    check_representative_cancel(control, cancellation_work)?;
                     let edge = self.graph.edges[edge_index];
                     let transitions = self.original_transitions(
                         node,
@@ -438,6 +492,7 @@ impl<'a> SetupRepresentativeResolver<'a> {
             .collect::<HashMap<_, _>>();
         let mut selected_records = HashMap::<u32, (u32, u8)>::new();
         for (record_index, record) in scratch.records.iter().copied().enumerate() {
+            check_representative_cancel(control, cancellation_work)?;
             if !record.can_complete {
                 continue;
             }
@@ -473,8 +528,10 @@ impl<'a> SetupRepresentativeResolver<'a> {
             ));
         }
         for (shape_index, output_index) in target_outputs {
+            check_representative_cancel(control, cancellation_work)?;
             let (record_index, _) = selected_records[&shape_index];
-            paths[output_index] = self.reconstruct_path(record_index, scratch)?;
+            paths[output_index] =
+                self.reconstruct_path(record_index, scratch, control, cancellation_work)?;
         }
         Ok(())
     }
@@ -486,6 +543,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
         targets: &[(usize, usize)],
         paths: &mut [Vec<CorePathStep>],
         completion_scratch: &mut CoverageCompletionScratch,
+        control: &ExecutionControl,
+        cancellation_work: &mut usize,
     ) -> Result<(), WasmExactSearchError> {
         let initial_hold_code = self
             .initial_hold
@@ -493,7 +552,10 @@ impl<'a> SetupRepresentativeResolver<'a> {
         let root_state = self
             .state_layout
             .encode(self.graph.root as usize, 0, initial_hold_code);
+        let mut target_outputs = HashMap::<usize, Vec<usize>>::new();
+        let mut max_target_depth = 0_u8;
         for (output_index, shape_index) in targets.iter().copied() {
+            check_representative_cancel(control, cancellation_work)?;
             let target_node = self.graph.shape_target_node(shape_index).ok_or(
                 WasmExactSearchError::InvalidProblem("setup_prefix_representative_target_missing"),
             )?;
@@ -505,94 +567,127 @@ impl<'a> SetupRepresentativeResolver<'a> {
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "setup_prefix_representative_target_invalid",
                 ))?;
-            let mut records = vec![PrefixRepresentativeRecord {
-                state: root_state,
-                previous: NO_RECORD,
-                edge_index: NO_RECORD,
-                hold_action: SetupHoldAction::UseCurrent,
-            }];
-            let mut seen = HashMap::<usize, u32>::new();
-            seen.insert(root_state, 0);
-            let mut cursor = 0_usize;
-            let mut selected = None;
-            while cursor < records.len() {
-                let record_index = cursor as u32;
-                let record = records[cursor];
-                cursor += 1;
-                let (node_index, extra_draw, hold_code) = self.state_layout.decode(record.state);
-                let node = self.graph.nodes[node_index];
-                if node_index == target_node as usize {
-                    let coverage_node = self.coverage_graph.source_class(node_index as u32).ok_or(
-                        WasmExactSearchError::InvalidProblem(
-                            "setup_prefix_representative_source_class_missing",
-                        ),
-                    )? as usize;
-                    if self.coverage_can_complete(
-                        coverage_node,
-                        extra_draw,
-                        hold_code,
-                        word_index,
-                        pattern_bit,
-                        completion_scratch,
-                    )? {
-                        selected = Some(record_index);
+            max_target_depth = max_target_depth.max(target_depth);
+            target_outputs
+                .entry(target_node as usize)
+                .or_default()
+                .push(output_index);
+        }
+        if target_outputs.is_empty() {
+            return Ok(());
+        }
+
+        // Compact continuation shapes share the same prefix graph. A single
+        // breadth-first traversal therefore preserves the first path chosen by
+        // the former per-target traversal while visiting each supply state at
+        // most once for this witness pattern.
+        let mut records = vec![PrefixRepresentativeRecord {
+            state: root_state,
+            previous: NO_RECORD,
+            edge_index: NO_RECORD,
+            hold_action: SetupHoldAction::UseCurrent,
+        }];
+        let mut seen = HashMap::<usize, u32>::new();
+        seen.insert(root_state, 0);
+        let mut selected_records = HashMap::<usize, u32>::new();
+        let mut cursor = 0_usize;
+        while cursor < records.len() && selected_records.len() < target_outputs.len() {
+            check_representative_cancel(control, cancellation_work)?;
+            let record_index = u32::try_from(cursor).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_prefix_representative_record_overflow")
+            })?;
+            let record = records[cursor];
+            cursor += 1;
+            let (node_index, extra_draw, hold_code) = self.state_layout.decode(record.state);
+            let node = self.graph.nodes[node_index];
+            if target_outputs.contains_key(&node_index)
+                && !selected_records.contains_key(&node_index)
+            {
+                let coverage_node = self.coverage_graph.source_class(node_index as u32).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "setup_prefix_representative_source_class_missing",
+                    ),
+                )? as usize;
+                if self.coverage_can_complete(
+                    coverage_node,
+                    extra_draw,
+                    hold_code,
+                    word_index,
+                    pattern_bit,
+                    completion_scratch,
+                    control,
+                    cancellation_work,
+                )? {
+                    selected_records.insert(node_index, record_index);
+                    if selected_records.len() == target_outputs.len() {
                         break;
                     }
                 }
-                if node.depth >= target_depth {
-                    continue;
-                }
-                let edge_start = node.edge_start as usize;
-                let edge_end = edge_start + node.edge_count as usize;
-                for edge_index in edge_start..edge_end {
-                    let edge = self.graph.edges[edge_index];
-                    for transition in self
-                        .original_transitions(
-                            node,
-                            edge,
-                            extra_draw,
-                            hold_code,
-                            pattern_bit,
-                            word_index,
-                        )
-                        .iter()
-                    {
-                        if seen.contains_key(&transition.target) {
-                            continue;
-                        }
-                        let next_index = u32::try_from(records.len()).map_err(|_| {
-                            WasmExactSearchError::InvalidProblem(
-                                "setup_prefix_representative_record_overflow",
-                            )
-                        })?;
-                        records.try_reserve(1).map_err(|_| {
-                            WasmExactSearchError::InvalidProblem(
-                                "setup_prefix_representative_storage_unavailable",
-                            )
-                        })?;
-                        seen.try_reserve(1).map_err(|_| {
-                            WasmExactSearchError::InvalidProblem(
-                                "setup_prefix_representative_index_unavailable",
-                            )
-                        })?;
-                        records.push(PrefixRepresentativeRecord {
-                            state: transition.target,
-                            previous: record_index,
-                            edge_index: u32::try_from(edge_index).map_err(|_| {
-                                WasmExactSearchError::InvalidProblem(
-                                    "setup_witness_edge_index_overflow",
-                                )
-                            })?,
-                            hold_action: transition.hold_action,
-                        });
-                        seen.insert(transition.target, next_index);
+            }
+            if node.depth >= max_target_depth {
+                continue;
+            }
+            let edge_start = node.edge_start as usize;
+            let edge_end = edge_start + node.edge_count as usize;
+            for edge_index in edge_start..edge_end {
+                check_representative_cancel(control, cancellation_work)?;
+                let edge = self.graph.edges[edge_index];
+                for transition in self
+                    .original_transitions(
+                        node,
+                        edge,
+                        extra_draw,
+                        hold_code,
+                        pattern_bit,
+                        word_index,
+                    )
+                    .iter()
+                {
+                    if seen.contains_key(&transition.target) {
+                        continue;
                     }
+                    let next_index = u32::try_from(records.len()).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_prefix_representative_record_overflow",
+                        )
+                    })?;
+                    records.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_prefix_representative_storage_unavailable",
+                        )
+                    })?;
+                    seen.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_prefix_representative_index_unavailable",
+                        )
+                    })?;
+                    records.push(PrefixRepresentativeRecord {
+                        state: transition.target,
+                        previous: record_index,
+                        edge_index: u32::try_from(edge_index).map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "setup_witness_edge_index_overflow",
+                            )
+                        })?,
+                        hold_action: transition.hold_action,
+                    });
+                    seen.insert(transition.target, next_index);
                 }
             }
-            let selected = selected.ok_or(WasmExactSearchError::InvalidProblem(
+        }
+        if selected_records.len() != target_outputs.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
                 "setup_witness_path_reconstruction_failed",
-            ))?;
-            paths[output_index] = self.reconstruct_prefix_path(selected, &records)?;
+            ));
+        }
+        for (target_node, output_indexes) in target_outputs {
+            check_representative_cancel(control, cancellation_work)?;
+            let selected = selected_records[&target_node];
+            let path =
+                self.reconstruct_prefix_path(selected, &records, control, cancellation_work)?;
+            for output_index in output_indexes {
+                paths[output_index] = path.clone();
+            }
         }
         Ok(())
     }
@@ -601,9 +696,12 @@ impl<'a> SetupRepresentativeResolver<'a> {
         &self,
         mut record_index: u32,
         records: &[PrefixRepresentativeRecord],
+        control: &ExecutionControl,
+        cancellation_work: &mut usize,
     ) -> Result<Vec<CorePathStep>, WasmExactSearchError> {
         let mut path = Vec::new();
         loop {
+            check_representative_cancel(control, cancellation_work)?;
             let record = records.get(record_index as usize).copied().ok_or(
                 WasmExactSearchError::InvalidProblem("setup_prefix_representative_record_missing"),
             )?;
@@ -640,7 +738,10 @@ impl<'a> SetupRepresentativeResolver<'a> {
         word_index: usize,
         pattern_bit: u64,
         scratch: &mut CoverageCompletionScratch,
+        control: &ExecutionControl,
+        cancellation_work: &mut usize,
     ) -> Result<bool, WasmExactSearchError> {
+        check_representative_cancel(control, cancellation_work)?;
         let state = self.state_layout.encode(node_index, extra_draw, hold_code);
         if let Some(completion) = scratch.get(state) {
             return Ok(completion);
@@ -690,6 +791,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
                         word_index,
                         pattern_bit,
                         scratch,
+                        control,
+                        cancellation_work,
                     )? {
                         found = true;
                         break 'edges;
@@ -747,9 +850,12 @@ impl<'a> SetupRepresentativeResolver<'a> {
         &self,
         mut record_index: u32,
         scratch: &RepresentativeScratch,
+        control: &ExecutionControl,
+        cancellation_work: &mut usize,
     ) -> Result<Vec<CorePathStep>, WasmExactSearchError> {
         let mut path = Vec::new();
         loop {
+            check_representative_cancel(control, cancellation_work)?;
             let record = scratch.records.get(record_index as usize).copied().ok_or(
                 WasmExactSearchError::InvalidProblem("setup_witness_record_out_of_range"),
             )?;
@@ -777,4 +883,70 @@ impl<'a> SetupRepresentativeResolver<'a> {
         path.reverse();
         Ok(path)
     }
+}
+
+#[inline]
+fn check_representative_cancel(
+    control: &ExecutionControl,
+    work: &mut usize,
+) -> Result<(), WasmExactSearchError> {
+    *work = work.wrapping_add(1);
+    if *work & 4095 == 0 && control.is_cancelled() {
+        Err(WasmExactSearchError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static VERIFY_COMPACT_PATH_EQUIVALENCE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static COMPACT_PATH_EQUIVALENCE_COMPARISONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(super) struct CompactPathEquivalenceGuard {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl CompactPathEquivalenceGuard {
+    pub(super) fn comparison_count(&self) -> usize {
+        compact_path_equivalence_comparison_count()
+    }
+}
+
+#[cfg(test)]
+impl Drop for CompactPathEquivalenceGuard {
+    fn drop(&mut self) {
+        VERIFY_COMPACT_PATH_EQUIVALENCE.with(|enabled| enabled.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn verify_compact_paths_against_singletons() -> CompactPathEquivalenceGuard {
+    let previous = VERIFY_COMPACT_PATH_EQUIVALENCE.with(|enabled| enabled.replace(true));
+    COMPACT_PATH_EQUIVALENCE_COMPARISONS.with(|comparisons| comparisons.set(0));
+    CompactPathEquivalenceGuard { previous }
+}
+
+#[cfg(test)]
+fn compact_path_equivalence_check_enabled() -> bool {
+    VERIFY_COMPACT_PATH_EQUIVALENCE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn compact_path_equivalence_comparison_count() -> usize {
+    COMPACT_PATH_EQUIVALENCE_COMPARISONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_compact_path_equivalence_comparison() {
+    COMPACT_PATH_EQUIVALENCE_COMPARISONS.with(|comparisons| {
+        comparisons.set(comparisons.get().saturating_add(1));
+    });
 }

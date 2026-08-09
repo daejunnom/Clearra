@@ -3,7 +3,10 @@ import {
   spawn as nodeSpawn,
 } from "node:child_process";
 
-import { prepareClearraArguments } from "../clearra/command.mjs";
+import {
+  prepareClearraArguments,
+  searchTimeoutMsForArguments,
+} from "../clearra/command.mjs";
 
 export class ClearraCommandRunner {
   constructor(config, options = {}) {
@@ -11,6 +14,8 @@ export class ClearraCommandRunner {
     this.spawn = options.spawn ?? nodeSpawn;
     this.execFile = options.execFile ?? nodeExecFile;
     this.now = options.now ?? Date.now;
+    this.setTimeout = options.setTimeout ?? setTimeout;
+    this.clearTimeout = options.clearTimeout ?? clearTimeout;
   }
 
   async verifyCapabilities() {
@@ -41,7 +46,7 @@ export class ClearraCommandRunner {
       return Promise.reject(deadlineError());
     }
     const timeoutMs = Math.min(
-      this.config.searchTimeoutMs,
+      searchTimeoutMsForArguments(job.arguments, this.config),
       deadlineRemainingMs,
     );
     const maxOutputBytes = Math.min(
@@ -87,7 +92,7 @@ export class ClearraCommandRunner {
         } catch {
           // A concurrent process exit is confirmed by the close event below.
         }
-        forceKillTimer = setTimeout(() => {
+        forceKillTimer = this.setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) {
             try {
               child.kill("SIGKILL");
@@ -101,15 +106,15 @@ export class ClearraCommandRunner {
       const finish = (callback) => {
         if (settled) return;
         settled = true;
-        if (timeout) clearTimeout(timeout);
-        if (forceKillTimer) clearTimeout(forceKillTimer);
+        if (timeout) this.clearTimeout(timeout);
+        if (forceKillTimer) this.clearTimeout(forceKillTimer);
         options.signal?.removeEventListener("abort", abort);
         callback();
       };
       const fail = (error) => {
         if (settled || pendingFailure) return;
         pendingFailure = error;
-        if (timeout) clearTimeout(timeout);
+        if (timeout) this.clearTimeout(timeout);
         options.signal?.removeEventListener("abort", abort);
         terminate();
       };
@@ -124,7 +129,7 @@ export class ClearraCommandRunner {
         chunks.push(bytes);
       };
       const abort = () => fail(abortError("Clearra job was cancelled."));
-      timeout = setTimeout(() => fail(deadlineError()), timeoutMs);
+      timeout = this.setTimeout(() => fail(deadlineError()), timeoutMs);
       timeout.unref?.();
 
       options.signal?.addEventListener("abort", abort, { once: true });

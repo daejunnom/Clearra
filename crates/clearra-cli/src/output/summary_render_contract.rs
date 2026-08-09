@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use clearra_output::model::is_json_number;
+
 use super::{bool_field, number_field, string_array_field, string_field, RenderField};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -26,7 +28,7 @@ fn render_field(key: String, value: String) -> RenderField {
     if bool_keys().contains(key.as_str()) {
         return bool_value_field(key, value);
     }
-    if number_keys().contains(key.as_str()) && value != "none" {
+    if number_keys().contains(key.as_str()) && is_json_number(&value) {
         return number_field(key, value);
     }
     if string_keys().contains(key.as_str()) {

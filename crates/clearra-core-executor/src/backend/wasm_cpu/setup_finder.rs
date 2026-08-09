@@ -123,7 +123,15 @@ impl WasmSetupSearchSession {
                             1,
                             false,
                             "setup-path-detail-graph-cache",
+                            control,
                         );
+                        let result = match result {
+                            Ok(result) => result,
+                            Err(WasmExactSearchError::Cancelled) => {
+                                return Ok(WasmSetupSearchAdvance::Cancelled)
+                            }
+                            Err(error) => return Err(error),
+                        };
                         self.stage = SetupSearchStage::Finished;
                         return Ok(WasmSetupSearchAdvance::Completed(result));
                     }
@@ -169,7 +177,15 @@ impl WasmSetupSearchSession {
                             1,
                             false,
                             "setup-family-quotient-serial",
+                            control,
                         );
+                        let result = match result {
+                            Ok(result) => result,
+                            Err(WasmExactSearchError::Cancelled) => {
+                                return Ok(WasmSetupSearchAdvance::Cancelled)
+                            }
+                            Err(error) => return Err(error),
+                        };
                         self.stage = SetupSearchStage::Finished;
                         return Ok(WasmSetupSearchAdvance::Completed(result));
                     }
@@ -260,8 +276,15 @@ pub(super) fn finish_setup_result(
     workers_used: usize,
     parallel: bool,
     parallel_decision_reason: &'static str,
-) -> CoreExecutionResult {
+    control: &ExecutionControl,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
     cache_setup_coverage_result(query, &completed);
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
     let solution_found = completed
         .iter()
         .any(|result| result.report.candidate_count() != 0);
@@ -269,7 +292,10 @@ pub(super) fn finish_setup_result(
         .iter()
         .map(|result| result.report.candidate_count())
         .sum::<usize>();
-    let normalized_solution_set_hash = setup_candidate_set_hash(&completed);
+    let normalized_solution_set_hash = setup_candidate_set_hash(&completed, control)?;
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
     let reports = completed.into_iter().map(|result| result.report).collect();
     let remaining_pieces = query
         .residue()
@@ -294,6 +320,9 @@ pub(super) fn finish_setup_result(
         .iter()
         .map(|piece| piece.as_ascii())
         .collect::<String>();
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
     let report = SetupFinderReport::new(
         query.search_mode(),
         query.queue_observation_policy(),
@@ -307,7 +336,10 @@ pub(super) fn finish_setup_result(
         true,
         reports,
     );
-    CoreExecutionResult::new(
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    let result = CoreExecutionResult::new(
         vec![
             ("status".to_owned(), "setup-finder-complete".to_owned()),
             (
@@ -421,7 +453,11 @@ pub(super) fn finish_setup_result(
         ],
         Vec::new(),
     )
-    .with_setup_finder_report(report)
+    .with_setup_finder_report(report);
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    Ok(result)
 }
 
 fn cached_path_detail_result(
@@ -1589,15 +1625,18 @@ impl SetupCoverageSession {
         &mut self,
         control: &ExecutionControl,
     ) -> Result<CompletedSetupCoverage, WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut cancellation_work = 0_usize;
         self.apply_observation_policy(control)?;
-        let mut shape_indexes = self
-            .graph
-            .shapes
-            .iter()
-            .enumerate()
-            .filter(|(shape_index, _)| self.accumulators[*shape_index].joint_covered_patterns != 0)
-            .map(|(shape_index, _)| shape_index)
-            .collect::<Vec<_>>();
+        let mut shape_indexes = Vec::new();
+        for shape_index in 0..self.graph.shapes.len() {
+            check_setup_coverage_cancel(control, &mut cancellation_work)?;
+            if self.accumulators[shape_index].joint_covered_patterns != 0 {
+                shape_indexes.push(shape_index);
+            }
+        }
         if let Some(target_shape_index) = self.path_target_shape_index {
             shape_indexes.retain(|shape_index| *shape_index == target_shape_index);
         }
@@ -1609,6 +1648,9 @@ impl SetupCoverageSession {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_covered_depth_range_missing",
             ));
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
         }
         shape_indexes.sort_by(|left, right| {
             let left_shape = &self.graph.shapes[*left];
@@ -1629,15 +1671,29 @@ impl SetupCoverageSession {
                 right_coverage.max_covered_locks,
                 right_shape.board,
             )
+            .then_with(|| left.cmp(right))
         });
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         retain_best_setup_state_per_board(&mut shape_indexes, &self.graph.shapes)?;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         let candidate_count = shape_indexes.len();
-        let mut candidate_boards = shape_indexes
-            .iter()
-            .map(|shape_index| self.graph.shapes[*shape_index].board)
-            .collect::<Vec<_>>();
+        let mut candidate_boards = Vec::with_capacity(candidate_count);
+        for shape_index in &shape_indexes {
+            check_setup_coverage_cancel(control, &mut cancellation_work)?;
+            candidate_boards.push(self.graph.shapes[*shape_index].board);
+        }
         candidate_boards.sort_unstable();
-        let representative_paths = self.representative_paths(&shape_indexes)?;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let representative_paths = self.representative_paths(&shape_indexes, control)?;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         let mut all_solution_paths = self
             .solution_paths
             .take()
@@ -1646,39 +1702,42 @@ impl SetupCoverageSession {
             .map(|path| path.into_core_path())
             .collect::<Vec<_>>();
         let detail_requested = self.path_target_shape_index.is_some();
-        let candidates = shape_indexes
-            .into_iter()
-            .zip(representative_paths)
-            .map(|(shape_index, representative_path)| {
-                let shape = &self.graph.shapes[shape_index];
-                let coverage = &self.accumulators[shape_index];
-                let conditional = if coverage.build_weight == 0.0 {
-                    0.0
-                } else {
-                    coverage.joint_weight / coverage.build_weight
-                };
-                let setup_id = self.graph.setup_id_for_shape(shape_index).ok_or(
-                    WasmExactSearchError::InvalidProblem("setup_candidate_identity_missing"),
-                )?;
-                let candidate = SetupCandidateReport::new(
-                    setup_id,
-                    shape.board,
-                    coverage.min_covered_locks,
-                    coverage.max_covered_locks,
-                    coverage.build_covered_patterns,
-                    coverage.joint_covered_patterns,
-                    probability_string(coverage.build_weight),
-                    probability_string(coverage.joint_weight),
-                    probability_string(conditional),
-                    representative_path,
-                );
-                if detail_requested {
-                    Ok(candidate.with_solution_paths(std::mem::take(&mut all_solution_paths)))
-                } else {
-                    Ok(candidate)
-                }
-            })
-            .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
+        let mut candidates = Vec::with_capacity(candidate_count);
+        for (shape_index, representative_path) in
+            shape_indexes.into_iter().zip(representative_paths)
+        {
+            check_setup_coverage_cancel(control, &mut cancellation_work)?;
+            let shape = &self.graph.shapes[shape_index];
+            let coverage = &self.accumulators[shape_index];
+            let conditional = if coverage.build_weight == 0.0 {
+                0.0
+            } else {
+                coverage.joint_weight / coverage.build_weight
+            };
+            let setup_id = self.graph.setup_id_for_shape(shape_index).ok_or(
+                WasmExactSearchError::InvalidProblem("setup_candidate_identity_missing"),
+            )?;
+            let candidate = SetupCandidateReport::new(
+                setup_id,
+                shape.board,
+                coverage.min_covered_locks,
+                coverage.max_covered_locks,
+                coverage.build_covered_patterns,
+                coverage.joint_covered_patterns,
+                probability_string(coverage.build_weight),
+                probability_string(coverage.joint_weight),
+                probability_string(conditional),
+                representative_path,
+            );
+            candidates.push(if detail_requested {
+                candidate.with_solution_paths(std::mem::take(&mut all_solution_paths))
+            } else {
+                candidate
+            });
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         Ok(CompletedSetupCoverage {
             report: SetupHoldConditionReport::new(
                 self.condition_id.clone(),
@@ -1697,6 +1756,7 @@ impl SetupCoverageSession {
     fn representative_paths(
         &self,
         shape_indexes: &[usize],
+        control: &ExecutionControl,
     ) -> Result<Vec<Vec<crate::CorePathStep>>, WasmExactSearchError> {
         let resolver = SetupRepresentativeResolver::new(
             &self.condition,
@@ -1726,7 +1786,7 @@ impl SetupCoverageSession {
                 Ok((shape_index, RepresentativeWitness { pattern_id }))
             })
             .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
-        resolver.paths(&targets)
+        resolver.paths_with_control(&targets, control)
     }
 }
 
@@ -1735,12 +1795,10 @@ fn setup_witness_for_coverage(
     coverage: &PatternBitSet,
 ) -> Option<SetupWitness> {
     let global_pattern_index = coverage.first_pattern()?.index();
-    (0..pattern_index.local_pattern_count()).find_map(|local_pattern_index| {
-        (pattern_index.global_pattern_index(local_pattern_index) == Some(global_pattern_index))
-            .then_some(SetupWitness {
-                word_index: local_pattern_index / 64,
-                pattern_bit: 1_u64 << (local_pattern_index % 64),
-            })
+    let local_pattern_index = pattern_index.local_pattern_index(global_pattern_index)?;
+    Some(SetupWitness {
+        word_index: local_pattern_index / 64,
+        pattern_bit: 1_u64 << (local_pattern_index % 64),
     })
 }
 
@@ -1892,7 +1950,10 @@ fn conditional_pc_probability(build: f64, joint: f64) -> f64 {
     }
 }
 
-fn setup_candidate_set_hash(results: &[CompletedSetupCoverage]) -> String {
+fn setup_candidate_set_hash(
+    results: &[CompletedSetupCoverage],
+    control: &ExecutionControl,
+) -> Result<String, WasmExactSearchError> {
     const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
     const FNV_PRIME: u64 = 1_099_511_628_211;
 
@@ -1904,10 +1965,13 @@ fn setup_candidate_set_hash(results: &[CompletedSetupCoverage]) -> String {
             .cmp(results[*right].report.condition_id())
     });
     let mut hash = FNV_OFFSET;
+    let mut cancellation_work = 0_usize;
     for condition_index in condition_order {
+        check_setup_coverage_cancel(control, &mut cancellation_work)?;
         let result = &results[condition_index];
         let condition_id = result.report.condition_id();
         for board in &result.candidate_boards {
+            check_setup_coverage_cancel(control, &mut cancellation_work)?;
             for byte in condition_id.bytes().chain(core::iter::once(b'|')) {
                 hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(FNV_PRIME);
@@ -1926,7 +1990,10 @@ fn setup_candidate_set_hash(results: &[CompletedSetupCoverage]) -> String {
             hash = hash.wrapping_mul(FNV_PRIME);
         }
     }
-    format!("css1:{hash:016x}")
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    Ok(format!("css1:{hash:016x}"))
 }
 
 #[cfg(test)]

@@ -167,6 +167,22 @@ test("job service uses every Cloud Run logical processor by default", () => {
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(config.maxConcurrentJobs, 1);
   assert.equal(config.port, 8787);
+  assert.equal(config.searchTimeoutMs, 170_000);
+  assert.equal(config.reverseSearchTimeoutMs, 300_000);
+  assert.equal(config.forwardSearchTimeoutMs, 900_000);
+
+  const timeoutOverrides = loadClearraJobServiceConfig(
+    {
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_SEARCH_TIMEOUT_MS: "1000",
+      CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "2000",
+      CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "3000",
+    },
+    { availableParallelism: () => 6 },
+  );
+  assert.equal(timeoutOverrides.searchTimeoutMs, 1_000);
+  assert.equal(timeoutOverrides.reverseSearchTimeoutMs, 2_000);
+  assert.equal(timeoutOverrides.forwardSearchTimeoutMs, 3_000);
 
   const reserveCore = loadClearraJobServiceConfig(
     {
@@ -306,6 +322,57 @@ test("job runner sends curated sfinder argv without shell interpretation", async
     "json",
     "--include-solution-data",
   ]);
+});
+
+test("job runner clamps execution timers by search direction and absolute deadline", async () => {
+  const observedTimeouts = [];
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra",
+      processLogicalProcessors: 1,
+      searchWorkersPerSession: 1,
+      useAllLogicalProcessors: false,
+      searchTimeoutMs: 2_000,
+      reverseSearchTimeoutMs: 5_000,
+      forwardSearchTimeoutMs: 15_000,
+      maxOutputBytes: 1024 * 1024,
+      terminationGraceMs: 100,
+    },
+    {
+      now: () => 10_000,
+      setTimeout: (_callback, timeoutMs) => {
+        observedTimeouts.push(timeoutMs);
+        return { unref() {} };
+      },
+      clearTimeout() {},
+      spawn: () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.kill = () => true;
+        queueMicrotask(() => {
+          child.exitCode = 0;
+          child.emit("close", 0, null);
+        });
+        return child;
+      },
+    },
+  );
+  const execute = (arguments_, deadlineUnixMs = 99_000) => runner.execute({
+    arguments: arguments_,
+    deadlineUnixMs,
+    maxOutputBytes: 1024 * 1024,
+  });
+
+  await execute(["pc"]);
+  await execute(["damage"]);
+  await execute(["setup-finder", "--remaining", "TI"]);
+  await execute(["sfinder", "verify", "pc"]);
+  await execute(["damage"], 10_750);
+
+  assert.deepEqual(observedTimeouts, [5_000, 15_000, 15_000, 2_000, 750]);
 });
 
 test("job runner retains its slot until a cancelled process closes", async () => {

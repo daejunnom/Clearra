@@ -31,6 +31,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForwardSearchError {
     EmptyQueue,
+    QueueTooLong,
     InvalidHeight,
     BoardOutsideField,
     PatternRequiresSpinFinder,
@@ -542,7 +543,7 @@ impl ForwardSearchSession {
         control: &ExecutionControl,
     ) -> Result<ForwardSearchAdvance, ForwardSearchError> {
         if self.completed {
-            return Ok(ForwardSearchAdvance::Completed(self.build_report()));
+            return completed_report_advance(self.build_report(control));
         }
         match self
             .active
@@ -557,6 +558,9 @@ impl ForwardSearchSession {
                     .saturating_add(report.generated_locks());
                 self.peak_frontier = self.peak_frontier.max(report.peak_frontier());
                 for mut outcome in report.outcomes().iter().cloned() {
+                    if control.is_cancelled() {
+                        return Ok(ForwardSearchAdvance::Cancelled);
+                    }
                     outcome.assign_id(self.outcomes.len() as u64 + 1);
                     self.outcomes.push(outcome);
                 }
@@ -570,7 +574,7 @@ impl ForwardSearchSession {
                 );
                 if self.pattern_index >= pattern_count {
                     self.completed = true;
-                    Ok(ForwardSearchAdvance::Completed(self.build_report()))
+                    completed_report_advance(self.build_report(control))
                 } else {
                     let queue = self.query.piece_source().sequence_at(self.pattern_index);
                     self.active = ForwardQueueSession::new(self.config, queue, self.pattern_index);
@@ -593,16 +597,36 @@ impl ForwardSearchSession {
         }
     }
 
-    pub(crate) fn build_report(&self) -> ForwardSearchReport {
-        ForwardSearchReport::new(
+    pub(crate) fn build_report(
+        &self,
+        control: &ExecutionControl,
+    ) -> Result<ForwardSearchReport, ForwardSearchError> {
+        let mut outcomes = Vec::with_capacity(self.outcomes.len());
+        for outcome in &self.outcomes {
+            if control.is_cancelled() {
+                return Err(ForwardSearchError::Cancelled);
+            }
+            outcomes.push(outcome.clone());
+        }
+        Ok(ForwardSearchReport::new(
             true,
             self.config.board.words(),
             1,
             self.visited_states,
             self.generated_locks,
             self.peak_frontier,
-            self.outcomes.clone(),
-        )
+            outcomes,
+        ))
+    }
+}
+
+fn completed_report_advance(
+    report: Result<ForwardSearchReport, ForwardSearchError>,
+) -> Result<ForwardSearchAdvance, ForwardSearchError> {
+    match report {
+        Ok(report) => Ok(ForwardSearchAdvance::Completed(report)),
+        Err(ForwardSearchError::Cancelled) => Ok(ForwardSearchAdvance::Cancelled),
+        Err(error) => Err(error),
     }
 }
 
@@ -683,7 +707,7 @@ impl ForwardQueueSession {
         reachability: &mut ReachabilityWorkspace,
     ) -> Result<ForwardSearchAdvance, ForwardSearchError> {
         if self.completed {
-            return Ok(ForwardSearchAdvance::Completed(self.build_report()));
+            return completed_report_advance(self.build_report(control));
         }
         let budget = work_budget.max(1);
         let mut processed = 0_usize;
@@ -694,7 +718,7 @@ impl ForwardQueueSession {
             if self.current_cursor >= self.current.len() {
                 if self.next.is_empty() {
                     self.completed = true;
-                    return Ok(ForwardSearchAdvance::Completed(self.build_report()));
+                    return completed_report_advance(self.build_report(control));
                 }
                 std::mem::swap(&mut self.current, &mut self.next);
                 self.next.clear();
@@ -1038,14 +1062,20 @@ impl ForwardQueueSession {
         });
     }
 
-    pub(crate) fn build_report(&self) -> ForwardSearchReport {
+    pub(crate) fn build_report(
+        &self,
+        control: &ExecutionControl,
+    ) -> Result<ForwardSearchReport, ForwardSearchError> {
         let outcomes = match self.config.mode {
             ForwardSearchMode::MaximumDamage | ForwardSearchMode::DamageAtLeast(_) => {
                 let mut outcomes = Vec::new();
                 let mut seen = HashSet::new();
                 for best in self.damage_outcomes.values() {
+                    if control.is_cancelled() {
+                        return Err(ForwardSearchError::Cancelled);
+                    }
                     for trace in &best.traces {
-                        for path in self.reconstruct_paths(*trace) {
+                        self.for_each_reconstructed_path(*trace, control, |path| {
                             let key = DamagePathKey {
                                 board: best.board,
                                 steps: path
@@ -1065,7 +1095,7 @@ impl ForwardQueueSession {
                                     .collect(),
                             };
                             if !seen.insert(key) {
-                                continue;
+                                return Ok(());
                             }
                             outcomes.push(ForwardSearchOutcome::new(
                                 outcomes.len() as u64 + 1,
@@ -1079,20 +1109,28 @@ impl ForwardQueueSession {
                                 best.total_damage,
                                 path,
                             ));
-                        }
+                            Ok(())
+                        })?;
                     }
                 }
                 if matches!(self.config.mode, ForwardSearchMode::MaximumDamage) {
+                    if control.is_cancelled() {
+                        return Err(ForwardSearchError::Cancelled);
+                    }
                     outcomes.sort_by_key(|outcome| outcome.path().len());
+                    if control.is_cancelled() {
+                        return Err(ForwardSearchError::Cancelled);
+                    }
                 }
                 outcomes
             }
-            ForwardSearchMode::SpinFinder(_) => self
-                .spin_outcomes
-                .values()
-                .enumerate()
-                .map(|(index, pending)| {
-                    ForwardSearchOutcome::new(
+            ForwardSearchMode::SpinFinder(_) => {
+                let mut outcomes = Vec::with_capacity(self.spin_outcomes.len());
+                for (index, pending) in self.spin_outcomes.values().enumerate() {
+                    if control.is_cancelled() {
+                        return Err(ForwardSearchError::Cancelled);
+                    }
+                    outcomes.push(ForwardSearchOutcome::new(
                         index as u64 + 1,
                         self.source_pattern_index,
                         self.queue.clone(),
@@ -1102,12 +1140,13 @@ impl ForwardQueueSession {
                         pending.key.mini,
                         pending.key.lines,
                         pending.total_damage,
-                        self.reconstruct_first_path(pending.trace),
-                    )
-                })
-                .collect(),
+                        self.reconstruct_first_path(pending.trace, control)?,
+                    ));
+                }
+                outcomes
+            }
         };
-        ForwardSearchReport::new(
+        Ok(ForwardSearchReport::new(
             true,
             self.config.board.words(),
             1,
@@ -1115,77 +1154,124 @@ impl ForwardQueueSession {
             self.generated_locks,
             self.peak_frontier,
             outcomes,
-        )
+        ))
     }
 
-    fn reconstruct_first_path(&self, mut trace: u32) -> Vec<ForwardPathStep> {
-        let mut path = Vec::new();
+    fn reconstruct_first_path(
+        &self,
+        mut trace: u32,
+        control: &ExecutionControl,
+    ) -> Result<Vec<ForwardPathStep>, ForwardSearchError> {
+        let mut reverse_path = Vec::new();
         loop {
+            if control.is_cancelled() {
+                return Err(ForwardSearchError::Cancelled);
+            }
             let node = self.trace.get(trace);
-            path.push(node.step);
+            reverse_path.push(node.step);
             if node.parent_head == NO_TRACE {
                 break;
             }
             trace = node.parent_head;
         }
-        path.reverse();
-        self.materialize_path(path)
+        self.materialize_reverse_path(&reverse_path, control)
     }
 
-    fn reconstruct_paths(&self, trace: u32) -> Vec<Vec<ForwardPathStep>> {
-        self.reconstruct_compact_paths(trace)
-            .into_iter()
-            .map(|path| self.materialize_path(path))
-            .collect()
+    fn for_each_reconstructed_path(
+        &self,
+        trace: u32,
+        control: &ExecutionControl,
+        mut visit: impl FnMut(Vec<ForwardPathStep>) -> Result<(), ForwardSearchError>,
+    ) -> Result<(), ForwardSearchError> {
+        self.for_each_compact_path(trace, control, |reverse_path| {
+            visit(self.materialize_reverse_path(reverse_path, control)?)
+        })
     }
 
-    fn reconstruct_compact_paths(&self, trace: u32) -> Vec<Vec<TraceStep>> {
-        let node = self.trace.get(trace);
-        if node.parent_head == NO_TRACE {
-            return vec![vec![node.step]];
+    fn for_each_compact_path(
+        &self,
+        trace: u32,
+        control: &ExecutionControl,
+        mut visit: impl FnMut(&[TraceStep]) -> Result<(), ForwardSearchError>,
+    ) -> Result<(), ForwardSearchError> {
+        struct TraceFrame {
+            next_parent: u32,
         }
-        let mut paths = Vec::new();
-        let mut parent = node.parent_head;
-        while parent != NO_TRACE {
-            for mut path in self.reconstruct_compact_paths(parent) {
-                path.push(node.step);
-                paths.push(path);
+
+        if control.is_cancelled() {
+            return Err(ForwardSearchError::Cancelled);
+        }
+        let first = self.trace.get(trace);
+        let mut reverse_path = vec![first.step];
+        if first.parent_head == NO_TRACE {
+            return visit(&reverse_path);
+        }
+        let mut frames = vec![TraceFrame {
+            next_parent: first.parent_head,
+        }];
+
+        while let Some(frame) = frames.last_mut() {
+            if control.is_cancelled() {
+                return Err(ForwardSearchError::Cancelled);
             }
-            parent = self.trace.get(parent).next;
+            if frame.next_parent == NO_TRACE {
+                frames.pop();
+                reverse_path.pop();
+                continue;
+            }
+
+            let parent = frame.next_parent;
+            let node = self.trace.get(parent);
+            frame.next_parent = node.next;
+            reverse_path.push(node.step);
+            if node.parent_head == NO_TRACE {
+                visit(&reverse_path)?;
+                reverse_path.pop();
+            } else {
+                frames.push(TraceFrame {
+                    next_parent: node.parent_head,
+                });
+            }
         }
-        paths
+        Ok(())
     }
 
-    fn materialize_path(&self, compact: Vec<TraceStep>) -> Vec<ForwardPathStep> {
+    fn materialize_reverse_path(
+        &self,
+        reverse_path: &[TraceStep],
+        control: &ExecutionControl,
+    ) -> Result<Vec<ForwardPathStep>, ForwardSearchError> {
         let mut board = self.config.board;
         let mut total_damage = 0_u32;
-        compact
-            .into_iter()
-            .map(|step| {
-                let placement = trace_placement(step.piece, step.rotation, step.x, step.y);
-                let placed = board.union_for_height(placement, self.config.height);
-                let (board_after, cleared_row_mask, cleared_lines) =
-                    place_and_clear(10, self.config.height, placed);
-                debug_assert_eq!(cleared_lines, step.cleared_lines);
-                total_damage = total_damage.saturating_add(step.damage);
-                board = board_after;
-                ForwardPathStep::new(
-                    step.piece,
-                    canonical_result_rotation(step.piece, step.rotation),
-                    canonical_result_rotation(step.piece, step.rotation),
-                    step.x,
-                    step.y,
-                    step.hold.label(),
-                    step.cleared_lines,
-                    step.spin.map(|(piece, mini)| (piece.as_ascii(), mini)),
-                    step.damage,
-                    total_damage,
-                    placement.words(),
-                    cleared_row_mask,
-                    board_after.words(),
-                )
-            })
-            .collect()
+        let mut path = Vec::with_capacity(reverse_path.len());
+        for step in reverse_path.iter().rev().copied() {
+            if control.is_cancelled() {
+                return Err(ForwardSearchError::Cancelled);
+            }
+            let placement = trace_placement(step.piece, step.rotation, step.x, step.y);
+            let placed = board.union_for_height(placement, self.config.height);
+            let (board_after, cleared_row_mask, cleared_lines) =
+                place_and_clear(10, self.config.height, placed);
+            debug_assert_eq!(cleared_lines, step.cleared_lines);
+            total_damage = total_damage.saturating_add(step.damage);
+            board = board_after;
+            path.push(ForwardPathStep::new(
+                step.piece,
+                canonical_result_rotation(step.piece, step.rotation),
+                canonical_result_rotation(step.piece, step.rotation),
+                step.x,
+                step.y,
+                step.hold.label(),
+                step.cleared_lines,
+                step.spin.map(|(piece, mini)| (piece.as_ascii(), mini)),
+                step.damage,
+                total_damage,
+                placement.words(),
+                cleared_row_mask,
+                board_after.words(),
+            ));
+        }
+        Ok(path)
     }
 }
 
@@ -1434,6 +1520,9 @@ pub(crate) fn validate_query(query: &ForwardSearchQuery) -> Result<(), ForwardSe
     if query.piece_source().sequence_len() == 0 {
         return Err(ForwardSearchError::EmptyQueue);
     }
+    if query.piece_source().sequence_len() > usize::from(u16::MAX) {
+        return Err(ForwardSearchError::QueueTooLong);
+    }
     if query.piece_source().is_pattern() {
         if !matches!(query.mode(), ForwardSearchMode::SpinFinder(_)) {
             return Err(ForwardSearchError::PatternRequiresSpinFinder);
@@ -1606,6 +1695,144 @@ mod tests {
             .expect("session")
             .run_to_completion(&control)
             .expect("search")
+    }
+
+    fn fixed_queue_query(queue_len: usize) -> ForwardSearchQuery {
+        ForwardSearchQuery::new(
+            Board256Mask::EMPTY,
+            4,
+            vec![PieceKind::O; queue_len],
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::TSpins,
+            None,
+            None,
+            ForwardSearchMode::MaximumDamage,
+        )
+    }
+
+    fn fixed_pattern_query(queue_len: usize) -> ForwardSearchQuery {
+        let expression = QueuePatternExpression::parse(&"I".repeat(queue_len), 1)
+            .expect("single concrete pattern");
+        ForwardSearchQuery::new_with_source(
+            Board256Mask::EMPTY,
+            4,
+            ForwardPieceSource::pattern(expression),
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::TSpins,
+            None,
+            None,
+            ForwardSearchMode::SpinFinder(ForwardSpinTarget::default()),
+        )
+    }
+
+    fn compact_o_step(x: i8) -> TraceStep {
+        TraceStep {
+            piece: PieceKind::O,
+            rotation: RotationState::Zero,
+            x,
+            y: 0,
+            hold: TraceHoldDecision::None,
+            cleared_lines: 0,
+            spin: None,
+            damage: 0,
+        }
+    }
+
+    fn push_trace_choice(
+        session: &mut ForwardQueueSession,
+        parent_head: u32,
+        left_x: i8,
+        right_x: i8,
+    ) -> u32 {
+        let left = session.trace.push(TraceNode {
+            parent_head,
+            next: NO_TRACE,
+            step: compact_o_step(left_x),
+        });
+        let right = session.trace.push(TraceNode {
+            parent_head,
+            next: NO_TRACE,
+            step: compact_o_step(right_x),
+        });
+        session.trace.get_mut(left).next = right;
+        left
+    }
+
+    #[test]
+    fn trace_reconstruction_preserves_parent_chain_order() {
+        let query = fixed_queue_query(1);
+        let config = ForwardSearchConfig::from_query(&query);
+        let mut session = ForwardQueueSession::new(config, vec![PieceKind::O], 0);
+        let parents = push_trace_choice(&mut session, NO_TRACE, 0, 2);
+        let terminal = session.trace.push(TraceNode {
+            parent_head: parents,
+            next: NO_TRACE,
+            step: compact_o_step(4),
+        });
+        let control = ExecutionControl::default();
+        let mut paths = Vec::new();
+
+        session
+            .for_each_reconstructed_path(terminal, &control, |path| {
+                paths.push(path.iter().map(ForwardPathStep::x).collect::<Vec<_>>());
+                Ok(())
+            })
+            .expect("reconstruct paths");
+
+        assert_eq!(paths, vec![vec![0, 4], vec![2, 4]]);
+    }
+
+    #[test]
+    fn cancellation_bounds_exponential_trace_dag_materialization() {
+        let query = fixed_queue_query(1);
+        let config = ForwardSearchConfig::from_query(&query);
+        let mut session = ForwardQueueSession::new(config, vec![PieceKind::O], 0);
+        let mut parents = push_trace_choice(&mut session, NO_TRACE, 0, 2);
+        for _ in 0..39 {
+            parents = push_trace_choice(&mut session, parents, 0, 2);
+        }
+        let terminal = session.trace.push(TraceNode {
+            parent_head: parents,
+            next: NO_TRACE,
+            step: compact_o_step(4),
+        });
+        let token = ExecutionCancellationToken::new();
+        let cancellation = token.handle();
+        let control = ExecutionControl::new(token);
+        let mut materialized = 0_usize;
+
+        let result = session.for_each_reconstructed_path(terminal, &control, |_| {
+            materialized += 1;
+            cancellation.cancel();
+            Ok(())
+        });
+
+        assert_eq!(result, Err(ForwardSearchError::Cancelled));
+        assert_eq!(materialized, 1);
+    }
+
+    #[test]
+    fn fixed_queue_accepts_the_largest_cursor_representable_length() {
+        assert!(ForwardSearchSession::new(fixed_queue_query(usize::from(u16::MAX))).is_ok());
+    }
+
+    #[test]
+    fn fixed_queue_rejects_a_length_beyond_the_cursor_representation() {
+        assert!(matches!(
+            ForwardSearchSession::new(fixed_queue_query(usize::from(u16::MAX) + 1)),
+            Err(ForwardSearchError::QueueTooLong)
+        ));
+    }
+
+    #[test]
+    fn concrete_pattern_obeys_the_same_cursor_length_boundary() {
+        assert!(ForwardSearchSession::new(fixed_pattern_query(usize::from(u16::MAX))).is_ok());
+        assert!(matches!(
+            ForwardSearchSession::new(fixed_pattern_query(usize::from(u16::MAX) + 1)),
+            Err(ForwardSearchError::QueueTooLong)
+        ));
     }
 
     #[test]

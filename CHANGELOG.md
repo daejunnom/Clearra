@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.7.3 - 2026-08-10
+
+- Localized Discord application commands and setup-search responses in Korean
+  and English, added setup sorting, maximum setup pieces, queue visibility,
+  next-cycle remainder, and setup-length controls, and aligned reverse,
+  forward, setup, and Sfinder-compatible command deadlines with long-search
+  progress notices.
+- Replaced per-candidate setup representative-path searches with shared
+  witness-pattern traversal, propagated cancellation through finalization,
+  removed duplicate result caching, and accelerated visible-seven witness
+  lookup while preserving the complete result set.
+- Hardened forward search against queues beyond its cursor range and changed
+  damage-trace reconstruction to cancellable iterative traversal without
+  truncating paths.
+- Precomputed spin-minimization operation keys to remove repeated sorting while
+  preserving deterministic reports.
+- Preserved non-numeric summary sentinels as valid JSON strings across CLI and
+  scenario output, and made release smoke tests parse structured output instead
+  of checking only process exit codes.
+
 ## 0.7.2 - 2026-08-09
 
 - Treated finesse candidates whose active piece cannot occupy its exact spawn

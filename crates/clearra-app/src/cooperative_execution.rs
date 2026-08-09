@@ -570,6 +570,9 @@ fn forward_error_as_wasm(error: ForwardSearchError) -> WasmCpuSearchError {
         ForwardSearchError::EmptyQueue => WasmCpuSearchError::InvalidProblem {
             reason: "forward_search_empty_queue",
         },
+        ForwardSearchError::QueueTooLong => WasmCpuSearchError::InvalidProblem {
+            reason: "forward_search_queue_too_long",
+        },
         ForwardSearchError::InvalidHeight => WasmCpuSearchError::InvalidProblem {
             reason: "forward_search_invalid_height",
         },

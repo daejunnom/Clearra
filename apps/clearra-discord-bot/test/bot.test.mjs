@@ -111,6 +111,8 @@ test("slash catalog registers only curated active commands", () => {
     }
     const expectedPrefix = command.name === "score-finder"
       ? ["sfinder", "score-finder"]
+      : command.input === "remaining"
+        ? ["setup-finder"]
       : command.name === "damage" || command.name === "spin-structure"
         ? [command.name]
         : ["sfinder", command.name];
@@ -176,7 +178,15 @@ test("slash catalog registers only curated active commands", () => {
   );
   assert.deepEqual(
     findSlashCommand("pc-setup").registration.options.map(({ name }) => name),
-    ["remaining", "kicktable"],
+    [
+      "remaining",
+      "priority",
+      "max-setup-pieces",
+      "queue-knowledge",
+      "next-cycle-remaining",
+      "setup-length",
+      "kicktable",
+    ],
   );
   assert.equal(globalCommands.some(({ name }) => name === "clearra"), false);
   assert.equal(globalCommands.some(({ name }) => name === "view"), false);
@@ -2315,6 +2325,188 @@ test("queued slash work expires before the Discord interaction deadline", async 
   );
   releaseFirst();
   await first;
+});
+
+test("long-running setup interaction publishes one localized progress update before the final result", async () => {
+  const edits = [];
+  let finishSearch;
+  const search = new Promise((resolve) => {
+    finishSearch = resolve;
+  });
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        edits.push(message.payload.content);
+      },
+    },
+    {
+      maxConcurrentSearches: 1,
+      interactionDeadlineMs: 1_000,
+      searchTimeoutMs: 1_000,
+      reverseSearchTimeoutMs: 1_000,
+      forwardSearchTimeoutMs: 1_000,
+      setupProgressNoticeMs: 5,
+    },
+    {
+      executor: {
+        async execute() {
+          await search;
+          return { exitCode: 0, stdout: "setup complete", stderr: "" };
+        },
+      },
+    },
+  );
+
+  const execution = bot.runInteractionCommand(
+    slashInteraction("pc-setup", [], undefined, "setup-progress"),
+    ["setup-finder", "--remaining", "IOTSZJL"],
+    null,
+    "ko",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(edits.length, 1);
+  assert.match(edits[0], /셋업 탐색이 아직 진행 중/u);
+
+  finishSearch();
+  await execution;
+  assert.equal(edits.length, 2);
+  assert.doesNotMatch(edits[1], /아직 진행 중/u);
+  assert.match(edits[1], /setup complete/u);
+});
+
+test("setup progress timer stays silent for fast searches", async () => {
+  const edits = [];
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        edits.push(message.payload.content);
+      },
+    },
+    {
+      maxConcurrentSearches: 1,
+      interactionDeadlineMs: 1_000,
+      searchTimeoutMs: 1_000,
+      reverseSearchTimeoutMs: 1_000,
+      forwardSearchTimeoutMs: 1_000,
+      setupProgressNoticeMs: 50,
+    },
+    {
+      executor: {
+        async execute() {
+          return { exitCode: 0, stdout: "fast setup", stderr: "" };
+        },
+      },
+    },
+  );
+
+  await bot.runInteractionCommand(
+    slashInteraction("best-setup", [], undefined, "setup-fast"),
+    ["setup-finder", "--remaining", "IOTSZJL"],
+  );
+  assert.deepEqual(edits, ["```text\nfast setup\n```"]);
+});
+
+test("long-running setup text search replaces its English progress reply", async () => {
+  const created = [];
+  const edited = [];
+  let finishSearch;
+  const search = new Promise((resolve) => {
+    finishSearch = resolve;
+  });
+  const bot = new Clearrabot(
+    {
+      async createChannelMessage(channelId, outgoing) {
+        created.push({ channelId, outgoing });
+        return { id: "setup-progress-message" };
+      },
+      async editChannelMessage(channelId, messageId, outgoing) {
+        edited.push({ channelId, messageId, outgoing });
+      },
+    },
+    {
+      maxConcurrentSearches: 1,
+      interactionDeadlineMs: 1_000,
+      searchTimeoutMs: 1_000,
+      reverseSearchTimeoutMs: 1_000,
+      forwardSearchTimeoutMs: 1_000,
+      setupProgressNoticeMs: 5,
+    },
+    {
+      executor: {
+        async execute() {
+          await search;
+          return { exitCode: 0, stdout: "text setup complete", stderr: "" };
+        },
+      },
+    },
+  );
+
+  const execution = bot.runOracleMessageCommand(
+    oracleMessage("setup-source", "$pc-setup IOTSZJL"),
+    ["setup-finder", "--remaining", "IOTSZJL"],
+    null,
+    "en",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(created.length, 1);
+  assert.match(created[0].outgoing.payload.content, /still running/iu);
+
+  finishSearch();
+  await execution;
+  assert.equal(edited.length, 1);
+  assert.equal(edited[0].messageId, "setup-progress-message");
+  assert.match(edited[0].outgoing.payload.content, /text setup complete/u);
+});
+
+test("gateway applies a five-minute reverse deadline and a fourteen-minute Discord delivery cap", async () => {
+  const calls = [];
+  const createdAt = Date.now();
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction() {},
+    },
+    {
+      maxConcurrentSearches: 1,
+      interactionDeadlineMs: 14 * 60_000,
+      searchTimeoutMs: 3 * 60_000,
+      reverseSearchTimeoutMs: 5 * 60_000,
+      forwardSearchTimeoutMs: 15 * 60_000,
+      setupProgressNoticeMs: 5 * 60_000,
+    },
+    {
+      executor: {
+        async execute(arguments_, options) {
+          calls.push({ arguments_, options });
+          return { exitCode: 0, stdout: "done", stderr: "" };
+        },
+      },
+    },
+  );
+
+  for (const [ordinal, arguments_] of [
+    [0, ["pc", "--lines", "4"]],
+    [1, ["damage", "--queue", "I"]],
+    [2, ["setup-finder", "--remaining", "IOTSZJL"]],
+  ]) {
+    await bot.runInteractionCommand(
+      slashInteraction(
+        ordinal === 0 ? "path" : ordinal === 1 ? "damage" : "pc-setup",
+        [],
+        undefined,
+        discordSnowflakeAt(createdAt + ordinal),
+      ),
+      arguments_,
+    );
+  }
+
+  assert.deepEqual(
+    calls.map(({ options }) => options.deadlineUnixMs),
+    [
+      createdAt + 5 * 60_000,
+      createdAt + 1 + 14 * 60_000,
+      createdAt + 2 + 14 * 60_000,
+    ],
+  );
 });
 
 function slashInteraction(name, options, resolved = undefined, id = "interaction-id") {

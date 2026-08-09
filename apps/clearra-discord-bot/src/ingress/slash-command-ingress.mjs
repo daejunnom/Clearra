@@ -66,7 +66,11 @@ export class SlashCommandIngress {
         return gatewayInteractionErrorResponse(validationErrorText(error, locale));
       }
     }
-    return buildCommandModalResponse(interaction, locale);
+    try {
+      return buildCommandModalResponse(interaction, locale);
+    } catch (error) {
+      return gatewayInteractionErrorResponse(validationErrorText(error, locale));
+    }
   }
 
   localeFor(interaction) {

@@ -57,11 +57,11 @@ const COLORED_COMMANDS = [
 const SPIN_COMMANDS = ["spin-cover", "spin"];
 const REMAINING_COMMANDS = ["pc-setup", "best-setup", "dpc-finder"];
 
-test("every ungrouped bare search command opens a v3 search Modal while help stays direct", () => {
+test("every ungrouped bare search command opens a v4 search Modal while help stays direct", () => {
   for (const command of slashCommandCatalog.filter(({ kind, input }) => kind === "search" && input !== "finesse")) {
     const response = buildMissingBoardModalResponse(slashInteraction(command.name));
     assert.equal(response?.type, 9, `/${command.name} must open a Modal`);
-    assert.equal(response.data.custom_id, `clearra:search:v3:${command.name}`);
+    assert.equal(response.data.custom_id, `clearra:search:v4:${command.name}`);
     assert.ok(
       response.data.components.length <= 5,
       `/${command.name} exceeded Discord's five-component Modal limit`,
@@ -77,7 +77,7 @@ test("every ungrouped bare search command opens a v3 search Modal while help sta
       slashInteraction("finesse", [{ type: 1, name: subcommand, options: [] }]),
     );
     assert.equal(response?.type, 9);
-    assert.equal(response.data.custom_id, `clearra:search:v3:finesse~${subcommand}`);
+    assert.equal(response.data.custom_id, `clearra:search:v4:finesse~${subcommand}`);
     const command = findFieldModalCommand(modalInteraction(response.data.custom_id, []));
     assert.equal(command?.name, "finesse");
     assert.equal(command?.subcommand, subcommand);
@@ -175,7 +175,7 @@ test("missing inputs and rich-text multi-line boards open the Modal", () => {
   );
 });
 
-test("v3 Modal layouts are localized where capacity allows and never exceed five components", () => {
+test("v4 Modal layouts are localized where capacity allows and never exceed five components", () => {
   for (const name of PC_COMMANDS) {
     assert.deepEqual(componentNames(modalFor(name)), [
       "field",
@@ -232,9 +232,96 @@ test("v3 Modal layouts are localized where capacity allows and never exceed five
     "kicktable",
   ]);
   for (const name of REMAINING_COMMANDS) {
-    assert.deepEqual(componentNames(modalFor(name)), ["remaining", "kicktable", "locale"]);
+    assert.deepEqual(componentNames(modalFor(name)), [
+      "remaining",
+      "kicktable",
+      "priority",
+      "max-setup-pieces",
+      "queue-knowledge",
+    ]);
   }
   assert.deepEqual(componentNames(modalFor("verify")), ["scope", "locale"]);
+});
+
+test("setup ranking Modals preserve command defaults within Discord's five-component cap", () => {
+  for (const [name, priority] of [
+    ["pc-setup", "all"],
+    ["best-setup", "build"],
+    ["dpc-finder", "pc"],
+  ]) {
+    const modal = modalFor(name);
+    assertStringSelect(component(modal, "priority"), ["all", "build", "pc"], priority);
+    assertStringSelect(
+      component(modal, "max-setup-pieces"),
+      Array.from({ length: 10 }, (_, index) => String(index + 1)),
+      "9",
+    );
+    assertStringSelect(
+      component(modal, "queue-knowledge"),
+      ["oracle", "visible-7"],
+      "oracle",
+    );
+    assert.equal(componentNames(modal).includes("next-cycle-remaining"), false);
+    assert.equal(componentNames(modal).includes("setup-length"), false);
+    assert.equal(componentNames(modal).includes("locale"), false);
+  }
+
+  const korean = modalFor("best-setup", [], "ko");
+  assert.match(label(korean, "priority").label, /셋업 정렬/u);
+  assert.match(label(korean, "max-setup-pieces").description, /1–10개/u);
+  assert.deepEqual(
+    component(korean, "queue-knowledge").options.map(({ label: text }) => text),
+    ["전체 미래 큐 (기본값)", "공개 7개"],
+  );
+
+  const preselected = modalFor("pc-setup", [
+    { name: "kicktable", value: "srs-x" },
+    { name: "priority", value: "build" },
+    { name: "max-setup-pieces", value: 8 },
+    { name: "queue-knowledge", value: "visible-7" },
+  ]);
+  assertStringSelect(component(preselected, "kicktable"), [
+    "srs-plus", "srs", "srs-x", "jstris-180",
+  ], "srs-x");
+  assertStringSelect(component(preselected, "priority"), ["all", "build", "pc"], "build");
+  assertStringSelect(
+    component(preselected, "max-setup-pieces"),
+    Array.from({ length: 10 }, (_, index) => String(index + 1)),
+    "8",
+  );
+  assertStringSelect(
+    component(preselected, "queue-knowledge"),
+    ["oracle", "visible-7"],
+    "visible-7",
+  );
+});
+
+test("setup ranking Modal submits explicit defaults and rejects hidden-option loss", () => {
+  const modal = modalFor("best-setup");
+  const interaction = modalInteraction(modal.data.custom_id, [
+    textLabel("remaining", "IOTS"),
+    selectLabel("kicktable", ["srs-plus"]),
+    selectLabel("priority", ["build"]),
+    selectLabel("max-setup-pieces", ["9"]),
+    selectLabel("queue-knowledge", ["oracle"]),
+  ]);
+  const command = findFieldModalCommand(interaction);
+  assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
+    remaining: "IOTS",
+    priority: "build",
+    "max-setup-pieces": 9,
+    "queue-knowledge": "oracle",
+    kicktable: "srs-plus",
+  });
+
+  for (const name of ["next-cycle-remaining", "setup-length"]) {
+    assert.throws(
+      () => buildMissingBoardModalResponse(slashInteraction("pc-setup", [
+        { name, value: name === "setup-length" ? "longer" : "Z" },
+      ])),
+      /remaining must also be supplied directly/,
+    );
+  }
 });
 
 test("PC fields default to four rows and other board searches default to eight", () => {
@@ -256,7 +343,7 @@ test("PC fields default to four rows and other board searches default to eight",
   assert.equal(component(modalFor("score-finder"), "field").value, EMPTY_FOUR_ROWS);
 });
 
-test("v3 lines, kicktable, hold, spin type, language, and verify scope use string selects", () => {
+test("v4 lines, kicktable, hold, spin type, language, and verify scope use string selects", () => {
   const path = modalFor("path");
   assertStringSelect(
     component(path, "lines"),
@@ -419,7 +506,7 @@ test("board forms prefer keyboard # and _ cells without advertising G", () => {
   assert.doesNotMatch(koreanScoreLines.description, /기본/u);
 });
 
-test("v3 Modal language selection is explicit only when the layout has capacity", () => {
+test("v4 Modal language selection is explicit only when the layout has capacity", () => {
   const verifyModal = modalFor("verify", [], "ko");
   const verifySubmit = modalInteraction(verifyModal.data.custom_id, [
     selectLabel("scope", ["all"]),
@@ -440,7 +527,7 @@ test("v3 Modal language selection is explicit only when the layout has capacity"
   assert.equal(readCommandModalLocale(pathSubmit), null);
 });
 
-test("v3 submit reads select values arrays and omits automatic lines", () => {
+test("v4 submit reads select values arrays and omits automatic lines", () => {
   const customId = modalFor("path").data.custom_id;
   const interaction = modalInteraction(customId, [
     textLabel("field", "..........\n....xx...."),
@@ -523,6 +610,32 @@ test("legacy v1 text-input submits remain compatible", () => {
     optionsByName(readFieldModalOptions(legacyActionRows, command)),
     { field: "..........", next: "I" },
   );
+});
+
+test("in-flight v3 setup-ranking Modals retain their two inputs and locale selector", () => {
+  const interaction = modalInteraction("clearra:search:v3:best-setup", [
+    textLabel("remaining", "IOTS"),
+    selectLabel("kicktable", ["srs-x"]),
+    selectLabel("locale", ["ko"]),
+  ]);
+  const command = findFieldModalCommand(interaction);
+  assert.equal(command?.name, "best-setup");
+  assert.equal(readCommandModalLocale(interaction), "ko");
+  assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
+    remaining: "IOTS",
+    kicktable: "srs-x",
+  });
+
+  const v2 = modalInteraction("clearra:search:v2:pc-setup", [
+    textLabel("remaining", "IOT"),
+    selectLabel("kicktable", ["srs"]),
+  ]);
+  const v2Command = findFieldModalCommand(v2);
+  assert.equal(readCommandModalLocale(v2), null);
+  assert.deepEqual(optionsByName(readFieldModalOptions(v2, v2Command)), {
+    remaining: "IOT",
+    kicktable: "srs",
+  });
 });
 
 test("Modal submit rejects duplicate, unknown, malformed, and multi-value inputs", () => {

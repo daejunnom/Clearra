@@ -382,7 +382,7 @@ fn run_parallel(
 
     let finish_started = Instant::now();
     let report = coordinator
-        .finish(workers)
+        .finish_with_control(workers, &control)
         .map_err(|error| error.reason())?;
     let finish = finish_started.elapsed();
     for sender in &request_senders {

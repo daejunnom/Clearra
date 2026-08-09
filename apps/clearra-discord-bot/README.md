@@ -33,9 +33,19 @@ ID.
 /damage next:<exact queue> field:<grid, CTK3, or Fumen> [kicktable:<built-in>]
 /finesse search target:<target delta> next:<queue or pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>]
 /finesse score document:<CTK3 or Fumen with operations> next:<queue or pattern> [kicktable:<built-in>] [options:<hold and knowledge>]
-/pc-setup remaining:<unordered piece inventory> [kicktable:<built-in>]
+/pc-setup remaining:<unordered piece inventory> [priority:<all|build|pc>] [max-setup-pieces:<1..10>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>]
 /verify scope:<pc|setup|cover|build|kicks>
 ```
+
+`/best-setup` and `/dpc-finder` expose the same seven setup-ranking options.
+Their default priorities are respectively `build` and `pc`; `/pc-setup`
+defaults to `all`. All three default to nine setup pieces, full-queue
+knowledge, automatic setup length, and no next-cycle restriction. `all` ranks
+joint build and conditional-PC coverage, while `build` and `pc` select one
+metric. Automatic length favors longer setups for `all`/`build` and shorter
+setups for `pc`. When supplied, the required next-cycle inventory length maps
+current remaining counts `7,4,1,5,2,6,3` to `4,1,5,2,6,3,7`; at most one piece
+kind may appear twice and no kind may appear three times.
 
 Board options accept raw CTK3/Fumen, a URL containing one of those values, or a
 plain text grid with exactly 10 columns. Grid rows are written top first; use
@@ -53,8 +63,12 @@ Gateway.
 
 Invoking any search command without all of its required runtime inputs opens a
 stateless command-specific Modal. Besides fields, the forms expose `next`, PC
-height, initial B2B state, the built-in kick table, hold policy, T-spin type, remaining pieces, or
-verification scope as applicable. Discord does not permit buttons inside a
+height, initial B2B state, the built-in kick table, hold policy, T-spin type,
+remaining pieces, or verification scope as applicable. A setup-ranking Modal
+uses Discord's five-component limit for `remaining`, `kicktable`, `priority`,
+`max-setup-pieces`, and `queue-knowledge`, in that order. The lower-priority
+`next-cycle-remaining` and `setup-length` settings remain available through a
+complete slash or text command. Discord does not permit buttons inside a
 Modal or another Modal as a Modal-submit response, so native previous/next page
 buttons and a draggable grid cannot be implemented in this surface. Dragging
 remains available in Clearra's web board editor; a future Discord Activity or
@@ -126,7 +140,9 @@ the Discord and Sfinder-compatibility boundaries.
 `options` is a command-specific choice: PC commands and `/cover` select
 `hold=use|avoid`, while spin commands select `type=TSS|TSD|TST|ANY`. These
 choices extend to finesse as `hold=use|avoid` plus
-`knowledge=both|oracle|visible-7`; omission selects `hold=use knowledge=both`.
+`knowledge=both|full-queue|visible-7`; omission selects
+`hold=use knowledge=both`. The public `full-queue` value is lowered to the
+engine's private wire value only after Discord validation.
 Finesse reports expose an exact total for a fixed queue or policy-level average
 inputs for patterns without expanding per-queue or per-solution lists. None of
 these choices can replace primary field/`next` inputs or select workers, files,
@@ -274,15 +290,27 @@ Discord requires the initial interaction response within three seconds. The
 Oracle Gateway handler therefore returns response type `9` for an
 incomplete-command Modal or type `5` (deferred channel message) before starting
 a complete command or Modal submission. Opening a Modal starts no work. Clearra caps
-`CLEARRA_INTERACTION_DEADLINE_MS` at 14 minutes so completion and error edits do
-not intentionally consume the full token window.
+`CLEARRA_INTERACTION_DEADLINE_MS` at 14 minutes so completion and error edits
+retain one minute of safety inside Discord's 15-minute interaction-token
+window.
 
-The default search limit is three minutes. A complete slash request starts the
-remote job and, when a static field is available, one bounded worker-thread GIF
-concurrently. If rendering wins, Oracle posts the GIF then retains its attachment
-in the final edit. If searching wins, Oracle waits for bounded rendering and
-sends one combined response. A render failure never cancels or invalidates the
-authoritative search.
+The generic compatibility limit remains three minutes. Reverse PC searches use
+five minutes; forward, build, spin, and setup-ranking searches use fifteen
+minutes. The caller's absolute deadline always wins when it is earlier, so a
+Discord interaction receives at most the 14-minute gateway budget. A complete
+slash request starts the remote job and, when a static field is available, one
+bounded worker-thread GIF concurrently. If rendering wins, Oracle posts the GIF
+then retains its attachment in the final edit. If searching wins, Oracle waits
+for bounded rendering and sends one combined response. A render failure never
+cancels or invalidates the authoritative search.
+
+The reverse class contains native PC/failed-queue/path/percent/replay work and
+the represented Sfinder PC solution and scoring commands. The forward class
+contains native build/coverage/damage/spin work plus represented Sfinder target,
+coverage, and spin commands. Native setup/setup-finder and Sfinder
+pc-setup/best-setup/dpc-finder are the setup-ranking subclass of forward work;
+this distinct label drives setup-only progress notices without changing the
+15-minute engine limit.
 
 For slash and text commands, `clearra-current-job` keeps `POST /jobs` open until
 Clearra finishes. Each instance accepts one request and has no durable
@@ -457,6 +485,8 @@ The job-service contract is:
 ```text
 CLEARRA_EXECUTABLE=/usr/local/bin/clearra
 CLEARRA_SEARCH_TIMEOUT_MS=170000
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
 CLEARRA_SEARCH_WORKERS_PER_SESSION=auto
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1
 CLEARRA_MAX_CONCURRENT_JOBS=1
@@ -559,9 +589,9 @@ gcloud run deploy clearra-current-job `
   --memory=16Gi `
   --no-cpu-throttling `
   --cpu-boost `
-  --timeout=180s `
+  --timeout=900s `
   --set-secrets="CLEARRA_JOB_TOKEN=${jobBearerSecret}:latest" `
-  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_SEARCH_WORKERS_PER_SESSION=auto,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
+  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000,CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000,CLEARRA_SEARCH_WORKERS_PER_SESSION=auto,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
 ```
 
 Both scale pairs are intentional. `--min=0` and `--max=4` set service-level
@@ -635,6 +665,11 @@ CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1
 CLEARRA_JOB_URL=https://<clearra-current-job service>/jobs
 CLEARRA_WORKER_AUTHORITY=remote
 CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
+CLEARRA_SEARCH_TIMEOUT_MS=180000
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_INTERACTION_DEADLINE_MS=840000
+CLEARRA_SETUP_PROGRESS_NOTICE_MS=300000
 ```
 
 The root-owned Oracle settings file contains only OCI Vault Secret identifiers

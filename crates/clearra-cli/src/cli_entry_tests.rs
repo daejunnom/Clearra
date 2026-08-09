@@ -118,6 +118,119 @@ mod case_run_with_args_selects_json_output_format {
     }
 }
 
+mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
+    use super::*;
+
+    fn run_json(args: &[&str]) -> serde_json::Value {
+        let output = run_with_args(args.iter().copied());
+        assert_eq!(output.exit_code(), ExitCode::Success, "{args:?}");
+        serde_json::from_str(output.stdout())
+            .unwrap_or_else(|error| panic!("{args:?} did not produce valid JSON: {error}"))
+    }
+
+    #[test]
+    fn failed_queue_json_quotes_not_calculated_solution_metadata() {
+        let value = run_json(&[
+            "clearra",
+            "--format",
+            "json",
+            "failed-queue",
+            "--lines",
+            "2",
+            "--patterns",
+            "P5",
+            "--backend",
+            "cpu",
+            "--failed-count",
+            "7",
+        ]);
+
+        assert_eq!(value["summary"]["unique_solution_count"], "not-calculated");
+        assert_eq!(
+            value["summary"]["normalized_unique_solution_count"],
+            "not-calculated"
+        );
+    }
+
+    #[test]
+    fn percent_json_quotes_not_calculated_solution_count() {
+        let value = run_json(&[
+            "clearra",
+            "--format",
+            "json",
+            "percent",
+            "--queue",
+            "IOT",
+            "--observed",
+            "--min-len",
+            "5",
+            "--max-patterns",
+            "16",
+        ]);
+
+        assert_eq!(value["summary"]["unique_solution_count"], "not-calculated");
+    }
+
+    #[test]
+    fn pc_tiling_json_quotes_not_calculated_probability_for_both_entry_points() {
+        for objective in ["--tiling-only", "--objective"] {
+            let mut args = vec![
+                "clearra",
+                "--format",
+                "json",
+                "pc",
+                "--lines",
+                "2",
+                "--queue",
+                "IJLOO",
+                "--fixed",
+                "--backend",
+                "cpu",
+                "--workers",
+                "1",
+                "--no-hold",
+                objective,
+            ];
+            if objective == "--objective" {
+                args.push("tiling");
+            }
+            let value = run_json(&args);
+
+            assert_eq!(
+                value["summary"]["coverage_probability"], "not-calculated",
+                "{objective}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_probability_tiling_json_quotes_not_calculated_probability() {
+        let value = run_json(&[
+            "clearra",
+            "--format",
+            "json",
+            "build-probability",
+            "--base-mask",
+            "0x0",
+            "--target-mask",
+            "0xf",
+            "--height",
+            "4",
+            "--queue",
+            "I",
+            "--no-hold",
+            "--no-mirror",
+            "--tiling-only",
+            "--backend",
+            "cpu",
+            "--workers",
+            "1",
+        ]);
+
+        assert_eq!(value["summary"]["coverage_probability"], "not-calculated");
+    }
+}
+
 mod case_run_with_args_verbose_text_contains_executor_flow {
     use super::*;
 

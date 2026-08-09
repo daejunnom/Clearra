@@ -694,9 +694,11 @@ impl WasmDistributedCoordinator {
                     ));
                 }
             };
-            let result = producer.finish(workers_used).map_err(|error| {
-                distributed_error("E_WASM_DISTRIBUTED_SETUP_FINISH", error.reason())
-            })?;
+            let result = producer
+                .finish_with_control(workers_used, &self.control)
+                .map_err(|error| {
+                    distributed_error("E_WASM_DISTRIBUTED_SETUP_FINISH", error.reason())
+                })?;
             let prepared = match self.prepared.take() {
                 Some(DistributedPreparedSearch::Setup(prepared)) => prepared,
                 _ => {
@@ -722,7 +724,7 @@ impl WasmDistributedCoordinator {
                 }
             };
             let report = merger
-                .finish(workers_used.min(self.worker_count).max(1))
+                .finish_with_control(workers_used.min(self.worker_count).max(1), &self.control)
                 .map_err(|error| {
                     distributed_error("E_WASM_DISTRIBUTED_FORWARD_FINISH", error.reason())
                 })?;

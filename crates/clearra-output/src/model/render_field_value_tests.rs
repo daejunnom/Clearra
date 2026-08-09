@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn json_number_predicate_accepts_only_json_number_tokens() {
+    for value in ["0", "-0", "12", "-12.5", "1e2", "1E+2", "1e-2"] {
+        assert!(is_json_number(value), "{value}");
+    }
+    for value in [
+        "",
+        "+1",
+        "01",
+        ".5",
+        "1.",
+        "1e",
+        "NaN",
+        "inf",
+        "not-calculated",
+        " 1",
+    ] {
+        assert!(!is_json_number(value), "{value}");
+    }
+}
+
+#[test]
 fn render_field_value_keeps_string_ids_distinct_from_numbers() {
     let value = RenderFieldValue::string("001");
 

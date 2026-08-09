@@ -74,7 +74,7 @@ CPU per instance:       8 vCPU
 Memory per instance:    16 GiB
 CPU allocation:         instance-based / no CPU throttling
 Startup CPU boost:      enabled
-Request timeout:        180 seconds
+Request timeout:        900 seconds
 ```
 
 Each instance executes one job at a time. Cloud Run may route four requests to
@@ -83,11 +83,17 @@ and use up to 32 Clearra workers in aggregate. This is per-instance serial
 execution, not a global FIFO or lock. Cloud Run does not offer a 16-vCPU
 instance; 8 vCPU is the per-instance ceiling for this service.
 
+The 900-second service timeout admits the 15-minute forward-search policy. The
+Discord Gateway still submits an absolute deadline capped at 840 seconds, which
+leaves one minute for the synchronous response and final Discord edit.
+
 Set these non-secret runtime values:
 
 ```text
 CLEARRA_EXECUTABLE=/usr/local/bin/clearra
 CLEARRA_SEARCH_TIMEOUT_MS=170000
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
 CLEARRA_SEARCH_WORKERS_PER_SESSION=auto
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1
 CLEARRA_MAX_CONCURRENT_JOBS=1
@@ -152,9 +158,9 @@ gcloud run deploy clearra-current-job `
   --memory=16Gi `
   --no-cpu-throttling `
   --cpu-boost `
-  --timeout=180s `
+  --timeout=900s `
   --set-secrets="CLEARRA_JOB_TOKEN=${jobBearerSecret}:latest" `
-  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_SEARCH_WORKERS_PER_SESSION=auto,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
+  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000,CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000,CLEARRA_SEARCH_WORKERS_PER_SESSION=auto,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
 ```
 
 Both pairs are required. Setting only `--max=4` can leave the active revision's
@@ -195,6 +201,9 @@ CLEARRA_JOB_URL=https://<clearra-current-job service>/jobs
 CLEARRA_WORKER_AUTHORITY=remote
 CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
 CLEARRA_SEARCH_TIMEOUT_MS=180000
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_INTERACTION_DEADLINE_MS=840000
 ```
 
 The job bearer is supplied by the Oracle Vault wrapper, not the settings file.

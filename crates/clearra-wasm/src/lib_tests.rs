@@ -214,6 +214,30 @@ fn wasm_setup_command_preserves_observed_qb_and_next_cycle_inventory() {
 }
 
 #[test]
+fn distributed_setup_finalize_preserves_the_cancellation_reason() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let preparation = WasmDistributedCoordinator::prepare(
+        &runtime,
+        "clearra setup-finder --remaining IOT --workers 2",
+    )
+    .expect("distributed setup preparation");
+    let coordinator = match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+        _ => panic!("setup search must use the distributed coordinator"),
+    };
+    coordinator.cancel();
+
+    let error = match coordinator.finish(2) {
+        Ok(_) => panic!("cancelled setup finalize must not complete"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), "E_WASM_DISTRIBUTED_SETUP_FINISH");
+    assert_eq!(error.message(), "wasm_cpu_search_cancelled");
+}
+
+#[test]
 fn occupied_initial_hold_plus_p7_solves_eight_piece_scenario() {
     let result = WasmCommandRuntime::default()
         .run_command_text(

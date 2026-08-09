@@ -801,7 +801,7 @@ test("fixed queues, remaining inventories, and verify scopes fail closed", () =>
     buildSlashCommandArguments(findSlashCommand("pc-setup"), [
       { name: "remaining", value: "tio" },
     ]),
-    ["sfinder", "pc-setup", "TIO"],
+    ["setup-finder", "--remaining", "TIO", "--priority", "all"],
   );
   assert.throws(
     () =>
@@ -810,6 +810,89 @@ test("fixed queues, remaining inventories, and verify scopes fail closed", () =>
       ]),
     /Verify scope/,
   );
+});
+
+test("setup ranking commands preserve their defaults and expose every canonical setting", () => {
+  for (const [name, priority] of [
+    ["pc-setup", "all"],
+    ["best-setup", "build"],
+    ["dpc-finder", "pc"],
+  ]) {
+    assert.deepEqual(
+      buildSlashCommandArguments(findSlashCommand(name), [
+        { name: "remaining", value: "IOTS" },
+      ]),
+      ["setup-finder", "--remaining", "IOTS", "--priority", priority],
+    );
+  }
+
+  assert.deepEqual(
+    buildSlashCommandArguments(findSlashCommand("pc-setup"), [
+      { name: "remaining", value: "iots" },
+      { name: "priority", value: "pc" },
+      { name: "max-setup-pieces", value: 10 },
+      { name: "queue-knowledge", value: "visible-7" },
+      { name: "next-cycle-remaining", value: "z" },
+      { name: "setup-length", value: "shorter" },
+      { name: "kicktable", value: "srs-x" },
+    ]),
+    [
+      "setup-finder",
+      "--remaining", "IOTS",
+      "--priority", "pc",
+      "--max-setup-pieces", "10",
+      "--queue-knowledge", "visible-7",
+      "--next-cycle-remaining", "Z",
+      "--setup-length", "shorter",
+      "--rule", "srs-x",
+    ],
+  );
+});
+
+test("setup ranking inventories and enums fail closed before execution", () => {
+  const build = (options) =>
+    buildSlashCommandArguments(findSlashCommand("pc-setup"), options);
+  for (const remaining of ["IOTSZJLI", "IIIO", "IIOO"]) {
+    assert.throws(
+      () => build([{ name: "remaining", value: remaining }]),
+      /1 through 7|at most one piece kind twice/,
+    );
+  }
+  assert.throws(
+    () => build([
+      { name: "remaining", value: "IOTS" },
+      { name: "next-cycle-remaining", value: "ZJ" },
+    ]),
+    /exactly 1 piece/,
+  );
+  assert.throws(
+    () => build([
+      { name: "remaining", value: "IOT" },
+      { name: "next-cycle-remaining", value: "IIOOTSZ" },
+    ]),
+    /at most one piece kind twice/,
+  );
+  assert.throws(
+    () => build([
+      { name: "remaining", value: "IOTS" },
+      { name: "next-cycle-remaining", value: "Q" },
+    ]),
+    /IOTSZJL/,
+  );
+  for (const [name, value, message] of [
+    ["priority", "fast", /priority must be/],
+    ["max-setup-pieces", 11, /integer from 1 through 10/],
+    ["queue-knowledge", "both", /queue-knowledge must be/],
+    ["setup-length", "medium", /setup-length must be/],
+  ]) {
+    assert.throws(
+      () => build([
+        { name: "remaining", value: "IOTS" },
+        { name, value },
+      ]),
+      message,
+    );
+  }
 });
 
 test("unsupported CTK3 width and Fumen v110 fail before execution", () => {

@@ -70,6 +70,43 @@ fn contract_preserves_solution_trace_mode_as_string() {
     );
 }
 
+#[test]
+fn contract_preserves_not_calculated_solution_metadata_as_strings() {
+    let fields = SummaryRenderContract::render_fields(vec![
+        (
+            "unique_solution_count".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        (
+            "normalized_solution_set_hash".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        ("coverage_probability".to_owned(), "unavailable".to_owned()),
+    ]);
+    let message = fields
+        .into_iter()
+        .fold(RenderMessage::new("failed-queue"), |message, field| {
+            message.with_value(field.key().to_owned(), field.value().clone())
+        });
+    let JsonValue::Object(root) = message.json_contract().root() else {
+        panic!("root object");
+    };
+    let summary = object_member(&root, "summary");
+
+    assert_eq!(
+        member_value(summary, "unique_solution_count"),
+        &JsonValue::string("not-calculated")
+    );
+    assert_eq!(
+        member_value(summary, "normalized_solution_set_hash"),
+        &JsonValue::string("not-calculated")
+    );
+    assert_eq!(
+        member_value(summary, "coverage_probability"),
+        &JsonValue::string("unavailable")
+    );
+}
+
 fn member_value<'a>(
     members: &'a [clearra_output::json::json_contract::JsonMember],
     key: &str,

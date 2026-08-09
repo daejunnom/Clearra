@@ -1,10 +1,38 @@
 import { ClearraCommandRunner } from "../job-service/runner.mjs";
+import { searchTimeoutMsForArguments } from "./command.mjs";
 
 export class ClearraDirectExecutor {
   constructor(config, options = {}) {
     this.now = options.now ?? Date.now;
+    this.timeoutPolicy = {
+      searchTimeoutMs: positiveInteger(
+        config.searchTimeoutMs,
+        "search timeout",
+      ),
+      ...(config.reverseSearchTimeoutMs === undefined
+        ? {}
+        : {
+            reverseSearchTimeoutMs: positiveInteger(
+              config.reverseSearchTimeoutMs,
+              "reverse-search timeout",
+            ),
+          }),
+      ...(config.forwardSearchTimeoutMs === undefined
+        ? {}
+        : {
+            forwardSearchTimeoutMs: positiveInteger(
+              config.forwardSearchTimeoutMs,
+              "forward-search timeout",
+            ),
+          }),
+    };
+    const maximumSearchTimeoutMs = Math.max(
+      searchTimeoutMsForArguments(["verify"], this.timeoutPolicy),
+      searchTimeoutMsForArguments(["pc"], this.timeoutPolicy),
+      searchTimeoutMsForArguments(["damage"], this.timeoutPolicy),
+    );
     this.totalTimeoutMs = positiveInteger(
-      config.interactionDeadlineMs ?? config.searchTimeoutMs,
+      config.interactionDeadlineMs ?? maximumSearchTimeoutMs,
       "interaction deadline",
     );
     this.maxOutputBytes = positiveInteger(
@@ -17,7 +45,7 @@ export class ClearraDirectExecutor {
       expectedVcpus: config.expectedVcpus,
       searchWorkersPerSession: config.searchWorkersPerSession,
       useAllLogicalProcessors: config.useAllLogicalProcessors,
-      searchTimeoutMs: config.searchTimeoutMs,
+      ...this.timeoutPolicy,
       maxOutputBytes: config.maxOutputBytes,
       terminationGraceMs: config.terminationGraceMs,
     }, options.runnerOptions);
@@ -26,7 +54,14 @@ export class ClearraDirectExecutor {
   execute(arguments_, options = {}) {
     validateArguments(arguments_);
     const now = this.now();
-    const latestDeadlineUnixMs = now + this.totalTimeoutMs;
+    const commandTimeoutMs = searchTimeoutMsForArguments(
+      arguments_,
+      this.timeoutPolicy,
+    );
+    const latestDeadlineUnixMs = now + Math.min(
+      this.totalTimeoutMs,
+      commandTimeoutMs,
+    );
     const callerDeadlineUnixMs = options.deadlineUnixMs === undefined
       ? latestDeadlineUnixMs
       : absoluteDeadline(options.deadlineUnixMs);

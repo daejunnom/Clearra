@@ -63,6 +63,7 @@ impl ForwardParallelError {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Search(ForwardSearchError::EmptyQueue) => "forward_search_empty_queue",
+            Self::Search(ForwardSearchError::QueueTooLong) => "forward_search_queue_too_long",
             Self::Search(ForwardSearchError::InvalidHeight) => "forward_search_invalid_height",
             Self::Search(ForwardSearchError::BoardOutsideField) => {
                 "forward_search_board_outside_field"
@@ -333,7 +334,13 @@ impl ForwardParallelCoordinator {
             }
             CoordinatorState::Pattern(pattern) => {
                 if pattern.layered {
-                    seal_layered_pattern(pattern, self.config);
+                    match seal_layered_pattern(pattern, self.config, control) {
+                        Ok(()) => {}
+                        Err(ForwardSearchError::Cancelled) => {
+                            return Ok((ForwardParallelProduce::Cancelled, Vec::new()));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                     let Some(session) = pattern.active_session.as_mut() else {
                         return Ok((ForwardParallelProduce::Completed, Vec::new()));
                     };
@@ -559,10 +566,18 @@ impl ForwardParallelCoordinator {
         Ok(())
     }
 
-    pub fn finish(
+    pub fn finish(self, workers_used: usize) -> Result<ForwardSearchReport, ForwardParallelError> {
+        self.finish_with_control(workers_used, &ExecutionControl::default())
+    }
+
+    pub fn finish_with_control(
         mut self,
         workers_used: usize,
+        control: &ExecutionControl,
     ) -> Result<ForwardSearchReport, ForwardParallelError> {
+        if control.is_cancelled() {
+            return Err(ForwardSearchError::Cancelled.into());
+        }
         let workers_used = workers_used.max(1);
         if self.outstanding_tasks() != 0 {
             return Err(ForwardParallelError::InvalidState(
@@ -582,13 +597,13 @@ impl ForwardParallelCoordinator {
                         "forward_parallel_fixed_search_incomplete",
                     ));
                 }
-                let mut report = fixed.session.build_report();
-                canonicalize_outcomes(report.outcomes_mut());
+                let mut report = fixed.session.build_report(control)?;
+                canonicalize_outcomes(report.outcomes_mut(), control)?;
                 Ok(report.with_workers_used(workers_used))
             }
             CoordinatorState::Pattern(pattern) => {
                 if pattern.layered {
-                    seal_layered_pattern(pattern, self.config);
+                    seal_layered_pattern(pattern, self.config, control)?;
                     if pattern.active_session.is_some() {
                         return Err(ForwardParallelError::InvalidState(
                             "forward_parallel_layered_pattern_search_incomplete",
@@ -605,12 +620,20 @@ impl ForwardParallelCoordinator {
                 let mut generated_locks = 0_u64;
                 let mut peak_frontier = 0_usize;
                 for report in pattern.reports.values() {
+                    if control.is_cancelled() {
+                        return Err(ForwardSearchError::Cancelled.into());
+                    }
                     visited_states = visited_states.saturating_add(report.visited_states());
                     generated_locks = generated_locks.saturating_add(report.generated_locks());
                     peak_frontier = peak_frontier.max(report.peak_frontier());
-                    outcomes.extend(report.outcomes().iter().cloned());
+                    for outcome in report.outcomes() {
+                        if control.is_cancelled() {
+                            return Err(ForwardSearchError::Cancelled.into());
+                        }
+                        outcomes.push(outcome.clone());
+                    }
                 }
-                canonicalize_outcomes(&mut outcomes);
+                canonicalize_outcomes(&mut outcomes, control)?;
                 Ok(ForwardSearchReport::new(
                     true,
                     self.config.board.words(),
@@ -810,12 +833,19 @@ fn seal_fixed_layer(fixed: &mut FixedCoordinator) {
     }
 }
 
-fn seal_layered_pattern(pattern: &mut PatternCoordinator, config: ForwardSearchConfig) {
+fn seal_layered_pattern(
+    pattern: &mut PatternCoordinator,
+    config: ForwardSearchConfig,
+    control: &ExecutionControl,
+) -> Result<(), ForwardSearchError> {
     loop {
+        if control.is_cancelled() {
+            return Err(ForwardSearchError::Cancelled);
+        }
         if pattern.active_session.is_none() {
             let pattern_count = pattern.query.piece_source().pattern_count();
             if pattern.next_pattern >= pattern_count {
-                return;
+                return Ok(());
             }
             let pattern_index = pattern.next_pattern;
             pattern.next_pattern += 1;
@@ -844,7 +874,7 @@ fn seal_layered_pattern(pattern: &mut PatternCoordinator, config: ForwardSearchC
             session.peak_frontier = session.peak_frontier.max(session.current.len());
         }
         if !session.completed || !pattern.pending.is_empty() {
-            return;
+            return Ok(());
         }
 
         let pattern_index = pattern
@@ -855,12 +885,18 @@ fn seal_layered_pattern(pattern: &mut PatternCoordinator, config: ForwardSearchC
             .active_session
             .take()
             .expect("completed layered pattern session")
-            .build_report();
+            .build_report(control)?;
         pattern.reports.insert(pattern_index, report);
     }
 }
 
-fn canonicalize_outcomes(outcomes: &mut Vec<ForwardSearchOutcome>) {
+fn canonicalize_outcomes(
+    outcomes: &mut Vec<ForwardSearchOutcome>,
+    control: &ExecutionControl,
+) -> Result<(), ForwardSearchError> {
+    if control.is_cancelled() {
+        return Err(ForwardSearchError::Cancelled);
+    }
     outcomes.sort_by(|left, right| {
         (
             left.source_pattern_index(),
@@ -887,6 +923,9 @@ fn canonicalize_outcomes(outcomes: &mut Vec<ForwardSearchOutcome>) {
                 right.path(),
             ))
     });
+    if control.is_cancelled() {
+        return Err(ForwardSearchError::Cancelled);
+    }
     outcomes.dedup_by(|left, right| {
         left.source_pattern_index() == right.source_pattern_index()
             && left.source_queue() == right.source_queue()
@@ -898,9 +937,16 @@ fn canonicalize_outcomes(outcomes: &mut Vec<ForwardSearchOutcome>) {
             && left.total_damage() == right.total_damage()
             && left.path() == right.path()
     });
+    if control.is_cancelled() {
+        return Err(ForwardSearchError::Cancelled);
+    }
     for (index, outcome) in outcomes.iter_mut().enumerate() {
+        if control.is_cancelled() {
+            return Err(ForwardSearchError::Cancelled);
+        }
         outcome.assign_id(index as u64 + 1);
     }
+    Ok(())
 }
 
 fn encode_worker_initialization(
@@ -1810,14 +1856,15 @@ mod tests {
             }
         }
         coordinator
-            .finish(reported_workers_used)
+            .finish_with_control(reported_workers_used, &control)
             .expect("parallel finish")
     }
 
     fn assert_exact_equivalence(query: ForwardSearchQuery) {
         let mut serial = run_serial(query.clone());
         let parallel = run_parallel(query, 4);
-        canonicalize_outcomes(serial.outcomes_mut());
+        canonicalize_outcomes(serial.outcomes_mut(), &ExecutionControl::default())
+            .expect("canonicalize serial outcomes");
         assert_eq!(serial.initial_board(), parallel.initial_board());
         assert_eq!(serial.visited_states(), parallel.visited_states());
         assert_eq!(serial.generated_locks(), parallel.generated_locks());
@@ -1828,8 +1875,9 @@ mod tests {
     }
 
     fn assert_same_search_semantics(mut left: ForwardSearchReport, mut right: ForwardSearchReport) {
-        canonicalize_outcomes(left.outcomes_mut());
-        canonicalize_outcomes(right.outcomes_mut());
+        let control = ExecutionControl::default();
+        canonicalize_outcomes(left.outcomes_mut(), &control).expect("canonicalize left outcomes");
+        canonicalize_outcomes(right.outcomes_mut(), &control).expect("canonicalize right outcomes");
         assert_eq!(left.complete(), right.complete());
         assert_eq!(left.initial_board(), right.initial_board());
         assert_eq!(left.visited_states(), right.visited_states());

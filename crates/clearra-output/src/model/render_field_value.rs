@@ -1,5 +1,47 @@
 use crate::json::json_contract::JsonValue;
 
+pub fn is_json_number(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    if bytes.get(cursor) == Some(&b'-') {
+        cursor += 1;
+    }
+    match bytes.get(cursor) {
+        Some(b'0') => cursor += 1,
+        Some(b'1'..=b'9') => {
+            cursor += 1;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+                cursor += 1;
+            }
+        }
+        _ => return false,
+    }
+    if bytes.get(cursor) == Some(&b'.') {
+        cursor += 1;
+        let fraction_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == fraction_start {
+            return false;
+        }
+    }
+    if matches!(bytes.get(cursor), Some(b'e' | b'E')) {
+        cursor += 1;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+        }
+        let exponent_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == exponent_start {
+            return false;
+        }
+    }
+    cursor == bytes.len()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RenderFieldValue {
     String(String),

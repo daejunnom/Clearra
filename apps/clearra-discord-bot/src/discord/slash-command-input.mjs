@@ -18,6 +18,9 @@ const SPIN_STRUCTURE_PROFILES = new Set([
   "all-spin-plus",
 ]);
 const BUILTIN_KICKTABLES = new Set(["srs-plus", "srs", "srs-x", "jstris-180"]);
+const SETUP_PRIORITIES = new Set(["all", "build", "pc"]);
+const SETUP_QUEUE_KNOWLEDGE = new Set(["oracle", "visible-7"]);
+const SETUP_LENGTHS = new Set(["auto", "longer", "shorter"]);
 const FUMEN_PAYLOAD_PATTERN = /^(?:v115|[Ddm]115)@[A-Za-z0-9+/?]+$/;
 const FUMEN_V110_PATTERN = /v110@[A-Za-z0-9+/?]+/i;
 const CTK3_PREFIX_PATTERN = /^ctk3(?:b_|_|@)/i;
@@ -70,11 +73,7 @@ export function buildSlashCommandArguments(command, rawOptions = []) {
         fixedNext: true,
       });
     case "remaining":
-      return [
-        ...command.argvPrefix,
-        pieceInventory(requiredText(values, "remaining", 64)),
-        ...kicktableArguments(values),
-      ];
+      return setupFinderArguments(command, values);
     case "spin-structure":
       return spinStructureArguments(command, values);
     case "verify": {
@@ -960,6 +959,99 @@ function catFinderSettings(command, values) {
   return output;
 }
 
+function setupFinderArguments(command, values) {
+  const remaining = setupInventory(
+    requiredText(values, "remaining", 64),
+    "remaining",
+  );
+  const defaultPriority = String(command.setupPriority ?? "").toLowerCase();
+  if (!SETUP_PRIORITIES.has(defaultPriority)) {
+    throw new Error(`/${command.name} has an invalid default setup priority.`);
+  }
+  const priority = normalizedSetupChoice(
+    optionalText(values, "priority", 16) ?? defaultPriority,
+  );
+  if (!SETUP_PRIORITIES.has(priority)) {
+    throw new Error("priority must be all, build, or pc.");
+  }
+
+  const output = [
+    ...command.argvPrefix,
+    "--remaining",
+    remaining,
+    "--priority",
+    priority,
+  ];
+  const maximumPieces = optionalInteger(values, "max-setup-pieces", 1, 10);
+  if (maximumPieces !== null) {
+    output.push("--max-setup-pieces", String(maximumPieces));
+  }
+
+  const queueKnowledge = optionalText(values, "queue-knowledge", 16);
+  if (queueKnowledge !== null) {
+    const requested = normalizedSetupChoice(queueKnowledge);
+    const normalized = requested === "full-queue" ? "oracle" : requested;
+    if (!SETUP_QUEUE_KNOWLEDGE.has(normalized)) {
+      throw new Error("queue-knowledge must be full-queue or visible-7.");
+    }
+    output.push("--queue-knowledge", normalized);
+  }
+
+  const nextCycleSource = optionalText(values, "next-cycle-remaining", 64);
+  if (nextCycleSource !== null) {
+    const nextCycleRemaining = setupInventory(
+      nextCycleSource,
+      "next-cycle-remaining",
+    );
+    const expected = nextCycleRemainingCount(remaining.length);
+    if (nextCycleRemaining.length !== expected) {
+      throw new Error(
+        `next-cycle-remaining must contain exactly ${expected} piece${expected === 1 ? "" : "s"} when remaining contains ${remaining.length}.`,
+      );
+    }
+    output.push("--next-cycle-remaining", nextCycleRemaining);
+  }
+
+  const setupLength = optionalText(values, "setup-length", 16);
+  if (setupLength !== null) {
+    const normalized = normalizedSetupChoice(setupLength);
+    if (!SETUP_LENGTHS.has(normalized)) {
+      throw new Error("setup-length must be auto, longer, or shorter.");
+    }
+    output.push("--setup-length", normalized);
+  }
+  output.push(...kicktableArguments(values));
+  return output;
+}
+
+function normalizedSetupChoice(value) {
+  return String(value).trim().toLowerCase().replaceAll("_", "-");
+}
+
+function setupInventory(value, name) {
+  const pieces = pieceInventory(value, name);
+  if (pieces.length < 1 || pieces.length > 7) {
+    throw new Error(`${name} must contain from 1 through 7 pieces.`);
+  }
+  const counts = new Map();
+  for (const piece of pieces) {
+    counts.set(piece, (counts.get(piece) ?? 0) + 1);
+  }
+  if (
+    [...counts.values()].some((count) => count > 2) ||
+    [...counts.values()].filter((count) => count === 2).length > 1
+  ) {
+    throw new Error(
+      `${name} allows at most one piece kind twice; no piece may appear three times.`,
+    );
+  }
+  return pieces;
+}
+
+function nextCycleRemainingCount(remainingCount) {
+  return ({ 7: 4, 4: 1, 1: 5, 5: 2, 2: 6, 6: 3, 3: 7 })[remainingCount];
+}
+
 function finesseSettings(command, values) {
   const settings = parseSettings(command, values, new Map([
     ["hold", "hold"],
@@ -1048,7 +1140,15 @@ function allowedOptionNames(input) {
     case "score-fixed-next":
       return new Set(["field", "next", "lines", "options", "kicktable"]);
     case "remaining":
-      return new Set(["remaining", "kicktable"]);
+      return new Set([
+        "remaining",
+        "priority",
+        "max-setup-pieces",
+        "queue-knowledge",
+        "next-cycle-remaining",
+        "setup-length",
+        "kicktable",
+      ]);
     case "spin-structure":
       return new Set(["pieces", "field", "lines", "profile", "kicktable"]);
     case "verify":

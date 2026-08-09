@@ -253,12 +253,99 @@ fn completed_condition_keeps_more_than_the_legacy_result_page() {
             SetupCandidatePriority::All,
             SetupLengthPreference::Auto,
             None,
+            &ExecutionControl::default(),
         )
         .expect("completed condition");
 
     assert_eq!(completed.candidate_count, SHAPE_COUNT);
     assert_eq!(completed.selected_shapes.len(), SHAPE_COUNT);
     assert_eq!(completed.candidate_boards.len(), SHAPE_COUNT);
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn completed_condition_honors_cancellation_during_finalize() {
+    let shapes = vec![SetupShape::new(1, 0, 0)];
+    let mut merge = SetupConditionMerge::new(1, 1).expect("condition merge");
+    merge
+        .absorb(
+            SetupParallelTaskResult {
+                task_index: 0,
+                condition_index: 0,
+                word_start: 0,
+                word_end: 1,
+                global_pattern_count: 1,
+                covered_shapes: vec![SetupParallelShapeResult {
+                    shape_index: 0,
+                    build_covered_patterns: 1,
+                    joint_covered_patterns: 1,
+                    build_weight: 1.0,
+                    joint_weight: 1.0,
+                    min_covered_locks: 1,
+                    max_covered_locks: 1,
+                    witness_pattern_id: 0,
+                }],
+                peak_segment_pages: 1,
+            },
+            1,
+        )
+        .expect("condition result");
+    let token = ExecutionCancellationToken::new();
+    token.handle().cancel();
+    let control = ExecutionControl::new(token);
+
+    let result = merge.finish(
+        &shapes,
+        SetupCandidatePriority::All,
+        SetupLengthPreference::Auto,
+        None,
+        &control,
+    );
+
+    assert!(matches!(result, Err(WasmExactSearchError::Cancelled)));
+}
+
+#[test]
+fn completed_condition_uses_shape_index_to_break_equal_board_ties() {
+    let shapes = vec![SetupShape::new(1, 0, 0), SetupShape::new(1, 1, 0)];
+    let equal_coverage = |shape_index| SetupParallelShapeResult {
+        shape_index,
+        build_covered_patterns: 1,
+        joint_covered_patterns: 1,
+        build_weight: 1.0,
+        joint_weight: 1.0,
+        min_covered_locks: 1,
+        max_covered_locks: 1,
+        witness_pattern_id: 0,
+    };
+    let mut merge = SetupConditionMerge::new(2, 1).expect("condition merge");
+    merge
+        .absorb(
+            SetupParallelTaskResult {
+                task_index: 0,
+                condition_index: 0,
+                word_start: 0,
+                word_end: 1,
+                global_pattern_count: 1,
+                covered_shapes: vec![equal_coverage(1), equal_coverage(0)],
+                peak_segment_pages: 1,
+            },
+            2,
+        )
+        .expect("condition result");
+
+    let completed = merge
+        .finish(
+            &shapes,
+            SetupCandidatePriority::All,
+            SetupLengthPreference::Auto,
+            None,
+            &ExecutionControl::default(),
+        )
+        .expect("completed condition");
+
+    assert_eq!(completed.candidate_count, 1);
+    assert_eq!(completed.selected_shapes[0].shape_index, 0);
 }
 
 fn assert_exact_condition_ranges(condition_words: &[usize], tasks: &[SetupParallelTask]) {

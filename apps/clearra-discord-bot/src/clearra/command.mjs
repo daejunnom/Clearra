@@ -58,6 +58,121 @@ const PARALLEL_SEARCH_COMMANDS = new Set([
   "spin-structure",
   "finesse",
 ]);
+const REVERSE_SEARCH_COMMANDS = new Set([
+  "pc",
+  "pc-scenario",
+  "failed-queue",
+  "path",
+  "pc-replay",
+  "percent",
+]);
+const FORWARD_SEARCH_COMMANDS = new Set([
+  "cover",
+  "build-coverage",
+  "build-probability",
+  "damage",
+  "spin-finder",
+  "spin-structure",
+]);
+const SETUP_SEARCH_COMMANDS = new Set(["setup", "setup-finder"]);
+const SFINDER_REVERSE_SEARCH_COMMANDS = new Set([
+  "path",
+  "chance",
+  "percent",
+  "minimals",
+  "score",
+  "score-minimals",
+  "saves",
+  "best-save",
+  "score-finder",
+]);
+const SFINDER_FORWARD_SEARCH_COMMANDS = new Set([
+  "cover",
+  "setup",
+  "congruent",
+  "congruent-cover",
+  "setup-cover",
+  "cover-percent",
+  "special-cover",
+  "spin-cover",
+  "spin",
+]);
+const SFINDER_SETUP_SEARCH_COMMANDS = new Set([
+  "pc-setup",
+  "best-setup",
+  "dpc-finder",
+]);
+
+const DEFAULT_SEARCH_TIMEOUT_MS = 3 * 60_000;
+const DEFAULT_REVERSE_SEARCH_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_FORWARD_SEARCH_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Classifies a curated Clearra argv by its search direction. Setup ranking is
+ * kept distinct so the Discord gateway can attach setup-only progress UX while
+ * sharing the forward-search execution limit.
+ */
+export function searchTimeoutClass(arguments_) {
+  if (!Array.isArray(arguments_) || arguments_.length === 0) return "default";
+  const command = normalizedSearchCommand(arguments_[0]);
+  if (!command) return "default";
+  if (SETUP_SEARCH_COMMANDS.has(command)) return "setup";
+  if (REVERSE_SEARCH_COMMANDS.has(command)) return "reverse";
+  if (FORWARD_SEARCH_COMMANDS.has(command)) return "forward";
+  if (command !== "sfinder") return "default";
+
+  const subcommand = normalizedSearchCommand(arguments_[1]);
+  if (!subcommand) return "default";
+  const canonical = normalizeSfinderCommand(subcommand);
+  if (SFINDER_SETUP_SEARCH_COMMANDS.has(canonical)) return "setup";
+  if (SFINDER_REVERSE_SEARCH_COMMANDS.has(canonical)) return "reverse";
+  if (SFINDER_FORWARD_SEARCH_COMMANDS.has(canonical)) return "forward";
+  return "default";
+}
+
+export function isSetupSearchArguments(arguments_) {
+  return searchTimeoutClass(arguments_) === "setup";
+}
+
+export function searchTimeoutMsForArguments(arguments_, policy = {}) {
+  const genericTimeoutMs = positiveSearchTimeout(
+    policy.searchTimeoutMs ?? policy.timeoutMs,
+    DEFAULT_SEARCH_TIMEOUT_MS,
+  );
+  const class_ = searchTimeoutClass(arguments_);
+  if (class_ === "reverse") {
+    return positiveSearchTimeout(
+      policy.reverseSearchTimeoutMs,
+      policy.searchTimeoutMs === undefined && policy.timeoutMs === undefined
+        ? DEFAULT_REVERSE_SEARCH_TIMEOUT_MS
+        : genericTimeoutMs,
+    );
+  }
+  if (class_ === "forward" || class_ === "setup") {
+    return positiveSearchTimeout(
+      policy.forwardSearchTimeoutMs,
+      policy.searchTimeoutMs === undefined && policy.timeoutMs === undefined
+        ? DEFAULT_FORWARD_SEARCH_TIMEOUT_MS
+        : genericTimeoutMs,
+    );
+  }
+  return genericTimeoutMs;
+}
+
+function normalizedSearchCommand(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
+  return normalized.length > 0 ? normalized : null;
+}
+
+function positiveSearchTimeout(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("Clearrabot received an invalid search timeout policy.");
+  }
+  return parsed;
+}
 
 /**
  * Returns the canonical, input-free command path that is safe to retain in an
@@ -312,7 +427,26 @@ export class ClearraJobExecutor {
     if (!this.authorizationToken && !isLoopbackHostname(this.endpoint.hostname)) {
       throw new Error("A remote Clearra job endpoint requires an authorization token.");
     }
-    this.timeoutMs = positiveExecutorOption(options.timeoutMs, 3 * 60_000);
+    const legacyTimeoutMs = options.timeoutMs === undefined
+      ? undefined
+      : positiveExecutorOption(options.timeoutMs, DEFAULT_SEARCH_TIMEOUT_MS);
+    this.searchTimeoutMs = positiveExecutorOption(
+      options.searchTimeoutMs ?? legacyTimeoutMs,
+      DEFAULT_SEARCH_TIMEOUT_MS,
+    );
+    this.reverseSearchTimeoutMs = positiveExecutorOption(
+      options.reverseSearchTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_REVERSE_SEARCH_TIMEOUT_MS,
+    );
+    this.forwardSearchTimeoutMs = positiveExecutorOption(
+      options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_FORWARD_SEARCH_TIMEOUT_MS,
+    );
+    this.timeoutMs = Math.max(
+      this.searchTimeoutMs,
+      this.reverseSearchTimeoutMs,
+      this.forwardSearchTimeoutMs,
+    );
     this.maxOutputBytes = positiveExecutorOption(
       options.maxOutputBytes,
       4 * 1024 * 1024,
@@ -321,6 +455,7 @@ export class ClearraJobExecutor {
     this.cancelTimeoutMs = positiveExecutorOption(options.cancelTimeoutMs, 2_000);
     this.fetch = options.fetch ?? globalThis.fetch?.bind(globalThis);
     this.createJobId = options.createJobId ?? randomUUID;
+    this.now = options.now ?? Date.now;
     if (typeof this.fetch !== "function") {
       throw new Error("Clearrabot requires an HTTP fetch implementation.");
     }
@@ -334,13 +469,14 @@ export class ClearraJobExecutor {
     }
 
     const controller = new AbortController();
-    const startedAt = Date.now();
+    const startedAt = this.now();
+    const commandTimeoutMs = searchTimeoutMsForArguments(arguments_, this);
     const requestedDeadlineUnixMs = options.deadlineUnixMs === undefined
-      ? startedAt + this.timeoutMs
+      ? startedAt + commandTimeoutMs
       : validAbsoluteDeadline(options.deadlineUnixMs);
     const deadlineUnixMs = Math.min(
       requestedDeadlineUnixMs,
-      startedAt + this.timeoutMs,
+      startedAt + commandTimeoutMs,
     );
     const remainingMs = deadlineUnixMs - startedAt;
     if (remainingMs <= 0) {
@@ -394,7 +530,7 @@ export class ClearraJobExecutor {
       if (controller.signal.aborted) {
         if (timedOut) {
           throw new Error(
-            `Clearrabot search exceeded the ${timeoutLabel(this.timeoutMs)} time limit.`,
+            `Clearrabot search exceeded the ${timeoutLabel(commandTimeoutMs)} time limit.`,
           );
         }
         throw abortError("Clearra search was cancelled.");

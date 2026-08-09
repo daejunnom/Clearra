@@ -12,6 +12,8 @@ use clearra_problem::{
 };
 use clearra_supply::pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex};
 
+use super::super::setup_representative::verify_compact_paths_against_singletons;
+
 use super::{
     compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
     merge_exact_state_coverage, piece_index, prefers_setup_representative_depth,
@@ -353,6 +355,7 @@ fn setup_candidate_priority_selects_a_representative_with_matching_lock_advantag
 #[test]
 #[ignore = "full empty-4L exact acceptance; run in the release acceptance suite"]
 fn setup_finder_returns_exact_joint_witness_paths() {
+    let compact_path_equivalence = verify_compact_paths_against_singletons();
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T])
         .with_limits(SetupLimits::new(1, 1, 1, 8, 100_000, 1).expect("setup limits"));
@@ -382,6 +385,7 @@ fn setup_finder_returns_exact_joint_witness_paths() {
             assert!(candidate.joint_covered_patterns() > 0);
         }
     }
+    assert_eq!(compact_path_equivalence.comparison_count(), 2);
 }
 
 #[test]

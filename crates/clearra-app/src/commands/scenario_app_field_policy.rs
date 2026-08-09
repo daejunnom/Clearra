@@ -1,4 +1,5 @@
 use crate::commands::{bool_field, number_field, string_field};
+use clearra_output::model::is_json_number;
 
 pub(super) fn scenario_field(key: String, value: String) -> clearra_output::model::RenderField {
     if SCENARIO_BOOL_KEYS.contains(&key.as_str()) {
@@ -8,7 +9,7 @@ pub(super) fn scenario_field(key: String, value: String) -> clearra_output::mode
             _ => string_field(key, value),
         };
     }
-    if SCENARIO_NUMBER_KEYS.contains(&key.as_str()) && value != "none" {
+    if SCENARIO_NUMBER_KEYS.contains(&key.as_str()) && is_json_number(&value) {
         return number_field(key, value);
     }
     string_field(key, value)
@@ -154,3 +155,25 @@ const SCENARIO_NUMBER_KEYS: &[&str] = &[
     "validation_error_count",
     "workers_used",
 ];
+
+#[cfg(test)]
+mod tests {
+    use clearra_output::model::RenderFieldValue;
+
+    use super::*;
+
+    #[test]
+    fn scenario_number_fields_keep_non_numeric_sentinels_as_strings() {
+        let sentinel = scenario_field(
+            "coverage_probability".to_owned(),
+            "not-calculated".to_owned(),
+        );
+        let number = scenario_field("coverage_probability".to_owned(), "0.25".to_owned());
+
+        assert_eq!(
+            sentinel.value(),
+            &RenderFieldValue::string("not-calculated")
+        );
+        assert_eq!(number.value(), &RenderFieldValue::number("0.25"));
+    }
+}

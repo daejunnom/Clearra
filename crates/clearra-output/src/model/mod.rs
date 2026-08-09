@@ -5,7 +5,7 @@ pub mod render_setup;
 pub mod render_solution;
 
 pub use render_board::RenderBoard;
-pub use render_field_value::{RenderField, RenderFieldValue};
+pub use render_field_value::{is_json_number, RenderField, RenderFieldValue};
 pub use render_message::RenderMessage;
 pub use render_setup::RenderSetup;
 pub use render_solution::{

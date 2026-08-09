@@ -71,7 +71,7 @@ test("direct execution preserves the caller's absolute deadline and AbortSignal"
   assert.equal(calls[0].options.signal, controller.signal);
 });
 
-test("direct execution cannot extend a caller deadline or its configured total bound", async () => {
+test("direct execution cannot extend a caller deadline or its command-class bound", async () => {
   const deadlines = [];
   const executor = new ClearraDirectExecutor(
     directConfig({ interactionDeadlineMs: 5_000 }),
@@ -88,7 +88,38 @@ test("direct execution cannot extend a caller deadline or its configured total b
 
   await executor.execute(["pc"], { deadlineUnixMs: 11_000 });
   await executor.execute(["pc"], { deadlineUnixMs: 99_000 });
-  assert.deepEqual(deadlines, [11_000, 15_000]);
+  assert.deepEqual(deadlines, [11_000, 13_000]);
+});
+
+test("direct execution applies reverse and forward limits before invoking the runner", async () => {
+  const jobs = [];
+  const executor = new ClearraDirectExecutor(
+    directConfig({
+      searchTimeoutMs: 2_000,
+      reverseSearchTimeoutMs: 5_000,
+      forwardSearchTimeoutMs: 15_000,
+      interactionDeadlineMs: 14_000,
+    }),
+    {
+      now: () => 10_000,
+      runner: {
+        async execute(job) {
+          jobs.push(job);
+          return { exitCode: 0, signal: null, stdout: "", stderr: "" };
+        },
+      },
+    },
+  );
+
+  await executor.execute(["pc"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["damage"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["setup-finder"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["verify", "pc"], { deadlineUnixMs: 99_000 });
+
+  assert.deepEqual(
+    jobs.map(({ deadlineUnixMs }) => deadlineUnixMs),
+    [15_000, 24_000, 24_000, 12_000],
+  );
 });
 
 test("an expired queued deadline fails before Clearra is spawned", async () => {

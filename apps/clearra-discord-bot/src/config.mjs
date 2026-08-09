@@ -69,9 +69,17 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     environment.CLEARRA_SEARCH_TIMEOUT_MS,
     3 * 60_000,
   );
+  const reverseSearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
+    5 * 60_000,
+  );
+  const forwardSearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+    15 * 60_000,
+  );
   const interactionDeadlineMs = boundedPositiveInteger(
     environment.CLEARRA_INTERACTION_DEADLINE_MS,
-    Math.min(14 * 60_000, searchTimeoutMs + 60_000),
+    14 * 60_000,
     14 * 60_000,
     "CLEARRA_INTERACTION_DEADLINE_MS",
     " milliseconds",
@@ -149,6 +157,12 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     discordAdminUserIds,
     registerCommands,
     searchTimeoutMs,
+    reverseSearchTimeoutMs,
+    forwardSearchTimeoutMs,
+    setupProgressNoticeMs: positiveInteger(
+      environment.CLEARRA_SETUP_PROGRESS_NOTICE_MS,
+      5 * 60_000,
+    ),
     interactionDeadlineMs,
     maxPendingSearches: positiveInteger(
       environment.CLEARRA_MAX_PENDING_SEARCHES,

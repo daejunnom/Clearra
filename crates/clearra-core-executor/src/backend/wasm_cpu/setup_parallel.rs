@@ -34,10 +34,7 @@ use super::{
         retain_best_setup_state_per_board, terminal_supply_target_word, CompletedSetupCoverage,
         SetupSupplyStateLayout, SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
     },
-    setup_graph_builder::{
-        cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
-        SetupSharedGraph,
-    },
+    setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
     setup_parallel_segmented::{SegmentedArray, SegmentedGenerationArray},
     setup_parallel_wire::{
         decode_initialization, decode_results, decode_tasks, encode_initialization, encode_results,
@@ -277,9 +274,21 @@ impl WasmSetupParallelCoordinator {
     }
 
     pub(crate) fn finish(
-        mut self,
+        self,
         workers_used: usize,
     ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        self.finish_with_control(workers_used, &ExecutionControl::default())
+    }
+
+    pub(crate) fn finish_with_control(
+        mut self,
+        workers_used: usize,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut cancellation_work = 0_usize;
         let shared = self
             .shared
             .take()
@@ -325,6 +334,7 @@ impl WasmSetupParallelCoordinator {
             })
             .transpose()?;
         for (condition_index, merge) in condition_merges.into_iter().enumerate() {
+            check_cancel(control, &mut cancellation_work)?;
             let condition = &shared.conditions[condition_index];
             peak_segment_pages = peak_segment_pages.max(merge.peak_segment_pages);
             let result = merge.finish(
@@ -332,6 +342,7 @@ impl WasmSetupParallelCoordinator {
                 shared.query.candidate_priority(),
                 shared.query.length_preference(),
                 path_target_shape_index,
+                control,
             )?;
             let resolver = SetupRepresentativeResolver::new(
                 condition,
@@ -353,44 +364,41 @@ impl WasmSetupParallelCoordinator {
                     )
                 })
                 .collect::<Vec<_>>();
-            let paths = resolver.paths(&targets)?;
-            let candidates = result
-                .selected_shapes
-                .into_iter()
-                .zip(paths)
-                .map(|(coverage, representative_path)| {
-                    let shape_index = coverage.shape_index as usize;
-                    let shape = &shared.graph.shapes[shape_index];
-                    let conditional = if coverage.build_weight == 0.0 {
-                        0.0
-                    } else {
-                        coverage.joint_weight / coverage.build_weight
-                    };
-                    let setup_id = shared.graph.setup_id_for_shape(shape_index).ok_or(
-                        WasmExactSearchError::InvalidProblem("setup_candidate_identity_missing"),
-                    )?;
-                    let candidate = SetupCandidateReport::new(
-                        setup_id,
-                        shape.board,
-                        coverage.min_covered_locks,
-                        coverage.max_covered_locks,
-                        coverage.build_covered_patterns as usize,
-                        coverage.joint_covered_patterns as usize,
-                        probability_string(coverage.build_weight),
-                        probability_string(coverage.joint_weight),
-                        probability_string(conditional),
-                        representative_path,
-                    );
-                    if path_target_shape_index == Some(shape_index) {
-                        Ok(
-                            candidate
-                                .with_solution_paths(solution_paths.take().unwrap_or_default()),
-                        )
-                    } else {
-                        Ok(candidate)
-                    }
-                })
-                .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
+            let paths = resolver.paths_with_control(&targets, control)?;
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            let mut candidates = Vec::with_capacity(result.selected_shapes.len());
+            for (coverage, representative_path) in result.selected_shapes.into_iter().zip(paths) {
+                check_cancel(control, &mut cancellation_work)?;
+                let shape_index = coverage.shape_index as usize;
+                let shape = &shared.graph.shapes[shape_index];
+                let conditional = if coverage.build_weight == 0.0 {
+                    0.0
+                } else {
+                    coverage.joint_weight / coverage.build_weight
+                };
+                let setup_id = shared.graph.setup_id_for_shape(shape_index).ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_candidate_identity_missing"),
+                )?;
+                let candidate = SetupCandidateReport::new(
+                    setup_id,
+                    shape.board,
+                    coverage.min_covered_locks,
+                    coverage.max_covered_locks,
+                    coverage.build_covered_patterns as usize,
+                    coverage.joint_covered_patterns as usize,
+                    probability_string(coverage.build_weight),
+                    probability_string(coverage.joint_weight),
+                    probability_string(conditional),
+                    representative_path,
+                );
+                candidates.push(if path_target_shape_index == Some(shape_index) {
+                    candidate.with_solution_paths(solution_paths.take().unwrap_or_default())
+                } else {
+                    candidate
+                });
+            }
             completed.push(CompletedSetupCoverage {
                 report: SetupHoldConditionReport::new(
                     condition.condition_id().to_owned(),
@@ -405,8 +413,10 @@ impl WasmSetupParallelCoordinator {
                 candidate_boards: result.candidate_boards,
             });
         }
-        cache_setup_coverage_result(&shared.query, &completed);
-        Ok(finish_setup_result(
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let result = finish_setup_result(
             &shared.query,
             &shared.graph,
             completed,
@@ -417,8 +427,9 @@ impl WasmSetupParallelCoordinator {
             workers_used.min(self.worker_count).max(1),
             true,
             "setup-family-quotient-segmented-task-multiworker",
-        )
-        .with_additional_fields(vec![
+            control,
+        )?;
+        Ok(result.with_additional_fields(vec![
             (
                 "setup_parallel_task_count".to_owned(),
                 self.tasks.len().to_string(),
@@ -649,7 +660,7 @@ pub(crate) fn execute_setup_parallel_native(
     control.report_progress("setup-finalize", 4, Some(4));
     coordinator.next_task = coordinator.tasks.len();
     coordinator.merge_ready_results()?;
-    coordinator.finish(workers_used)
+    coordinator.finish_with_control(workers_used, control)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -984,7 +995,12 @@ impl SetupConditionMerge {
         candidate_priority: clearra_problem::SetupCandidatePriority,
         length_preference: clearra_problem::SetupLengthPreference,
         path_target_shape_index: Option<usize>,
+        control: &ExecutionControl,
     ) -> Result<CompletedParallelCondition, WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut cancellation_work = 0_usize;
         if self.received_tasks != self.expected_tasks {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_parallel_condition_tasks_incomplete",
@@ -1014,6 +1030,9 @@ impl SetupConditionMerge {
                 "setup_parallel_covered_depth_range_missing",
             ));
         }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         self.covered_shapes.sort_unstable_by(|left, right| {
             let left_shape = &shapes[*left];
             let right_shape = &shapes[*right];
@@ -1033,38 +1052,49 @@ impl SetupConditionMerge {
                 right_coverage.max_covered_locks,
                 right_shape.board,
             )
+            .then_with(|| left.cmp(right))
         });
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         retain_best_setup_state_per_board(&mut self.covered_shapes, shapes)?;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         let candidate_count = self.covered_shapes.len();
-        let mut candidate_boards = self
-            .covered_shapes
-            .iter()
-            .map(|shape_index| shapes[*shape_index].board)
-            .collect::<Vec<_>>();
+        let mut candidate_boards = Vec::with_capacity(candidate_count);
+        for shape_index in &self.covered_shapes {
+            check_cancel(control, &mut cancellation_work)?;
+            candidate_boards.push(shapes[*shape_index].board);
+        }
         candidate_boards.sort_unstable();
-        let selected_shapes = self
-            .covered_shapes
-            .into_iter()
-            .map(|shape_index| {
-                let coverage = self.accumulators.get(shape_index).copied().ok_or(
-                    WasmExactSearchError::InvalidProblem(
-                        "setup_parallel_candidate_accumulator_missing",
-                    ),
-                )?;
-                Ok(SetupParallelShapeResult {
-                    shape_index: u32::try_from(shape_index).map_err(|_| {
-                        WasmExactSearchError::InvalidProblem("setup_parallel_shape_index_overflow")
-                    })?,
-                    build_covered_patterns: coverage.build_covered_patterns,
-                    joint_covered_patterns: coverage.joint_covered_patterns,
-                    build_weight: coverage.build_weight,
-                    joint_weight: coverage.joint_weight,
-                    min_covered_locks: coverage.min_covered_locks,
-                    max_covered_locks: coverage.max_covered_locks,
-                    witness_pattern_id: coverage.witness_pattern_id,
-                })
-            })
-            .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut selected_shapes = Vec::with_capacity(candidate_count);
+        for shape_index in self.covered_shapes {
+            check_cancel(control, &mut cancellation_work)?;
+            let coverage = self.accumulators.get(shape_index).copied().ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_candidate_accumulator_missing",
+                ),
+            )?;
+            selected_shapes.push(SetupParallelShapeResult {
+                shape_index: u32::try_from(shape_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("setup_parallel_shape_index_overflow")
+                })?,
+                build_covered_patterns: coverage.build_covered_patterns,
+                joint_covered_patterns: coverage.joint_covered_patterns,
+                build_weight: coverage.build_weight,
+                joint_weight: coverage.joint_weight,
+                min_covered_locks: coverage.min_covered_locks,
+                max_covered_locks: coverage.max_covered_locks,
+                witness_pattern_id: coverage.witness_pattern_id,
+            });
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         Ok(CompletedParallelCondition {
             global_pattern_count,
             candidate_count,

@@ -4,8 +4,11 @@ import test from "node:test";
 import {
   canonicalClearraOperationalCommand,
   ClearraJobExecutor,
+  isSetupSearchArguments,
   parseClearraMessage,
   prepareClearraArguments,
+  searchTimeoutClass,
+  searchTimeoutMsForArguments,
   tilingOnlyRequested,
   tokenizeCommand,
 } from "../src/clearra/command.mjs";
@@ -14,14 +17,119 @@ import {
   loadDiscordBotConfig,
 } from "../src/config.mjs";
 
-test("Clearrabot defaults each search session to a three-minute timeout", () => {
+test("Clearrabot applies direction-specific search and interaction limits", () => {
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
   assert.equal(config.ingressMode, "gateway");
   assert.equal(config.searchTimeoutMs, 180_000);
+  assert.equal(config.reverseSearchTimeoutMs, 300_000);
+  assert.equal(config.forwardSearchTimeoutMs, 900_000);
+  assert.equal(config.setupProgressNoticeMs, 300_000);
+  assert.equal(config.interactionDeadlineMs, 840_000);
   assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
   assert.equal(config.jobPollIntervalMs, 250);
   assert.equal(config.jobCancelTimeoutMs, 2_000);
   assert.equal(config.accessStorePath, null);
+});
+
+test("search timeout policy classifies native and sfinder argv consistently", () => {
+  const examples = [
+    [["pc", "--lines", "4"], "reverse"],
+    [["pc-scenario", "--fixture", "opening"], "reverse"],
+    [["failed-queue"], "reverse"],
+    [["sfinder", "score-finder"], "reverse"],
+    [["sfinder", "best_save"], "reverse"],
+    [["damage"], "forward"],
+    [["spin-structure"], "forward"],
+    [["build-probability"], "forward"],
+    [["sfinder", "spin-cover"], "forward"],
+    [["sfinder", "setup"], "forward"],
+    [["setup-finder", "--remaining", "TI"], "setup"],
+    [["sfinder", "pcsetup"], "setup"],
+    [["verify", "pc"], "default"],
+  ];
+  for (const [arguments_, expected] of examples) {
+    assert.equal(searchTimeoutClass(arguments_), expected, arguments_.join(" "));
+  }
+  assert.equal(isSetupSearchArguments(["setup-finder"]), true);
+  assert.equal(isSetupSearchArguments(["sfinder", "best-setup"]), true);
+  assert.equal(isSetupSearchArguments(["sfinder", "setup"]), false);
+});
+
+test("every represented sfinder search keeps its direction-specific deadline", () => {
+  const reverse = [
+    "path",
+    "chance",
+    "percent",
+    "minimals",
+    "score",
+    "score-minimals",
+    "saves",
+    "best-save",
+    "score-finder",
+  ];
+  const forward = [
+    "cover",
+    "setup",
+    "congruent",
+    "congruent-cover",
+    "setup-cover",
+    "cover-percent",
+    "special-cover",
+    "spin-cover",
+    "spin",
+  ];
+  const setup = ["pc-setup", "best-setup", "dpc-finder"];
+
+  for (const command of reverse) {
+    assert.equal(searchTimeoutClass(["sfinder", command]), "reverse", command);
+    assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 300_000, command);
+  }
+  for (const command of forward) {
+    assert.equal(searchTimeoutClass(["sfinder", command]), "forward", command);
+    assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 900_000, command);
+  }
+  for (const command of setup) {
+    assert.equal(searchTimeoutClass(["sfinder", command]), "setup", command);
+    assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 900_000, command);
+  }
+});
+
+test("search timeout policy gives reverse five minutes and forward/setup fifteen", () => {
+  assert.equal(searchTimeoutMsForArguments(["pc"]), 300_000);
+  assert.equal(searchTimeoutMsForArguments(["damage"]), 900_000);
+  assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000);
+  assert.equal(searchTimeoutMsForArguments(["verify"]), 180_000);
+
+  const policy = {
+    searchTimeoutMs: 11,
+    reverseSearchTimeoutMs: 22,
+    forwardSearchTimeoutMs: 33,
+  };
+  assert.equal(searchTimeoutMsForArguments(["verify"], policy), 11);
+  assert.equal(searchTimeoutMsForArguments(["sfinder", "path"], policy), 22);
+  assert.equal(searchTimeoutMsForArguments(["spin-finder"], policy), 33);
+  assert.equal(searchTimeoutMsForArguments(["sfinder", "dpc-finder"], policy), 33);
+});
+
+test("directional search timeout settings remain independently configurable", () => {
+  const config = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_SEARCH_TIMEOUT_MS: "1000",
+    CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "2000",
+    CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "3000",
+    CLEARRA_SETUP_PROGRESS_NOTICE_MS: "4000",
+  });
+  assert.equal(config.searchTimeoutMs, 1_000);
+  assert.equal(config.reverseSearchTimeoutMs, 2_000);
+  assert.equal(config.forwardSearchTimeoutMs, 3_000);
+  assert.equal(config.setupProgressNoticeMs, 4_000);
+  assert.throws(
+    () => loadDiscordBotConfig({
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "0",
+    }),
+    /numeric setting is invalid/,
+  );
 });
 
 test("Discord locale and access persistence paths stay independently configurable", () => {
@@ -665,6 +773,44 @@ test("Clearra executor submits an idempotent POST job without shell interpretati
   assert.equal(job.kind, "clearra.command");
   assert.deepEqual(job.arguments, ["pc", "queue with spaces", "literal;&|$()"]);
   assert.equal(job.deadlineUnixMs > Date.now(), true);
+});
+
+test("Clearra executor submits argv-specific reverse and forward deadlines", async () => {
+  const submitted = [];
+  let jobIndex = 0;
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
+    searchTimeoutMs: 2_000,
+    reverseSearchTimeoutMs: 5_000,
+    forwardSearchTimeoutMs: 15_000,
+    now: () => 10_000,
+    createJobId: () => `job-policy-${++jobIndex}`,
+    fetch: async (_url, request) => {
+      const job = JSON.parse(request.body);
+      submitted.push(job);
+      return jobResponse({
+        id: job.id,
+        state: "completed",
+        result: {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+        },
+      });
+    },
+  });
+
+  await executor.execute(["pc"]);
+  await executor.execute(["damage"]);
+  await executor.execute(["setup-finder", "--remaining", "TI"]);
+  await executor.execute(["verify", "pc"]);
+
+  assert.deepEqual(
+    submitted.map(({ deadlineUnixMs }) => deadlineUnixMs),
+    [15_000, 25_000, 25_000, 12_000],
+  );
 });
 
 test("remote Clearra job endpoints fail closed without HTTPS and application auth", () => {

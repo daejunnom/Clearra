@@ -21,6 +21,7 @@ const CATALOGS = Object.freeze({
     "viewer.document_description": "CTK3 document for the Clearra renderer",
     "viewer.document_failed": "The document could not be rendered.",
     "search.stopped": "Clearra search stopped before producing a result.",
+    "search.setup_long_running": "The setup search is still running and is taking longer than expected. It will continue within Discord's response window.",
     "search.busy": "Clearra is busy. Please try again shortly.",
     "search.cancelled": "The search was cancelled.",
     "search.timeout": "The calculation exceeded its time limit. Please try again.",
@@ -120,6 +121,7 @@ const CATALOGS = Object.freeze({
     "viewer.document_description": "Clearra 렌더러용 CTK3 문서",
     "viewer.document_failed": "문서를 렌더링할 수 없습니다.",
     "search.stopped": "결과를 만들기 전에 Clearra 탐색이 중단되었습니다.",
+    "search.setup_long_running": "셋업 탐색이 아직 진행 중이며 예상보다 오래 걸리고 있습니다. Discord 응답 제한 안에서 계속 탐색합니다.",
     "search.busy": "요청이 많습니다. 잠시 후 다시 시도해 주세요.",
     "search.cancelled": "탐색이 취소되었습니다.",
     "search.timeout": "제한 시간 안에 연산을 마치지 못했습니다. 다시 시도해 주세요.",
@@ -333,6 +335,10 @@ const KOREAN_VALIDATION_MESSAGES = new Map([
   ["The command contains an unterminated code block.", "명령어의 코드 블록이 닫히지 않았습니다."],
   ["A command code block cannot be empty.", "명령어 코드 블록은 비워 둘 수 없습니다."],
   ["remaining must contain only IOTSZJL pieces.", "남은 미노에는 IOTSZJL만 사용할 수 있습니다."],
+  ["priority must be all, build, or pc.", "셋업 정렬은 all, build, pc 중 하나여야 합니다."],
+  ["queue-knowledge must be full-queue or visible-7.", "큐 공개 범위는 full-queue 또는 visible-7이어야 합니다."],
+  ["setup-length must be auto, longer, or shorter.", "셋업 길이는 auto, longer, shorter 중 하나여야 합니다."],
+  ["When next-cycle-remaining or setup-length is set, remaining must also be supplied directly.", "다음 회차 남은 미노 또는 셋업 길이를 먼저 설정했다면 남은 미노도 슬래시 명령어에 직접 입력해 주세요."],
   ["Verify scope must be pc, setup, cover, build, or kicks.", "검증 범위는 pc, setup, cover, build, kicks 중 하나여야 합니다."],
 ]);
 
@@ -343,6 +349,10 @@ const KOREAN_VALIDATION_PATTERNS = Object.freeze([
   [/^(.+) must be text\.$/, (name) => `${koreanInputName(name)} 입력은 텍스트여야 합니다.`],
   [/^(.+) exceeds the (\d+)-character limit\.$/, (name, limit) => `${koreanInputName(name)} 입력은 ${limit}자를 넘을 수 없습니다.`],
   [/^(.+) must be an integer from (\d+) through (\d+)\.$/, (name, min, max) => `${koreanInputName(name)} 값은 ${min}부터 ${max}까지의 정수여야 합니다.`],
+  [/^(.+) must contain from 1 through 7 pieces\.$/, (name) => `${koreanInputName(name)}에는 미노를 1–7개 입력해야 합니다.`],
+  [/^(.+) must contain only IOTSZJL pieces\.$/, (name) => `${koreanInputName(name)}에는 IOTSZJL만 사용할 수 있습니다.`],
+  [/^(.+) allows at most one piece kind twice; no piece may appear three times\.$/, (name) => `${koreanInputName(name)}에서는 한 종류만 두 번 사용할 수 있고 같은 미노를 세 번 사용할 수 없습니다.`],
+  [/^next-cycle-remaining must contain exactly (\d+) pieces? when remaining contains (\d+)\.$/, (expected, remaining) => `남은 미노가 ${remaining}개이면 다음 회차 남은 미노는 정확히 ${expected}개여야 합니다.`],
   [/^(.+) grid rows must be exactly 10 columns wide\.$/, (name) => `${koreanInputName(name)} 격자의 각 줄은 정확히 10칸이어야 합니다.`],
   [
     /^(.+) grid must contain from one through (six|twenty-four) rows\.$/,
@@ -367,6 +377,11 @@ const KOREAN_INPUT_NAMES = Object.freeze({
   kicktable: "킥테이블",
   options: "옵션",
   remaining: "남은 미노",
+  priority: "셋업 정렬",
+  "max-setup-pieces": "최대 구축 미노",
+  "queue-knowledge": "큐 공개 범위",
+  "next-cycle-remaining": "다음 회차 남은 미노",
+  "setup-length": "셋업 길이",
   scope: "범위",
 });
 

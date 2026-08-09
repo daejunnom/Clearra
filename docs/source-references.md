@@ -128,8 +128,13 @@ parity, bumper, separator/MITM, setup family-quotient 계약은 루트 핸드오
 - 해당 commit에는 루트 `LICENSE`/`COPYING`이 없고, 포함된 `sfinder.jar`의
   버전·provenance도 고정되지 않았다. sfinder-man 고유 코드·데이터는 직접
   복사하거나 번역하지 않고 공개된 동작 계약만 독립 구현한다.
-- 사용한 범위: 공개 command 목록, 3분 job timeout, path/percent/cover/setup
-  역할, Discord UX와 실패 응답.
+- 사용한 범위: 공개 command 목록, path/percent/cover/setup 역할, Discord UX와
+  실패 응답. 원본의 공통 `asyncio.wait_for` 값은 1000초이지만 timeout 오류
+  문구는 일관되게 3분이라고 안내한다. ClearraBot은 이 모순된 구현 상수를
+  그대로 복사하지 않고 비방향 기타 호환 작업에 공개된 3분 계약을
+  기본값으로 사용한다. 표현된 역방향은 5분, Sfinder-man 호환을 포함한
+  정방향·셋업 탐색은 15분 정책을 적용하고 Discord 전달은 별도 안전 상한을
+  둔다.
 - Clearra 경계: 같은 이름이 다른 의미를 가지는 명령은 `clearra sfinder`
   compatibility namespace에 격리한다. Java subprocess나 Sfinder runtime을
   제품 backend로 사용하지 않는다.

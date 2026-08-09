@@ -82,6 +82,16 @@ impl WasmSetupParallelCoordinator {
         self.inner.finish(workers_used).map_err(map_error)
     }
 
+    pub fn finish_with_control(
+        self,
+        workers_used: usize,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        self.inner
+            .finish_with_control(workers_used, control)
+            .map_err(map_error)
+    }
+
     pub fn producer_completed(&self) -> bool {
         self.inner.producer_completed()
     }

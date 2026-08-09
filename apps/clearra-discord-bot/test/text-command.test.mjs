@@ -150,6 +150,37 @@ test("dollar and greater-than finesse commands share the grouped slash contracts
   assert.equal(classifyClearraTextCommand(">finesse score PRIVATE", ">"), "finesse.score");
 });
 
+test("setup-ranking text commands share the canonical slash settings without finesse collisions", () => {
+  const arguments_ = parseClearraTextMessage(
+    "$best-setup IOTS --setup-order pc --max-setup-pieces 10 --queue-knowledge visible-7 --next-cycle-remaining Z --setup-length shorter --rule srs-x",
+    "$",
+    remoteExecution,
+  );
+  assert.deepEqual(arguments_.slice(0, 16), [
+    "setup-finder",
+    "--remaining", "IOTS",
+    "--priority", "pc",
+    "--max-setup-pieces", "10",
+    "--queue-knowledge", "visible-7",
+    "--next-cycle-remaining", "Z",
+    "--setup-length", "shorter",
+    "--rule", "srs-x",
+    "--no-tablebase",
+  ]);
+  assert.equal(arguments_.includes("--pattern-knowledge"), false);
+
+  assert.deepEqual(
+    parseClearraTextMessage(">dpc-finder IOTS --knowledge full-queue", ">", remoteExecution)
+      .slice(0, 7),
+    [
+      "setup-finder",
+      "--remaining", "IOTS",
+      "--priority", "pc",
+      "--queue-knowledge", "oracle",
+    ],
+  );
+});
+
 test("catalog text requests retain the raw field for the parallel preview", () => {
   const request = parseClearraTextRequest(
     "$path --field XXXXXX____ --patterns I --lines 1",

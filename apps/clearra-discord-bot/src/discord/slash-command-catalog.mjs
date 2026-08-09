@@ -119,12 +119,18 @@ const SEARCH_COMMAND_DEFINITIONS = Object.freeze([
     { argvPrefix: Object.freeze(["spin-structure"]) },
   ),
   command("pc-setup", "Rank setup candidates by joint build and PC coverage", "setup", "remaining", {
+    argvPrefix: Object.freeze(["setup-finder"]),
+    setupPriority: "all",
     note: "Ranks candidates by both build and perfect-clear coverage.",
   }),
   command("best-setup", "Rank setup candidates by build coverage", "setup", "remaining", {
+    argvPrefix: Object.freeze(["setup-finder"]),
+    setupPriority: "build",
     note: "Ranks candidates by build coverage.",
   }),
   command("dpc-finder", "Rank setup candidates by perfect-clear coverage", "setup", "remaining", {
+    argvPrefix: Object.freeze(["setup-finder"]),
+    setupPriority: "pc",
     note: "Ranks candidates by perfect-clear coverage.",
   }),
   command("verify", "Run one group of Clearra verification checks", "verify", "verify"),
@@ -469,6 +475,16 @@ function registrationOptions(input) {
           false,
           64,
         ),
+        setupPriorityOption(),
+        setupMaximumPiecesOption(),
+        setupQueueKnowledgeOption(),
+        stringOption(
+          "next-cycle-remaining",
+          "Exact next-cycle residue; required count depends on the current remaining inventory",
+          false,
+          64,
+        ),
+        setupLengthOption(),
         kicktableOption(),
       ]);
     case "spin-structure":
@@ -653,6 +669,69 @@ function kicktableOption() {
   });
 }
 
+function setupPriorityOption() {
+  return Object.freeze({
+    ...stringOption(
+      "priority",
+      "Setup ordering: joint build × PC, build probability first, or PC probability first",
+      false,
+      16,
+    ),
+    choices: Object.freeze([
+      Object.freeze({ name: "Joint build × PC", value: "all" }),
+      Object.freeze({ name: "Build probability first", value: "build" }),
+      Object.freeze({ name: "PC probability first", value: "pc" }),
+    ]),
+  });
+}
+
+function setupMaximumPiecesOption() {
+  return Object.freeze({
+    type: INTEGER_OPTION,
+    name: "max-setup-pieces",
+    description: "Maximum pieces in a setup candidate; defaults to 9 and 10 includes complete PCs",
+    required: false,
+    min_value: 1,
+    max_value: 10,
+    choices: Object.freeze(
+      Array.from({ length: 10 }, (_, index) => index + 1).map((value) =>
+        Object.freeze({ name: `${value} piece${value === 1 ? "" : "s"}`, value })
+      ),
+    ),
+  });
+}
+
+function setupQueueKnowledgeOption() {
+  return Object.freeze({
+    ...stringOption(
+      "queue-knowledge",
+      "Queue information available while ranking setups; defaults to the full future queue",
+      false,
+      16,
+    ),
+    choices: Object.freeze([
+      Object.freeze({ name: "Full future queue", value: "oracle" }),
+      Object.freeze({ name: "Visible 7 pieces", value: "visible-7" }),
+    ]),
+  });
+}
+
+function setupLengthOption() {
+  return Object.freeze({
+    ...stringOption(
+      "setup-length",
+      "Setup-length preference; Auto follows the selected ordering",
+      false,
+      16,
+    ),
+    choices: Object.freeze([
+      Object.freeze({ name: "Auto", value: "auto" }),
+      Object.freeze({ name: "Prefer longer setups", value: "longer" }),
+      Object.freeze({ name: "Prefer shorter setups", value: "shorter" }),
+    ]),
+  });
+}
+
 function settingsOption(input) {
   const choices = input === "spin"
     ? [
@@ -793,7 +872,7 @@ function syntax(entry, locale = "en") {
       case "score-fixed-next":
         return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:initial_b2b=false]`;
       case "remaining":
-        return `/${entry.name} remaining:<순서 없는 IOTSZJL 목록> [kicktable:<내장 프로필>]`;
+        return `/${entry.name} remaining:<순서 없는 IOTSZJL 목록> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<정확한 목록>] [setup-length:<auto|longer|shorter>] [kicktable:<내장 프로필>]`;
       case "spin-structure":
         return `/${entry.name} pieces:<순서 없는 IOTSZJL 목록> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<내장 프로필>]`;
       case "verify":
@@ -824,7 +903,7 @@ function syntax(entry, locale = "en") {
     case "score-fixed-next":
       return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:initial_b2b=false]`;
     case "remaining":
-      return `/${entry.name} remaining:<unordered IOTSZJL inventory> [kicktable:<built-in>]`;
+      return `/${entry.name} remaining:<unordered IOTSZJL inventory> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>]`;
     case "spin-structure":
       return `/${entry.name} pieces:<unordered IOTSZJL inventory> field:<grid:top-row/next-row|document|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<built-in>]`;
     case "verify":
@@ -892,6 +971,10 @@ function inputHelp(entry, locale = "en") {
     case "remaining":
       return [
         "`remaining` is an unordered inventory of 1–7 IOTSZJL pieces. At most one piece kind may appear twice; that duplicate becomes the initial hold. Three copies or multiple duplicated kinds are rejected.",
+        `\`priority\` orders candidates by joint build × PC (\`all\`), build probability, or PC probability. /${entry.name} defaults to \`${entry.setupPriority}\`.`,
+        "`max-setup-pieces` accepts 1–10 and defaults to 9; choose 10 to include complete perfect clears. `queue-knowledge` is `full-queue` (default) or `visible-7`.",
+        "`next-cycle-remaining` is an exact unordered inventory for the following cycle. Its required count is determined by `remaining` (7→4, 4→1, 1→5, 5→2, 2→6, 6→3, 3→7), with the same duplicate rule.",
+        "`setup-length` is `auto`, `longer`, or `shorter`. Auto favors longer setups for `all`/`build` and shorter setups for `pc`.",
         kickHelp,
       ];
     case "spin-structure":
@@ -982,6 +1065,10 @@ function koreanInputHelp(entry) {
     case "remaining":
       return [
         "`remaining`은 순서 없는 IOTSZJL 미노 1–7개입니다. 한 종류만 두 번 나올 수 있으며 중복 미노가 초기 홀드가 됩니다. 세 개 이상 또는 여러 종류의 중복은 허용하지 않습니다.",
+        `\`priority\`는 구축 × PC 종합(\`all\`), 구축 확률 우선, PC 확률 우선으로 후보를 정렬합니다. /${entry.name}의 기본값은 \`${entry.setupPriority}\`입니다.`,
+        "`max-setup-pieces`는 1–10이며 기본값은 9입니다. 완성된 PC까지 포함하려면 10을 선택합니다. `queue-knowledge`는 전체 미래 큐를 쓰는 `full-queue`(기본값) 또는 `visible-7`입니다.",
+        "`next-cycle-remaining`은 다음 회차에 남을 정확한 순서 없는 미노 목록입니다. 필요한 개수는 `remaining`에 따라 7→4, 4→1, 1→5, 5→2, 2→6, 6→3, 3→7이며 중복 규칙은 같습니다.",
+        "`setup-length`는 `auto`, `longer`, `shorter` 중 하나입니다. 자동은 `all`/`build`에서 긴 셋업, `pc`에서 짧은 셋업을 우선합니다.",
         kickHelp,
       ];
     case "spin-structure":
@@ -1135,6 +1222,29 @@ function koreanChoiceName(name, value, path = "") {
       "all-spin-plus": "전체 스핀+",
     })[value] ?? name;
   }
+  if (path.endsWith(".priority")) {
+    return ({
+      all: "구축 × PC 종합",
+      build: "구축 확률 우선",
+      pc: "PC 확률 우선",
+    })[value] ?? name;
+  }
+  if (path.endsWith(".max-setup-pieces") && typeof value === "number") {
+    return `${value}개`;
+  }
+  if (path.endsWith(".queue-knowledge")) {
+    return ({
+      oracle: "전체 미래 큐",
+      "visible-7": "공개 7개",
+    })[value] ?? name;
+  }
+  if (path.endsWith(".setup-length")) {
+    return ({
+      auto: "자동",
+      longer: "긴 셋업 우선",
+      shorter: "짧은 셋업 우선",
+    })[value] ?? name;
+  }
   if (value === "en") return "영어";
   if (value === "ko") return "한국어";
   if (value === "channel") return "채널";
@@ -1214,6 +1324,11 @@ const KOREAN_OPTION_NAMES = Object.freeze({
   base: "기존필드",
   target: "목표필드",
   remaining: "남은미노",
+  priority: "셋업-정렬",
+  "max-setup-pieces": "최대-구축-미노",
+  "queue-knowledge": "큐-공개-범위",
+  "next-cycle-remaining": "다음-회차-남은-미노",
+  "setup-length": "셋업-길이",
   scope: "범위",
   language: "언어",
   document: "문서",
@@ -1299,6 +1414,11 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   base: `기존 필드 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
   target: `목표 칸 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
   remaining: "순서 없는 IOTSZJL 미노 1–7개",
+  priority: "셋업 후보를 구축 × PC 종합, 구축 확률 우선, PC 확률 우선 중 하나로 정렬합니다",
+  "max-setup-pieces": "셋업 후보에 포함할 최대 미노 수는 1–10이며 기본값은 9입니다",
+  "queue-knowledge": "셋업 순위 계산에 공개되는 큐 범위이며 기본값은 전체 미래 큐입니다",
+  "next-cycle-remaining": "다음 회차에 남아야 하는 정확한 순서 없는 미노 목록입니다",
+  "setup-length": "셋업 길이 선호도이며 자동은 선택한 정렬 기준을 따릅니다",
   scope: "검증 범위",
   "verify.scope": "실행할 검증 그룹이며 생략하면 모든 검증을 실행합니다",
   language: "ClearraBot 응답과 입력 창에 사용할 언어",

@@ -81,6 +81,17 @@ test("public validation and operation errors hide deployment details", () => {
     validationErrorText(new Error("private engine server failed"), "en"),
     /engine|server/i,
   );
+  assert.match(
+    validationErrorText(
+      new Error("queue-knowledge must be full-queue or visible-7."),
+      "en",
+    ),
+    /full-queue.*visible-7/u,
+  );
+  assert.doesNotMatch(
+    validationErrorText(new Error("private oracle mode failed"), "en"),
+    /oracle/i,
+  );
 });
 
 test("Korean public validation errors preserve actionable input details", () => {
@@ -110,6 +121,12 @@ test("Korean public validation errors preserve actionable input details", () => 
     ["help arguments exceeds the 64-character limit.", "/help의 명령어 인수는 64자를 넘을 수 없습니다."],
     ["The command contains an unterminated code block.", "명령어의 코드 블록이 닫히지 않았습니다."],
     ["A command code block cannot be empty.", "명령어 코드 블록은 비워 둘 수 없습니다."],
+    ["priority must be all, build, or pc.", "셋업 정렬은 all, build, pc 중 하나여야 합니다."],
+    ["queue-knowledge must be full-queue or visible-7.", "큐 공개 범위는 full-queue 또는 visible-7이어야 합니다."],
+    ["setup-length must be auto, longer, or shorter.", "셋업 길이는 auto, longer, shorter 중 하나여야 합니다."],
+    ["remaining must contain from 1 through 7 pieces.", "남은 미노에는 미노를 1–7개 입력해야 합니다."],
+    ["next-cycle-remaining must contain exactly 1 piece when remaining contains 4.", "남은 미노가 4개이면 다음 회차 남은 미노는 정확히 1개여야 합니다."],
+    ["When next-cycle-remaining or setup-length is set, remaining must also be supplied directly.", "다음 회차 남은 미노 또는 셋업 길이를 먼저 설정했다면 남은 미노도 슬래시 명령어에 직접 입력해 주세요."],
   ];
   const generic = validationErrorText(new Error("unmapped public validation"), "ko");
 
@@ -216,6 +233,33 @@ test("Discord registration localizes names without redundant values or collision
     verifyScope?.choices.map(effectiveKoreanChoiceName),
     ["퍼펙트 클리어", "셋업", "커버", "빌드", "킥"],
   );
+
+  const setupRanking = globalCommands.find(({ name }) => name === "pc-setup");
+  assert.deepEqual(setupRanking?.options.map(({ name }) => name), [
+    "remaining",
+    "priority",
+    "max-setup-pieces",
+    "queue-knowledge",
+    "next-cycle-remaining",
+    "setup-length",
+    "kicktable",
+  ]);
+  assert.deepEqual(
+    setupRanking?.options.find(({ name }) => name === "priority")
+      ?.choices.map(effectiveKoreanChoiceName),
+    ["구축 × PC 종합", "구축 확률 우선", "PC 확률 우선"],
+  );
+  assert.deepEqual(
+    setupRanking?.options.find(({ name }) => name === "queue-knowledge")
+      ?.choices.map(effectiveKoreanChoiceName),
+    ["전체 미래 큐", "공개 7개"],
+  );
+  assert.deepEqual(
+    setupRanking?.options.find(({ name }) => name === "setup-length")
+      ?.choices.map(effectiveKoreanChoiceName),
+    ["자동", "긴 셋업 우선", "짧은 셋업 우선"],
+  );
+  assert.match(formatSlashCommandHelp("best-setup", "ko"), /기본값은 `build`/u);
 });
 
 function effectiveKoreanChoiceName(choice) {

@@ -240,7 +240,7 @@ test("slash ingress accepts exactly the registered command catalog", () => {
     "clearra:search:v1:percent",
     "clearra:command:v1:percent",
     "clearra:command:v2:path",
-    "clearra:search:v4:percent",
+    "clearra:search:v5:percent",
     "clearra:search:v2:disabled",
   ]) {
     const stale = {
@@ -255,12 +255,12 @@ test("slash ingress accepts exactly the registered command catalog", () => {
 test("slash ingress opens bounded command Modals and answers direct help immediately", () => {
   const ingress = new SlashCommandIngress({});
   const expectations = [
-    ["path", "clearra:search:v3:path", 5],
-    ["percent", "clearra:search:v3:percent", 5],
-    ["cover", "clearra:search:v3:cover", 5],
-    ["spin-structure", "clearra:search:v3:spin-structure", 5],
-    ["pc-setup", "clearra:search:v3:pc-setup", 3],
-    ["verify", "clearra:search:v3:verify", 2],
+    ["path", "clearra:search:v4:path", 5],
+    ["percent", "clearra:search:v4:percent", 5],
+    ["cover", "clearra:search:v4:cover", 5],
+    ["spin-structure", "clearra:search:v4:spin-structure", 5],
+    ["pc-setup", "clearra:search:v4:pc-setup", 5],
+    ["verify", "clearra:search:v4:verify", 2],
   ];
 
   for (const [name, customId, rowCount] of expectations) {
@@ -318,6 +318,30 @@ test("slash ingress opens bounded command Modals and answers direct help immedia
     }),
     null,
   );
+});
+
+test("slash ingress localizes setup advanced-option Modal loss prevention", () => {
+  const interaction = {
+    type: 2,
+    data: {
+      type: 1,
+      name: "pc-setup",
+      options: [{ name: "setup-length", value: "longer" }],
+    },
+  };
+  const english = new SlashCommandIngress({}).initialResponse(interaction);
+  assert.equal(english.type, 4);
+  assert.equal(english.data.flags, 64);
+  assert.match(english.data.content, /remaining must also be supplied directly/u);
+
+  const korean = new SlashCommandIngress({
+    resolveResponseLocale() {
+      return { locale: "ko" };
+    },
+  }).initialResponse(interaction);
+  assert.equal(korean.type, 4);
+  assert.match(korean.data.content, /남은 미노도 슬래시 명령어에 직접 입력/u);
+  assert.doesNotMatch(korean.data.content, /next-cycle-remaining|setup-length/i);
 });
 
 test("Gateway help resolves access and locale before its type 4 response without invoking the bot handler", async () => {

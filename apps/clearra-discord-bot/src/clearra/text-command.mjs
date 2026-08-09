@@ -41,6 +41,11 @@ const OPTION_ALIASES = new Map([
   ["--rule", "kicktable"],
   ["--options", "options"],
   ["--remaining", "remaining"],
+  ["--priority", "priority"],
+  ["--setup-order", "priority"],
+  ["--max-setup-pieces", "max-setup-pieces"],
+  ["--next-cycle-remaining", "next-cycle-remaining"],
+  ["--setup-length", "setup-length"],
   ["--pieces", "pieces"],
   ["--inventory", "pieces"],
   ["--profile", "profile"],
@@ -329,7 +334,11 @@ function readCatalogTextOptions(command, tokens) {
     if (parsed.name === "--knowledge" || parsed.name === "--queue-knowledge" || parsed.name === "--pattern-knowledge") {
       const value = optionValue(tokens, index, parsed, parsed.name);
       if (parsed.value === null) index += 1;
-      settings.push(`knowledge=${value}`);
+      if (command.input === "remaining") {
+        options.push({ name: "queue-knowledge", value });
+      } else {
+        settings.push(`knowledge=${value}`);
+      }
       continue;
     }
 

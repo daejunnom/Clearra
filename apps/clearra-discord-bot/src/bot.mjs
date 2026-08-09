@@ -1,6 +1,8 @@
 import {
   ClearraJobExecutor,
+  isSetupSearchArguments,
   prepareClearraArguments,
+  searchTimeoutMsForArguments,
   tilingOnlyRequested,
 } from "./clearra/command.mjs";
 import { ClearraDirectExecutor } from "./clearra/direct-executor.mjs";
@@ -100,6 +102,8 @@ export class Clearrabot {
             endpoint: config.jobEndpoint,
             authorizationToken: config.jobToken,
             timeoutMs: config.searchTimeoutMs,
+            reverseSearchTimeoutMs: config.reverseSearchTimeoutMs,
+            forwardSearchTimeoutMs: config.forwardSearchTimeoutMs,
             maxOutputBytes: config.maxOutputBytes,
             pollIntervalMs: config.jobPollIntervalMs,
             cancelTimeoutMs: config.jobCancelTimeoutMs,
@@ -128,6 +132,8 @@ export class Clearrabot {
     this.controllers = new Set();
     this.interactionDeadlineMs =
       config.interactionDeadlineMs ?? config.searchTimeoutMs ?? 3 * 60_000;
+    this.setupProgressNoticeMs =
+      config.setupProgressNoticeMs ?? 5 * 60_000;
     this.maxPendingSearches = config.maxPendingSearches ?? 8;
   }
 
@@ -693,7 +699,11 @@ export class Clearrabot {
     const controller = new AbortController();
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
-      this.interactionDeadlineMs,
+      Math.min(
+        ...argumentSets.map((arguments_) =>
+          this.searchDeadlineDurationMs(arguments_)
+        ),
+      ),
     );
     let delivered = 0;
     const firstResult = promiseCapability();
@@ -764,7 +774,7 @@ export class Clearrabot {
     const tilingOnly = tilingOnlyRequested(arguments_);
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
-      this.interactionDeadlineMs,
+      this.searchDeadlineDurationMs(arguments_),
     );
     this.controllers.add(controller);
     try {
@@ -790,11 +800,15 @@ export class Clearrabot {
             locale,
           )
         : null;
-      await this.deliverInteractionResult(
-        interaction,
-        result,
-        preview,
-      );
+      if (isSetupSearchArguments(arguments_) && !preview) {
+        await this.deliverSetupInteractionResult(interaction, result, locale);
+      } else {
+        await this.deliverInteractionResult(
+          interaction,
+          result,
+          preview,
+        );
+      }
     } finally {
       this.controllers.delete(controller);
     }
@@ -828,6 +842,35 @@ export class Clearrabot {
       interaction,
       combinePreviewAndResult(preview, first.message),
     );
+  }
+
+  async deliverSetupInteractionResult(interaction, resultPromise, locale = "en") {
+    const result = Promise.resolve(resultPromise).then((message) => ({
+      kind: "result",
+      message,
+    }));
+    const progress = delayedValue(
+      setupProgressDelayMs(interaction, this.setupProgressNoticeMs),
+      { kind: "progress" },
+    );
+    const first = await Promise.race([result, progress.promise]);
+    if (first.kind === "result") {
+      progress.cancel();
+      await this.editInteraction(interaction, first.message);
+      return;
+    }
+
+    try {
+      await this.editInteraction(
+        interaction,
+        textMessage(t(locale, "search.setup_long_running")),
+      );
+    } catch (error) {
+      this.logger?.warn?.(
+        `Clearra progress update failed: ${safeErrorDiagnostic(error)}`,
+      );
+    }
+    await this.editInteraction(interaction, (await result).message);
   }
 
   async readAttachmentDocuments(attachments = []) {
@@ -1218,7 +1261,7 @@ export class Clearrabot {
   ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
-    const deadlineUnixMs = Date.now() + this.interactionDeadlineMs;
+    const deadlineUnixMs = Date.now() + this.searchDeadlineDurationMs(arguments_);
     this.controllers.add(controller);
     try {
       const result = this.withSearchSlot(
@@ -1242,7 +1285,11 @@ export class Clearrabot {
             locale,
           )
         : null;
-      await this.deliverOracleMessageResult(message, result, preview);
+      if (isSetupSearchArguments(arguments_) && !preview) {
+        await this.deliverSetupOracleMessageResult(message, result, locale);
+      } else {
+        await this.deliverOracleMessageResult(message, result, preview);
+      }
     } finally {
       this.controllers.delete(controller);
     }
@@ -1255,7 +1302,11 @@ export class Clearrabot {
     locale = "en",
   ) {
     const controller = new AbortController();
-    const deadlineUnixMs = Date.now() + this.interactionDeadlineMs;
+    const deadlineUnixMs = Date.now() + Math.min(
+      ...argumentSets.map((arguments_) =>
+        this.searchDeadlineDurationMs(arguments_)
+      ),
+    );
     let delivered = 0;
     const firstResult = promiseCapability();
     const preview = previewDocument
@@ -1368,6 +1419,65 @@ export class Clearrabot {
     await this.rest.createChannelMessage(
       message.channel_id,
       replyMessage(combinePreviewAndResult(preview, first.outgoing), message.id),
+    );
+  }
+
+  async deliverSetupOracleMessageResult(message, resultPromise, locale = "en") {
+    const result = Promise.resolve(resultPromise).then((outgoing) => ({
+      kind: "result",
+      outgoing,
+    }));
+    const progress = delayedValue(
+      this.setupProgressNoticeMs,
+      { kind: "progress" },
+    );
+    const first = await Promise.race([result, progress.promise]);
+    if (first.kind === "result") {
+      progress.cancel();
+      await this.rest.createChannelMessage(
+        message.channel_id,
+        replyMessage(first.outgoing, message.id),
+      );
+      return;
+    }
+
+    let posted = null;
+    try {
+      posted = await this.rest.createChannelMessage(
+        message.channel_id,
+        replyMessage(
+          textMessage(t(locale, "search.setup_long_running")),
+          message.id,
+        ),
+      );
+    } catch (error) {
+      this.logger?.warn?.(
+        `Clearra progress update failed: ${safeErrorDiagnostic(error)}`,
+      );
+    }
+    const final = (await result).outgoing;
+    if (posted?.id) {
+      try {
+        await this.rest.editChannelMessage(
+          message.channel_id,
+          posted.id,
+          final,
+        );
+        return;
+      } catch {
+        // Preserve the final result even if the progress message disappeared.
+      }
+    }
+    await this.rest.createChannelMessage(
+      message.channel_id,
+      replyMessage(final, posted?.id ?? message.id),
+    );
+  }
+
+  searchDeadlineDurationMs(arguments_) {
+    return Math.min(
+      this.interactionDeadlineMs,
+      searchTimeoutMsForArguments(arguments_, this.config),
     );
   }
 
@@ -1556,6 +1666,28 @@ function interactionDeadlineUnixMs(interaction, durationMs) {
     (BigInt(interactionId) >> 22n) + DISCORD_EPOCH_MS,
   );
   return createdAt + durationMs;
+}
+
+function setupProgressDelayMs(interaction, durationMs) {
+  return Math.max(
+    0,
+    interactionDeadlineUnixMs(interaction, durationMs) - Date.now(),
+  );
+}
+
+function delayedValue(delayMs, value) {
+  let timeout = null;
+  const promise = new Promise((resolve) => {
+    timeout = setTimeout(resolve, Math.max(0, delayMs), value);
+    timeout.unref?.();
+  });
+  return Object.freeze({
+    promise,
+    cancel() {
+      if (timeout !== null) clearTimeout(timeout);
+      timeout = null;
+    },
+  });
 }
 
 function resultMessage(result, tilingOnly = false, options = {}) {
