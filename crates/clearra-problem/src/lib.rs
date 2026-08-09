@@ -26,10 +26,11 @@ pub use preset::{
 };
 pub use query::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFieldError,
-    BuildProbabilityQuery, BuildProblemLimits, BuildQuery, BuildTemplateBridge, GroupingMode,
-    PcQuery, PieceBudget, PieceBudgetError, ScenarioQuery, ScenarioQuerySource,
-    SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupLengthPreference,
-    SetupLimits, SetupLimitsError, SetupPathDetail, SetupProbabilityFilter,
+    BuildProbabilityFinesseRequest, BuildProbabilityQuery, BuildProblemLimits, BuildQuery,
+    BuildTemplateBridge, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
+    FinesseScoreRequest, GroupingMode, PcQuery, PieceBudget, PieceBudgetError, ScenarioQuery,
+    ScenarioQuerySource, SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupHoldPolicy,
+    SetupLengthPreference, SetupLimits, SetupLimitsError, SetupPathDetail, SetupProbabilityFilter,
     SetupProbabilityFilterError, SetupQueueInput, SetupResidueInput, SetupSearchMode,
     SetupSearchQuery, SpinTargetBaseQuery, SpinTargetQuery, SpinTargetQuerySource,
     SpinTargetTraceRequirement,

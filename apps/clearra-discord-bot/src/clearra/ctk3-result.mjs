@@ -2,6 +2,8 @@ import {
   CTK3_MAX_BUNDLE_PAGES,
   encodeCtk3Bundle,
   encodeCtk3Compact,
+  operationCells,
+  operationOffsets,
 } from "ctk3";
 
 const ARTIFACT_SCHEMA = "clearra.solution-data.v1";
@@ -19,6 +21,22 @@ const COMPACT_PLACEMENT_PATTERN = /^([IOTSZJL]):([0-9a-f]{16})$/;
 const EXTENDED_PLACEMENT_PATTERN = /^([IOTSZJL]):([0-9a-f]{64})$/;
 const HEX_MASK_PATTERN = /^0x[0-9a-f]+$/;
 const BOARD_WORDS_PATTERN = /^0x[0-9a-f]{64}$/;
+const INPUT_COUNT_PATTERN = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
+const EXACT_INPUT_COUNT_PATTERN = /^(?:0|[1-9][0-9]*)$/;
+const FINESSE_UNAVAILABLE_VALUES = new Set(["not-calculated", "unavailable"]);
+const FINESSE_POLICIES = new Set(["oracle", "visible-7"]);
+const FINESSE_INPUT_ACTIONS = new Set([
+  "hold",
+  "tap-left",
+  "tap-right",
+  "das-left",
+  "das-right",
+  "rotate-clockwise",
+  "rotate-counter-clockwise",
+  "rotate-180",
+  "soft-drop",
+  "hard-drop",
+]);
 const RESULT_COMPLETENESS_FIELDS = new Set([
   "complete",
   "packing_count_complete",
@@ -45,6 +63,13 @@ const PAGE_FLAGS = Object.freeze({
   rise: false,
   quiz: false,
 });
+
+const CTK_ROTATIONS = Object.freeze([
+  "spawn",
+  "right",
+  "reverse",
+  "left",
+]);
 
 const SHAPES = {
   I: [
@@ -117,20 +142,47 @@ export function buildCtk3Result(jsonOrObject) {
   collectSummaryCompleteness(summary, state);
   const probabilityComments = solutionProbabilityComments(plan, state);
   const classComments = solutionClassComments(plan);
-  if (plan.pageCount === 0) return null;
+  const finesseComments = finesseReportComments(plan, state);
+  if (finesseComments.searchHasSuccessfulQueue === false) return null;
+  const includeFinesseScore = Boolean(
+    plan.finesseScore && finesseComments.scoreHasSuccessfulQueue,
+  );
+  let pageCount = includeFinesseScore
+    ? checkedPageCount(plan.pageCount, plan.finesseScore.steps.length)
+    : plan.pageCount;
+  if (finesseComments.searchWitness?.placements.length > 1) {
+    pageCount = checkedPageCount(
+      pageCount,
+      finesseComments.searchWitness.placements.length - 1,
+    );
+  }
+  checkBundlePageLimit(pageCount);
+  if (pageCount === 0) return null;
   const encoder = createSegmentEncoder();
 
+  let searchWitnessWritten = false;
   for (let index = 0; index < plan.solutionKeys.length; index += 1) {
-    encoder.add(
-      solutionKeyPage(
-        plan.solutionKeys[index],
-        `artifacts.solution_keys[${index}]`,
-        combinePageComments(
-          classComments?.[index],
-          probabilityComments?.get(plan.solutionKeys[index]),
-        ),
-      ),
+    const solutionKey = plan.solutionKeys[index];
+    const path = `artifacts.solution_keys[${index}]`;
+    const comment = combinePageComments(
+      classComments?.[index],
+      probabilityComments?.get(solutionKey),
+      finesseComments.solutionComments.get(solutionKey),
     );
+    if (!searchWitnessWritten && finesseComments.searchWitness &&
+      finesseComments.searchWitness.solutionKey === solutionKey &&
+      finesseComments.searchWitness.placements.length > 0) {
+      for (const page of finesseSearchPages(
+        finesseComments.searchWitness,
+        path,
+        comment,
+      )) {
+        encoder.add(page);
+      }
+      searchWitnessWritten = true;
+    } else {
+      encoder.add(solutionKeyPage(solutionKey, path, comment));
+    }
   }
 
   for (const entry of plan.setupConditions) {
@@ -157,12 +209,21 @@ export function buildCtk3Result(jsonOrObject) {
     }
   }
 
+  if (includeFinesseScore) {
+    for (const page of finesseScorePages(
+      plan.finesseScore,
+      finesseComments.scoreComment,
+    )) {
+      encoder.add(page);
+    }
+  }
+
   const source = encoder.finish();
-  if (encoder.pageCount !== plan.pageCount) {
+  if (encoder.pageCount !== pageCount) {
     fail(
       "internal-page-count-mismatch",
       "artifacts",
-      `expected ${plan.pageCount} pages but encoded ${encoder.pageCount}`,
+      `expected ${pageCount} pages but encoded ${encoder.pageCount}`,
     );
   }
   return {
@@ -285,18 +346,31 @@ function buildPlan(artifacts) {
     };
   }
 
+  const finesseReport = hasOwn(artifacts, "finesse_report")
+    ? requireRecord(artifacts.finesse_report, "artifacts.finesse_report")
+    : null;
+  let finesseScore = null;
+  if (hasOwn(artifacts, "finesse_score")) {
+    const value = requireRecord(
+      artifacts.finesse_score,
+      "artifacts.finesse_score",
+    );
+    finesseScore = {
+      value,
+      steps: requiredArray(
+        value,
+        "representative_path",
+        "artifacts.finesse_score.representative_path",
+      ),
+    };
+  }
+
   let pageCount = solutionKeys.length;
   for (const condition of setupConditions) {
     pageCount = checkedPageCount(pageCount, condition.candidates.length);
   }
   if (forward) pageCount = checkedPageCount(pageCount, forward.outcomes.length);
-  if (pageCount > CTK3_MAX_BUNDLE_PAGES) {
-    fail(
-      "ctk3-page-limit",
-      "artifacts",
-      `page count ${pageCount} exceeds the CTK3 bundle limit ${CTK3_MAX_BUNDLE_PAGES}`,
-    );
-  }
+  checkBundlePageLimit(pageCount);
 
   return {
     solutionKeys,
@@ -306,8 +380,435 @@ function buildPlan(artifacts) {
     hasSolutionProbabilities,
     setupConditions,
     forward,
+    finesseReport,
+    finesseScore,
     pageCount,
   };
+}
+
+function finesseReportComments(plan, state) {
+  // Only typed user-level costs cross into CTK3 comments. Policy names and
+  // execution details deliberately remain outside the document.
+  const solutionComments = new Map();
+  if (!plan.finesseReport) {
+    if (plan.finesseScore) {
+      fail(
+        "missing-finesse-report",
+        "artifacts.finesse_report",
+        "finesse_score requires its typed finesse_report",
+      );
+    }
+    return {
+      solutionComments,
+      scoreComment: undefined,
+      scoreHasSuccessfulQueue: false,
+      searchWitness: null,
+      searchHasSuccessfulQueue: null,
+    };
+  }
+
+  const report = plan.finesseReport;
+  const mode = requiredString(report, "mode", "artifacts.finesse_report.mode");
+  if (mode !== "search" && mode !== "score") {
+    fail(
+      "invalid-finesse-report",
+      "artifacts.finesse_report.mode",
+      "expected search or score",
+    );
+  }
+  if (plan.finesseScore && mode !== "score") {
+    fail(
+      "finesse-report-mode-mismatch",
+      "artifacts.finesse_report.mode",
+      "finesse_score requires a score report",
+    );
+  }
+  if (requiredString(
+    report,
+    "metric",
+    "artifacts.finesse_report.metric",
+  ) !== "inputs") {
+    fail(
+      "invalid-finesse-report",
+      "artifacts.finesse_report.metric",
+      "only the inputs metric can be written to CTK3",
+    );
+  }
+  requiredString(
+    report,
+    "pattern_knowledge",
+    "artifacts.finesse_report.pattern_knowledge",
+  );
+  if (!requiredBoolean(
+    report,
+    "complete",
+    "artifacts.finesse_report.complete",
+  )) {
+    state.complete = false;
+    addWarning(state.warnings, "artifacts.finesse_report is incomplete.");
+  }
+
+  if (!hasOwn(report, "exact_total_inputs")) {
+    fail(
+      "invalid-finesse-report",
+      "artifacts.finesse_report.exact_total_inputs",
+      "field is required",
+    );
+  }
+  const exact = report.exact_total_inputs === null
+    ? null
+    : inputCount(
+      report.exact_total_inputs,
+      "artifacts.finesse_report.exact_total_inputs",
+      { integer: true },
+    );
+  const policies = requiredArray(
+    report,
+    "policy_results",
+    "artifacts.finesse_report.policy_results",
+  );
+  const minimumBySolution = new Map();
+  const seenPolicies = new Set();
+  const expectedSolutionKeys = new Set(plan.solutionKeys);
+  const representativeWitness = validateFinesseRepresentativeWitness(
+    report,
+    mode,
+    exact,
+    expectedSolutionKeys,
+  );
+  let scoreHasSuccessfulQueue = false;
+  let searchSuccessCountsObserved = 0;
+  let searchHasSuccessfulQueue = false;
+  if (plan.finesseScore && policies.length === 0) {
+    fail(
+      "invalid-finesse-report",
+      "artifacts.finesse_report.policy_results",
+      "a score report must contain at least one policy",
+    );
+  }
+  for (let policyIndex = 0; policyIndex < policies.length; policyIndex += 1) {
+    const policyPath = `artifacts.finesse_report.policy_results[${policyIndex}]`;
+    const policy = requireRecord(policies[policyIndex], policyPath);
+    const policyName = requiredString(policy, "policy", `${policyPath}.policy`);
+    if (!FINESSE_POLICIES.has(policyName)) {
+      fail(
+        "invalid-finesse-policy",
+        `${policyPath}.policy`,
+        "expected oracle or visible-7",
+      );
+    }
+    if (seenPolicies.has(policyName)) {
+      fail(
+        "duplicate-finesse-policy",
+        `${policyPath}.policy`,
+        "each policy may appear only once",
+      );
+    }
+    seenPolicies.add(policyName);
+    if (!requiredBoolean(policy, "complete", `${policyPath}.complete`)) {
+      state.complete = false;
+      addWarning(state.warnings, `${policyPath} is incomplete.`);
+    }
+    const averages = requiredArray(
+      policy,
+      "solution_averages",
+      `${policyPath}.solution_averages`,
+    );
+    const seen = new Set();
+    let scoreAverage = undefined;
+    for (let averageIndex = 0; averageIndex < averages.length; averageIndex += 1) {
+      const averagePath = `${policyPath}.solution_averages[${averageIndex}]`;
+      const average = requireRecord(averages[averageIndex], averagePath);
+      const solutionKey = requiredString(
+        average,
+        "solution_key",
+        `${averagePath}.solution_key`,
+      );
+      if (seen.has(solutionKey)) {
+        fail(
+          "duplicate-finesse-solution-average",
+          `${averagePath}.solution_key`,
+          "a policy may contain each solution key only once",
+        );
+      }
+      seen.add(solutionKey);
+      if (
+        mode === "search" &&
+        expectedSolutionKeys.size > 0 &&
+        !expectedSolutionKeys.has(solutionKey)
+      ) {
+        fail(
+          "finesse-solution-average-key-mismatch",
+          `${averagePath}.solution_key`,
+          "solution key does not exist in solution_keys",
+        );
+      }
+      if (!requiredBoolean(average, "complete", `${averagePath}.complete`)) {
+        state.complete = false;
+        addWarning(state.warnings, `${averagePath} is incomplete.`);
+      }
+      const parsed = inputCount(
+        average.average_inputs,
+        `${averagePath}.average_inputs`,
+        { allowUnavailable: true },
+      );
+      if (mode === "score" && solutionKey === "given-operation-sequence") {
+        scoreAverage = parsed;
+      }
+      if (!parsed) continue;
+      const current = minimumBySolution.get(solutionKey);
+      if (!current || parsed.numeric < current.numeric) {
+        minimumBySolution.set(solutionKey, parsed);
+      }
+    }
+    if (plan.finesseScore) {
+      if (averages.length !== 1 || !seen.has("given-operation-sequence")) {
+        fail(
+          "finesse-score-average-mismatch",
+          `${policyPath}.solution_averages`,
+          "a score policy must contain only given-operation-sequence",
+        );
+      }
+      const successfulQueueCount = requiredInteger(
+        policy,
+        "successful_unique_queue_count",
+        `${policyPath}.successful_unique_queue_count`,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      );
+      if ((successfulQueueCount === 0) !== (scoreAverage === null)) {
+        fail(
+          "finesse-score-success-mismatch",
+          `${policyPath}.successful_unique_queue_count`,
+          "successful queue count and score average disagree",
+        );
+      }
+      if (successfulQueueCount > 0) scoreHasSuccessfulQueue = true;
+    }
+    if (mode === "search" && hasOwn(policy, "successful_unique_queue_count") &&
+      policy.successful_unique_queue_count !== null) {
+      const successfulQueueCount = requiredInteger(
+        policy,
+        "successful_unique_queue_count",
+        `${policyPath}.successful_unique_queue_count`,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      );
+      searchSuccessCountsObserved += 1;
+      if (successfulQueueCount > 0) searchHasSuccessfulQueue = true;
+    }
+    if (mode === "search") {
+      for (const solutionKey of expectedSolutionKeys) {
+        if (!seen.has(solutionKey)) {
+          fail(
+            "finesse-solution-average-key-mismatch",
+            `${policyPath}.solution_averages`,
+            "averages do not cover every solution key",
+          );
+        }
+      }
+    }
+  }
+
+  if (plan.finesseScore && exact && !scoreHasSuccessfulQueue) {
+    fail(
+      "finesse-score-success-mismatch",
+      "artifacts.finesse_report.exact_total_inputs",
+      "an exact score requires a successful queue",
+    );
+  }
+
+  for (const key of plan.solutionKeys) {
+    const minimum = minimumBySolution.get(key);
+    if (minimum) solutionComments.set(key, `F=${minimum.text}`);
+  }
+  const scoreCost = exact ?? minimumBySolution.get("given-operation-sequence");
+  return {
+    solutionComments,
+    scoreComment: scoreCost ? `F=${scoreCost.text}` : undefined,
+    scoreHasSuccessfulQueue,
+    searchWitness: mode === "search" ? representativeWitness : null,
+    searchHasSuccessfulQueue: mode === "search" &&
+      searchSuccessCountsObserved === policies.length && policies.length > 0
+      ? searchHasSuccessfulQueue
+      : null,
+  };
+}
+
+function validateFinesseRepresentativeWitness(
+  report,
+  mode,
+  exact,
+  expectedSolutionKeys,
+) {
+  if (!hasOwn(report, "representative_witness") || report.representative_witness === null) {
+    return null;
+  }
+  const path = "artifacts.finesse_report.representative_witness";
+  const witness = requireRecord(report.representative_witness, path);
+  const policy = requiredString(witness, "policy", `${path}.policy`);
+  if (!FINESSE_POLICIES.has(policy)) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.policy`,
+      "expected oracle or visible-7",
+    );
+  }
+  if (!hasOwn(witness, "solution_key")) {
+    fail("invalid-finesse-witness", `${path}.solution_key`, "field is required");
+  }
+  const solutionKey = witness.solution_key;
+  if (solutionKey !== null && (typeof solutionKey !== "string" || solutionKey.length === 0)) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.solution_key`,
+      "expected a non-empty string or null",
+    );
+  }
+  if (mode === "search" && solutionKey !== null &&
+    !expectedSolutionKeys.has(solutionKey)) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.solution_key`,
+      "solution key does not exist in solution_keys",
+    );
+  }
+  if (mode === "search" && solutionKey === null) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.solution_key`,
+      "a search witness requires its selected solution key",
+    );
+  }
+  if (mode === "score" && solutionKey !== null && solutionKey !== "given-operation-sequence") {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.solution_key`,
+      "score witness must use given-operation-sequence",
+    );
+  }
+
+  const patternIds = requiredArray(witness, "pattern_ids", `${path}.pattern_ids`);
+  if (!patternIds.every((id) => Number.isSafeInteger(id) && id >= 0)) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.pattern_ids`,
+      "expected non-negative integer pattern IDs",
+    );
+  }
+  const queue = requiredArray(witness, "queue", `${path}.queue`);
+  if (!queue.every((piece) => typeof piece === "string" && PIECES.has(piece))) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.queue`,
+      "expected an array of piece letters",
+    );
+  }
+  const totalInputs = requiredInteger(
+    witness,
+    "total_inputs",
+    `${path}.total_inputs`,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (exact && totalInputs !== exact.numeric) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.total_inputs`,
+      "representative cost does not match exact_total_inputs",
+    );
+  }
+  const inputs = requiredArray(witness, "input_sequence", `${path}.input_sequence`);
+  if (!inputs.every((input) => FINESSE_INPUT_ACTIONS.has(input))) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.input_sequence`,
+      "contains an unsupported input action",
+    );
+  }
+  if (inputs.length !== totalInputs) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.input_sequence`,
+      "input sequence length does not match total_inputs",
+    );
+  }
+  const placements = requiredArray(witness, "placements", `${path}.placements`);
+  if (placements.length > 60) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.placements`,
+      "placement sequence exceeds the supported result limit",
+    );
+  }
+  const normalizedPlacements = placements.map((entry, index) => {
+    const placementPath = `${path}.placements[${index}]`;
+    const placement = requireRecord(entry, placementPath);
+    return {
+      piece: requiredPiece(placement, "piece", `${placementPath}.piece`),
+      rotation: requiredInteger(
+        placement,
+        "rotation",
+        `${placementPath}.rotation`,
+        0,
+        3,
+      ),
+      x: requiredInteger(placement, "x", `${placementPath}.x`, -32, 32),
+      y: requiredInteger(placement, "y", `${placementPath}.y`, -32, 32),
+    };
+  });
+  const hardDropCount = inputs.filter((input) => input === "hard-drop").length;
+  if (hardDropCount !== normalizedPlacements.length) {
+    fail(
+      "invalid-finesse-witness",
+      `${path}.placements`,
+      "each selected placement must have exactly one hard-drop input",
+    );
+  }
+  return {
+    solutionKey,
+    placements: normalizedPlacements,
+  };
+}
+
+function inputCount(
+  value,
+  path,
+  { allowUnavailable = false, integer = false } = {},
+) {
+  if (
+    allowUnavailable &&
+    typeof value === "string" &&
+    FINESSE_UNAVAILABLE_VALUES.has(value)
+  ) {
+    return null;
+  }
+  const text = typeof value === "number" ? String(value) : value;
+  const pattern = integer ? EXACT_INPUT_COUNT_PATTERN : INPUT_COUNT_PATTERN;
+  if (typeof text !== "string" || !pattern.test(text)) {
+    fail(
+      "invalid-finesse-report",
+      path,
+      integer
+        ? "expected a non-negative integer input count"
+        : "expected a non-negative decimal input average",
+    );
+  }
+  const numeric = Number(text);
+  if (!Number.isFinite(numeric) || numeric > Number.MAX_SAFE_INTEGER) {
+    fail(
+      "invalid-finesse-report",
+      path,
+      "input count is outside the supported range",
+    );
+  }
+  return { numeric, text: normalizeDecimal(text) };
+}
+
+function normalizeDecimal(value) {
+  if (!value.includes(".")) return value;
+  const trimmed = value.replace(/0+$/, "").replace(/\.$/, "");
+  return trimmed || "0";
 }
 
 function solutionClassComments(plan) {
@@ -343,6 +844,16 @@ function checkedPageCount(current, additional) {
     fail("ctk3-page-limit", "artifacts", "page count is not a safe integer");
   }
   return total;
+}
+
+function checkBundlePageLimit(pageCount) {
+  if (pageCount > CTK3_MAX_BUNDLE_PAGES) {
+    fail(
+      "ctk3-page-limit",
+      "artifacts",
+      `page count ${pageCount} exceeds the CTK3 bundle limit ${CTK3_MAX_BUNDLE_PAGES}`,
+    );
+  }
 }
 
 function collectSummaryCompleteness(summary, state) {
@@ -523,6 +1034,11 @@ function createSegmentEncoder() {
 }
 
 function solutionKeyPage(key, path, comment) {
+  const parsed = parseSolutionKey(key, path);
+  return coloredPage(parsed.initialMask, parsed.placements, path, comment);
+}
+
+function parseSolutionKey(key, path) {
   if (typeof key !== "string") {
     fail("invalid-solution-key", path, "expected a string");
   }
@@ -579,7 +1095,131 @@ function solutionKeyPage(key, path, comment) {
     occupied |= mask;
     placements.push({ piece: match[1], mask });
   }
-  return coloredPage(initialMask, placements, path, comment);
+  return { height, initialMask, placements };
+}
+
+function finesseSearchPages(witness, solutionPath, comment) {
+  const witnessPath = "artifacts.finesse_report.representative_witness";
+  const parsed = parseSolutionKey(witness.solutionKey, solutionPath);
+  const canonicalPieces = parsed.placements
+    .map((placement) => placement.piece)
+    .sort()
+    .join("");
+  const witnessPieces = witness.placements
+    .map((placement) => placement.piece)
+    .sort()
+    .join("");
+  if (canonicalPieces !== witnessPieces) {
+    fail(
+      "invalid-finesse-search",
+      `${witnessPath}.placements`,
+      "selected placements do not match the selected solution pieces",
+    );
+  }
+
+  const canonicalOccupied = parsed.placements.reduce(
+    (mask, placement) => mask | placement.mask,
+    parsed.initialMask,
+  );
+  let maximumCellY = highestOccupiedRow(canonicalOccupied);
+  for (let index = 0; index < witness.placements.length; index += 1) {
+    const placement = witness.placements[index];
+    for (const [dx, dy] of SHAPES[placement.piece][placement.rotation]) {
+      const cellX = placement.x + dx;
+      const cellY = placement.y + dy;
+      if (cellX < 0 || cellX >= BOARD_WIDTH || cellY < 0) {
+        fail(
+          "invalid-finesse-search",
+          `${witnessPath}.placements[${index}]`,
+          "placement is outside the field",
+        );
+      }
+      maximumCellY = Math.max(maximumCellY, cellY);
+    }
+  }
+  const height = Math.max(parsed.height, maximumCellY + 1, 1);
+  if (height > CTK3_MAX_HEIGHT) {
+    fail(
+      "ctk3-height-limit",
+      `${witnessPath}.placements`,
+      `representative path requires ${height} rows; CTK3 supports at most ${CTK3_MAX_HEIGHT}`,
+    );
+  }
+  if (parsed.initialMask >> BigInt(height * BOARD_WIDTH)) {
+    fail(
+      "invalid-finesse-search",
+      solutionPath,
+      "initial field exceeds the representative path height",
+    );
+  }
+
+  const rows = emptyRows(height);
+  forEachSetBit(parsed.initialMask, (bit) => {
+    rows[Math.floor(bit / BOARD_WIDTH)][bit % BOARD_WIDTH] = "G";
+  });
+  if (fullRowIndexes(rows).length !== 0) {
+    fail(
+      "invalid-finesse-search",
+      solutionPath,
+      "selected solution initial field must already have its complete rows cleared",
+    );
+  }
+  clearCompletedRowsInPlace(rows);
+
+  const pages = [];
+  for (let index = 0; index < witness.placements.length; index += 1) {
+    const placement = witness.placements[index];
+    const stepPath = `${witnessPath}.placements[${index}]`;
+    const targetCells = SHAPES[placement.piece][placement.rotation].map(
+      ([dx, dy]) => ({ x: placement.x + dx, y: placement.y + dy }),
+    );
+    for (const cell of targetCells) {
+      if (cell.x < 0 || cell.x >= BOARD_WIDTH || cell.y < 0 || cell.y >= height) {
+        fail("invalid-finesse-search", stepPath, "placement is outside the field");
+      }
+      if (rows[cell.y][cell.x] !== null) {
+        fail(
+          "invalid-finesse-search",
+          stepPath,
+          "placement overlaps an occupied cell",
+        );
+      }
+    }
+    pages.push({
+      height,
+      cells: rows.flat(),
+      ...(index === 0 && comment ? { comment } : {}),
+      operation: ctkOperationForCells(
+        placement.piece,
+        placement.rotation,
+        targetCells,
+        stepPath,
+        "invalid-finesse-search",
+      ),
+      flags: PAGE_FLAGS,
+    });
+    for (const cell of targetCells) rows[cell.y][cell.x] = placement.piece;
+    clearCompletedRowsInPlace(rows);
+  }
+
+  const expectedRows = emptyRows(height);
+  forEachSetBit(parsed.initialMask, (bit) => {
+    expectedRows[Math.floor(bit / BOARD_WIDTH)][bit % BOARD_WIDTH] = "G";
+  });
+  for (const placement of parsed.placements) {
+    forEachSetBit(placement.mask, (bit) => {
+      expectedRows[Math.floor(bit / BOARD_WIDTH)][bit % BOARD_WIDTH] = placement.piece;
+    });
+  }
+  clearCompletedRowsInPlace(expectedRows);
+  if (!sameColoredRows(rows, expectedRows)) {
+    fail(
+      "invalid-finesse-search-final-field",
+      `${witnessPath}.placements`,
+      "replayed placements do not match the selected solution field",
+    );
+  }
+  return pages;
 }
 
 function setupCandidatePage(candidate, path) {
@@ -810,6 +1450,147 @@ function forwardOutcomeComment(outcome, path) {
   return parts.length ? parts.join(" | ") : undefined;
 }
 
+function finesseScorePages(entry, comment) {
+  const value = entry.value;
+  const path = "artifacts.finesse_score";
+  const height = requiredInteger(value, "height", `${path}.height`, 1, 24);
+  const initialMask = parseFinesseBoardMask(
+    requiredString(value, "initial_board", `${path}.initial_board`),
+    height,
+    `${path}.initial_board`,
+  );
+  const rows = emptyRows(height);
+  forEachSetBit(initialMask, (bit) => {
+    rows[Math.floor(bit / BOARD_WIDTH)][bit % BOARD_WIDTH] = "G";
+  });
+  if (fullRowIndexes(rows).length !== 0) {
+    fail(
+      "invalid-finesse-score",
+      `${path}.initial_board`,
+      "initial_board must already have its complete rows cleared",
+    );
+  }
+
+  const pages = [];
+  for (let index = 0; index < entry.steps.length; index += 1) {
+    const stepPath = `${path}.representative_path[${index}]`;
+    const step = requireRecord(entry.steps[index], stepPath);
+    const piece = requiredPiece(step, "piece", `${stepPath}.piece`);
+    const rotation = requiredInteger(
+      step,
+      "rotation",
+      `${stepPath}.rotation`,
+      0,
+      3,
+    );
+    const x = requiredInteger(step, "x", `${stepPath}.x`, -32, 32);
+    const y = requiredInteger(step, "y", `${stepPath}.y`, -32, 32);
+    const clearedLines = requiredInteger(
+      step,
+      "cleared_lines",
+      `${stepPath}.cleared_lines`,
+      0,
+      4,
+    );
+    const targetCells = SHAPES[piece][rotation].map(([dx, dy]) => ({
+      x: x + dx,
+      y: y + dy,
+    }));
+    for (const cell of targetCells) {
+      if (
+        cell.x < 0 ||
+        cell.x >= BOARD_WIDTH ||
+        cell.y < 0 ||
+        cell.y >= height
+      ) {
+        fail(
+          "invalid-finesse-score",
+          stepPath,
+          "placement is outside the declared field",
+        );
+      }
+      if (rows[cell.y][cell.x] !== null) {
+        fail(
+          "invalid-finesse-score",
+          stepPath,
+          "placement overlaps an occupied cell",
+        );
+      }
+    }
+    const operation = ctkOperationForCells(
+      piece,
+      rotation,
+      targetCells,
+      stepPath,
+    );
+    pages.push({
+      height,
+      cells: rows.flat(),
+      ...(index === 0 && comment ? { comment } : {}),
+      operation,
+      flags: PAGE_FLAGS,
+    });
+
+    for (const cell of targetCells) rows[cell.y][cell.x] = piece;
+    const fullRows = fullRowIndexes(rows);
+    if (fullRows.length !== clearedLines) {
+      fail(
+        "invalid-finesse-score",
+        `${stepPath}.cleared_lines`,
+        `expected ${fullRows.length} cleared lines`,
+      );
+    }
+    for (let row = fullRows.length - 1; row >= 0; row -= 1) {
+      rows.splice(fullRows[row], 1);
+    }
+    while (rows.length < height) rows.push(Array(BOARD_WIDTH).fill(null));
+  }
+  return pages;
+}
+
+function ctkOperationForCells(
+  piece,
+  declaredRotation,
+  targetCells,
+  path,
+  errorCode = "invalid-finesse-score",
+) {
+  const target = new Set(targetCells.map(({ x, y }) => `${x},${y}`));
+  const rotation = canonicalCtkRotation(piece, declaredRotation);
+  const offsets = operationOffsets(piece, rotation);
+  for (const targetCell of targetCells) {
+    for (const [offsetX, offsetY] of offsets) {
+      const candidate = {
+        piece,
+        rotation,
+        x: targetCell.x - offsetX,
+        y: targetCell.y - offsetY,
+      };
+      const cells = operationCells(candidate);
+      if (
+        cells.length === target.size &&
+        cells.every(({ x, y }) => target.has(`${x},${y}`))
+      ) {
+        return candidate;
+      }
+    }
+  }
+  fail(
+    errorCode,
+    path,
+    "placement cannot be represented as a CTK3 page operation",
+  );
+}
+
+function canonicalCtkRotation(piece, declaredRotation) {
+  const rotation = CTK_ROTATIONS[declaredRotation];
+  if (piece === "O") return "spawn";
+  if (piece === "I" || piece === "S" || piece === "Z") {
+    return declaredRotation % 2 === 0 ? "spawn" : "right";
+  }
+  return rotation;
+}
+
 function writeInitialRows(logicalRows, displayRows, mask, path) {
   const bitLimit = logicalRows.length * BOARD_WIDTH;
   if (mask >> BigInt(bitLimit)) {
@@ -917,6 +1698,17 @@ function parseBoardWordsMask(value, path) {
   return parseHexMask(value, FORWARD_HEIGHT * BOARD_WIDTH, path);
 }
 
+function parseFinesseBoardMask(value, height, path) {
+  if (typeof value !== "string" || !BOARD_WORDS_PATTERN.test(value)) {
+    fail(
+      "invalid-mask",
+      path,
+      "expected 0x followed by exactly 64 lowercase hex digits",
+    );
+  }
+  return parseHexMask(value, height * BOARD_WIDTH, path);
+}
+
 function emptyRows(height) {
   return Array.from({ length: height }, () => Array(BOARD_WIDTH).fill(null));
 }
@@ -929,6 +1721,15 @@ function fullRowIndexes(rows) {
   return result;
 }
 
+function clearCompletedRowsInPlace(rows) {
+  const declaredHeight = rows.length;
+  const fullRows = fullRowIndexes(rows);
+  for (let row = fullRows.length - 1; row >= 0; row -= 1) {
+    rows.splice(fullRows[row], 1);
+  }
+  while (rows.length < declaredHeight) rows.push(Array(BOARD_WIDTH).fill(null));
+}
+
 function rowsMask(rows) {
   let mask = 0n;
   for (let y = 0; y < rows.length; y += 1) {
@@ -939,6 +1740,13 @@ function rowsMask(rows) {
     }
   }
   return mask;
+}
+
+function sameColoredRows(left, right) {
+  return left.length === right.length && left.every((row, y) =>
+    row.length === right[y]?.length &&
+    row.every((cell, x) => cell === right[y][x])
+  );
 }
 
 function paintMask(cells, mask, color) {

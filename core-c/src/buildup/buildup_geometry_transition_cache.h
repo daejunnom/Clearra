@@ -19,7 +19,8 @@ typedef struct ClearraBuildUpGeometryTransitionKey {
     int8_t x;
     int8_t y;
     uint8_t trace_mode;
-    uint8_t reserved[3];
+    uint8_t transition_mode;
+    uint8_t reserved[2];
 } ClearraBuildUpGeometryTransitionKey;
 
 typedef struct ClearraBuildUpGeometryTransitionResult {
@@ -76,6 +77,7 @@ bool clearra_buildup_geometry_transition_cache_lookup(
     const ClearraBuildUpState *state,
     const clr_buildup_operation *operation,
     uint8_t trace_mode,
+    uint8_t transition_mode,
     ClearraBuildUpGeometryTransitionResult *out_result);
 void clearra_buildup_geometry_transition_cache_insert(
     ClearraBuildUpGeometryTransitionCache *cache,
@@ -85,6 +87,7 @@ void clearra_buildup_geometry_transition_cache_insert(
     const ClearraBuildUpState *next_state,
     const clr_buildup_trace_step *trace_step,
     const clr_kick_evidence_view *kick_evidence,
-    uint8_t trace_mode);
+    uint8_t trace_mode,
+    uint8_t transition_mode);
 
 #endif

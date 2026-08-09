@@ -3,6 +3,12 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import type { Plugin } from 'vite';
+import {
+  clearraWasmBuildContractsEqual,
+  createClearraWasmBuildContract,
+  isClearraWasmBuildContract,
+  type ClearraWasmBuildContract
+} from '../../scripts/tools/clearra-wasm-build-contract.mjs';
 
 type WasmArtifact = {
   path: string;
@@ -12,6 +18,7 @@ type WasmArtifact = {
 
 type WasmArtifactManifest = {
   schema_version: number;
+  build: ClearraWasmBuildContract;
   bindings: WasmArtifact;
   wasm: WasmArtifact;
 };
@@ -22,6 +29,7 @@ export function wasmArtifactGuard(): Plugin {
     async configResolved(config) {
       const publicDir = process.env.CLEARRA_WEB_PUBLIC_DIR || 'static';
       const root = resolve(config.root, publicDir, 'wasm');
+      const repositoryRoot = resolve(config.root, '..', '..');
       const manifestPath = resolve(root, 'clearra_wasm.manifest.json');
       let manifest: WasmArtifactManifest;
       try {
@@ -31,12 +39,24 @@ export function wasmArtifactGuard(): Plugin {
       }
       if (
         manifest.schema_version !== 1 ||
+        !isClearraWasmBuildContract(manifest.build) ||
         !isSha256(manifest.bindings.sha256) ||
         !isSha256(manifest.wasm.sha256) ||
         !isArtifactPath(manifest.bindings, 'clearra_wasm.js', 'clearra_wasm', '.js') ||
         !isArtifactPath(manifest.wasm, 'clearra_wasm_bg.wasm', 'clearra_wasm_bg', '.wasm')
       ) {
-        throw new Error(`Invalid Clearra WASM artifact manifest: ${manifestPath}`);
+        throw staleArtifactError(
+          manifestPath,
+          'the manifest does not contain the current WASM build capability contract'
+        );
+      }
+      const expectedBuild = await createClearraWasmBuildContract(repositoryRoot);
+      if (!clearraWasmBuildContractsEqual(manifest.build, expectedBuild)) {
+        throw staleArtifactError(
+          manifestPath,
+          `the artifact source fingerprint ${manifest.build.source_sha256} does not match ` +
+            `the current source fingerprint ${expectedBuild.source_sha256}`
+        );
       }
       await Promise.all([
         assertArtifact(root, manifest.bindings),
@@ -86,5 +106,13 @@ function missingArtifactError(path: string, cause: unknown): Error {
     `Clearra WASM artifact is missing or incomplete: ${path}. ` +
       'Run "npm run wasm:build" before invoking Vite directly.',
     { cause }
+  );
+}
+
+function staleArtifactError(path: string, reason: string): Error {
+  return new Error(
+    `Clearra WASM artifact is stale: ${path}; ${reason}. ` +
+      'From the repository root, run "npm --workspace @clearra/web run wasm:build" ' +
+      'before starting or building the GUI.'
   );
 }

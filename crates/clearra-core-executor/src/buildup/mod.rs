@@ -23,6 +23,8 @@ mod candidate_execution_aggregate;
 mod candidate_execution_aggregate_builder;
 mod execution_variant_set;
 pub mod generic_buildup;
+#[cfg(feature = "native-c-core")]
+pub mod native_compact_finesse_language;
 mod objective_incomplete_reason;
 mod objective_pattern_input_materializer;
 mod objective_pattern_inputs;

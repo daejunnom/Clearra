@@ -1,6 +1,9 @@
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_pc_graph::request::RequestedSearchBackend;
-use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
+    SearchProblem,
+};
 
 use crate::CoreExecutionResult;
 
@@ -26,6 +29,7 @@ impl WasmBuildProbabilitySession {
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
     ) -> Result<Self, WasmCpuSearchError> {
         let explicit_gpu =
             problem.backend_policy().requested_backend() == RequestedSearchBackend::Gpu;
@@ -35,7 +39,7 @@ impl WasmBuildProbabilitySession {
             });
         }
         Ok(Self {
-            inner: InnerSession::new(problem, field, aggregation).map_err(map_error)?,
+            inner: InnerSession::new(problem, field, aggregation, finesse).map_err(map_error)?,
             cpu_fallback_reason: explicit_gpu.then_some("gpu_kernel_unavailable"),
         })
     }
@@ -70,9 +74,10 @@ impl WasmBuildProbabilityBackend {
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
-        let mut session = WasmBuildProbabilitySession::new(problem, field, aggregation)?;
+        let mut session = WasmBuildProbabilitySession::new(problem, field, aggregation, finesse)?;
         loop {
             match session.advance(4096, control)? {
                 WasmBuildProbabilityAdvance::Pending => {}

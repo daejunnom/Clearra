@@ -1,7 +1,8 @@
-import { documentDecoder, isCtk3 } from "ctk3";
+import { documentDecoder, isCtk3, operationCells } from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
 
 import { tokenizeCommand } from "../clearra/command.mjs";
+import { decodeViewerDocument } from "../viewer/document.mjs";
 
 const FIELD_MAX_LENGTH = 6000;
 const NEXT_MAX_LENGTH = 2048;
@@ -32,6 +33,10 @@ export const DISCORD_WIDE_FIELD_MAX_ROWS = 24;
 export function buildSlashCommandArguments(command, rawOptions = []) {
   if (!command || command.kind !== "search") {
     throw new Error("This Discord command is not a Clearra search.");
+  }
+  if (command.input === "finesse") {
+    const selected = resolveFinesseInvocation(command, rawOptions);
+    return buildSlashCommandArguments(selected.command, selected.rawOptions);
   }
   const values = optionValues(rawOptions, allowedOptionNames(command.input));
 
@@ -79,9 +84,28 @@ export function buildSlashCommandArguments(command, rawOptions = []) {
       }
       return scope ? [...command.argvPrefix, scope] : [...command.argvPrefix];
     }
+    case "finesse-search":
+      return finesseSearchArguments(command, values);
+    case "finesse-score":
+      return finesseScoreArguments(command, values);
     default:
       throw new Error(`Unknown slash-command input contract: ${command.input}`);
   }
+}
+
+function resolveFinesseInvocation(command, rawOptions) {
+  if (!Array.isArray(rawOptions) || rawOptions.length !== 1) {
+    throw new Error("/finesse requires exactly one search or score subcommand.");
+  }
+  const selected = rawOptions[0];
+  const variant = selected?.type === 1 && typeof selected.name === "string"
+    ? command.subcommands?.[selected.name]
+    : null;
+  if (!variant) throw new Error("/finesse subcommand must be search or score.");
+  if (selected.options !== undefined && !Array.isArray(selected.options)) {
+    throw new Error("Discord supplied invalid /finesse subcommand options.");
+  }
+  return { command: variant, rawOptions: selected.options ?? [] };
 }
 
 export function buildSlashCommandArgumentSets(command, rawOptions = []) {
@@ -138,6 +162,122 @@ export function normalizeSearchField(source, options = {}) {
     default:
       throw new Error(`${name} has an unsupported field format.`);
   }
+}
+
+export function normalizeFinesseDocument(source) {
+  const value = requiredString(source, "document", FIELD_MAX_LENGTH);
+  const input = extractSlashFieldSource(value);
+  if (input.format !== "ctk3" && input.format !== "fumen") {
+    throw new Error("document must be one CTK3 or v115 Fumen document with placement operations.");
+  }
+  let document;
+  try {
+    document = decodeViewerDocument(input.source, {
+      maxPages: 128,
+      maxSourceChars: FIELD_MAX_LENGTH,
+    });
+  } catch {
+    throw new Error("document could not be decoded as CTK3 or v115 Fumen.");
+  }
+  if (document.width !== 10 || !Array.isArray(document.pages) || document.pages.length === 0) {
+    throw new Error("document must contain at least one 10-column page.");
+  }
+
+  const initial = document.pages[0];
+  const occupied = pageOccupiedMask(initial, "document initial field");
+  const placements = [];
+  let height = Math.max(1, initial.height);
+  for (let index = 0; index < document.pages.length; index += 1) {
+    const page = document.pages[index];
+    pageOccupiedMask(page, `document page ${index + 1}`);
+    if (Array.isArray(page.garbage) && page.garbage.some((cell) => cell !== null)) {
+      throw new Error(`document page ${index + 1} has a non-empty garbage row.`);
+    }
+    if (!page.operation) {
+      throw new Error(`document page ${index + 1} is missing its placement operation.`);
+    }
+    const placement = canonicalFinessePlacement(page.operation, index);
+    placements.push(placement.value);
+    height = Math.max(height, page.height, placement.height);
+  }
+  if (height > DISCORD_WIDE_FIELD_MAX_ROWS) {
+    throw new Error(`document placements exceed the ${DISCORD_WIDE_FIELD_MAX_ROWS}-row limit.`);
+  }
+  return Object.freeze({
+    source: input.source,
+    sourceFormat: input.format,
+    initialMask: hexMask(occupied, 240),
+    height,
+    placements: Object.freeze(placements),
+  });
+}
+
+function pageOccupiedMask(page, name) {
+  const height = Number(page?.height);
+  if (!Number.isSafeInteger(height) || height < 0 || height > DISCORD_WIDE_FIELD_MAX_ROWS) {
+    throw new Error(`${name} exceeds the ${DISCORD_WIDE_FIELD_MAX_ROWS}-row limit.`);
+  }
+  if (!Array.isArray(page.cells) || page.cells.length !== height * 10) {
+    throw new Error(`${name} has an invalid 10-column field.`);
+  }
+  let occupied = 0n;
+  for (let index = 0; index < page.cells.length; index += 1) {
+    const cell = page.cells[index];
+    if (cell === null) continue;
+    if (!CTK3_COLORS.has(String(cell).toUpperCase())) {
+      throw new Error(`${name} contains an unsupported field color.`);
+    }
+    occupied |= 1n << BigInt(index);
+  }
+  return occupied;
+}
+
+function canonicalFinessePlacement(operation, pageIndex) {
+  const piece = String(operation?.piece ?? "").toUpperCase();
+  if (!/^[IOTSZJL]$/.test(piece)) {
+    throw new Error(`document page ${pageIndex + 1} has an invalid operation piece.`);
+  }
+  const rotation = normalizeFinesseRotation(operation?.rotation);
+  const x = Number(operation?.x);
+  const y = Number(operation?.y);
+  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) {
+    throw new Error(`document page ${pageIndex + 1} has invalid operation coordinates.`);
+  }
+  let cells;
+  try {
+    cells = operationCells({ piece, rotation, x, y });
+  } catch {
+    throw new Error(`document page ${pageIndex + 1} has an invalid placement operation.`);
+  }
+  if (!Array.isArray(cells) || cells.length !== 4 || cells.some((cell) =>
+    !Number.isSafeInteger(cell?.x) || !Number.isSafeInteger(cell?.y) ||
+    cell.x < 0 || cell.x >= 10 || cell.y < 0 || cell.y >= DISCORD_WIDE_FIELD_MAX_ROWS
+  )) {
+    throw new Error(`document page ${pageIndex + 1} places a piece outside the supported field.`);
+  }
+  return Object.freeze({
+    // The engine uses a lower-left normalized pose. CTK3/Fumen operation
+    // anchors vary by piece and rotation, so derive the canonical pose from
+    // the decoded occupied cells rather than forwarding the document anchor.
+    value: `${piece}:${rotation}:${Math.min(...cells.map((cell) => cell.x))}:${Math.min(...cells.map((cell) => cell.y))}`,
+    height: Math.max(...cells.map((cell) => cell.y + 1)),
+  });
+}
+
+function normalizeFinesseRotation(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  const rotation = ({
+    spawn: "spawn",
+    north: "spawn",
+    right: "right",
+    east: "right",
+    reverse: "reverse",
+    south: "reverse",
+    left: "left",
+    west: "left",
+  })[normalized];
+  if (!rotation) throw new Error("document contains an invalid operation rotation.");
+  return rotation;
 }
 
 // Discord's slash-command composer is a rich-text editor. A pasted multi-line
@@ -203,6 +343,63 @@ function coverArguments(command, values) {
     ...coverSettings(command, values),
     ...kicktableArguments(values),
   ];
+}
+
+function finesseSearchArguments(command, values) {
+  const base = normalizeSearchField(values.get("base"), {
+    name: "base",
+    maxBits: 240,
+    maxRows: DISCORD_WIDE_FIELD_MAX_ROWS,
+  });
+  const target = normalizeSearchField(values.get("target"), {
+    name: "target",
+    maxBits: 240,
+    maxRows: DISCORD_WIDE_FIELD_MAX_ROWS,
+  });
+  if (target.occupied === 0n) {
+    throw new Error("target must contain at least one occupied cell.");
+  }
+  if ((base.occupied & target.occupied) !== 0n) {
+    throw new Error("base and target must not overlap; target contains only cells to add.");
+  }
+  if (popcount(target.occupied) % 4 !== 0) {
+    throw new Error("target occupied-cell count must be divisible by four.");
+  }
+  return [
+    ...command.argvPrefix,
+    "--base-mask",
+    base.mask,
+    "--target-mask",
+    target.mask,
+    "--height",
+    String(Math.max(1, base.height, target.height)),
+    ...finesseNextArguments(values),
+    ...finesseSettings(command, values),
+    ...kicktableArguments(values),
+  ];
+}
+
+function finesseScoreArguments(command, values) {
+  const document = normalizeFinesseDocument(values.get("document"));
+  return [
+    ...command.argvPrefix,
+    "--initial-mask",
+    document.initialMask,
+    "--height",
+    String(document.height),
+    "--placements",
+    document.placements.join(","),
+    ...finesseNextArguments(values),
+    ...finesseSettings(command, values),
+    ...kicktableArguments(values),
+  ];
+}
+
+function finesseNextArguments(values) {
+  const next = validatedNext(values, false);
+  return /^[IOTSZJL]+$/i.test(next)
+    ? ["--queue", next.toUpperCase()]
+    : ["--patterns", next];
 }
 
 function spinStructureArguments(command, values) {
@@ -763,6 +960,32 @@ function catFinderSettings(command, values) {
   return output;
 }
 
+function finesseSettings(command, values) {
+  const settings = parseSettings(command, values, new Map([
+    ["hold", "hold"],
+    ["knowledge", "knowledge"],
+    ["queue-knowledge", "knowledge"],
+    ["pattern-knowledge", "knowledge"],
+  ]));
+  const output = [];
+  const hold = settings.has("hold")
+    ? booleanSetting(settings.get("hold"), "hold")
+    : "true";
+  if (hold === "true") output.push("--hold", "empty");
+  else output.push("--no-hold");
+
+  const requestedKnowledge = (settings.get("knowledge") ?? "both")
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "-");
+  const knowledge = requestedKnowledge === "full-queue" ? "oracle" : requestedKnowledge;
+  if (!["both", "oracle", "visible-7"].includes(knowledge)) {
+    throw new Error("options knowledge must be both, full-queue, or visible-7.");
+  }
+  output.push("--pattern-knowledge", knowledge);
+  return output;
+}
+
 function parseSettings(command, values, aliases) {
   const source = optionalText(values, "options", SETTINGS_MAX_LENGTH);
   const settings = new Map();
@@ -830,6 +1053,10 @@ function allowedOptionNames(input) {
       return new Set(["pieces", "field", "lines", "profile", "kicktable"]);
     case "verify":
       return new Set(["scope"]);
+    case "finesse-search":
+      return new Set(["target", "next", "base", "kicktable", "options"]);
+    case "finesse-score":
+      return new Set(["document", "next", "kicktable", "options"]);
     default:
       throw new Error(`Unknown slash-command input contract: ${input}`);
   }

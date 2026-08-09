@@ -2,6 +2,7 @@ import {
   BUILTIN_KICKTABLES,
   findSlashCommand,
   localizedSlashCommandName,
+  resolveSlashCommandInvocation,
 } from "./slash-command-catalog.mjs";
 import { normalizeDiscordLocale } from "./i18n.mjs";
 import {
@@ -44,6 +45,16 @@ const INPUT_SCHEMAS = Object.freeze({
   ),
   remaining: schema(["remaining", "kicktable"], ["remaining"], []),
   verify: schema(["scope"], [], [], true),
+  "finesse-search": schema(
+    ["target", "next", "base", "kicktable", "options"],
+    ["target", "next", "base"],
+    ["target", "base"],
+  ),
+  "finesse-score": schema(
+    ["document", "next", "kicktable", "options"],
+    ["document", "next"],
+    [],
+  ),
 });
 
 export function buildCommandModalResponse(interaction, locale = "en") {
@@ -51,12 +62,16 @@ export function buildCommandModalResponse(interaction, locale = "en") {
     interaction?.type !== APPLICATION_COMMAND_INTERACTION ||
     interaction.data?.type !== CHAT_INPUT_COMMAND
   ) return null;
-  const command = findSlashCommand(interaction.data?.name);
+  const rootCommand = findSlashCommand(interaction.data?.name);
+  const invocation = rootCommand
+    ? resolveSlashCommandInvocation(rootCommand, interaction.data?.options ?? [])
+    : null;
+  const command = invocation?.command ?? null;
   const inputSchema = inputSchemaFor(command);
   if (!command || !inputSchema) return null;
   const language = normalizeDiscordLocale(locale);
 
-  const supplied = readSlashValues(interaction.data?.options ?? [], command);
+  const supplied = readSlashValues(invocation.rawOptions, command);
   const missingRequired = inputSchema.required.some((name) => !supplied.has(name));
   const richTextBoard = inputSchema.boards.some((name) =>
     supplied.has(name) && requiresDiscordFieldModal(supplied.get(name))
@@ -83,10 +98,10 @@ export function buildCommandModalResponse(interaction, locale = "en") {
   const response = Object.freeze({
     type: MODAL_RESPONSE,
     data: Object.freeze({
-      custom_id: `${MODAL_ID_PREFIX}${command.name}`,
+      custom_id: `${MODAL_ID_PREFIX}${modalCommandKey(command)}`,
       title: (language === "ko"
-        ? `${localizedSlashCommandName(command.name, language)} 탐색 입력`
-        : `${command.name} search form`
+        ? `${localizedSlashCommandName(command.rootName ?? command.name, language)}${command.subcommand ? ` ${localizedFinesseSubcommand(command.subcommand, language)}` : " 탐색"} 입력`
+        : `${command.rootName ?? command.name}${command.subcommand ? ` ${command.subcommand}` : " search"} form`
       ).slice(0, 45),
       components: Object.freeze(components),
     }),
@@ -102,7 +117,7 @@ export function findCommandModalCommand(interaction) {
 
 export function readCommandModalOptions(interaction, command) {
   const route = commandModalRoute(interaction);
-  if (route?.command.name !== command?.name) {
+  if (modalCommandKey(route?.command) !== modalCommandKey(command)) {
     throw new Error("Discord supplied an unknown or outdated Clearra command Modal.");
   }
   const inputSchema = INPUT_SCHEMAS[command.input];
@@ -184,6 +199,17 @@ function schema(order, required, boards, openWhenEmpty = false) {
   });
 }
 
+function modalCommandKey(command) {
+  if (!command) return "";
+  const root = command.rootName ?? command.name;
+  return command.subcommand ? `${root}~${command.subcommand}` : root;
+}
+
+function localizedFinesseSubcommand(subcommand, locale) {
+  if (normalizeDiscordLocale(locale) !== "ko") return subcommand;
+  return subcommand === "search" ? "탐색" : subcommand === "score" ? "계산" : subcommand;
+}
+
 function commandModalRoute(interaction) {
   if (interaction?.type !== MODAL_SUBMIT_INTERACTION) return null;
   const customId = interaction.data?.custom_id;
@@ -203,7 +229,14 @@ function commandModalRoute(interaction) {
     return null;
   }
   if (!name || name.includes(":")) return null;
-  const command = findSlashCommand(name);
+  const [rootName, subcommand, extra] = name.split("~");
+  if (extra !== undefined) return null;
+  const root = findSlashCommand(rootName);
+  const command = subcommand
+    ? root?.input === "finesse"
+      ? root.subcommands?.[subcommand] ?? null
+      : null
+    : root;
   const inputSchema = inputSchemaFor(command);
   if (!command || !inputSchema) return null;
   if (version === 1 && inputSchema.boards.length === 0) return null;
@@ -456,6 +489,29 @@ function modalSelectSpec(input, name, locale = "en") {
       { label: korean ? "홀드 사용 안 함" : "Avoid hold", value: "hold=avoid" },
     ]);
   }
+  if (name === "options" && (input === "finesse-search" || input === "finesse-score")) {
+    const choices = [];
+    for (const [holdLabel, hold] of [
+      [korean ? "홀드 사용" : "Use hold", "use"],
+      [korean ? "홀드 사용 안 함" : "Avoid hold", "avoid"],
+    ]) {
+      for (const [knowledgeLabel, knowledge] of [
+        [korean ? "전체 큐 및 공개 7개" : "Full queue and visible 7", "both"],
+        [korean ? "전체 큐" : "Full queue", "oracle"],
+        [korean ? "공개 7개" : "Visible 7", "visible-7"],
+      ]) {
+        choices.push({
+          label: `${holdLabel} · ${knowledgeLabel}`,
+          value: `hold=${hold} knowledge=${knowledge}`,
+        });
+      }
+    }
+    return selectSpec(
+      "hold=use knowledge=both",
+      korean ? "홀드 및 큐 공개 정책 선택" : "Choose hold and queue knowledge",
+      choices,
+    );
+  }
   if (name === "scope" && input === "verify") {
     return selectSpec("all", korean ? "검증 범위 선택" : "Choose verification scope", [
       { label: korean ? "전체 검증" : "All checks", value: "all" },
@@ -496,6 +552,15 @@ function normalizeSelectValue(input, name, raw) {
     if (["hold=use", "hold=true", "hold=yes", "hold=on"].includes(value)) return "hold=use";
     if (["hold=avoid", "hold=false", "hold=no", "hold=off"].includes(value)) return "hold=avoid";
     return value;
+  }
+  if (name === "options" && (input === "finesse-search" || input === "finesse-score")) {
+    const value = String(raw).trim().toLowerCase().replaceAll("_", "-");
+    const fields = new Map(value.split(/\s+/).map((token) => token.split("=", 2)));
+    const hold = ["avoid", "false", "no", "off"].includes(fields.get("hold"))
+      ? "avoid"
+      : "use";
+    const knowledge = fields.get("knowledge") ?? "both";
+    return `hold=${hold} knowledge=${knowledge}`;
   }
   if (name === "options" && input === "spin") {
     const value = String(raw).trim().toUpperCase();
@@ -545,10 +610,17 @@ function modalLabelText(input, name, locale = "en") {
       field: `필드 — 10열, 1–${maximum}줄`,
       base: `기존 필드 — 10열, 1–${maximum}줄`,
       target: `목표 차이 — 10열, 1–${maximum}줄`,
+      document: "배치 문서 — CTK3 / v115 Fumen",
       next: isFixedQueueInput(input) ? "정확한 넥스트 큐" : "넥스트 큐 / 패턴",
       lines: input === "spin-structure" ? "마지막 스핀 줄 수" : "PC 목표 줄",
       kicktable: "킥테이블",
-      options: input === "spin" ? "T-spin 목표" : input === "score-fixed-next" ? "초기 B2B" : "홀드 정책",
+      options: input === "spin"
+        ? "T-spin 목표"
+        : input === "score-fixed-next"
+          ? "초기 B2B"
+          : input.startsWith("finesse-")
+            ? "홀드 및 큐 공개 정책"
+            : "홀드 정책",
       remaining: "남은 미노",
       pieces: "순서 없는 미노 목록",
       profile: "스핀 판정 프로필",
@@ -559,10 +631,17 @@ function modalLabelText(input, name, locale = "en") {
     field: `Field — 10 columns, 1–${maximum} rows`,
     base: `Base — 10 columns, 1–${maximum} rows`,
     target: `Target delta — 10 columns, 1–${maximum} rows`,
+    document: "Placement document — CTK3 / v115 Fumen",
     next: isFixedQueueInput(input) ? "Exact next queue" : "Next queue / pattern",
     lines: input === "spin-structure" ? "Terminal-spin line count" : "PC target rows",
     kicktable: "Kick table",
-    options: input === "spin" ? "T-spin target" : input === "score-fixed-next" ? "Initial B2B" : "Hold policy",
+    options: input === "spin"
+      ? "T-spin target"
+      : input === "score-fixed-next"
+        ? "Initial B2B"
+        : input.startsWith("finesse-")
+          ? "Hold and queue knowledge"
+          : "Hold policy",
     remaining: "Remaining-piece inventory",
     pieces: "Unordered piece inventory",
     profile: "Spin-recognition profile",
@@ -575,6 +654,7 @@ function modalDescription(input, name, locale = "en") {
     if (["field", "base", "target"].includes(name)) {
       return "위쪽 줄부터 입력. 권장: #은 채움, _는 빈칸. CTK3, v115 Fumen, URL도 지원.";
     }
+    if (name === "document") return "모든 페이지에 배치 operation이 하나씩 있어야 하며 색상은 미리보기에 보존됩니다.";
     if (name === "next") return isFixedQueueInput(input)
       ? "정확한 IOTSZJL 큐만 입력하며 영문 대소문자를 구분하지 않습니다."
       : "고정 큐 또는 지원되는 그룹·가방 패턴이며 영문 대소문자를 구분하지 않습니다.";
@@ -590,13 +670,16 @@ function modalDescription(input, name, locale = "en") {
       ? "TSM은 지원하지 않습니다."
       : input === "score-fixed-next"
         ? "초기 B2B 상태를 선택하며 기본값은 사용 안 함입니다."
-        : "홀드 사용 여부를 선택합니다.";
+        : input.startsWith("finesse-")
+          ? "홀드 사용 여부와 전체 큐/공개 7개 계산 범위를 선택합니다."
+          : "홀드 사용 여부를 선택합니다.";
     if (name === "remaining") return "IOTSZJL 미노 1–7개를 입력하며 한 종류만 두 번 사용할 수 있습니다.";
     return "범위 하나를 선택하거나 전체를 선택해 모든 검증을 실행합니다.";
   }
   if (["field", "base", "target"].includes(name)) {
     return "Top first. Prefer # for filled and _ for empty. CTK3, Fumen, and URLs also work.";
   }
+  if (name === "document") return "Every page needs one placement operation; colors are preserved for the preview.";
   if (name === "next") return isFixedQueueInput(input)
     ? "Exact IOTSZJL queue only; piece letters are case-insensitive."
     : "Fixed queue or supported group/bag pattern; letters are case-insensitive.";
@@ -612,7 +695,9 @@ function modalDescription(input, name, locale = "en") {
     ? "TSM remains intentionally unavailable."
     : input === "score-fixed-next"
       ? "Choose the initial B2B state; disabled is the default."
-      : "Use or avoid hold.";
+      : input.startsWith("finesse-")
+        ? "Choose hold and full-queue/visible-7 calculation scope."
+        : "Use or avoid hold.";
   if (name === "remaining") return "Use 1–7 IOTSZJL pieces; at most one piece kind may occur twice.";
   return "Choose one scope, or All to run every verification group.";
 }
@@ -620,6 +705,7 @@ function modalDescription(input, name, locale = "en") {
 function modalPlaceholder(input, name) {
   if (["field", "base", "target"].includes(name)) return emptyGrid(defaultBoardRows(input));
   if (name === "next") return isFixedQueueInput(input) ? "IOTSZJL" : "*! or [IOSZ]p2";
+  if (name === "document") return "ctk3_… or v115@…";
   if (name === "pieces") return "IOTSZJL";
   if (name === "remaining") return "IOTSZJL";
   return "";

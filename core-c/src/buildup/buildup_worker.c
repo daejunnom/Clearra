@@ -549,6 +549,68 @@ clr_buildup_status clr_buildup_export_geometry_language_with_workspace(
     return status;
 }
 
+clr_buildup_status clr_buildup_prepare_geometry_language_v2_with_workspace(
+    const clr_buildup_problem *problem,
+    clr_buildup_workspace *workspace,
+    clr_buildup_geometry_transition_mode transition_mode,
+    clr_buildup_geometry_language_report_v2 *out_report) {
+    if (workspace == 0 || out_report == 0 ||
+        (transition_mode != CLR_BUILDUP_GEOMETRY_TRANSITION_REACHABLE &&
+         transition_mode != CLR_BUILDUP_GEOMETRY_TRANSITION_GEOMETRY_ONLY)) {
+        return CLR_BUILDUP_INVALID_ARGUMENT;
+    }
+    *out_report = (clr_buildup_geometry_language_report_v2){0};
+    clr_buildup_status status = validate_buildup_problem_for_search(problem);
+    if (status != CLR_BUILDUP_OK) {
+        return status;
+    }
+    status = clearra_buildup_workspace_prepare(workspace, problem);
+    if (status != CLR_BUILDUP_OK) {
+        return status;
+    }
+    ClearraBuildUpSearchContext context = {0};
+    status = clearra_buildup_search_context_init_with_reachability(
+        problem, &workspace->compiled_rule, &context);
+    if (status != CLR_BUILDUP_OK) {
+        return status;
+    }
+    context.operation_variant_cache = &workspace->operation_variant_cache;
+    context.reachability_cache = &workspace->reachability_cache;
+    context.reachable_lock_cache = &workspace->reachable_lock_cache;
+    context.reachability_frontier = &workspace->reachability_frontier;
+    context.geometry_transition_cache = &workspace->geometry_transition_cache;
+    context.geometry_dag = &workspace->geometry_dag;
+    context.capture_trace = 0u;
+    context.reachability_trace_mode = CLEARRA_REACHABILITY_TRACE_NONE;
+    context.geometry_transition_mode = (uint8_t)transition_mode;
+    status = clearra_buildup_geometry_dag_prepare_with_options(
+        context.geometry_dag, &context, 1u);
+    if (status != CLR_BUILDUP_OK) {
+        return status;
+    }
+    return clearra_buildup_geometry_dag_export_v2(
+        context.geometry_dag, 0, 0u, 0, 0u, out_report);
+}
+
+clr_buildup_status clr_buildup_copy_prepared_geometry_language_v2(
+    const clr_buildup_workspace *workspace,
+    clr_buildup_geometry_language_node_v2 *nodes,
+    size_t node_capacity,
+    clr_buildup_geometry_language_edge_v2 *edges,
+    size_t edge_capacity,
+    clr_buildup_geometry_language_report_v2 *out_report) {
+    if (workspace == 0 || out_report == 0) {
+        return CLR_BUILDUP_INVALID_ARGUMENT;
+    }
+    return clearra_buildup_geometry_dag_export_v2(
+        &workspace->geometry_dag,
+        nodes,
+        node_capacity,
+        edges,
+        edge_capacity,
+        out_report);
+}
+
 clr_buildup_status clr_buildup_count_variants(
     const clr_buildup_problem *problem,
     const clr_buildup_count_limits *limits,

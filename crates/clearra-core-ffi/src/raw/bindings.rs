@@ -7,8 +7,9 @@ mod linked {
         gpu::{CNativeGpuBackendCapability, CNativeGpuDeviceRequest},
         native::{
             buildup_geometry_language::{
-                CNativeBuildUpGeometryLanguageEdge, CNativeBuildUpGeometryLanguageNode,
-                CNativeBuildUpGeometryLanguageReport,
+                CNativeBuildUpGeometryLanguageEdge, CNativeBuildUpGeometryLanguageEdgeV2,
+                CNativeBuildUpGeometryLanguageNode, CNativeBuildUpGeometryLanguageNodeV2,
+                CNativeBuildUpGeometryLanguageReport, CNativeBuildUpGeometryLanguageReportV2,
             },
             CNativeBuildUpCountLimits, CNativeBuildUpCountReport, CNativeBuildUpEnumerationLimits,
             CNativeBuildUpVerification, CNativeBuildVariantBuffer,
@@ -180,6 +181,20 @@ mod linked {
             edges: *mut CNativeBuildUpGeometryLanguageEdge,
             edge_capacity: usize,
             out_report: *mut CNativeBuildUpGeometryLanguageReport,
+        ) -> c_int;
+        pub fn clr_buildup_prepare_geometry_language_v2_with_workspace(
+            problem: *const CBuildUpProblem,
+            workspace: *mut c_void,
+            transition_mode: c_int,
+            out_report: *mut CNativeBuildUpGeometryLanguageReportV2,
+        ) -> c_int;
+        pub fn clr_buildup_copy_prepared_geometry_language_v2(
+            workspace: *const c_void,
+            nodes: *mut CNativeBuildUpGeometryLanguageNodeV2,
+            node_capacity: usize,
+            edges: *mut CNativeBuildUpGeometryLanguageEdgeV2,
+            edge_capacity: usize,
+            out_report: *mut CNativeBuildUpGeometryLanguageReportV2,
         ) -> c_int;
 
         pub fn clr_buildup_count_variants(
@@ -658,6 +673,42 @@ mod linked {
             unsafe {
                 clr_buildup_export_geometry_language_with_workspace(
                     problem,
+                    workspace,
+                    nodes,
+                    node_capacity,
+                    edges,
+                    edge_capacity,
+                    out_report,
+                )
+            }
+        }
+
+        pub fn prepare_geometry_language_v2(
+            problem: &CBuildUpProblem,
+            workspace: *mut c_void,
+            transition_mode: c_int,
+            out_report: &mut CNativeBuildUpGeometryLanguageReportV2,
+        ) -> i32 {
+            unsafe {
+                clr_buildup_prepare_geometry_language_v2_with_workspace(
+                    problem,
+                    workspace,
+                    transition_mode,
+                    out_report,
+                )
+            }
+        }
+
+        pub fn copy_prepared_geometry_language_v2(
+            workspace: *mut c_void,
+            nodes: *mut CNativeBuildUpGeometryLanguageNodeV2,
+            node_capacity: usize,
+            edges: *mut CNativeBuildUpGeometryLanguageEdgeV2,
+            edge_capacity: usize,
+            out_report: &mut CNativeBuildUpGeometryLanguageReportV2,
+        ) -> i32 {
+            unsafe {
+                clr_buildup_copy_prepared_geometry_language_v2(
                     workspace,
                     nodes,
                     node_capacity,

@@ -51,7 +51,7 @@ const REPRESENTED_SFINDER_COMMANDS = [
 test("slash catalog registers only curated active commands", () => {
   assert.deepEqual(
     slashCommandCatalog.map((command) => command.name),
-    ["help", "render-file", "channel-settings", "server-settings", ...REPRESENTED_SFINDER_COMMANDS],
+    ["help", "render-file", "channel-settings", "server-settings", "finesse", ...REPRESENTED_SFINDER_COMMANDS],
   );
   assert.deepEqual(
     globalCommands.map((command) => command.name),
@@ -60,6 +60,7 @@ test("slash catalog registers only curated active commands", () => {
       "render-file",
       "channel-settings",
       "server-settings",
+      "finesse",
       ...REPRESENTED_SFINDER_COMMANDS,
       "Get original GIF",
     ],
@@ -103,6 +104,11 @@ test("slash catalog registers only curated active commands", () => {
     },
   );
   for (const command of slashCommandCatalog.filter(({ kind }) => kind === "search")) {
+    if (command.name === "finesse") {
+      assert.deepEqual(command.subcommands.search.argvPrefix, ["finesse", "search"]);
+      assert.deepEqual(command.subcommands.score.argvPrefix, ["finesse", "score"]);
+      continue;
+    }
     const expectedPrefix = command.name === "score-finder"
       ? ["sfinder", "score-finder"]
       : command.name === "damage" || command.name === "spin-structure"
@@ -1785,6 +1791,161 @@ test("Korean structured build kinds use the build-probability result name", asyn
     assert.match(message.payload.content, /Clearra 구축 확률 탐색/u);
     assert.match(message.payload.content, /커버 확률: 50%/u);
   }
+});
+
+test("Discord finesse summaries expose only typed user-level costs", async () => {
+  const messages = [];
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: "build-probability",
+              summary: {
+                coverage_probability: 0.75,
+                workers_used: 8,
+                backend: "private-backend",
+                server: "private-server",
+              },
+              finesse_report: {
+                mode: "search",
+                metric: "inputs",
+                pattern_knowledge: "both",
+                complete: true,
+                exact_total_inputs: "7",
+                representative_witness: {
+                  policy: "oracle",
+                  solution_key: "PRIVATE-SOLUTION",
+                  pattern_ids: [999],
+                  queue: ["T", "I"],
+                  total_inputs: 7,
+                  input_sequence: [
+                    "hold",
+                    "tap-left",
+                    "rotate-clockwise",
+                    "soft-drop",
+                    "das-right",
+                    "rotate-180",
+                    "hard-drop",
+                  ],
+                  placements: [{ piece: "T", rotation: 2, x: 4, y: 0 }],
+                  backend: "private-witness-backend",
+                },
+                policy_results: [
+                  {
+                    policy: "oracle",
+                    overall_average_inputs: "8.25",
+                    complete: true,
+                    solution_averages: [{ private_queue: "PRIVATE", inputs: 8 }],
+                  },
+                  {
+                    policy: "visible-7",
+                    overall_average_inputs: "9.5",
+                    oracle_on_covered_average_inputs: "8.5",
+                    information_penalty_inputs: "1",
+                    success_probability_gap: "0.125",
+                    complete: true,
+                  },
+                ],
+              },
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  await bot.runInteractionCommand(
+    slashInteraction("finesse", []),
+    ["finesse", "search"],
+  );
+  const content = messages[0].payload.content;
+  assert.match(content, /Clearra finesse search completed/);
+  assert.match(content, /Minimum total: 7 inputs/);
+  assert.match(content, /Full-queue average: 8\.25 inputs/);
+  assert.match(content, /Visible-7 average: 9\.5 inputs/);
+  assert.match(content, /Information cost: 1 input/);
+  assert.match(content, /Success probability gap: 12\.5%/);
+  assert.doesNotMatch(content, /Representative queue|Representative inputs/i);
+  assert.doesNotMatch(content, /PRIVATE|999|worker|backend|server/i);
+
+  await bot.runInteractionCommand(
+    slashInteraction("finesse", [], undefined, "finesse-ko"),
+    ["finesse", "search"],
+    null,
+    "ko",
+  );
+  const korean = messages[1].payload.content;
+  assert.doesNotMatch(korean, /대표 큐|대표 입력/u);
+  assert.doesNotMatch(korean, /PRIVATE|999|worker|backend|server/i);
+});
+
+test("Discord pattern finesse reports averages without exposing a representative route", async () => {
+  const messages = [];
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: "build-probability",
+              summary: { coverage_probability: 1 },
+              finesse_report: {
+                mode: "search",
+                metric: "inputs",
+                pattern_knowledge: "oracle",
+                complete: false,
+                exact_total_inputs: null,
+                representative_witness: {
+                  policy: "oracle",
+                  solution_key: "private-solution-key",
+                  pattern_ids: [4],
+                  queue: ["O"],
+                  total_inputs: 1,
+                  input_sequence: ["hard-drop"],
+                  placements: [{ piece: "O", rotation: 0, x: 4, y: 0 }],
+                },
+                policy_results: [{
+                  policy: "oracle",
+                  overall_average_inputs: "1.5",
+                  complete: false,
+                  successful_probability_mass: "1",
+                  successful_unique_queue_count: 2,
+                  total_unique_queue_count: 2,
+                  solution_averages: [],
+                }],
+              },
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  await bot.runInteractionCommand(
+    slashInteraction("finesse", [], undefined, "finesse-pattern"),
+    ["finesse", "search"],
+  );
+  const content = messages[0].payload.content;
+  assert.match(content, /Full-queue average: 1\.5 inputs/);
+  assert.doesNotMatch(content, /Minimum total|Representative queue|Representative inputs|private-solution|pattern_ids/i);
 });
 
 test("spin-structure structured results keep their neutral localized result name", async () => {

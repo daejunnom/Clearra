@@ -1,10 +1,24 @@
+// SRP rationale: this module has one behavior-level change reason: constructing and annotating exact extended-board BuildUp order languages.
+
 use std::collections::HashMap;
 
-use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    board::standard_pc_board::StandardPcBoard, execution_cancellation::ExecutionControl,
+    piece::piece_kind::PieceKind,
+};
+use clearra_finesse::{FinesseBoard, FinesseTarget, GeometryActionKey};
+use clearra_problem::SearchProblem;
 use clearra_replay::{ScoringExecutionEdge, ScoringExecutionNode, SpinCoverageExecutionGraph};
 
+use crate::performance::{ExecutorSearchStage, SearchStageSpan};
+
 use super::{
-    buildup::{BuildEdge, BuildOrderGraph, BuildOrderNodeSpec},
+    buildup::{
+        annotate_frozen_finesse_target_groups, finesse_b2b_policy,
+        finesse_scoring_edge_requirement, finesse_terminal_label, push_frozen_finesse_target,
+        BuildEdge, BuildOrderGraph, BuildOrderNodeSpec, FrozenFinesseTargetGroups,
+        GroupedFinesseTarget, PreparedFinesseEdge, PreparedFinesseLanguage, PreparedFinesseNode,
+    },
     extended_board::{compact_logical_board, merge_deleted_rows, place_and_clear, ExtendedBoard},
     extended_geometry::ExtendedGeometryCandidate,
     extended_inverse_catalog::ExtendedInverseCatalog,
@@ -13,6 +27,7 @@ use super::{
 };
 
 const NO_BUILD_NODE: u32 = u32::MAX;
+type ScoringEdgeSlices<'a> = (&'a [(u32, u32)], &'a [ScoringExecutionEdge]);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct ExtendedTilingKey {
@@ -26,6 +41,12 @@ struct ExtendedPlacementKey {
 }
 
 impl ExtendedTilingKey {
+    pub fn empty() -> Self {
+        Self {
+            placements: Vec::new(),
+        }
+    }
+
     pub fn from_candidate(
         catalog: &ExtendedInverseCatalog,
         candidate: &ExtendedGeometryCandidate,
@@ -94,6 +115,7 @@ pub(super) enum ExtendedBuildOrderResult {
     },
     Complete {
         graph: BuildOrderGraph,
+        finesse_language: Option<PreparedFinesseLanguage>,
         spin_graph: Option<SpinCoverageExecutionGraph>,
         searched_nodes: usize,
         reachability_states: usize,
@@ -254,6 +276,54 @@ pub(super) fn build_extended_order_graph(
     spin_candidate: Option<(u64, String)>,
     control: &ExecutionControl,
 ) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
+    build_extended_order_graph_mode(
+        catalog,
+        candidate,
+        workspace,
+        remaining_node_budget,
+        spin_candidate,
+        None,
+        false,
+        control,
+    )
+}
+
+pub(super) fn build_extended_order_graph_with_finesse(
+    problem: &SearchProblem,
+    catalog: &ExtendedInverseCatalog,
+    candidate: &ExtendedGeometryCandidate,
+    workspace: &mut ExtendedBuildOrderWorkspace,
+    remaining_node_budget: usize,
+    spin_candidate: Option<(u64, String)>,
+    spin_coverage_requested: bool,
+    control: &ExecutionControl,
+) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
+    build_extended_order_graph_mode(
+        catalog,
+        candidate,
+        workspace,
+        remaining_node_budget,
+        spin_candidate,
+        Some(problem),
+        spin_coverage_requested,
+        control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_extended_order_graph_mode(
+    catalog: &ExtendedInverseCatalog,
+    candidate: &ExtendedGeometryCandidate,
+    workspace: &mut ExtendedBuildOrderWorkspace,
+    remaining_node_budget: usize,
+    spin_candidate: Option<(u64, String)>,
+    finesse_problem: Option<&SearchProblem>,
+    finesse_spin_coverage_requested: bool,
+    control: &ExecutionControl,
+) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
+    let geometry_only = finesse_problem.is_some();
+    let mut finesse_geometry_span =
+        geometry_only.then(|| SearchStageSpan::begin(ExecutorSearchStage::FinesseGeometry));
     let projection = CandidateProjection::compile(catalog, candidate)?;
     let rows = candidate.row_ids();
     let dense_state_count =
@@ -313,6 +383,9 @@ pub(super) fn build_extended_order_graph(
             return Err(WasmExactSearchError::Cancelled);
         }
         if remaining_node_budget != 0 && searched_nodes >= remaining_node_budget {
+            if let Some(span) = finesse_geometry_span.take() {
+                span.finish(searched_nodes as u64);
+            }
             return Ok(ExtendedBuildOrderResult::Incomplete {
                 searched_nodes,
                 reachability_states: workspace
@@ -354,24 +427,23 @@ pub(super) fn build_extended_order_graph(
             }
             let piece = projection.operation_pieces[operation];
             let piece_slot = piece_index(piece);
-            if lock_sets[piece_slot].is_none() {
+            if (!geometry_only || spin_candidate.is_some()) && lock_sets[piece_slot].is_none() {
                 lock_sets[piece_slot] = Some(workspace.reachability.reachable_locks_with_scoring(
                     board,
                     piece,
                     spin_candidate.is_some(),
                 ));
             }
-            let locks = lock_sets[piece_slot]
-                .as_ref()
-                .expect("extended piece reachability was initialized");
+            let locks = lock_sets[piece_slot].as_ref();
             let child_subset = subset | operation_bit;
             let (expected_board, expected_deleted) = projection.state_for_subset(child_subset);
             let row_id = rows[operation];
             let mut build_edge_added = false;
             for realization in catalog.instantiations(row_id, deleted_rows) {
-                if !locks.contains(realization.rotation, realization.x, realization.lock_y)
-                    || board.intersects(realization.lock_mask)
-                {
+                let lock_reachable = locks.is_some_and(|locks| {
+                    locks.contains(realization.rotation, realization.x, realization.lock_y)
+                });
+                if (!geometry_only && !lock_reachable) || board.intersects(realization.lock_mask) {
                     continue;
                 }
                 let (next_board, cleared_physical, cleared_lines) = place_and_clear(
@@ -435,7 +507,7 @@ pub(super) fn build_extended_order_graph(
                     }
                     child_index
                 };
-                if !build_edge_added {
+                if geometry_only || !build_edge_added {
                     workspace.edge_scratch.push(BuildOrderGraph::edge(
                         child_index,
                         operation as u8,
@@ -447,7 +519,8 @@ pub(super) fn build_extended_order_graph(
                     ));
                     build_edge_added = true;
                 }
-                if spin_candidate.is_some() {
+                if spin_candidate.is_some() && lock_reachable {
+                    let locks = locks.expect("spin evidence requires initialized reachability");
                     let lock_evidence = locks.scoring_evidence(
                         realization.rotation,
                         realization.x,
@@ -483,7 +556,7 @@ pub(super) fn build_extended_order_graph(
                 }
                 // Buildability depends on the exact operation order, not on how
                 // many equivalent movement paths reach the same lock state.
-                if spin_candidate.is_none() {
+                if !geometry_only && spin_candidate.is_none() {
                     break;
                 }
             }
@@ -516,10 +589,35 @@ pub(super) fn build_extended_order_graph(
         .reachability
         .visited_state_count()
         .saturating_sub(reachability_before);
-    // build_edge_added emits at most one edge per operation, and each
-    // operation advances to a distinct child subset.
-    let graph =
-        BuildOrderGraph::from_topological_parts(specs, edges, 0, reachability_states, true)?;
+    if let Some(span) = finesse_geometry_span.take() {
+        span.finish(searched_nodes as u64);
+    }
+    let finesse_language = finesse_problem
+        .map(|problem| {
+            annotate_and_prune_extended_finesse_graph(
+                problem,
+                &projection,
+                &workspace.subset_queue,
+                &mut specs,
+                &mut edges,
+                spin_candidate
+                    .is_some()
+                    .then_some((spin_node_spans.as_slice(), spin_edges.as_slice())),
+                finesse_spin_coverage_requested,
+                control,
+            )
+        })
+        .transpose()?;
+    // The normal path emits one edge per operation and therefore keeps its
+    // existing shared piece-edge representation. Finesse retains concrete
+    // poses until movement costs have been attached and pruned.
+    let graph = BuildOrderGraph::from_topological_parts(
+        specs,
+        edges,
+        0,
+        reachability_states,
+        !geometry_only,
+    )?;
     let spin_graph = spin_candidate.map(|(candidate_id, candidate_key)| {
         let mut live_nodes = Vec::with_capacity(graph.nodes.len());
         let mut live_edges = Vec::new();
@@ -556,11 +654,245 @@ pub(super) fn build_extended_order_graph(
         .saturating_add(spin_edges.capacity() * core::mem::size_of::<ScoringExecutionEdge>());
     Ok(ExtendedBuildOrderResult::Complete {
         graph,
+        finesse_language,
         spin_graph,
         searched_nodes,
         reachability_states,
         scratch_bytes,
     })
+}
+
+fn annotate_and_prune_extended_finesse_graph(
+    problem: &SearchProblem,
+    projection: &CandidateProjection,
+    node_subsets: &[u64],
+    specs: &mut [BuildOrderNodeSpec],
+    edges: &mut Vec<BuildEdge>,
+    scoring_edges: Option<ScoringEdgeSlices<'_>>,
+    spin_coverage_requested: bool,
+    control: &ExecutionControl,
+) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
+    annotate_and_prune_extended_finesse_graph_with_query_count(
+        problem,
+        projection,
+        node_subsets,
+        specs,
+        edges,
+        scoring_edges,
+        spin_coverage_requested,
+        control,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn annotate_and_prune_extended_finesse_graph_with_query_count(
+    problem: &SearchProblem,
+    projection: &CandidateProjection,
+    node_subsets: &[u64],
+    specs: &mut [BuildOrderNodeSpec],
+    edges: &mut Vec<BuildEdge>,
+    scoring_edges: Option<ScoringEdgeSlices<'_>>,
+    spin_coverage_requested: bool,
+    control: &ExecutionControl,
+    query_count: Option<&mut usize>,
+) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
+    if specs.len() != node_subsets.len() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_extended_finesse_subset_node_mismatch",
+        ));
+    }
+    let target_grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
+    let grouped_target_count = edges.len();
+    let kick_profile =
+        super::kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_kick_profile_unavailable",
+            ))?
+            .clone();
+    let mut edge_costs = vec![None; edges.len()];
+    let mut edge_terminal_evidence = vec![None; edges.len()];
+    let b2b_policy = finesse_b2b_policy(problem);
+    let mut groups = FrozenFinesseTargetGroups::new();
+    for (node_index, spec) in specs.iter().copied().enumerate() {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let start = spec.edge_start as usize;
+        let end = start.checked_add(spec.edge_count as usize).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_extended_finesse_edge_range_overflow"),
+        )?;
+        let source_edges = edges
+            .get(start..end)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_edge_range_invalid",
+            ))?;
+        if source_edges.is_empty() {
+            continue;
+        }
+        let source_board = extended_finesse_board(projection, node_subsets[node_index])?;
+        let scoring = if let Some((node_spans, scoring)) = scoring_edges {
+            let (scoring_start, scoring_count) =
+                *node_spans
+                    .get(node_index)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_extended_finesse_scoring_node_span_missing",
+                    ))?;
+            let scoring_start = scoring_start as usize;
+            let scoring_end = scoring_start.checked_add(scoring_count as usize).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_scoring_edge_range_overflow",
+                ),
+            )?;
+            Some(scoring.get(scoring_start..scoring_end).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_scoring_edge_range_invalid",
+                ),
+            )?)
+        } else {
+            None
+        };
+        for (offset, edge) in source_edges.iter().copied().enumerate() {
+            let edge_index = start + offset;
+            let (_, piece, _, rotation, x, y, _) = edge.canonical_key();
+            let target = FinesseTarget::new(rotation, i16::from(x), i16::from(y));
+            let (terminal_evidence, allowed) = if let Some(scoring) = scoring {
+                let matching_edge = scoring
+                    .iter()
+                    .find(|candidate| scoring_edge_matches_build_edge(candidate, &edge))
+                    .copied();
+                let (allowed, exact_evidence_required) =
+                    matching_edge.map_or((false, false), |candidate| {
+                        finesse_scoring_edge_requirement(
+                            spin_coverage_requested,
+                            b2b_policy,
+                            candidate,
+                        )
+                    });
+                (
+                    (allowed && exact_evidence_required)
+                        .then_some(matching_edge)
+                        .flatten()
+                        .map(|evidence| {
+                            finesse_terminal_label(evidence.lock_evidence(), target.pose().rotation)
+                        })
+                        .transpose()?,
+                    allowed,
+                )
+            } else {
+                (None, true)
+            };
+            push_frozen_finesse_target(
+                &mut groups,
+                source_board,
+                piece,
+                GroupedFinesseTarget::new(edge_index, target, terminal_evidence, allowed),
+            );
+        }
+    }
+    target_grouping_span.finish(grouped_target_count as u64);
+
+    let movement_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseMovementBfs);
+    let query_traversals = annotate_frozen_finesse_target_groups(
+        groups,
+        problem.spawn_profile(),
+        &kick_profile,
+        &mut edge_costs,
+        &mut edge_terminal_evidence,
+        control,
+        "wasm_extended_finesse_movement_search_failed",
+        "wasm_extended_finesse_scoring_evidence_search_failed",
+    )?;
+    if let Some(query_count) = query_count {
+        *query_count = query_traversals;
+    }
+    movement_span.finish(grouped_target_count as u64);
+
+    let prune_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseAnnotationPrune);
+    let mut live = specs.iter().map(|spec| spec.accepting).collect::<Vec<_>>();
+    for node_index in (0..specs.len()).rev() {
+        if live[node_index] {
+            continue;
+        }
+        let spec = specs[node_index];
+        let start = spec.edge_start as usize;
+        let end = start + spec.edge_count as usize;
+        live[node_index] = edges[start..end]
+            .iter()
+            .enumerate()
+            .any(|(offset, edge)| edge_costs[start + offset].is_some() && live[edge.to as usize]);
+    }
+
+    let old_edges = core::mem::take(edges);
+    let mut retained_edges = Vec::with_capacity(old_edges.len());
+    let mut prepared_nodes = Vec::with_capacity(specs.len());
+    let mut prepared_edges = Vec::with_capacity(old_edges.len());
+    for (node_index, spec) in specs.iter_mut().enumerate() {
+        let old_start = spec.edge_start as usize;
+        let old_end = old_start + spec.edge_count as usize;
+        spec.edge_start = retained_edges.len() as u32;
+        let prepared_start = prepared_edges.len() as u32;
+        if live[node_index] {
+            for (offset, edge) in old_edges[old_start..old_end].iter().copied().enumerate() {
+                let original_index = old_start + offset;
+                let Some(cost) = edge_costs[original_index] else {
+                    continue;
+                };
+                if !live[edge.to as usize] {
+                    continue;
+                }
+                let (_, piece, _, rotation, x, y, _) = edge.canonical_key();
+                retained_edges.push(edge);
+                prepared_edges.push(PreparedFinesseEdge {
+                    child: edge.to,
+                    piece,
+                    cost,
+                    transition_order: u32::try_from(original_index).unwrap_or(u32::MAX),
+                    action_key: GeometryActionKey::new(piece, rotation, i16::from(x), i16::from(y)),
+                    terminal_evidence: edge_terminal_evidence[original_index],
+                });
+            }
+        }
+        spec.edge_count = retained_edges.len() as u32 - spec.edge_start;
+        prepared_nodes.push(PreparedFinesseNode {
+            edge_start: prepared_start,
+            edge_count: prepared_edges.len() as u32 - prepared_start,
+            depth: spec.depth,
+            accepting: spec.accepting,
+            source_board: Some(extended_finesse_board(
+                projection,
+                node_subsets[node_index],
+            )?),
+        });
+    }
+    *edges = retained_edges;
+    prune_span.finish(prepared_edges.len() as u64);
+    Ok(PreparedFinesseLanguage {
+        nodes: prepared_nodes,
+        edges: prepared_edges,
+        root: 0,
+    })
+}
+
+fn scoring_edge_matches_build_edge(scoring: &ScoringExecutionEdge, edge: &BuildEdge) -> bool {
+    let (to, piece, operation, rotation, x, y, cleared_lines) = edge.canonical_key();
+    scoring.to() == to
+        && scoring.operation_index() == operation
+        && scoring.piece() == piece
+        && scoring.rotation() == rotation
+        && scoring.x() == x
+        && scoring.y() == y
+        && scoring.cleared_lines() == cleared_lines
+}
+
+fn extended_finesse_board(
+    projection: &CandidateProjection,
+    subset: u64,
+) -> Result<FinesseBoard, WasmExactSearchError> {
+    let occupied = projection.state_for_subset(subset).0;
+    let board = StandardPcBoard::from_words(projection.height, occupied.words())
+        .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_extended_finesse_board_invalid"))?;
+    Ok(FinesseBoard::from_standard_pc(board))
 }
 
 fn spin_edge_key(
@@ -627,4 +959,494 @@ fn extended_t_corner_evidence(
             .count() as u8,
         front.into_iter().filter(|corner| blocked(*corner)).count() as u8,
     )
+}
+
+#[cfg(test)]
+mod finesse_tests {
+    use clearra_core_domain::{
+        execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+        pc::pc_target::PcTarget,
+        piece::{piece_kind::PieceKind, rotation::RotationState},
+    };
+    use clearra_finesse::{
+        FinesseSequenceInput, FrozenFinesseQuery, QueueClassProductEvaluator,
+        TerminalEvidenceClass, TerminalEvidenceLabel,
+    };
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput};
+    use clearra_problem::{ProblemCompiler, SearchProblem};
+    use clearra_replay::{RotationRequest, ScoringLockEvidence};
+
+    use super::*;
+
+    fn problem() -> SearchProblem {
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::standard_7_bag())
+            .with_hold_policy(PcHoldPolicy::EnabledEmpty)
+            .with_objective(ObjectivePolicy::unique());
+        ProblemCompiler::compile_opening_pc(&query).expect("test problem")
+    }
+
+    fn b2b_problem() -> SearchProblem {
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::standard_7_bag())
+            .with_hold_policy(PcHoldPolicy::EnabledEmpty)
+            .with_objective(
+                ObjectivePolicy::unique()
+                    .with_back_to_back_preservation(SpinProfileSelection::TSpins),
+            );
+        ProblemCompiler::compile_opening_pc(&query).expect("B2B test problem")
+    }
+
+    fn one_t_projection(height: u8) -> CandidateProjection {
+        let mut cells = ExtendedBoard::EMPTY;
+        for index in [3_u16, 4, 5, 14] {
+            assert!(cells.insert(index));
+        }
+        CandidateProjection {
+            operation_cells: vec![cells],
+            operation_pieces: vec![PieceKind::T],
+            row_contributors: [0; 24],
+            completed_target_rows: 0,
+            initial_board: ExtendedBoard::EMPTY,
+            target_cells: cells,
+            width: 10,
+            height,
+            all_operations: 1,
+            final_board: cells,
+        }
+    }
+
+    fn annotate_one_t(height: u8) -> PreparedFinesseLanguage {
+        let projection = one_t_projection(height);
+        let mut specs = [
+            BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: 1,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 1,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+        ];
+        let mut edges = vec![BuildOrderGraph::edge(
+            1,
+            0,
+            PieceKind::T,
+            RotationState::Zero,
+            3,
+            0,
+            0,
+        )];
+        annotate_and_prune_extended_finesse_graph(
+            &problem(),
+            &projection,
+            &[0, 1],
+            &mut specs,
+            &mut edges,
+            None,
+            false,
+            &ExecutionControl::new(ExecutionCancellationToken::new()),
+        )
+        .expect("extended finesse annotation")
+    }
+
+    #[test]
+    fn extended_finesse_cost_is_stable_across_the_six_seven_row_boundary() {
+        let compact_boundary = annotate_one_t(6);
+        let extended_boundary = annotate_one_t(7);
+        let compact_edge = compact_boundary.edges[0];
+        let extended_edge = extended_boundary.edges[0];
+
+        assert_eq!(compact_edge.cost, extended_edge.cost);
+        assert_eq!(compact_edge.action_key, extended_edge.action_key);
+        assert_eq!(compact_edge.cost, 2);
+        assert_eq!(
+            compact_boundary.nodes[0]
+                .source_board
+                .expect("compact boundary source")
+                .height(),
+            6
+        );
+        assert_eq!(
+            extended_boundary.nodes[0]
+                .source_board
+                .expect("extended boundary source")
+                .height(),
+            7
+        );
+    }
+
+    #[test]
+    fn extended_repeated_semantic_nodes_share_one_board_piece_query() {
+        let projection = one_t_projection(7);
+        let mut specs = [
+            BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: 1,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 1,
+                edge_count: 1,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 2,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 2,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+        ];
+        let mut edges = vec![
+            BuildOrderGraph::edge(2, 0, PieceKind::T, RotationState::Zero, 3, 0, 0),
+            BuildOrderGraph::edge(3, 0, PieceKind::T, RotationState::Zero, 3, 0, 0),
+        ];
+        let mut query_count = usize::MAX;
+        let language = annotate_and_prune_extended_finesse_graph_with_query_count(
+            &problem(),
+            &projection,
+            &[0, 0, 1, 1],
+            &mut specs,
+            &mut edges,
+            None,
+            false,
+            &ExecutionControl::default(),
+            Some(&mut query_count),
+        )
+        .unwrap();
+
+        assert_eq!(query_count, 1);
+        assert_eq!(edges.len(), 2);
+        assert_eq!(language.edges.len(), 2);
+        assert_eq!(language.edges[0].cost, language.edges[1].cost);
+        assert_eq!(language.edges[0].transition_order, 0);
+        assert_eq!(language.edges[1].transition_order, 1);
+    }
+
+    #[test]
+    fn finesse_annotation_prunes_only_the_opt_in_language_copy() {
+        let projection = one_t_projection(7);
+        let specs = vec![
+            BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: 2,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 2,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+        ];
+        let edges = vec![
+            BuildOrderGraph::edge(1, 0, PieceKind::T, RotationState::Zero, -3, 0, 0),
+            BuildOrderGraph::edge(1, 0, PieceKind::T, RotationState::Zero, 3, 0, 0),
+        ];
+        let normal_graph =
+            BuildOrderGraph::from_topological_parts(specs.clone(), edges.clone(), 0, 0, false)
+                .expect("normal graph remains valid");
+        assert_eq!(normal_graph.edges(0).len(), 2);
+
+        let mut finesse_specs = specs;
+        let mut finesse_edges = edges;
+        let language = annotate_and_prune_extended_finesse_graph(
+            &problem(),
+            &projection,
+            &[0, 1],
+            &mut finesse_specs,
+            &mut finesse_edges,
+            None,
+            false,
+            &ExecutionControl::new(ExecutionCancellationToken::new()),
+        )
+        .expect("finesse graph annotation");
+
+        assert_eq!(finesse_edges.len(), 1);
+        assert_eq!(language.edges.len(), 1);
+        assert_eq!(language.edges[0].action_key.x(), 3);
+        assert_eq!(normal_graph.edges(0).len(), 2);
+    }
+
+    #[test]
+    fn scoring_annotation_keeps_exact_rotation_while_b2b_harmless_edge_uses_hard_drop() {
+        let mut cells = ExtendedBoard::EMPTY;
+        for index in [4_u16, 5, 14, 15] {
+            assert!(cells.insert(index));
+        }
+        let projection = CandidateProjection {
+            operation_cells: vec![cells],
+            operation_pieces: vec![PieceKind::O],
+            row_contributors: [0; 24],
+            completed_target_rows: 0,
+            initial_board: ExtendedBoard::EMPTY,
+            target_cells: cells,
+            width: 10,
+            height: 7,
+            all_operations: 1,
+            final_board: cells,
+        };
+        let problem = problem();
+        let source_board = extended_finesse_board(&projection, 0).unwrap();
+        let query = FrozenFinesseQuery::new(
+            source_board,
+            PieceKind::O,
+            problem.spawn_profile(),
+            super::super::kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
+                .unwrap()
+                .clone(),
+            [FinesseTarget::new(RotationState::Zero, 4, 0)],
+        );
+        assert_eq!(query.costs().unwrap().as_slice(), [Some(1)]);
+        let rotation = query
+            .route_labels()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .get(TerminalEvidenceClass::Rotation)
+            .expect("a slower terminal rotation reaches the same O lock");
+        let TerminalEvidenceLabel::Rotation {
+            from,
+            request,
+            kick_index,
+            kick_dx,
+            kick_dy,
+            predecessor,
+            ..
+        } = rotation.terminal_evidence
+        else {
+            panic!("rotation class carries rotation evidence")
+        };
+        let request = match request {
+            clearra_finesse::ClassicInputAction::RotateClockwise => RotationRequest::Clockwise,
+            clearra_finesse::ClassicInputAction::RotateCounterClockwise => {
+                RotationRequest::CounterClockwise
+            }
+            clearra_finesse::ClassicInputAction::Rotate180 => RotationRequest::HalfTurn,
+            _ => panic!("terminal evidence is a rotation"),
+        };
+        let evidence = ScoringLockEvidence::rotation(
+            from,
+            request,
+            kick_index,
+            kick_dx,
+            kick_dy,
+            predecessor.x as i8,
+            predecessor.y as i8,
+        );
+        let scoring_edges = [ScoringExecutionEdge::new(
+            1,
+            0,
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+            0,
+            0,
+            0,
+            evidence,
+        )];
+        let spans = [(0, 1), (1, 0)];
+        let mut specs = [
+            BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: 1,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 1,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+        ];
+        let mut edges = vec![BuildOrderGraph::edge(
+            1,
+            0,
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+            0,
+        )];
+        let language = annotate_and_prune_extended_finesse_graph(
+            &problem,
+            &projection,
+            &[0, 1],
+            &mut specs,
+            &mut edges,
+            Some((&spans, &scoring_edges)),
+            true,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert!(rotation.cost > 1);
+        assert_eq!(language.edges[0].cost, rotation.cost);
+        assert_eq!(
+            language.edges[0].terminal_evidence,
+            Some(rotation.terminal_evidence)
+        );
+        let costed = super::super::build_probability::costed_finesse_language(&language).unwrap();
+        let replay = QueueClassProductEvaluator::new(&costed)
+            .replay_fixed_queue_witness(
+                &[PieceKind::O],
+                None,
+                problem.spawn_profile(),
+                super::super::kick_profiles::builtin_kick_profile(
+                    problem.kick_profile().profile_id(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.total_cost(), rotation.cost);
+        assert!(replay.inputs().iter().any(|input| matches!(
+            input,
+            FinesseSequenceInput::Movement(
+                clearra_finesse::ClassicInputAction::RotateClockwise
+                    | clearra_finesse::ClassicInputAction::RotateCounterClockwise
+                    | clearra_finesse::ClassicInputAction::Rotate180
+            )
+        )));
+
+        let mut b2b_specs = [
+            BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: 1,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 1,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+        ];
+        let mut b2b_edges = vec![BuildOrderGraph::edge(
+            1,
+            0,
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+            0,
+        )];
+        let b2b_language = annotate_and_prune_extended_finesse_graph(
+            &b2b_problem(),
+            &projection,
+            &[0, 1],
+            &mut b2b_specs,
+            &mut b2b_edges,
+            Some((&spans, &scoring_edges)),
+            false,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(b2b_language.edges[0].cost, 1);
+        assert_eq!(b2b_language.edges[0].terminal_evidence, None);
+        let b2b_costed =
+            super::super::build_probability::costed_finesse_language(&b2b_language).unwrap();
+        let b2b_replay = QueueClassProductEvaluator::new(&b2b_costed)
+            .replay_fixed_queue_witness(
+                &[PieceKind::O],
+                None,
+                problem.spawn_profile(),
+                super::super::kick_profiles::builtin_kick_profile(
+                    problem.kick_profile().profile_id(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            b2b_replay.inputs(),
+            [FinesseSequenceInput::Movement(
+                clearra_finesse::ClassicInputAction::HardDrop
+            )]
+        );
+    }
+
+    #[test]
+    fn b2b_finesse_language_prunes_the_same_non_spin_clear_as_postprocess() {
+        let projection = one_t_projection(7);
+        let scoring_edges = [ScoringExecutionEdge::new(
+            1,
+            0,
+            PieceKind::T,
+            RotationState::Zero,
+            3,
+            0,
+            1,
+            0,
+            0,
+            ScoringLockEvidence::no_rotation(RotationState::Zero),
+        )];
+        let spans = [(0, 1), (1, 0)];
+        let mut specs = [
+            BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: 1,
+                depth: 0,
+                accepting: false,
+            },
+            BuildOrderNodeSpec {
+                edge_start: 1,
+                edge_count: 0,
+                depth: 1,
+                accepting: true,
+            },
+        ];
+        let mut edges = vec![BuildOrderGraph::edge(
+            1,
+            0,
+            PieceKind::T,
+            RotationState::Zero,
+            3,
+            0,
+            1,
+        )];
+
+        let language = annotate_and_prune_extended_finesse_graph(
+            &b2b_problem(),
+            &projection,
+            &[0, 1],
+            &mut specs,
+            &mut edges,
+            Some((&spans, &scoring_edges)),
+            false,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert!(edges.is_empty());
+        assert!(language.edges.is_empty());
+        assert_eq!(language.nodes[language.root as usize].edge_count, 0);
+        let costed = super::super::build_probability::costed_finesse_language(&language).unwrap();
+        assert_eq!(
+            QueueClassProductEvaluator::new(&costed)
+                .fixed_queue_cost(&[PieceKind::T], None)
+                .unwrap(),
+            None
+        );
+    }
 }

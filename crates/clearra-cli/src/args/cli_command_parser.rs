@@ -32,17 +32,16 @@ pub(crate) fn parse_command(
         {
             Ok(ParsedCliCommand::Help(CliHelpTopic::SpinStructure))
         }
-        "build-probability" | "damage" | "spin-finder" | "spin-structure" | "chance"
-        | "minimals" | "score" | "special-minimals" | "special_minimals" | "special-cover"
-        | "special_cover" | "score-minimals" | "score_minimals" | "saves" | "best-save"
-        | "best_save" | "score-finder" | "score_finder" | "spin-cover" | "spincover"
-        | "setup-cover" | "setupcover" | "congruent" | "congruent-cover" | "congruent_cover"
-        | "cover-percent" | "cover_percent" | "pc-setup" | "pcsetup" | "best-setup"
-        | "bestsetup" | "dpc-finder" | "dpcfinder" | "parity" | "to-gray" | "togray"
-        | "to-fumen" | "tofumen" | "render" => Ok(ParsedCliCommand::Product(product_tokens(
-            command,
-            command_args,
-        ))),
+        "build-probability" | "finesse" | "damage" | "spin-finder" | "spin-structure"
+        | "chance" | "minimals" | "score" | "special-minimals" | "special_minimals"
+        | "special-cover" | "special_cover" | "score-minimals" | "score_minimals" | "saves"
+        | "best-save" | "best_save" | "score-finder" | "score_finder" | "spin-cover"
+        | "spincover" | "setup-cover" | "setupcover" | "congruent" | "congruent-cover"
+        | "congruent_cover" | "cover-percent" | "cover_percent" | "pc-setup" | "pcsetup"
+        | "best-setup" | "bestsetup" | "dpc-finder" | "dpcfinder" | "parity" | "to-gray"
+        | "togray" | "to-fumen" | "tofumen" | "render" => Ok(ParsedCliCommand::Product(
+            product_tokens(command, command_args),
+        )),
         "sfinder"
             if command_args
                 .first()

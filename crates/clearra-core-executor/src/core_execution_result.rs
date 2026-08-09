@@ -9,6 +9,7 @@ use crate::{
     core_postprocess_execution::CorePostProcessExecution,
     core_postprocess_score_cell::CorePostProcessScoreCell,
     core_postprocess_spin_coverage::CorePostProcessSpinCoverage,
+    finesse_report::FinesseReport,
     result_views::SearchExecutionReport,
     setup_finder_report::SetupFinderReport,
     solution_probability::{
@@ -102,6 +103,7 @@ pub struct CoreExecutionResult {
     postprocess_score_profile_id: Option<String>,
     postprocess_spin_coverages: Vec<CorePostProcessSpinCoverage>,
     setup_finder_report: Option<SetupFinderReport>,
+    finesse_report: Option<FinesseReport>,
     tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
 }
 
@@ -131,6 +133,7 @@ impl CoreExecutionResult {
             postprocess_score_profile_id: None,
             postprocess_spin_coverages: Vec::new(),
             setup_finder_report: None,
+            finesse_report: None,
             tiling_solution_page_store: None,
         }
     }
@@ -259,6 +262,11 @@ impl CoreExecutionResult {
 
     pub fn with_setup_finder_report(mut self, report: SetupFinderReport) -> Self {
         self.setup_finder_report = Some(report);
+        self
+    }
+
+    pub fn with_finesse_report(mut self, report: FinesseReport) -> Self {
+        self.finesse_report = Some(report);
         self
     }
 }
@@ -411,6 +419,10 @@ impl CoreExecutionResult {
 
     pub fn setup_finder_report(&self) -> Option<&SetupFinderReport> {
         self.setup_finder_report.as_ref()
+    }
+
+    pub fn finesse_report(&self) -> Option<&FinesseReport> {
+        self.finesse_report.as_ref()
     }
 
     pub(crate) fn take_exact_scoring_execution_batches(

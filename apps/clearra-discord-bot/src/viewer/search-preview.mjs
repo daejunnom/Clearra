@@ -9,6 +9,9 @@ const EMPTY = /^[C~□._0]$/i;
 const FILLED = /^[+■#1XGIOTSZJL]$/i;
 
 export function buildSearchPreviewDocument(command, rawOptions = []) {
+  if (command?.input === "finesse-score") {
+    return finesseScorePreview(rawOptions);
+  }
   const fields = previewFields(command?.input);
   if (fields.length === 0) return null;
   const values = new Map(
@@ -41,7 +44,7 @@ export function buildSearchPreviewDocument(command, rawOptions = []) {
 }
 
 function previewFields(input) {
-  if (input === "cover") {
+  if (input === "cover" || input === "finesse-search") {
     return [
       { name: "base", label: "Base field" },
       { name: "target", label: "Target delta" },
@@ -60,6 +63,25 @@ function previewFields(input) {
     return [{ name: "field", label: "Input field" }];
   }
   return [];
+}
+
+function finesseScorePreview(rawOptions) {
+  const option = rawOptions.find(({ name }) => name === "document");
+  if (typeof option?.value !== "string") return null;
+  const documents = extractViewerDocuments(option.value, {
+    maxDocuments: 2,
+    maxPages: 128,
+    maxSourceChars: 6_000,
+  });
+  if (documents.length !== 1) return null;
+  const [{ format, source, document }] = documents;
+  if (
+    document.width !== 10 ||
+    !Array.isArray(document.pages) ||
+    document.pages.length === 0 ||
+    document.pages.some((page) => !page.operation)
+  ) return null;
+  return { format, source, document };
 }
 
 function decodeStaticField(value, name) {

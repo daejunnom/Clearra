@@ -14,6 +14,7 @@ mod cpu_worker_pool;
 pub mod diagnostics;
 #[cfg(test)]
 mod execution_worker_limit;
+pub mod finesse_report;
 pub mod memory;
 #[cfg(test)]
 pub(crate) mod order_language;
@@ -53,6 +54,10 @@ pub use core_executor::{CoreExecutionError, CoreExecutor};
 pub use core_postprocess_execution::CorePostProcessExecution;
 pub use core_postprocess_score_cell::CorePostProcessScoreCell;
 pub use core_postprocess_spin_coverage::CorePostProcessSpinCoverage;
+pub use finesse_report::{
+    FinessePolicyResult, FinesseReport, FinesseReportInput, FinesseReportPlacement,
+    FinesseRepresentativeWitness, FinesseSolutionAverage,
+};
 pub use memory::ScopeGuard;
 pub use packing::{PackingExecutionPlan, PackingRunResult, PackingRunner, PackingState};
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]

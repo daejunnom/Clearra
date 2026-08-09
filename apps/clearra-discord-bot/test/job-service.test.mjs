@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -8,6 +9,99 @@ import { loadDiscordBotConfig } from "../src/config.mjs";
 import { loadClearraJobServiceConfig } from "../src/job-service/config.mjs";
 import { ClearraCommandRunner } from "../src/job-service/runner.mjs";
 import { ClearraJobService } from "../src/job-service/server.mjs";
+
+test("job runner requires working finesse search and score capabilities", async () => {
+  const invocations = [];
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra",
+      searchTimeoutMs: 5_000,
+    },
+    {
+      execFile: (_executable, arguments_, options, callback) => {
+        invocations.push({ arguments_, options });
+        callback(null, JSON.stringify({
+          finesse_report: {
+            mode: arguments_[1],
+            metric: "inputs",
+          },
+        }), "");
+      },
+    },
+  );
+
+  await runner.verifyCapabilities();
+
+  assert.deepEqual(
+    invocations.map(({ arguments_ }) => arguments_.slice(0, 2)),
+    [["finesse", "search"], ["finesse", "score"]],
+  );
+  for (const invocation of invocations) {
+    assert.equal(invocation.options.shell, false);
+    assert.equal(invocation.options.windowsHide, true);
+    assert.equal(invocation.arguments_.includes("--workers"), true);
+    assert.equal(invocation.arguments_.includes("--format"), true);
+  }
+});
+
+test("job runner fails closed when a legacy CLI lacks finesse", async () => {
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra-v0.5.1",
+      searchTimeoutMs: 5_000,
+    },
+    {
+      execFile: (_executable, _arguments, _options, callback) => {
+        const error = new Error("unsupported command");
+        error.code = 2;
+        callback(error, "", "unsupported command");
+      },
+    },
+  );
+
+  await assert.rejects(
+    runner.verifyCapabilities(),
+    /^Error: Clearra engine capability check failed\.$/,
+  );
+});
+
+test("both job-service Docker paths smoke-test finesse before runtime", () => {
+  const imagePaths = [
+    ["Dockerfile.current-job-service", "cloudbuild-current-job-service.yaml"],
+    ["Dockerfile.job-service", "cloudbuild-job-service.yaml"],
+  ];
+  for (const [dockerName, cloudBuildName] of imagePaths) {
+    const dockerfile = readFileSync(
+      new URL(`../${dockerName}`, import.meta.url),
+      "utf8",
+    );
+    assert.match(dockerfile, /finesse search --base-mask/);
+    assert.match(dockerfile, /finesse score --initial-mask/);
+    assert.match(dockerfile, /grep -q '\"mode\":\"search\"'/);
+    assert.match(dockerfile, /grep -q '\"mode\":\"score\"'/);
+    const cloudBuild = readFileSync(
+      new URL(`../${cloudBuildName}`, import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      cloudBuild,
+      new RegExp(`- apps/clearra-discord-bot/${dockerName.replaceAll(".", "\\.")}`),
+    );
+  }
+
+  const main = readFileSync(
+    new URL("../src/job-service/main.mjs", import.meta.url),
+    "utf8",
+  );
+  const gateOffset = main.indexOf("await runner.verifyCapabilities()");
+  const listenOffset = main.indexOf("await service.listen()");
+  assert.notEqual(gateOffset, -1);
+  assert.notEqual(listenOffset, -1);
+  assert.ok(
+    gateOffset < listenOffset,
+    "the capability gate must finish before the service listens",
+  );
+});
 
 test("remote job execution is not capped by the Oracle gateway CPU count", () => {
   const config = loadDiscordBotConfig(

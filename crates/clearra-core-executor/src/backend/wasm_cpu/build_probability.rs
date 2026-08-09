@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use clearra_core_domain::{
     board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
+    piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{
         normalized_tiling_solution_key_set_hash_from_sorted_strings,
         normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
@@ -12,23 +13,36 @@ use clearra_core_domain::{
 use clearra_coverage::pattern::{
     pattern_bitset::PatternBitSet, pattern_id::PatternId, weighted_pattern_set::WeightedPatternSet,
 };
+use clearra_finesse::{
+    aggregate_unique_queue_costs, union_costed_geometry_languages, CostedGeometryEdge,
+    CostedGeometryLanguage, FinesseError, FinesseRouteWitnessError, GeometryLanguageError,
+    GeometryLanguageNode, GeometryNodeId, QueueClassProductEvaluator, QueueClassSet,
+    QueueCostAggregation, QueueCostTable, QueuePattern,
+};
 use clearra_geometry::layout::board64_layout::Board64Layout;
-use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
+    FinesseMetric, FinessePatternKnowledge, FinesseScoreRequest, SearchProblem,
+};
 use clearra_replay::ExactScoringExecutionBatch;
+use clearra_rules::{kicks::KickTableProfile, spawn::SpawnProfile};
 use clearra_supply::{
-    hold_automaton::HoldAutomatonState, pattern_universe::PackingPatternMembershipKind,
+    hold_automaton::HoldAutomatonState,
+    pattern_universe::{PackingPatternMembershipKind, PieceMultisetKey},
 };
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
-    CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage, SolutionCoverage,
-    TilingSolutionPageStore,
+    CoreExecutionResult, CorePathStep, FinessePolicyResult, FinesseReport, FinesseReportInput,
+    FinesseRepresentativeWitness, FinesseSolutionAverage, NormalizedSolutionCoverage,
+    SolutionCoverage, TilingSolutionPageStore,
 };
 
 use super::{
     buildup::{
         exact_scoring_execution_graph_for_completion, verify_candidate_for_completion,
-        BuildCompletion, BuildUpWorkspace, CandidateWitnessMode,
+        verify_candidate_for_completion_with_finesse, BuildCompletion, BuildUpWorkspace,
+        CandidateWitnessMode, PreparedFinesseLanguage,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
@@ -54,10 +68,20 @@ pub(crate) struct WasmBuildProbabilitySession {
     completed: Vec<CoreExecutionResult>,
     pattern_weights: WeightedPatternSet,
     aggregation: BuildProbabilityAggregation,
+    finesse_metric: FinesseMetric,
+    finesse_pattern_knowledge: FinessePatternKnowledge,
+    finesse_score: Option<PendingFinesseScore>,
+    finesse_search_materials: Vec<FinesseSearchMaterial>,
     mirror_included: bool,
     mirror_distinct: bool,
     execution_constraints_requested: bool,
     finished: bool,
+}
+
+struct PendingFinesseScore {
+    problem: SearchProblem,
+    field: BuildProbabilityField,
+    request: FinesseScoreRequest,
 }
 
 enum BuildProbabilitySessionKind {
@@ -70,23 +94,32 @@ impl WasmBuildProbabilitySession {
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
     ) -> Result<Self, WasmExactSearchError> {
-        let mirror_included = field.includes_applicable_horizontal_mirror();
+        let finesse_metric = finesse.metric();
+        let finesse_pattern_knowledge = finesse.pattern_knowledge();
+        let finesse_score = finesse.score().cloned();
+        let score_requested = finesse_score.is_some();
+        let mirror_included = !score_requested && field.includes_applicable_horizontal_mirror();
         let original = field.original_only();
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
         let mirror_distinct = mirrored.is_some_and(|candidate| candidate != original);
         let mut pending = VecDeque::with_capacity(usize::from(mirror_distinct) + 1);
-        pending.push_back(build_probability_session_for_field(
-            problem,
-            original,
-            aggregation,
-        )?);
-        if let Some(mirrored) = mirrored.filter(|candidate| *candidate != original) {
+        if !score_requested {
             pending.push_back(build_probability_session_for_field(
                 problem,
-                mirrored,
+                original,
                 aggregation,
+                finesse_metric,
             )?);
+            if let Some(mirrored) = mirrored.filter(|candidate| *candidate != original) {
+                pending.push_back(build_probability_session_for_field(
+                    problem,
+                    mirrored,
+                    aggregation,
+                    finesse_metric,
+                )?);
+            }
         }
         Ok(Self {
             pending,
@@ -99,6 +132,14 @@ impl WasmBuildProbabilitySession {
                 ))?
                 .clone(),
             aggregation,
+            finesse_metric,
+            finesse_pattern_knowledge,
+            finesse_score: finesse_score.map(|request| PendingFinesseScore {
+                problem: problem.clone(),
+                field: original,
+                request,
+            }),
+            finesse_search_materials: Vec::new(),
             mirror_included,
             mirror_distinct,
             execution_constraints_requested: problem
@@ -119,6 +160,22 @@ impl WasmBuildProbabilitySession {
                 "wasm_build_probability_session_already_finished",
             ));
         }
+        if control.is_cancelled() {
+            return Ok(BuildProbabilityAdvance::Cancelled);
+        }
+        if let Some(score) = self.finesse_score.as_ref() {
+            let result = super::finesse_score::execute_finesse_score(
+                &score.problem,
+                score.field,
+                &score.request,
+                self.finesse_pattern_knowledge,
+                control,
+            )?;
+            self.finesse_score = None;
+            self.finished = true;
+            return Ok(BuildProbabilityAdvance::Completed(result));
+        }
+        let collect_search_finesse = self.finesse_metric.requested();
         let Some(session) = self.pending.front_mut() else {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_pass_missing",
@@ -132,20 +189,49 @@ impl WasmBuildProbabilitySession {
             BuildProbabilityAdvance::Pending => Ok(BuildProbabilityAdvance::Pending),
             BuildProbabilityAdvance::Cancelled => Ok(BuildProbabilityAdvance::Cancelled),
             BuildProbabilityAdvance::Completed(result) => {
+                if collect_search_finesse {
+                    let material = match session {
+                        BuildProbabilitySessionKind::Compact(session) => {
+                            session.finesse_search_material()?
+                        }
+                        BuildProbabilitySessionKind::Extended(session) => {
+                            session.finesse_search_material()?
+                        }
+                    };
+                    self.finesse_search_materials.push(material);
+                }
                 self.completed.push(result);
                 self.pending.pop_front();
                 if !self.pending.is_empty() {
                     return Ok(BuildProbabilityAdvance::Pending);
                 }
                 self.finished = true;
-                Ok(BuildProbabilityAdvance::Completed(merge_symmetry_results(
+                let mut result = merge_symmetry_results(
                     core::mem::take(&mut self.completed),
                     self.mirror_included,
                     self.mirror_distinct,
                     &self.pattern_weights,
                     self.aggregation.requests_spin_coverage()
                         || self.execution_constraints_requested,
-                )?))
+                )?;
+                if collect_search_finesse {
+                    result = result.with_additional_fields(vec![
+                        (
+                            "finesse_metric_requested".to_owned(),
+                            self.finesse_metric.as_str().to_owned(),
+                        ),
+                        (
+                            "finesse_pattern_knowledge_requested".to_owned(),
+                            self.finesse_pattern_knowledge.as_str().to_owned(),
+                        ),
+                    ]);
+                    result = result.with_finesse_report(build_finesse_report(
+                        core::mem::take(&mut self.finesse_search_materials),
+                        self.finesse_pattern_knowledge,
+                        control,
+                    )?);
+                }
+                Ok(BuildProbabilityAdvance::Completed(result))
             }
         }
     }
@@ -155,19 +241,32 @@ fn build_probability_session_for_field(
     problem: &SearchProblem,
     field: BuildProbabilityField,
     aggregation: BuildProbabilityAggregation,
+    finesse_metric: FinesseMetric,
 ) -> Result<BuildProbabilitySessionKind, WasmExactSearchError> {
     if field.is_compact() {
         Ok(BuildProbabilitySessionKind::Compact(
-            CompactBuildProbabilitySession::new(problem, field, aggregation)?,
+            CompactBuildProbabilitySession::new_with_finesse(
+                problem,
+                field,
+                aggregation,
+                finesse_metric.requested(),
+            )?,
         ))
     } else {
-        Ok(BuildProbabilitySessionKind::Extended(
+        let session = if finesse_metric.requested() {
+            super::extended_build_probability::ExtendedBuildProbabilitySession::new_with_finesse(
+                problem,
+                field,
+                aggregation,
+            )?
+        } else {
             super::extended_build_probability::ExtendedBuildProbabilitySession::new(
                 problem,
                 field,
                 aggregation,
-            )?,
-        ))
+            )?
+        };
+        Ok(BuildProbabilitySessionKind::Extended(session))
     }
 }
 
@@ -634,6 +733,8 @@ pub(super) struct CompactBuildProbabilitySession {
     parallel_decision_reason: &'static str,
     distributed_spin_materialized: bool,
     distributed_execution_constraint_materialized: bool,
+    finesse_requested: bool,
+    finesse_languages: Vec<(StandardBoard64TilingIdentity, PreparedFinesseLanguage)>,
     finished: bool,
 }
 
@@ -662,7 +763,23 @@ impl CompactBuildProbabilitySession {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::new_with_external_geometry(problem, field, aggregation, false, None)
+        Self::new_with_external_geometry(problem, field, aggregation, false, None, false)
+    }
+
+    pub(super) fn new_with_finesse(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_requested: bool,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_external_geometry(
+            problem,
+            field,
+            aggregation,
+            false,
+            None,
+            finesse_requested,
+        )
     }
 
     pub(super) fn new_external_geometry(
@@ -670,7 +787,7 @@ impl CompactBuildProbabilitySession {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::new_with_external_geometry(problem, field, aggregation, true, None)
+        Self::new_with_external_geometry(problem, field, aggregation, true, None, false)
     }
 
     pub(super) fn new_with_shared_supply_catalog(
@@ -686,6 +803,7 @@ impl CompactBuildProbabilitySession {
             aggregation,
             external_geometry,
             Some(shared_supply_catalog),
+            false,
         )
     }
 
@@ -711,6 +829,7 @@ impl CompactBuildProbabilitySession {
         aggregation: BuildProbabilityAggregation,
         external_geometry: bool,
         shared_supply_catalog: Option<&CompactBuildProbabilitySharedCatalog>,
+        finesse_requested: bool,
     ) -> Result<Self, WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
         let target_cells =
@@ -840,6 +959,8 @@ impl CompactBuildProbabilitySession {
             parallel_decision_reason: "serial-build-probability-session",
             distributed_spin_materialized: false,
             distributed_execution_constraint_materialized: false,
+            finesse_requested,
+            finesse_languages: Vec::new(),
             finished: false,
         })
     }
@@ -911,7 +1032,9 @@ impl CompactBuildProbabilitySession {
                 )
             })?;
             self.buildable_tilings.insert(candidate.identity);
-            return Ok(());
+            if !self.finesse_requested {
+                return Ok(());
+            }
         }
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
@@ -928,19 +1051,36 @@ impl CompactBuildProbabilitySession {
             coverage_already_known,
             solution_coverage_required,
         );
-        let result = verify_candidate_for_completion(
-            &self.problem,
-            &self.catalog,
-            &candidate,
-            target,
-            &mut self.buildup,
-            &mut self.coverage_evaluator,
-            witness_mode,
-            self.representative_path.is_empty(),
-            0,
-            BuildCompletion::ExactBoardAfterLineClears(self.target_board),
-            control,
-        )?;
+        let mut result = if self.finesse_requested {
+            verify_candidate_for_completion_with_finesse(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                target,
+                &mut self.buildup,
+                &mut self.coverage_evaluator,
+                witness_mode,
+                self.representative_path.is_empty(),
+                0,
+                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                self.aggregation.requests_spin_coverage(),
+                control,
+            )?
+        } else {
+            verify_candidate_for_completion(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                target,
+                &mut self.buildup,
+                &mut self.coverage_evaluator,
+                witness_mode,
+                self.representative_path.is_empty(),
+                0,
+                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                control,
+            )?
+        };
 
         self.peak_build_nodes = self.peak_build_nodes.max(result.graph_nodes);
         self.total_build_nodes = self.total_build_nodes.saturating_add(result.graph_nodes);
@@ -986,6 +1126,14 @@ impl CompactBuildProbabilitySession {
             self.buildup.merge_standard_bag_coverage(root)?;
         }
         if result.buildable {
+            if let Some(language) = result.finesse_language.take() {
+                self.finesse_languages.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_language_storage_unavailable",
+                    )
+                })?;
+                self.finesse_languages.push((candidate.identity, language));
+            }
             if retain_solution_coverage {
                 let candidate_coverage =
                     candidate_coverage
@@ -1169,7 +1317,7 @@ impl CompactBuildProbabilitySession {
             None
         };
         self.finished = true;
-        Ok(self.build_result(scoring_batch))
+        self.build_result(scoring_batch)
     }
 
     pub(super) fn absorb_distributed_result(
@@ -1295,6 +1443,97 @@ impl CompactBuildProbabilitySession {
         self.complete()
     }
 
+    pub(super) fn annotate_distributed_finesse(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.finished {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_distributed_annotation_after_finish",
+            ));
+        }
+        self.finesse_requested = true;
+        self.finesse_languages.clear();
+        let mut identities = self.buildable_tilings.iter().copied().collect::<Vec<_>>();
+        identities.sort_unstable();
+        for identity in identities {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if identity.initial_board_mask() != self.catalog.initial_board() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_distributed_identity_initial_board_mismatch",
+                ));
+            }
+            let mut row_ids = Vec::with_capacity(identity.placement_count());
+            let mut pieces = Vec::with_capacity(identity.placement_count());
+            for index in 0..identity.placement_count() {
+                let placement =
+                    identity
+                        .placement(index)
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "wasm_finesse_distributed_identity_placement_missing",
+                        ))?;
+                let row_id = self
+                    .catalog
+                    .skeleton_id(placement.piece(), placement.cells_mask())
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_distributed_identity_not_in_catalog",
+                    ))?;
+                row_ids.push(row_id);
+                pieces.push(placement.piece());
+            }
+            let multiset = PieceMultisetKey::from_pieces(pieces);
+            let target = self
+                .shared_supply_catalog
+                .targets
+                .targets()
+                .iter()
+                .find(|target| target.key == multiset)
+                .cloned()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_distributed_identity_supply_mismatch",
+                ))?;
+            let candidate =
+                GeometryCandidate::from_rows(&self.catalog, target.pattern_index_id, &row_ids)
+                    .filter(|candidate| candidate.identity == identity)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_distributed_identity_reconstruction_failed",
+                    ))?;
+            let result = verify_candidate_for_completion_with_finesse(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                &target,
+                &mut self.buildup,
+                &mut self.coverage_evaluator,
+                CandidateWitnessMode::Disabled,
+                false,
+                0,
+                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                self.aggregation.requests_spin_coverage(),
+                control,
+            )?;
+            if !result.buildable {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_distributed_verified_identity_became_unbuildable",
+                ));
+            }
+            let language = result
+                .finesse_language
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_distributed_language_missing",
+                ))?;
+            self.finesse_languages.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_distributed_language_storage_unavailable",
+                )
+            })?;
+            self.finesse_languages.push((identity, language));
+        }
+        Ok(())
+    }
+
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
         if !self.aggregation.is_tiling_only() {
             if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
@@ -1320,7 +1559,7 @@ impl CompactBuildProbabilitySession {
             None
         };
         Ok(BuildProbabilityAdvance::Completed(
-            self.build_result(scoring_batch),
+            self.build_result(scoring_batch)?,
         ))
     }
 
@@ -1384,7 +1623,7 @@ impl CompactBuildProbabilitySession {
     fn build_result(
         &self,
         scoring_batch: Option<ExactScoringExecutionBatch>,
-    ) -> CoreExecutionResult {
+    ) -> Result<CoreExecutionResult, WasmExactSearchError> {
         let tiling_only = self.aggregation.is_tiling_only();
         let universe = self
             .problem
@@ -1691,7 +1930,7 @@ impl CompactBuildProbabilitySession {
             .with_solution_coverages(solution_coverages)
             .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_exact_scoring_execution_batch(scoring_batch);
-        if execution_constraints.requested() {
+        let result = if execution_constraints.requested() {
             let pattern_weights = (0..universe.pattern_count())
                 .map(|pattern| universe.weight_at(pattern).get().to_string())
                 .collect();
@@ -1702,7 +1941,62 @@ impl CompactBuildProbabilitySession {
             )
         } else {
             result
+        };
+        Ok(result)
+    }
+
+    pub(super) fn finesse_search_material(
+        &self,
+    ) -> Result<FinesseSearchMaterial, WasmExactSearchError> {
+        let mut languages = Vec::new();
+        languages
+            .try_reserve_exact(self.finesse_languages.len() + usize::from(self.trivial_target))
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_evaluation_language_storage_unavailable",
+                )
+            })?;
+        for (identity, prepared) in &self.finesse_languages {
+            languages.push((
+                NormalizedTilingSolutionKey::from_standard_board64_identity(*identity)
+                    .as_str()
+                    .to_owned(),
+                costed_finesse_language(prepared)?,
+            ));
         }
+        if self.trivial_target {
+            let identity = StandardBoard64TilingIdentity::from_placements(
+                self.catalog.initial_board(),
+                std::iter::empty(),
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_finesse_trivial_identity_invalid")
+            })?;
+            let language = CostedGeometryLanguage::new(
+                GeometryNodeId::new(0),
+                vec![GeometryLanguageNode::new(
+                    0,
+                    true,
+                    Vec::<CostedGeometryEdge>::new(),
+                )],
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_finesse_trivial_language_invalid")
+            })?;
+            languages.push((
+                NormalizedTilingSolutionKey::from_standard_board64_identity(identity)
+                    .as_str()
+                    .to_owned(),
+                language,
+            ));
+        }
+        sort_finesse_language_alternatives(&mut languages);
+
+        FinesseSearchMaterial::new(
+            &self.problem,
+            languages,
+            self.truncated_reason.is_none() && self.count_complete,
+        )
     }
 
     fn retained_bytes(&self) -> usize {
@@ -1722,6 +2016,889 @@ impl CompactBuildProbabilitySession {
                         .map(PatternBitSet::retained_bytes)
                         .sum::<usize>()
             })
+            + self.finesse_languages.capacity()
+                * core::mem::size_of::<(StandardBoard64TilingIdentity, PreparedFinesseLanguage)>()
+            + self
+                .finesse_languages
+                .iter()
+                .map(|(_, language)| {
+                    language.nodes.capacity()
+                        * core::mem::size_of::<super::buildup::PreparedFinesseNode>()
+                        + language.edges.capacity()
+                            * core::mem::size_of::<super::buildup::PreparedFinesseEdge>()
+                })
+                .sum::<usize>()
+    }
+}
+
+pub(super) struct FinesseSearchMaterial {
+    classes: QueueClassSet,
+    languages: Vec<(String, CostedGeometryLanguage)>,
+    fixed_queue: bool,
+    initial_hold: Option<PieceKind>,
+    hold_enabled: bool,
+    terminal_hold_release: bool,
+    spawn_profile: SpawnProfile,
+    kick_profile: KickTableProfile,
+}
+
+impl FinesseSearchMaterial {
+    pub(super) fn new(
+        problem: &SearchProblem,
+        languages: Vec<(String, CostedGeometryLanguage)>,
+        evaluation_complete: bool,
+    ) -> Result<Self, WasmExactSearchError> {
+        let hold_enabled = problem.supply().hold_enabled();
+        Ok(Self {
+            classes: finesse_queue_classes_for_problem(problem, evaluation_complete)?,
+            languages,
+            fixed_queue: problem.piece_source().fixed_sequence().is_some(),
+            initial_hold: hold_enabled
+                .then(|| problem.initial_hold().hold_piece())
+                .flatten(),
+            hold_enabled,
+            terminal_hold_release: problem.supply().projects_unplaced_lookahead(),
+            spawn_profile: problem.spawn_profile(),
+            kick_profile: super::kick_profiles::builtin_kick_profile(
+                problem.kick_profile().profile_id(),
+            )
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_kick_profile_unavailable",
+            ))?
+            .clone(),
+        })
+    }
+}
+
+fn sort_finesse_language_alternatives(languages: &mut [(String, CostedGeometryLanguage)]) {
+    // A normalized occupancy key does not identify its concrete rotation or
+    // realization language. Keep every alternative; the outer exact union
+    // determinizes their placement actions after all symmetry passes arrive.
+    languages.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+}
+
+struct EvaluatedFinessePolicy {
+    report: FinessePolicyResult,
+    overall_costs: QueueCostTable,
+    aggregation: QueueCostAggregation,
+    representative: Option<FinesseRepresentativeSelection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FinesseRepresentativeSelection {
+    pub(super) solution_index: usize,
+    pub(super) class_index: usize,
+    pub(super) expected_cost: u32,
+}
+
+pub(super) fn build_finesse_report(
+    materials: Vec<FinesseSearchMaterial>,
+    pattern_knowledge: FinessePatternKnowledge,
+    control: &ExecutionControl,
+) -> Result<FinesseReport, WasmExactSearchError> {
+    ensure_finesse_not_cancelled(control)?;
+    let mut materials = materials.into_iter();
+    let first = materials
+        .next()
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_search_material_missing",
+        ))?;
+    let fixed_queue = first.fixed_queue;
+    let initial_hold = first.initial_hold;
+    let hold_enabled = first.hold_enabled;
+    let terminal_hold_release = first.terminal_hold_release;
+    let spawn_profile = first.spawn_profile;
+    let kick_profile = first.kick_profile;
+    let mut complete = first.classes.metadata().complete;
+    let mut classes = first.classes;
+    let mut language_groups = BTreeMap::<String, Vec<CostedGeometryLanguage>>::new();
+    for (solution_key, language) in first.languages {
+        language_groups
+            .entry(solution_key)
+            .or_default()
+            .push(language);
+    }
+    for material in materials {
+        ensure_finesse_not_cancelled(control)?;
+        if material.fixed_queue != fixed_queue
+            || material.initial_hold != initial_hold
+            || material.hold_enabled != hold_enabled
+            || material.terminal_hold_release != terminal_hold_release
+            || material.spawn_profile != spawn_profile
+            || material.kick_profile != kick_profile
+            || material.classes.classes() != classes.classes()
+            || material.classes.metadata().pattern_count != classes.metadata().pattern_count
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_symmetry_material_mismatch",
+            ));
+        }
+        complete &= material.classes.metadata().complete;
+        for (solution_key, language) in material.languages {
+            language_groups
+                .entry(solution_key)
+                .or_default()
+                .push(language);
+        }
+    }
+    classes = classes.with_complete(complete);
+
+    let mut languages = Vec::new();
+    languages
+        .try_reserve_exact(language_groups.len())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_union_storage_unavailable")
+        })?;
+    for (solution_key, mut alternatives) in language_groups {
+        ensure_finesse_not_cancelled(control)?;
+        let language = if alternatives.len() == 1 {
+            alternatives
+                .pop()
+                .expect("one solution language is present")
+        } else {
+            let references = alternatives.iter().collect::<Vec<_>>();
+            union_costed_geometry_languages(&references).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_finesse_solution_union_failed")
+            })?
+        };
+        languages.push((solution_key, language));
+    }
+
+    let oracle_requested = matches!(
+        pattern_knowledge,
+        FinessePatternKnowledge::Both | FinessePatternKnowledge::Oracle
+    );
+    let visible_requested = matches!(
+        pattern_knowledge,
+        FinessePatternKnowledge::Both | FinessePatternKnowledge::VisibleSeven
+    );
+    // Visible-7 reports always include an Oracle baseline over the same
+    // materialized universe, even when the caller does not request the Oracle
+    // policy as a standalone result.
+    let mut oracle = (oracle_requested || visible_requested)
+        .then(|| {
+            evaluate_finesse_policy(
+                "oracle",
+                &languages,
+                &classes,
+                fixed_queue,
+                initial_hold,
+                hold_enabled,
+                terminal_hold_release,
+                control,
+            )
+        })
+        .transpose()?;
+    let mut visible = visible_requested
+        .then(|| {
+            evaluate_finesse_policy(
+                "visible-7",
+                &languages,
+                &classes,
+                fixed_queue,
+                initial_hold,
+                hold_enabled,
+                terminal_hold_release,
+                control,
+            )
+        })
+        .transpose()?;
+
+    if let (Some(oracle_result), Some(visible_result)) = (&oracle, &mut visible) {
+        let mut oracle_on_visible =
+            QueueCostTable::unreachable(classes.classes().len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_oracle_comparison_storage_unavailable",
+                )
+            })?;
+        for class_index in 0..classes.classes().len() {
+            if visible_result
+                .overall_costs
+                .get(class_index)
+                .flatten()
+                .is_none()
+            {
+                continue;
+            }
+            if let Some(cost) = oracle_result.overall_costs.get(class_index).flatten() {
+                oracle_on_visible.set_min(class_index, cost).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_oracle_comparison_cost_invalid",
+                    )
+                })?;
+            }
+        }
+        let oracle_covered =
+            aggregate_unique_queue_costs(&classes, &oracle_on_visible).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_oracle_comparison_aggregation_failed",
+                )
+            })?;
+        let oracle_average = oracle_covered.conditional_mean_inputs;
+        let information_penalty = visible_result
+            .aggregation
+            .conditional_mean_inputs
+            .zip(oracle_average)
+            .map(|(visible_average, oracle_average)| {
+                (visible_average - oracle_average).max(0.0).to_string()
+            });
+        let success_probability_gap = (oracle_result.aggregation.successful_probability_mass
+            - visible_result.aggregation.successful_probability_mass)
+            .max(0.0)
+            .to_string();
+        visible_result.report = visible_result.report.clone().with_comparison(
+            oracle_average.map(|average| average.to_string()),
+            information_penalty,
+            Some(success_probability_gap),
+        );
+    }
+
+    let exact_total_inputs = (fixed_queue && classes.classes().len() == 1)
+        .then(|| {
+            oracle
+                .as_ref()
+                .or(visible.as_ref())
+                .and_then(|result| result.overall_costs.get(0).flatten())
+                .map(|cost| cost.to_string())
+        })
+        .flatten();
+    let selected_policy = if oracle_requested {
+        oracle.as_ref()
+    } else {
+        visible.as_ref()
+    };
+    let representative_witness = if fixed_queue && classes.classes().len() == 1 {
+        fixed_queue_representative_witness(
+            if oracle_requested {
+                "oracle"
+            } else {
+                "visible-7"
+            },
+            &languages,
+            &classes,
+            initial_hold,
+            hold_enabled,
+            terminal_hold_release,
+            spawn_profile,
+            &kick_profile,
+            control,
+        )?
+    } else {
+        selected_policy
+            .and_then(|evaluated| evaluated.representative)
+            .map(|selection| {
+                pattern_representative_witness(
+                    if oracle_requested {
+                        "oracle"
+                    } else {
+                        "visible-7"
+                    },
+                    selection,
+                    &languages,
+                    &classes,
+                    initial_hold,
+                    hold_enabled,
+                    terminal_hold_release,
+                    spawn_profile,
+                    &kick_profile,
+                    control,
+                )
+            })
+            .transpose()?
+            .flatten()
+    };
+    if let Some(exact_total_inputs) = exact_total_inputs.as_deref() {
+        if representative_witness
+            .as_ref()
+            .map(|witness| witness.total_inputs().to_string())
+            .as_deref()
+            != Some(exact_total_inputs)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_exact_witness_cost_mismatch",
+            ));
+        }
+    }
+    let mut policy_results = Vec::with_capacity(
+        usize::from(oracle_requested && oracle.is_some()) + usize::from(visible.is_some()),
+    );
+    if oracle_requested {
+        if let Some(result) = oracle.take() {
+            policy_results.push(result.report);
+        }
+    }
+    if let Some(result) = visible.take() {
+        policy_results.push(result.report);
+    }
+    let report_complete =
+        !policy_results.is_empty() && policy_results.iter().all(FinessePolicyResult::complete);
+    let report = FinesseReport::new(
+        "search",
+        pattern_knowledge.as_str(),
+        report_complete,
+        exact_total_inputs,
+        policy_results,
+    );
+    Ok(match representative_witness {
+        Some(witness) => report.with_representative_witness(witness),
+        None => report,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fixed_queue_representative_witness(
+    policy: &'static str,
+    languages: &[(String, CostedGeometryLanguage)],
+    classes: &QueueClassSet,
+    initial_hold: Option<PieceKind>,
+    hold_enabled: bool,
+    terminal_hold_release: bool,
+    spawn_profile: SpawnProfile,
+    kick_profile: &KickTableProfile,
+    control: &ExecutionControl,
+) -> Result<Option<FinesseRepresentativeWitness>, WasmExactSearchError> {
+    fixed_queue_representative_witness_with_cancel(
+        policy,
+        languages,
+        classes,
+        initial_hold,
+        hold_enabled,
+        terminal_hold_release,
+        spawn_profile,
+        kick_profile,
+        || control.is_cancelled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fixed_queue_representative_witness_with_cancel(
+    policy: &'static str,
+    languages: &[(String, CostedGeometryLanguage)],
+    classes: &QueueClassSet,
+    initial_hold: Option<PieceKind>,
+    hold_enabled: bool,
+    terminal_hold_release: bool,
+    spawn_profile: SpawnProfile,
+    kick_profile: &KickTableProfile,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<Option<FinesseRepresentativeWitness>, WasmExactSearchError> {
+    ensure_finesse_not_cancelled_with(&mut is_cancelled)?;
+    let Some(class) = classes
+        .classes()
+        .first()
+        .filter(|_| classes.classes().len() == 1)
+    else {
+        return Ok(None);
+    };
+    let mut selected = None;
+    for (solution_key, language) in languages {
+        ensure_finesse_not_cancelled_with(&mut is_cancelled)?;
+        let evaluator = QueueClassProductEvaluator::new(language)
+            .with_hold_enabled(hold_enabled)
+            .with_terminal_hold_release_enabled(terminal_hold_release);
+        let Some(cost) = evaluator
+            .fixed_queue_cost_with_cancel(class.queue(), initial_hold, &mut is_cancelled)
+            .map_err(|error| {
+                map_finesse_product_error(
+                    error,
+                    "wasm_finesse_representative_cost_evaluation_failed",
+                )
+            })?
+        else {
+            continue;
+        };
+        if selected
+            .as_ref()
+            .is_none_or(|(_, _, best_cost)| cost < *best_cost)
+        {
+            selected = Some((solution_key, language, cost));
+        }
+    }
+    let Some((solution_key, language, expected_cost)) = selected else {
+        return Ok(None);
+    };
+    ensure_finesse_not_cancelled_with(&mut is_cancelled)?;
+    let witness_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseWitness);
+    let witness = QueueClassProductEvaluator::new(language)
+        .with_hold_enabled(hold_enabled)
+        .with_terminal_hold_release_enabled(terminal_hold_release)
+        .replay_fixed_queue_witness_with_cancel(
+            class.queue(),
+            initial_hold,
+            spawn_profile,
+            kick_profile,
+            &mut is_cancelled,
+        )
+        .map_err(|error| {
+            map_finesse_route_witness_error(error, "wasm_finesse_representative_witness_failed")
+        })?
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_representative_witness_missing",
+        ))?;
+    if witness.total_cost() != expected_cost {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_representative_witness_cost_mismatch",
+        ));
+    }
+    witness_span.finish(witness.inputs().len() as u64);
+    Ok(Some(FinesseRepresentativeWitness::new(
+        policy,
+        Some(solution_key.clone()),
+        class
+            .pattern_ids()
+            .iter()
+            .map(|pattern| pattern.index())
+            .collect(),
+        class.queue().to_vec(),
+        witness.total_cost(),
+        witness
+            .inputs()
+            .iter()
+            .copied()
+            .map(FinesseReportInput::from)
+            .collect(),
+        witness
+            .placements()
+            .iter()
+            .copied()
+            .map(crate::FinesseReportPlacement::from)
+            .collect(),
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn pattern_representative_witness(
+    policy: &'static str,
+    selection: FinesseRepresentativeSelection,
+    languages: &[(String, CostedGeometryLanguage)],
+    classes: &QueueClassSet,
+    initial_hold: Option<PieceKind>,
+    hold_enabled: bool,
+    terminal_hold_release: bool,
+    spawn_profile: SpawnProfile,
+    kick_profile: &KickTableProfile,
+    control: &ExecutionControl,
+) -> Result<Option<FinesseRepresentativeWitness>, WasmExactSearchError> {
+    pattern_representative_witness_with_cancel(
+        policy,
+        selection,
+        languages,
+        classes,
+        initial_hold,
+        hold_enabled,
+        terminal_hold_release,
+        spawn_profile,
+        kick_profile,
+        || control.is_cancelled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pattern_representative_witness_with_cancel(
+    policy: &'static str,
+    selection: FinesseRepresentativeSelection,
+    languages: &[(String, CostedGeometryLanguage)],
+    classes: &QueueClassSet,
+    initial_hold: Option<PieceKind>,
+    hold_enabled: bool,
+    terminal_hold_release: bool,
+    spawn_profile: SpawnProfile,
+    kick_profile: &KickTableProfile,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<Option<FinesseRepresentativeWitness>, WasmExactSearchError> {
+    ensure_finesse_not_cancelled_with(&mut is_cancelled)?;
+    let (solution_key, language) =
+        languages
+            .get(selection.solution_index)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_representative_solution_missing",
+            ))?;
+    let class = classes.classes().get(selection.class_index).ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_finesse_representative_queue_missing"),
+    )?;
+    let evaluator = QueueClassProductEvaluator::new(language)
+        .with_hold_enabled(hold_enabled)
+        .with_terminal_hold_release_enabled(terminal_hold_release);
+    let witness_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseWitness);
+    let witness = match policy {
+        "oracle" => evaluator.replay_fixed_queue_witness_with_cancel(
+            class.queue(),
+            initial_hold,
+            spawn_profile,
+            kick_profile,
+            &mut is_cancelled,
+        ),
+        "visible-7" => evaluator.replay_visible_seven_class_witness_with_cancel(
+            classes,
+            initial_hold,
+            selection.class_index,
+            spawn_profile,
+            kick_profile,
+            &mut is_cancelled,
+        ),
+        _ => unreachable!("finesse policy is selected internally"),
+    }
+    .map_err(|error| {
+        map_finesse_route_witness_error(error, "wasm_finesse_representative_witness_failed")
+    })?
+    .ok_or(WasmExactSearchError::InvalidProblem(
+        "wasm_finesse_representative_witness_missing",
+    ))?;
+    if witness.total_cost() != selection.expected_cost {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_representative_witness_cost_mismatch",
+        ));
+    }
+    witness_span.finish(witness.inputs().len() as u64);
+    Ok(Some(FinesseRepresentativeWitness::new(
+        policy,
+        Some(solution_key.clone()),
+        class
+            .pattern_ids()
+            .iter()
+            .map(|pattern| pattern.index())
+            .collect(),
+        class.queue().to_vec(),
+        witness.total_cost(),
+        witness
+            .inputs()
+            .iter()
+            .copied()
+            .map(FinesseReportInput::from)
+            .collect(),
+        witness
+            .placements()
+            .iter()
+            .copied()
+            .map(crate::FinesseReportPlacement::from)
+            .collect(),
+    )))
+}
+
+pub(super) fn costed_finesse_language(
+    prepared: &PreparedFinesseLanguage,
+) -> Result<CostedGeometryLanguage, WasmExactSearchError> {
+    let mut nodes = Vec::new();
+    nodes.try_reserve_exact(prepared.nodes.len()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_finesse_costed_node_storage_unavailable")
+    })?;
+    for node in &prepared.nodes {
+        let start = usize::try_from(node.edge_start)
+            .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_edge_range_invalid"))?;
+        let count = usize::try_from(node.edge_count)
+            .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_edge_range_invalid"))?;
+        let end = start
+            .checked_add(count)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_edge_range_invalid",
+            ))?;
+        let source_edges =
+            prepared
+                .edges
+                .get(start..end)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_edge_range_invalid",
+                ))?;
+        let mut edges = Vec::new();
+        edges.try_reserve_exact(source_edges.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_costed_edge_storage_unavailable")
+        })?;
+        edges.extend(source_edges.iter().map(|edge| {
+            let mut converted = CostedGeometryEdge::new(
+                edge.piece,
+                GeometryNodeId::new(edge.child),
+                edge.cost,
+                edge.transition_order,
+            )
+            .with_action_key(edge.action_key);
+            if let Some(evidence) = edge.terminal_evidence {
+                converted = converted.with_terminal_evidence(evidence);
+            }
+            converted
+        }));
+        let mut converted = GeometryLanguageNode::new(u16::from(node.depth), node.accepting, edges);
+        if let Some(source_board) = node.source_board {
+            converted = converted.with_source_board(source_board);
+        }
+        nodes.push(converted);
+    }
+    CostedGeometryLanguage::new(GeometryNodeId::new(prepared.root), nodes)
+        .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_costed_language_invalid"))
+}
+
+fn evaluate_finesse_policy(
+    policy: &'static str,
+    languages: &[(String, CostedGeometryLanguage)],
+    classes: &QueueClassSet,
+    fixed_queue: bool,
+    initial_hold: Option<PieceKind>,
+    hold_enabled: bool,
+    terminal_hold_release: bool,
+    control: &ExecutionControl,
+) -> Result<EvaluatedFinessePolicy, WasmExactSearchError> {
+    let product_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseProductDp);
+    let mut solutions = Vec::new();
+    solutions.try_reserve_exact(languages.len()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_finesse_solution_cost_storage_unavailable")
+    })?;
+    for (solution_key, language) in languages {
+        ensure_finesse_not_cancelled(control)?;
+        let evaluator = QueueClassProductEvaluator::new(language)
+            .with_hold_enabled(hold_enabled)
+            .with_terminal_hold_release_enabled(terminal_hold_release);
+        let costs = finesse_policy_costs(
+            &evaluator,
+            policy,
+            classes,
+            fixed_queue,
+            initial_hold,
+            control,
+            "wasm_finesse_policy_evaluation_failed",
+        )?;
+        solutions.push((solution_key.clone(), costs));
+    }
+    let overall_costs = if languages.is_empty() {
+        QueueCostTable::unreachable(classes.classes().len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_overall_cost_storage_unavailable")
+        })?
+    } else {
+        ensure_finesse_not_cancelled(control)?;
+        let references = languages
+            .iter()
+            .map(|(_, language)| language)
+            .collect::<Vec<_>>();
+        let union = union_costed_geometry_languages(&references).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_overall_union_failed")
+        })?;
+        let evaluator = QueueClassProductEvaluator::new(&union)
+            .with_hold_enabled(hold_enabled)
+            .with_terminal_hold_release_enabled(terminal_hold_release);
+        finesse_policy_costs(
+            &evaluator,
+            policy,
+            classes,
+            fixed_queue,
+            initial_hold,
+            control,
+            "wasm_finesse_overall_policy_evaluation_failed",
+        )?
+    };
+    product_span
+        .finish((languages.len().saturating_add(1)).saturating_mul(classes.classes().len()) as u64);
+
+    let aggregation_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseAggregation);
+    let mut solution_averages = Vec::new();
+    solution_averages
+        .try_reserve_exact(solutions.len())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_average_storage_unavailable")
+        })?;
+    for (solution_key, costs) in &solutions {
+        ensure_finesse_not_cancelled(control)?;
+        let aggregation = aggregate_unique_queue_costs(classes, costs).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_solution_aggregation_failed")
+        })?;
+        solution_averages.push(FinesseSolutionAverage::new(
+            solution_key,
+            finesse_average_text(aggregation.conditional_mean_inputs),
+            aggregation.complete,
+        ));
+    }
+    let aggregation = aggregate_unique_queue_costs(classes, &overall_costs).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_finesse_overall_aggregation_failed")
+    })?;
+    let mut representative = None;
+    for (solution_index, (_, costs)) in solutions.iter().enumerate() {
+        for class_index in 0..classes.classes().len() {
+            let Some(expected_cost) = costs.get(class_index).flatten() else {
+                continue;
+            };
+            let candidate = FinesseRepresentativeSelection {
+                solution_index,
+                class_index,
+                expected_cost,
+            };
+            if representative
+                .as_ref()
+                .is_none_or(|current: &FinesseRepresentativeSelection| {
+                    (
+                        candidate.expected_cost,
+                        candidate.solution_index,
+                        candidate.class_index,
+                    ) < (
+                        current.expected_cost,
+                        current.solution_index,
+                        current.class_index,
+                    )
+                })
+            {
+                representative = Some(candidate);
+            }
+        }
+    }
+    let report = FinessePolicyResult::new(
+        policy,
+        finesse_average_text(aggregation.conditional_mean_inputs),
+        aggregation.complete,
+        solution_averages,
+    )
+    .with_success_summary(
+        aggregation.successful_probability_mass.to_string(),
+        aggregation.successful_unique_queue_count,
+        aggregation.total_unique_queue_count,
+    );
+    aggregation_span.finish(solutions.len().saturating_add(1) as u64);
+    Ok(EvaluatedFinessePolicy {
+        report,
+        overall_costs,
+        aggregation,
+        representative,
+    })
+}
+
+pub(super) fn finesse_policy_costs(
+    evaluator: &QueueClassProductEvaluator<'_>,
+    policy: &'static str,
+    classes: &QueueClassSet,
+    fixed_queue: bool,
+    initial_hold: Option<PieceKind>,
+    control: &ExecutionControl,
+    fallback: &'static str,
+) -> Result<QueueCostTable, WasmExactSearchError> {
+    if fixed_queue {
+        let [class] = classes.classes() else {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_fixed_queue_class_mismatch",
+            ));
+        };
+        let mut costs = QueueCostTable::unreachable(1)
+            .map_err(|error| map_finesse_product_error(error, fallback))?;
+        if let Some(cost) = evaluator
+            .fixed_queue_cost_with_cancel(class.queue(), initial_hold, || control.is_cancelled())
+            .map_err(|error| map_finesse_product_error(error, fallback))?
+        {
+            costs
+                .set_min(0, cost)
+                .map_err(|error| map_finesse_product_error(error, fallback))?;
+        }
+        return Ok(costs);
+    }
+    match policy {
+        "oracle" => evaluator
+            .oracle_with_cancel(classes, initial_hold, || control.is_cancelled())
+            .map(|result| result.costs),
+        "visible-7" => evaluator
+            .visible_seven_with_cancel(classes, initial_hold, || control.is_cancelled())
+            .map(|result| result.costs),
+        _ => unreachable!("finesse policy is selected internally"),
+    }
+    .map_err(|error| map_finesse_product_error(error, fallback))
+}
+
+fn ensure_finesse_not_cancelled(control: &ExecutionControl) -> Result<(), WasmExactSearchError> {
+    ensure_finesse_not_cancelled_with(&mut || control.is_cancelled())
+}
+
+fn ensure_finesse_not_cancelled_with(
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), WasmExactSearchError> {
+    if is_cancelled() {
+        Err(WasmExactSearchError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_finesse_product_error(
+    error: GeometryLanguageError,
+    fallback: &'static str,
+) -> WasmExactSearchError {
+    match error {
+        GeometryLanguageError::Cancelled => WasmExactSearchError::Cancelled,
+        _ => WasmExactSearchError::InvalidProblem(fallback),
+    }
+}
+
+fn map_finesse_route_witness_error(
+    error: FinesseRouteWitnessError,
+    fallback: &'static str,
+) -> WasmExactSearchError {
+    match error {
+        FinesseRouteWitnessError::Geometry(GeometryLanguageError::Cancelled)
+        | FinesseRouteWitnessError::Movement(FinesseError::Cancelled) => {
+            WasmExactSearchError::Cancelled
+        }
+        _ => WasmExactSearchError::InvalidProblem(fallback),
+    }
+}
+
+fn finesse_average_text(average: Option<f64>) -> String {
+    average.map_or_else(|| "not-calculated".to_owned(), |value| value.to_string())
+}
+
+pub(super) fn finesse_queue_classes_for_problem(
+    problem: &SearchProblem,
+    evaluation_complete: bool,
+) -> Result<QueueClassSet, WasmExactSearchError> {
+    let universe = problem.piece_source().materialized_universe().ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+    )?;
+    let initial_cursor = usize::from(problem.initial_hold().cursor());
+    let mut patterns = Vec::new();
+    patterns
+        .try_reserve_exact(universe.pattern_count())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_queue_storage_unavailable")
+        })?;
+    for pattern_index in 0..universe.pattern_count() {
+        let mut sequence = universe.sequence_at(pattern_index).into_owned();
+        if problem.supply().projects_standard_bag_lookahead() {
+            append_projected_finesse_bag_piece(&mut sequence)?;
+        }
+        let queue = sequence
+            .get(initial_cursor..)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_initial_cursor_out_of_range",
+            ))?;
+        patterns.push(QueuePattern::new(
+            PatternId::new(pattern_index),
+            queue.to_vec(),
+            universe.weight_at(pattern_index),
+        ));
+    }
+    QueueClassSet::group(&patterns, universe.complete() && evaluation_complete)
+        .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_queue_grouping_failed"))
+}
+
+fn append_projected_finesse_bag_piece(
+    sequence: &mut Vec<PieceKind>,
+) -> Result<(), WasmExactSearchError> {
+    if sequence.len() % 7 != 6 {
+        return Ok(());
+    }
+    let mut present = 0_u8;
+    for piece in &sequence[sequence.len() - 6..] {
+        present |= 1_u8 << finesse_piece_index(*piece);
+    }
+    let missing = (!present) & 0x7f;
+    if missing.count_ones() != 1 {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_projected_bag_piece_invalid",
+        ));
+    }
+    sequence.push(PieceKind::STANDARD_TETROMINOES[missing.trailing_zeros() as usize]);
+    Ok(())
+}
+
+const fn finesse_piece_index(piece: PieceKind) -> u8 {
+    match piece {
+        PieceKind::I => 0,
+        PieceKind::O => 1,
+        PieceKind::T => 2,
+        PieceKind::S => 3,
+        PieceKind::Z => 4,
+        PieceKind::J => 5,
+        PieceKind::L => 6,
     }
 }
 
@@ -1773,5 +2950,740 @@ fn merge_normalized_solution_coverages(
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())
+}
+
+#[cfg(test)]
+mod finesse_integration_tests {
+    use clearra_core_domain::{
+        execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+        piece::rotation::RotationState,
+        probability::probability_value::ProbabilityValue,
+    };
+    use clearra_finesse::FinesseBoard;
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_problem::{BuildProbabilityQuery, FinessePlacement, ProblemCompiler};
+    use clearra_supply::queue::{
+        fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
+    };
+
+    use super::*;
+    use crate::backend::wasm_cpu::buildup::{PreparedFinesseEdge, PreparedFinesseNode};
+
+    fn probability(value: f64) -> ProbabilityValue {
+        ProbabilityValue::new(value).expect("test probability is valid")
+    }
+
+    fn one_piece_language(piece: PieceKind, cost: u32) -> PreparedFinesseLanguage {
+        let source_board = FinesseBoard::new(
+            Board64Layout::new(BoardSize::new(10, 4).expect("test board size"))
+                .expect("test board layout"),
+            0,
+        )
+        .expect("empty finesse board");
+        PreparedFinesseLanguage {
+            nodes: vec![
+                PreparedFinesseNode {
+                    edge_start: 0,
+                    edge_count: 1,
+                    depth: 0,
+                    accepting: false,
+                    source_board: Some(source_board),
+                },
+                PreparedFinesseNode {
+                    edge_start: 1,
+                    edge_count: 0,
+                    depth: 1,
+                    accepting: true,
+                    source_board: None,
+                },
+            ],
+            edges: vec![PreparedFinesseEdge {
+                child: 1,
+                piece,
+                cost,
+                transition_order: 7,
+                action_key: clearra_finesse::GeometryActionKey::new(
+                    piece,
+                    clearra_core_domain::piece::rotation::RotationState::Zero,
+                    if piece == PieceKind::I && cost == 3 {
+                        1
+                    } else {
+                        0
+                    },
+                    0,
+                ),
+                terminal_evidence: None,
+            }],
+            root: 0,
+        }
+    }
+
+    #[test]
+    fn representative_witness_cancellation_maps_to_executor_cancellation() {
+        assert_eq!(
+            map_finesse_route_witness_error(
+                FinesseRouteWitnessError::Geometry(GeometryLanguageError::Cancelled),
+                "fallback",
+            ),
+            WasmExactSearchError::Cancelled
+        );
+        assert_eq!(
+            map_finesse_route_witness_error(
+                FinesseRouteWitnessError::Movement(FinesseError::Cancelled),
+                "fallback",
+            ),
+            WasmExactSearchError::Cancelled
+        );
+    }
+
+    #[test]
+    fn search_and_score_representative_helpers_forward_cancellation_to_every_policy() {
+        let language = costed_finesse_language(&one_piece_language(PieceKind::O, 1)).unwrap();
+        let languages = vec![("solution".to_owned(), language)];
+        let classes = QueueClassSet::group(
+            &[QueuePattern::new(
+                PatternId::new(0),
+                vec![PieceKind::O],
+                ProbabilityValue::ONE,
+            )],
+            false,
+        )
+        .unwrap();
+        let kicks = clearra_rules::kicks::NoKick::profile();
+
+        // Search and Score share these fixed/pattern representative helpers.
+        // Cancel after entering the lower product/replay API, rather than at
+        // the helper's initial boundary, so closure forwarding is exercised.
+        for policy in ["oracle", "visible-7"] {
+            let mut checks = 0;
+            assert_eq!(
+                fixed_queue_representative_witness_with_cancel(
+                    policy,
+                    &languages,
+                    &classes,
+                    None,
+                    false,
+                    false,
+                    SpawnProfile::new(0, 4),
+                    &kicks,
+                    || {
+                        checks += 1;
+                        checks == 3
+                    },
+                ),
+                Err(WasmExactSearchError::Cancelled)
+            );
+            assert_eq!(checks, 3);
+        }
+
+        for policy in ["oracle", "visible-7"] {
+            let mut checks = 0;
+            assert_eq!(
+                pattern_representative_witness_with_cancel(
+                    policy,
+                    FinesseRepresentativeSelection {
+                        solution_index: 0,
+                        class_index: 0,
+                        expected_cost: 1,
+                    },
+                    &languages,
+                    &classes,
+                    None,
+                    false,
+                    false,
+                    SpawnProfile::new(0, 4),
+                    &kicks,
+                    || {
+                        checks += 1;
+                        checks == 2
+                    },
+                ),
+                Err(WasmExactSearchError::Cancelled)
+            );
+            assert_eq!(checks, 2);
+        }
+    }
+
+    #[test]
+    fn prepared_language_keeps_cost_and_transition_order() {
+        let language = costed_finesse_language(&one_piece_language(PieceKind::T, 4)).unwrap();
+        let edge = language.node(language.root()).unwrap().edges()[0];
+
+        assert_eq!(edge.piece(), PieceKind::T);
+        assert_eq!(edge.input_cost(), 4);
+        assert_eq!(edge.transition_order(), 7);
+        assert!(language.node(edge.child()).unwrap().accepting());
+    }
+
+    #[test]
+    fn compact_material_keeps_same_occupancy_rotation_alternatives() {
+        let alternative = |rotation, cost| {
+            CostedGeometryLanguage::new(
+                GeometryNodeId::new(0),
+                vec![
+                    GeometryLanguageNode::new(
+                        0,
+                        false,
+                        vec![CostedGeometryEdge::new(
+                            PieceKind::O,
+                            GeometryNodeId::new(1),
+                            cost,
+                            0,
+                        )
+                        .with_action_key(
+                            clearra_finesse::GeometryActionKey::new(PieceKind::O, rotation, 4, 0),
+                        )],
+                    ),
+                    GeometryLanguageNode::new(1, true, Vec::<CostedGeometryEdge>::new()),
+                ],
+            )
+            .unwrap()
+        };
+        let mut languages = vec![
+            (
+                "same-occupancy".to_owned(),
+                alternative(RotationState::Zero, 4),
+            ),
+            (
+                "same-occupancy".to_owned(),
+                alternative(RotationState::Right, 2),
+            ),
+        ];
+        sort_finesse_language_alternatives(&mut languages);
+        assert_eq!(languages.len(), 2);
+
+        let references = languages
+            .iter()
+            .map(|(_, language)| language)
+            .collect::<Vec<_>>();
+        let union = union_costed_geometry_languages(&references).unwrap();
+        assert_eq!(
+            QueueClassProductEvaluator::new(&union)
+                .fixed_queue_cost(&[PieceKind::O], None)
+                .unwrap(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn policy_report_keeps_raw_success_mass_and_universe_completeness() {
+        let language = costed_finesse_language(&one_piece_language(PieceKind::I, 3)).unwrap();
+        let classes = QueueClassSet::group(
+            &[
+                QueuePattern::new(PatternId::new(0), vec![PieceKind::I], probability(0.25)),
+                QueuePattern::new(PatternId::new(1), vec![PieceKind::O], probability(0.5)),
+            ],
+            true,
+        )
+        .unwrap();
+
+        let evaluated = evaluate_finesse_policy(
+            "oracle",
+            &[("solution".to_owned(), language)],
+            &classes,
+            false,
+            None,
+            false,
+            false,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert!(evaluated.report.complete());
+        assert_eq!(evaluated.report.overall_average_inputs(), "3");
+        assert_eq!(evaluated.report.successful_probability_mass(), Some("0.25"));
+        assert_eq!(evaluated.report.successful_unique_queue_count(), Some(1));
+        assert_eq!(evaluated.report.total_unique_queue_count(), Some(2));
+    }
+
+    #[test]
+    fn one_materialized_pattern_class_has_a_representative_but_no_exact_total() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("[I]!", 6).expect("single-queue pattern"),
+            ),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        assert!(problem.piece_source().fixed_sequence().is_none());
+        let language = costed_finesse_language(&one_piece_language(PieceKind::I, 3)).unwrap();
+        let material =
+            FinesseSearchMaterial::new(&problem, vec![("solution".to_owned(), language)], false)
+                .unwrap();
+
+        let report = build_finesse_report(
+            vec![material],
+            FinessePatternKnowledge::Oracle,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert!(!report.complete());
+        assert_eq!(report.exact_total_inputs(), None);
+        let witness = report
+            .representative_witness()
+            .expect("a successful materialized pattern has one representative");
+        assert_eq!(witness.policy(), "oracle");
+        assert_eq!(witness.solution_key(), Some("solution"));
+        assert_eq!(witness.pattern_ids(), [0]);
+        assert_eq!(witness.queue(), [PieceKind::I]);
+        assert_eq!(witness.total_inputs(), 3);
+        assert_eq!(report.policy_results()[0].overall_average_inputs(), "3");
+    }
+
+    #[test]
+    fn visible_only_report_keeps_its_oracle_comparison_metrics() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("[I]!", 6).expect("single-queue pattern"),
+            ),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let language = costed_finesse_language(&one_piece_language(PieceKind::I, 3)).unwrap();
+        let material =
+            FinesseSearchMaterial::new(&problem, vec![("solution".to_owned(), language)], true)
+                .unwrap();
+
+        let report = build_finesse_report(
+            vec![material],
+            FinessePatternKnowledge::VisibleSeven,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.policy_results().len(), 1);
+        let visible = &report.policy_results()[0];
+        assert_eq!(visible.policy(), "visible-7");
+        assert_eq!(visible.oracle_on_covered_average_inputs(), Some("3"));
+        assert_eq!(visible.information_penalty_inputs(), Some("0"));
+        assert_eq!(visible.success_probability_gap(), Some("0"));
+        let witness = report
+            .representative_witness()
+            .expect("visible-only pattern replay remains available");
+        assert_eq!(witness.policy(), "visible-7");
+        assert_eq!(witness.total_inputs(), 3);
+    }
+
+    #[test]
+    fn build_policy_evaluator_honors_no_hold() {
+        let language = costed_finesse_language(&one_piece_language(PieceKind::O, 2)).unwrap();
+        let classes = QueueClassSet::group(
+            &[QueuePattern::new(
+                PatternId::new(0),
+                vec![PieceKind::I, PieceKind::O],
+                ProbabilityValue::ONE,
+            )],
+            true,
+        )
+        .unwrap();
+
+        let with_hold = evaluate_finesse_policy(
+            "oracle",
+            &[("solution".to_owned(), language.clone())],
+            &classes,
+            true,
+            None,
+            true,
+            false,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+        let without_hold = evaluate_finesse_policy(
+            "oracle",
+            &[("solution".to_owned(), language)],
+            &classes,
+            true,
+            None,
+            false,
+            false,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(with_hold.report.overall_average_inputs(), "3");
+        assert_eq!(
+            without_hold.report.overall_average_inputs(),
+            "not-calculated"
+        );
+        assert_eq!(without_hold.report.successful_unique_queue_count(), Some(0));
+    }
+
+    #[test]
+    fn score_request_skips_build_sessions_and_horizontal_mirror() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .unwrap()
+            .with_horizontal_mirror_included(true);
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        )])
+        .unwrap();
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge: FinessePatternKnowledge::Both,
+                request: score,
+            },
+        )
+        .unwrap();
+
+        assert!(session.pending.is_empty());
+        assert!(!session.mirror_included);
+        assert!(!session.mirror_distinct);
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let result = match session.advance(1, &control).unwrap() {
+            BuildProbabilityAdvance::Completed(result) => result,
+            BuildProbabilityAdvance::Pending | BuildProbabilityAdvance::Cancelled => {
+                panic!("score is one serial execution")
+            }
+        };
+
+        assert_eq!(result.field("search_kind"), Some("finesse-score"));
+        assert!(result.field("packing_candidate_count").is_none());
+        assert_eq!(
+            result
+                .finesse_report()
+                .and_then(FinesseReport::exact_total_inputs),
+            Some("1")
+        );
+        let witness = result
+            .finesse_report()
+            .and_then(FinesseReport::representative_witness)
+            .unwrap();
+        assert_eq!(witness.policy(), "oracle");
+        assert_eq!(witness.solution_key(), Some("given-operation-sequence"));
+        assert_eq!(witness.queue(), [PieceKind::O]);
+        assert_eq!(witness.total_inputs(), 1);
+        assert_eq!(witness.input_sequence(), [FinesseReportInput::HardDrop]);
+        assert_eq!(witness.placements().len(), 1);
+        assert_eq!(witness.placements()[0].piece(), PieceKind::O);
+        assert_eq!(witness.placements()[0].rotation(), RotationState::Zero);
+        assert_eq!(
+            (witness.placements()[0].x(), witness.placements()[0].y()),
+            (4, 0)
+        );
+        assert!(session.advance(1, &control).is_err());
+    }
+
+    #[test]
+    fn score_with_one_pattern_queue_reports_an_average_and_representative_witness() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("[O]!", 6).expect("single-queue pattern"),
+            ),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        assert!(problem.piece_source().fixed_sequence().is_none());
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4]).unwrap();
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        )])
+        .unwrap();
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge: FinessePatternKnowledge::VisibleSeven,
+                request: score,
+            },
+        )
+        .unwrap();
+        let result = match session.advance(1, &ExecutionControl::default()).unwrap() {
+            BuildProbabilityAdvance::Completed(result) => result,
+            BuildProbabilityAdvance::Pending | BuildProbabilityAdvance::Cancelled => {
+                panic!("score is one serial execution")
+            }
+        };
+        let report = result.finesse_report().expect("score report");
+
+        assert_eq!(report.exact_total_inputs(), None);
+        let witness = report
+            .representative_witness()
+            .expect("a successful score pattern has one representative");
+        assert_eq!(witness.policy(), "visible-7");
+        assert_eq!(witness.solution_key(), Some("given-operation-sequence"));
+        assert_eq!(witness.pattern_ids(), [0]);
+        assert_eq!(witness.queue(), [PieceKind::O]);
+        assert_eq!(witness.total_inputs(), 1);
+        assert_eq!(witness.input_sequence(), [FinesseReportInput::HardDrop]);
+        assert_eq!(witness.placements().len(), 1);
+        assert_eq!(witness.placements()[0].piece(), PieceKind::O);
+        assert_eq!(report.policy_results()[0].overall_average_inputs(), "1");
+    }
+
+    #[test]
+    fn finesse_score_uses_the_precleared_initial_field_and_original_spawn_height() {
+        let base_mask = 0x3ff_u64;
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, base_mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&core).unwrap();
+        let field =
+            BuildProbabilityField::from_words_preserving_height(4, [base_mask, 0, 0, 0], [0; 4])
+                .unwrap();
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            1,
+        )])
+        .unwrap();
+        let query = BuildProbabilityQuery::new(core, field).with_finesse_score(score);
+        assert_eq!(query.field().height(), 4);
+        assert!(query.field().base().is_empty());
+        assert_eq!(query.finesse_score().unwrap().initial_cleared_rows(), 1);
+
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            query.field(),
+            query.aggregation(),
+            query.finesse_request().clone(),
+        )
+        .unwrap();
+        let result = match session.advance(1, &ExecutionControl::default()).unwrap() {
+            BuildProbabilityAdvance::Completed(result) => result,
+            _ => panic!("score completes serially"),
+        };
+
+        assert_eq!(
+            result.field("finesse_initial_board_words"),
+            Some("0x0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        assert_eq!(result.path_steps().len(), 1);
+        assert_eq!(
+            (result.path_steps()[0].x(), result.path_steps()[0].y()),
+            (4, 0)
+        );
+    }
+
+    #[test]
+    fn cancelled_score_keeps_the_serial_request_pending() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4]).unwrap();
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        )])
+        .unwrap();
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge: FinessePatternKnowledge::Oracle,
+                request: score,
+            },
+        )
+        .unwrap();
+        let token = ExecutionCancellationToken::new();
+        token.handle().cancel();
+        let control = ExecutionControl::new(token);
+
+        assert!(matches!(
+            session.advance(1, &control).unwrap(),
+            BuildProbabilityAdvance::Cancelled
+        ));
+        assert!(session.finesse_score.is_some());
+        assert!(!session.finished);
+    }
+
+    #[test]
+    fn score_with_no_successful_queue_keeps_a_report_but_no_path_artifact() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4]).unwrap();
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        )])
+        .unwrap();
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge: FinessePatternKnowledge::Oracle,
+                request: score,
+            },
+        )
+        .unwrap();
+        let result = match session.advance(1, &ExecutionControl::default()).unwrap() {
+            BuildProbabilityAdvance::Completed(result) => result,
+            _ => panic!("score completes serially"),
+        };
+
+        assert!(result.path_steps().is_empty());
+        let report = result
+            .finesse_report()
+            .expect("typed failure report remains");
+        assert_eq!(report.exact_total_inputs(), None);
+        assert_eq!(report.representative_witness(), None);
+        assert_eq!(
+            report.policy_results()[0].successful_unique_queue_count(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn compact_and_extended_fixed_queue_searches_report_the_same_exact_cost() {
+        let run = |height: u8, base_mask: u64| {
+            let target_mask = (1_u64 << 4) | (1_u64 << 5) | (1_u64 << 14) | (1_u64 << 15);
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(u16::from(height), base_mask),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+                PieceWindow::new(1),
+            )
+            .with_exact_pieces(Some(1));
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let field = BuildProbabilityField::from_words(
+                height,
+                [base_mask, 0, 0, 0],
+                [target_mask, 0, 0, 0],
+            )
+            .unwrap();
+            assert_eq!(field.height(), height);
+            let mut session = WasmBuildProbabilitySession::new(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                BuildProbabilityFinesseRequest::Search {
+                    pattern_knowledge: FinessePatternKnowledge::Oracle,
+                },
+            )
+            .unwrap();
+            let control = ExecutionControl::new(ExecutionCancellationToken::new());
+            loop {
+                match session.advance(1_024, &control).unwrap() {
+                    BuildProbabilityAdvance::Pending => {}
+                    BuildProbabilityAdvance::Completed(result) => break result,
+                    BuildProbabilityAdvance::Cancelled => panic!("test search was not cancelled"),
+                }
+            }
+        };
+        let compact = run(6, 1_u64 << 50);
+        let extended = run(7, 1_u64 << 60);
+
+        assert_eq!(extended.field("board_height"), Some("7"));
+        let exact_cost = |result: &CoreExecutionResult| {
+            result
+                .finesse_report()
+                .and_then(FinesseReport::exact_total_inputs)
+                .map(str::to_owned)
+        };
+        assert_eq!(exact_cost(&compact).as_deref(), Some("1"));
+        assert_eq!(exact_cost(&extended), exact_cost(&compact));
+    }
+
+    #[test]
+    fn finesse_search_preclears_initial_rows_in_compact_and_extended_fields() {
+        let run = |height: u8| {
+            let base_mask = 0x3ff_u64;
+            let target_mask = (1_u64 << 14) | (1_u64 << 15) | (1_u64 << 24) | (1_u64 << 25);
+            let core = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(u16::from(height), base_mask),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+                PieceWindow::new(1),
+            )
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(1));
+            let problem = ProblemCompiler::compile_scenario_pc(&core).unwrap();
+            let field = BuildProbabilityField::from_words_preserving_height(
+                height,
+                [base_mask, 0, 0, 0],
+                [target_mask, 0, 0, 0],
+            )
+            .unwrap();
+            let query = BuildProbabilityQuery::new(core, field)
+                .with_finesse(FinesseMetric::Inputs, FinessePatternKnowledge::Oracle);
+            assert_eq!(query.field().height(), height);
+            assert!(query.field().base().is_empty());
+            assert_eq!(query.field().target_words(), [0xc030, 0, 0, 0]);
+
+            let mut session = WasmBuildProbabilitySession::new(
+                &problem,
+                query.field(),
+                query.aggregation(),
+                query.finesse_request().clone(),
+            )
+            .unwrap();
+            loop {
+                match session
+                    .advance(1_024, &ExecutionControl::default())
+                    .unwrap()
+                {
+                    BuildProbabilityAdvance::Pending => {}
+                    BuildProbabilityAdvance::Completed(result) => break result,
+                    BuildProbabilityAdvance::Cancelled => panic!("test search was not cancelled"),
+                }
+            }
+        };
+
+        for height in [4, 7] {
+            let result = run(height);
+            if height <= 6 {
+                assert_eq!(result.field("build_base_mask"), Some("0"));
+                assert_eq!(result.field("build_target_cells_mask"), Some("49200"));
+                assert_eq!(result.field("build_final_board_mask"), Some("49200"));
+            } else {
+                assert_eq!(result.field("build_base_mask"), Some("0x0"));
+                assert_eq!(result.field("build_target_cells_mask"), Some("0xc030"));
+                assert_eq!(result.field("build_final_board_mask"), Some("0xc030"));
+                assert_eq!(result.field("board_storage"), Some("board256-canonical"));
+            }
+            let witness = result
+                .finesse_report()
+                .and_then(FinesseReport::representative_witness)
+                .expect("fixed queue has an exact representative");
+            assert_eq!(witness.total_inputs(), 1);
+            assert_eq!(witness.placements().len(), 1);
+            assert_eq!(
+                (witness.placements()[0].x(), witness.placements()[0].y()),
+                (4, 0)
+            );
+        }
+    }
 }
 // SRP rationale: this module has one behavior-level change reason: exact pattern-specific build-probability evaluation.

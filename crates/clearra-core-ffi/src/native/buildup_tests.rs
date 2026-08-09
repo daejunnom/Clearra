@@ -77,15 +77,18 @@ mod case_count_zero_solution_report_is_complete {
 
 #[cfg(feature = "native-c-core")]
 mod case_native_buildup_exports_actual_first_success_kick_evidence {
-    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionCancellationToken, piece::piece_kind::PieceKind,
+    };
     use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
     use clearra_problem::ProblemCompiler;
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use crate::{
         problem::{C_PIECE_O, C_PIECE_S},
-        CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits, CPackingCandidate,
-        CPackingOperation, CoreCNative, C_BUILDUP_STATUS_OK,
+        BuildUpGeometryTransitionMode, CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits,
+        CPackingCandidate, CPackingOperation, CoreCNative, NativeBuildUpWorkspace,
+        C_BUILDUP_STATUS_OK,
     };
 
     #[test]
@@ -155,5 +158,115 @@ mod case_native_buildup_exports_actual_first_success_kick_evidence {
             0
         );
         assert_eq!(outcome.buffer.variants[0].trace_completeness_flags, 0);
+
+        // Geometry v2 intentionally transports the semantic lock target, not
+        // scoring evidence. Tie that target to the independently exported
+        // first-success kick trace so the adapter boundary cannot drift in
+        // rotation, coordinates, or mask.
+        let mut workspace = NativeBuildUpWorkspace::new();
+        let geometry = workspace
+            .export_geometry_language_v2_with_cancellation(
+                &buildup,
+                BuildUpGeometryTransitionMode::GeometryOnly,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("prepared geometry v2");
+        let kick_target = geometry
+            .nodes()
+            .iter()
+            .filter(|node| node.depth() == 1)
+            .flat_map(|node| {
+                let start = node.first_edge();
+                let end = start + node.edge_count();
+                geometry.edges()[start..end].iter()
+            })
+            .find(|edge| edge.operation_index() == 1)
+            .expect("depth-one S target is exported");
+        assert_eq!(kick_target.piece(), C_PIECE_S);
+        assert_eq!(kick_target.rotation(), evidence.to_rotation);
+        assert_eq!(i16::from(kick_target.x()), evidence.result_x);
+        assert_eq!(i16::from(kick_target.adjusted_y()), evidence.result_y);
+        assert_eq!(kick_target.target_mask(), s_mask);
+    }
+}
+
+#[cfg(feature = "native-c-core")]
+mod case_native_buildup_exports_prepared_geometry_language_v2 {
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionCancellationToken, piece::piece_kind::PieceKind,
+    };
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use crate::{
+        problem::C_PIECE_O, BuildUpGeometryTransitionMode, CBuildUpProblemBuilder,
+        CPackingCandidate, CPackingOperation, NativeBuildUpWorkspace,
+    };
+
+    #[test]
+    fn native_buildup_exports_prepared_geometry_language_v2() {
+        let first_o = 0x0c03u64;
+        let second_o = 0x300cu64;
+        let initial_mask = 0x0f_ffffu64 & !(first_o | second_o);
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, initial_mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O, PieceKind::O])),
+            PieceWindow::new(2),
+        )
+        .with_exact_pieces(Some(2))
+        .with_allow_hold(false);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+        let mut candidate = CPackingCandidate {
+            candidate_id: 7,
+            canonical_operation_set_id: 9,
+            operation_count: 2,
+            ..Default::default()
+        };
+        candidate.operations[0] = CPackingOperation {
+            piece: C_PIECE_O,
+            rotation: 0,
+            x: 0,
+            y: 0,
+            operation_id: 4,
+            required_deleted_row_mask: 0,
+            mask: first_o,
+        };
+        candidate.operations[1] = CPackingOperation {
+            piece: C_PIECE_O,
+            rotation: 0,
+            x: 2,
+            y: 0,
+            operation_id: 4,
+            required_deleted_row_mask: 0,
+            mask: second_o,
+        };
+        let buildup = CBuildUpProblemBuilder::from_packing_candidate(&problem, &candidate, 0, 0)
+            .expect("buildup");
+        let mut workspace = NativeBuildUpWorkspace::new();
+        let language = workspace
+            .export_geometry_language_v2_with_cancellation(
+                &buildup,
+                BuildUpGeometryTransitionMode::GeometryOnly,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("geometry v2");
+
+        assert!(language.complete());
+        assert_eq!(
+            language.transition_mode(),
+            BuildUpGeometryTransitionMode::GeometryOnly
+        );
+        assert_ne!(language.snapshot_id(), 0);
+        let root = language.nodes()[language.root_node_index()];
+        assert_eq!(root.board_mask(), initial_mask);
+        assert_eq!(root.remaining_operations(), 3);
+        assert_eq!(root.depth(), 0);
+        assert!(root.edge_count() > 0);
+        assert!(language.edges().iter().all(|edge| edge.target_mask() != 0));
+        assert!(language
+            .edges()
+            .iter()
+            .any(|edge| edge.cleared_lines() == 2 && edge.cleared_row_mask() == 3));
     }
 }

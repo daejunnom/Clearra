@@ -18,6 +18,7 @@ const NATIVE_COMMANDS = new Set([
   "damage",
   "spin-finder",
   "spin-structure",
+  "finesse",
 ]);
 const SFINDER_SEARCH_COMMANDS = new Set([
   "path",
@@ -55,6 +56,7 @@ const PARALLEL_SEARCH_COMMANDS = new Set([
   "damage",
   "spin-finder",
   "spin-structure",
+  "finesse",
 ]);
 
 /**
@@ -71,6 +73,13 @@ export function canonicalClearraOperationalCommand(value) {
       : [];
   const command = normalizedOperationalPart(tokens[0]);
   if (!command) return null;
+  if (command === "finesse") {
+    if (pathInput && tokens.length !== 2) return null;
+    const subcommand = normalizedOperationalPart(tokens[1]);
+    return subcommand === "search" || subcommand === "score"
+      ? `finesse.${subcommand}`
+      : null;
+  }
   if (NATIVE_COMMANDS.has(command)) {
     return !pathInput || tokens.length === 1 ? command : null;
   }
@@ -92,6 +101,7 @@ const FILE_OPTIONS = new Set([
   "--log-path",
   "--wgsl",
   "--kick-profile-json",
+  "--document",
   "-fp",
   "-pp",
   "-lp",
@@ -138,6 +148,9 @@ export function prepareClearraArguments(tokens, execution = {}) {
   const sfinderCommand = command === "sfinder"
     ? validateSfinderCommand(tokens[1])
     : null;
+  if (command === "finesse" && !["search", "score"].includes(tokens[1]?.toLowerCase())) {
+    throw new Error("Discord finesse calculations require a search or score subcommand.");
+  }
 
   const output = [command];
   for (let index = 1; index < tokens.length; index += 1) {

@@ -10,7 +10,9 @@ use clearra_forward_search::{
 use clearra_host_contract::{AppCommandKind, BackendReport};
 use clearra_pc_graph::request::OpeningPcSearchQuery;
 use clearra_problem::ProblemCompiler;
-use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
+};
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use crate::{
@@ -80,6 +82,7 @@ pub(crate) enum CooperativeSearchResponseKind {
     BuildProbability {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
     },
     Damage,
     SpinFinder,
@@ -237,10 +240,12 @@ impl AppContext {
             }
         };
         let session = match &response_kind {
-            CooperativeSearchResponseKind::BuildProbability { field, aggregation } => {
-                WasmBuildProbabilitySession::new(&problem, *field, *aggregation)
-                    .map(CooperativeSearchSession::BuildProbability)
-            }
+            CooperativeSearchResponseKind::BuildProbability {
+                field,
+                aggregation,
+                finesse,
+            } => WasmBuildProbabilitySession::new(&problem, *field, *aggregation, finesse.clone())
+                .map(CooperativeSearchSession::BuildProbability),
             _ => WasmCpuSearchSession::new(&problem).map(CooperativeSearchSession::Pc),
         };
         let session = match session {
@@ -448,10 +453,15 @@ pub(crate) fn compile_search_command(
             }
             let field = command.query().field();
             let aggregation = command.query().aggregation();
+            let finesse = command.query().finesse_request().clone();
             ProblemCompiler::compile_scenario_pc(command.query().core_query()).map(|problem| {
                 (
                     problem,
-                    CooperativeSearchResponseKind::BuildProbability { field, aggregation },
+                    CooperativeSearchResponseKind::BuildProbability {
+                        field,
+                        aggregation,
+                        finesse,
+                    },
                 )
             })
         }

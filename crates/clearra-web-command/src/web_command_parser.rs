@@ -1,5 +1,5 @@
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_forward_search::{
     ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery,
     ForwardSpinCategory, ForwardSpinLineRequirement, ForwardSpinTarget,
@@ -13,7 +13,10 @@ use clearra_pc_graph::request::{
     GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
     PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
 };
-use clearra_problem::BuildProbabilityAggregation;
+use clearra_problem::{
+    BuildProbabilityAggregation, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
+    FinesseScoreRequest,
+};
 use clearra_rules::profile::{
     builtin_rules::srs_plus,
     rule_profile::{RuleProfile, RuleProfileId},
@@ -83,6 +86,7 @@ impl WebCommandParser {
             "build-probability" => {
                 parse_build_probability_command(&tokens[cursor..], worker_hardware_limit.max(1))
             }
+            "finesse" => parse_finesse_command(&tokens[cursor..], worker_hardware_limit.max(1)),
             "setup-finder" | "setup" => {
                 parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1))
             }
@@ -102,6 +106,157 @@ impl WebCommandParser {
             )),
         }
     }
+}
+
+fn parse_finesse_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    let (mode, arguments) = tokens.split_first().ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "finesse requires search or score",
+        )
+    })?;
+    match mode.as_str() {
+        "search" => {
+            let mut forwarded = arguments.to_vec();
+            forwarded.extend([
+                "--finesse".to_owned(),
+                "inputs".to_owned(),
+                "--no-mirror".to_owned(),
+            ]);
+            parse_build_probability_command(&forwarded, worker_hardware_limit)
+        }
+        "score" => {
+            let mut forwarded = Vec::with_capacity(arguments.len() + 6);
+            let mut placements = None;
+            let mut saw_initial = false;
+            let mut cursor = 0usize;
+            while cursor < arguments.len() {
+                match arguments[cursor].as_str() {
+                    "--placements" => {
+                        if placements.is_some() {
+                            return Err(WebCommandError::new(
+                                WebCommandErrorCode::InvalidValue,
+                                "finesse score --placements may be specified only once",
+                            ));
+                        }
+                        let value = next_value(arguments, &mut cursor, "--placements")?;
+                        placements = Some(parse_finesse_placements(value)?);
+                    }
+                    "--initial-mask" => {
+                        if saw_initial {
+                            return Err(WebCommandError::new(
+                                WebCommandErrorCode::InvalidValue,
+                                "finesse score --initial-mask may be specified only once",
+                            ));
+                        }
+                        saw_initial = true;
+                        let value = next_value(arguments, &mut cursor, "--initial-mask")?;
+                        forwarded.push("--base-mask".to_owned());
+                        forwarded.push(value.to_owned());
+                    }
+                    "--base-mask" | "--target-mask" | "--finesse" => {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!("finesse score does not accept {}", arguments[cursor]),
+                        ));
+                    }
+                    _ => {
+                        forwarded.push(arguments[cursor].clone());
+                        cursor += 1;
+                    }
+                }
+            }
+            if !saw_initial {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::MissingValue,
+                    "finesse score requires --initial-mask",
+                ));
+            }
+            let placements = placements.ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::MissingValue,
+                    "finesse score requires --placements",
+                )
+            })?;
+            forwarded.extend([
+                "--target-mask".to_owned(),
+                "0".to_owned(),
+                "--finesse".to_owned(),
+                "inputs".to_owned(),
+                "--no-mirror".to_owned(),
+            ]);
+            parse_build_probability_command(&forwarded, worker_hardware_limit)
+                .map(|request| request.with_finesse_score(placements))
+        }
+        value => Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("invalid finesse mode '{value}'; expected search or score"),
+        )),
+    }
+}
+
+fn parse_finesse_placements(value: &str) -> Result<FinesseScoreRequest, WebCommandError> {
+    let mut placements = Vec::new();
+    // `|` remains reserved for rejected process-control syntax at every
+    // boundary, so multi-placement score requests use an ordinary comma.
+    for (index, placement) in value.split(',').enumerate() {
+        if index >= FinesseScoreRequest::MAX_PLACEMENTS {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "finesse score accepts at most {} placements",
+                    FinesseScoreRequest::MAX_PLACEMENTS
+                ),
+            ));
+        }
+        let parts = placement.split(':').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            return Err(invalid_finesse_placement(index));
+        }
+        let piece = match parts[0].to_ascii_uppercase().as_str() {
+            "I" => PieceKind::I,
+            "O" => PieceKind::O,
+            "T" => PieceKind::T,
+            "S" => PieceKind::S,
+            "Z" => PieceKind::Z,
+            "J" => PieceKind::J,
+            "L" => PieceKind::L,
+            _ => return Err(invalid_finesse_placement(index)),
+        };
+        let rotation = match parts[1].to_ascii_lowercase().as_str() {
+            "spawn" | "north" | "0" => RotationState::Zero,
+            "right" | "east" | "1" => RotationState::Right,
+            "reverse" | "south" | "2" => RotationState::Two,
+            "left" | "west" | "3" => RotationState::Left,
+            _ => return Err(invalid_finesse_placement(index)),
+        };
+        let x = parts[2]
+            .parse::<i16>()
+            .map_err(|_| invalid_finesse_placement(index))?;
+        let y = parts[3]
+            .parse::<i16>()
+            .map_err(|_| invalid_finesse_placement(index))?;
+        placements.push(FinessePlacement::new(piece, rotation, x, y));
+    }
+    FinesseScoreRequest::new(placements).ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "finesse score requires at least one placement",
+        )
+    })
+}
+
+fn invalid_finesse_placement(index: usize) -> WebCommandError {
+    WebCommandError::new(
+        WebCommandErrorCode::InvalidValue,
+        format!(
+            "invalid finesse placement {}; expected PIECE:rotation:x:y",
+            index + 1
+        ),
+    )
 }
 
 fn parse_spin_structure_command(
@@ -988,6 +1143,8 @@ fn parse_build_probability_command(
     let mut spin_profile = None;
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
+    let mut finesse_metric = FinesseMetric::Off;
+    let mut finesse_pattern_knowledge = FinessePatternKnowledge::Both;
     let mut rule = srs_plus();
     let mut cursor = 0usize;
 
@@ -1141,6 +1298,27 @@ fn parse_build_probability_command(
                 precompute_build_dependencies = false;
                 cursor += 1;
             }
+            "--finesse" => {
+                let value = next_value(tokens, &mut cursor, "--finesse")?;
+                finesse_metric = FinesseMetric::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("unsupported --finesse value '{value}'; expected off or inputs"),
+                    )
+                })?;
+            }
+            "--pattern-knowledge" => {
+                let value = next_value(tokens, &mut cursor, "--pattern-knowledge")?;
+                finesse_pattern_knowledge =
+                    FinessePatternKnowledge::parse(value).ok_or_else(|| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!(
+                                "unsupported --pattern-knowledge value '{value}'; expected both, oracle, or visible-7"
+                            ),
+                        )
+                    })?;
+            }
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
             }
@@ -1174,11 +1352,12 @@ fn parse_build_probability_command(
         && (spin_aggregation_requested
             || spin_profile.is_some()
             || preserve_back_to_back
-            || precompute_build_dependencies)
+            || precompute_build_dependencies
+            || finesse_metric.requested())
     {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
-            "--tiling-only cannot be combined with spin, B2B-preservation, or BuildUp dependency options",
+            "--tiling-only cannot be combined with spin, B2B-preservation, BuildUp dependency, or finesse options",
         ));
     }
     if tiling_only {
@@ -1206,7 +1385,8 @@ fn parse_build_probability_command(
     .with_hold_piece(hold_piece.unwrap_or(None))
     .with_allow_hold(hold_enabled)
     .with_horizontal_mirror_included(include_horizontal_mirror)
-    .with_aggregation(aggregation);
+    .with_aggregation(aggregation)
+    .with_finesse(finesse_metric, finesse_pattern_knowledge);
     if let Some(source_piece_count) = source_piece_count {
         input = input.with_source_piece_count(source_piece_count);
     }
@@ -1857,10 +2037,15 @@ fn parse_board_words(value: &str, option: &str) -> Result<[u64; 4], WebCommandEr
             format!("invalid {option} value '{value}'"),
         )
     };
-    if let Some(hex) = value
+    let prefixed_hex = value
         .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
+        .or_else(|| value.strip_prefix("0X"));
+    // Discord's canonical 10 x 24 field contract is a fixed-width 240-bit
+    // hexadecimal value without a prefix. Keep shorter unprefixed values on
+    // the established decimal path so existing web commands remain stable.
+    let canonical_field_hex =
+        (value.len() == 60 && value.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(value);
+    if let Some(hex) = prefixed_hex.or(canonical_field_hex) {
         if hex.is_empty() || hex.len() > 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid());
         }

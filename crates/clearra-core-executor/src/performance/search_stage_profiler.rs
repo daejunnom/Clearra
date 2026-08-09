@@ -118,11 +118,18 @@ pub(crate) enum ExecutorSearchStage {
     WasmFinalCoverage,
     WasmSpinExecutionGraphPrepare,
     WasmResultCanonicalize,
+    FinesseGeometry,
+    FinesseTargetGrouping,
+    FinesseMovementBfs,
+    FinesseAnnotationPrune,
+    FinesseProductDp,
+    FinesseAggregation,
+    FinesseWitness,
 }
 
 impl ExecutorSearchStage {
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
-    const COUNT: usize = Self::WasmResultCanonicalize as usize + 1;
+    const COUNT: usize = Self::FinesseWitness as usize + 1;
 
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     const ALL: [Self; Self::COUNT] = [
@@ -187,6 +194,13 @@ impl ExecutorSearchStage {
         Self::WasmFinalCoverage,
         Self::WasmSpinExecutionGraphPrepare,
         Self::WasmResultCanonicalize,
+        Self::FinesseGeometry,
+        Self::FinesseTargetGrouping,
+        Self::FinesseMovementBfs,
+        Self::FinesseAnnotationPrune,
+        Self::FinesseProductDp,
+        Self::FinesseAggregation,
+        Self::FinesseWitness,
     ];
 
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
@@ -253,6 +267,13 @@ impl ExecutorSearchStage {
             Self::WasmFinalCoverage => "wasm.finalize.coverage",
             Self::WasmSpinExecutionGraphPrepare => "wasm.finalize.spin_execution_graph_prepare",
             Self::WasmResultCanonicalize => "wasm.finalize.result_canonicalize",
+            Self::FinesseGeometry => "finesse.geometry",
+            Self::FinesseTargetGrouping => "finesse.target_grouping",
+            Self::FinesseMovementBfs => "finesse.movement_bfs",
+            Self::FinesseAnnotationPrune => "finesse.annotation_prune",
+            Self::FinesseProductDp => "finesse.product_dp",
+            Self::FinesseAggregation => "finesse.aggregation",
+            Self::FinesseWitness => "finesse.witness",
         }
     }
 }

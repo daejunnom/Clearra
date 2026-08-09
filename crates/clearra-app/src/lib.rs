@@ -17,6 +17,8 @@ mod execution_constraint_postprocess;
 pub mod gui_bridge;
 pub mod io;
 pub mod language;
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+mod native_build_probability_execution;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_forward_execution;
 #[cfg(not(target_arch = "wasm32"))]
@@ -45,6 +47,9 @@ pub use clearra_core_domain::execution_cancellation::{
 #[cfg(feature = "wasm-stage-profiling")]
 pub use clearra_core_executor::{
     ExecutorSearchProfileError, ExecutorSearchProfileSession, ExecutorSearchProfileStage,
+};
+pub use clearra_core_executor::{
+    FinesseReport, FinesseReportInput, FinesseReportPlacement, FinesseRepresentativeWitness,
 };
 pub use clearra_host_contract::{
     AppCommandKind, AppResult, BackendPolicy, BackendReport, CapabilityReport, ContinuationReport,

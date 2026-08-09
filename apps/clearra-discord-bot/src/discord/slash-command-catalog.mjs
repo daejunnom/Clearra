@@ -16,6 +16,7 @@ const MANAGE_GUILD_PERMISSION = String(1n << 5n);
 const FIELD_MAX_LENGTH = 6000;
 const NEXT_MAX_LENGTH = 2048;
 const OPTIONAL_SETTINGS_MAX_LENGTH = 256;
+const DOCUMENT_MAX_LENGTH = 6000;
 
 export const BUILTIN_KICKTABLES = Object.freeze([
   Object.freeze({ name: "SRS+ (default)", value: "srs-plus" }),
@@ -243,6 +244,41 @@ const SEARCH_COMMANDS = Object.freeze(
   }),
 );
 
+const FINESSE_SUBCOMMANDS = Object.freeze({
+  search: finesseSubcommand(
+    "search",
+    "Find minimum-input build routes for a target",
+    "finesse-search",
+  ),
+  score: finesseSubcommand(
+    "score",
+    "Calculate minimum inputs for a CTK3 or Fumen placement sequence",
+    "finesse-score",
+  ),
+});
+
+const FINESSE_COMMAND = Object.freeze({
+  name: "finesse",
+  kind: "search",
+  input: "finesse",
+  description: "Find or score minimum-input tetromino placements",
+  subcommands: FINESSE_SUBCOMMANDS,
+  registration: Object.freeze({
+    name: "finesse",
+    description: "Find or score minimum-input tetromino placements",
+    options: Object.freeze(
+      Object.values(FINESSE_SUBCOMMANDS).map(({ subcommand, description, registration }) =>
+        Object.freeze({
+          type: SUB_COMMAND_OPTION,
+          name: subcommand,
+          description,
+          options: registration.options,
+        })
+      ),
+    ),
+  }),
+});
+
 export const representedSfinderCommandNames = Object.freeze(
   SEARCH_COMMANDS.map(({ name }) => name),
 );
@@ -252,6 +288,7 @@ export const slashCommandCatalog = Object.freeze([
   RENDER_FILE_COMMAND,
   CHANNEL_SETTINGS_COMMAND,
   SERVER_SETTINGS_COMMAND,
+  FINESSE_COMMAND,
   ...SEARCH_COMMANDS,
 ]);
 
@@ -283,18 +320,42 @@ export function findApplicationCommand(type, name) {
   return null;
 }
 
+export function resolveSlashCommandInvocation(command, rawOptions = []) {
+  if (command?.input !== "finesse") {
+    return Object.freeze({ command, rawOptions });
+  }
+  if (!Array.isArray(rawOptions) || rawOptions.length !== 1) {
+    throw new Error("/finesse requires exactly one search or score subcommand.");
+  }
+  const selected = rawOptions[0];
+  if (selected?.type !== SUB_COMMAND_OPTION || typeof selected.name !== "string") {
+    throw new Error("/finesse requires a search or score subcommand.");
+  }
+  const variant = command.subcommands[selected.name];
+  if (!variant) {
+    throw new Error("/finesse subcommand must be search or score.");
+  }
+  if (selected.options !== undefined && !Array.isArray(selected.options)) {
+    throw new Error("Discord supplied invalid /finesse subcommand options.");
+  }
+  return Object.freeze({
+    command: variant,
+    rawOptions: selected.options ?? [],
+  });
+}
+
 export function formatSlashCommandHelp(requestedName, locale = "en") {
   const language = normalizeDiscordLocale(locale);
   const normalized = normalizeHelpTarget(requestedName);
   if (!normalized) return commandListHelp(language);
-  const entry = findSlashCommand(normalized);
+  const entry = findHelpCommand(normalized);
   if (!entry || !["search", "render-file"].includes(entry.kind)) {
     return language === "ko"
       ? `알 수 없는 Clearra 명령어 \`${requestedName}\`입니다. \`/help\`에서 명령어 목록을 확인하세요.`
       : `Unknown Clearra command \`${requestedName}\`. Use \`/help\` to list commands.`;
   }
   const lines = [
-    `**/${entry.name}** — ${localizedCommandDescription(entry, language)}`,
+    `**/${entry.name}${entry.subcommand ? ` ${entry.subcommand}` : ""}** — ${localizedCommandDescription(entry, language)}`,
     language === "ko"
       ? `직접 입력 문법: \`${syntax(entry, language)}\``
       : `Direct syntax: \`${syntax(entry)}\``,
@@ -319,6 +380,14 @@ export function formatSlashCommandHelp(requestedName, locale = "en") {
   return lines.join("\n");
 }
 
+function findHelpCommand(normalized) {
+  const compact = normalized.replace(/[ /]+/g, "-");
+  if (["finesse-search", "finesse-score"].includes(compact)) {
+    return FINESSE_SUBCOMMANDS[compact.slice("finesse-".length)];
+  }
+  return findSlashCommand(normalized);
+}
+
 export function localizedSlashCommandName(name, locale = "en") {
   const command = findSlashCommand(name);
   if (!command) return String(name ?? "");
@@ -329,6 +398,24 @@ export function localizedSlashCommandName(name, locale = "en") {
 
 function command(name, description, group, input, extras = {}) {
   return Object.freeze({ name, description, group, input, ...extras });
+}
+
+function finesseSubcommand(subcommand, description, input) {
+  return Object.freeze({
+    name: "finesse",
+    rootName: "finesse",
+    subcommand,
+    kind: "search",
+    group: "finesse",
+    input,
+    description,
+    argvPrefix: Object.freeze(["finesse", subcommand]),
+    registration: Object.freeze({
+      name: "finesse",
+      description,
+      options: registrationOptions(input),
+    }),
+  });
 }
 
 function registrationOptions(input) {
@@ -399,9 +486,60 @@ function registrationOptions(input) {
       ]);
     case "verify":
       return Object.freeze([verifyScopeOption()]);
+    case "finesse-search":
+      return Object.freeze([
+        boardOption(
+          "target",
+          `Target cells (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): static CTK3/Fumen/URL or grid:row/row`,
+        ),
+        nextOption(false),
+        boardOption(
+          "base",
+          `Starting field (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): static CTK3/Fumen/URL or grid:row/row`,
+        ),
+        kicktableOption(),
+        finesseSettingsOption(),
+      ]);
+    case "finesse-score":
+      return Object.freeze([
+        stringOption(
+          "document",
+          "CTK3 or v115 Fumen whose every page contains one placement operation",
+          false,
+          DOCUMENT_MAX_LENGTH,
+        ),
+        nextOption(false),
+        kicktableOption(),
+        finesseSettingsOption(),
+      ]);
     default:
       throw new Error(`Unknown slash-command input contract: ${input}`);
   }
+}
+
+function finesseSettingsOption() {
+  const choices = [];
+  for (const [holdName, hold] of [["Use hold", "use"], ["Avoid hold", "avoid"]]) {
+    for (const [knowledgeName, knowledge] of [
+      ["Full queue and visible 7", "both"],
+      ["Full queue", "oracle"],
+      ["Visible 7", "visible-7"],
+    ]) {
+      choices.push(Object.freeze({
+        name: `${holdName} · ${knowledgeName}${hold === "use" && knowledge === "both" ? " (default)" : ""}`,
+        value: `hold=${hold} knowledge=${knowledge}`,
+      }));
+    }
+  }
+  return Object.freeze({
+    ...stringOption(
+      "options",
+      "Hold and queue-knowledge policy; defaults to hold=use knowledge=both",
+      false,
+      OPTIONAL_SETTINGS_MAX_LENGTH,
+    ),
+    choices: Object.freeze(choices),
+  });
 }
 
 function fieldOption(input) {
@@ -615,6 +753,7 @@ function commandListHelp(locale) {
       "구축 확률: `/cover`, `/setup`, `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`, `/special-cover`",
       "전방 탐색: `/spin-cover`, `/spin`, `/damage`",
       "스핀 구조 탐색: `/spin-structure`",
+      "피네스: `/finesse search`, `/finesse score`",
       "셋업 순위: `/pc-setup`, `/best-setup`, `/dpc-finder`",
       "검증: `/verify`",
       "정확한 문법은 `/help arguments:<명령어>`로 확인하세요. 여러 줄 격자는 필드 옵션을 생략하고 입력 창에서 작성하며, 직접 입력은 `grid:윗줄/다음줄` 형식을 사용합니다.",
@@ -628,6 +767,7 @@ function commandListHelp(locale) {
     "Build probability: `/cover`, `/setup`, `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`, `/special-cover`",
     "Forward search: `/spin-cover`, `/spin`, `/damage`",
     "Spin structures: `/spin-structure`",
+    "Finesse: `/finesse search`, `/finesse score`",
     "Setup ranking: `/pc-setup`, `/best-setup`, `/dpc-finder`",
     "Checks: `/verify`",
     "Use `/help arguments:<command>` for exact syntax. Omit a board option to enter a multiline grid in the guided form; direct grids use `grid:top-row/next-row`.",
@@ -658,6 +798,12 @@ function syntax(entry, locale = "en") {
         return `/${entry.name} pieces:<순서 없는 IOTSZJL 목록> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<내장 프로필>]`;
       case "verify":
         return `/${entry.name} [scope:<pc|setup|cover|build|kicks>]`;
+      case "finesse":
+        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>] | /finesse score document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>]";
+      case "finesse-search":
+        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>]";
+      case "finesse-score":
+        return "/finesse score document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>]";
       default:
         throw new Error(`Unknown slash-command input contract: ${entry.input}`);
     }
@@ -683,6 +829,12 @@ function syntax(entry, locale = "en") {
       return `/${entry.name} pieces:<unordered IOTSZJL inventory> field:<grid:top-row/next-row|document|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<built-in>]`;
     case "verify":
       return `/${entry.name} [scope:<pc|setup|cover|build|kicks>]`;
+    case "finesse":
+      return "/finesse search target:<target cells> next:<queue|pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>] | /finesse score document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [kicktable:<built-in>] [options:<hold and knowledge>]";
+    case "finesse-search":
+      return "/finesse search target:<target cells> next:<queue|pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>]";
+    case "finesse-score":
+      return "/finesse score document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [kicktable:<built-in>] [options:<hold and knowledge>]";
     default:
       throw new Error(`Unknown slash-command input contract: ${entry.input}`);
   }
@@ -754,6 +906,26 @@ function inputHelp(entry, locale = "en") {
       return [
         "Choose `pc`, `setup`, `cover`, `build`, or `kicks`. Choose input-form `All` or omit `scope` to run every check.",
       ];
+    case "finesse":
+      return [
+        "Use `search` to find minimum-input builds, or `score` to calculate the minimum inputs for a placement sequence.",
+        "`options` selects hold and `both|full-queue|visible-7` queue knowledge. The default is `hold=use knowledge=both`.",
+        "Finesse counts inputs, not frames; hard drop and hold each cost one input.",
+      ];
+    case "finesse-search":
+      return [
+        "`base` is the starting field and `target` contains only cells to add. Both accept one static CTK3/v115 Fumen/URL or a 1–24-row grid.",
+        "`next` accepts either one exact IOTSZJL queue or the supported pattern grammar. Exact queues are evaluated as fixed queues.",
+        "`options` selects hold and `both|full-queue|visible-7` queue knowledge; the default is `hold=use knowledge=both`.",
+        kickHelp,
+      ];
+    case "finesse-score":
+      return [
+        "`document` must be CTK3 or v115 Fumen, and every page must contain one placement operation in sequence. Static fields and plain grids are not accepted here.",
+        "`next` accepts either one exact IOTSZJL queue or the supported pattern grammar. The result is a minimum-input score for the supplied placements, not a reconstruction of past play.",
+        "`options` selects hold and `both|full-queue|visible-7` queue knowledge; the default is `hold=use knowledge=both`.",
+        kickHelp,
+      ];
     default:
       throw new Error(`Unknown slash-command input contract: ${entry.input}`);
   }
@@ -822,6 +994,26 @@ function koreanInputHelp(entry) {
       ];
     case "verify":
       return ["`pc`, `setup`, `cover`, `build`, `kicks` 중 하나를 고르세요. 모든 검증을 실행하려면 입력 창에서 `전체`를 고르거나 `scope`를 생략하세요."];
+    case "finesse":
+      return [
+        "`search`는 최소 입력 구축 경로를 찾고, `score`는 지정한 배치 순서의 최소 입력 수를 계산합니다.",
+        "`options`에서 홀드와 `both|full-queue|visible-7` 큐 공개 정책을 고릅니다. 기본값은 `hold=use knowledge=both`입니다.",
+        "피네스는 프레임이 아닌 입력 수를 세며, 하드 드롭과 홀드는 각각 1입력입니다.",
+      ];
+    case "finesse-search":
+      return [
+        "`base`는 시작 필드이고 `target`에는 추가할 칸만 입력합니다. 두 필드 모두 정적 CTK3/v115 Fumen/URL 또는 1–24줄 격자를 받습니다.",
+        "`next`에는 정확한 IOTSZJL 큐 하나 또는 지원되는 패턴 문법을 입력합니다. 정확한 큐는 고정 큐로 계산합니다.",
+        "`options`에서 홀드와 `both|full-queue|visible-7` 큐 공개 정책을 고르며 기본값은 `hold=use knowledge=both`입니다.",
+        kickHelp,
+      ];
+    case "finesse-score":
+      return [
+        "`document`에는 모든 페이지에 배치 operation이 하나씩 있는 CTK3 또는 v115 Fumen을 입력합니다. 정적 필드와 일반 격자는 받지 않습니다.",
+        "`next`에는 정확한 IOTSZJL 큐 하나 또는 지원되는 패턴 문법을 입력합니다. 결과는 주어진 배치의 최소 입력 점수이며 과거 플레이를 복원한 값이 아닙니다.",
+        "`options`에서 홀드와 `both|full-queue|visible-7` 큐 공개 정책을 고르며 기본값은 `hold=use knowledge=both`입니다.",
+        kickHelp,
+      ];
     default:
       throw new Error(`Unknown slash-command input contract: ${entry.input}`);
   }
@@ -906,6 +1098,9 @@ function localizationProperty(property, original, localized) {
 
 function localizedCommandDescription(entry, locale) {
   if (locale !== "ko") return entry.description ?? entry.registration.description;
+  if (entry.rootName === "finesse" && entry.subcommand) {
+    return KOREAN_OPTION_DESCRIPTIONS[`finesse.${entry.subcommand}`] ?? entry.description;
+  }
   return KOREAN_COMMAND_DESCRIPTIONS[entry.name] ??
     entry.description ?? entry.registration.description;
 }
@@ -955,6 +1150,15 @@ function koreanChoiceName(name, value, path = "") {
   if (typeof value === "string" && /^type=TSD$/.test(value)) return "T-spin 더블";
   if (typeof value === "string" && /^type=TST$/.test(value)) return "T-spin 트리플";
   if (typeof value === "string" && /^type=ANY$/.test(value)) return "모든 T-spin";
+  if (path === "finesse.search.options" || path === "finesse.score.options") {
+    const hold = value.includes("hold=avoid") ? "홀드 사용 안 함" : "홀드 사용";
+    const knowledge = value.includes("knowledge=visible-7")
+      ? "공개 7개"
+      : value.includes("knowledge=oracle")
+        ? "전체 큐"
+        : "전체 큐 및 공개 7개";
+    return `${hold} · ${knowledge}${value === "hold=use knowledge=both" ? " (기본값)" : ""}`;
+  }
   if (value === "initial_b2b=false") return "초기 B2B 사용 안 함 (기본값)";
   if (value === "initial_b2b=true") return "초기 B2B 사용";
   if (value === "pc") return "퍼펙트 클리어";
@@ -970,6 +1174,7 @@ const KOREAN_COMMAND_NAMES = Object.freeze({
   "get-original-gif": "원본 GIF 받기",
   "channel-settings": "채널-설정",
   "server-settings": "서버-설정",
+  finesse: "피네스",
   path: "경로",
   percent: "퍼센트",
   chance: "확률",
@@ -1011,6 +1216,9 @@ const KOREAN_OPTION_NAMES = Object.freeze({
   remaining: "남은미노",
   scope: "범위",
   language: "언어",
+  document: "문서",
+  "finesse.search": "탐색",
+  "finesse.score": "계산",
   "channel-settings.language-show": "언어-확인",
   "channel-settings.language-set": "언어-설정",
   "channel-settings.language-reset": "언어-초기화",
@@ -1028,6 +1236,7 @@ const KOREAN_COMMAND_DESCRIPTIONS = Object.freeze({
   "render-file": "최근 필드 미리보기의 원본 GIF 파일을 받습니다",
   "channel-settings": "현재 채널의 Clearra 설정을 관리합니다",
   "server-settings": "이 서버의 Clearra 설정을 관리합니다",
+  finesse: "최소 입력 수로 미노 배치를 탐색하거나 계산합니다",
   path: "표현되는 모든 퍼펙트 클리어 경로를 찾습니다",
   percent: "정확한 퍼펙트 클리어 성공 확률을 계산합니다",
   chance: "정확한 퍼펙트 클리어 성공 확률을 계산합니다",
@@ -1093,6 +1302,14 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   scope: "검증 범위",
   "verify.scope": "실행할 검증 그룹이며 생략하면 모든 검증을 실행합니다",
   language: "ClearraBot 응답과 입력 창에 사용할 언어",
+  document: "각 페이지에 배치 operation이 하나씩 있는 CTK3 또는 v115 Fumen 문서",
+  "finesse.search": "목표 필드까지의 최소 입력 구축 경로를 찾습니다",
+  "finesse.score": "CTK3 또는 Fumen 배치 순서의 최소 입력 수를 계산합니다",
+  "finesse.search.target": `추가할 목표 칸 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: 정적 CTK3/Fumen/문서 링크 또는 grid:줄/줄`,
+  "finesse.search.base": `시작 필드 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: 정적 CTK3/Fumen/문서 링크 또는 grid:줄/줄`,
+  "finesse.search.options": "홀드와 큐 공개 정책이며 기본값은 홀드 사용 및 두 정책 계산입니다",
+  "finesse.score.document": "모든 페이지에 배치 operation이 하나씩 있는 CTK3 또는 v115 Fumen 문서",
+  "finesse.score.options": "홀드와 큐 공개 정책이며 기본값은 홀드 사용 및 두 정책 계산입니다",
   "channel-settings.language-show": "현재 채널에 적용되는 언어를 표시합니다",
   "channel-settings.language-set": "현재 채널의 응답 언어를 설정합니다",
   "channel-settings.language-reset": "현재 채널의 언어 설정을 삭제합니다",

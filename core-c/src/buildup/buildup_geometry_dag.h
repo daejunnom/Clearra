@@ -9,6 +9,8 @@ typedef struct ClearraBuildUpGeometryNode ClearraBuildUpGeometryNode;
 typedef struct ClearraBuildUpGeometryNodeChunk ClearraBuildUpGeometryNodeChunk;
 typedef struct ClearraBuildUpGeometryEdgeChunk ClearraBuildUpGeometryEdgeChunk;
 typedef struct ClearraBuildUpGeometryTraceChunk ClearraBuildUpGeometryTraceChunk;
+typedef struct ClearraBuildUpGeometryEdgeDataChunk
+    ClearraBuildUpGeometryEdgeDataChunk;
 
 typedef struct ClearraBuildUpGeometryDag {
     clr_board_descriptor initial_board;
@@ -28,7 +30,11 @@ typedef struct ClearraBuildUpGeometryDag {
     ClearraBuildUpGeometryTraceChunk *trace_chunks;
     ClearraBuildUpGeometryTraceChunk *trace_tail;
     ClearraBuildUpGeometryTraceChunk *trace_cursor;
+    ClearraBuildUpGeometryEdgeDataChunk *edge_data_chunks;
+    ClearraBuildUpGeometryEdgeDataChunk *edge_data_tail;
+    ClearraBuildUpGeometryEdgeDataChunk *edge_data_cursor;
     ClearraBuildUpGeometryNode *root;
+    uint64_t snapshot_id;
     uint32_t node_count;
     uint32_t edge_count;
     uint32_t export_node_count;
@@ -38,14 +44,20 @@ typedef struct ClearraBuildUpGeometryDag {
     uint8_t prepared;
     uint8_t available;
     uint8_t capture_trace;
+    uint8_t capture_geometry;
     uint8_t bucket_growth_disabled;
     uint8_t reachability_trace_mode;
-    uint8_t reserved;
+    uint8_t transition_mode;
+    uint8_t reserved[2];
 } ClearraBuildUpGeometryDag;
 
 clr_buildup_status clearra_buildup_geometry_dag_prepare(
     ClearraBuildUpGeometryDag *dag,
     ClearraBuildUpSearchContext *context);
+clr_buildup_status clearra_buildup_geometry_dag_prepare_with_options(
+    ClearraBuildUpGeometryDag *dag,
+    ClearraBuildUpSearchContext *context,
+    uint8_t capture_geometry);
 void clearra_buildup_geometry_dag_release(ClearraBuildUpGeometryDag *dag);
 size_t clearra_buildup_geometry_dag_retained_bytes(
     const ClearraBuildUpGeometryDag *dag);
@@ -58,6 +70,13 @@ clr_buildup_status clearra_buildup_geometry_dag_export(
     clr_buildup_geometry_language_edge *edges,
     size_t edge_capacity,
     clr_buildup_geometry_language_report *out_report);
+clr_buildup_status clearra_buildup_geometry_dag_export_v2(
+    const ClearraBuildUpGeometryDag *dag,
+    clr_buildup_geometry_language_node_v2 *nodes,
+    size_t node_capacity,
+    clr_buildup_geometry_language_edge_v2 *edges,
+    size_t edge_capacity,
+    clr_buildup_geometry_language_report_v2 *out_report);
 clr_buildup_status clearra_buildup_search_geometry_dag(
     ClearraBuildUpSearchContext *context,
     const ClearraBuildUpGeometryDag *dag,

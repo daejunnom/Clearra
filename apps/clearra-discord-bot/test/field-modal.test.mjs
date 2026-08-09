@@ -57,8 +57,8 @@ const COLORED_COMMANDS = [
 const SPIN_COMMANDS = ["spin-cover", "spin"];
 const REMAINING_COMMANDS = ["pc-setup", "best-setup", "dpc-finder"];
 
-test("every bare search command opens a v3 search Modal while help stays direct", () => {
-  for (const command of slashCommandCatalog.filter(({ kind }) => kind === "search")) {
+test("every ungrouped bare search command opens a v3 search Modal while help stays direct", () => {
+  for (const command of slashCommandCatalog.filter(({ kind, input }) => kind === "search" && input !== "finesse")) {
     const response = buildMissingBoardModalResponse(slashInteraction(command.name));
     assert.equal(response?.type, 9, `/${command.name} must open a Modal`);
     assert.equal(response.data.custom_id, `clearra:search:v3:${command.name}`);
@@ -70,6 +70,17 @@ test("every bare search command opens a v3 search Modal while help stays direct"
       findFieldModalCommand(modalInteraction(response.data.custom_id, []))?.name,
       command.name,
     );
+  }
+
+  for (const subcommand of ["search", "score"]) {
+    const response = buildMissingBoardModalResponse(
+      slashInteraction("finesse", [{ type: 1, name: subcommand, options: [] }]),
+    );
+    assert.equal(response?.type, 9);
+    assert.equal(response.data.custom_id, `clearra:search:v3:finesse~${subcommand}`);
+    const command = findFieldModalCommand(modalInteraction(response.data.custom_id, []));
+    assert.equal(command?.name, "finesse");
+    assert.equal(command?.subcommand, subcommand);
   }
 
   assert.equal(buildMissingBoardModalResponse(slashInteraction("help")), null);
@@ -84,8 +95,55 @@ test("render-file stays direct and removed render Modal routes stay inactive", (
   );
 });
 
+test("finesse subcommands use bounded localized guided forms", () => {
+  const search = buildMissingBoardModalResponse(
+    slashInteraction("finesse", [{ type: 1, name: "search", options: [] }]),
+    "ko",
+  );
+  assert.equal(search.data.title, "피네스 탐색 입력");
+  assert.deepEqual(componentNames(search), ["target", "next", "base", "kicktable", "options"]);
+  assert.equal(search.data.components.length, 5);
+  assertStringSelect(
+    component(search, "options"),
+    [
+      "hold=use knowledge=both",
+      "hold=use knowledge=oracle",
+      "hold=use knowledge=visible-7",
+      "hold=avoid knowledge=both",
+      "hold=avoid knowledge=oracle",
+      "hold=avoid knowledge=visible-7",
+    ],
+    "hold=use knowledge=both",
+  );
+
+  const score = buildMissingBoardModalResponse(
+    slashInteraction("finesse", [{ type: 1, name: "score", options: [] }]),
+    "en",
+  );
+  assert.equal(score.data.title, "finesse score form");
+  assert.deepEqual(componentNames(score), ["document", "next", "kicktable", "options", "locale"]);
+  assert.equal(score.data.components.length, 5);
+
+  const scoreSubmit = modalInteraction(score.data.custom_id, [
+    textLabel("document", "ctk3_example"),
+    textLabel("next", "[TI]!"),
+    selectLabel("kicktable", ["srs-plus"]),
+    selectLabel("options", ["hold=avoid knowledge=oracle"]),
+    selectLabel("locale", ["en"]),
+  ]);
+  const scoreCommand = findFieldModalCommand(scoreSubmit);
+  assert.equal(scoreCommand.subcommand, "score");
+  assert.equal(readCommandModalLocale(scoreSubmit), "en");
+  assert.deepEqual(optionsByName(readFieldModalOptions(scoreSubmit, scoreCommand)), {
+    document: "ctk3_example",
+    next: "[TI]!",
+    kicktable: "srs-plus",
+    options: "hold=avoid knowledge=oracle",
+  });
+});
+
 test("missing inputs and rich-text multi-line boards open the Modal", () => {
-  for (const command of slashCommandCatalog.filter(({ kind }) => kind === "search")) {
+  for (const command of slashCommandCatalog.filter(({ kind, input }) => kind === "search" && input !== "finesse")) {
     const complete = completeOptions(command.input);
     const response = buildMissingBoardModalResponse(
       slashInteraction(command.name, complete),

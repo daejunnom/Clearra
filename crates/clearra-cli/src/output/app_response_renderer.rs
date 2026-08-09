@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: rendering typed application responses into the stable CLI output contract.
+
 use clearra_app::{AppErrorCode, AppRenderModel, AppResponse, AppStatus};
 use clearra_spin_structure_search::{SpinStructureOutcome, SpinStructureQuery, StructureOperation};
 
@@ -90,6 +92,12 @@ fn render_success(
                     })),
                 ));
             }
+            if let Some(report) = result.finesse_report() {
+                fields.push(RenderField::new(
+                    "finesse_report",
+                    finesse_report_value(report),
+                ));
+            }
             if include_solution_data {
                 fields.extend([
                     RenderField::new("solution_data_requested", true),
@@ -103,6 +111,51 @@ fn render_success(
                         ),
                     ),
                 ]);
+                if result
+                    .finesse_report()
+                    .is_some_and(|report| report.mode() == "score")
+                {
+                    fields.push(RenderField::new(
+                        "finesse_score_data",
+                        RenderFieldValue::object([
+                            (
+                                "initial_board",
+                                RenderFieldValue::string(
+                                    result
+                                        .field("finesse_initial_board_words")
+                                        .unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                                ),
+                            ),
+                            (
+                                "height",
+                                result
+                                    .field("finesse_height")
+                                    .and_then(|value| value.parse::<u8>().ok())
+                                    .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+                            ),
+                            (
+                                "representative_path",
+                                RenderFieldValue::array(result.path_steps().iter().map(|step| {
+                                    RenderFieldValue::object([
+                                        (
+                                            "piece",
+                                            RenderFieldValue::string(
+                                                step.piece().as_ascii().to_string(),
+                                            ),
+                                        ),
+                                        ("rotation", RenderFieldValue::from(step.rotation())),
+                                        ("x", RenderFieldValue::from(step.x())),
+                                        ("y", RenderFieldValue::from(step.y())),
+                                        (
+                                            "cleared_lines",
+                                            RenderFieldValue::from(step.cleared_lines()),
+                                        ),
+                                    ])
+                                })),
+                            ),
+                        ]),
+                    ));
+                }
             }
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
@@ -784,6 +837,153 @@ fn render_success(
             }
         }
     }
+}
+
+fn finesse_report_value(report: &clearra_app::FinesseReport) -> RenderFieldValue {
+    RenderFieldValue::object([
+        ("mode", RenderFieldValue::string(report.mode())),
+        ("metric", RenderFieldValue::string(report.metric())),
+        (
+            "pattern_knowledge",
+            RenderFieldValue::string(report.pattern_knowledge()),
+        ),
+        ("complete", RenderFieldValue::bool(report.complete())),
+        (
+            "exact_total_inputs",
+            report
+                .exact_total_inputs()
+                .map_or(RenderFieldValue::Null, |value| {
+                    RenderFieldValue::string(value.to_owned())
+                }),
+        ),
+        (
+            "representative_witness",
+            report
+                .representative_witness()
+                .map_or(RenderFieldValue::Null, |witness| {
+                    RenderFieldValue::object([
+                        ("policy", RenderFieldValue::string(witness.policy())),
+                        (
+                            "solution_key",
+                            optional_string_value(witness.solution_key()),
+                        ),
+                        (
+                            "pattern_ids",
+                            RenderFieldValue::array(
+                                witness
+                                    .pattern_ids()
+                                    .iter()
+                                    .copied()
+                                    .map(RenderFieldValue::from),
+                            ),
+                        ),
+                        (
+                            "queue",
+                            RenderFieldValue::array(witness.queue().iter().map(|piece| {
+                                RenderFieldValue::string(piece.as_ascii().to_string())
+                            })),
+                        ),
+                        (
+                            "total_inputs",
+                            RenderFieldValue::from(witness.total_inputs()),
+                        ),
+                        (
+                            "input_sequence",
+                            RenderFieldValue::array(
+                                witness
+                                    .input_sequence()
+                                    .iter()
+                                    .map(|input| RenderFieldValue::string(input.as_str())),
+                            ),
+                        ),
+                        (
+                            "placements",
+                            RenderFieldValue::array(witness.placements().iter().map(|placement| {
+                                RenderFieldValue::object([
+                                    (
+                                        "piece",
+                                        RenderFieldValue::string(
+                                            placement.piece().as_ascii().to_string(),
+                                        ),
+                                    ),
+                                    (
+                                        "rotation",
+                                        RenderFieldValue::from(
+                                            placement.rotation().quarter_turns(),
+                                        ),
+                                    ),
+                                    ("x", RenderFieldValue::from(placement.x())),
+                                    ("y", RenderFieldValue::from(placement.y())),
+                                ])
+                            })),
+                        ),
+                    ])
+                }),
+        ),
+        (
+            "policy_results",
+            RenderFieldValue::array(report.policy_results().iter().map(|policy| {
+                RenderFieldValue::object([
+                    ("policy", RenderFieldValue::string(policy.policy())),
+                    (
+                        "overall_average_inputs",
+                        RenderFieldValue::string(policy.overall_average_inputs()),
+                    ),
+                    ("complete", RenderFieldValue::bool(policy.complete())),
+                    (
+                        "oracle_on_covered_average_inputs",
+                        optional_string_value(policy.oracle_on_covered_average_inputs()),
+                    ),
+                    (
+                        "information_penalty_inputs",
+                        optional_string_value(policy.information_penalty_inputs()),
+                    ),
+                    (
+                        "success_probability_gap",
+                        optional_string_value(policy.success_probability_gap()),
+                    ),
+                    (
+                        "successful_probability_mass",
+                        optional_string_value(policy.successful_probability_mass()),
+                    ),
+                    (
+                        "successful_unique_queue_count",
+                        policy
+                            .successful_unique_queue_count()
+                            .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+                    ),
+                    (
+                        "total_unique_queue_count",
+                        policy
+                            .total_unique_queue_count()
+                            .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+                    ),
+                    (
+                        "solution_averages",
+                        RenderFieldValue::array(policy.solution_averages().iter().map(
+                            |solution| {
+                                RenderFieldValue::object([
+                                    (
+                                        "solution_key",
+                                        RenderFieldValue::string(solution.solution_key()),
+                                    ),
+                                    (
+                                        "average_inputs",
+                                        RenderFieldValue::string(solution.average_inputs()),
+                                    ),
+                                    ("complete", RenderFieldValue::bool(solution.complete())),
+                                ])
+                            },
+                        )),
+                    ),
+                ])
+            })),
+        ),
+    ])
+}
+
+fn optional_string_value(value: Option<&str>) -> RenderFieldValue {
+    value.map_or(RenderFieldValue::Null, RenderFieldValue::string)
 }
 
 fn board_mask_hex(words: [u64; 4]) -> String {

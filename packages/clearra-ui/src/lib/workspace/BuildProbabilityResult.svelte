@@ -7,6 +7,11 @@
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
   import { boardCellOccupied } from './solverWorkspaceModel';
+  import {
+    buildProbabilityFinesseView,
+    formatFinesseInputCount
+  } from './buildProbabilityFinesse';
+  import type { ClearraFinessePolicyResult } from '../wasm/wasmCommandClient';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -31,7 +36,18 @@
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: report = view.searchReport;
   $: summary = Object.fromEntries(report?.summary_fields ?? []);
+  $: solutionProbabilityByKey = Object.fromEntries(
+    (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
+  );
+  $: finesseView = buildProbabilityFinesseView(report?.finesse_report);
   $: solutionKeys = report?.normalized_solution_keys ?? [];
+  $: solutionCommentByKey = buildSolutionComments();
+  $: showFinesseDetails = Boolean(
+    finesseView && (
+      finesseView.exactTotalInputs !== null ||
+      finesseView.policyResults.some(hasFinessePolicyDetails)
+    )
+  );
   $: finalBoardMask = parseBoardMask(summary.build_final_board_mask);
   $: canContinue = view.status === 'completed' && report?.solution_found === true && finalBoardMask !== null;
   $: hasOutput = Boolean(view.response || report || view.diagnostics.length || view.error);
@@ -48,6 +64,42 @@
     if (value === undefined) return undefined;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  function inputCount(value: string | number | undefined | null): string {
+    return formatFinesseInputCount(value, language);
+  }
+
+  function hasFinessePolicyDetails(policy: ClearraFinessePolicyResult): boolean {
+    return !policy.complete ||
+      policy.successful_probability_mass != null ||
+      policy.oracle_on_covered_average_inputs != null ||
+      policy.information_penalty_inputs != null ||
+      policy.success_probability_gap != null;
+  }
+
+  function buildSolutionComments(): Record<string, string> {
+    return Object.fromEntries(
+      solutionKeys.flatMap((key) => {
+        const parts: string[] = [];
+        const probability = solutionProbabilityByKey[key];
+        if (probability) {
+          parts.push(
+            `${label('solutionProbability')}: ${workspaceProbability(language, probability.probability)}`
+          );
+        }
+        for (const finesse of finesseView?.solutionByKey[key] ?? []) {
+          const policy = label(
+            finesse.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy'
+          );
+          const materialized = finesse.complete ? '' : ` (${label('finesseMaterialized')})`;
+          parts.push(
+            `${label('finesseSolutionAverageInputs')} (${policy}): ${inputCount(finesse.average_inputs)}${materialized}`
+          );
+        }
+        return parts.length ? [[key, parts.join(' | ')]] : [];
+      })
+    );
   }
 
   function parseBoardMask(value: string | undefined): bigint | null {
@@ -79,6 +131,7 @@
   progressDone={view.progressDone}
   progressTotal={view.progressTotal}
   progressTelemetry={view.progressTelemetry}
+  showWorkerMetrics={false}
   failureDiagnostics={view.diagnostics}
   failureMessage={view.error ?? ''}
 >
@@ -117,16 +170,90 @@
               <strong>{workspaceProbability(language, summary.spin_search_probability)}</strong>
               <small>{number(summaryNumber(summary.spin_search_candidate_count))} {label('spinSearchBuilds')} · {label('spinAccuracy')}: {summary.spin_search_accuracy ?? '—'}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
             {:else}
-              <span>{label('buildProbability')}</span>
-              <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
-              <small>{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
+              <div class:with-averages={Boolean(finesseView?.policyResults.length)} class="probability-with-inputs">
+                <div class="primary-probability">
+                  <span>{label('buildProbability')}</span>
+                  <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
+                </div>
+                {#if finesseView?.policyResults.length}
+                  <div class="average-input-list" aria-label={label('finesseOverallAverageInputs')}>
+                    {#each finesseView.policyResults as policyResult}
+                      <div class="average-input">
+                        <span>
+                          {label('finesseOverallAverageInputs')} ·
+                          {label(policyResult.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy')}
+                        </span>
+                        <strong>{inputCount(policyResult.overall_average_inputs)}</strong>
+                        {#if !policyResult.complete}<small>{label('finesseMaterialized')}</small>{/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              <small class="metric-footnote">{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
             {/if}
           </div>
           {#if aggregation === 'spin'}
             <div class="spin-metric">
-              <span>{label('buildProbability')}</span>
-              <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
-              <small>{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}</small>
+              <div class:with-averages={Boolean(finesseView?.policyResults.length)} class="probability-with-inputs">
+                <div class="primary-probability">
+                  <span>{label('buildProbability')}</span>
+                  <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
+                </div>
+                {#if finesseView?.policyResults.length}
+                  <div class="average-input-list" aria-label={label('finesseOverallAverageInputs')}>
+                    {#each finesseView.policyResults as policyResult}
+                      <div class="average-input">
+                        <span>
+                          {label('finesseOverallAverageInputs')} ·
+                          {label(policyResult.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy')}
+                        </span>
+                        <strong>{inputCount(policyResult.overall_average_inputs)}</strong>
+                        {#if !policyResult.complete}<small>{label('finesseMaterialized')}</small>{/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              <small class="metric-footnote">{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}</small>
+            </div>
+          {/if}
+          {#if finesseView && showFinesseDetails}
+            <div class="finesse-metrics">
+              {#if finesseView.exactTotalInputs !== null}
+                <div>
+                  <span>{label('finesseExactTotalInputs')}</span>
+                  <strong>{inputCount(finesseView.exactTotalInputs)}</strong>
+                  {#if !finesseView.complete}<small>{label('finesseMaterialized')}</small>{/if}
+                </div>
+              {/if}
+              {#each finesseView.policyResults as policyResult}
+                {#if hasFinessePolicyDetails(policyResult)}
+                  <div>
+                    <span>{label(policyResult.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy')}</span>
+                    {#if policyResult.successful_probability_mass != null}
+                      <small>
+                        {label('finesseSuccessProbability')}:
+                        {workspaceProbability(language, policyResult.successful_probability_mass)}
+                        {#if policyResult.successful_unique_queue_count != null && policyResult.total_unique_queue_count != null}
+                          · {number(policyResult.successful_unique_queue_count)} / {number(policyResult.total_unique_queue_count)}
+                          {label('finesseSuccessfulQueues')}
+                        {/if}
+                      </small>
+                    {/if}
+                    {#if policyResult.oracle_on_covered_average_inputs != null}
+                      <small>{label('finesseOracleOnCoveredAverage')}: {inputCount(policyResult.oracle_on_covered_average_inputs)}</small>
+                    {/if}
+                    {#if policyResult.information_penalty_inputs != null}
+                      <small>{label('finesseInformationPenalty')}: {inputCount(policyResult.information_penalty_inputs)}</small>
+                    {/if}
+                    {#if policyResult.success_probability_gap != null}
+                      <small>{label('finesseSuccessProbabilityGap')}: {workspaceProbability(language, policyResult.success_probability_gap)}</small>
+                    {/if}
+                    {#if !policyResult.complete}<small>{label('finesseMaterialized')}</small>{/if}
+                  </div>
+                {/if}
+              {/each}
             </div>
           {/if}
           <dl>
@@ -154,6 +281,10 @@
         {#if solutionKeys.length}
           <SolutionGallery
             {solutionKeys}
+            solutionProbabilities={solutionProbabilityByKey}
+            solutionFinesse={finesseView?.solutionByKey ?? {}}
+            solutionComments={solutionCommentByKey}
+            representativeWitness={finesseView?.representativeWitness ?? null}
             solutionSetHash={report?.normalized_solution_set_hash ?? ''}
             targetLines={height}
             {language}
@@ -179,14 +310,26 @@
   .continue-button { align-items: center; background: #fff; border: 1px solid #aebbb5; border-radius: 5px; color: #27403a; cursor: pointer; display: inline-flex; font-size: 11px; font-weight: 700; gap: 7px; margin-top: 10px; min-height: 34px; padding: 7px 10px; }
   .continue-button:disabled { cursor: default; opacity: .4; }
   .metrics-panel { min-width: 0; }
-  .hero-metric { border-bottom: 1px solid #dce2de; display: grid; gap: 4px; padding: 2px 0 18px; }
+  .hero-metric { border-bottom: 1px solid #dce2de; display: grid; gap: 6px; padding: 2px 0 18px; }
   .hero-metric > span { color: #68736f; font-size: 11px; font-weight: 700; text-transform: uppercase; }
   .hero-metric strong { color: #075f58; font-size: 34px; font-weight: 780; }
   .hero-metric small { color: #6b7671; font-size: 11px; }
-  .spin-metric { background: #edf6f3; border-bottom: 1px solid #cfe1dc; display: grid; gap: 3px; padding: 13px 10px; }
-  .spin-metric > span { color: #4f625c; font-size: 11px; font-weight: 700; }
-  .spin-metric strong { color: #075f58; font-size: 22px; }
+  .spin-metric { background: #edf6f3; border-bottom: 1px solid #cfe1dc; display: grid; gap: 5px; padding: 13px 10px; }
+  .spin-metric .primary-probability strong { font-size: 22px; }
   .spin-metric small { color: #64726d; font-size: 10px; }
+  .probability-with-inputs { display: grid; min-width: 0; }
+  .probability-with-inputs.with-averages { align-items: stretch; gap: 14px; grid-template-columns: minmax(140px, .75fr) minmax(180px, 1.25fr); }
+  .primary-probability { display: grid; gap: 4px; min-width: 0; }
+  .primary-probability > span, .average-input > span { color: #68736f; font-size: 10px; font-weight: 700; }
+  .average-input-list { display: grid; gap: 6px; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); min-width: 0; }
+  .average-input { border-left: 1px solid #d5ded9; display: grid; gap: 3px; min-width: 0; padding-left: 12px; }
+  .average-input strong { font-size: 19px; }
+  .average-input small { color: #8a5b36; font-size: 10px; font-weight: 700; }
+  .finesse-metrics { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-top: 1px; }
+  .finesse-metrics > div { background: #f0f3f1; display: grid; gap: 4px; padding: 12px 10px; }
+  .finesse-metrics span { color: #68736f; font-size: 10px; font-weight: 700; }
+  .finesse-metrics strong { color: #075f58; font-size: 19px; }
+  .finesse-metrics small { color: #8a5b36; font-size: 10px; font-weight: 700; }
   dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 16px 0 0; }
   dl div { align-items: baseline; border-bottom: 1px solid #e5e9e6; display: flex; gap: 12px; justify-content: space-between; padding: 10px; }
   dt { color: #68736f; font-size: 11px; }
@@ -195,4 +338,8 @@
   .solutions-heading { align-items: center; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 12px; }
   .solutions-heading h3 { margin: 0; }
   @media (max-width: 780px) { .result-grid { grid-template-columns: 1fr; } dl { grid-template-columns: 1fr; } }
+  @media (max-width: 520px) {
+    .probability-with-inputs.with-averages { grid-template-columns: 1fr; }
+    .average-input { border-left: 0; border-top: 1px solid #d5ded9; padding-left: 0; padding-top: 9px; }
+  }
 </style>

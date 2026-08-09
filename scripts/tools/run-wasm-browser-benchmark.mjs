@@ -25,6 +25,7 @@ let server = null;
 let timeout = null;
 let lastProgress = null;
 const progressSamples = [];
+let processMemoryProbe = null;
 
 try {
   const outcome = await new Promise((resolveResult, rejectResult) => {
@@ -80,6 +81,7 @@ try {
         '--metrics-recording-only',
         url.href,
       ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      processMemoryProbe = startProcessMemoryProbe(browser.pid, profile, options);
       let browserError = '';
       browser.stderr.on('data', (chunk) => { browserError += chunk.toString(); });
       browser.once('error', rejectResult);
@@ -97,6 +99,11 @@ try {
     });
   });
   clearTimeout(timeout);
+  const processMemory = await finishProcessMemoryProbe(processMemoryProbe);
+  processMemoryProbe = null;
+  outcome.result.browser_process_tree_peak_working_set_bytes = processMemory.peakBytes;
+  outcome.result.browser_process_tree_memory_probe = processMemory.status;
+  outcome.result.browser_process_tree_memory_sample_interval_ms = processMemory.intervalMs;
   await stopBrowser(browser, profile);
   browser = null;
   await closeServer(server);
@@ -104,6 +111,7 @@ try {
   console.log(JSON.stringify(outcome.result, null, 2));
 } finally {
   clearTimeout(timeout);
+  await finishProcessMemoryProbe(processMemoryProbe);
   await stopBrowser(browser, profile);
   await closeServer(server);
   try {
@@ -111,6 +119,99 @@ try {
   } finally {
     await profileLease.release({ remove: false });
   }
+}
+
+function startProcessMemoryProbe(rootPid, profilePath, values) {
+  if (values['memory-probe'] !== 'true') return null;
+  if (process.platform !== 'win32') {
+    return { unsupported: true, intervalMs: null };
+  }
+  const intervalMs = positiveInteger(
+    values['memory-sample-interval'] ?? '250',
+    'memory-sample-interval'
+  );
+  const outputPath = resolve(profilePath, 'process-tree-peak-working-set.txt');
+  const stopPath = resolve(profilePath, 'process-tree-memory-probe.stop');
+  const source = String.raw`
+$ErrorActionPreference = 'Stop'
+$rootProcessId = [uint32]$env:CLEARRA_MEMORY_PROBE_ROOT_PID
+$stopPath = $env:CLEARRA_MEMORY_PROBE_STOP_PATH
+$outputPath = $env:CLEARRA_MEMORY_PROBE_OUTPUT_PATH
+$intervalMs = [int]$env:CLEARRA_MEMORY_PROBE_INTERVAL_MS
+$peakBytes = [long]0
+try {
+  while (-not (Test-Path -LiteralPath $stopPath)) {
+    $rows = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,WorkingSetSize)
+    $ids = [System.Collections.Generic.HashSet[uint32]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $changed = $false
+      foreach ($row in $rows) {
+        if ($ids.Contains([uint32]$row.ParentProcessId) -and $ids.Add([uint32]$row.ProcessId)) {
+          $changed = $true
+        }
+      }
+    } while ($changed)
+    $workingSetBytes = [long]0
+    foreach ($row in $rows) {
+      if ($ids.Contains([uint32]$row.ProcessId)) {
+        $workingSetBytes += [long]$row.WorkingSetSize
+      }
+    }
+    if ($workingSetBytes -gt $peakBytes) { $peakBytes = $workingSetBytes }
+    Start-Sleep -Milliseconds $intervalMs
+  }
+} finally {
+  [System.IO.File]::WriteAllText($outputPath, [string]$peakBytes)
+}
+`;
+  const encoded = Buffer.from(source, 'utf16le').toString('base64');
+  const child = spawn('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-EncodedCommand',
+    encoded,
+  ], {
+    stdio: 'ignore',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      CLEARRA_MEMORY_PROBE_ROOT_PID: String(rootPid),
+      CLEARRA_MEMORY_PROBE_STOP_PATH: stopPath,
+      CLEARRA_MEMORY_PROBE_OUTPUT_PATH: outputPath,
+      CLEARRA_MEMORY_PROBE_INTERVAL_MS: String(intervalMs),
+    },
+  });
+  return { child, outputPath, stopPath, intervalMs };
+}
+
+async function finishProcessMemoryProbe(probe) {
+  if (!probe) return { peakBytes: null, status: 'not-requested', intervalMs: null };
+  if (probe.unsupported) {
+    return { peakBytes: null, status: 'unsupported-platform', intervalMs: null };
+  }
+  await fs.promises.writeFile(probe.stopPath, '', 'utf8');
+  const exited = probe.child.exitCode === null
+    ? new Promise((resolveExit) => probe.child.once('exit', resolveExit))
+    : Promise.resolve(probe.child.exitCode);
+  const completed = await Promise.race([
+    exited.then(() => true),
+    new Promise((resolveWait) => setTimeout(() => resolveWait(false), 5_000)),
+  ]);
+  if (!completed) probe.child.kill('SIGKILL');
+  let peakBytes = null;
+  try {
+    const parsed = Number.parseInt(await fs.promises.readFile(probe.outputPath, 'utf8'), 10);
+    if (Number.isSafeInteger(parsed) && parsed > 0) peakBytes = parsed;
+  } catch {
+    // A missing sample is explicit in the returned probe status.
+  }
+  return {
+    peakBytes,
+    status: peakBytes === null ? 'no-sample' : 'sampled-windows-process-tree-working-set',
+    intervalMs: probe.intervalMs,
+  };
 }
 
 async function closeServer(activeServer) {

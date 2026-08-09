@@ -30,4 +30,6 @@ test('failed queue mode uses the reverse coverage command without scoring', () =
   assert.equal(desktop.count_policy, 'all');
   assert.equal(desktop.initial_b2b, 0);
   assert.equal(desktop.solution_probabilities, false);
+  assert.equal(desktop.finesse, 'off');
+  assert.equal(desktop.pattern_knowledge, 'both');
 });

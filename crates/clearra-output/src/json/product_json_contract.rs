@@ -91,6 +91,8 @@ fn solution_artifacts_contract(fields: &[JsonField]) -> JsonValue {
         "solution_probabilities",
         "solution_probabilities",
     );
+    push_existing(fields, &mut members, "finesse_report", "finesse_report");
+    push_existing(fields, &mut members, "finesse_score_data", "finesse_score");
     push_existing(fields, &mut members, "hold_conditions", "setup_conditions");
     push_existing(fields, &mut members, "forward_solution_data", "forward");
     JsonValue::object(members)

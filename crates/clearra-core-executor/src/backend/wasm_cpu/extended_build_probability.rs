@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_finesse::{
+    CostedGeometryEdge, CostedGeometryLanguage, GeometryLanguageNode, GeometryNodeId,
+};
 use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
 use clearra_replay::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
 use clearra_supply::pattern_universe::PackingPatternMembershipKind;
@@ -9,8 +12,8 @@ use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 use crate::{CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage};
 
 use super::{
-    build_probability::BuildProbabilityAdvance,
-    buildup::representative_pattern_path,
+    build_probability::{costed_finesse_language, BuildProbabilityAdvance, FinesseSearchMaterial},
+    buildup::{representative_pattern_path, PreparedFinesseLanguage},
     coverage_product::CoverageProductEvaluator,
     distributed::{
         WasmCandidatePacket, WasmCandidateProducerAdvance, WasmDistributedBackendExecution,
@@ -18,8 +21,8 @@ use super::{
     },
     extended_board::{compact_logical_board, words_hex},
     extended_buildup::{
-        build_extended_order_graph, ExtendedBuildOrderResult, ExtendedBuildOrderWorkspace,
-        ExtendedTilingKey,
+        build_extended_order_graph, build_extended_order_graph_with_finesse,
+        ExtendedBuildOrderResult, ExtendedBuildOrderWorkspace, ExtendedTilingKey,
     },
     extended_geometry::{ExtendedGeometryAdvance, ExtendedGeometrySearch},
     extended_inverse_catalog::ExtendedInverseCatalog,
@@ -64,6 +67,8 @@ pub(super) struct ExtendedBuildProbabilitySession {
     parallel_maximum_worker_candidates: usize,
     distributed_worker_memory_bytes: usize,
     distributed_execution_constraint_materialized: bool,
+    finesse_requested: bool,
+    finesse_languages: Vec<(String, PreparedFinesseLanguage)>,
     finished: bool,
 }
 
@@ -72,6 +77,23 @@ impl ExtendedBuildProbabilitySession {
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_mode(problem, field, aggregation, false)
+    }
+
+    pub fn new_with_finesse(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_mode(problem, field, aggregation, true)
+    }
+
+    fn new_mode(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_requested: bool,
     ) -> Result<Self, WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
         if field.is_compact() || !(7..=24).contains(&field.height()) {
@@ -166,6 +188,8 @@ impl ExtendedBuildProbabilitySession {
             parallel_maximum_worker_candidates: 0,
             distributed_worker_memory_bytes: 0,
             distributed_execution_constraint_materialized: false,
+            finesse_requested,
+            finesse_languages: Vec::new(),
             finished: false,
         })
     }
@@ -272,29 +296,52 @@ impl ExtendedBuildProbabilitySession {
                     "wasm_extended_build_probability_solution_storage_unavailable",
                 )
             })?;
-            self.buildable_tilings.insert(tiling);
-            return Ok(());
+            if !self.finesse_requested {
+                self.buildable_tilings.insert(tiling);
+                return Ok(());
+            }
+            self.buildable_tilings.insert(tiling.clone());
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested();
-        let candidate_key = execution_evidence_requested
+        let candidate_key = (execution_evidence_requested || self.finesse_requested)
             .then(|| tiling.canonical_key(self.catalog.initial_board(), self.field.height()));
-        let spin_candidate = candidate_key
-            .as_ref()
-            .map(|candidate_key| (tiling_digest, candidate_key.clone()));
+        let spin_candidate = execution_evidence_requested.then(|| {
+            (
+                tiling_digest,
+                candidate_key
+                    .as_ref()
+                    .expect("requested execution evidence has a candidate key")
+                    .clone(),
+            )
+        });
         let node_limit = self.remaining_node_budget();
         if self.problem.backend_request().max_nodes() != 0 && node_limit == 0 {
             self.truncated_reason = Some("node_budget_exceeded");
             return Ok(());
         }
-        match build_extended_order_graph(
-            &self.catalog,
-            &candidate,
-            &mut self.build_order_workspace,
-            node_limit,
-            spin_candidate,
-            control,
-        )? {
+        let build_order = if self.finesse_requested {
+            build_extended_order_graph_with_finesse(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                &mut self.build_order_workspace,
+                node_limit,
+                spin_candidate,
+                self.aggregation.requests_spin_coverage(),
+                control,
+            )
+        } else {
+            build_extended_order_graph(
+                &self.catalog,
+                &candidate,
+                &mut self.build_order_workspace,
+                node_limit,
+                spin_candidate,
+                control,
+            )
+        }?;
+        match build_order {
             ExtendedBuildOrderResult::Incomplete {
                 searched_nodes,
                 reachability_states,
@@ -310,6 +357,7 @@ impl ExtendedBuildProbabilitySession {
             }
             ExtendedBuildOrderResult::Complete {
                 graph,
+                finesse_language,
                 spin_graph,
                 searched_nodes,
                 reachability_states,
@@ -395,6 +443,22 @@ impl ExtendedBuildProbabilitySession {
                                 "wasm_extended_solution_coverage_key_missing",
                             ))?;
                     self.merge_solution_coverage(candidate_key, &product.coverage_bits)?;
+                }
+                if let Some(language) = finesse_language {
+                    self.finesse_languages.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_extended_finesse_language_storage_unavailable",
+                        )
+                    })?;
+                    self.finesse_languages.push((
+                        candidate_key
+                            .as_ref()
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_extended_finesse_solution_key_missing",
+                            ))?
+                            .clone(),
+                        language,
+                    ));
                 }
                 self.retain_buildable_tiling(tiling)?;
                 if let Some(spin_graph) = spin_graph {
@@ -698,6 +762,100 @@ impl ExtendedBuildProbabilitySession {
             self.truncated_reason = Some(reason);
         }
         self.complete()
+    }
+
+    pub(super) fn annotate_distributed_finesse(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.external_geometry || self.finished {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_distributed_annotation_state_invalid",
+            ));
+        }
+        self.finesse_requested = true;
+        self.finesse_languages.clear();
+        let universe = self.problem.piece_source().materialized_universe().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+        )?;
+        let family = universe.packing_multiset_family(
+            self.field.target_piece_count(),
+            self.problem.initial_hold(),
+            super::packing_projection_hold_enabled(&self.problem),
+        );
+        let mut reconstruction = ExtendedGeometrySearch::new(universe, &family, &self.catalog)?;
+        if !reconstruction.prepare_external() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_reconstruction_targets_unavailable",
+            ));
+        }
+        let mut solution_keys = self
+            .distributed_solution_keys
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        solution_keys.sort_unstable();
+        for solution_key in solution_keys {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            let row_ids = extended_row_ids_from_canonical_key(
+                &solution_key,
+                self.field.height(),
+                &self.catalog,
+            )?;
+            let candidate = reconstruction
+                .external_candidate(&self.catalog, &row_ids)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_not_in_catalog",
+                ))?;
+            let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
+            if tiling.canonical_key(self.catalog.initial_board(), self.field.height())
+                != solution_key
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_reconstruction_mismatch",
+                ));
+            }
+            let spin_candidate = (self.aggregation.requests_spin_coverage()
+                || self.problem.objective().execution_constraints().requested())
+            .then(|| (tiling.digest(), solution_key.clone()));
+            let build = build_extended_order_graph_with_finesse(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                &mut self.build_order_workspace,
+                usize::MAX,
+                spin_candidate,
+                self.aggregation.requests_spin_coverage(),
+                control,
+            )?;
+            let ExtendedBuildOrderResult::Complete {
+                graph,
+                finesse_language,
+                ..
+            } = build
+            else {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_reconstruction_incomplete",
+                ));
+            };
+            if !graph.is_live() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_verified_solution_became_unbuildable",
+                ));
+            }
+            let language = finesse_language.ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_distributed_language_missing",
+            ))?;
+            self.finesse_languages.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_distributed_language_storage_unavailable",
+                )
+            })?;
+            self.finesse_languages.push((solution_key, language));
+        }
+        Ok(())
     }
 
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
@@ -1108,6 +1266,56 @@ impl ExtendedBuildProbabilitySession {
         }
     }
 
+    pub(super) fn finesse_search_material(
+        &self,
+    ) -> Result<FinesseSearchMaterial, WasmExactSearchError> {
+        if !self.finesse_requested {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_material_not_requested",
+            ));
+        }
+        let mut languages = Vec::new();
+        languages
+            .try_reserve_exact(self.finesse_languages.len() + usize::from(self.trivial_target))
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_evaluation_language_storage_unavailable",
+                )
+            })?;
+        for (solution_key, prepared) in &self.finesse_languages {
+            languages.push((solution_key.clone(), costed_finesse_language(prepared)?));
+        }
+        if self.trivial_target {
+            let language = CostedGeometryLanguage::new(
+                GeometryNodeId::new(0),
+                vec![GeometryLanguageNode::new(
+                    0,
+                    true,
+                    Vec::<CostedGeometryEdge>::new(),
+                )],
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_trivial_language_invalid",
+                )
+            })?;
+            languages.push((
+                ExtendedTilingKey::empty()
+                    .canonical_key(self.catalog.initial_board(), self.field.height()),
+                language,
+            ));
+        }
+        // Equal canonical keys can still expose different concrete minimal
+        // movement alternatives. Preserve them for the shared exact union.
+        languages.sort_by(|left, right| left.0.cmp(&right.0));
+
+        FinesseSearchMaterial::new(
+            &self.problem,
+            languages,
+            self.supply_projection_complete && self.truncated_reason.is_none(),
+        )
+    }
+
     fn node_budget_exhausted(&self) -> bool {
         self.problem.backend_request().max_nodes() != 0 && self.remaining_node_budget() == 0
     }
@@ -1159,8 +1367,116 @@ impl ExtendedBuildProbabilitySession {
                 .iter()
                 .map(SpinCoverageExecutionGraph::retained_bytes)
                 .sum::<usize>()
+            + self.finesse_languages.capacity()
+                * core::mem::size_of::<(String, PreparedFinesseLanguage)>()
+            + self
+                .finesse_languages
+                .iter()
+                .map(|(key, language)| {
+                    key.capacity()
+                        + language.nodes.capacity()
+                            * core::mem::size_of::<super::buildup::PreparedFinesseNode>()
+                        + language.edges.capacity()
+                            * core::mem::size_of::<super::buildup::PreparedFinesseEdge>()
+                })
+                .sum::<usize>()
             + self.peak_build_scratch_bytes
     }
+}
+
+fn extended_row_ids_from_canonical_key(
+    key: &str,
+    expected_height: u8,
+    catalog: &ExtendedInverseCatalog,
+) -> Result<Vec<u32>, WasmExactSearchError> {
+    let prefix = format!("ctk2|height={expected_height}|initial=");
+    let rest = key
+        .strip_prefix(&prefix)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_extended_finesse_solution_key_header_invalid",
+        ))?;
+    let (initial, placements) =
+        rest.split_once("|placements=")
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_solution_key_sections_invalid",
+            ))?;
+    if parse_extended_board_hex(initial)? != catalog.initial_board() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_extended_finesse_solution_key_initial_board_mismatch",
+        ));
+    }
+    let mut row_ids = Vec::new();
+    if !placements.is_empty() {
+        row_ids
+            .try_reserve_exact(placements.split(',').count())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_storage_unavailable",
+                )
+            })?;
+        for placement in placements.split(',') {
+            let (piece, cells) =
+                placement
+                    .split_once(':')
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_extended_finesse_solution_key_placement_invalid",
+                    ))?;
+            let mut characters = piece.chars();
+            let piece = PieceKind::from_ascii(characters.next().ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_piece_missing",
+                ),
+            )?)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_piece_invalid",
+                )
+            })?;
+            if characters.next().is_some() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_piece_invalid",
+                ));
+            }
+            let cells = parse_extended_board_hex(cells)?;
+            let mut matches = catalog
+                .skeletons()
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.piece == piece && row.cells == cells);
+            let (row_id, _) = matches.next().ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_solution_key_placement_not_in_catalog",
+            ))?;
+            if matches.next().is_some() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_catalog_collision",
+                ));
+            }
+            row_ids.push(u32::try_from(row_id).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_row_overflow",
+                )
+            })?);
+        }
+    }
+    Ok(row_ids)
+}
+
+fn parse_extended_board_hex(
+    value: &str,
+) -> Result<super::extended_board::ExtendedBoard, WasmExactSearchError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_extended_finesse_solution_key_mask_invalid",
+        ));
+    }
+    let mut words = [0_u64; 4];
+    for (chunk, word_index) in [3_usize, 2, 1, 0].into_iter().enumerate() {
+        let start = chunk * 16;
+        words[word_index] = u64::from_str_radix(&value[start..start + 16], 16).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_extended_finesse_solution_key_mask_invalid")
+        })?;
+    }
+    Ok(super::extended_board::ExtendedBoard::from_words(words))
 }
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {

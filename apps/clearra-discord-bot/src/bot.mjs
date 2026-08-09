@@ -30,6 +30,7 @@ import {
   findApplicationCommand,
   formatSlashCommandHelp,
   globalCommands,
+  resolveSlashCommandInvocation,
 } from "./discord/slash-command-catalog.mjs";
 import {
   findCommandModalCommand,
@@ -374,10 +375,15 @@ export class Clearrabot {
 
     let argumentSets;
     let automaticPcTargets = false;
+    let executionCommand = command;
+    let executionOptions = rawOptions;
     try {
+      const invocation = resolveSlashCommandInvocation(command, rawOptions);
+      executionCommand = invocation.command;
+      executionOptions = invocation.rawOptions;
       const argumentPlan = buildSlashCommandArgumentPlan(
-        command,
-        rawOptions,
+        executionCommand,
+        executionOptions,
       );
       automaticPcTargets = argumentPlan.automaticPcTargets;
       argumentSets = argumentPlan.argumentSets.map((tokens) =>
@@ -390,7 +396,7 @@ export class Clearrabot {
       );
       return true;
     }
-    const previewDocument = safeSearchPreviewDocument(command, rawOptions);
+    const previewDocument = safeSearchPreviewDocument(executionCommand, executionOptions);
     if (argumentSets.length === 1 && !automaticPcTargets) {
       await this.runInteractionCommand(
         interaction,
@@ -1559,13 +1565,13 @@ function resultMessage(result, tilingOnly = false, options = {}) {
     const structured = parsed
       ? {
           ...parsed,
-          kind: publicStructuredResultKind(parsed.kind, options.resultKind),
+          kind: requestedStructuredResultKind(parsed, options.resultKind),
         }
       : parsed;
     if (structured) {
       const ctk3 = buildCtk3Result(parsed);
       if (ctk3) return ctk3ResultMessage(structured, ctk3, tilingOnly, options);
-      const empty = structuredCompleteness(structured.summary);
+      const empty = structuredCompleteness(structured.summary, structured.finesse_report);
       return textMessage(
         structuredResultSummary(
           structured,
@@ -1610,6 +1616,14 @@ function resultMessage(result, tilingOnly = false, options = {}) {
   );
 }
 
+function requestedStructuredResultKind(structured, fallback) {
+  if (
+    isPlainObject(structured?.finesse_report) &&
+    (fallback === "finesse-search" || fallback === "finesse-score")
+  ) return fallback;
+  return publicStructuredResultKind(structured?.kind, fallback);
+}
+
 function publicResultKind(arguments_) {
   const namespace = String(arguments_?.[0] ?? "").toLowerCase();
   const command = String(arguments_?.[1] ?? "")
@@ -1618,12 +1632,19 @@ function publicResultKind(arguments_) {
   if (namespace === "sfinder" && PUBLIC_RESULT_KINDS.has(command)) {
     return command;
   }
+  if (namespace === "finesse" && ["search", "score"].includes(command)) {
+    return `finesse-${command}`;
+  }
   const direct = namespace.replaceAll("_", "-");
   return PUBLIC_RESULT_KINDS.has(direct) ? direct : "search";
 }
 
 function ctk3ResultMessage(structured, ctk3, tilingOnly, options) {
   const locale = options.locale ?? "en";
+  const finesseCompleteness = structuredCompleteness(
+    null,
+    structured.finesse_report,
+  );
   const bytes = new TextEncoder().encode(ctk3.source);
   const limit = options.maxCtk3FileBytes ?? 24 * 1024 * 1024;
   if (!Number.isSafeInteger(limit) || limit < 1) {
@@ -1638,8 +1659,8 @@ function ctk3ResultMessage(structured, ctk3, tilingOnly, options) {
     structuredResultSummary(
       structured,
       ctk3.pageCount,
-      ctk3.complete,
-      ctk3.warnings,
+      ctk3.complete && finesseCompleteness.complete,
+      [...ctk3.warnings, ...finesseCompleteness.warnings],
       tilingOnly,
       locale,
     ),
@@ -1691,6 +1712,7 @@ function structuredResultSummary(
       }
     }
   }
+  lines.push(...finesseReportLines(structured.finesse_report, locale));
   const warningKinds = [...new Set(warnings.map(publicWarningKind))];
   const visibleWarnings = warningKinds.slice(0, 3);
   for (const warning of visibleWarnings) {
@@ -1735,6 +1757,9 @@ function friendlyResultKind(value, locale) {
   if (normalizedKind === "spin-structure") {
     return t(locale, "result.kind.spin_structure");
   }
+  if (normalizedKind === "finesse-search" || normalizedKind === "finesse-score") {
+    return t(locale, `result.kind.${normalizedKind.replace("-", "_")}`);
+  }
   if (locale === "en") return kind;
   const translationKind =
     normalizedKind === "pc" || normalizedKind.includes("perfect-clear")
@@ -1761,23 +1786,111 @@ function friendlyResultKind(value, locale) {
     : "result.generic_kind");
 }
 
-function structuredCompleteness(summary) {
+function structuredCompleteness(summary, finesseReport = null) {
   const warnings = [];
   let complete = true;
-  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
-    return { complete, warnings };
+  if (summary && typeof summary === "object" && !Array.isArray(summary)) {
+    for (const [key, value] of Object.entries(summary)) {
+      if (/(?:^|_)complete$/.test(key) && value === false) {
+        complete = false;
+        warnings.push("incomplete");
+      } else if (/(?:^|_)truncated$/.test(key) && value === true) {
+        complete = false;
+        warnings.push("truncated");
+      }
+    }
   }
-  for (const [key, value] of Object.entries(summary)) {
-    if (/(?:^|_)complete$/.test(key) && value === false) {
+  if (isPlainObject(finesseReport)) {
+    if (finesseReport.complete === false) {
       complete = false;
       warnings.push("incomplete");
-    } else if (/(?:^|_)truncated$/.test(key) && value === true) {
+    }
+    if (Array.isArray(finesseReport.policy_results) &&
+      finesseReport.policy_results.some((result) => isPlainObject(result) && result.complete === false)) {
       complete = false;
-      warnings.push("truncated");
+      warnings.push("incomplete");
     }
   }
   return { complete, warnings };
 }
+
+function finesseReportLines(report, locale) {
+  if (!isPlainObject(report)) return [];
+  const lines = [];
+  const exact = nonNegativeFiniteNumber(report.exact_total_inputs);
+  if (exact !== null) {
+    lines.push(`${t(locale, "finesse.exact_total_inputs")}: ${formatInputCount(exact, locale)}`);
+  }
+  if (!Array.isArray(report.policy_results)) return lines;
+
+  const results = new Map();
+  for (const result of report.policy_results) {
+    if (!isPlainObject(result) || !["oracle", "visible-7"].includes(result.policy)) continue;
+    if (!results.has(result.policy)) results.set(result.policy, result);
+  }
+  for (const policy of ["oracle", "visible-7"]) {
+    const result = results.get(policy);
+    if (!result) continue;
+    const average = nonNegativeFiniteNumber(result.overall_average_inputs);
+    if (average !== null) {
+      lines.push(`${t(locale, `finesse.average.${policy.replace("-", "_")}`)}: ${formatInputCount(average, locale)}`);
+    }
+    const successProbability = unitProbability(result.successful_probability_mass);
+    if (successProbability !== null) {
+      lines.push(`${t(locale, "finesse.success_probability")}: ${Number((successProbability * 100).toFixed(4))}%`);
+    }
+    const successfulQueues = nonNegativeInteger(result.successful_unique_queue_count);
+    const totalQueues = nonNegativeInteger(result.total_unique_queue_count);
+    if (successfulQueues !== null && totalQueues !== null) {
+      lines.push(`${t(locale, "finesse.successful_queues")}: ${successfulQueues}/${totalQueues}`);
+    }
+    if (policy !== "visible-7") continue;
+    const oracleCovered = nonNegativeFiniteNumber(result.oracle_on_covered_average_inputs);
+    if (oracleCovered !== null) {
+      lines.push(`${t(locale, "finesse.oracle_on_covered_average")}: ${formatInputCount(oracleCovered, locale)}`);
+    }
+    const penalty = nonNegativeFiniteNumber(result.information_penalty_inputs);
+    if (penalty !== null) {
+      lines.push(`${t(locale, "finesse.information_penalty")}: ${formatInputCount(penalty, locale)}`);
+    }
+    const probabilityGap = unitProbability(result.success_probability_gap);
+    if (probabilityGap !== null) {
+      lines.push(`${t(locale, "finesse.success_probability_gap")}: ${Number((probabilityGap * 100).toFixed(4))}%`);
+    }
+  }
+  return lines;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonNegativeFiniteNumber(value) {
+  const number = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.length <= 64 && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)
+      ? Number(value)
+      : null;
+  return number !== null && Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function nonNegativeInteger(value) {
+  const number = nonNegativeFiniteNumber(value);
+  return number !== null && Number.isSafeInteger(number) ? number : null;
+}
+
+function unitProbability(value) {
+  const number = nonNegativeFiniteNumber(value);
+  return number !== null && number <= 1 ? number : null;
+}
+
+function formatInputCount(value, locale) {
+  const formatted = Number(value.toFixed(4));
+  return t(locale, formatted === 1 ? "finesse.input" : "finesse.inputs", {
+    count: formatted,
+  });
+}
+
 
 const RESULT_SUMMARY_FIELDS = Object.freeze([
   "coverage_probability",
@@ -1822,6 +1935,8 @@ const PUBLIC_RESULT_KINDS = new Set([
   "best-setup",
   "dpc-finder",
   "verify",
+  "finesse-search",
+  "finesse-score",
 ]);
 
 const PROBABILITY_SUMMARY_FIELDS = new Set([

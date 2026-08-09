@@ -180,6 +180,15 @@ type ClearraWasmBindings = {
 
 type ClearraWasmArtifactManifest = {
   schema_version: 1;
+  // The worker also enforces the capability contract. This closes the gap
+  // where a long-running Vite process can serve a freshly HMR-updated GUI with
+  // an older, otherwise valid WASM generation.
+  build: {
+    contract_version: number;
+    source_sha256: string;
+    source_file_count: number;
+    capabilities_sha256: string;
+  };
   bindings: ClearraWasmArtifact;
   wasm: ClearraWasmArtifact;
 };
@@ -420,8 +429,25 @@ function isArtifactManifest(manifest: unknown): manifest is ClearraWasmArtifactM
   const candidate = manifest as Partial<ClearraWasmArtifactManifest>;
   return (
     candidate.schema_version === 1 &&
+    isBuildContract(candidate.build) &&
     isArtifact(candidate.bindings, 'clearra_wasm.js', 'clearra_wasm', '.js') &&
     isArtifact(candidate.wasm, 'clearra_wasm_bg.wasm', 'clearra_wasm_bg', '.wasm')
+  );
+}
+
+const REQUIRED_WASM_CAPABILITIES_SHA256 =
+  '6e6e2c1e973f62c6d6fa28f571b326104aec625e6879c4aca67df3364029d98b';
+
+function isBuildContract(value: unknown): value is ClearraWasmArtifactManifest['build'] {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ClearraWasmArtifactManifest['build']>;
+  return (
+    candidate.contract_version === 1 &&
+    typeof candidate.source_sha256 === 'string' &&
+    isSha256(candidate.source_sha256) &&
+    Number.isSafeInteger(candidate.source_file_count) &&
+    Number(candidate.source_file_count) > 0 &&
+    candidate.capabilities_sha256 === REQUIRED_WASM_CAPABILITIES_SHA256
   );
 }
 

@@ -6,7 +6,8 @@ use clearra_pc_graph::request::{
 };
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFieldError,
-    BuildProbabilityQuery,
+    BuildProbabilityFinesseRequest, BuildProbabilityQuery, FinesseMetric, FinessePatternKnowledge,
+    FinesseScoreRequest,
 };
 use clearra_rules::profile::rule_profile::RuleProfile;
 
@@ -20,6 +21,7 @@ pub struct WebBuildProbabilityInput {
     source_piece_count: Option<usize>,
     include_horizontal_mirror: bool,
     aggregation: BuildProbabilityAggregation,
+    finesse: BuildProbabilityFinesseRequest,
 }
 
 impl WebBuildProbabilityInput {
@@ -41,6 +43,7 @@ impl WebBuildProbabilityInput {
             source_piece_count: None,
             include_horizontal_mirror: true,
             aggregation: BuildProbabilityAggregation::Buildability,
+            finesse: BuildProbabilityFinesseRequest::Off,
         }
     }
 
@@ -69,6 +72,26 @@ impl WebBuildProbabilityInput {
         self
     }
 
+    pub fn with_finesse(
+        mut self,
+        metric: FinesseMetric,
+        pattern_knowledge: FinessePatternKnowledge,
+    ) -> Self {
+        self.finesse = match metric {
+            FinesseMetric::Off => BuildProbabilityFinesseRequest::Off,
+            FinesseMetric::Inputs => BuildProbabilityFinesseRequest::Search { pattern_knowledge },
+        };
+        self
+    }
+
+    pub fn with_finesse_score(mut self, score: FinesseScoreRequest) -> Self {
+        self.finesse = BuildProbabilityFinesseRequest::Score {
+            pattern_knowledge: self.finesse.pattern_knowledge(),
+            request: score,
+        };
+        self
+    }
+
     pub fn to_query(
         &self,
         queue: PcQueueInput,
@@ -79,9 +102,23 @@ impl WebBuildProbabilityInput {
     ) -> Result<BuildProbabilityQuery, BuildProbabilityFieldError> {
         let height = u8::try_from(self.visible_height)
             .map_err(|_| BuildProbabilityFieldError::HeightOutOfRange { height: u8::MAX })?;
-        let field = BuildProbabilityField::from_words(height, self.base_words, self.target_words)?
-            .with_horizontal_mirror_included(self.include_horizontal_mirror);
-        let target_piece_count = field.target_piece_count();
+        let field = if self.finesse.metric().requested() {
+            BuildProbabilityField::from_words_preserving_height(
+                height,
+                self.base_words,
+                self.target_words,
+            )?
+        } else {
+            BuildProbabilityField::from_words(height, self.base_words, self.target_words)?
+        }
+        .with_horizontal_mirror_included(
+            self.include_horizontal_mirror
+                && !matches!(&self.finesse, BuildProbabilityFinesseRequest::Score { .. }),
+        );
+        let target_piece_count = self.finesse.score().map_or_else(
+            || field.target_piece_count(),
+            |score| score.placements().len(),
+        );
         let compact_supply_shell = field.compact_base_mask().unwrap_or(0);
         let mut query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(u16::from(field.height()), compact_supply_shell),
@@ -112,7 +149,19 @@ impl WebBuildProbabilityInput {
         {
             query = query.with_supply_window_size(window);
         }
-        Ok(BuildProbabilityQuery::new(query, field).with_aggregation(self.aggregation))
+        let query = BuildProbabilityQuery::new(query, field).with_aggregation(self.aggregation);
+        Ok(match &self.finesse {
+            BuildProbabilityFinesseRequest::Off => query,
+            BuildProbabilityFinesseRequest::Search { pattern_knowledge } => {
+                query.with_finesse(FinesseMetric::Inputs, *pattern_knowledge)
+            }
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge,
+                request,
+            } => query
+                .with_finesse(FinesseMetric::Inputs, *pattern_knowledge)
+                .with_finesse_score(request.clone()),
+        })
     }
 
     pub const fn hold_piece(&self) -> Option<PieceKind> {
@@ -122,5 +171,51 @@ impl WebBuildProbabilityInput {
     pub fn with_leading_hold_piece(mut self, piece: PieceKind) -> Self {
         self.hold_piece = Some(piece);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::{PcExecutionPolicy, PcQueueInput};
+    use clearra_problem::{
+        BuildProbabilityFinesseRequest, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
+        FinesseScoreRequest,
+    };
+    use clearra_rules::profile::builtin_rules::srs_plus;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::WebBuildProbabilityInput;
+
+    #[test]
+    fn latest_finesse_variant_replaces_a_prior_score_request() {
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::I,
+            RotationState::Zero,
+            3,
+            0,
+        )])
+        .unwrap();
+        let input = WebBuildProbabilityInput::new(0, 0xf, 4)
+            .with_finesse_score(score)
+            .with_finesse(FinesseMetric::Off, FinessePatternKnowledge::Oracle);
+        let query = input
+            .to_query(
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PcExecutionPolicy::mvp_default(),
+                None,
+                srs_plus(),
+                ObjectivePolicy::unique(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            query.finesse_request(),
+            BuildProbabilityFinesseRequest::Off
+        ));
+        assert!(query.finesse_score().is_none());
+        assert_eq!(query.field().height(), 1);
+        assert!(query.field().includes_horizontal_mirror());
     }
 }

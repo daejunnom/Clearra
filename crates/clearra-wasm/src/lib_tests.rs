@@ -1,3 +1,5 @@
+// SRP rationale: this test module has one behavior-level change reason: verifying the complete public WASM command and JSON envelope contract.
+
 use clearra_app::{AppCommand, AppContext, AppCoreExecutorService, AppServices};
 use clearra_host_contract::AppStatus;
 use serde_json::Value;
@@ -257,6 +259,165 @@ fn finite_pattern_releases_terminal_hold_for_complete_build_coverage() {
             - 1.0)
             .abs()
             <= f64::EPSILON
+    );
+}
+
+#[test]
+fn finesse_fixed_queue_witness_reaches_the_typed_wasm_json_contract() {
+    const COMMAND: &str = "clearra finesse search --base-mask 0x0 --target-mask 0xf --height 1 \
+         --queue I --no-hold --pattern-knowledge oracle --rule srs-plus";
+    let result = WasmCommandRuntime::default()
+        .run_command_text(COMMAND)
+        .expect("fixed-queue finesse search");
+    let report = result.search_report().expect("finesse search report");
+    let finesse = report
+        .finesse_report
+        .as_ref()
+        .expect("typed finesse report");
+    let witness = finesse
+        .representative_witness
+        .as_ref()
+        .expect("fixed queue witness");
+    assert_eq!(witness.policy, "oracle");
+    assert_eq!(witness.queue, ["I"]);
+    assert_eq!(
+        finesse
+            .exact_total_inputs
+            .as_deref()
+            .and_then(|value| value.parse::<u32>().ok()),
+        Some(witness.total_inputs)
+    );
+    assert_eq!(witness.input_sequence.len(), witness.total_inputs as usize);
+    assert_eq!(
+        witness.input_sequence.last().map(String::as_str),
+        Some("hard-drop")
+    );
+    assert_eq!(witness.placements.len(), 1);
+    assert_eq!(witness.placements[0].piece, "I");
+    assert_eq!(witness.placements[0].rotation, 0);
+    assert_eq!((witness.placements[0].x, witness.placements[0].y), (0, 0));
+
+    let request = WasmCommandRuntime::default()
+        .compile_command_text(COMMAND)
+        .expect("finesse AppRequest");
+    let app_response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    )
+    .run(request);
+    let json = serialize_search_report_from_app_response(&app_response)
+        .expect("serialized finesse search report");
+    let value: Value = serde_json::from_str(&json).expect("valid search report JSON");
+    let json_witness = &value["finesse_report"]["representative_witness"];
+    assert_eq!(json_witness["queue"], serde_json::json!(["I"]));
+    assert_eq!(json_witness["total_inputs"], witness.total_inputs);
+    assert_eq!(
+        json_witness["input_sequence"].as_array().map(Vec::len),
+        Some(witness.total_inputs as usize)
+    );
+    assert_eq!(
+        json_witness["placements"],
+        serde_json::json!([{"piece":"I","rotation":0,"x":0,"y":0}])
+    );
+}
+
+#[test]
+fn finesse_fixed_queue_score_reaches_the_typed_wasm_report_contract() {
+    const COMMAND: &str = "clearra finesse score --initial-mask 0 --height 4 \
+         --placements O:spawn:4:0 --queue O --no-hold --pattern-knowledge both \
+         --rule srs-plus --workers 2";
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let result = runtime
+        .run_command_text(COMMAND)
+        .expect("fixed-queue finesse score");
+    let report = result.search_report().expect("finesse score report");
+    let finesse = report
+        .finesse_report
+        .as_ref()
+        .expect("typed finesse score report");
+    let witness = finesse
+        .representative_witness
+        .as_ref()
+        .expect("fixed score witness");
+
+    assert_eq!(report.workers_used, 1, "score remains globally serial");
+    assert!(!report.cpu_parallel_execution);
+    assert_eq!(finesse.mode, "score");
+    assert_eq!(finesse.exact_total_inputs.as_deref(), Some("1"));
+    assert_eq!(witness.total_inputs, 1);
+    assert_eq!(witness.input_sequence, ["hard-drop"]);
+    assert_eq!(witness.placements.len(), 1);
+
+    let request = runtime
+        .compile_command_text(COMMAND)
+        .expect("finesse score AppRequest");
+    let app_response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    )
+    .run(request);
+    let core_result = app_response
+        .render_model()
+        .and_then(|model| model.core_result())
+        .expect("score core result");
+    assert_eq!(core_result.field("backend_selected"), None);
+    assert_eq!(core_result.field("workers_used"), None);
+    let json = serialize_search_report_from_app_response(&app_response)
+        .expect("serialized finesse score report");
+    let value: Value = serde_json::from_str(&json).expect("valid score report JSON");
+    assert_eq!(value["workers_used"], 1);
+    assert_eq!(value["finesse_report"]["mode"], "score");
+    assert_eq!(value["finesse_report"]["exact_total_inputs"], "1");
+    assert_eq!(
+        value["finesse_report"]["representative_witness"]["input_sequence"],
+        serde_json::json!(["hard-drop"])
+    );
+}
+
+#[test]
+fn browser_worker_final_event_keeps_the_fixed_score_typed_report() {
+    let mut runtime = WasmWorkerJobRuntime::default();
+    let job_id = runtime
+        .start_job(
+            "clearra finesse score --initial-mask 0 --height 4 \
+             --placements O:spawn:4:0 --queue O --no-hold \
+             --pattern-knowledge both --rule srs-plus --workers 2",
+        )
+        .expect("browser score job");
+    while !runtime
+        .advance_job(job_id, 4096)
+        .expect("advance browser score job")
+        .is_terminal()
+    {}
+    let json = runtime
+        .drain_events_json(job_id)
+        .expect("browser event JSON");
+    let events: Value = serde_json::from_str(&json).expect("valid browser events");
+    let final_event = events
+        .as_array()
+        .and_then(|events| {
+            events
+                .iter()
+                .find(|event| event["event"] == "final_response")
+        })
+        .expect("final browser response");
+
+    assert_eq!(final_event["response"]["status"], "success");
+    assert_eq!(
+        final_event["response"]["result"],
+        serde_json::json!({"kind": "build-probability"})
+    );
+    assert_eq!(final_event["search_report"]["workers_used"], 1);
+    assert_eq!(
+        final_event["search_report"]["finesse_report"]["mode"],
+        "score"
+    );
+    assert_eq!(
+        final_event["search_report"]["finesse_report"]["exact_total_inputs"],
+        "1"
+    );
+    assert_eq!(
+        final_event["search_report"]["finesse_report"]["representative_witness"]["total_inputs"],
+        1
     );
 }
 
@@ -658,6 +819,153 @@ fn distributed_build_probability_b2b_constraint_matches_serial_exact_result() {
 }
 
 #[test]
+fn distributed_build_probability_finesse_matches_serial_report_and_witness() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // Seven O pieces keep the distributed eligibility threshold while making the
+    // exact geometry catalog deliberately small and deterministic.
+    let serial_command = "clearra build-probability --base-mask 0x0 --target-mask 0xfc3f3fcff --height 4 --queue OOOOOOO --no-hold --no-mirror --workers 1 --finesse inputs --pattern-knowledge both";
+    let distributed_command = "clearra build-probability --base-mask 0x0 --target-mask 0xfc3f3fcff --height 4 --queue OOOOOOO --no-hold --no-mirror --workers 2 --finesse inputs --pattern-knowledge both";
+    let serial = runtime
+        .run_command_text(serial_command)
+        .expect("serial finesse build probability result");
+    let distributed = run_distributed_cpu(&runtime, distributed_command);
+    let serial_result = serial.search_report().expect("serial search report");
+    let distributed_result = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert_eq!(
+        distributed_result.normalized_solution_keys,
+        serial_result.normalized_solution_keys
+    );
+    assert_eq!(
+        distributed_result.normalized_solution_set_hash,
+        serial_result.normalized_solution_set_hash
+    );
+    assert_eq!(
+        distributed_result.finesse_report,
+        serial_result.finesse_report
+    );
+    assert!(serial_result
+        .finesse_report
+        .as_ref()
+        .and_then(|report| report.representative_witness.as_ref())
+        .is_some());
+    assert_eq!(distributed_result.workers_used, 2);
+}
+
+#[cfg(feature = "stage-profiling")]
+#[test]
+fn distributed_finesse_finalizer_records_every_coordinator_profile_stage() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra build-probability --base-mask 0x0 \
+        --target-mask 0xfc3f3fcff --height 4 --queue OOOOOOO --no-hold \
+        --no-mirror --workers 2 --finesse inputs --pattern-knowledge both";
+    let preparation =
+        WasmDistributedCoordinator::prepare(&runtime, command).expect("distributed preparation");
+    let mut coordinator = match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+        _ => panic!("finesse search must use the distributed coordinator"),
+    };
+    let mut verifier =
+        WasmDistributedVerifierRuntime::prepare(&runtime, command).expect("distributed verifier");
+    loop {
+        match coordinator
+            .advance_producer(16_384, 16)
+            .expect("geometry producer")
+        {
+            WasmDistributedProducerAdvance::Pending
+            | WasmDistributedProducerAdvance::Initialization(_) => {}
+            WasmDistributedProducerAdvance::Batch(batch) => {
+                let mut consumed = verifier.consume(&batch).expect("candidate batch");
+                if let Some(partial) = consumed.partial.take() {
+                    coordinator
+                        .absorb_partial(&partial)
+                        .expect("merge streamed partial result");
+                }
+                while consumed.has_pending_work {
+                    consumed = verifier.continue_work().expect("continue worker task");
+                    if let Some(partial) = consumed.partial.take() {
+                        coordinator
+                            .absorb_partial(&partial)
+                            .expect("merge streamed partial result");
+                    }
+                }
+            }
+            WasmDistributedProducerAdvance::Completed => break,
+            WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+        }
+    }
+    let partial = verifier.finish().expect("partial exact result");
+    if !partial.is_empty() {
+        coordinator
+            .absorb_partial(&partial)
+            .expect("merge partial exact result");
+    }
+
+    // Start after the worker has finished: every recorded finesse span below
+    // must therefore belong to coordinator-side reconstruction and aggregation.
+    let profile = ExecutorSearchProfileSession::start().expect("profile session");
+    let result = coordinator.finish(2).expect("distributed exact result");
+    let stages = profile.finish();
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    for required in [
+        "finesse.geometry",
+        "finesse.target_grouping",
+        "finesse.movement_bfs",
+        "finesse.annotation_prune",
+        "finesse.product_dp",
+        "finesse.aggregation",
+    ] {
+        let stage = stages
+            .iter()
+            .find(|stage| stage.name == required)
+            .unwrap_or_else(|| panic!("missing coordinator profile stage {required}"));
+        assert!(
+            stage.invocation_count > 0,
+            "coordinator profile stage {required} was not invoked"
+        );
+    }
+}
+
+#[cfg(feature = "stage-profiling")]
+#[test]
+fn fixed_queue_finesse_score_records_all_seven_profile_stages_serially() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let profile = ExecutorSearchProfileSession::start().expect("profile session");
+    let result = runtime
+        .run_command_text(
+            "clearra finesse score --initial-mask 0 --height 4 \
+             --placements O:spawn:4:0 --queue O --no-hold --workers 2 \
+             --pattern-knowledge both",
+        )
+        .expect("serial fixed-queue finesse score");
+    let stages = profile.finish();
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    for required in [
+        "finesse.geometry",
+        "finesse.target_grouping",
+        "finesse.movement_bfs",
+        "finesse.annotation_prune",
+        "finesse.product_dp",
+        "finesse.aggregation",
+        "finesse.witness",
+    ] {
+        let stage = stages
+            .iter()
+            .find(|stage| stage.name == required)
+            .unwrap_or_else(|| panic!("missing score profile stage {required}"));
+        assert!(
+            stage.invocation_count > 0,
+            "score profile stage {required} was not invoked"
+        );
+    }
+}
+
+#[test]
 fn distributed_build_probability_tiling_matches_serial_without_buildup() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
@@ -805,6 +1113,37 @@ fn visible_seven_pc_uses_the_global_serial_policy_finalizer() {
     .expect("visible-seven distributed preparation");
 
     assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+}
+
+#[test]
+fn finesse_score_remains_serial_when_multiple_workers_are_requested() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let preparation = WasmDistributedCoordinator::prepare(
+        &runtime,
+        "clearra finesse score --initial-mask 0 --height 4 \
+         --placements I:spawn:3:0 --queue I --no-hold --workers 2",
+    )
+    .expect("finesse score preparation");
+
+    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+}
+
+#[test]
+fn tiling_only_finesse_search_is_rejected_before_distribution() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let error = match WasmDistributedCoordinator::prepare(
+        &runtime,
+        "clearra build-probability --base-mask 0 --target-mask 0xfc3f3fcff \
+         --height 4 --queue OOOOOOO --no-hold --no-mirror --tiling-only \
+         --finesse inputs --pattern-knowledge both --workers 2",
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("tiling-only finesse must not enter a root-only worker path"),
+    };
+
+    assert_eq!(error.code(), "E_WASM_COMMAND_INVALID_VALUE");
 }
 
 #[test]

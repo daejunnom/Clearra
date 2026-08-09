@@ -238,7 +238,8 @@ static bool ensure_cold_sidecar(
 static ClearraBuildUpGeometryTransitionKey transition_key(
     const ClearraBuildUpState *state,
     const clr_buildup_operation *operation,
-    uint8_t trace_mode) {
+    uint8_t trace_mode,
+    uint8_t transition_mode) {
     return (ClearraBuildUpGeometryTransitionKey){
         .board_mask = state->board_mask,
         .operation_mask = operation->mask,
@@ -253,6 +254,7 @@ static ClearraBuildUpGeometryTransitionKey transition_key(
         .x = operation->x,
         .y = operation->y,
         .trace_mode = trace_mode,
+        .transition_mode = transition_mode,
     };
 }
 
@@ -270,6 +272,7 @@ static uint64_t key_hash(const ClearraBuildUpGeometryTransitionKey *key) {
     hash ^= (uint64_t)(uint8_t)key->x << 56u;
     hash ^= (uint64_t)(uint8_t)key->y << 40u;
     hash ^= (uint64_t)key->trace_mode << 32u;
+    hash ^= (uint64_t)key->transition_mode << 24u;
     hash = (hash ^ (hash >> 30u)) * UINT64_C(0xbf58476d1ce4e5b9);
     hash = (hash ^ (hash >> 27u)) * UINT64_C(0x94d049bb133111eb);
     return hash ^ (hash >> 31u);
@@ -289,7 +292,8 @@ static bool key_matches(
            left->cleared_lines == right->cleared_lines &&
            left->piece == right->piece && left->rotation == right->rotation &&
            left->x == right->x && left->y == right->y &&
-           left->trace_mode == right->trace_mode;
+           left->trace_mode == right->trace_mode &&
+           left->transition_mode == right->transition_mode;
 }
 
 static uint32_t cache_index(
@@ -303,6 +307,7 @@ bool clearra_buildup_geometry_transition_cache_lookup(
     const ClearraBuildUpState *state,
     const clr_buildup_operation *operation,
     uint8_t trace_mode,
+    uint8_t transition_mode,
     ClearraBuildUpGeometryTransitionResult *out_result) {
     if (cache == 0 || cache->hot_entries == 0 || cache->epochs == 0 ||
         cache->capacity == 0u || state == 0 || operation == 0 ||
@@ -310,7 +315,7 @@ bool clearra_buildup_geometry_transition_cache_lookup(
         return false;
     }
     ClearraBuildUpGeometryTransitionKey key =
-        transition_key(state, operation, trace_mode);
+        transition_key(state, operation, trace_mode, transition_mode);
     uint32_t index = cache_index(cache, &key);
     const ClearraBuildUpGeometryTransitionHotEntry *entry =
         &cache->hot_entries[index];
@@ -350,7 +355,8 @@ void clearra_buildup_geometry_transition_cache_insert(
     const ClearraBuildUpState *next_state,
     const clr_buildup_trace_step *trace_step,
     const clr_kick_evidence_view *kick_evidence,
-    uint8_t trace_mode) {
+    uint8_t trace_mode,
+    uint8_t transition_mode) {
     if (cache == 0 || cache->hot_entries == 0 || cache->epochs == 0 ||
         cache->capacity == 0u || state == 0 || operation == 0 ||
         (status == CLR_BUILDUP_OK &&
@@ -363,7 +369,7 @@ void clearra_buildup_geometry_transition_cache_insert(
         return;
     }
     ClearraBuildUpGeometryTransitionKey key =
-        transition_key(state, operation, trace_mode);
+        transition_key(state, operation, trace_mode, transition_mode);
     uint32_t index = cache_index(cache, &key);
     cache->insertion_count++;
     if (cache->epochs[index] == cache->epoch &&

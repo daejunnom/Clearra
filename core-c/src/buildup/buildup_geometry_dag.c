@@ -1,3 +1,5 @@
+/* SRP rationale: this module has one behavior-level change reason: constructing and exporting the exact BuildUp geometry DAG. */
+
 #include "buildup_geometry_dag.h"
 
 #include "buildup_search_internal.h"
@@ -10,19 +12,48 @@
 #define CLEARRA_BUILDUP_GEOMETRY_NODE_CHUNK_CAPACITY 256u
 #define CLEARRA_BUILDUP_GEOMETRY_EDGE_CHUNK_CAPACITY 512u
 #define CLEARRA_BUILDUP_GEOMETRY_TRACE_CHUNK_CAPACITY 512u
+#define CLEARRA_BUILDUP_GEOMETRY_EDGE_DATA_CHUNK_CAPACITY 512u
 #define CLEARRA_BUILDUP_GEOMETRY_BUCKET_COUNT 4096u
 #define CLEARRA_BUILDUP_GEOMETRY_INDEX_LOAD_NUMERATOR 3u
 #define CLEARRA_BUILDUP_GEOMETRY_INDEX_LOAD_DENOMINATOR 4u
+
+_Static_assert(
+    sizeof(clr_buildup_geometry_language_node_v2) == 32u,
+    "BuildUp geometry language v2 node ABI changed");
+_Static_assert(
+    sizeof(clr_buildup_geometry_language_edge_v2) == 24u,
+    "BuildUp geometry language v2 edge ABI changed");
+_Static_assert(
+    sizeof(clr_buildup_geometry_language_report_v2) == 40u,
+    "BuildUp geometry language v2 report ABI changed");
+_Static_assert(
+    sizeof(clr_buildup_geometry_transition_mode) == sizeof(int),
+    "BuildUp geometry transition mode ABI changed");
 
 typedef struct ClearraBuildUpGeometryTracePayload {
     clr_buildup_trace_step trace_step;
     clr_kick_evidence_view kick_evidence;
 } ClearraBuildUpGeometryTracePayload;
 
+typedef struct ClearraBuildUpGeometryEdgeData {
+    uint64_t target_mask;
+    uint16_t cleared_row_mask;
+    int8_t adjusted_y;
+    int8_t x;
+    uint8_t rotation;
+    uint8_t cleared_lines;
+    uint8_t reserved[2];
+} ClearraBuildUpGeometryEdgeData;
+
+typedef union ClearraBuildUpGeometryEdgePayload {
+    ClearraBuildUpGeometryTracePayload *trace;
+    ClearraBuildUpGeometryEdgeData *geometry;
+} ClearraBuildUpGeometryEdgePayload;
+
 typedef struct ClearraBuildUpGeometryEdge {
     struct ClearraBuildUpGeometryEdge *next;
     ClearraBuildUpGeometryNode *child;
-    ClearraBuildUpGeometryTracePayload *trace;
+    ClearraBuildUpGeometryEdgePayload payload;
     uint16_t operation_index;
     uint8_t piece;
     uint8_t reserved[5];
@@ -74,6 +105,13 @@ struct ClearraBuildUpGeometryTraceChunk {
         traces[CLEARRA_BUILDUP_GEOMETRY_TRACE_CHUNK_CAPACITY];
 };
 
+struct ClearraBuildUpGeometryEdgeDataChunk {
+    struct ClearraBuildUpGeometryEdgeDataChunk *next;
+    size_t used;
+    ClearraBuildUpGeometryEdgeData
+        values[CLEARRA_BUILDUP_GEOMETRY_EDGE_DATA_CHUNK_CAPACITY];
+};
+
 typedef struct ClearraBuildUpGeometryPathStep {
     const ClearraBuildUpGeometryEdge *edge;
     uint8_t branch_kind;
@@ -104,6 +142,11 @@ static void reset_chunks(ClearraBuildUpGeometryDag *dag) {
          chunk = chunk->next) {
         chunk->used = 0u;
     }
+    for (ClearraBuildUpGeometryEdgeDataChunk *chunk = dag->edge_data_chunks;
+         chunk != 0;
+         chunk = chunk->next) {
+        chunk->used = 0u;
+    }
     if (dag->buckets != 0 && dag->touched_buckets != 0) {
         for (size_t index = 0u;
              index < dag->touched_bucket_count;
@@ -115,6 +158,7 @@ static void reset_chunks(ClearraBuildUpGeometryDag *dag) {
     dag->node_cursor = dag->node_chunks;
     dag->edge_cursor = dag->edge_chunks;
     dag->trace_cursor = dag->trace_chunks;
+    dag->edge_data_cursor = dag->edge_data_chunks;
     dag->root = 0;
     dag->node_count = 0u;
     dag->edge_count = 0u;
@@ -244,6 +288,35 @@ static ClearraBuildUpGeometryTracePayload *allocate_trace(
         &chunk->traces[chunk->used++];
     *trace = (ClearraBuildUpGeometryTracePayload){0};
     return trace;
+}
+
+static ClearraBuildUpGeometryEdgeData *allocate_edge_data(
+    ClearraBuildUpGeometryDag *dag) {
+    ClearraBuildUpGeometryEdgeDataChunk *chunk = dag->edge_data_cursor;
+    if (chunk != 0 &&
+        chunk->used == CLEARRA_BUILDUP_GEOMETRY_EDGE_DATA_CHUNK_CAPACITY) {
+        chunk = chunk->next;
+        dag->edge_data_cursor = chunk;
+    }
+    if (chunk == 0) {
+        chunk = (ClearraBuildUpGeometryEdgeDataChunk *)malloc(sizeof(*chunk));
+        if (chunk == 0) {
+            return 0;
+        }
+        chunk->used = 0u;
+        chunk->next = 0;
+        if (dag->edge_data_tail == 0) {
+            dag->edge_data_chunks = chunk;
+        } else {
+            dag->edge_data_tail->next = chunk;
+        }
+        dag->edge_data_tail = chunk;
+        dag->edge_data_cursor = chunk;
+        dag->retained_bytes += sizeof(*chunk);
+    }
+    ClearraBuildUpGeometryEdgeData *value = &chunk->values[chunk->used++];
+    *value = (ClearraBuildUpGeometryEdgeData){0};
+    return value;
 }
 
 static uint64_t geometry_hash(
@@ -460,7 +533,8 @@ static clr_buildup_status expand_node(
             ClearraBuildUpState next_state;
             clr_buildup_trace_step trace_step;
             clr_kick_evidence_view kick_evidence;
-            status = clearra_buildup_search_try_operation(
+            ClearraBuildUpGeometryTransitionView geometry;
+            status = clearra_buildup_search_try_operation_with_geometry(
                 context,
                 state,
                 (ClearraBuildUpQueueHold){0},
@@ -468,7 +542,8 @@ static clr_buildup_status expand_node(
                 operation_index,
                 &next_state,
                 &trace_step,
-                &kick_evidence);
+                &kick_evidence,
+                dag->capture_geometry != 0u ? &geometry : 0);
             if (status != CLR_BUILDUP_OK) {
                 if (clearra_buildup_branch_outcome_for_status(status) ==
                     CLEARRA_BUILDUP_BRANCH_LOGICAL_REJECT) {
@@ -485,17 +560,31 @@ static clr_buildup_status expand_node(
             ClearraBuildUpGeometryEdge *edge = allocate_edge(dag);
             ClearraBuildUpGeometryTracePayload *trace =
                 dag->capture_trace != 0u ? allocate_trace(dag) : 0;
+            ClearraBuildUpGeometryEdgeData *edge_data =
+                dag->capture_geometry != 0u ? allocate_edge_data(dag) : 0;
             if (child == 0 || edge == 0 ||
-                (dag->capture_trace != 0u && trace == 0)) {
+                (dag->capture_trace != 0u && trace == 0) ||
+                (dag->capture_geometry != 0u && edge_data == 0)) {
                 return CLR_BUILDUP_CAPACITY_EXCEEDED;
             }
             edge->child = child;
             edge->operation_index = operation_index;
             edge->piece = variants[variant_index].piece;
-            edge->trace = trace;
+            edge->payload.trace = trace;
             if (trace != 0) {
                 trace->trace_step = trace_step;
                 trace->kick_evidence = kick_evidence;
+            }
+            if (edge_data != 0) {
+                edge->payload.geometry = edge_data;
+                *edge_data = (ClearraBuildUpGeometryEdgeData){
+                    .target_mask = geometry.target_mask,
+                    .cleared_row_mask = geometry.cleared_row_mask,
+                    .adjusted_y = geometry.adjusted_y,
+                    .x = variants[variant_index].x,
+                    .rotation = variants[variant_index].rotation,
+                    .cleared_lines = geometry.cleared_lines,
+                };
             }
             if (node->last_edge == 0) {
                 node->first_edge = edge;
@@ -560,18 +649,27 @@ static clr_buildup_status finalize_export_layout(
     return CLR_BUILDUP_OK;
 }
 
-clr_buildup_status clearra_buildup_geometry_dag_prepare(
+clr_buildup_status clearra_buildup_geometry_dag_prepare_with_options(
     ClearraBuildUpGeometryDag *dag,
-    ClearraBuildUpSearchContext *context) {
+    ClearraBuildUpSearchContext *context,
+    uint8_t capture_geometry) {
     if (dag == 0 || context == 0 || context->problem == 0) {
         return CLR_BUILDUP_INVALID_ARGUMENT;
     }
+    capture_geometry = capture_geometry != 0u ? 1u : 0u;
+    if (capture_geometry != 0u && context->capture_trace != 0u) {
+        return CLR_BUILDUP_INVALID_ARGUMENT;
+    }
     const clr_buildup_problem *problem = context->problem;
+    const uint64_t previous_snapshot_id = dag->snapshot_id;
     if (dag->prepared != 0u &&
         (dag->capture_trace != context->capture_trace ||
+         dag->capture_geometry != capture_geometry ||
          dag->reachability_trace_mode !=
-             context->reachability_trace_mode)) {
+             context->reachability_trace_mode ||
+         dag->transition_mode != context->geometry_transition_mode)) {
         clearra_buildup_geometry_dag_release(dag);
+        dag->snapshot_id = previous_snapshot_id;
     } else {
         reset_chunks(dag);
     }
@@ -581,7 +679,9 @@ clr_buildup_status clearra_buildup_geometry_dag_prepare(
     dag->canonical_operation_set_id = problem->canonical_operation_set_id;
     dag->operation_count = context->operation_source.operation_count;
     dag->capture_trace = context->capture_trace;
+    dag->capture_geometry = capture_geometry;
     dag->reachability_trace_mode = context->reachability_trace_mode;
+    dag->transition_mode = context->geometry_transition_mode;
     dag->prepared = 1u;
     if (!ensure_buckets(dag)) {
         return CLR_BUILDUP_CAPACITY_EXCEEDED;
@@ -613,7 +713,18 @@ clr_buildup_status clearra_buildup_geometry_dag_prepare(
         return status;
     }
     dag->available = 1u;
+    dag->snapshot_id++;
+    if (dag->snapshot_id == 0u) {
+        dag->snapshot_id = 1u;
+    }
     return CLR_BUILDUP_OK;
+}
+
+clr_buildup_status clearra_buildup_geometry_dag_prepare(
+    ClearraBuildUpGeometryDag *dag,
+    ClearraBuildUpSearchContext *context) {
+    return clearra_buildup_geometry_dag_prepare_with_options(
+        dag, context, 0u);
 }
 
 void clearra_buildup_geometry_dag_release(ClearraBuildUpGeometryDag *dag) {
@@ -637,6 +748,13 @@ void clearra_buildup_geometry_dag_release(ClearraBuildUpGeometryDag *dag) {
         ClearraBuildUpGeometryTraceChunk *next = trace_chunk->next;
         free(trace_chunk);
         trace_chunk = next;
+    }
+    ClearraBuildUpGeometryEdgeDataChunk *edge_data_chunk =
+        dag->edge_data_chunks;
+    while (edge_data_chunk != 0) {
+        ClearraBuildUpGeometryEdgeDataChunk *next = edge_data_chunk->next;
+        free(edge_data_chunk);
+        edge_data_chunk = next;
     }
     free(dag->buckets);
     free(dag->touched_buckets);
@@ -724,6 +842,98 @@ clr_buildup_status clearra_buildup_geometry_dag_export(
                                                  : CLR_BUILDUP_INVALID_PROBLEM;
 }
 
+clr_buildup_status clearra_buildup_geometry_dag_export_v2(
+    const ClearraBuildUpGeometryDag *dag,
+    clr_buildup_geometry_language_node_v2 *nodes,
+    size_t node_capacity,
+    clr_buildup_geometry_language_edge_v2 *edges,
+    size_t edge_capacity,
+    clr_buildup_geometry_language_report_v2 *out_report) {
+    if (dag == 0 || out_report == 0) {
+        return CLR_BUILDUP_INVALID_ARGUMENT;
+    }
+    *out_report = (clr_buildup_geometry_language_report_v2){
+        .candidate_id = dag->candidate_id,
+        .canonical_operation_set_id = dag->canonical_operation_set_id,
+        .snapshot_id = dag->snapshot_id,
+        .root_node_index = dag->root == 0 ? 0u : dag->root->export_index,
+        .node_count = dag->export_node_count,
+        .edge_count = dag->export_edge_count,
+        .complete = (uint8_t)(
+            clearra_buildup_geometry_dag_is_available(dag) &&
+            dag->capture_geometry != 0u),
+        .transition_mode = dag->transition_mode,
+        .format_version = 2u,
+    };
+    if (out_report->complete == 0u || (nodes == 0 && edges == 0)) {
+        return CLR_BUILDUP_OK;
+    }
+    if (nodes == 0 || node_capacity < dag->export_node_count ||
+        (dag->export_edge_count != 0u &&
+         (edges == 0 || edge_capacity < dag->export_edge_count))) {
+        return CLR_BUILDUP_INVALID_ARGUMENT;
+    }
+
+    uint32_t edge_cursor = 0u;
+    for (const ClearraBuildUpGeometryNodeChunk *chunk = dag->node_chunks;
+         chunk != 0;
+         chunk = chunk->next) {
+        for (size_t index = 0u; index < chunk->used; ++index) {
+            const ClearraBuildUpGeometryNode *node = &chunk->nodes[index];
+            if (!node_is_exported(dag, node)) {
+                continue;
+            }
+            clr_buildup_geometry_language_node_v2 *exported =
+                &nodes[node->export_index];
+            *exported = (clr_buildup_geometry_language_node_v2){
+                .board_mask = node->board_mask,
+                .reachability_relevant_state =
+                    node->reachability_relevant_state,
+                .first_edge = edge_cursor,
+                .remaining_operations = node->remaining_operations,
+                .deleted_row_mask = node->deleted_row_mask,
+                .deleted_count = node->deleted_count,
+                .cleared_lines = node->cleared_lines,
+                .accepting = node->accepting,
+                .depth = (uint8_t)(
+                    dag->operation_count -
+                    count_operation_bits(node->remaining_operations)),
+            };
+            for (const ClearraBuildUpGeometryEdge *edge = node->first_edge;
+                 edge != 0;
+                 edge = edge->next) {
+                if (edge->child->live == 0u) {
+                    continue;
+                }
+                const ClearraBuildUpGeometryEdgeData *geometry =
+                    edge->payload.geometry;
+                if (edge_cursor >= dag->export_edge_count || geometry == 0 ||
+                    edge->operation_index >= dag->operation_count) {
+                    return CLR_BUILDUP_INVALID_PROBLEM;
+                }
+                edges[edge_cursor++] =
+                    (clr_buildup_geometry_language_edge_v2){
+                        .target_mask = geometry->target_mask,
+                        .child_node_index = edge->child->export_index,
+                        .operation_index = edge->operation_index,
+                        .cleared_row_mask = geometry->cleared_row_mask,
+                        .x = geometry->x,
+                        .adjusted_y = geometry->adjusted_y,
+                        .piece = edge->piece,
+                        .rotation = geometry->rotation,
+                        .cleared_lines = geometry->cleared_lines,
+                    };
+                if (exported->edge_count == UINT16_MAX) {
+                    return CLR_BUILDUP_CAPACITY_EXCEEDED;
+                }
+                exported->edge_count++;
+            }
+        }
+    }
+    return edge_cursor == dag->export_edge_count ? CLR_BUILDUP_OK
+                                                 : CLR_BUILDUP_INVALID_PROBLEM;
+}
+
 static bool completion_memo_can_shortcut(
     const ClearraBuildUpSearchContext *context) {
     return context->stop_after_first_success == 0u &&
@@ -755,7 +965,7 @@ static void materialize_success_path(
     for (uint16_t index = 0u; index < depth; ++index) {
         const ClearraBuildUpGeometryPathStep *path_step = &path->steps[index];
         const ClearraBuildUpGeometryTracePayload *trace =
-            path_step->edge->trace;
+            path_step->edge->payload.trace;
         if (trace == 0) {
             context->incomplete_branch_seen = 1u;
             return;

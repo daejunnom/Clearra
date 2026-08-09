@@ -5,7 +5,7 @@ mod execution_supply;
 pub mod score_matrix;
 mod t_spin_coverage_only_materializer;
 
-pub use b2b_execution_filter::BackToBackExecutionFilter;
+pub use b2b_execution_filter::{BackToBackEdgePolicy, BackToBackExecutionFilter};
 pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAggregate};
 #[cfg(feature = "stage-profiling")]
 pub use exact_scoring_execution_materializer::ExactScoringExecutionProfile;

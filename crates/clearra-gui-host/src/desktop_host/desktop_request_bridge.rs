@@ -126,8 +126,8 @@ mod form_parser {
     };
     use clearra_pc_graph::request::WorkerPolicy;
     use clearra_problem::{
-        BuildProbabilityAggregation, SetupCandidatePriority, SetupLengthPreference,
-        SetupPathDetail, SetupSearchMode,
+        BuildProbabilityAggregation, FinesseMetric, FinessePatternKnowledge,
+        SetupCandidatePriority, SetupLengthPreference, SetupPathDetail, SetupSearchMode,
     };
     use clearra_scoring::profile::SpinProfileId;
     use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
@@ -521,11 +521,24 @@ mod form_parser {
         let preserve_b2b = optional_bool(value, &["preserve_b2b"]).unwrap_or(false);
         let precompute_build_dependencies =
             optional_bool(value, &["precompute_build_dependencies"]).unwrap_or(false);
+        let finesse_text = optional_text(value, &["finesse"]).unwrap_or("off");
+        let finesse_metric = FinesseMetric::parse(finesse_text).ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop build-probability finesse '{finesse_text}'"
+            ))
+        })?;
+        let pattern_knowledge_text = optional_text(value, &["pattern_knowledge"]).unwrap_or("both");
+        let pattern_knowledge =
+            FinessePatternKnowledge::parse(pattern_knowledge_text).ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "invalid desktop build-probability pattern_knowledge '{pattern_knowledge_text}'"
+                ))
+            })?;
         if matches!(aggregation, BuildProbabilityAggregation::TilingOnly)
-            && (preserve_b2b || precompute_build_dependencies)
+            && (preserve_b2b || precompute_build_dependencies || finesse_metric.requested())
         {
             return Err(DesktopTauriCommandError::invalid_request(
-                "desktop tiling-only build probability cannot request spin, B2B, or BuildUp dependencies",
+                "desktop tiling-only build probability cannot request spin, B2B, BuildUp dependencies, or finesse",
             ));
         }
 
@@ -543,7 +556,8 @@ mod form_parser {
                 optional_bool(value, &["include_mirror", "include_horizontal_mirror"])
                     .unwrap_or(true),
             )
-            .with_aggregation(aggregation);
+            .with_aggregation(aggregation)
+            .with_finesse(finesse_metric, pattern_knowledge);
         if let Some(source_piece_count) =
             optional_usize_any(value, &["source_piece_count", "source_pieces"])?
         {

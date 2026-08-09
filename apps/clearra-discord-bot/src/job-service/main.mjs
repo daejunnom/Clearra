@@ -4,6 +4,7 @@ import { ClearraJobService } from "./server.mjs";
 
 const config = loadClearraJobServiceConfig();
 const runner = new ClearraCommandRunner(config);
+await runner.verifyCapabilities();
 const service = new ClearraJobService(config, runner, {
   operationalScope: "job",
 });

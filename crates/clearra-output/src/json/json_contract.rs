@@ -45,6 +45,8 @@ impl JsonContract {
                             "solution_keys"
                                 | "solution_classes"
                                 | "solution_probabilities"
+                                | "finesse_report"
+                                | "finesse_score_data"
                                 | "hold_conditions"
                                 | "outcomes"
                                 | "regular"
@@ -65,6 +67,13 @@ impl JsonContract {
         ];
         if let Some(report) = resource_report_object(&fields) {
             root_members.push(("resource_report".to_owned(), report));
+        }
+        if let Some(report) = fields
+            .iter()
+            .find(|field| field.key() == "finesse_report")
+            .map(|field| field.value().clone())
+        {
+            root_members.push(("finesse_report".to_owned(), report));
         }
         let root = JsonValue::object(root_members);
 

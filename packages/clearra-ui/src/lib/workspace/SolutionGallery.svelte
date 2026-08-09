@@ -4,12 +4,18 @@
 
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import {
+    formatFinesseInputCount,
+    representativeWitnessExportForSolution,
+    type BuildProbabilitySolutionFinesse
+  } from './buildProbabilityFinesse';
+  import {
     parseSolutionKey,
     renderSolutionBoard,
     type SolutionCopyFormat,
     type SolutionExportBoard,
     type SolutionExportPage
   } from './solutionExport';
+  import type { ClearraFinesseRepresentativeWitness } from '../wasm/wasmCommandClient';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let solutionKeys: string[] = [];
@@ -31,6 +37,8 @@
       score_complete: boolean;
     }
   > = {};
+  export let solutionFinesse: Record<string, BuildProbabilitySolutionFinesse[]> = {};
+  export let representativeWitness: ClearraFinesseRepresentativeWitness | null = null;
   export let solutionComments: Record<string, string> = {};
   export let solutionSetHash = '';
   export let targetLines = 4;
@@ -89,6 +97,7 @@
     ...solution,
     probability: solutionProbabilities[solution.key],
     averageScore: solutionAverageScores[solution.key],
+    finesse: solutionFinesse[solution.key] ?? [],
     comment: solutionComments[solution.key]
   }));
   $: remainingCount = Math.max(0, totalSolutionCount - visibleSolutions.length);
@@ -132,7 +141,7 @@
 
   function probabilityLabel(value: string): string {
     const probability = Number(value);
-    if (!Number.isFinite(probability)) return value;
+    if (!Number.isFinite(probability) || probability < 0 || probability > 1) return '—';
     return new Intl.NumberFormat(language, {
       style: 'percent',
       maximumFractionDigits: 4
@@ -184,21 +193,36 @@
         <div class="solution-heading">
           <div>
             <strong>{label('solutionNumber', { number: solution.index + 1 })}</strong>
-            {#if solution.probability}
-              <span class="solution-probability">
-                {label('solutionProbability')}: {probabilityLabel(solution.probability.probability)}
-                {#if !solution.probability.probability_complete} ({label('incomplete')}){/if}
-              </span>
-            {/if}
-            {#if solution.averageScore}
-              <span class="solution-probability">
-                {label('solutionAverageScore')}: {scoreLabel(solution.averageScore.average_score)}
-                {#if !solution.averageScore.score_complete} ({label('incomplete')}){/if}
-              </span>
-            {/if}
+            <div class="solution-metrics">
+              {#if solution.probability}
+                <span class="solution-probability">
+                  {label('solutionProbability')}: {probabilityLabel(solution.probability.probability)}
+                  {#if !solution.probability.probability_complete} ({label('incomplete')}){/if}
+                </span>
+              {/if}
+              {#if solution.averageScore}
+                <span class="solution-probability">
+                  {label('solutionAverageScore')}: {scoreLabel(solution.averageScore.average_score)}
+                  {#if !solution.averageScore.score_complete} ({label('incomplete')}){/if}
+                </span>
+              {/if}
+              {#each solution.finesse as finesse}
+                <span class="solution-probability">
+                  {label('finesseSolutionAverageInputs')}
+                  ({label(finesse.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy')}):
+                  {formatFinesseInputCount(finesse.average_inputs, language)}
+                  {#if !finesse.complete} ({label('finesseMaterialized')}){/if}
+                </span>
+              {/each}
+            </div>
           </div>
           <SolutionCopyButton
             page={pageWithComment(solution.page, solution.comment)}
+            finesseWitness={representativeWitnessExportForSolution(
+              representativeWitness,
+              solution.key,
+              solution.finesse
+            )}
             format={copyFormat}
             {language}
           />
@@ -265,23 +289,32 @@
   }
 
   .solution-heading {
-    align-items: center;
+    align-items: flex-start;
     display: flex;
+    gap: 8px;
     justify-content: space-between;
     margin-bottom: 8px;
   }
+
+  .solution-heading > div { min-width: 0; }
 
   .solution-heading strong {
     color: #4d5955;
     font-size: 11px;
   }
 
+  .solution-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    margin-top: 2px;
+  }
+
   .solution-probability {
     color: #075f58;
-    display: block;
     font-size: 10px;
     font-weight: 700;
-    margin-top: 2px;
+    overflow-wrap: anywhere;
   }
 
   .solution-board {

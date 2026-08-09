@@ -2,9 +2,46 @@
 #include "buildup_reachability_cache.h"
 #include "buildup_reachable_lock_cache.h"
 #include "buildup_search_internal.h"
+#include "clr_buildup_geometry_language.h"
 #include "clr_search_profile.h"
 
-clr_buildup_status clearra_buildup_search_try_operation(
+static clr_buildup_status fill_geometry_transition_view(
+    const ClearraBuildUpSearchContext *context,
+    ClearraBuildUpState state,
+    const clr_buildup_operation *operation,
+    ClearraBuildUpGeometryTransitionView *out_geometry) {
+    if (out_geometry == 0) {
+        return CLR_BUILDUP_OK;
+    }
+    uint64_t adjusted_mask = 0u;
+    int8_t adjusted_y = 0;
+    clr_buildup_status status = clearra_buildup_adjust_operation_for_line_clears(
+        context->layout, state, operation, &adjusted_mask, &adjusted_y);
+    if (status != CLR_BUILDUP_OK) {
+        return status;
+    }
+    uint64_t placed_board = 0u;
+    if (clearra_board64_place(
+            context->layout, state.board_mask, adjusted_mask, &placed_board) !=
+        CLEARRA_BOARD64_OK) {
+        return CLR_BUILDUP_INVALID_PROBLEM;
+    }
+    ClearraBoard64LineClearResult clear_result;
+    if (clearra_board64_clear_lines(
+            context->layout, placed_board, &clear_result) !=
+        CLEARRA_BOARD64_OK) {
+        return CLR_BUILDUP_INVALID_PROBLEM;
+    }
+    *out_geometry = (ClearraBuildUpGeometryTransitionView){
+        .target_mask = adjusted_mask,
+        .cleared_row_mask = clear_result.deleted_row_mask,
+        .adjusted_y = adjusted_y,
+        .cleared_lines = clear_result.cleared_lines,
+    };
+    return CLR_BUILDUP_OK;
+}
+
+clr_buildup_status clearra_buildup_search_try_operation_with_geometry(
     ClearraBuildUpSearchContext *context,
     ClearraBuildUpState state,
     ClearraBuildUpQueueHold queue_hold,
@@ -12,7 +49,8 @@ clr_buildup_status clearra_buildup_search_try_operation(
     uint16_t operation_index,
     ClearraBuildUpState *out_next_state,
     clr_buildup_trace_step *out_trace_step,
-    clr_kick_evidence_view *out_kick_evidence) {
+    clr_kick_evidence_view *out_kick_evidence,
+    ClearraBuildUpGeometryTransitionView *out_geometry) {
     if (context == 0 || operation == 0 || out_next_state == 0 ||
         out_trace_step == 0 || out_kick_evidence == 0) {
         return CLR_BUILDUP_INVALID_ARGUMENT;
@@ -20,6 +58,9 @@ clr_buildup_status clearra_buildup_search_try_operation(
     const ClearraBuildUpState input_state = state;
     *out_trace_step = (clr_buildup_trace_step){0};
     *out_kick_evidence = (clr_kick_evidence_view){0};
+    if (out_geometry != 0) {
+        *out_geometry = (ClearraBuildUpGeometryTransitionView){0};
+    }
     ClearraBuildUpGeometryTransitionResult cached;
     clr_search_profile_count(
         CLR_PROFILE_BUILDUP_GEOMETRY_TRANSITION_CACHE_LOOKUPS, 1u);
@@ -28,6 +69,7 @@ clr_buildup_status clearra_buildup_search_try_operation(
             &input_state,
             operation,
             context->reachability_trace_mode,
+            context->geometry_transition_mode,
             &cached)) {
         clr_search_profile_count(
             CLR_PROFILE_BUILDUP_GEOMETRY_TRANSITION_CACHE_HITS, 1u);
@@ -48,6 +90,11 @@ clr_buildup_status clearra_buildup_search_try_operation(
         state.hold_automaton_state = queue_hold;
         state.reachability_relevant_state = cached.reachability_relevant_state;
         state.cleared_lines = cached.cleared_lines;
+        clr_buildup_status geometry_status = fill_geometry_transition_view(
+            context, input_state, operation, out_geometry);
+        if (geometry_status != CLR_BUILDUP_OK) {
+            return geometry_status;
+        }
         *out_next_state = state;
         return CLR_BUILDUP_OK;
     }
@@ -67,7 +114,8 @@ clr_buildup_status clearra_buildup_search_try_operation(
             0,
             0,
             0,
-            context->reachability_trace_mode);
+            context->reachability_trace_mode,
+            context->geometry_transition_mode);
         return status;
     }
 
@@ -85,7 +133,8 @@ clr_buildup_status clearra_buildup_search_try_operation(
             0,
             0,
             0,
-            context->reachability_trace_mode);
+            context->reachability_trace_mode,
+            context->geometry_transition_mode);
         return status;
     }
 
@@ -103,80 +152,85 @@ clr_buildup_status clearra_buildup_search_try_operation(
             0,
             0,
             0,
-            context->reachability_trace_mode);
+            context->reachability_trace_mode,
+            context->geometry_transition_mode);
         return status;
     }
 
-    ClearraBuildUpReachabilityResult reachability_result;
-    clr_search_profile_count(
-        CLR_PROFILE_BUILDUP_REACHABILITY_CACHE_LOOKUPS, 1u);
+    ClearraBuildUpReachabilityResult reachability_result = {0};
     bool reachability_cache_hit = false;
-    if (context->capture_trace == 0u &&
-        context->reachable_lock_cache != 0) {
-        clr_search_profile_span reachability_span =
-            clr_search_profile_begin(CLR_PROFILE_BUILDUP_REACHABILITY);
-        status = clearra_buildup_reachable_lock_cache_check(
-            context->reachable_lock_cache,
-            context->layout,
-            state.board_mask,
-            operation,
-            adjusted_y,
-            context->compiled_rule,
-            context->reachability_mode,
-            context->reachability_frontier,
-            &reachability_cache_hit,
-            &reachability_result);
-        (void)clr_search_profile_end(reachability_span, 1u);
-    } else {
-        reachability_cache_hit = clearra_buildup_reachability_cache_lookup(
-            context->reachability_cache,
-            state.board_mask,
-            operation,
-            adjusted_y,
-            context->reachability_mode,
-            context->reachability_trace_mode,
-            &status,
-            &reachability_result);
-        if (!reachability_cache_hit) {
+    if (context->geometry_transition_mode !=
+        CLR_BUILDUP_GEOMETRY_TRANSITION_GEOMETRY_ONLY) {
+        clr_search_profile_count(
+            CLR_PROFILE_BUILDUP_REACHABILITY_CACHE_LOOKUPS, 1u);
+        if (context->capture_trace == 0u &&
+            context->reachable_lock_cache != 0) {
             clr_search_profile_span reachability_span =
                 clr_search_profile_begin(CLR_PROFILE_BUILDUP_REACHABILITY);
-            status = clearra_buildup_reachability_check_compiled(
-                context->compiled_rule,
+            status = clearra_buildup_reachable_lock_cache_check(
+                context->reachable_lock_cache,
                 context->layout,
                 state.board_mask,
                 operation,
                 adjusted_y,
+                context->compiled_rule,
                 context->reachability_mode,
-                context->reachability_trace_mode,
                 context->reachability_frontier,
+                &reachability_cache_hit,
                 &reachability_result);
             (void)clr_search_profile_end(reachability_span, 1u);
-            clearra_buildup_reachability_cache_insert(
+        } else {
+            reachability_cache_hit = clearra_buildup_reachability_cache_lookup(
                 context->reachability_cache,
                 state.board_mask,
                 operation,
                 adjusted_y,
                 context->reachability_mode,
                 context->reachability_trace_mode,
-                status,
+                &status,
                 &reachability_result);
+            if (!reachability_cache_hit) {
+                clr_search_profile_span reachability_span =
+                    clr_search_profile_begin(CLR_PROFILE_BUILDUP_REACHABILITY);
+                status = clearra_buildup_reachability_check_compiled(
+                    context->compiled_rule,
+                    context->layout,
+                    state.board_mask,
+                    operation,
+                    adjusted_y,
+                    context->reachability_mode,
+                    context->reachability_trace_mode,
+                    context->reachability_frontier,
+                    &reachability_result);
+                (void)clr_search_profile_end(reachability_span, 1u);
+                clearra_buildup_reachability_cache_insert(
+                    context->reachability_cache,
+                    state.board_mask,
+                    operation,
+                    adjusted_y,
+                    context->reachability_mode,
+                    context->reachability_trace_mode,
+                    status,
+                    &reachability_result);
+            }
         }
-    }
-    if (reachability_cache_hit) {
-        clr_search_profile_count(
-            CLR_PROFILE_BUILDUP_REACHABILITY_CACHE_HITS, 1u);
-    }
-    if (status != CLR_BUILDUP_OK) {
-        clearra_buildup_geometry_transition_cache_insert(
-            context->geometry_transition_cache,
-            &input_state,
-            operation,
-            status,
-            0,
-            0,
-            0,
-            context->reachability_trace_mode);
-        return status;
+        if (reachability_cache_hit) {
+            clr_search_profile_count(
+                CLR_PROFILE_BUILDUP_REACHABILITY_CACHE_HITS, 1u);
+        }
+        if (status != CLR_BUILDUP_OK) {
+            clearra_buildup_geometry_transition_cache_insert(
+                context->geometry_transition_cache,
+                &input_state,
+                operation,
+                status,
+                0,
+                0,
+                0,
+                context->reachability_trace_mode,
+                context->geometry_transition_mode);
+            return status;
+        }
     }
 
     uint64_t placed_board = 0u;
@@ -194,7 +248,8 @@ clr_buildup_status clearra_buildup_search_try_operation(
             0,
             0,
             0,
-            context->reachability_trace_mode);
+            context->reachability_trace_mode,
+            context->geometry_transition_mode);
         return CLR_BUILDUP_COLLISION;
     }
     if (board_status != CLEARRA_BOARD64_OK) {
@@ -221,6 +276,14 @@ clr_buildup_status clearra_buildup_search_try_operation(
             out_trace_step,
             out_kick_evidence);
     }
+    if (out_geometry != 0) {
+        *out_geometry = (ClearraBuildUpGeometryTransitionView){
+            .target_mask = adjusted_mask,
+            .cleared_row_mask = clear_result.deleted_row_mask,
+            .adjusted_y = adjusted_y,
+            .cleared_lines = clear_result.cleared_lines,
+        };
+    }
     state.board_mask = clear_result.board;
     clr_search_profile_span line_state_span =
         clr_search_profile_begin(CLR_PROFILE_BUILDUP_LINE_STATE_UPDATE);
@@ -240,7 +303,29 @@ clr_buildup_status clearra_buildup_search_try_operation(
         &state,
         out_trace_step,
         out_kick_evidence,
-        context->reachability_trace_mode);
+        context->reachability_trace_mode,
+        context->geometry_transition_mode);
     *out_next_state = state;
     return CLR_BUILDUP_OK;
+}
+
+clr_buildup_status clearra_buildup_search_try_operation(
+    ClearraBuildUpSearchContext *context,
+    ClearraBuildUpState state,
+    ClearraBuildUpQueueHold queue_hold,
+    const clr_buildup_operation *operation,
+    uint16_t operation_index,
+    ClearraBuildUpState *out_next_state,
+    clr_buildup_trace_step *out_trace_step,
+    clr_kick_evidence_view *out_kick_evidence) {
+    return clearra_buildup_search_try_operation_with_geometry(
+        context,
+        state,
+        queue_hold,
+        operation,
+        operation_index,
+        out_next_state,
+        out_trace_step,
+        out_kick_evidence,
+        0);
 }

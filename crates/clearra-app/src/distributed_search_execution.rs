@@ -1,7 +1,10 @@
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::{CoreExecutionError, CoreExecutionResult};
 use clearra_host_contract::AppCommandKind;
-use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildProbabilityField, FinesseMetric, FinessePatternKnowledge,
+    SearchProblem,
+};
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use crate::{
@@ -74,9 +77,25 @@ impl PreparedDistributedSearch {
     pub fn build_probability_request(
         &self,
     ) -> Option<(BuildProbabilityField, BuildProbabilityAggregation)> {
-        match self.response_kind {
-            CooperativeSearchResponseKind::BuildProbability { field, aggregation } => {
-                Some((field, aggregation))
+        match &self.response_kind {
+            CooperativeSearchResponseKind::BuildProbability {
+                field,
+                aggregation,
+                finesse,
+                ..
+            } if finesse.score().is_none() => Some((*field, *aggregation)),
+            _ => None,
+        }
+    }
+
+    pub fn build_probability_finesse_request(
+        &self,
+    ) -> Option<(FinesseMetric, FinessePatternKnowledge)> {
+        match &self.response_kind {
+            CooperativeSearchResponseKind::BuildProbability { finesse, .. }
+                if finesse.score().is_none() =>
+            {
+                Some((finesse.metric(), finesse.pattern_knowledge()))
             }
             _ => None,
         }
@@ -116,7 +135,9 @@ fn decorate_distributed_build_probability_tiling_result(
     response_kind: &CooperativeSearchResponseKind,
     result: CoreExecutionResult,
 ) -> CoreExecutionResult {
-    let CooperativeSearchResponseKind::BuildProbability { field, aggregation } = response_kind
+    let CooperativeSearchResponseKind::BuildProbability {
+        field, aggregation, ..
+    } = response_kind
     else {
         return result;
     };

@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { decoder as fumenDecoder, encoder as fumenEncoder, Field } from 'tetris-fumen';
 
 import { decodeCtk3 } from '../src/lib/workspace/ctk3Codec';
+import { operationCells } from '../src/lib/workspace/ctkOperationGeometry';
 import {
   encodeColoredFumenPages,
+  encodeFinesseWitnessCtk,
   encodeSolutionPages,
+  finesseWitnessCtkPages,
   SolutionExportError,
   type SolutionExportPage,
   type SolutionPiece
@@ -207,6 +210,131 @@ try {
 const ordinary = encodeSolutionPages([partialPage], 'ctk');
 assert.equal(decodeCtk3(ordinary).pages.length, 1);
 
+const finesseSolutionKey =
+  'ctk1|initial=000000000000003f|placements=I:00000000000003c0,O:0000000000300c00';
+const finesseWitness = {
+  solutionKey: finesseSolutionKey,
+  totalInputs: 3,
+  inputSequence: ['hard-drop', 'tap-left', 'hard-drop'],
+  placements: [
+    { piece: 'I', rotation: 2, x: 6, y: 0 },
+    { piece: 'O', rotation: 3, x: 0, y: 0 }
+  ]
+};
+const finesseSource = encodeFinesseWitnessCtk(finesseWitness);
+const finesseDocument = decodeCtk3(finesseSource);
+assert.equal(finesseDocument.pages.length, 2);
+assert.equal(finesseDocument.pages[0]?.comment, 'F=3');
+assert.equal(finesseDocument.pages[1]?.comment, undefined);
+assert.deepEqual(finesseDocument.pages[0]?.cells.slice(0, 10), [
+  'G', 'G', 'G', 'G', 'G', 'G', null, null, null, null
+]);
+assert.deepEqual(finesseDocument.pages[0]?.operation, {
+  piece: 'I', rotation: 'spawn', x: 7, y: 0
+});
+assert.equal(finesseDocument.pages[1]?.cells.length, 0);
+assert.deepEqual(finesseDocument.pages[1]?.operation, {
+  piece: 'O', rotation: 'spawn', x: 0, y: 0
+});
+assert.deepEqual(replayCtkPages(finesseDocument.pages), [
+  'O', 'O', null, null, null, null, null, null, null, null,
+  'O', 'O', null, null, null, null, null, null, null, null
+]);
+
+const patternFinesseDocument = decodeCtk3(encodeFinesseWitnessCtk({
+  ...finesseWitness,
+  annotationInputs: '3.5000'
+}));
+assert.equal(patternFinesseDocument.pages[0]?.comment, 'F=3.5');
+assert.deepEqual(
+  patternFinesseDocument.pages.map((page) => page.operation),
+  finesseDocument.pages.map((page) => page.operation)
+);
+assert.deepEqual(patternFinesseDocument.pages[1]?.cells, finesseDocument.pages[1]?.cells);
+
+const rotationPlacements = [
+  {
+    witness: { piece: 'O', rotation: 3, x: 0, y: 0 },
+    operation: { piece: 'O', rotation: 'spawn', x: 0, y: 0 }
+  },
+  {
+    witness: { piece: 'I', rotation: 3, x: 2, y: 0 },
+    operation: { piece: 'I', rotation: 'right', x: 2, y: 2 }
+  },
+  {
+    witness: { piece: 'S', rotation: 2, x: 4, y: 0 },
+    operation: { piece: 'S', rotation: 'spawn', x: 5, y: 0 }
+  },
+  {
+    witness: { piece: 'Z', rotation: 3, x: 8, y: 0 },
+    operation: { piece: 'Z', rotation: 'right', x: 8, y: 1 }
+  }
+] as const;
+const rotationSolutionKey = `ctk1|initial=${hexMask(0n)}|placements=${rotationPlacements
+  .map(({ witness, operation }) =>
+    `${witness.piece}:${hexMask(maskForCtkOperation(operation))}`)
+  .join(',')}`;
+const rotationDocument = decodeCtk3(encodeFinesseWitnessCtk({
+  solutionKey: rotationSolutionKey,
+  totalInputs: rotationPlacements.length,
+  inputSequence: rotationPlacements.map(() => 'hard-drop'),
+  placements: rotationPlacements.map(({ witness }) => witness)
+}));
+assert.deepEqual(
+  rotationDocument.pages.map((page) => page.operation),
+  rotationPlacements.map(({ operation }) => operation)
+);
+
+assert.throws(
+  () => finesseWitnessCtkPages({
+    ...finesseWitness,
+    placements: [
+      { piece: 'I', rotation: 0, x: 0, y: 0 },
+      finesseWitness.placements[1]
+    ]
+  }),
+  isInvalidFinesseWitness
+);
+assert.throws(
+  () => finesseWitnessCtkPages({
+    ...finesseWitness,
+    placements: [
+      { piece: 'I', rotation: 0, x: 8, y: 0 },
+      finesseWitness.placements[1]
+    ]
+  }),
+  isInvalidFinesseWitness
+);
+assert.throws(
+  () => finesseWitnessCtkPages({
+    ...finesseWitness,
+    inputSequence: ['hard-drop', 'tap-left', 'tap-right']
+  }),
+  isInvalidFinesseWitness
+);
+assert.throws(
+  () => finesseWitnessCtkPages({
+    solutionKey: 'ctk1|initial=0000000000000000|placements=O:0000000000000c03,I:000000000000003c',
+    totalInputs: 2,
+    inputSequence: ['hard-drop', 'hard-drop'],
+    placements: [
+      { piece: 'I', rotation: 0, x: 0, y: 0 },
+      { piece: 'O', rotation: 0, x: 4, y: 0 }
+    ]
+  }),
+  isFinesseSolutionMismatch
+);
+assert.throws(
+  () => finesseWitnessCtkPages({
+    solutionKey:
+      'ctk1|initial=00000000000003ff|placements=O:0000000000300c00',
+    totalInputs: 1,
+    inputSequence: ['hard-drop'],
+    placements: [{ piece: 'O', rotation: 0, x: 0, y: 1 }]
+  }),
+  isInvalidFinesseWitness
+);
+
 console.log(
   JSON.stringify({
     fumen_pages: pages.length,
@@ -243,4 +371,49 @@ function isClipboardSizeError(error: unknown): boolean {
     error instanceof SolutionExportError &&
     error.code === 'clipboard-output-too-large'
   );
+}
+
+function isInvalidFinesseWitness(error: unknown): boolean {
+  return error instanceof SolutionExportError && error.code === 'invalid-finesse-witness';
+}
+
+function isFinesseSolutionMismatch(error: unknown): boolean {
+  return error instanceof SolutionExportError &&
+    error.code === 'finesse-witness-solution-mismatch';
+}
+
+function replayCtkPages(pages: ReturnType<typeof decodeCtk3>['pages']) {
+  const height = Math.max(
+    1,
+    ...pages.map((page) => page.height),
+    ...pages.flatMap((page) => page.operation
+      ? operationCells(page.operation).map((cell) => cell.y + 1)
+      : [])
+  );
+  let rows = Array.from({ length: height }, () => Array<string | null>(10).fill(null));
+  for (const page of pages) {
+    rows = Array.from({ length: height }, (_, y) =>
+      Array.from({ length: 10 }, (_, x) => page.cells[y * 10 + x] ?? null)
+    );
+    assert.ok(page.operation);
+    for (const cell of operationCells(page.operation!)) {
+      assert.equal(rows[cell.y]?.[cell.x], null);
+      rows[cell.y][cell.x] = page.operation!.piece;
+    }
+    rows = rows.filter((row) => row.some((cell) => cell === null));
+    while (rows.length < height) rows.push(Array<string | null>(10).fill(null));
+  }
+  while (rows.at(-1)?.every((cell) => cell === null)) rows.pop();
+  return rows.flat();
+}
+
+function maskForCtkOperation(operation: Parameters<typeof operationCells>[0]): bigint {
+  return operationCells(operation).reduce(
+    (mask, cell) => mask | (1n << BigInt(cell.y * 10 + cell.x)),
+    0n
+  );
+}
+
+function hexMask(mask: bigint): string {
+  return mask.toString(16).padStart(16, '0');
 }

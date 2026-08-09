@@ -247,6 +247,13 @@ impl WebCommandRequest {
         request.allow_backend_fallback = false;
         request
     }
+
+    pub fn with_finesse_score(mut self, score: clearra_problem::FinesseScoreRequest) -> Self {
+        if let Some(input) = self.build_probability.take() {
+            self.build_probability = Some(input.with_finesse_score(score));
+        }
+        self
+    }
 }
 impl WebCommandRequest {
     pub fn forward(command_kind: &str, query: ForwardSearchQuery) -> Self {

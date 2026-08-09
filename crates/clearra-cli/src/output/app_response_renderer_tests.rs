@@ -1,4 +1,8 @@
-use clearra_app::{AppContext, AppStatus};
+use clearra_app::{
+    AppContext, AppCoreExecutorService, AppServices, AppStatus, FinesseReport, FinesseReportInput,
+    FinesseReportPlacement, FinesseRepresentativeWitness,
+};
+use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_web_command::WebCommandParser;
 
 use super::*;
@@ -32,6 +36,119 @@ fn render_forward(command: &str, format: RenderFormat) -> String {
     AppResponseRenderer::render(response, format, CliErrorCode::ProductRuntimeUnsupported)
         .stdout()
         .to_owned()
+}
+
+#[test]
+fn finesse_renderer_preserves_the_typed_representative_witness() {
+    let report = FinesseReport::new("search", "oracle", true, Some("3".to_owned()), vec![])
+        .with_representative_witness(FinesseRepresentativeWitness::new(
+            "oracle",
+            Some("solution-a".to_owned()),
+            vec![4],
+            vec![PieceKind::T],
+            3,
+            vec![
+                FinesseReportInput::TapLeft,
+                FinesseReportInput::RotateClockwise,
+                FinesseReportInput::HardDrop,
+            ],
+            vec![FinesseReportPlacement::new(
+                PieceKind::T,
+                RotationState::Right,
+                2,
+                0,
+            )],
+        ));
+    let RenderFieldValue::Object(fields) = finesse_report_value(&report) else {
+        panic!("finesse report object");
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .find(|field| field.key() == "exact_total_inputs")
+            .map(|field| field.value()),
+        Some(&RenderFieldValue::string("3"))
+    );
+    let witness = fields
+        .iter()
+        .find(|field| field.key() == "representative_witness")
+        .expect("representative witness field");
+    assert_eq!(
+        witness.value(),
+        &RenderFieldValue::object([
+            ("policy", RenderFieldValue::string("oracle")),
+            ("solution_key", RenderFieldValue::string("solution-a")),
+            (
+                "pattern_ids",
+                RenderFieldValue::array([RenderFieldValue::from(4_usize)]),
+            ),
+            (
+                "queue",
+                RenderFieldValue::array([RenderFieldValue::string("T")]),
+            ),
+            ("total_inputs", RenderFieldValue::from(3_u32)),
+            (
+                "input_sequence",
+                RenderFieldValue::array([
+                    RenderFieldValue::string("tap-left"),
+                    RenderFieldValue::string("rotate-clockwise"),
+                    RenderFieldValue::string("hard-drop"),
+                ]),
+            ),
+            (
+                "placements",
+                RenderFieldValue::array([RenderFieldValue::object([
+                    ("piece", RenderFieldValue::string("T")),
+                    ("rotation", RenderFieldValue::from(1_u8)),
+                    ("x", RenderFieldValue::from(2_i16)),
+                    ("y", RenderFieldValue::from(0_i16)),
+                ])]),
+            ),
+        ])
+    );
+}
+
+#[test]
+fn fixed_queue_finesse_score_cli_json_preserves_the_typed_public_contract() {
+    let request = WebCommandParser::parse_with_worker_limit(
+        "clearra finesse score --initial-mask 0 --height 4 \
+         --placements O:spawn:4:0 --queue O --no-hold --pattern-knowledge both \
+         --rule srs-plus --workers 2",
+        4,
+    )
+    .expect("finesse score CLI command")
+    .to_app_request()
+    .expect("typed score request");
+    let response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    )
+    .run(request);
+    assert_eq!(response.status(), AppStatus::Success);
+
+    let rendered = AppResponseRenderer::render_with_solution_data(
+        response,
+        RenderFormat::Json,
+        CliErrorCode::ProductRuntimeUnsupported,
+        true,
+    )
+    .stdout()
+    .to_owned();
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("score CLI JSON");
+
+    assert_eq!(value["finesse_report"]["mode"], "score");
+    assert_eq!(value["finesse_report"]["exact_total_inputs"], "1");
+    assert_eq!(
+        value["contract"]["artifacts"]["finesse_report"],
+        value["finesse_report"]
+    );
+    assert_eq!(
+        value["contract"]["artifacts"]["finesse_score"]["representative_path"][0]["piece"],
+        "O"
+    );
+    assert!(
+        !rendered.contains("wasm-cpu-finesse-score"),
+        "the browser adapter fallback must not leak into CLI output"
+    );
 }
 
 #[test]

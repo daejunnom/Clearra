@@ -459,6 +459,11 @@ export function workspaceRequestForDesktop(
     spin_profile: request.spinProfile,
     preserve_b2b: request.preserveB2B,
     precompute_build_dependencies: request.precomputeBuildDependencies,
+    // The general PC/failed-queue workspace does not request finesse. Keep the
+    // new desktop bridge fields explicit so it cannot inherit a prior job's
+    // build-probability policy.
+    finesse: 'off',
+    pattern_knowledge: 'both',
     initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
     solution_probabilities: request.solutionProbabilities,
     // Desktop worker selection is automatic and must use the native host's

@@ -215,6 +215,64 @@ export type ClearraSetupFinderReport = {
   hold_conditions: ClearraSetupHoldCondition[];
 };
 
+export type ClearraFinesseSolutionAverage = {
+  solution_key: string;
+  average_inputs: string;
+  complete: boolean;
+};
+
+export type ClearraFinessePolicyResult = {
+  policy: 'oracle' | 'visible-7';
+  overall_average_inputs: string;
+  complete: boolean;
+  oracle_on_covered_average_inputs?: string | null;
+  information_penalty_inputs?: string | null;
+  success_probability_gap?: string | null;
+  successful_probability_mass?: string | null;
+  successful_unique_queue_count?: number | null;
+  total_unique_queue_count?: number | null;
+  solution_averages: ClearraFinesseSolutionAverage[];
+};
+
+export type ClearraFinesseReportInput =
+  | 'hold'
+  | 'tap-left'
+  | 'tap-right'
+  | 'das-left'
+  | 'das-right'
+  | 'rotate-clockwise'
+  | 'rotate-counter-clockwise'
+  | 'rotate-180'
+  | 'soft-drop'
+  | 'hard-drop';
+
+export type ClearraFinesseRepresentativeWitness = {
+  policy: 'oracle' | 'visible-7';
+  solution_key?: string | null;
+  pattern_ids: number[];
+  queue: string[];
+  total_inputs: number;
+  input_sequence: ClearraFinesseReportInput[];
+  placements: ClearraFinessePlacement[];
+};
+
+export type ClearraFinessePlacement = {
+  piece: string;
+  rotation: number;
+  x: number;
+  y: number;
+};
+
+export type ClearraFinesseReport = {
+  metric: 'inputs';
+  mode: 'score' | 'search';
+  pattern_knowledge: 'both' | 'oracle' | 'visible-7';
+  complete: boolean;
+  exact_total_inputs?: string | number | null;
+  representative_witness?: ClearraFinesseRepresentativeWitness | null;
+  policy_results: ClearraFinessePolicyResult[];
+};
+
 export type ClearraWasmSearchReport = {
   backend_selected: string;
   workers_used: number;
@@ -251,6 +309,7 @@ export type ClearraWasmSearchReport = {
   maximum_damage: number | null;
   forward_outcomes: ClearraForwardSearchOutcome[];
   setup_report: ClearraSetupFinderReport | null;
+  finesse_report?: ClearraFinesseReport | null;
 };
 
 type ClearraWasmWorkerEventBase = {

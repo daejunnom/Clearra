@@ -6,6 +6,7 @@ export { default as CtkDrawerWorkspace } from './CtkDrawerWorkspace.svelte';
 export { default as PlayerWorkspace } from './PlayerWorkspace.svelte';
 export { default as PcSolverStandalone } from './PcSolverStandalone.svelte';
 export * from './buildProbabilityModel';
+export * from './buildProbabilityFinesse';
 export * from './forwardSearchModel';
 export * from './solverWorkspaceModel';
 export * from './setupFinderModel';

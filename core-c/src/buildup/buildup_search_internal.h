@@ -61,6 +61,12 @@ void clearra_buildup_attach_success_trace(
 void clearra_buildup_copy_success_trace_to_verification(
     const ClearraBuildUpSearchContext *context,
     clr_buildup_verification *verification);
+typedef struct ClearraBuildUpGeometryTransitionView {
+    uint64_t target_mask;
+    uint16_t cleared_row_mask;
+    int8_t adjusted_y;
+    uint8_t cleared_lines;
+} ClearraBuildUpGeometryTransitionView;
 clr_buildup_status clearra_buildup_search_try_operation(
     ClearraBuildUpSearchContext *context,
     ClearraBuildUpState state,
@@ -70,6 +76,16 @@ clr_buildup_status clearra_buildup_search_try_operation(
     ClearraBuildUpState *out_next_state,
     clr_buildup_trace_step *out_trace_step,
     clr_kick_evidence_view *out_kick_evidence);
+clr_buildup_status clearra_buildup_search_try_operation_with_geometry(
+    ClearraBuildUpSearchContext *context,
+    ClearraBuildUpState state,
+    ClearraBuildUpQueueHold queue_hold,
+    const clr_buildup_operation *operation,
+    uint16_t operation_index,
+    ClearraBuildUpState *out_next_state,
+    clr_buildup_trace_step *out_trace_step,
+    clr_kick_evidence_view *out_kick_evidence,
+    ClearraBuildUpGeometryTransitionView *out_geometry);
 clr_buildup_status clearra_buildup_operation_variants_for_state(
     const ClearraBuildUpSearchContext *context,
     const ClearraBuildUpState *state,

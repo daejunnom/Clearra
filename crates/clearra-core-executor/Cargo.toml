@@ -23,10 +23,12 @@ clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-core-ffi = { path = "../clearra-core-ffi" }
 clearra-coverage = { path = "../clearra-coverage" }
+clearra-finesse = { path = "../clearra-finesse" }
 clearra-geometry = { path = "../clearra-geometry" }
 clearra-objectives = { path = "../clearra-objectives" }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-piece-registry = { path = "../clearra-piece-registry" }
+clearra-postprocess = { path = "../clearra-postprocess" }
 clearra-problem = { path = "../clearra-problem" }
 clearra-replay = { path = "../clearra-replay" }
 clearra-rules = { path = "../clearra-rules" }

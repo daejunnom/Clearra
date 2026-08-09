@@ -32,7 +32,9 @@ pub use buildup::{
     C_BUILDUP_STATUS_UNSUPPORTED_RUNTIME_SCOPE,
 };
 pub use buildup_geometry_language::{
-    BuildUpGeometryLanguage, BuildUpGeometryLanguageEdge, BuildUpGeometryLanguageNode,
+    BuildUpGeometryLanguage, BuildUpGeometryLanguageEdge, BuildUpGeometryLanguageEdgeV2,
+    BuildUpGeometryLanguageNode, BuildUpGeometryLanguageNodeV2, BuildUpGeometryLanguageV2,
+    BuildUpGeometryTransitionMode,
 };
 #[cfg(feature = "native-c-core")]
 pub(crate) use geometry_catalog::CNativeGeometryCatalogView;

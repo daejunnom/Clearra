@@ -1,6 +1,23 @@
+// SRP rationale: this test module has one behavior-level change reason: verifying the complete public CLI grammar and its typed request projection.
+
 use clearra_i18n::LanguageId;
 
 use super::*;
+
+#[test]
+fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
+    let output = CliHelpTopic::TopLevel.into_output(LanguageId::En);
+
+    assert!(output
+        .stdout()
+        .contains("finesse search: clearra finesse search"));
+    assert!(output
+        .stdout()
+        .contains("finesse score: clearra finesse score"));
+    assert!(output
+        .stdout()
+        .contains("build-probability finesse: add --finesse inputs"));
+}
 
 #[test]
 fn tablebase_use_is_explicit_for_pc_and_setup() {

@@ -23,6 +23,7 @@ members = [
     "crates/clearra-spin",
     "crates/clearra-scoring",
     "crates/clearra-forward-search",
+    "crates/clearra-finesse",
     "crates/clearra-spin-structure-search",
     "crates/clearra-postprocess",
     "crates/clearra-postprocess-gpu",
@@ -44,7 +45,7 @@ members = [
 exclude = ["apps/clearra-desktop/src-tauri"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 license = "MIT"
 

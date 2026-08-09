@@ -15,6 +15,16 @@ RUN cargo build \
     && /workspace/target/release/clearra --format json rules list >/dev/null \
     && /workspace/target/release/clearra \
       --format json pc --lines 2 --queue IJLOO --fixed --no-hold >/dev/null
+RUN output="$(/workspace/target/release/clearra \
+      finesse search --base-mask 0 --target-mask 0xf --height 1 \
+      --queue I --no-hold --pattern-knowledge oracle --rule srs-plus \
+      --workers 1 --format json)" \
+    && echo "${output}" | grep -q '"mode":"search"'
+RUN output="$(/workspace/target/release/clearra \
+      finesse score --initial-mask 0 --height 4 \
+      --placements O:spawn:4:0 --queue O --no-hold \
+      --pattern-knowledge both --rule srs-plus --workers 1 --format json)" \
+    && echo "${output}" | grep -q '"mode":"score"'
 
 FROM node:22-bookworm-slim AS node-build
 

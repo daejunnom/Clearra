@@ -18,9 +18,9 @@ pub use pc_scoring::{
 #[cfg(feature = "stage-profiling")]
 pub use score_batch::ExactScoringExecutionProfile;
 pub use score_batch::{
-    BackToBackExecutionFilter, CandidateExecution, CandidateExecutionAggregate,
-    CandidatePatternCoverage, ExactScoredExecution, ExactScoringExecutionCancelled,
-    ExactScoringExecutionMaterialization, ExactScoringExecutionMaterializer, ScoreCell,
-    ScoreMatrix, SpinCoverageTarget, TSpinCoverageOnlyMaterialization,
-    TSpinCoverageOnlyMaterializer,
+    BackToBackEdgePolicy, BackToBackExecutionFilter, CandidateExecution,
+    CandidateExecutionAggregate, CandidatePatternCoverage, ExactScoredExecution,
+    ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
+    ExactScoringExecutionMaterializer, ScoreCell, ScoreMatrix, SpinCoverageTarget,
+    TSpinCoverageOnlyMaterialization, TSpinCoverageOnlyMaterializer,
 };

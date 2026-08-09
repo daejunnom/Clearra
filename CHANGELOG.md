@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-08-09
+
+- Added opt-in finesse input analysis to Build Probability and dedicated
+  finesse search/score commands across the GUI, CLI, and Discord surfaces,
+  including full-queue and visible-seven policy averages.
+- Preserved exact colored CTK3 operation replay while presenting average
+  inputs beside build probability and removing representative route text from
+  user-facing results.
+- Corrected B2B-preserving finesse movement so Soft Drop reaches any valid
+  lower stop in one input, unreachable sky targets are pruned, and harmless
+  placements prefer direct Hard Drop paths.
+- Added compact and extended geometry-language annotations, fixed-queue and
+  pattern witnesses, bounded multi-worker reconstruction, prepared C geometry
+  snapshots, and complete profiling/provenance gates without changing the
+  default non-finesse search path.
+
 ## 0.7.0 - 2026-08-06
 
 - Added a clean-room Player workspace to the browser and Tauri products. It

@@ -41,6 +41,7 @@ pub struct WasmSearchReport {
     pub normalized_solution_keys: Vec<String>,
     pub solution_probabilities: Vec<WasmSolutionProbability>,
     pub solution_average_scores: Vec<WasmSolutionAverageScore>,
+    pub finesse_report: Option<WasmFinesseReport>,
     pub build_variant_count: u64,
     pub build_variant_count_exact: String,
     pub buildability_verified: bool,
@@ -186,6 +187,57 @@ pub struct WasmSolutionAverageScore {
     pub score_complete: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmFinesseSolutionAverage {
+    pub solution_key: String,
+    pub average_inputs: String,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmFinessePolicyResult {
+    pub policy: String,
+    pub overall_average_inputs: String,
+    pub complete: bool,
+    pub oracle_on_covered_average_inputs: Option<String>,
+    pub information_penalty_inputs: Option<String>,
+    pub success_probability_gap: Option<String>,
+    pub successful_probability_mass: Option<String>,
+    pub successful_unique_queue_count: Option<usize>,
+    pub total_unique_queue_count: Option<usize>,
+    pub solution_averages: Vec<WasmFinesseSolutionAverage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmFinesseRepresentativeWitness {
+    pub policy: String,
+    pub solution_key: Option<String>,
+    pub pattern_ids: Vec<usize>,
+    pub queue: Vec<String>,
+    pub total_inputs: u32,
+    pub input_sequence: Vec<String>,
+    pub placements: Vec<WasmFinessePlacement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmFinessePlacement {
+    pub piece: String,
+    pub rotation: u8,
+    pub x: i16,
+    pub y: i16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmFinesseReport {
+    pub mode: String,
+    pub metric: String,
+    pub pattern_knowledge: String,
+    pub complete: bool,
+    pub exact_total_inputs: Option<String>,
+    pub representative_witness: Option<WasmFinesseRepresentativeWitness>,
+    pub policy_results: Vec<WasmFinessePolicyResult>,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct WasmSearchPathStep {
     pub piece: String,
@@ -281,8 +333,24 @@ impl WasmSearchReport {
             });
         }
         let result = render_model.core_result()?;
+        // Finesse score deliberately keeps backend and worker implementation
+        // details out of the user-facing CoreExecutionResult summary. It is a
+        // serial WASM command, however, and still needs the same typed browser
+        // search-report envelope as finesse search. Keep the adapter fallback
+        // narrowly scoped to that tagged report so a missing backend field on
+        // every other search result remains a contract error.
+        let backend_selected = match result.field("backend_selected") {
+            Some(backend) => backend.to_owned(),
+            None if result
+                .finesse_report()
+                .is_some_and(|report| report.mode() == "score") =>
+            {
+                "wasm-cpu-finesse-score".to_owned()
+            }
+            None => return None,
+        };
         Some(Self {
-            backend_selected: result.field("backend_selected")?.to_owned(),
+            backend_selected,
             workers_used: result.usize_field("workers_used").unwrap_or(1),
             cpu_parallel_execution: result.bool_field("cpu_parallel_execution").unwrap_or(false),
             cpu_parallel_decision_reason: result
@@ -342,6 +410,73 @@ impl WasmSearchReport {
                     score_complete: entry.score_complete(),
                 })
                 .collect(),
+            finesse_report: result.finesse_report().map(|report| WasmFinesseReport {
+                mode: report.mode().to_owned(),
+                metric: report.metric().to_owned(),
+                pattern_knowledge: report.pattern_knowledge().to_owned(),
+                complete: report.complete(),
+                exact_total_inputs: report.exact_total_inputs().map(ToOwned::to_owned),
+                representative_witness: report.representative_witness().map(|witness| {
+                    WasmFinesseRepresentativeWitness {
+                        policy: witness.policy().to_owned(),
+                        solution_key: witness.solution_key().map(ToOwned::to_owned),
+                        pattern_ids: witness.pattern_ids().to_vec(),
+                        queue: witness
+                            .queue()
+                            .iter()
+                            .map(|piece| piece.as_ascii().to_string())
+                            .collect(),
+                        total_inputs: witness.total_inputs(),
+                        input_sequence: witness
+                            .input_sequence()
+                            .iter()
+                            .map(|input| input.as_str().to_owned())
+                            .collect(),
+                        placements: witness
+                            .placements()
+                            .iter()
+                            .map(|placement| WasmFinessePlacement {
+                                piece: placement.piece().as_ascii().to_string(),
+                                rotation: placement.rotation().quarter_turns(),
+                                x: placement.x(),
+                                y: placement.y(),
+                            })
+                            .collect(),
+                    }
+                }),
+                policy_results: report
+                    .policy_results()
+                    .iter()
+                    .map(|policy| WasmFinessePolicyResult {
+                        policy: policy.policy().to_owned(),
+                        overall_average_inputs: policy.overall_average_inputs().to_owned(),
+                        complete: policy.complete(),
+                        oracle_on_covered_average_inputs: policy
+                            .oracle_on_covered_average_inputs()
+                            .map(ToOwned::to_owned),
+                        information_penalty_inputs: policy
+                            .information_penalty_inputs()
+                            .map(ToOwned::to_owned),
+                        success_probability_gap: policy
+                            .success_probability_gap()
+                            .map(ToOwned::to_owned),
+                        successful_probability_mass: policy
+                            .successful_probability_mass()
+                            .map(ToOwned::to_owned),
+                        successful_unique_queue_count: policy.successful_unique_queue_count(),
+                        total_unique_queue_count: policy.total_unique_queue_count(),
+                        solution_averages: policy
+                            .solution_averages()
+                            .iter()
+                            .map(|solution| WasmFinesseSolutionAverage {
+                                solution_key: solution.solution_key().to_owned(),
+                                average_inputs: solution.average_inputs().to_owned(),
+                                complete: solution.complete(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }),
             build_variant_count: result
                 .field("build_variant_count")
                 .and_then(|value| value.parse().ok())

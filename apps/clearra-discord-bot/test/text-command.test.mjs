@@ -106,6 +106,50 @@ test("bare path text commands use the registered slash field contract", () => {
   );
 });
 
+test("dollar and greater-than finesse commands share the grouped slash contracts", () => {
+  const document = encodeCtk3({
+    width: 10,
+    pages: [{
+      height: 0,
+      cells: [],
+      operation: { piece: "T", rotation: "spawn", x: 4, y: 0 },
+    }],
+  });
+  const search = parseClearraTextRequest(
+    '$finesse search XXXX______ I __________ srs-plus "hold=avoid knowledge=visible-7"',
+    "$",
+    remoteExecution,
+  );
+  assert.equal(search.command.subcommand, "search");
+  assert.equal(classifyClearraTextCommand("$finesse search PRIVATE", "$"), "finesse.search");
+  assert.deepEqual(search.arguments_.slice(0, 14), [
+    "finesse", "search",
+    "--base-mask", "0".repeat(60),
+    "--target-mask", `${"0".repeat(59)}f`,
+    "--height", "1",
+    "--queue", "I",
+    "--no-hold",
+    "--pattern-knowledge", "visible-7",
+    "--rule",
+  ]);
+
+  const score = parseClearraTextRequest(
+    `>finesse score ${document} T --knowledge oracle`,
+    ">",
+    remoteExecution,
+  );
+  assert.equal(score.command.subcommand, "score");
+  assert.equal(score.arguments_.includes(document), false);
+  assert.deepEqual(score.arguments_.slice(0, 10), [
+    "finesse", "score",
+    "--initial-mask", "0".repeat(60),
+    "--height", "2",
+    "--placements", "T:spawn:3:0",
+    "--queue", "T",
+  ]);
+  assert.equal(classifyClearraTextCommand(">finesse score PRIVATE", ">"), "finesse.score");
+});
+
 test("catalog text requests retain the raw field for the parallel preview", () => {
   const request = parseClearraTextRequest(
     "$path --field XXXXXX____ --patterns I --lines 1",

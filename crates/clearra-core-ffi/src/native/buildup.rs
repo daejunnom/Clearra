@@ -274,12 +274,47 @@ impl NativeBuildUpWorkspace {
         Ok(language)
     }
 
+    #[cfg(feature = "native-c-core")]
+    pub fn export_geometry_language_v2_with_cancellation(
+        &mut self,
+        problem: &CBuildUpProblem,
+        transition_mode: super::BuildUpGeometryTransitionMode,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<super::BuildUpGeometryLanguageV2, NativeCoreError> {
+        let _execution_control =
+            crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
+        let workspace = self
+            .native_workspace
+            .as_mut()
+            .ok_or(NativeCoreError::Unavailable)?;
+        let language = super::buildup_geometry_language::export_v2_with_workspace(
+            workspace,
+            problem,
+            transition_mode,
+        )
+        .map_err(NativeCoreError::BuildUpStatus)?;
+        if cancellation.is_cancelled() {
+            return Err(NativeCoreError::ExecutionCancelled);
+        }
+        Ok(language)
+    }
+
     #[cfg(not(feature = "native-c-core"))]
     pub fn export_geometry_language_with_cancellation(
         &mut self,
         _problem: &CBuildUpProblem,
         _cancellation: &ExecutionCancellationToken,
     ) -> Result<super::BuildUpGeometryLanguage, NativeCoreError> {
+        Err(NativeCoreError::Unavailable)
+    }
+
+    #[cfg(not(feature = "native-c-core"))]
+    pub fn export_geometry_language_v2_with_cancellation(
+        &mut self,
+        _problem: &CBuildUpProblem,
+        _transition_mode: super::BuildUpGeometryTransitionMode,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> Result<super::BuildUpGeometryLanguageV2, NativeCoreError> {
         Err(NativeCoreError::Unavailable)
     }
 }

@@ -2,14 +2,18 @@ use std::collections::VecDeque;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
-use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildProbabilityField, FinesseMetric, FinessePatternKnowledge,
+    SearchProblem,
+};
 
 use crate::{CoreExecutionResult, CorePostProcessSpinCoverage};
 
 use super::{
     build_probability::{
-        merge_symmetry_results, BuildProbabilityAdvance, CompactBuildProbabilitySession,
-        CompactBuildProbabilitySharedCatalog,
+        build_finesse_report, merge_symmetry_results, BuildProbabilityAdvance,
+        CompactBuildProbabilitySession, CompactBuildProbabilitySharedCatalog,
+        FinesseSearchMaterial,
     },
     distributed::{
         WasmCandidatePacket, WasmCandidateProducerAdvance, WasmDistributedGeometrySummary,
@@ -144,6 +148,20 @@ impl DistributedBuildProbabilitySession {
             Self::Extended(session) => session.distributed_progress(),
         }
     }
+
+    fn annotate_finesse(&mut self, control: &ExecutionControl) -> Result<(), WasmExactSearchError> {
+        match self {
+            Self::Compact(session) => session.annotate_distributed_finesse(control),
+            Self::Extended(session) => session.annotate_distributed_finesse(control),
+        }
+    }
+
+    fn finesse_search_material(&self) -> Result<FinesseSearchMaterial, WasmExactSearchError> {
+        match self {
+            Self::Compact(session) => session.finesse_search_material(),
+            Self::Extended(session) => session.finesse_search_material(),
+        }
+    }
 }
 
 struct ProducerPass {
@@ -166,6 +184,8 @@ pub struct WasmBuildProbabilityCandidateProducer {
     summaries: Vec<WasmDistributedGeometrySummary>,
     mirror_included: bool,
     mirror_distinct: bool,
+    finesse_metric: FinesseMetric,
+    finesse_pattern_knowledge: FinessePatternKnowledge,
     finished: bool,
 }
 
@@ -174,6 +194,22 @@ impl WasmBuildProbabilityCandidateProducer {
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
+    ) -> Result<Self, &'static str> {
+        Self::new_with_finesse(
+            problem,
+            field,
+            aggregation,
+            FinesseMetric::Off,
+            FinessePatternKnowledge::Both,
+        )
+    }
+
+    pub fn new_with_finesse(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_metric: FinesseMetric,
+        finesse_pattern_knowledge: FinessePatternKnowledge,
     ) -> Result<Self, &'static str> {
         let mirror_included = field.includes_applicable_horizontal_mirror();
         let original = field.original_only();
@@ -204,6 +240,8 @@ impl WasmBuildProbabilityCandidateProducer {
             summaries: Vec::with_capacity(usize::from(mirror_distinct) + 1),
             mirror_included,
             mirror_distinct,
+            finesse_metric,
+            finesse_pattern_knowledge,
             finished: false,
         })
     }
@@ -292,6 +330,8 @@ impl WasmBuildProbabilityCandidateProducer {
             mirror_included: self.mirror_included,
             mirror_distinct: self.mirror_distinct,
             spin_coverages: Vec::new(),
+            finesse_metric: self.finesse_metric,
+            finesse_pattern_knowledge: self.finesse_pattern_knowledge,
         })
     }
 
@@ -478,6 +518,8 @@ pub struct WasmBuildProbabilityDistributedResultMerger {
     mirror_included: bool,
     mirror_distinct: bool,
     spin_coverages: Vec<CorePostProcessSpinCoverage>,
+    finesse_metric: FinesseMetric,
+    finesse_pattern_knowledge: FinessePatternKnowledge,
 }
 
 impl WasmBuildProbabilityDistributedResultMerger {
@@ -499,8 +541,25 @@ impl WasmBuildProbabilityDistributedResultMerger {
         summary: &WasmDistributedGeometrySummary,
         workers_used: usize,
     ) -> Result<CoreExecutionResult, &'static str> {
+        self.finish_with_control(summary, workers_used, &ExecutionControl::default())
+    }
+
+    pub fn finish_with_control(
+        &mut self,
+        summary: &WasmDistributedGeometrySummary,
+        workers_used: usize,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, &'static str> {
         if self.passes.len() != self.summaries.len() {
             return Err("wasm_build_probability_distributed_summary_mismatch");
+        }
+        let collect_finesse = self.finesse_metric.requested();
+        let mut finesse_materials = Vec::with_capacity(self.passes.len());
+        if collect_finesse {
+            for pass in &mut self.passes {
+                pass.annotate_finesse(control).map_err(map_error)?;
+                finesse_materials.push(pass.finesse_search_material().map_err(map_error)?);
+            }
         }
         let mut results = Vec::with_capacity(self.passes.len());
         for (pass, summary) in self.passes.iter_mut().zip(&self.summaries) {
@@ -515,7 +574,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
                 BuildProbabilityAdvance::Cancelled => return Err("wasm_cpu_search_cancelled"),
             }
         }
-        let result = merge_symmetry_results(
+        let mut result = merge_symmetry_results(
             results,
             self.mirror_included,
             self.mirror_distinct,
@@ -523,6 +582,22 @@ impl WasmBuildProbabilityDistributedResultMerger {
             self.aggregation.requests_spin_coverage() || self.execution_constraints_requested,
         )
         .map_err(map_error)?;
+        if collect_finesse {
+            result = result.with_additional_fields(vec![
+                (
+                    "finesse_metric_requested".to_owned(),
+                    self.finesse_metric.as_str().to_owned(),
+                ),
+                (
+                    "finesse_pattern_knowledge_requested".to_owned(),
+                    self.finesse_pattern_knowledge.as_str().to_owned(),
+                ),
+            ]);
+            result = result.with_finesse_report(
+                build_finesse_report(finesse_materials, self.finesse_pattern_knowledge, control)
+                    .map_err(map_error)?,
+            );
+        }
         Ok(apply_backend_execution(
             result.with_postprocess_spin_coverages(core::mem::take(&mut self.spin_coverages)),
             &summary.backend_execution,

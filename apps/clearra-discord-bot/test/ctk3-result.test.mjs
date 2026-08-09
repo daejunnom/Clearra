@@ -5,16 +5,24 @@ import {
   CTK3_MAX_BUNDLE_PAGES,
   decodeCtk3,
   inspectCtk3,
+  operationCells,
 } from "ctk3";
+import { encoder as fumenEncoder, Field } from "tetris-fumen";
 
 import {
   buildCtk3Result,
   Ctk3ResultError,
 } from "../src/clearra/ctk3-result.mjs";
+import { findSlashCommand } from "../src/discord/slash-command-catalog.mjs";
+import { buildSlashCommandArguments } from "../src/discord/slash-command-input.mjs";
 
 const ARTIFACT_SCHEMA = "clearra.solution-data.v1";
 const SIMPLE_KEY =
   "ctk1|initial=0000000000000003|placements=T:000000000000003c,I:0000000000003c00";
+const SEARCH_CLEAR_KEY =
+  "ctk1|initial=000000000000003f|placements=I:00000000000003c0";
+const SEARCH_ORDER_KEY =
+  "ctk1|initial=0000000000000000|placements=O:0000000000000c03,I:000000000000003c";
 
 test("strict ctk1/ctk2 keys become colored CTK3 pages with gray initial cells", () => {
   const highPlacement = 0xfn << 70n;
@@ -167,6 +175,655 @@ test("spin solution classes are preserved as per-page CTK3 comments", () => {
     (error) =>
       error instanceof Ctk3ResultError &&
       error.code === "invalid-solution-class",
+  );
+});
+
+test("typed finesse averages add only the minimum per-solution input cost", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SEARCH_CLEAR_KEY],
+    solution_classes: ["regular"],
+    solution_probabilities: [
+      {
+        solution_key: SEARCH_CLEAR_KEY,
+        probability: 0.25,
+        probability_complete: true,
+      },
+    ],
+    finesse_report: {
+      mode: "search",
+      metric: "inputs",
+      pattern_knowledge: "both",
+      complete: true,
+      exact_total_inputs: "1",
+      representative_witness: {
+        policy: "oracle",
+        solution_key: SEARCH_CLEAR_KEY,
+        pattern_ids: [0],
+        queue: ["I"],
+        total_inputs: 1,
+        input_sequence: ["hard-drop"],
+        placements: [{ piece: "I", rotation: 0, x: 6, y: 0 }],
+      },
+      policy_results: [
+        {
+          policy: "oracle",
+          backend: "private-backend-name",
+          complete: true,
+          solution_averages: [
+            {
+              solution_key: SEARCH_CLEAR_KEY,
+              average_inputs: "9.5000",
+              complete: true,
+            },
+          ],
+        },
+        {
+          policy: "visible-7",
+          complete: true,
+          solution_averages: [
+            {
+              solution_key: SEARCH_CLEAR_KEY,
+              average_inputs: "8.25",
+              complete: true,
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.ok(result);
+  const page = decodeCtk3(result.source).pages[0];
+  const comment = page.comment;
+  assert.equal(comment, "Spin: Regular | P=25% | F=8.25");
+  assert.doesNotMatch(comment, /private|policy|worker|backend|server|tap|rotate|hard/i);
+  assert.deepEqual(page.cells.slice(0, 10), [
+    "G", "G", "G", "G", "G", "G", null, null, null, null,
+  ]);
+  assert.deepEqual(page.operation, {
+    piece: "I",
+    rotation: "spawn",
+    x: 7,
+    y: 0,
+  });
+});
+
+test("finesse witness schema is checked without expanding its route into CTK3 comments", () => {
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SIMPLE_KEY],
+      finesse_report: {
+        ...searchReport([
+          {
+            policy: "oracle",
+            complete: true,
+            solution_averages: [
+              { solution_key: SIMPLE_KEY, average_inputs: "3", complete: true },
+            ],
+          },
+        ], "3"),
+        representative_witness: {
+          policy: "oracle",
+          solution_key: SIMPLE_KEY,
+          pattern_ids: [0],
+          queue: ["T"],
+          total_inputs: 2,
+          input_sequence: ["tap-left", "hard-drop"],
+          placements: [{ piece: "T", rotation: 0, x: 2, y: 0 }],
+        },
+      },
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "invalid-finesse-witness" &&
+      error.path.endsWith("total_inputs"),
+  );
+});
+
+test("search CTK3 uses the selected fixed-queue placement order", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SEARCH_ORDER_KEY],
+    finesse_report: {
+      ...searchReport([
+        {
+          policy: "oracle",
+          complete: true,
+          solution_averages: [
+            { solution_key: SEARCH_ORDER_KEY, average_inputs: "2", complete: true },
+          ],
+        },
+      ], "2"),
+      representative_witness: {
+        policy: "oracle",
+        solution_key: SEARCH_ORDER_KEY,
+        pattern_ids: [0],
+        queue: ["I", "O"],
+        total_inputs: 2,
+        input_sequence: ["hard-drop", "hard-drop"],
+        placements: [
+          { piece: "I", rotation: 0, x: 2, y: 0 },
+          { piece: "O", rotation: 0, x: 0, y: 0 },
+        ],
+      },
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result.pageCount, 2);
+  const pages = decodeCtk3(result.source).pages;
+  assert.equal(pages[0].operation.piece, "I");
+  assert.equal(pages[0].comment, "F=2");
+  assert.deepEqual(pages[1].cells.slice(0, 6), [null, null, "I", "I", "I", "I"]);
+  assert.equal(pages[1].operation.piece, "O");
+});
+
+test("pattern search CTK3 keeps one colored representative path and the average comment", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SEARCH_ORDER_KEY],
+    finesse_report: {
+      ...searchReport([{
+        policy: "oracle",
+        complete: false,
+        successful_unique_queue_count: 2,
+        solution_averages: [
+          { solution_key: SEARCH_ORDER_KEY, average_inputs: "2.5", complete: false },
+        ],
+      }]),
+      complete: false,
+      representative_witness: {
+        policy: "oracle",
+        solution_key: SEARCH_ORDER_KEY,
+        pattern_ids: [1, 4],
+        queue: ["I", "O"],
+        total_inputs: 2,
+        input_sequence: ["hard-drop", "hard-drop"],
+        placements: [
+          { piece: "I", rotation: 0, x: 2, y: 0 },
+          { piece: "O", rotation: 0, x: 0, y: 0 },
+        ],
+      },
+    },
+  });
+
+  assert.ok(result);
+  const pages = decodeCtk3(result.source).pages;
+  assert.equal(pages.length, 2);
+  assert.equal(pages[0].comment, "F=2.5");
+  assert.equal(pages[0].operation.piece, "I");
+  assert.deepEqual(pages[1].cells.slice(0, 6), [null, null, "I", "I", "I", "I"]);
+  assert.equal(pages[1].operation.piece, "O");
+});
+
+test("search CTK3 operations preserve each typed witness orientation", () => {
+  const placements = [
+    {
+      witness: { piece: "O", rotation: 3, x: 0, y: 0 },
+      operation: { piece: "O", rotation: "spawn", x: 0, y: 0 },
+    },
+    {
+      witness: { piece: "I", rotation: 3, x: 2, y: 0 },
+      operation: { piece: "I", rotation: "right", x: 2, y: 2 },
+    },
+    {
+      witness: { piece: "S", rotation: 2, x: 4, y: 0 },
+      operation: { piece: "S", rotation: "spawn", x: 5, y: 0 },
+    },
+    {
+      witness: { piece: "Z", rotation: 3, x: 8, y: 0 },
+      operation: { piece: "Z", rotation: "right", x: 8, y: 1 },
+    },
+  ];
+  const solutionKey = `ctk1|initial=${hex(0n, 16)}|placements=${placements
+    .map(({ witness, operation }) =>
+      `${witness.piece}:${hex(maskForOperation(operation), 16)}`)
+    .join(",")}`;
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [solutionKey],
+    finesse_report: {
+      ...searchReport([{
+        policy: "oracle",
+        complete: true,
+        solution_averages: [
+          { solution_key: solutionKey, average_inputs: "4", complete: true },
+        ],
+      }], "4"),
+      representative_witness: {
+        policy: "oracle",
+        solution_key: solutionKey,
+        pattern_ids: [0],
+        queue: placements.map(({ witness }) => witness.piece),
+        total_inputs: 4,
+        input_sequence: Array(4).fill("hard-drop"),
+        placements: placements.map(({ witness }) => witness),
+      },
+    },
+  });
+
+  assert.ok(result);
+  assert.deepEqual(
+    decodeCtk3(result.source).pages.map((page) => page.operation),
+    placements.map(({ operation }) => operation),
+  );
+});
+
+test("search CTK3 requires the engine representative field to be initially precleared", () => {
+  const unnormalizedKey =
+    "ctk1|initial=00000000000003ff|placements=O:0000000000300c00";
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [unnormalizedKey],
+      finesse_report: {
+        ...searchReport([
+          {
+            policy: "oracle",
+            complete: true,
+            solution_averages: [
+              {
+                solution_key: unnormalizedKey,
+                average_inputs: "1",
+                complete: true,
+              },
+            ],
+          },
+        ], "1"),
+        representative_witness: {
+          policy: "oracle",
+          solution_key: unnormalizedKey,
+          pattern_ids: [0],
+          queue: ["O"],
+          total_inputs: 1,
+          input_sequence: ["hard-drop"],
+          placements: [{ piece: "O", rotation: 0, x: 0, y: 0 }],
+        },
+      },
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "invalid-finesse-search" &&
+      /already have its complete rows cleared/.test(error.message),
+  );
+});
+
+test("search CTK3 rejects a placement path unrelated to the selected solution", () => {
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SEARCH_CLEAR_KEY],
+      finesse_report: {
+        ...searchReport([
+          {
+            policy: "oracle",
+            complete: true,
+            solution_averages: [
+              { solution_key: SEARCH_CLEAR_KEY, average_inputs: "1", complete: true },
+            ],
+          },
+        ], "1"),
+        representative_witness: {
+          policy: "oracle",
+          solution_key: SEARCH_CLEAR_KEY,
+          pattern_ids: [0],
+          queue: ["I"],
+          total_inputs: 1,
+          input_sequence: ["hard-drop"],
+          placements: [{ piece: "I", rotation: 0, x: 0, y: 1 }],
+        },
+      },
+    }),
+    (error) => error instanceof Ctk3ResultError &&
+      error.code === "invalid-finesse-search-final-field",
+  );
+});
+
+test("search CTK3 rejects a witness that swaps the selected solution colors", () => {
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SEARCH_ORDER_KEY],
+      finesse_report: {
+        ...searchReport([
+          {
+            policy: "oracle",
+            complete: true,
+            solution_averages: [
+              { solution_key: SEARCH_ORDER_KEY, average_inputs: "2", complete: true },
+            ],
+          },
+        ], "2"),
+        representative_witness: {
+          policy: "oracle",
+          solution_key: SEARCH_ORDER_KEY,
+          pattern_ids: [0],
+          queue: ["I", "O"],
+          total_inputs: 2,
+          input_sequence: ["hard-drop", "hard-drop"],
+          placements: [
+            { piece: "I", rotation: 0, x: 0, y: 0 },
+            { piece: "O", rotation: 0, x: 4, y: 0 },
+          ],
+        },
+      },
+    }),
+    (error) => error instanceof Ctk3ResultError &&
+      error.code === "invalid-finesse-search-final-field",
+  );
+});
+
+test("search finesse comments reject invalid policy and solution coverage", () => {
+  const average = {
+    solution_key: SIMPLE_KEY,
+    average_inputs: "8",
+    complete: true,
+  };
+  const policy = {
+    policy: "oracle",
+    complete: true,
+    solution_averages: [average],
+  };
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SIMPLE_KEY],
+      finesse_report: searchReport([{ ...policy, policy: "unknown" }]),
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "invalid-finesse-policy",
+  );
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SIMPLE_KEY],
+      finesse_report: searchReport([policy, policy]),
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "duplicate-finesse-policy",
+  );
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      solution_keys: [SIMPLE_KEY],
+      finesse_report: searchReport([
+        { ...policy, solution_averages: [] },
+      ]),
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "finesse-solution-average-key-mismatch",
+  );
+});
+
+test("search exact totals never substitute for a missing solution average", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SIMPLE_KEY],
+    finesse_report: searchReport([
+      {
+        policy: "oracle",
+        complete: true,
+        solution_averages: [
+          {
+            solution_key: SIMPLE_KEY,
+            average_inputs: "not-calculated",
+            complete: true,
+          },
+        ],
+      },
+    ], "3"),
+  });
+
+  assert.ok(result);
+  assert.equal(decodeCtk3(result.source).pages[0].comment, undefined);
+});
+
+test("search finesse emits no file when every requested policy has zero successes", () => {
+  assert.equal(buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SIMPLE_KEY],
+    finesse_report: searchReport([
+      {
+        policy: "oracle",
+        complete: true,
+        successful_unique_queue_count: 0,
+        solution_averages: [
+          {
+            solution_key: SIMPLE_KEY,
+            average_inputs: "unavailable",
+            complete: true,
+          },
+        ],
+      },
+    ]),
+  }), null);
+});
+
+test("finesse score paths become color-preserving CTK3 page operations", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    finesse_report: scoreReport("7"),
+    finesse_score: {
+      initial_board: words(0x3fn),
+      height: 4,
+      representative_path: [
+        { piece: "I", rotation: 0, x: 6, y: 0, cleared_lines: 1 },
+        { piece: "O", rotation: 0, x: 0, y: 0, cleared_lines: 0 },
+        { piece: "I", rotation: 0, x: 2, y: 0, cleared_lines: 0 },
+      ],
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result.pageCount, 3);
+  const pages = decodeCtk3(result.source).pages;
+  assert.deepEqual(pages[0].cells.slice(0, 10), [
+    "G", "G", "G", "G", "G", "G", null, null, null, null,
+  ]);
+  assert.deepEqual(pages[0].operation, {
+    piece: "I",
+    rotation: "spawn",
+    x: 7,
+    y: 0,
+  });
+  assert.equal(pages[0].comment, "F=7");
+  assert.deepEqual(pages[1].cells, []);
+  assert.deepEqual(pages[1].operation, {
+    piece: "O",
+    rotation: "spawn",
+    x: 0,
+    y: 0,
+  });
+  assert.equal(pages[1].comment, undefined);
+  assert.deepEqual(pages[2].cells.slice(0, 2), ["O", "O"]);
+  assert.deepEqual(pages[2].cells.slice(10, 12), ["O", "O"]);
+});
+
+test("Fumen operation canonicalization crosses typed score argv and CTK3 report output", () => {
+  const fumen = fumenEncoder.encode([{
+    field: Field.create("XXXXXX____"),
+    operation: { type: "I", rotation: "spawn", x: 7, y: 0 },
+    comment: "input comment must not become authoritative output",
+  }]);
+  const arguments_ = buildSlashCommandArguments(
+    findSlashCommand("finesse").subcommands.score,
+    [
+      { name: "document", value: fumen },
+      { name: "next", value: "I" },
+      { name: "options", value: "hold=avoid knowledge=oracle" },
+    ],
+  );
+  assert.deepEqual(arguments_, [
+    "finesse", "score",
+    "--initial-mask", `${"0".repeat(58)}3f`,
+    "--height", "1",
+    "--placements", "I:spawn:6:0",
+    "--queue", "I",
+    "--no-hold",
+    "--pattern-knowledge", "oracle",
+  ]);
+  assert.equal(arguments_.includes(fumen), false);
+
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    finesse_report: scoreReport("1"),
+    finesse_score: {
+      initial_board: words(0x3fn),
+      height: 1,
+      representative_path: [
+        { piece: "I", rotation: 0, x: 6, y: 0, cleared_lines: 1 },
+      ],
+    },
+  });
+  assert.ok(result);
+  const [page] = decodeCtk3(result.source).pages;
+  assert.deepEqual(page.cells, [
+    "G", "G", "G", "G", "G", "G", null, null, null, null,
+  ]);
+  assert.deepEqual(page.operation, {
+    piece: "I", rotation: "spawn", x: 7, y: 0,
+  });
+  assert.equal(page.comment, "F=1");
+});
+
+test("finesse score operations use only the declared canonical orientation", () => {
+  const cases = [
+    ["O", 3, 1, 1, { piece: "O", rotation: "spawn", x: 1, y: 1 }],
+    ["I", 2, 1, 1, { piece: "I", rotation: "spawn", x: 2, y: 1 }],
+    ["I", 3, 1, 1, { piece: "I", rotation: "right", x: 1, y: 3 }],
+    ["S", 2, 1, 1, { piece: "S", rotation: "spawn", x: 2, y: 1 }],
+    ["S", 3, 1, 1, { piece: "S", rotation: "right", x: 1, y: 2 }],
+    ["Z", 2, 1, 1, { piece: "Z", rotation: "spawn", x: 2, y: 1 }],
+    ["Z", 3, 1, 1, { piece: "Z", rotation: "right", x: 1, y: 2 }],
+    ["J", 2, 1, 1, { piece: "J", rotation: "reverse", x: 2, y: 2 }],
+    ["L", 3, 1, 1, { piece: "L", rotation: "left", x: 2, y: 2 }],
+    ["T", 1, 1, 1, { piece: "T", rotation: "right", x: 1, y: 2 }],
+  ];
+
+  for (const [piece, rotation, x, y, expected] of cases) {
+    const result = buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      finesse_report: scoreReport("1"),
+      finesse_score: {
+        initial_board: words(0n),
+        height: 8,
+        representative_path: [
+          { piece, rotation, x, y, cleared_lines: 0 },
+        ],
+      },
+    });
+    assert.ok(result, `${piece}:${rotation}`);
+    assert.deepEqual(
+      decodeCtk3(result.source).pages[0].operation,
+      expected,
+      `${piece}:${rotation}`,
+    );
+  }
+});
+
+test("finesse score replay fails closed when a declared line clear is wrong", () => {
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      finesse_report: scoreReport("1"),
+      finesse_score: {
+        initial_board: words(0x3fn),
+        height: 4,
+        representative_path: [
+          { piece: "I", rotation: 0, x: 6, y: 0, cleared_lines: 0 },
+        ],
+      },
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "invalid-finesse-score" &&
+      error.path.endsWith("cleared_lines"),
+  );
+});
+
+test("an empty finesse representative path does not create an initial-only file", () => {
+  assert.equal(buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    finesse_report: scoreReport(null),
+    finesse_score: {
+      initial_board: words(0x3fn),
+      height: 4,
+      representative_path: [],
+    },
+  }), null);
+});
+
+test("finesse score geometry is suppressed when every policy has zero successes", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    finesse_report: scoreReport(null, [
+      scorePolicy("oracle", 0, "unavailable"),
+      scorePolicy("visible-7", 0, "unavailable"),
+    ]),
+    finesse_score: {
+      initial_board: words(0n),
+      height: 4,
+      representative_path: [
+        { piece: "O", rotation: 0, x: 0, y: 0, cleared_lines: 0 },
+      ],
+    },
+  });
+
+  assert.equal(result, null);
+});
+
+test("one successful score policy permits the representative operation pages", () => {
+  const result = buildCtk3Result({
+    schema_version: ARTIFACT_SCHEMA,
+    finesse_report: {
+      ...scoreReport(null, [scorePolicy("oracle", 1, "6.5")]),
+      representative_witness: {
+        policy: "oracle",
+        solution_key: "given-operation-sequence",
+        pattern_ids: [3],
+        queue: ["O"],
+        total_inputs: 2,
+        input_sequence: ["das-left", "hard-drop"],
+        placements: [{ piece: "O", rotation: 0, x: 0, y: 0 }],
+      },
+    },
+    finesse_score: {
+      initial_board: words(0n),
+      height: 4,
+      representative_path: [
+        { piece: "O", rotation: 0, x: 0, y: 0, cleared_lines: 0 },
+      ],
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result.pageCount, 1);
+  const page = decodeCtk3(result.source).pages[0];
+  assert.equal(page.comment, "F=6.5");
+  assert.equal(page.operation.piece, "O");
+});
+
+test("finesse score success counts and typed averages must agree", () => {
+  assert.throws(
+    () => buildCtk3Result({
+      schema_version: ARTIFACT_SCHEMA,
+      finesse_report: scoreReport(null, [scorePolicy("oracle", 0, "5")]),
+      finesse_score: {
+        initial_board: words(0n),
+        height: 4,
+        representative_path: [
+          { piece: "O", rotation: 0, x: 0, y: 0, cleared_lines: 0 },
+        ],
+      },
+    }),
+    (error) =>
+      error instanceof Ctk3ResultError &&
+      error.code === "finesse-score-success-mismatch",
   );
 });
 
@@ -370,6 +1027,56 @@ function words(mask) {
   return `0x${hex(mask, 64)}`;
 }
 
+function scoreReport(exactTotalInputs, policyResults) {
+  return {
+    mode: "score",
+    metric: "inputs",
+    pattern_knowledge: "oracle",
+    complete: true,
+    exact_total_inputs: exactTotalInputs,
+    policy_results: policyResults ?? [
+      scorePolicy(
+        "oracle",
+        exactTotalInputs === null ? 0 : 1,
+        exactTotalInputs ?? "unavailable",
+      ),
+    ],
+  };
+}
+
+function scorePolicy(policy, successfulQueueCount, averageInputs) {
+  return {
+    policy,
+    complete: true,
+    successful_unique_queue_count: successfulQueueCount,
+    solution_averages: [
+      {
+        solution_key: "given-operation-sequence",
+        average_inputs: averageInputs,
+        complete: true,
+      },
+    ],
+  };
+}
+
+function searchReport(policyResults, exactTotalInputs = null) {
+  return {
+    mode: "search",
+    metric: "inputs",
+    pattern_knowledge: "both",
+    complete: true,
+    exact_total_inputs: exactTotalInputs,
+    policy_results: policyResults,
+  };
+}
+
 function hex(mask, width) {
   return mask.toString(16).padStart(width, "0");
+}
+
+function maskForOperation(operation) {
+  return operationCells(operation).reduce(
+    (mask, { x, y }) => mask | (1n << BigInt(y * 10 + x)),
+    0n,
+  );
 }

@@ -14,6 +14,7 @@ mod extended_geometry_dense;
 mod extended_geometry_domain;
 mod extended_inverse_catalog;
 mod extended_reachability;
+mod finesse_score;
 mod geometry;
 mod geometry_apdp;
 mod geometry_component;

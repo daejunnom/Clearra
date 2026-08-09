@@ -82,6 +82,8 @@ void kick_evidence_buffer_budget_rejects_exhaustion(void);
 void kick_evidence_missing_sets_trace_completeness_flag(void);
 void kick_profile_without_rotation_evidence_remains_complete(void);
 void same_operation_set_different_order_produces_distinct_trace_identity(void);
+void prepared_geometry_language_v2_exports_semantic_nodes_and_edges(void);
+void geometry_only_transition_does_not_share_reachability_cache_entries(void);
 
 int main(void) {
     buildup_rejects_queue_order_mismatch();
@@ -166,6 +168,8 @@ int main(void) {
     kick_evidence_missing_sets_trace_completeness_flag();
     kick_profile_without_rotation_evidence_remains_complete();
     same_operation_set_different_order_produces_distinct_trace_identity();
+    prepared_geometry_language_v2_exports_semantic_nodes_and_edges();
+    geometry_only_transition_does_not_share_reachability_cache_entries();
     puts("core-c buildup tests passed");
     return 0;
 }

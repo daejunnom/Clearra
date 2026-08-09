@@ -210,9 +210,12 @@ function interactionCommandPath(interaction) {
   const modalCommand = findCommandModalCommand(interaction);
   const root = interaction?.type === APPLICATION_COMMAND_INTERACTION
     ? interaction?.data?.name
-    : modalCommand?.name;
+    : modalCommand?.rootName ?? modalCommand?.name;
   if (!safeCommandPart(root)) return null;
   const names = [root];
+  if (modalCommand?.subcommand && safeCommandPart(modalCommand.subcommand)) {
+    names.push(modalCommand.subcommand);
+  }
   let options = interaction?.data?.options;
   while (Array.isArray(options) && options.length === 1) {
     const option = options[0];

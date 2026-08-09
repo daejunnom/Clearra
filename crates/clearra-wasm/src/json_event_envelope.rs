@@ -734,6 +734,110 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
             });
         },
     );
+    object.optional_object(
+        "finesse_report",
+        report.finesse_report.as_ref(),
+        |nested, finesse| {
+            nested.string("mode", &finesse.mode);
+            nested.string("metric", &finesse.metric);
+            nested.string("pattern_knowledge", &finesse.pattern_knowledge);
+            nested.boolean("complete", finesse.complete);
+            nested.optional_string("exact_total_inputs", finesse.exact_total_inputs.as_deref());
+            nested.optional_object(
+                "representative_witness",
+                finesse.representative_witness.as_ref(),
+                |witness_object, witness| {
+                    witness_object.string("policy", &witness.policy);
+                    witness_object.optional_string("solution_key", witness.solution_key.as_deref());
+                    witness_object.array("pattern_ids", |output| {
+                        output.push('[');
+                        for (index, pattern_id) in witness.pattern_ids.iter().enumerate() {
+                            if index != 0 {
+                                output.push(',');
+                            }
+                            let _ = write!(output, "{pattern_id}");
+                        }
+                        output.push(']');
+                    });
+                    witness_object
+                        .array("queue", |output| write_string_array(output, &witness.queue));
+                    witness_object.number("total_inputs", witness.total_inputs);
+                    witness_object.array("input_sequence", |output| {
+                        write_string_array(output, &witness.input_sequence)
+                    });
+                    witness_object.array("placements", |output| {
+                        output.push('[');
+                        for (index, placement) in witness.placements.iter().enumerate() {
+                            if index != 0 {
+                                output.push(',');
+                            }
+                            let mut placement_object = JsonObject::begin(output);
+                            placement_object.string("piece", &placement.piece);
+                            placement_object.number("rotation", placement.rotation);
+                            placement_object.number("x", placement.x);
+                            placement_object.number("y", placement.y);
+                            placement_object.finish();
+                        }
+                        output.push(']');
+                    });
+                },
+            );
+            nested.array("policy_results", |output| {
+                output.push('[');
+                for (index, policy) in finesse.policy_results.iter().enumerate() {
+                    if index != 0 {
+                        output.push(',');
+                    }
+                    let mut policy_object = JsonObject::begin(output);
+                    policy_object.string("policy", &policy.policy);
+                    policy_object.string("overall_average_inputs", &policy.overall_average_inputs);
+                    policy_object.boolean("complete", policy.complete);
+                    policy_object.optional_string(
+                        "oracle_on_covered_average_inputs",
+                        policy.oracle_on_covered_average_inputs.as_deref(),
+                    );
+                    policy_object.optional_string(
+                        "information_penalty_inputs",
+                        policy.information_penalty_inputs.as_deref(),
+                    );
+                    policy_object.optional_string(
+                        "success_probability_gap",
+                        policy.success_probability_gap.as_deref(),
+                    );
+                    policy_object.optional_string(
+                        "successful_probability_mass",
+                        policy.successful_probability_mass.as_deref(),
+                    );
+                    policy_object.optional_number(
+                        "successful_unique_queue_count",
+                        policy.successful_unique_queue_count,
+                    );
+                    policy_object.optional_number(
+                        "total_unique_queue_count",
+                        policy.total_unique_queue_count,
+                    );
+                    policy_object.array("solution_averages", |output| {
+                        output.push('[');
+                        for (solution_index, solution) in
+                            policy.solution_averages.iter().enumerate()
+                        {
+                            if solution_index != 0 {
+                                output.push(',');
+                            }
+                            let mut solution_object = JsonObject::begin(output);
+                            solution_object.string("solution_key", &solution.solution_key);
+                            solution_object.string("average_inputs", &solution.average_inputs);
+                            solution_object.boolean("complete", solution.complete);
+                            solution_object.finish();
+                        }
+                        output.push(']');
+                    });
+                    policy_object.finish();
+                }
+                output.push(']');
+            });
+        },
+    );
 }
 
 fn write_object_array<T>(

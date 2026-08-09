@@ -1,12 +1,24 @@
+use std::collections::BTreeMap;
+
 use clearra_core_domain::{
+    board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
     piece::{piece_kind::PieceKind, rotation::RotationState},
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_finesse::{
+    ClassicInputAction, FinesseBoard, FinesseTarget, FrozenFinesseQuery, GeometryActionKey,
+    PiecePose, TerminalEvidenceLabel,
+};
+use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_pc_graph::request::PcCountPolicy;
+use clearra_postprocess::BackToBackEdgePolicy;
 use clearra_problem::SearchProblem;
-use clearra_replay::{ExactScoringExecutionGraph, ScoringExecutionEdge, ScoringExecutionNode};
+use clearra_replay::{
+    ExactScoringExecutionGraph, RotationRequest, ScoringExecutionEdge, ScoringExecutionNode,
+    ScoringLockEvidence,
+};
 use clearra_supply::pattern_universe::PatternPiecePositionIndex;
 
 use crate::{
@@ -121,6 +133,322 @@ pub(super) struct CandidateBuildResult {
     pub feasibility_rejected: bool,
     pub reachability_states: usize,
     pub retained_bytes: usize,
+    pub finesse_language: Option<PreparedFinesseLanguage>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct PreparedFinesseNode {
+    pub edge_start: u32,
+    pub edge_count: u32,
+    pub depth: u8,
+    pub accepting: bool,
+    pub source_board: Option<FinesseBoard>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PreparedFinesseEdge {
+    pub child: u32,
+    pub piece: PieceKind,
+    pub cost: u32,
+    pub transition_order: u32,
+    pub action_key: GeometryActionKey,
+    pub terminal_evidence: Option<TerminalEvidenceLabel>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct PreparedFinesseLanguage {
+    pub nodes: Vec<PreparedFinesseNode>,
+    pub edges: Vec<PreparedFinesseEdge>,
+    pub root: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct FinesseAnnotationGroupKey {
+    occupied: [u64; 4],
+    piece: PieceKind,
+}
+
+impl FinesseAnnotationGroupKey {
+    pub(super) fn new(board: FinesseBoard, piece: PieceKind) -> Self {
+        Self {
+            occupied: board.occupied().words(),
+            piece,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct GroupedFinesseTarget {
+    edge_index: usize,
+    target: FinesseTarget,
+    terminal_evidence: Option<TerminalEvidenceLabel>,
+    allowed: bool,
+}
+
+impl GroupedFinesseTarget {
+    pub(super) const fn new(
+        edge_index: usize,
+        target: FinesseTarget,
+        terminal_evidence: Option<TerminalEvidenceLabel>,
+        allowed: bool,
+    ) -> Self {
+        Self {
+            edge_index,
+            target,
+            terminal_evidence,
+            allowed,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FrozenFinesseTargetGroup {
+    board: FinesseBoard,
+    piece: PieceKind,
+    targets: Vec<GroupedFinesseTarget>,
+}
+
+pub(super) type FrozenFinesseTargetGroups =
+    BTreeMap<FinesseAnnotationGroupKey, FrozenFinesseTargetGroup>;
+
+pub(super) fn push_frozen_finesse_target(
+    groups: &mut FrozenFinesseTargetGroups,
+    board: FinesseBoard,
+    piece: PieceKind,
+    target: GroupedFinesseTarget,
+) {
+    // Spawn, kick rules, and the classic-input finesse profile are fixed by one
+    // request. Board and piece are therefore the complete traversal key.
+    groups
+        .entry(FinesseAnnotationGroupKey::new(board, piece))
+        .or_insert_with(|| FrozenFinesseTargetGroup {
+            board,
+            piece,
+            targets: Vec::new(),
+        })
+        .targets
+        .push(target);
+}
+
+pub(super) fn finesse_scoring_edge_requirement(
+    spin_coverage_requested: bool,
+    b2b_policy: Option<BackToBackEdgePolicy>,
+    edge: ScoringExecutionEdge,
+) -> (bool, bool) {
+    let allowed = b2b_policy.is_none_or(|policy| policy.allows(edge));
+    let exact_evidence_required = spin_coverage_requested
+        || b2b_policy.is_some_and(|policy| policy.requires_recognized_spin(edge));
+    (allowed, exact_evidence_required)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn annotate_frozen_finesse_target_groups(
+    groups: FrozenFinesseTargetGroups,
+    spawn: clearra_rules::spawn::SpawnProfile,
+    kicks: &clearra_rules::kicks::KickTableProfile,
+    edge_costs: &mut [Option<u32>],
+    edge_terminal_evidence: &mut [Option<TerminalEvidenceLabel>],
+    control: &ExecutionControl,
+    movement_error: &'static str,
+    scoring_error: &'static str,
+) -> Result<usize, WasmExactSearchError> {
+    let mut query_traversals = 0_usize;
+    for group in groups.into_values() {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        query_traversals += 1;
+        let query = FrozenFinesseQuery::new(
+            group.board,
+            group.piece,
+            spawn,
+            kicks.clone(),
+            group
+                .targets
+                .iter()
+                .map(|target| target.target)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let exact_evidence_required = group
+            .targets
+            .iter()
+            .any(|target| target.allowed && target.terminal_evidence.is_some());
+        let costs = if exact_evidence_required {
+            let evidence = group
+                .targets
+                .iter()
+                .map(|target| target.allowed.then_some(target.terminal_evidence).flatten())
+                .collect::<Vec<_>>();
+            query
+                .costs_for_terminal_evidence(&evidence)
+                .map_err(|_| WasmExactSearchError::InvalidProblem(scoring_error))?
+        } else {
+            query
+                .costs()
+                .map_err(|_| WasmExactSearchError::InvalidProblem(movement_error))?
+        };
+        for (target, cost) in group.targets.iter().zip(costs.as_slice()) {
+            let Some(edge_cost) = edge_costs.get_mut(target.edge_index) else {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_grouped_edge_index_invalid",
+                ));
+            };
+            *edge_cost = target.allowed.then_some(*cost).flatten();
+            let Some(edge_evidence) = edge_terminal_evidence.get_mut(target.edge_index) else {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_grouped_evidence_index_invalid",
+                ));
+            };
+            *edge_evidence = target.allowed.then_some(target.terminal_evidence).flatten();
+        }
+    }
+    Ok(query_traversals)
+}
+
+#[cfg(test)]
+mod finesse_target_grouping_tests {
+    use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
+    use clearra_replay::ScoringLockEvidence;
+    use clearra_rules::{kicks::NoKick, spawn::SpawnProfile};
+
+    use super::*;
+
+    #[test]
+    fn compact_repeated_semantic_nodes_share_one_board_piece_query() {
+        let layout = Board64Layout::new(BoardSize::new(10, 4).unwrap()).unwrap();
+        let board = FinesseBoard::new(layout, 0).unwrap();
+        let mut groups = FrozenFinesseTargetGroups::new();
+
+        // These two records model distinct semantic nodes that project to the
+        // same physical board. Insertion order and the duplicate target remain
+        // one-for-one with their original edge indexes.
+        for edge_index in [1, 0] {
+            push_frozen_finesse_target(
+                &mut groups,
+                board,
+                PieceKind::O,
+                GroupedFinesseTarget::new(
+                    edge_index,
+                    FinesseTarget::new(RotationState::Zero, 4, 0),
+                    None,
+                    true,
+                ),
+            );
+        }
+
+        let mut edge_costs = vec![None; 2];
+        let mut evidence = vec![None; 2];
+        let query_count = annotate_frozen_finesse_target_groups(
+            groups,
+            SpawnProfile::new(4, 2),
+            &NoKick::profile(),
+            &mut edge_costs,
+            &mut evidence,
+            &ExecutionControl::default(),
+            "compact_test_movement_failed",
+            "compact_test_scoring_failed",
+        )
+        .unwrap();
+
+        assert_eq!(query_count, 1);
+        assert_eq!(edge_costs, vec![Some(1), Some(1)]);
+        assert_eq!(evidence, vec![None, None]);
+    }
+
+    #[test]
+    fn grouped_duplicate_targets_keep_per_edge_evidence_and_allowance() {
+        let layout = Board64Layout::new(BoardSize::new(10, 4).unwrap()).unwrap();
+        let board = FinesseBoard::new(layout, 0).unwrap();
+        let target = FinesseTarget::new(RotationState::Zero, 4, 0);
+        let mut groups = FrozenFinesseTargetGroups::new();
+        push_frozen_finesse_target(
+            &mut groups,
+            board,
+            PieceKind::O,
+            GroupedFinesseTarget::new(2, target, None, false),
+        );
+        push_frozen_finesse_target(
+            &mut groups,
+            board,
+            PieceKind::O,
+            GroupedFinesseTarget::new(1, target, None, true),
+        );
+        push_frozen_finesse_target(
+            &mut groups,
+            board,
+            PieceKind::O,
+            GroupedFinesseTarget::new(0, target, Some(TerminalEvidenceLabel::NoRotation), true),
+        );
+
+        let mut edge_costs = vec![None; 3];
+        let mut evidence = vec![None; 3];
+        let query_count = annotate_frozen_finesse_target_groups(
+            groups,
+            SpawnProfile::new(4, 2),
+            &NoKick::profile(),
+            &mut edge_costs,
+            &mut evidence,
+            &ExecutionControl::default(),
+            "compact_test_movement_failed",
+            "compact_test_scoring_failed",
+        )
+        .unwrap();
+
+        assert_eq!(query_count, 1);
+        assert_eq!(edge_costs, vec![Some(1), Some(1), None]);
+        assert_eq!(
+            evidence,
+            vec![Some(TerminalEvidenceLabel::NoRotation), None, None]
+        );
+    }
+
+    #[test]
+    fn b2b_only_requires_exact_evidence_for_spin_dependent_clears() {
+        let policy = BackToBackEdgePolicy::new(SpinProfileSelection::TSpins);
+        let edge = |cleared_lines, perfect_clear| {
+            ScoringExecutionEdge::new(
+                1,
+                0,
+                PieceKind::I,
+                RotationState::Zero,
+                0,
+                0,
+                cleared_lines,
+                0,
+                0,
+                ScoringLockEvidence::no_rotation(RotationState::Zero),
+            )
+            .with_perfect_clear(perfect_clear)
+        };
+
+        assert_eq!(
+            finesse_scoring_edge_requirement(false, Some(policy), edge(0, false)),
+            (true, false)
+        );
+        assert_eq!(
+            finesse_scoring_edge_requirement(false, Some(policy), edge(4, false)),
+            (true, false)
+        );
+        assert_eq!(
+            finesse_scoring_edge_requirement(false, Some(policy), edge(1, true)),
+            (true, false)
+        );
+        assert_eq!(
+            finesse_scoring_edge_requirement(false, Some(policy), edge(1, false)),
+            (false, true)
+        );
+        assert_eq!(
+            finesse_scoring_edge_requirement(true, Some(policy), edge(0, false)),
+            (true, true)
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildReachabilityMode {
+    Existing,
+    GeometryOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -706,6 +1034,71 @@ pub(super) fn verify_candidate_for_completion(
     completion: BuildCompletion,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    verify_candidate_for_completion_mode(
+        problem,
+        catalog,
+        candidate,
+        target,
+        workspace,
+        evaluator,
+        witness_mode,
+        retain_trace,
+        profile_scale,
+        completion,
+        false,
+        false,
+        control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn verify_candidate_for_completion_with_finesse(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
+    witness_mode: CandidateWitnessMode,
+    retain_trace: bool,
+    profile_scale: u64,
+    completion: BuildCompletion,
+    spin_coverage_requested: bool,
+    control: &ExecutionControl,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    verify_candidate_for_completion_mode(
+        problem,
+        catalog,
+        candidate,
+        target,
+        workspace,
+        evaluator,
+        witness_mode,
+        retain_trace,
+        profile_scale,
+        completion,
+        true,
+        spin_coverage_requested,
+        control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_candidate_for_completion_mode(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
+    witness_mode: CandidateWitnessMode,
+    retain_trace: bool,
+    profile_scale: u64,
+    completion: BuildCompletion,
+    finesse_requested: bool,
+    finesse_spin_coverage_requested: bool,
+    control: &ExecutionControl,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
     let kick_profile_id = problem.kick_profile().profile_id();
     if super::kick_profiles::builtin_kick_profile(kick_profile_id).is_none() {
         return Err(WasmExactSearchError::InvalidProblem(
@@ -735,6 +1128,8 @@ pub(super) fn verify_candidate_for_completion(
         retain_trace,
         profile_scale,
         completion,
+        finesse_requested,
+        finesse_spin_coverage_requested,
         control,
     );
     workspace.recycle_projection(projection);
@@ -754,6 +1149,8 @@ fn verify_candidate_with_projection(
     retain_trace: bool,
     profile_scale: u64,
     completion: BuildCompletion,
+    finesse_requested: bool,
+    finesse_spin_coverage_requested: bool,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
     let universe = problem.piece_source().materialized_universe().ok_or(
@@ -774,7 +1171,8 @@ fn verify_candidate_with_projection(
     if feasibility.is_infeasible() {
         return Ok(infeasible_candidate_result(feasibility_states));
     }
-    if witness_mode.enabled()
+    if !finesse_requested
+        && witness_mode.enabled()
         && problem.count_policy() == PcCountPolicy::CountUnique
         && target.pattern_index.is_some()
     {
@@ -798,7 +1196,9 @@ fn verify_candidate_with_projection(
         ExecutorSearchStage::WasmBuildOrderReachability,
         profile_scale,
     );
-    let graph = BuildOrderGraph::build(
+    let finesse_geometry_span =
+        finesse_requested.then(|| SearchStageSpan::begin(ExecutorSearchStage::FinesseGeometry));
+    let mut graph = BuildOrderGraph::build(
         problem,
         catalog,
         candidate,
@@ -807,8 +1207,35 @@ fn verify_candidate_with_projection(
         problem.count_policy() == PcCountPolicy::CountUnique,
         completion,
         Some(feasibility),
+        if finesse_requested {
+            BuildReachabilityMode::GeometryOnly
+        } else {
+            BuildReachabilityMode::Existing
+        },
     )?;
     graph_span.finish(graph.nodes.len() as u64);
+    if let Some(span) = finesse_geometry_span {
+        span.finish(graph.nodes.len() as u64);
+    }
+    let finesse_language = if finesse_requested {
+        match annotate_and_prune_finesse_graph(
+            problem,
+            catalog,
+            projection,
+            &mut graph,
+            &mut workspace.reachability,
+            finesse_spin_coverage_requested,
+            control,
+        ) {
+            Ok(language) => Some(language),
+            Err(error) => {
+                workspace.recycle_graph(graph);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let mut covered_patterns = None;
     let mut symbolic_coverage_root = None;
     let mut observation_language_root = None;
@@ -1034,6 +1461,7 @@ fn verify_candidate_with_projection(
         feasibility_rejected: false,
         reachability_states,
         retained_bytes: 0,
+        finesse_language,
     })
 }
 
@@ -1056,6 +1484,7 @@ fn infeasible_candidate_result(feasibility_states: usize) -> CandidateBuildResul
         feasibility_rejected: true,
         reachability_states: 0,
         retained_bytes: 0,
+        finesse_language: None,
     }
 }
 
@@ -1112,6 +1541,7 @@ fn verify_first_pattern_witness(
             feasibility_rejected: false,
             reachability_states,
             retained_bytes: 0,
+            finesse_language: None,
         });
     };
     let representative_path = if retain_trace {
@@ -1153,6 +1583,7 @@ fn verify_first_pattern_witness(
         feasibility_rejected: false,
         reachability_states,
         retained_bytes: witness.retained_bytes,
+        finesse_language: None,
     })
 }
 
@@ -1873,6 +2304,7 @@ impl BuildOrderGraph {
         piece_language_projection_only: bool,
         completion: BuildCompletion,
         feasibility: Option<RealizationFeasibility>,
+        reachability_mode: BuildReachabilityMode,
     ) -> Result<Self, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1958,7 +2390,22 @@ impl BuildOrderGraph {
                 }
                 let row_id = candidate.row_ids()[operation_index];
                 let row = catalog.skeleton(row_id);
-                if piece_language_projection_only {
+                if reachability_mode == BuildReachabilityMode::GeometryOnly {
+                    for realization in catalog.instantiations(row_id, deleted_rows) {
+                        if let Some(edge) = geometric_build_edge(
+                            catalog,
+                            projection,
+                            child,
+                            operation_index,
+                            row.piece,
+                            board,
+                            deleted_rows,
+                            realization,
+                        ) {
+                            edge_scratch.push(edge);
+                        }
+                    }
+                } else if piece_language_projection_only {
                     let scratch_start = edge_scratch.len();
                     let mut harddrop_edge = None;
                     for realization in catalog.instantiations(row_id, deleted_rows) {
@@ -2147,6 +2594,304 @@ impl BuildOrderGraph {
     }
 }
 
+fn annotate_and_prune_finesse_graph(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    projection: &mut CandidateProjection,
+    graph: &mut BuildOrderGraph,
+    reachability: &mut ReachabilityWorkspace,
+    spin_coverage_requested: bool,
+    control: &ExecutionControl,
+) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
+    annotate_and_prune_finesse_graph_with_query_count(
+        problem,
+        catalog,
+        projection,
+        graph,
+        reachability,
+        spin_coverage_requested,
+        control,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn annotate_and_prune_finesse_graph_with_query_count(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    projection: &mut CandidateProjection,
+    graph: &mut BuildOrderGraph,
+    reachability: &mut ReachabilityWorkspace,
+    spin_coverage_requested: bool,
+    control: &ExecutionControl,
+    query_count: Option<&mut usize>,
+) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
+    let target_grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
+    let mut subsets = vec![usize::MAX; graph.nodes.len()];
+    subsets[graph.root as usize] = 0;
+    for node_index in 0..graph.nodes.len() {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let subset = subsets[node_index];
+        if subset == usize::MAX {
+            continue;
+        }
+        for edge in graph.edges(node_index) {
+            let child_subset = subset | (1_usize << edge.operation_index);
+            let child = &mut subsets[edge.to as usize];
+            if *child == usize::MAX {
+                *child = child_subset;
+            } else if *child != child_subset {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_build_order_subset_mismatch",
+                ));
+            }
+        }
+    }
+    let size = BoardSize::new(u16::from(catalog.width()), u16::from(catalog.height()))
+        .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_board_size_invalid"))?;
+    let layout = Board64Layout::new(size).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_finesse_compact_board_layout_invalid")
+    })?;
+    let kick_profile =
+        super::kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_kick_profile_unavailable",
+            ))?
+            .clone();
+    let mut edge_costs = vec![None; graph.edges.len()];
+    let mut edge_terminal_evidence = vec![None; graph.edges.len()];
+    let b2b_policy = finesse_b2b_policy(problem);
+    let grouped_target_count = graph.edges.len();
+    let mut groups = FrozenFinesseTargetGroups::new();
+    for node_index in 0..graph.nodes.len() {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let subset = subsets[node_index];
+        if subset == usize::MAX {
+            continue;
+        }
+        let board = projection.state(subset).0;
+        let node = &graph.nodes[node_index];
+        let edge_start = node.edge_start as usize;
+        let finesse_board = FinesseBoard::new(layout, board)
+            .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_board_invalid"))?;
+        for (local_index, edge) in graph.edges(node_index).iter().copied().enumerate() {
+            let edge_index = edge_start + local_index;
+            let (terminal_evidence, allowed) = if spin_coverage_requested || b2b_policy.is_some() {
+                let lock_evidence = reachability.scoring_lock_evidence(
+                    catalog,
+                    board,
+                    edge.piece,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                );
+                let child_subset = subset | (1_usize << edge.operation_index);
+                let perfect_clear = edge.cleared_lines > 0 && projection.state(child_subset).0 == 0;
+                let (blocked_t_corners, blocked_t_front_corners) = if edge.piece == PieceKind::T {
+                    t_corner_evidence(
+                        catalog.width(),
+                        catalog.height(),
+                        board,
+                        edge.rotation,
+                        edge.x,
+                        edge.y,
+                    )
+                } else {
+                    (0, 0)
+                };
+                let scoring_edge = ScoringExecutionEdge::new(
+                    edge.to,
+                    edge.operation_index,
+                    edge.piece,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                    edge.cleared_lines,
+                    blocked_t_corners,
+                    blocked_t_front_corners,
+                    lock_evidence,
+                )
+                .with_perfect_clear(perfect_clear);
+                let (allowed, exact_evidence_required) = finesse_scoring_edge_requirement(
+                    spin_coverage_requested,
+                    b2b_policy,
+                    scoring_edge,
+                );
+                (
+                    (allowed && exact_evidence_required)
+                        .then(|| finesse_terminal_label(lock_evidence, edge.rotation))
+                        .transpose()?,
+                    allowed,
+                )
+            } else {
+                (None, true)
+            };
+            push_frozen_finesse_target(
+                &mut groups,
+                finesse_board,
+                edge.piece,
+                GroupedFinesseTarget::new(
+                    edge_index,
+                    FinesseTarget::new(edge.rotation, i16::from(edge.x), i16::from(edge.y)),
+                    terminal_evidence,
+                    allowed,
+                ),
+            );
+        }
+    }
+    target_grouping_span.finish(grouped_target_count as u64);
+
+    let movement_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseMovementBfs);
+    let query_traversals = annotate_frozen_finesse_target_groups(
+        groups,
+        problem.spawn_profile(),
+        &kick_profile,
+        &mut edge_costs,
+        &mut edge_terminal_evidence,
+        control,
+        "wasm_finesse_movement_search_failed",
+        "wasm_finesse_scoring_evidence_search_failed",
+    )?;
+    if let Some(query_count) = query_count {
+        *query_count = query_traversals;
+    }
+    movement_span.finish(grouped_target_count as u64);
+
+    let prune_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseAnnotationPrune);
+    let mut live = graph
+        .nodes
+        .iter()
+        .map(BuildNode::accepting)
+        .collect::<Vec<_>>();
+    for node_index in (0..graph.nodes.len()).rev() {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        if live[node_index] {
+            continue;
+        }
+        let node = &graph.nodes[node_index];
+        let start = node.edge_start as usize;
+        live[node_index] = graph
+            .edges(node_index)
+            .iter()
+            .enumerate()
+            .any(|(offset, edge)| edge_costs[start + offset].is_some() && live[edge.to as usize]);
+    }
+
+    let old_edges = core::mem::take(&mut graph.edges);
+    let mut new_edges = Vec::with_capacity(old_edges.len());
+    let mut new_piece_edges = Vec::with_capacity(old_edges.len());
+    let mut prepared_nodes = Vec::with_capacity(graph.nodes.len());
+    let mut prepared_edges = Vec::with_capacity(old_edges.len());
+    for (node_index, node) in graph.nodes.iter_mut().enumerate() {
+        let old_start = node.edge_start as usize;
+        let old_end = old_start + node.edge_count as usize;
+        node.live = live[node_index];
+        node.edge_start = new_edges.len() as u32;
+        node.piece_edge_start = new_piece_edges.len() as u32;
+        let prepared_start = prepared_edges.len() as u32;
+        if node.live {
+            for (offset, edge) in old_edges[old_start..old_end].iter().copied().enumerate() {
+                let original_index = old_start + offset;
+                let Some(cost) = edge_costs[original_index] else {
+                    continue;
+                };
+                if !live[edge.to as usize] {
+                    continue;
+                }
+                new_edges.push(edge);
+                prepared_edges.push(PreparedFinesseEdge {
+                    child: edge.to,
+                    piece: edge.piece,
+                    cost,
+                    transition_order: u32::try_from(original_index).unwrap_or(u32::MAX),
+                    action_key: GeometryActionKey::new(
+                        edge.piece,
+                        edge.rotation,
+                        i16::from(edge.x),
+                        i16::from(edge.y),
+                    ),
+                    terminal_evidence: edge_terminal_evidence[original_index],
+                });
+            }
+        }
+        node.edge_count = new_edges.len() as u32 - node.edge_start;
+        let mut previous = None;
+        for edge in &new_edges[node.edge_start as usize..] {
+            let key = (edge.to, edge.piece);
+            if previous != Some(key) {
+                new_piece_edges.push(*edge);
+                previous = Some(key);
+            }
+        }
+        node.piece_edge_count = new_piece_edges.len() as u32 - node.piece_edge_start;
+        prepared_nodes.push(PreparedFinesseNode {
+            edge_start: prepared_start,
+            edge_count: prepared_edges.len() as u32 - prepared_start,
+            depth: node.depth,
+            accepting: node.accepting,
+            source_board: (subsets[node_index] != usize::MAX)
+                .then(|| FinesseBoard::new(layout, projection.state(subsets[node_index]).0))
+                .transpose()
+                .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_board_invalid"))?,
+        });
+    }
+    graph.edges = new_edges;
+    graph.piece_edges = new_piece_edges;
+    graph.piece_edges_share_operation_edges = false;
+    prune_span.finish(prepared_edges.len() as u64);
+    Ok(PreparedFinesseLanguage {
+        nodes: prepared_nodes,
+        edges: prepared_edges,
+        root: graph.root,
+    })
+}
+
+pub(super) fn finesse_b2b_policy(problem: &SearchProblem) -> Option<BackToBackEdgePolicy> {
+    let constraints = problem.objective().execution_constraints();
+    constraints
+        .preserves_back_to_back()
+        .then(|| BackToBackEdgePolicy::new(constraints.spin_profile()))
+}
+
+pub(super) fn finesse_terminal_label(
+    evidence: ScoringLockEvidence,
+    to: RotationState,
+) -> Result<TerminalEvidenceLabel, WasmExactSearchError> {
+    if !evidence.last_action_was_rotation() {
+        return Ok(TerminalEvidenceLabel::NoRotation);
+    }
+    let request = match evidence.rotation_request() {
+        RotationRequest::Clockwise => ClassicInputAction::RotateClockwise,
+        RotationRequest::CounterClockwise => ClassicInputAction::RotateCounterClockwise,
+        RotationRequest::HalfTurn => ClassicInputAction::Rotate180,
+        RotationRequest::None => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_scoring_rotation_request_missing",
+            ));
+        }
+    };
+    let (predecessor_x, predecessor_y) = evidence.predecessor();
+    Ok(TerminalEvidenceLabel::Rotation {
+        from: evidence.from_rotation(),
+        to,
+        request,
+        kick_index: evidence.kick_index(),
+        kick_dx: evidence.kick_dx(),
+        kick_dy: evidence.kick_dy(),
+        predecessor: PiecePose::new(
+            evidence.from_rotation(),
+            i16::from(predecessor_x),
+            i16::from(predecessor_y),
+        ),
+    })
+}
+
 pub(super) fn exact_scoring_execution_graph(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -2209,6 +2954,7 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         false,
         completion,
         None,
+        BuildReachabilityMode::Existing,
     ) {
         Ok(graph) => graph,
         Err(error) => {

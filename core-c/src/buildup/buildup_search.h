@@ -59,7 +59,8 @@ typedef struct ClearraBuildUpSearchContext {
     uint16_t success_kick_evidence_count;
     uint32_t cancellation_poll_counter;
     uint8_t reachability_mode;
-    uint8_t reserved1[7];
+    uint8_t geometry_transition_mode;
+    uint8_t reserved1[6];
 } ClearraBuildUpSearchContext;
 
 clr_buildup_status clearra_buildup_verify_piece_window(

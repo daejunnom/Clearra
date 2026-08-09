@@ -1,4 +1,7 @@
-import { spawn as nodeSpawn } from "node:child_process";
+import {
+  execFile as nodeExecFile,
+  spawn as nodeSpawn,
+} from "node:child_process";
 
 import { prepareClearraArguments } from "../clearra/command.mjs";
 
@@ -6,7 +9,30 @@ export class ClearraCommandRunner {
   constructor(config, options = {}) {
     this.config = config;
     this.spawn = options.spawn ?? nodeSpawn;
+    this.execFile = options.execFile ?? nodeExecFile;
     this.now = options.now ?? Date.now;
+  }
+
+  async verifyCapabilities() {
+    for (const probe of FINESSE_CAPABILITY_PROBES) {
+      const output = await executeCapabilityProbe(
+        this.execFile,
+        this.config,
+        probe.arguments,
+      );
+      let payload;
+      try {
+        payload = JSON.parse(output);
+      } catch {
+        throw capabilityError();
+      }
+      if (
+        payload?.finesse_report?.mode !== probe.mode ||
+        payload?.finesse_report?.metric !== "inputs"
+      ) {
+        throw capabilityError();
+      }
+    }
   }
 
   execute(job, options = {}) {
@@ -126,6 +152,72 @@ export class ClearraCommandRunner {
       if (options.signal?.aborted) abort();
     });
   }
+}
+
+const FINESSE_CAPABILITY_PROBES = Object.freeze([
+  Object.freeze({
+    mode: "search",
+    arguments: Object.freeze([
+      "finesse", "search",
+      "--base-mask", "0",
+      "--target-mask", "0xf",
+      "--height", "1",
+      "--queue", "I",
+      "--no-hold",
+      "--pattern-knowledge", "oracle",
+      "--rule", "srs-plus",
+      "--workers", "1",
+      "--format", "json",
+    ]),
+  }),
+  Object.freeze({
+    mode: "score",
+    arguments: Object.freeze([
+      "finesse", "score",
+      "--initial-mask", "0",
+      "--height", "4",
+      "--placements", "O:spawn:4:0",
+      "--queue", "O",
+      "--no-hold",
+      "--pattern-knowledge", "both",
+      "--rule", "srs-plus",
+      "--workers", "1",
+      "--format", "json",
+    ]),
+  }),
+]);
+
+function executeCapabilityProbe(execFile, config, arguments_) {
+  const timeout = Math.max(
+    1,
+    Math.min(Number(config.searchTimeoutMs) || 30_000, 30_000),
+  );
+  const childEnvironment = expectedVcpuEnvironment(config.expectedVcpus);
+  return new Promise((resolve, reject) => {
+    execFile(
+      config.executable,
+      arguments_,
+      {
+        shell: false,
+        windowsHide: true,
+        timeout,
+        maxBuffer: 256 * 1024,
+        encoding: "utf8",
+        ...(childEnvironment ? { env: childEnvironment } : {}),
+      },
+      (error, stdout) => {
+        if (error || typeof stdout !== "string") {
+          reject(capabilityError());
+          return;
+        }
+        resolve(stdout.trim());
+      },
+    );
+  });
+}
+
+function capabilityError() {
+  return new Error("Clearra engine capability check failed.");
 }
 
 function expectedVcpuEnvironment(value) {

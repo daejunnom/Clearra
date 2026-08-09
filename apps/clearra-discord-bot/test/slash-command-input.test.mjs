@@ -10,9 +10,144 @@ import {
   buildSlashCommandArgumentPlan,
   buildSlashCommandArgumentSets,
   buildSlashCommandArguments,
+  normalizeFinesseDocument,
   normalizeSearchField,
   queuePatternPieceCount,
 } from "../src/discord/slash-command-input.mjs";
+
+test("finesse search forwards canonical masks, height, queue class, and policies", () => {
+  const command = findSlashCommand("finesse");
+  const direct = buildSlashCommandArguments(command, [{
+    type: 1,
+    name: "search",
+    options: [
+      { name: "target", value: "XXXX______" },
+      { name: "next", value: "i" },
+      { name: "base", value: "__________" },
+      { name: "kicktable", value: "srs-x" },
+    ],
+  }]);
+  assert.deepEqual(direct, [
+    "finesse", "search",
+    "--base-mask", "0".repeat(60),
+    "--target-mask", `${"0".repeat(59)}f`,
+    "--height", "1",
+    "--queue", "I",
+    "--hold", "empty",
+    "--pattern-knowledge", "both",
+    "--rule", "srs-x",
+  ]);
+
+  const pattern = buildSlashCommandArguments(command.subcommands.search, [
+    { name: "target", value: "XXXX______" },
+    { name: "next", value: "*!" },
+    { name: "base", value: "__________" },
+    { name: "options", value: "hold=avoid knowledge=visible-7" },
+  ]);
+  assert.deepEqual(pattern.slice(-5), [
+    "--patterns", "*!", "--no-hold", "--pattern-knowledge", "visible-7",
+  ]);
+});
+
+test("finesse search forwards completed base rows for core-only initial clearing", () => {
+  const base = "__________\n##########";
+  const target = "####______\n__________";
+  const values = [
+    { name: "base", value: base },
+    { name: "target", value: target },
+    { name: "next", value: "I" },
+  ];
+  const arguments_ = buildSlashCommandArguments(
+    findSlashCommand("finesse").subcommands.search,
+    values,
+  );
+
+  assert.deepEqual(arguments_.slice(0, 8), [
+    "finesse", "search",
+    "--base-mask", `${"0".repeat(57)}3ff`,
+    "--target-mask", `${"0".repeat(56)}3c00`,
+    "--height", "2",
+  ]);
+  assert.throws(
+    () => buildSlashCommandArguments(findSlashCommand("cover"), values),
+    /completed row/,
+  );
+});
+
+test("finesse score canonicalizes operation documents without forwarding source text", () => {
+  const source = encodeCtk3({
+    width: 10,
+    pages: [
+      {
+        height: 1,
+        cells: ["G", ...Array(9).fill(null)],
+        operation: { piece: "T", rotation: "spawn", x: 4, y: 1 },
+      },
+      {
+        height: 0,
+        cells: [],
+        operation: { piece: "I", rotation: "right", x: 4, y: 2 },
+      },
+    ],
+  });
+  const normalized = normalizeFinesseDocument(source);
+  assert.equal(normalized.initialMask, `${"0".repeat(59)}1`);
+  assert.deepEqual(normalized.placements, ["T:spawn:3:1", "I:right:4:0"]);
+
+  const arguments_ = buildSlashCommandArguments(
+    findSlashCommand("finesse").subcommands.score,
+    [
+      { name: "document", value: source },
+      { name: "next", value: "[TI]!" },
+      { name: "options", value: "hold=use knowledge=full-queue" },
+    ],
+  );
+  assert.equal(arguments_.includes(source), false);
+  assert.deepEqual(arguments_.slice(0, 8), [
+    "finesse", "score",
+    "--initial-mask", `${"0".repeat(59)}1`,
+    "--height", "4",
+    "--placements", "T:spawn:3:1,I:right:4:0",
+  ]);
+  assert.deepEqual(arguments_.slice(8), [
+    "--patterns", "[TI]!",
+    "--hold", "empty",
+    "--pattern-knowledge", "oracle",
+  ]);
+});
+
+test("progressive Fumen keeps later operations in their post-clear page coordinates", () => {
+  const source = fumenEncoder.encode([
+    {
+      field: Field.create("XXXXXXXXXX__________"),
+      operation: { type: "O", rotation: "spawn", x: 1, y: 2 },
+    },
+    {
+      operation: { type: "I", rotation: "spawn", x: 4, y: 1 },
+    },
+  ]);
+
+  const normalized = normalizeFinesseDocument(source);
+
+  assert.equal(normalized.initialMask, `${"0".repeat(55)}ffc00`);
+  assert.equal(normalized.height, 4);
+  assert.deepEqual(normalized.placements, ["O:spawn:1:2", "I:spawn:3:1"]);
+});
+
+test("finesse score requires an operation on every CTK3 or Fumen page", () => {
+  const staticDocument = encodeCtk3({
+    width: 10,
+    pages: [{ height: 1, cells: ["G", ...Array(9).fill(null)] }],
+  });
+  assert.throws(
+    () => normalizeFinesseDocument(staticDocument),
+    /page 1 is missing its placement operation/,
+  );
+  assert.throws(
+    () => normalizeFinesseDocument("XXXX______"),
+    /must be one CTK3 or v115 Fumen document/,
+  );
+});
 
 test("PC text grids are top-down, colorless, case-insensitive, and limited to 6x10", () => {
   assert.deepEqual(normalizeSearchField("..........\n....xT...."), {

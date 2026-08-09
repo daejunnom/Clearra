@@ -3,13 +3,16 @@
 
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import {
+    encodeFinesseWitnessCtk,
     encodeSolution,
     SolutionExportError,
+    type FinesseWitnessExport,
     type SolutionCopyFormat,
     type SolutionExportPage
   } from './solutionExport';
 
   export let page: SolutionExportPage | null = null;
+  export let finesseWitness: FinesseWitnessExport | null = null;
   export let format: SolutionCopyFormat = 'ctk';
   export let language: WorkspaceLanguage;
 
@@ -29,7 +32,10 @@
   async function copySolution() {
     if (!page) return;
     try {
-      await navigator.clipboard.writeText(encodeSolution(page, format));
+      const source = format === 'ctk' && finesseWitness
+        ? encodeFinesseWitnessCtk(finesseWitness)
+        : encodeSolution(page, format);
+      await navigator.clipboard.writeText(source);
       failureKey = 'solutionCopyFailed';
       setState('copied');
     } catch (error) {

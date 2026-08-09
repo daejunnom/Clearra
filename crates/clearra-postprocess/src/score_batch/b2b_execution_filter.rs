@@ -1,3 +1,4 @@
+use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
 use clearra_replay::{
     ExactScoringExecutionBatch, ExactScoringExecutionGraph, ScoringExecutionEdge,
     ScoringExecutionNode, SpinCoverageExecutionBatch, SpinCoverageExecutionGraph,
@@ -6,6 +7,36 @@ use clearra_scoring::{
     b2b_preservation::BackToBackPreservationPolicy,
     profile::{SpinProfile, SpinProfileId},
 };
+
+use crate::score_profile_selection::spin_profile_id;
+
+/// Post-processing-owned predicate used when a consumer needs the exact same
+/// B2B edge decision without importing the scoring implementation itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackToBackEdgePolicy {
+    policy: BackToBackPreservationPolicy,
+}
+
+impl BackToBackEdgePolicy {
+    pub fn new(profile: SpinProfileSelection) -> Self {
+        Self {
+            policy: BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile_id(
+                profile,
+            ))),
+        }
+    }
+
+    pub fn allows(self, edge: ScoringExecutionEdge) -> bool {
+        self.policy.allows(edge)
+    }
+
+    /// Whether preserving B2B for this edge depends on recognized spin
+    /// evidence. Zero-line clears, tetrises, and perfect clears are
+    /// movement-evidence agnostic and may use their ordinary finesse route.
+    pub const fn requires_recognized_spin(self, edge: ScoringExecutionEdge) -> bool {
+        BackToBackPreservationPolicy::requires_recognized_spin(edge)
+    }
+}
 
 pub struct BackToBackExecutionFilter;
 
@@ -141,7 +172,9 @@ mod tests {
     };
     use clearra_scoring::profile::SpinProfileId;
 
-    use super::BackToBackExecutionFilter;
+    use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
+
+    use super::{BackToBackEdgePolicy, BackToBackExecutionFilter};
     use crate::TSpinCoverageOnlyMaterializer;
 
     #[test]
@@ -159,6 +192,17 @@ mod tests {
         .expect("coverage");
         assert_eq!(materialized.candidate_keys().count(), 1);
         assert_eq!(materialized.covered_patterns().count_ones(), 1);
+    }
+
+    #[test]
+    fn edge_policy_uses_the_same_authoritative_scoring_decision() {
+        let normal_clear = edge(1, 1);
+        let preserving = edge(2, 0);
+        let policy = BackToBackEdgePolicy::new(SpinProfileSelection::TSpins);
+        assert!(!policy.allows(normal_clear));
+        assert!(policy.allows(preserving));
+        assert!(policy.requires_recognized_spin(normal_clear));
+        assert!(!policy.requires_recognized_spin(preserving));
     }
 
     #[test]

@@ -26,7 +26,9 @@ Two job-service artifacts intentionally remain separate:
   Oracle.
 - `Dockerfile.job-service` and `cloudbuild-job-service.yaml` package the
   released v0.5.1 Linux CLI. That immutable artifact is compatibility-test only
-  and must not receive active Oracle traffic.
+  and must not receive active Oracle traffic. Its build now intentionally fails
+  the required finesse capability gate, so it cannot become a healthy service
+  revision by mistake.
 
 The retired Discord interaction image is not a job-service artifact and must not
 receive active traffic. Discord interactions are owned by Oracle Gateway.
@@ -50,9 +52,11 @@ gcloud builds submit `
 ```
 
 The Docker build compiles `clearra-cli` in release mode with the current feature
-contract and smoke checks. Its final stage contains the CLI, job-service and
-command-policy sources, production Node dependencies, and built CTK3 package.
-Secrets are runtime bindings, never build arguments or image contents.
+contract and executes tiny `finesse search` and `finesse score` JSON probes. The
+service repeats those probes before opening its listen port. Its final stage
+contains the CLI, job-service and command-policy sources, production Node
+dependencies, and built CTK3 package. Secrets are runtime bindings, never build
+arguments or image contents.
 
 ## Approved Tokyo shape
 
@@ -198,9 +202,9 @@ An external job URL must use HTTPS, contain no URL credentials, and be paired
 with the bearer. With remote worker authority, Oracle's two logical processors
 do not cap Cloud Run's eight-worker job.
 
-## Compatibility artifact
+## Compatibility negative test
 
-Build the pinned v0.5.1 artifact only for an explicit protocol comparison:
+The pinned v0.5.1 build is retained as an explicit negative compatibility test:
 
 ```powershell
 $projectId = gcloud config get-value project
@@ -216,8 +220,10 @@ gcloud builds submit `
   .
 ```
 
-Rebuilding this image does not make it current source. Never repoint the Oracle
-production URL to it.
+This build must fail at the finesse capability probes and therefore must not
+publish an image. A later released CLI may use this Docker path only after both
+probes pass. Rebuilding a release image does not make it current source; never
+repoint the Oracle production URL to an unverified compatibility artifact.
 
 ## Health, cutover, and rollback
 

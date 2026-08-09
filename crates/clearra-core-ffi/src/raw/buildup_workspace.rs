@@ -2,8 +2,9 @@ use std::{ffi::c_void, ptr::NonNull};
 
 use crate::{
     native::buildup_geometry_language::{
-        CNativeBuildUpGeometryLanguageEdge, CNativeBuildUpGeometryLanguageNode,
-        CNativeBuildUpGeometryLanguageReport,
+        CNativeBuildUpGeometryLanguageEdge, CNativeBuildUpGeometryLanguageEdgeV2,
+        CNativeBuildUpGeometryLanguageNode, CNativeBuildUpGeometryLanguageNodeV2,
+        CNativeBuildUpGeometryLanguageReport, CNativeBuildUpGeometryLanguageReportV2,
     },
     native::{CNativeBuildUpEnumerationLimits, CNativeBuildVariantBuffer},
     problem::CBuildUpProblem,
@@ -82,6 +83,36 @@ impl RawBuildUpWorkspace {
     ) -> i32 {
         crate::raw::bindings::buildup_workspace::export_geometry_language(
             problem,
+            self.pointer.as_ptr(),
+            nodes.as_mut_ptr(),
+            nodes.len(),
+            edges.as_mut_ptr(),
+            edges.len(),
+            report,
+        )
+    }
+
+    pub(crate) fn prepare_geometry_language_v2(
+        &mut self,
+        problem: &CBuildUpProblem,
+        transition_mode: i32,
+        report: &mut CNativeBuildUpGeometryLanguageReportV2,
+    ) -> i32 {
+        crate::raw::bindings::buildup_workspace::prepare_geometry_language_v2(
+            problem,
+            self.pointer.as_ptr(),
+            transition_mode,
+            report,
+        )
+    }
+
+    pub(crate) fn copy_prepared_geometry_language_v2(
+        &mut self,
+        nodes: &mut [CNativeBuildUpGeometryLanguageNodeV2],
+        edges: &mut [CNativeBuildUpGeometryLanguageEdgeV2],
+        report: &mut CNativeBuildUpGeometryLanguageReportV2,
+    ) -> i32 {
+        crate::raw::bindings::buildup_workspace::copy_prepared_geometry_language_v2(
             self.pointer.as_ptr(),
             nodes.as_mut_ptr(),
             nodes.len(),

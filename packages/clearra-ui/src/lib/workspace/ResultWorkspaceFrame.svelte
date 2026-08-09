@@ -26,6 +26,7 @@
   export let progressDone = 0;
   export let progressTotal = 0;
   export let progressTelemetry: ClearraSearchProgressTelemetry | null = null;
+  export let showWorkerMetrics = true;
   export let forwardPatternDone = 0;
   export let forwardPatternTotal = 0;
   export let failureDiagnostics: ClearraDiagnostic[] = [];
@@ -84,6 +85,7 @@
       {forwardPatternDone}
       {forwardPatternTotal}
       telemetry={displayedTelemetry}
+      {showWorkerMetrics}
     />
 
     {#if status === 'failed' || status === 'terminated'}

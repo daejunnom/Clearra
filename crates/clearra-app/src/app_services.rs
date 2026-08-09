@@ -31,7 +31,7 @@ use clearra_postprocess::{
     ExactScoringExecutionMaterializer, PcScoringPostProcessInput, PcScoringPostProcessor,
     ScoreCell, ScoreMatrix, SpinCoverageTarget, TSpinCoverageOnlyMaterializer,
 };
-use clearra_problem::{SearchProblem, SetupSearchQuery};
+use clearra_problem::{BuildProbabilityFinesseRequest, SearchProblem, SetupSearchQuery};
 use clearra_scoring::{
     builtin::{
         guideline_pc_score_with_spin_profile, jstris_ultra_pc_score_with_spin_profile,
@@ -40,6 +40,8 @@ use clearra_scoring::{
     profile::SpinProfileId,
 };
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+use crate::native_build_probability_execution::run_native_build_probability_with_workers;
 use crate::{
     diagnostics::AppDiagnosticReport,
     execution_constraint_postprocess::apply_execution_constraints,
@@ -439,16 +441,37 @@ impl AppCoreExecutorService {
         problem: &SearchProblem,
         field: clearra_problem::BuildProbabilityField,
         aggregation: clearra_problem::BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
         if control.is_cancelled() {
             return Err(CoreExecutionError::Cancelled);
+        }
+        #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+        if matches!(self.backend, AppCoreExecutorBackend::WasmCpu)
+            && matches!(&finesse, BuildProbabilityFinesseRequest::Search { .. })
+            && !aggregation.is_tiling_only()
+            && problem.backend_policy().workers() >= 2
+        {
+            let result = run_native_build_probability_with_workers(
+                *self,
+                problem,
+                field,
+                aggregation,
+                finesse.metric(),
+                finesse.pattern_knowledge(),
+                problem.backend_policy().workers(),
+                control,
+            )?;
+            let result = apply_execution_constraints(result, control)?;
+            return apply_build_spin_postprocess(result, control);
         }
         let result = match self.backend {
             AppCoreExecutorBackend::WasmCpu => WasmBuildProbabilityBackend::execute_with_control(
                 problem,
                 field,
                 aggregation,
+                finesse,
                 control,
             )
             .map_err(core_error_from_wasm),

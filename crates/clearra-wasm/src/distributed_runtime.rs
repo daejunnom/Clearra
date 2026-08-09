@@ -260,9 +260,22 @@ impl WasmDistributedCoordinator {
             return Ok(WasmDistributedPreparation::Serial);
         }
         let build_probability_request = prepared.build_probability_request();
+        let build_probability_finesse_request = prepared.build_probability_finesse_request();
+        let build_probability_finesse_requested =
+            build_probability_finesse_request.is_some_and(|(metric, _)| metric.requested());
+        if build_probability_finesse_requested
+            && build_probability_request
+                .is_some_and(|(_, aggregation)| aggregation.is_tiling_only())
+        {
+            // Tiling-only workers return roots rather than authoritative BuildUp
+            // successes. Finesse reconstruction must only consume candidates that
+            // passed the normal BuildUp verifier, so keep this combination serial.
+            return Ok(WasmDistributedPreparation::Serial);
+        }
         let build_probability_tiling_roots =
             build_probability_request.is_some_and(|(field, aggregation)| {
-                build_probability_uses_tiling_roots(problem, field, aggregation)
+                !build_probability_finesse_requested
+                    && build_probability_uses_tiling_roots(problem, field, aggregation)
             });
         let worker_count = problem.backend_policy().workers();
         let distributed_worthwhile = build_probability_request.map_or_else(
@@ -326,10 +339,18 @@ impl WasmDistributedCoordinator {
                 worker_count,
             )
         } else if let Some((field, aggregation)) = build_probability_request {
+            let (finesse_metric, finesse_pattern_knowledge) =
+                build_probability_finesse_request.unwrap_or_default();
             (
                 DistributedCandidateProducer::BuildProbability(
-                    WasmBuildProbabilityCandidateProducer::new(problem, field, aggregation)
-                        .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?,
+                    WasmBuildProbabilityCandidateProducer::new_with_finesse(
+                        problem,
+                        field,
+                        aggregation,
+                        finesse_metric,
+                        finesse_pattern_knowledge,
+                    )
+                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?,
                 ),
                 WasmDistributedMode::CpuMulti,
                 worker_count,
@@ -731,7 +752,11 @@ impl WasmDistributedCoordinator {
             .ok_or_else(|| {
                 distributed_error("E_WASM_DISTRIBUTED_STATE", "result merger is not ready")
             })?
-            .finish(&summary, workers_used.min(self.worker_count).max(1))
+            .finish(
+                &summary,
+                workers_used.min(self.worker_count).max(1),
+                &self.control,
+            )
             .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
         let response = match self.prepared.take() {
             Some(DistributedPreparedSearch::Core(prepared)) => {
@@ -952,11 +977,14 @@ impl DistributedResultMerger {
         &mut self,
         summary: &WasmDistributedGeometrySummary,
         workers_used: usize,
+        control: &ExecutionControl,
     ) -> Result<clearra_core_executor::CoreExecutionResult, &'static str> {
         match self {
             Self::Pc(merger) => merger.finish(summary, workers_used),
             Self::Tiling(merger) => merger.finish(summary, workers_used),
-            Self::BuildProbability(merger) => merger.finish(summary, workers_used),
+            Self::BuildProbability(merger) => {
+                merger.finish_with_control(summary, workers_used, control)
+            }
             Self::Forward(_) => Err("forward_merger_requires_forward_finish"),
         }
     }
@@ -978,9 +1006,14 @@ impl WasmDistributedVerifierRuntime {
                 ));
             }
         };
+        let finesse_requested = prepared
+            .build_probability_finesse_request()
+            .is_some_and(|(metric, _)| metric.requested());
         let verifier =
             if let Some((field, aggregation)) = prepared.build_probability_request() {
-                if build_probability_uses_tiling_roots(prepared.problem(), field, aggregation) {
+                if !finesse_requested
+                    && build_probability_uses_tiling_roots(prepared.problem(), field, aggregation)
+                {
                     DistributedVerifier::Tiling(
                         WasmTilingRootWorker::new_for_build_probability(prepared.problem(), field)
                             .map_err(|reason| {
@@ -1243,6 +1276,9 @@ fn request_needs_distributed_execution(request: &AppRequest) -> bool {
             )
         }
         AppCommand::BuildProbability(command) => {
+            if command.query().finesse_score().is_some() {
+                return false;
+            }
             return command.query().core_query().execution_policy().workers() >= 2
                 && command.query().target_piece_count() >= MIN_DISTRIBUTED_TARGET_PIECES;
         }

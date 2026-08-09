@@ -47,6 +47,7 @@ const OPTION_ALIASES = new Map([
   ["--spin-profile", "profile"],
   ["--scope", "scope"],
   ["--image", "image"],
+  ["--document", "document"],
 ]);
 
 export function parseClearraTextMessage(
@@ -64,7 +65,7 @@ export function parseClearraTextRequest(
 ) {
   const resolution = resolveTextCommand(content, prefix);
   if (!resolution) return null;
-  const { tokens, first, explicitSfinder, command } = resolution;
+  const { tokens, first, explicitSfinder, command, argumentStart } = resolution;
   if (first === "clearra") {
     return rawRequest(parseRawClearraMessage(content, prefix, execution));
   }
@@ -81,7 +82,7 @@ export function parseClearraTextRequest(
   if (!command || command.kind !== "search") return null;
   const rawOptions = readCatalogTextOptions(
     command,
-    tokens.slice(explicitSfinder ? 2 : 1),
+    tokens.slice(argumentStart),
   );
   const argumentPlan = buildSlashCommandArgumentPlan(command, rawOptions);
   const argumentSets = freezeArgumentSets(
@@ -132,7 +133,9 @@ function commandIdentityFromResolution(resolution) {
       canonicalClearraOperationalCommand(tokens),
     );
   }
-  return command?.name ?? null;
+  return command?.subcommand
+    ? `${command.rootName ?? command.name}.${command.subcommand}`
+    : command?.name ?? null;
 }
 
 function publicTextCommandIdentity(value) {
@@ -156,11 +159,14 @@ function resolveTextCommandHead(content, prefix) {
   const first = tokens[0]?.toLowerCase();
   const explicitSfinder = first === "sfinder";
   const commandName = explicitSfinder ? tokens[1] : first;
+  const root = findSlashCommand(normalizeCatalogName(commandName));
+  const command = resolveFinesseTextVariant(root, tokens, explicitSfinder ? 2 : 1, false);
   return {
     tokens,
     first,
     explicitSfinder,
-    command: findSlashCommand(normalizeCatalogName(commandName)),
+    command,
+    argumentStart: explicitSfinder ? 2 : 1,
   };
 }
 
@@ -176,12 +182,26 @@ function resolveTextCommand(content, prefix) {
   const first = tokens[0]?.toLowerCase();
   const explicitSfinder = first === "sfinder";
   const commandName = explicitSfinder ? tokens[1] : first;
+  const root = findSlashCommand(normalizeCatalogName(commandName));
+  const baseArgumentStart = explicitSfinder ? 2 : 1;
+  const command = resolveFinesseTextVariant(root, tokens, baseArgumentStart, true);
   return {
     tokens,
     first,
     explicitSfinder,
-    command: findSlashCommand(normalizeCatalogName(commandName)),
+    command,
+    argumentStart: command?.subcommand ? baseArgumentStart + 1 : baseArgumentStart,
   };
+}
+
+function resolveFinesseTextVariant(command, tokens, subcommandIndex, strict) {
+  if (command?.input !== "finesse") return command;
+  const name = normalizeCatalogName(tokens[subcommandIndex]);
+  const variant = command.subcommands?.[name] ?? null;
+  if (!variant && strict) {
+    throw new Error("Text command /finesse requires a search or score subcommand.");
+  }
+  return variant;
 }
 
 function usesRetiredCatFinderName(tokens) {
@@ -306,6 +326,12 @@ function readCatalogTextOptions(command, tokens) {
       settings.push(`type=${value}`);
       continue;
     }
+    if (parsed.name === "--knowledge" || parsed.name === "--queue-knowledge" || parsed.name === "--pattern-knowledge") {
+      const value = optionValue(tokens, index, parsed, parsed.name);
+      if (parsed.value === null) index += 1;
+      settings.push(`knowledge=${value}`);
+      continue;
+    }
 
     const optionName = OPTION_ALIASES.get(parsed.name);
     if (!optionName) {
@@ -368,6 +394,10 @@ function positionalOptionOrder(input) {
       return ["remaining"];
     case "verify":
       return ["scope"];
+    case "finesse-search":
+      return ["target", "next", "base", "kicktable", "options"];
+    case "finesse-score":
+      return ["document", "next", "kicktable", "options"];
     default:
       throw new Error(`Unknown text-command input contract: ${input}`);
   }

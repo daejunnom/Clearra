@@ -13,7 +13,7 @@ The registered slash commands are `/render-file`, `/path`, `/percent`, `/chance`
 `/score`, `/score-minimals`, `/saves`, `/best-save`, `/cover`, `/setup`,
 `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`,
 `/special-cover`, `/spin-cover`, `/spin`, `/spin-structure`, `/score-finder`, `/damage`, `/pc-setup`,
-`/best-setup`, `/dpc-finder`, `/verify`, and `/help`. `/help` accepts an
+`/best-setup`, `/dpc-finder`, `/finesse search`, `/finesse score`, `/verify`, and `/help`. `/help` accepts an
 optional command name in `arguments`; without it, the command lists the active
 groups. Search commands use structured primary inputs instead of one raw argv
 string. For example:
@@ -31,6 +31,8 @@ ID.
 /spin-structure pieces:<unordered inventory> field:<grid, CTK3, or Fumen> [lines:<any|0..4|0+..4+>] [profile:<t-spins|t-spins-plus|all-mini|all-mini-plus|all-spin|all-spin-plus>] [kicktable:<built-in>]
 /score-finder next:<exact queue> field:<grid, CTK3, or Fumen> [lines:<1..6>] [kicktable:<built-in>] [options:<initial_b2b=false>]
 /damage next:<exact queue> field:<grid, CTK3, or Fumen> [kicktable:<built-in>]
+/finesse search target:<target delta> next:<queue or pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>]
+/finesse score document:<CTK3 or Fumen with operations> next:<queue or pattern> [kicktable:<built-in>] [options:<hold and knowledge>]
 /pc-setup remaining:<unordered piece inventory> [kicktable:<built-in>]
 /verify scope:<pc|setup|cover|build|kicks>
 ```
@@ -58,8 +60,11 @@ buttons and a draggable grid cannot be implemented in this surface. Dragging
 remains available in Clearra's web board editor; a future Discord Activity or
 bounded external editor can reuse it.
 
-Each search CTK3/Fumen value must decode to one operation-free, static,
-10-column page.
+Except for `/finesse score`, each search CTK3/Fumen field must decode to one
+operation-free, static, 10-column page. Finesse scoring instead requires an
+operation on every page. The Discord boundary validates that document and
+forwards only its canonical initial mask, height, and ordered placements; it
+does not submit the source document as a calculation argument.
 CTK3 is read directly with the npm `ctk3` package and is never re-encoded as
 Fumen; Fumen is decoded independently at the Discord boundary. For both formats
 every non-empty color becomes the same occupancy bit. PC field inputs use a
@@ -120,7 +125,11 @@ the GUI and CTK3 result formatter do not multiply an already converted value.
 the Discord and Sfinder-compatibility boundaries.
 `options` is a command-specific choice: PC commands and `/cover` select
 `hold=use|avoid`, while spin commands select `type=TSS|TSD|TST|ANY`. These
-choices cannot replace primary field/`next` inputs or select workers, files,
+choices extend to finesse as `hold=use|avoid` plus
+`knowledge=both|oracle|visible-7`; omission selects `hold=use knowledge=both`.
+Finesse reports expose an exact total for a fixed queue or policy-level average
+inputs for patterns without expanding per-queue or per-solution lists. None of
+these choices can replace primary field/`next` inputs or select workers, files,
 custom profiles, or output formats.
 
 There is no active `/clearra` catch-all command and no active `/view` command.

@@ -9,6 +9,14 @@ import {
   type SpinProfile
 } from './solverWorkspaceModel';
 import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
+import {
+  buildProbabilityFinesseCommandArguments,
+  buildProbabilityFinesseDesktopFields,
+  DEFAULT_BUILD_PROBABILITY_FINESSE,
+  DEFAULT_BUILD_PROBABILITY_PATTERN_KNOWLEDGE,
+  type BuildProbabilityFinesseMetric,
+  type BuildProbabilityPatternKnowledge
+} from './buildProbabilityFinesse';
 
 export type BuildProbabilityRequest = {
   height: number;
@@ -21,6 +29,8 @@ export type BuildProbabilityRequest = {
   spinProfile: SpinProfile;
   preserveB2B: boolean;
   precomputeBuildDependencies: boolean;
+  finesse: BuildProbabilityFinesseMetric;
+  patternKnowledge: BuildProbabilityPatternKnowledge;
   workers: number;
   useAllLogicalProcessors: boolean;
 };
@@ -45,6 +55,8 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     spinProfile: 't-spins',
     preserveB2B: false,
     precomputeBuildDependencies: false,
+    finesse: DEFAULT_BUILD_PROBABILITY_FINESSE,
+    patternKnowledge: DEFAULT_BUILD_PROBABILITY_PATTERN_KNOWLEDGE,
     workers: defaultWorkerCount(),
     useAllLogicalProcessors: false
   };
@@ -121,6 +133,7 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
     '--cpu-warmup'
   );
   if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
+  tokens.push(...buildProbabilityFinesseCommandArguments(request.finesse, request.patternKnowledge));
   return tokens.join(' ');
 }
 
@@ -145,6 +158,7 @@ export function buildProbabilityRequestForDesktop(
     spin_profile: request.spinProfile,
     preserve_b2b: request.preserveB2B,
     precompute_build_dependencies: request.precomputeBuildDependencies,
+    ...buildProbabilityFinesseDesktopFields(request.finesse, request.patternKnowledge),
     include_horizontal_mirror: mirrorBoardMask(existing, request.height) === existing,
     workers: 0,
     use_all_logical_processors: request.useAllLogicalProcessors,

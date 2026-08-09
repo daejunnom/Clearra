@@ -821,6 +821,330 @@ fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
 }
 
 #[test]
+fn finesse_search_accepts_the_discord_fixed_queue_contract() {
+    let base = "0".repeat(60);
+    let target = format!("{}f", "0".repeat(59));
+    let request = WebCommandParser::parse(&format!(
+        "finesse search --base-mask {base} --target-mask {target} --height 1 \
+         --queue I --hold empty --pattern-knowledge both --rule srs-x"
+    ))
+    .expect("Discord finesse search command")
+    .to_app_request()
+    .expect("finesse search AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    let query = command.query();
+    assert_eq!(query.field().base_words(), [0; 4]);
+    assert_eq!(query.field().target_words(), [0xf, 0, 0, 0]);
+    assert_eq!(query.field().height(), 1);
+    assert!(!query.field().includes_horizontal_mirror());
+    assert_eq!(
+        query.finesse_metric(),
+        clearra_problem::FinesseMetric::Inputs
+    );
+    assert_eq!(
+        query.finesse_pattern_knowledge(),
+        clearra_problem::FinessePatternKnowledge::Both
+    );
+    assert!(query.core_query().allow_hold());
+    assert_eq!(query.core_query().hold_state().piece(), None);
+    assert_eq!(
+        query
+            .core_query()
+            .remaining_queue()
+            .as_fixed_sequence()
+            .expect("fixed queue")
+            .pieces(),
+        &[PieceKind::I]
+    );
+    assert_eq!(query.core_query().rule().id().as_str(), "srs-x");
+}
+
+#[test]
+fn finesse_search_accepts_the_discord_pattern_policy_contract() {
+    let base = "0".repeat(60);
+    let target = format!("{}f", "0".repeat(59));
+    let request = WebCommandParser::parse(&format!(
+        "finesse search --base-mask {base} --target-mask {target} --height 1 \
+         --patterns [TI]! --no-hold --pattern-knowledge visible-7"
+    ))
+    .expect("Discord pattern finesse search")
+    .to_app_request()
+    .expect("pattern finesse AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    let query = command.query();
+    assert_eq!(
+        query.finesse_metric(),
+        clearra_problem::FinesseMetric::Inputs
+    );
+    assert_eq!(
+        query.finesse_pattern_knowledge(),
+        clearra_problem::FinessePatternKnowledge::VisibleSeven
+    );
+    assert!(!query.core_query().allow_hold());
+    assert_eq!(
+        query.core_query().remaining_queue().mode(),
+        "materialized-pattern-expression"
+    );
+}
+
+#[test]
+fn finesse_search_preserves_the_declared_spawn_height() {
+    let request = WebCommandParser::parse(
+        "finesse search --base-mask 0 --target-mask 0xf --height 8 \
+         --queue I --no-hold --pattern-knowledge oracle",
+    )
+    .expect("finesse search command")
+    .to_app_request()
+    .expect("finesse search AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert_eq!(command.query().field().height(), 8);
+}
+
+#[test]
+fn finesse_score_accepts_the_discord_ctk3_canonical_contract() {
+    // Canonical output of the Discord CTK3 document decoder. The source
+    // document itself must never cross this parser boundary.
+    let initial = format!("{}1", "0".repeat(59));
+    let tokens = [
+        "finesse".to_owned(),
+        "score".to_owned(),
+        "--initial-mask".to_owned(),
+        initial,
+        "--height".to_owned(),
+        "4".to_owned(),
+        "--placements".to_owned(),
+        "T:spawn:3:1,I:right:4:0".to_owned(),
+        "--patterns".to_owned(),
+        "[TI]!".to_owned(),
+        "--hold".to_owned(),
+        "empty".to_owned(),
+        "--pattern-knowledge".to_owned(),
+        "oracle".to_owned(),
+    ];
+    let request = WebCommandParser::parse_tokens(&tokens)
+        .expect("Discord CTK3 finesse score command")
+        .to_app_request()
+        .expect("CTK3 finesse score AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    let query = command.query();
+    assert_eq!(query.field().base_words(), [1, 0, 0, 0]);
+    assert_eq!(query.field().target_words(), [0; 4]);
+    assert_eq!(query.field().height(), 4);
+    assert_eq!(
+        query.finesse_pattern_knowledge(),
+        clearra_problem::FinessePatternKnowledge::Oracle
+    );
+    assert!(query.core_query().allow_hold());
+    assert_eq!(query.core_query().exact_pieces(), Some(2));
+    let placements = query
+        .finesse_score()
+        .expect("typed finesse score")
+        .placements();
+    assert_eq!(placements.len(), 2);
+    assert_eq!(placements[0].piece(), PieceKind::T);
+    assert_eq!(
+        placements[0].rotation(),
+        clearra_core_domain::piece::rotation::RotationState::Zero
+    );
+    assert_eq!((placements[0].x(), placements[0].y()), (3, 1));
+    assert_eq!(placements[1].piece(), PieceKind::I);
+    assert_eq!(
+        placements[1].rotation(),
+        clearra_core_domain::piece::rotation::RotationState::Right
+    );
+    assert_eq!((placements[1].x(), placements[1].y()), (4, 0));
+}
+
+#[test]
+fn finesse_score_command_text_accepts_multiple_comma_separated_placements() {
+    let request = WebCommandParser::parse(
+        "finesse score --initial-mask 0 --height 4 \
+         --placements O:spawn:0:0,O:spawn:2:0 \
+         --queue OO --no-hold --pattern-knowledge both",
+    )
+    .expect("multi-placement finesse score command text")
+    .to_app_request()
+    .expect("multi-placement finesse score AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    let placements = command
+        .query()
+        .finesse_score()
+        .expect("typed finesse score")
+        .placements();
+    assert_eq!(placements.len(), 2);
+    assert_eq!((placements[0].x(), placements[0].y()), (0, 0));
+    assert_eq!((placements[1].x(), placements[1].y()), (2, 0));
+}
+
+#[test]
+fn finesse_score_accepts_the_discord_fumen_canonical_contract() {
+    // Canonical output for v115@bhA8SeaLJKhhWIegWEeAACegWOekmB.
+    let initial = format!("{}1", "0".repeat(59));
+    let tokens = [
+        "finesse".to_owned(),
+        "score".to_owned(),
+        "--initial-mask".to_owned(),
+        initial,
+        "--height".to_owned(),
+        "3".to_owned(),
+        "--placements".to_owned(),
+        "L:left:3:0,Z:reverse:4:1".to_owned(),
+        "--queue".to_owned(),
+        "LZ".to_owned(),
+        "--no-hold".to_owned(),
+        "--pattern-knowledge".to_owned(),
+        "visible-7".to_owned(),
+        "--rule".to_owned(),
+        "srs-plus".to_owned(),
+    ];
+    let request = WebCommandParser::parse_tokens(&tokens)
+        .expect("Discord Fumen finesse score command")
+        .to_app_request()
+        .expect("Fumen finesse score AppRequest");
+
+    let AppCommand::BuildProbability(command) = request.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    let query = command.query();
+    assert!(!query.core_query().allow_hold());
+    assert_eq!(
+        query.finesse_pattern_knowledge(),
+        clearra_problem::FinessePatternKnowledge::VisibleSeven
+    );
+    assert_eq!(
+        query
+            .core_query()
+            .remaining_queue()
+            .as_fixed_sequence()
+            .expect("fixed queue")
+            .pieces(),
+        &[PieceKind::L, PieceKind::Z]
+    );
+    let placements = query
+        .finesse_score()
+        .expect("typed finesse score")
+        .placements();
+    assert_eq!(placements.len(), 2);
+    assert_eq!(placements[0].piece(), PieceKind::L);
+    assert_eq!(
+        placements[0].rotation(),
+        clearra_core_domain::piece::rotation::RotationState::Left
+    );
+    assert_eq!((placements[0].x(), placements[0].y()), (3, 0));
+    assert_eq!(placements[1].piece(), PieceKind::Z);
+    assert_eq!(
+        placements[1].rotation(),
+        clearra_core_domain::piece::rotation::RotationState::Two
+    );
+    assert_eq!((placements[1].x(), placements[1].y()), (4, 1));
+}
+
+#[test]
+fn finesse_parser_rejects_raw_documents_and_malformed_contracts() {
+    let initial = "0".repeat(60);
+    let valid_placement = "T:spawn:4:1";
+    let cases = [
+        ("finesse".to_owned(), WebCommandErrorCode::MissingValue),
+        (
+            "finesse other".to_owned(),
+            WebCommandErrorCode::InvalidValue,
+        ),
+        (
+            format!(
+                "finesse score --document v115@vhAAgH --initial-mask {initial} \
+                 --height 4 --placements {valid_placement} --queue T"
+            ),
+            WebCommandErrorCode::UnsupportedCommand,
+        ),
+        (
+            format!("finesse score --height 4 --placements {valid_placement} --queue T"),
+            WebCommandErrorCode::MissingValue,
+        ),
+        (
+            format!("finesse score --initial-mask {initial} --height 4 --queue T"),
+            WebCommandErrorCode::MissingValue,
+        ),
+        (
+            format!(
+                "finesse score --initial-mask {initial} --height 4 \
+                 --placements T:up:4:1 --queue T"
+            ),
+            WebCommandErrorCode::InvalidValue,
+        ),
+        (
+            format!(
+                "finesse score --initial-mask {initial} --height 4 \
+                 --placements {valid_placement} --placements {valid_placement} --queue T"
+            ),
+            WebCommandErrorCode::InvalidValue,
+        ),
+        (
+            format!(
+                "finesse score --initial-mask {initial} --height 4 \
+                 --placements O:spawn:0:0|O:spawn:2:0 --queue OO"
+            ),
+            WebCommandErrorCode::ProcessSemantics,
+        ),
+        (
+            format!(
+                "finesse search --base-mask {initial} --target-mask {initial} --height 4 \
+                 --queue T --patterns [T]!"
+            ),
+            WebCommandErrorCode::InvalidValue,
+        ),
+        (
+            format!(
+                "finesse search --base-mask {initial} --target-mask {initial} --height 4 \
+                 --queue T --pattern-knowledge private"
+            ),
+            WebCommandErrorCode::InvalidValue,
+        ),
+    ];
+
+    for (command, expected_code) in cases {
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), expected_code, "{command}");
+    }
+}
+
+#[test]
+fn finesse_score_rejects_more_than_sixty_typed_placements() {
+    let placements = std::iter::repeat_n("T:spawn:4:1", 61)
+        .collect::<Vec<_>>()
+        .join(",");
+    let tokens = vec![
+        "finesse".to_owned(),
+        "score".to_owned(),
+        "--initial-mask".to_owned(),
+        "0".repeat(60),
+        "--height".to_owned(),
+        "4".to_owned(),
+        "--placements".to_owned(),
+        placements,
+        "--patterns".to_owned(),
+        "[T]!".to_owned(),
+    ];
+
+    let error = WebCommandParser::parse_tokens(&tokens).expect_err("placement limit");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+}
+
+#[test]
 fn build_probability_preserves_rule_spin_profile_and_initial_hold() {
     let request = WebCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --hold T --no-mirror --aggregate spin --rule srs-x --spin-profile all-mini-plus",

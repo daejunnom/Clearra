@@ -27,7 +27,8 @@
       aggregation,
       preserveB2B: aggregation === 'tiling' ? false : request.preserveB2B,
       precomputeBuildDependencies:
-        aggregation === 'tiling' ? false : request.precomputeBuildDependencies
+        aggregation === 'tiling' ? false : request.precomputeBuildDependencies,
+      finesse: aggregation === 'tiling' ? 'off' : request.finesse
     });
   }
 </script>
@@ -97,6 +98,30 @@
           <option value="all-mini">All-Mini</option>
           <option value="all-mini-plus">All-Mini+</option>
         </select>
+      </label>
+      <label class="workspace-field">
+        <span>{label('finesseCalculation')}</span>
+        <select
+          value={request.finesse}
+          disabled={request.aggregation === 'tiling'}
+          on:change={(event) => patch({ finesse: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['finesse'] })}
+        >
+          <option value="off">{label('finesseOff')}</option>
+          <option value="inputs">{label('finesseInputs')}</option>
+        </select>
+      </label>
+      <label class="workspace-field">
+        <span>{label('finessePatternKnowledge')}</span>
+        <select
+          value={request.patternKnowledge}
+          disabled={request.aggregation === 'tiling' || request.finesse === 'off'}
+          on:change={(event) => patch({ patternKnowledge: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['patternKnowledge'] })}
+        >
+          <option value="both">{label('finessePatternBoth')}</option>
+          <option value="oracle">{label('finessePatternOracle')}</option>
+          <option value="visible-7">{label('finessePatternVisibleSeven')}</option>
+        </select>
+        <small class="workspace-field-help">{label('finessePatternKnowledgeHelp')}</small>
       </label>
     </div>
     <div class="b2b-preservation-control">

@@ -16,6 +16,7 @@ const DISCORD_ROOT_COMMANDS = new Set([
   "dpc-finder",
   "get-original-gif",
   "help",
+  "finesse",
   "minimals",
   "path",
   "pc-setup",
@@ -45,6 +46,8 @@ const DISCORD_COMMAND_PATHS = new Set([
   "server-settings.language-show",
   "server-settings.pause",
   "server-settings.resume",
+  "finesse.search",
+  "finesse.score",
 ]);
 /**
  * Emits one allow-listed, metadata-only terminal record. Arbitrary fields and

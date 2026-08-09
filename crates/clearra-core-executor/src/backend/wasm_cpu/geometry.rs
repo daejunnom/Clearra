@@ -1841,6 +1841,10 @@ impl SharedTargetGroups {
             group_pattern_index_bytes,
         })
     }
+
+    pub(super) fn targets(&self) -> &[TargetGroup] {
+        self.targets.as_ref()
+    }
 }
 
 #[cfg(feature = "parallel")]
