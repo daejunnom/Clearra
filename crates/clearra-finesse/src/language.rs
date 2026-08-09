@@ -10,8 +10,8 @@ use clearra_coverage::pattern::pattern_id::PatternId;
 use clearra_rules::{kicks::KickTableProfile, spawn::SpawnProfile};
 
 use crate::{
-    ClassicInputAction, FinesseBoard, FinesseError, FinesseTarget, FrozenFinesseQuery,
-    TerminalEvidenceLabel,
+    piece_can_spawn, ClassicInputAction, FinesseBoard, FinesseError, FinesseTarget,
+    FrozenFinesseQuery, TerminalEvidenceLabel,
 };
 
 const UNREACHABLE: u32 = u32::MAX;
@@ -1209,6 +1209,7 @@ pub struct QueueClassProductEvaluator<'a> {
     language: &'a CostedGeometryLanguage,
     hold_enabled: bool,
     terminal_hold_release_enabled: bool,
+    spawn_profile: Option<SpawnProfile>,
 }
 
 impl<'a> QueueClassProductEvaluator<'a> {
@@ -1217,6 +1218,7 @@ impl<'a> QueueClassProductEvaluator<'a> {
             language,
             hold_enabled: true,
             terminal_hold_release_enabled: true,
+            spawn_profile: None,
         }
     }
 
@@ -1234,6 +1236,14 @@ impl<'a> QueueClassProductEvaluator<'a> {
 
     pub const fn with_terminal_hold_release_enabled(mut self, enabled: bool) -> Self {
         self.terminal_hold_release_enabled = enabled;
+        self
+    }
+
+    /// Require the currently active queue piece to exist at its exact spawn
+    /// pose before any normal or Hold supply action is considered. Nodes
+    /// without a source board retain the generic language behavior.
+    pub const fn with_spawn_profile(mut self, spawn_profile: SpawnProfile) -> Self {
+        self.spawn_profile = Some(spawn_profile);
         self
     }
 
@@ -1307,13 +1317,8 @@ impl<'a> QueueClassProductEvaluator<'a> {
             }
             let node = &self.language.nodes[state.node.index()];
             let mut selected = None;
-            'candidate: for supply in supply_transitions(
-                queue,
-                state.cursor,
-                state.hold,
-                self.hold_enabled,
-                self.terminal_hold_release_enabled,
-            ) {
+            'candidate: for supply in self.supply_transitions(node, queue, state.cursor, state.hold)
+            {
                 for edge in node.edges.iter().copied() {
                     if edge.piece != supply.piece {
                         continue;
@@ -1463,20 +1468,14 @@ impl<'a> QueueClassProductEvaluator<'a> {
             let node = &self.language.nodes[state.node.index()];
             let mut selected = None;
 
-            'candidate: for supply in supply_transitions(
-                queue,
-                state.cursor,
-                state.hold,
-                self.hold_enabled,
-                self.terminal_hold_release_enabled,
-            ) {
+            'candidate: for supply in self.supply_transitions(node, queue, state.cursor, state.hold)
+            {
                 if !state.members.iter().copied().all(|member| {
-                    supply_transitions(
+                    self.supply_transitions(
+                        node,
                         classes.classes[member].queue(),
                         state.cursor,
                         state.hold,
-                        self.hold_enabled,
-                        self.terminal_hold_release_enabled,
                     )
                     .into_iter()
                     .any(|candidate| candidate == supply)
@@ -1820,12 +1819,11 @@ impl<'a> QueueClassProductEvaluator<'a> {
                 while reachable_lanes != 0 {
                     let lane = reachable_lanes.trailing_zeros() as usize;
                     reachable_lanes &= reachable_lanes - 1;
-                    for supply in supply_transitions(
+                    for supply in self.supply_transitions(
+                        node,
                         classes[lane].queue(),
                         state.cursor,
                         state.hold,
-                        self.hold_enabled,
-                        self.terminal_hold_release_enabled,
                     ) {
                         *supply_masks.entry(supply).or_default() |= 1_u64 << lane;
                     }
@@ -1886,13 +1884,7 @@ impl<'a> QueueClassProductEvaluator<'a> {
         }
 
         let mut best = None;
-        for supply in supply_transitions(
-            queue,
-            state.cursor,
-            state.hold,
-            self.hold_enabled,
-            self.terminal_hold_release_enabled,
-        ) {
+        for supply in self.supply_transitions(node, queue, state.cursor, state.hold) {
             for edge in node.edges.iter().copied() {
                 if edge.piece != supply.piece {
                     continue;
@@ -1957,20 +1949,13 @@ impl<'a> QueueClassProductEvaluator<'a> {
         };
         let queue = classes.classes[representative].queue();
         let mut best: Option<PolicyValue> = None;
-        for supply in supply_transitions(
-            queue,
-            state.cursor,
-            state.hold,
-            self.hold_enabled,
-            self.terminal_hold_release_enabled,
-        ) {
+        for supply in self.supply_transitions(node, queue, state.cursor, state.hold) {
             if !state.members.iter().copied().all(|class_index| {
-                supply_transitions(
+                self.supply_transitions(
+                    node,
                     classes.classes[class_index].queue(),
                     state.cursor,
                     state.hold,
-                    self.hold_enabled,
-                    self.terminal_hold_release_enabled,
                 )
                 .into_iter()
                 .any(|candidate| candidate == supply)
@@ -2026,6 +2011,33 @@ impl<'a> QueueClassProductEvaluator<'a> {
         let value = best.unwrap_or_else(|| PolicyValue::reject(classes.classes.len()));
         memo.insert(state, value.clone());
         Ok(value)
+    }
+
+    fn supply_transitions(
+        &self,
+        node: &GeometryLanguageNode,
+        queue: &[PieceKind],
+        cursor: usize,
+        hold: Option<PieceKind>,
+    ) -> Vec<SupplyTransition> {
+        if !node.accepting {
+            if let (Some(spawn), Some(board), Some(current)) = (
+                self.spawn_profile,
+                node.source_board,
+                queue.get(cursor).copied(),
+            ) {
+                if !piece_can_spawn(board, current, spawn) {
+                    return Vec::new();
+                }
+            }
+        }
+        supply_transitions(
+            queue,
+            cursor,
+            hold,
+            self.hold_enabled,
+            self.terminal_hold_release_enabled,
+        )
     }
 }
 
@@ -2386,9 +2398,12 @@ pub fn aggregate_overall_costs(
 #[cfg(test)]
 mod tests {
     use clearra_core_domain::{
-        board::board_size::BoardSize, probability::probability_value::ProbabilityValue,
+        board::{board_size::BoardSize, standard_pc_board::Board256Mask},
+        probability::probability_value::ProbabilityValue,
     };
-    use clearra_geometry::layout::board64_layout::Board64Layout;
+    use clearra_geometry::layout::{
+        board256_layout::Board256Layout, board64_layout::Board64Layout,
+    };
     use clearra_rules::kicks::NoKick;
 
     use super::*;
@@ -2447,6 +2462,31 @@ mod tests {
             ));
         }
         CostedGeometryLanguage::new(GeometryNodeId::new(0), nodes).unwrap()
+    }
+
+    fn single_edge_language_with_board(
+        board: FinesseBoard,
+        piece: PieceKind,
+        input_cost: u32,
+    ) -> CostedGeometryLanguage {
+        CostedGeometryLanguage::new(
+            GeometryNodeId::new(0),
+            vec![
+                GeometryLanguageNode::new(
+                    0,
+                    false,
+                    vec![CostedGeometryEdge::new(
+                        piece,
+                        GeometryNodeId::new(1),
+                        input_cost,
+                        0,
+                    )],
+                )
+                .with_source_board(board),
+                GeometryLanguageNode::new(1, true, Vec::<CostedGeometryEdge>::new()),
+            ],
+        )
+        .unwrap()
     }
 
     fn encoded_suffix(mut value: usize, digits: usize) -> Vec<PieceKind> {
@@ -2612,6 +2652,92 @@ mod tests {
             .oracle(&classes, None)
             .unwrap();
         assert_eq!(disabled.costs.get(0), Some(None));
+    }
+
+    #[test]
+    fn spawn_guard_rejects_hold_when_the_current_piece_cannot_spawn() {
+        let layout = Board256Layout::standard_10_by_lines(22).unwrap();
+        let blocker = Board256Mask::singleton(21 * 10 + 4).unwrap();
+        let board = FinesseBoard::from_board256(layout, blocker).unwrap();
+        let spawn = SpawnProfile::STANDARD_10;
+        assert!(!piece_can_spawn(board, PieceKind::O, spawn));
+        assert!(piece_can_spawn(board, PieceKind::I, spawn));
+
+        let language = single_edge_language_with_board(board, PieceKind::I, 1);
+        let unguarded = QueueClassProductEvaluator::new(&language);
+        assert_eq!(
+            unguarded.fixed_queue_cost(&[PieceKind::O, PieceKind::I], None),
+            Ok(Some(2))
+        );
+        assert_eq!(
+            unguarded.fixed_queue_cost(&[PieceKind::O], Some(PieceKind::I)),
+            Ok(Some(2))
+        );
+
+        let guarded = QueueClassProductEvaluator::new(&language).with_spawn_profile(spawn);
+        assert_eq!(
+            guarded.fixed_queue_cost(&[PieceKind::O, PieceKind::I], None),
+            Ok(None)
+        );
+        assert_eq!(
+            guarded.fixed_queue_cost(&[PieceKind::O], Some(PieceKind::I)),
+            Ok(None)
+        );
+        assert_eq!(guarded.fixed_queue_cost(&[PieceKind::I], None), Ok(Some(1)));
+        assert_eq!(
+            guarded.fixed_queue_witness(&[PieceKind::O, PieceKind::I], None),
+            Ok(None)
+        );
+
+        let classes = QueueClassSet::group(
+            &[
+                QueuePattern::new(
+                    PatternId::new(0),
+                    vec![PieceKind::O, PieceKind::I],
+                    probability(0.5),
+                ),
+                QueuePattern::new(PatternId::new(1), vec![PieceKind::I], probability(0.5)),
+            ],
+            true,
+        )
+        .unwrap();
+        let oracle = guarded.oracle(&classes, None).unwrap();
+        let visible = guarded.visible_seven(&classes, None).unwrap();
+        for (class_index, class) in classes.classes().iter().enumerate() {
+            let expected = (class.queue() == [PieceKind::I]).then_some(1);
+            assert_eq!(oracle.costs.get(class_index).flatten(), expected);
+            assert_eq!(visible.costs.get(class_index).flatten(), expected);
+            assert_eq!(
+                guarded
+                    .visible_seven_class_witness(&classes, None, class_index)
+                    .unwrap()
+                    .map(|witness| witness.total_cost()),
+                expected
+            );
+        }
+
+        let manual_language = linear_language(&[PieceKind::I], &[1]);
+        assert_eq!(
+            QueueClassProductEvaluator::new(&manual_language)
+                .with_spawn_profile(spawn)
+                .fixed_queue_cost(&[PieceKind::I], None),
+            Ok(Some(1))
+        );
+    }
+
+    #[test]
+    fn spawn_guard_rejects_a_blocked_use_current_transition() {
+        let layout = Board256Layout::standard_10_by_lines(22).unwrap();
+        let blocker = Board256Mask::singleton(21 * 10 + 4).unwrap();
+        let board = FinesseBoard::from_board256(layout, blocker).unwrap();
+        let language = single_edge_language_with_board(board, PieceKind::O, 1);
+
+        assert_eq!(
+            QueueClassProductEvaluator::new(&language)
+                .with_spawn_profile(SpawnProfile::STANDARD_10)
+                .fixed_queue_cost(&[PieceKind::O], None),
+            Ok(None)
+        );
     }
 
     #[test]

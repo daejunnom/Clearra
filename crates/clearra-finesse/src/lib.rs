@@ -173,6 +173,12 @@ impl FinesseBoard {
         self.occupied
     }
 
+    /// Returns whether the piece's exact zero-rotation spawn pose is clear.
+    /// Cells above the visible board are valid spawn space.
+    pub fn piece_can_spawn(self, piece: PieceKind, spawn: SpawnProfile) -> bool {
+        piece_can_spawn(self, piece, spawn)
+    }
+
     fn from_parts(size: BoardSize, occupied: Board256Mask) -> Result<Self, FinesseError> {
         if !occupied
             .fits_cell_count(size.area() as u16)
@@ -182,6 +188,35 @@ impl FinesseBoard {
         }
         Ok(Self { size, occupied })
     }
+}
+
+pub(crate) fn piece_can_spawn(board: FinesseBoard, piece: PieceKind, spawn: SpawnProfile) -> bool {
+    let Some(definition) = standard_tetromino_registry().get(piece) else {
+        return false;
+    };
+    let width = i16::try_from(board.width()).expect("finesse board width fits i16");
+    let height = i16::try_from(board.height()).expect("finesse board height fits i16");
+    definition
+        .shape(RotationState::Zero)
+        .cells()
+        .into_iter()
+        .all(|cell| {
+            let Some(x) = spawn.x().checked_add(i16::from(cell.x())) else {
+                return false;
+            };
+            let Some(y) = spawn.y().checked_add(i16::from(cell.y())) else {
+                return false;
+            };
+            if x < 0 || x >= width || y < 0 {
+                return false;
+            }
+            if y >= height {
+                return true;
+            }
+            let cell_index =
+                u16::try_from(y * width + x).expect("non-negative Board256 cell index");
+            !board.occupied().contains_index(cell_index)
+        })
 }
 
 /// Frozen board, piece, rules, and target order for one multi-target query.

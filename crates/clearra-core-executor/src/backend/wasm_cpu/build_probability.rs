@@ -42,7 +42,7 @@ use super::{
     buildup::{
         exact_scoring_execution_graph_for_completion, verify_candidate_for_completion,
         verify_candidate_for_completion_with_finesse, BuildCompletion, BuildUpWorkspace,
-        CandidateWitnessMode, PreparedFinesseLanguage,
+        CandidateBuildResult, CandidateWitnessMode, PreparedFinesseLanguage,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
@@ -867,6 +867,9 @@ impl CompactBuildProbabilitySession {
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
         let symbolic = StandardBagCoverage::supports(universe, problem.initial_hold());
+        let compile_pattern_indexes = !symbolic
+            || finesse_requested
+            || shared_supply_catalog.is_some_and(|shared| shared.key.compile_pattern_indexes);
         let shared_key = CompactBuildProbabilitySharedCatalogKey {
             piece_source_id: problem.piece_source().id().get(),
             pattern_universe_id: universe.pattern_universe_id().get(),
@@ -875,7 +878,7 @@ impl CompactBuildProbabilitySession {
             initial_hold: problem.initial_hold(),
             hold_enabled: problem.supply().hold_enabled(),
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
-            compile_pattern_indexes: !symbolic,
+            compile_pattern_indexes,
         };
         let shared_supply_catalog = match shared_supply_catalog {
             Some(shared) if shared.key == shared_key => shared.clone(),
@@ -900,7 +903,11 @@ impl CompactBuildProbabilitySession {
                         == PackingPatternMembershipKind::ExactSymbolicStandardBag;
                 CompactBuildProbabilitySharedCatalog {
                     key: shared_key,
-                    targets: SharedTargetGroups::compile(universe, &family, !symbolic)?,
+                    targets: SharedTargetGroups::compile(
+                        universe,
+                        &family,
+                        compile_pattern_indexes,
+                    )?,
                     supply_projection_complete,
                 }
             }
@@ -1051,7 +1058,7 @@ impl CompactBuildProbabilitySession {
             coverage_already_known,
             solution_coverage_required,
         );
-        let mut result = if self.finesse_requested {
+        let result = if self.finesse_requested {
             verify_candidate_for_completion_with_finesse(
                 &self.problem,
                 &self.catalog,
@@ -1082,6 +1089,15 @@ impl CompactBuildProbabilitySession {
             )?
         };
 
+        self.apply_candidate_result(candidate.identity, external_ordinal, result)
+    }
+
+    fn apply_candidate_result(
+        &mut self,
+        identity: StandardBoard64TilingIdentity,
+        external_ordinal: Option<u64>,
+        mut result: CandidateBuildResult,
+    ) -> Result<(), WasmExactSearchError> {
         self.peak_build_nodes = self.peak_build_nodes.max(result.graph_nodes);
         self.total_build_nodes = self.total_build_nodes.saturating_add(result.graph_nodes);
         self.coverage_product_states = self
@@ -1132,7 +1148,7 @@ impl CompactBuildProbabilitySession {
                         "wasm_finesse_language_storage_unavailable",
                     )
                 })?;
-                self.finesse_languages.push((candidate.identity, language));
+                self.finesse_languages.push((identity, language));
             }
             if retain_solution_coverage {
                 let candidate_coverage =
@@ -1141,14 +1157,14 @@ impl CompactBuildProbabilitySession {
                         .ok_or(WasmExactSearchError::InvalidProblem(
                             "wasm_build_probability_solution_coverage_missing",
                         ))?;
-                self.merge_solution_coverage(candidate.identity, candidate_coverage)?;
+                self.merge_solution_coverage(identity, candidate_coverage)?;
             }
             self.buildable_tilings.try_reserve(1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
                     "wasm_build_probability_solution_storage_unavailable",
                 )
             })?;
-            self.buildable_tilings.insert(candidate.identity);
+            self.buildable_tilings.insert(identity);
             self.build_variant_count = self
                 .build_variant_count
                 .checked_add(result.build_variant_count)
@@ -1157,7 +1173,8 @@ impl CompactBuildProbabilitySession {
                     u128::MAX
                 });
             self.count_complete &= result.count_complete;
-            let rank = external_ordinal.unwrap_or((self.candidate_count - 1) as u64);
+            let rank =
+                external_ordinal.unwrap_or_else(|| self.candidate_count.saturating_sub(1) as u64);
             if self
                 .representative_rank
                 .is_none_or(|current| rank < current)
@@ -1452,11 +1469,10 @@ impl CompactBuildProbabilitySession {
                 "wasm_finesse_distributed_annotation_after_finish",
             ));
         }
-        self.finesse_requested = true;
-        self.finesse_languages.clear();
         let mut identities = self.buildable_tilings.iter().copied().collect::<Vec<_>>();
         identities.sort_unstable();
-        for identity in identities {
+        self.reset_distributed_finesse_aggregation();
+        for (ordinal, identity) in identities.into_iter().enumerate() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
@@ -1500,6 +1516,18 @@ impl CompactBuildProbabilitySession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_finesse_distributed_identity_reconstruction_failed",
                     ))?;
+            let solution_coverage_required = self.solution_coverage.is_some();
+            let coverage_already_known = self.buildup.standard_bag_coverage_complete()
+                || self
+                    .covered_patterns
+                    .is_superset(target.possible_patterns.as_ref())
+                    .expect("candidate pattern group belongs to the build probability universe");
+            let witness_mode = CandidateWitnessMode::for_candidate(
+                &self.problem,
+                &target,
+                coverage_already_known,
+                solution_coverage_required,
+            );
             let result = verify_candidate_for_completion_with_finesse(
                 &self.problem,
                 &self.catalog,
@@ -1507,31 +1535,43 @@ impl CompactBuildProbabilitySession {
                 &target,
                 &mut self.buildup,
                 &mut self.coverage_evaluator,
-                CandidateWitnessMode::Disabled,
-                false,
+                witness_mode,
+                self.representative_path.is_empty(),
                 0,
                 BuildCompletion::ExactBoardAfterLineClears(self.target_board),
                 self.aggregation.requests_spin_coverage(),
                 control,
             )?;
-            if !result.buildable {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_finesse_distributed_verified_identity_became_unbuildable",
-                ));
-            }
-            let language = result
-                .finesse_language
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_finesse_distributed_language_missing",
-                ))?;
-            self.finesse_languages.try_reserve(1).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_finesse_distributed_language_storage_unavailable",
-                )
-            })?;
-            self.finesse_languages.push((identity, language));
+            self.apply_candidate_result(identity, Some(ordinal as u64), result)?;
         }
         Ok(())
+    }
+
+    fn reset_distributed_finesse_aggregation(&mut self) {
+        self.finesse_requested = true;
+        self.covered_patterns = if self.trivial_target {
+            PatternBitSet::all(self.covered_patterns.pattern_count())
+        } else {
+            PatternBitSet::new(self.covered_patterns.pattern_count())
+        };
+        self.buildable_tilings.clear();
+        if let Some(solution_coverage) = self.solution_coverage.as_mut() {
+            solution_coverage.clear();
+        }
+        self.finesse_languages.clear();
+        self.build_variant_count = 0;
+        self.count_complete = self.truncated_reason.is_none();
+        self.representative_path.clear();
+        self.representative_pattern_id = None;
+        self.representative_rank = None;
+        self.peak_build_nodes = 0;
+        self.total_build_nodes = 0;
+        self.coverage_product_states = 0;
+        self.coverage_product_edge_checks = 0;
+        self.peak_reachability_states = 0;
+        self.total_reachability_states = 0;
+        self.distributed_spin_materialized = false;
+        self.distributed_execution_constraint_materialized = false;
     }
 
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
@@ -2185,6 +2225,7 @@ pub(super) fn build_finesse_report(
                 initial_hold,
                 hold_enabled,
                 terminal_hold_release,
+                spawn_profile,
                 control,
             )
         })
@@ -2199,6 +2240,7 @@ pub(super) fn build_finesse_report(
                 initial_hold,
                 hold_enabled,
                 terminal_hold_release,
+                spawn_profile,
                 control,
             )
         })
@@ -2394,6 +2436,7 @@ fn fixed_queue_representative_witness_with_cancel(
     for (solution_key, language) in languages {
         ensure_finesse_not_cancelled_with(&mut is_cancelled)?;
         let evaluator = QueueClassProductEvaluator::new(language)
+            .with_spawn_profile(spawn_profile)
             .with_hold_enabled(hold_enabled)
             .with_terminal_hold_release_enabled(terminal_hold_release);
         let Some(cost) = evaluator
@@ -2420,6 +2463,7 @@ fn fixed_queue_representative_witness_with_cancel(
     ensure_finesse_not_cancelled_with(&mut is_cancelled)?;
     let witness_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseWitness);
     let witness = QueueClassProductEvaluator::new(language)
+        .with_spawn_profile(spawn_profile)
         .with_hold_enabled(hold_enabled)
         .with_terminal_hold_release_enabled(terminal_hold_release)
         .replay_fixed_queue_witness_with_cancel(
@@ -2517,6 +2561,7 @@ fn pattern_representative_witness_with_cancel(
         WasmExactSearchError::InvalidProblem("wasm_finesse_representative_queue_missing"),
     )?;
     let evaluator = QueueClassProductEvaluator::new(language)
+        .with_spawn_profile(spawn_profile)
         .with_hold_enabled(hold_enabled)
         .with_terminal_hold_release_enabled(terminal_hold_release);
     let witness_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseWitness);
@@ -2634,6 +2679,7 @@ fn evaluate_finesse_policy(
     initial_hold: Option<PieceKind>,
     hold_enabled: bool,
     terminal_hold_release: bool,
+    spawn_profile: SpawnProfile,
     control: &ExecutionControl,
 ) -> Result<EvaluatedFinessePolicy, WasmExactSearchError> {
     let product_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseProductDp);
@@ -2644,6 +2690,7 @@ fn evaluate_finesse_policy(
     for (solution_key, language) in languages {
         ensure_finesse_not_cancelled(control)?;
         let evaluator = QueueClassProductEvaluator::new(language)
+            .with_spawn_profile(spawn_profile)
             .with_hold_enabled(hold_enabled)
             .with_terminal_hold_release_enabled(terminal_hold_release);
         let costs = finesse_policy_costs(
@@ -2671,6 +2718,7 @@ fn evaluate_finesse_policy(
             WasmExactSearchError::InvalidProblem("wasm_finesse_overall_union_failed")
         })?;
         let evaluator = QueueClassProductEvaluator::new(&union)
+            .with_spawn_profile(spawn_profile)
             .with_hold_enabled(hold_enabled)
             .with_terminal_hold_release_enabled(terminal_hold_release);
         finesse_policy_costs(
@@ -3185,6 +3233,7 @@ mod finesse_integration_tests {
             None,
             false,
             false,
+            SpawnProfile::STANDARD_10,
             &ExecutionControl::default(),
         )
         .unwrap();
@@ -3290,6 +3339,7 @@ mod finesse_integration_tests {
             None,
             true,
             false,
+            SpawnProfile::STANDARD_10,
             &ExecutionControl::default(),
         )
         .unwrap();
@@ -3301,6 +3351,7 @@ mod finesse_integration_tests {
             None,
             false,
             false,
+            SpawnProfile::STANDARD_10,
             &ExecutionControl::default(),
         )
         .unwrap();

@@ -41,6 +41,24 @@ impl DistributedBuildProbabilitySession {
         }
     }
 
+    fn new_with_finesse(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_requested: bool,
+    ) -> Result<Self, WasmExactSearchError> {
+        if !finesse_requested {
+            return Self::new(problem, field, aggregation);
+        }
+        if field.is_compact() {
+            CompactBuildProbabilitySession::new_with_finesse(problem, field, aggregation, true)
+                .map(Self::Compact)
+        } else {
+            ExtendedBuildProbabilitySession::new_with_finesse(problem, field, aggregation)
+                .map(Self::Extended)
+        }
+    }
+
     fn new_external_geometry(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -215,9 +233,13 @@ impl WasmBuildProbabilityCandidateProducer {
         let original = field.original_only();
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
         let mirror_distinct = mirrored.is_some_and(|candidate| candidate != original);
-        let active_session =
-            DistributedBuildProbabilitySession::new(problem, original, aggregation)
-                .map_err(map_error)?;
+        let active_session = DistributedBuildProbabilitySession::new_with_finesse(
+            problem,
+            original,
+            aggregation,
+            finesse_metric.requested(),
+        )
+        .map_err(map_error)?;
         let shared_supply_catalog = active_session.shared_supply_catalog();
         let active = Some(ProducerPass {
             pass_index: 0,
@@ -271,10 +293,11 @@ impl WasmBuildProbabilityCandidateProducer {
                             shared,
                         )
                     }
-                    None => DistributedBuildProbabilitySession::new(
+                    None => DistributedBuildProbabilitySession::new_with_finesse(
                         &self.problem,
                         spec.field,
                         self.aggregation,
+                        self.finesse_metric.requested(),
                     ),
                 }
                 .map_err(map_error)?;
@@ -556,6 +579,9 @@ impl WasmBuildProbabilityDistributedResultMerger {
         let collect_finesse = self.finesse_metric.requested();
         let mut finesse_materials = Vec::with_capacity(self.passes.len());
         if collect_finesse {
+            // Worker evidence was produced from the pre-finesse build graphs. The
+            // coordinator rebuilds exact evidence from the surviving graphs below.
+            self.spin_coverages.clear();
             for pass in &mut self.passes {
                 pass.annotate_finesse(control).map_err(map_error)?;
                 finesse_materials.push(pass.finesse_search_material().map_err(map_error)?);
@@ -745,4 +771,134 @@ fn map_error(error: WasmExactSearchError) -> &'static str {
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_problem::{
+        BuildProbabilityFinesseRequest, FinessePatternKnowledge, ProblemCompiler,
+    };
+    use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+
+    use super::*;
+    use crate::backend::wasm_cpu::build_probability::WasmBuildProbabilitySession;
+
+    fn mixed_spawn_problem() -> (SearchProblem, BuildProbabilityField) {
+        let queue = QueuePatternExpression::parse("[OI]!", 2).expect("two queue permutations");
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(24, 0),
+            PcQueueInput::pattern_expression(queue),
+            PieceWindow::new(2),
+        )
+        .with_allow_hold(true)
+        .with_exact_pieces(Some(1))
+        .with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("search problem");
+        let field = BuildProbabilityField::from_words_preserving_height(
+            24,
+            [0, 0, 0, 0x40_0000],
+            [0xf, 0, 0, 0],
+        )
+        .expect("extended field");
+        (problem, field)
+    }
+
+    fn run_serial(problem: &SearchProblem, field: BuildProbabilityField) -> CoreExecutionResult {
+        let mut session = WasmBuildProbabilitySession::new(
+            problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Search {
+                pattern_knowledge: FinessePatternKnowledge::Both,
+            },
+        )
+        .expect("serial session");
+        loop {
+            match session
+                .advance(1_024, &ExecutionControl::default())
+                .expect("serial advance")
+            {
+                BuildProbabilityAdvance::Pending => {}
+                BuildProbabilityAdvance::Completed(result) => return result,
+                BuildProbabilityAdvance::Cancelled => panic!("serial test was not cancelled"),
+            }
+        }
+    }
+
+    fn run_distributed(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+    ) -> CoreExecutionResult {
+        let control = ExecutionControl::default();
+        let mut producer = WasmBuildProbabilityCandidateProducer::new_with_finesse(
+            problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            FinesseMetric::Inputs,
+            FinessePatternKnowledge::Both,
+        )
+        .expect("producer");
+        let mut verifier = WasmBuildProbabilityDistributedVerifier::new(
+            problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+        )
+        .expect("verifier");
+        let summary = loop {
+            match producer.advance(&control).expect("producer advance") {
+                WasmCandidateProducerAdvance::Pending => {}
+                WasmCandidateProducerAdvance::Candidate(candidate) => verifier
+                    .consume(&candidate, &control)
+                    .expect("candidate verification"),
+                WasmCandidateProducerAdvance::Completed(summary) => break summary,
+                WasmCandidateProducerAdvance::Cancelled => {
+                    panic!("distributed test was not cancelled")
+                }
+            }
+        };
+        let partials = verifier.finish().expect("worker results");
+        let mut merger = producer.into_merger().expect("result merger");
+        for partial in &partials {
+            merger.absorb(partial).expect("partial merge");
+        }
+        merger.finish(&summary, 2).expect("distributed result")
+    }
+
+    #[test]
+    fn distributed_finesse_rebuilds_mixed_spawn_coverage_and_solution_coverage() {
+        let (problem, field) = mixed_spawn_problem();
+        let serial = run_serial(&problem, field);
+        let distributed = run_distributed(&problem, field);
+
+        assert_eq!(
+            distributed.coverage_pattern_words(),
+            serial.coverage_pattern_words()
+        );
+        assert_eq!(
+            distributed.normalized_solution_keys(),
+            serial.normalized_solution_keys()
+        );
+        assert_eq!(
+            distributed.normalized_solution_coverages(),
+            serial.normalized_solution_coverages()
+        );
+        assert_eq!(distributed.finesse_report(), serial.finesse_report());
+        assert_eq!(serial.usize_field("coverage_pattern_count"), Some(2));
+        assert_eq!(serial.usize_field("covered_pattern_count"), Some(1));
+        assert_eq!(serial.field("coverage_probability"), Some("0.5"));
+        assert_eq!(serial.normalized_solution_coverages().len(), 1);
+        assert_eq!(
+            serial.normalized_solution_coverages()[0]
+                .covered_patterns()
+                .count_ones(),
+            1
+        );
+    }
 }

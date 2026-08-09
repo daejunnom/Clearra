@@ -855,6 +855,63 @@ fn distributed_build_probability_finesse_matches_serial_report_and_witness() {
     assert_eq!(distributed_result.workers_used, 2);
 }
 
+#[test]
+fn ctk3_spawn_blocked_finesse_matches_serial_instead_of_failing_distribution() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // ctk3_w0kEaIIDmggnun6Vo_iPi8HogDAUR74DBhQocwCBgAEDCBQocODAAQQCDBAghACBAAMGiIkwGuQ
+    // Page one is the occupied base. Page two contributes the colorless target delta.
+    const COMMAND: &str = "clearra build-probability \
+        --base-mask 0x3effbfeffbfeffbfeffbfeffbfeffbfeffbfeffbfeffbfef \
+        --target-mask 0xa07e1fffe3c00000000000000000000000000000000000000000000000 \
+        --height 24 --patterns P7 --hold empty --no-mirror \
+        --finesse inputs --pattern-knowledge both";
+    let serial = runtime
+        .run_command_text(&format!("{COMMAND} --workers 1"))
+        .expect("serial CTK3 finesse build probability");
+    let distributed = run_distributed_cpu(&runtime, &format!("{COMMAND} --workers 2"));
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert_build_probability_semantics_match(serial_report, distributed_report);
+    assert!(!serial_report.solution_found);
+    assert_eq!(serial_report.covered_pattern_count, 0);
+    assert!(serial_report
+        .finesse_report
+        .as_ref()
+        .is_some_and(|report| report.representative_witness.is_none()));
+}
+
+#[test]
+fn initial_hold_cannot_bypass_a_blocked_current_piece_in_serial_or_distributed_finesse() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const COMMAND: &str = "clearra build-probability \
+        --base-mask 0x400000000000000000000000000000000000000000000000000000 \
+        --target-mask 0xf --height 24 --queue OI --hold empty --no-mirror \
+        --finesse inputs --pattern-knowledge both";
+    let serial = runtime
+        .run_command_text(&format!("{COMMAND} --workers 1"))
+        .expect("serial blocked-current-piece finesse build probability");
+    let distributed = runtime
+        .run_command_text(&format!("{COMMAND} --workers 2"))
+        .expect("two-worker blocked-current-piece finesse build probability");
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert_build_probability_semantics_match(serial_report, distributed_report);
+    assert!(!serial_report.solution_found);
+    assert_eq!(serial_report.covered_pattern_count, 0);
+    assert!(serial_report
+        .finesse_report
+        .as_ref()
+        .is_some_and(|report| report.representative_witness.is_none()));
+}
+
 #[cfg(feature = "stage-profiling")]
 #[test]
 fn distributed_finesse_finalizer_records_every_coordinator_profile_stage() {
@@ -1055,6 +1112,107 @@ fn distributed_tiling_root_tasks_match_serial_hold_supply_result() {
     );
     assert!(!distributed_report.buildability_verified);
     assert_eq!(distributed_report.workers_used, 2);
+}
+
+fn assert_build_probability_semantics_match(
+    serial: &WasmSearchReport,
+    distributed: &WasmSearchReport,
+) {
+    assert_eq!(
+        distributed.supply_window_resolution,
+        serial.supply_window_resolution
+    );
+    assert_eq!(
+        distributed.projects_unplaced_lookahead,
+        serial.projects_unplaced_lookahead
+    );
+    assert_eq!(
+        distributed.source_sequence_length,
+        serial.source_sequence_length
+    );
+    assert_eq!(
+        distributed.total_possible_pattern_count,
+        serial.total_possible_pattern_count
+    );
+    assert_eq!(distributed.solution_found, serial.solution_found);
+    assert_eq!(
+        distributed.packing_candidate_count,
+        serial.packing_candidate_count
+    );
+    assert_eq!(
+        distributed.geometry_candidate_family_count,
+        serial.geometry_candidate_family_count
+    );
+    assert_eq!(
+        distributed.packing_candidate_set_digest,
+        serial.packing_candidate_set_digest
+    );
+    assert_eq!(
+        distributed.packing_candidate_keys,
+        serial.packing_candidate_keys
+    );
+    assert_eq!(
+        distributed.unique_solution_count,
+        serial.unique_solution_count
+    );
+    assert_eq!(
+        distributed.normalized_solution_set_hash,
+        serial.normalized_solution_set_hash
+    );
+    assert_eq!(
+        distributed.normalized_solution_keys,
+        serial.normalized_solution_keys
+    );
+    assert_eq!(
+        distributed.solution_probabilities,
+        serial.solution_probabilities
+    );
+    assert_eq!(
+        distributed.solution_average_scores,
+        serial.solution_average_scores
+    );
+    assert_eq!(distributed.finesse_report, serial.finesse_report);
+    assert_eq!(distributed.build_variant_count, serial.build_variant_count);
+    assert_eq!(
+        distributed.build_variant_count_exact,
+        serial.build_variant_count_exact
+    );
+    assert_eq!(
+        distributed.buildability_verified,
+        serial.buildability_verified
+    );
+    assert_eq!(distributed.coverage_calculated, serial.coverage_calculated);
+    assert_eq!(
+        distributed.probability_calculated,
+        serial.probability_calculated
+    );
+    assert_eq!(
+        distributed.materialized_pattern_count,
+        serial.materialized_pattern_count
+    );
+    assert_eq!(
+        distributed.covered_pattern_count,
+        serial.covered_pattern_count
+    );
+    assert_eq!(
+        distributed.coverage_probability,
+        serial.coverage_probability
+    );
+    assert_eq!(
+        distributed.probability_complete,
+        serial.probability_complete
+    );
+    assert_eq!(distributed.count_complete, serial.count_complete);
+    assert_eq!(distributed.resource_truncated, serial.resource_truncated);
+    assert_eq!(
+        distributed.resource_truncation_reason,
+        serial.resource_truncation_reason
+    );
+    assert_eq!(
+        distributed.representative_pattern_id,
+        serial.representative_pattern_id
+    );
+    assert_eq!(distributed.representative_path, serial.representative_path);
 }
 
 fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecutionResult {

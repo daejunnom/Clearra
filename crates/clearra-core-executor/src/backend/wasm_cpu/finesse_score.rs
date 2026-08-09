@@ -47,7 +47,8 @@ pub(super) fn execute_finesse_score(
     let product_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseProductDp);
     let evaluator = QueueClassProductEvaluator::new(&language)
         .with_hold_enabled(problem.supply().hold_enabled())
-        .with_terminal_hold_release_enabled(problem.supply().projects_unplaced_lookahead());
+        .with_terminal_hold_release_enabled(problem.supply().projects_unplaced_lookahead())
+        .with_spawn_profile(problem.spawn_profile());
     let initial_hold = problem
         .supply()
         .hold_enabled()

@@ -1,15 +1,37 @@
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_rules::spawn::SpawnProfile;
 use clearra_supply::{
     hold_automaton::HoldAutomatonState, pattern_universe::PatternPiecePositionIndex,
 };
 
-use super::{buildup::BuildOrderGraph, WasmExactSearchError};
+use super::{
+    buildup::{BuildOrderGraph, PreparedFinesseNode},
+    WasmExactSearchError,
+};
 
 const HOLD_STATE_COUNT: usize = 8;
 const EXTRA_DRAW_STATE_COUNT: usize = 2;
 const PATTERNS_PER_WORD: usize = u64::BITS as usize;
 const CANCELLATION_POLL_MASK: u32 = 0xff;
+
+#[derive(Clone, Copy)]
+struct FinesseCoverageGuard<'a> {
+    nodes: &'a [PreparedFinesseNode],
+    spawn_profile: SpawnProfile,
+}
+
+impl FinesseCoverageGuard<'_> {
+    fn current_piece_can_spawn(self, node_index: usize, piece_code: u8) -> bool {
+        let Some(piece) = piece_from_code(piece_code) else {
+            return false;
+        };
+        self.nodes
+            .get(node_index)
+            .and_then(|node| node.source_board)
+            .is_none_or(|board| board.piece_can_spawn(piece, self.spawn_profile))
+    }
+}
 
 pub(super) struct CoverageProductResult {
     pub coverage_bits: PatternBitSet,
@@ -47,9 +69,74 @@ impl CoverageProductEvaluator {
         stop_after_first_pattern: bool,
         control: &ExecutionControl,
     ) -> Result<CoverageProductResult, WasmExactSearchError> {
+        self.evaluate_mode(
+            graph,
+            pattern_index,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
+            count_paths,
+            stop_after_first_pattern,
+            None,
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_with_finesse(
+        &mut self,
+        graph: &BuildOrderGraph,
+        pattern_index: &PatternPiecePositionIndex,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
+        count_paths: bool,
+        stop_after_first_pattern: bool,
+        finesse_nodes: &[PreparedFinesseNode],
+        spawn_profile: SpawnProfile,
+        control: &ExecutionControl,
+    ) -> Result<CoverageProductResult, WasmExactSearchError> {
+        self.evaluate_mode(
+            graph,
+            pattern_index,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
+            count_paths,
+            stop_after_first_pattern,
+            Some(FinesseCoverageGuard {
+                nodes: finesse_nodes,
+                spawn_profile,
+            }),
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_mode(
+        &mut self,
+        graph: &BuildOrderGraph,
+        pattern_index: &PatternPiecePositionIndex,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
+        count_paths: bool,
+        stop_after_first_pattern: bool,
+        finesse_guard: Option<FinesseCoverageGuard<'_>>,
+        control: &ExecutionControl,
+    ) -> Result<CoverageProductResult, WasmExactSearchError> {
         if graph.nodes.is_empty() || graph.root as usize >= graph.nodes.len() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_order_language_invalid",
+            ));
+        }
+        if finesse_guard.is_some_and(|guard| guard.nodes.len() != graph.nodes.len()) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_coverage_node_count_mismatch",
             ));
         }
         if control.is_cancelled() {
@@ -163,11 +250,23 @@ impl CoverageProductEvaluator {
                             && queue_position == pattern_index.sequence_len()
                             && graph.nodes[edge.to as usize].accepting()
                         {
+                            // Releasing the held piece is terminal only when
+                            // there is no current piece to spawn. A six-piece
+                            // standard-bag prefix has an inferred seventh
+                            // piece at this position, so it must take the
+                            // normal Hold swap path (and its spawn guard)
+                            // instead of bypassing that current piece.
+                            let projected_current = projected_current_word(
+                                pattern_index,
+                                queue_position,
+                                word_index,
+                                projects_standard_bag_lookahead,
+                            );
                             self.activate_transition(
                                 edge.to as usize,
                                 extra_draw,
                                 hold_code,
-                                active,
+                                active & !projected_current,
                                 state_index,
                                 graph,
                                 count_paths,
@@ -197,6 +296,11 @@ impl CoverageProductEvaluator {
 
                         if hold_code != 0 && hold_code == desired_piece {
                             for current_piece in 1..=7 {
+                                if finesse_guard.is_some_and(|guard| {
+                                    !guard.current_piece_can_spawn(node_index, current_piece)
+                                }) {
+                                    continue;
+                                }
                                 let swap_bits = active
                                     & pattern_index
                                         .piece_word_with_projected_standard_bag_lookahead(
@@ -218,6 +322,11 @@ impl CoverageProductEvaluator {
                             }
                         } else if hold_code == 0 && extra_draw == 0 {
                             for current_piece in 1..=7 {
+                                if finesse_guard.is_some_and(|guard| {
+                                    !guard.current_piece_can_spawn(node_index, current_piece)
+                                }) {
+                                    continue;
+                                }
                                 let store_bits = active
                                     & pattern_index
                                         .piece_word_with_projected_standard_bag_lookahead(
@@ -471,5 +580,91 @@ const fn piece_code(piece: PieceKind) -> u8 {
         PieceKind::Z => 5,
         PieceKind::J => 6,
         PieceKind::L => 7,
+    }
+}
+
+const fn piece_from_code(code: u8) -> Option<PieceKind> {
+    match code {
+        1 => Some(PieceKind::I),
+        2 => Some(PieceKind::O),
+        3 => Some(PieceKind::T),
+        4 => Some(PieceKind::S),
+        5 => Some(PieceKind::Z),
+        6 => Some(PieceKind::J),
+        7 => Some(PieceKind::L),
+        _ => None,
+    }
+}
+
+fn projected_current_word(
+    pattern_index: &PatternPiecePositionIndex,
+    queue_position: usize,
+    word_index: usize,
+    projects_standard_bag_lookahead: bool,
+) -> u64 {
+    (1..=7).fold(0_u64, |word, piece_code| {
+        word | pattern_index.piece_word_with_projected_standard_bag_lookahead(
+            queue_position,
+            piece_code,
+            word_index,
+            projects_standard_bag_lookahead,
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::{
+        piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
+    };
+    use clearra_coverage::universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    };
+    use clearra_supply::pattern_universe::{
+        MaterializedPatternUniverse, PatternPiecePositionIndex,
+    };
+
+    use super::projected_current_word;
+
+    fn pattern_index(sequence: Vec<PieceKind>) -> PatternPiecePositionIndex {
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(1),
+            PatternWeightModelId::new(1),
+            vec![sequence],
+            vec![ProbabilityValue::ONE],
+            1,
+            true,
+            None,
+        )
+        .expect("test pattern universe");
+        PatternPiecePositionIndex::compile(&universe).expect("test pattern index")
+    }
+
+    #[test]
+    fn terminal_hold_release_excludes_an_inferred_standard_bag_current_piece() {
+        use PieceKind::{I, J, O, S, T, Z};
+
+        let index = pattern_index(vec![I, O, T, S, Z, J]);
+        let active = index.active_word(0);
+
+        assert_ne!(
+            projected_current_word(&index, index.sequence_len(), 0, true) & active,
+            0
+        );
+        assert_eq!(
+            projected_current_word(&index, index.sequence_len(), 0, false) & active,
+            0
+        );
+    }
+
+    #[test]
+    fn terminal_hold_release_remains_available_without_an_inferred_current_piece() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let index = pattern_index(vec![I, O, T, S, Z, J, L]);
+        assert_eq!(
+            projected_current_word(&index, index.sequence_len(), 0, true) & index.active_word(0),
+            0
+        );
     }
 }

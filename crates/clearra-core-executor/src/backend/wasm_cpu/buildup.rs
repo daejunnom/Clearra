@@ -114,6 +114,21 @@ struct CoverageState {
     hold: Option<PieceKind>,
 }
 
+#[derive(Clone, Copy)]
+struct FinessePathGuard<'a> {
+    nodes: &'a [PreparedFinesseNode],
+    spawn_profile: clearra_rules::spawn::SpawnProfile,
+}
+
+impl FinessePathGuard<'_> {
+    fn current_piece_can_spawn(self, node_index: usize, piece: PieceKind) -> bool {
+        self.nodes
+            .get(node_index)
+            .and_then(|node| node.source_board)
+            .is_none_or(|board| board.piece_can_spawn(piece, self.spawn_profile))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct CandidateBuildResult {
     pub buildable: bool,
@@ -1253,37 +1268,27 @@ fn verify_candidate_with_projection(
     );
     if graph.nodes[graph.root as usize].live {
         let count_paths = problem.count_policy() == PcCountPolicy::CountAll;
-        let mut canonical_language_id = None;
-        if problem
-            .queue_observation_policy()
-            .requires_observation_policy()
-        {
-            let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
-                Ok(language_id) => language_id,
-                Err(error) => {
-                    workspace.recycle_graph(graph);
-                    return Err(error);
-                }
-            };
-            canonical_language_id = Some(language_id);
-            observation_language_root = Some(language_id);
-        }
-        if count_paths {
+        if finesse_requested {
             let Some(pattern_index) = target.pattern_index.as_deref() else {
                 workspace.recycle_graph(graph);
                 return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_concrete_pattern_index_not_compiled",
+                    "wasm_finesse_concrete_pattern_index_not_compiled",
                 ));
             };
-            let product = match evaluator.evaluate(
+            let prepared = finesse_language
+                .as_ref()
+                .expect("requested finesse annotation produced a language");
+            let product = match evaluator.evaluate_with_finesse(
                 &graph,
                 pattern_index,
                 problem.initial_hold(),
                 problem.supply().hold_enabled(),
                 problem.supply().projects_unplaced_lookahead(),
                 problem.supply().projects_standard_bag_lookahead(),
-                true,
+                count_paths,
                 false,
+                &prepared.nodes,
+                problem.spawn_profile(),
                 control,
             ) {
                 Ok(product) => product,
@@ -1293,6 +1298,10 @@ fn verify_candidate_with_projection(
                 }
             };
             if !product.coverage_bits.is_empty() {
+                witness_pattern_id = product
+                    .coverage_bits
+                    .first_pattern()
+                    .map(|pattern| pattern.index() as u32);
                 covered_patterns = Some(product.coverage_bits);
             }
             build_variant_count = product.path_count;
@@ -1301,108 +1310,157 @@ fn verify_candidate_with_projection(
             coverage_product_states = product.active_states;
             coverage_product_edge_checks = product.edge_checks;
         } else {
-            let language_id = if let Some(language_id) = canonical_language_id {
-                language_id
-            } else {
-                match workspace.piece_order_languages.canonicalize(&graph) {
+            let mut canonical_language_id = None;
+            if problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            {
+                let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
                     Ok(language_id) => language_id,
                     Err(error) => {
                         workspace.recycle_graph(graph);
                         return Err(error);
                     }
-                }
-            };
-            let symbolic =
-                match workspace.cover_standard_bag_language(problem, language_id, control) {
-                    Ok(symbolic) => symbolic,
-                    Err(error) => {
-                        workspace.recycle_graph(graph);
-                        return Err(error);
-                    }
                 };
-            if let Some(symbolic) = symbolic {
-                coverage_product_states = symbolic.product_states;
-                coverage_product_edge_checks = symbolic.edge_checks;
-                if symbolic.covers_any_pattern {
-                    symbolic_coverage_root = Some(symbolic.root);
-                    symbolic_covered_pattern_count = symbolic.covered_pattern_count;
-                    witness_pattern_id = symbolic.witness_pattern_id;
-                }
-            } else {
+                canonical_language_id = Some(language_id);
+                observation_language_root = Some(language_id);
+            }
+            if count_paths {
                 let Some(pattern_index) = target.pattern_index.as_deref() else {
                     workspace.recycle_graph(graph);
                     return Err(WasmExactSearchError::InvalidProblem(
                         "wasm_concrete_pattern_index_not_compiled",
                     ));
                 };
-                let cache_lookup = match workspace
-                    .piece_order_languages
-                    .coverage(language_id, target.pattern_index_id)
-                {
-                    Ok(lookup) => lookup,
+                let product = match evaluator.evaluate(
+                    &graph,
+                    pattern_index,
+                    problem.initial_hold(),
+                    problem.supply().hold_enabled(),
+                    problem.supply().projects_unplaced_lookahead(),
+                    problem.supply().projects_standard_bag_lookahead(),
+                    true,
+                    false,
+                    control,
+                ) {
+                    Ok(product) => product,
                     Err(error) => {
                         workspace.recycle_graph(graph);
                         return Err(error);
                     }
                 };
-                let coverage = match cache_lookup {
-                    CoverageCacheLookup::Hit(local_words) => {
-                        match target
-                            .pattern_index
-                            .as_deref()
-                            .expect("generic coverage requires its compiled pattern index")
-                            .expand_coverage_words(local_words.as_ref())
-                        {
-                            Ok(coverage) => coverage,
-                            Err(_) => {
-                                workspace.recycle_graph(graph);
-                                return Err(WasmExactSearchError::InvalidProblem(
-                                    "wasm_cached_coverage_expansion_failed",
-                                ));
-                            }
+                if !product.coverage_bits.is_empty() {
+                    covered_patterns = Some(product.coverage_bits);
+                }
+                build_variant_count = product.path_count;
+                count_complete = product.count_complete;
+                coverage_product_words = product.processed_words;
+                coverage_product_states = product.active_states;
+                coverage_product_edge_checks = product.edge_checks;
+            } else {
+                let language_id = if let Some(language_id) = canonical_language_id {
+                    language_id
+                } else {
+                    match workspace.piece_order_languages.canonicalize(&graph) {
+                        Ok(language_id) => language_id,
+                        Err(error) => {
+                            workspace.recycle_graph(graph);
+                            return Err(error);
                         }
-                    }
-                    CoverageCacheLookup::Miss {
-                        admit_after_compute,
-                    } => {
-                        let product = match evaluator.evaluate(
-                            &graph,
-                            pattern_index,
-                            problem.initial_hold(),
-                            problem.supply().hold_enabled(),
-                            problem.supply().projects_unplaced_lookahead(),
-                            problem.supply().projects_standard_bag_lookahead(),
-                            false,
-                            false,
-                            control,
-                        ) {
-                            Ok(product) => product,
-                            Err(error) => {
-                                workspace.recycle_graph(graph);
-                                return Err(error);
-                            }
-                        };
-                        coverage_product_words = product.processed_words;
-                        coverage_product_states = product.active_states;
-                        coverage_product_edge_checks = product.edge_checks;
-                        if admit_after_compute {
-                            if let Err(error) = workspace.piece_order_languages.insert_coverage(
-                                language_id,
-                                target.pattern_index_id,
-                                evaluator.local_coverage_words(),
-                            ) {
-                                workspace.recycle_graph(graph);
-                                return Err(error);
-                            }
-                        }
-                        product.coverage_bits
                     }
                 };
-                if !coverage.is_empty() {
-                    witness_pattern_id = coverage
-                        .first_pattern()
-                        .map(|pattern| pattern.index() as u32);
-                    covered_patterns = Some(coverage);
+                let symbolic =
+                    match workspace.cover_standard_bag_language(problem, language_id, control) {
+                        Ok(symbolic) => symbolic,
+                        Err(error) => {
+                            workspace.recycle_graph(graph);
+                            return Err(error);
+                        }
+                    };
+                if let Some(symbolic) = symbolic {
+                    coverage_product_states = symbolic.product_states;
+                    coverage_product_edge_checks = symbolic.edge_checks;
+                    if symbolic.covers_any_pattern {
+                        symbolic_coverage_root = Some(symbolic.root);
+                        symbolic_covered_pattern_count = symbolic.covered_pattern_count;
+                        witness_pattern_id = symbolic.witness_pattern_id;
+                    }
+                } else {
+                    let Some(pattern_index) = target.pattern_index.as_deref() else {
+                        workspace.recycle_graph(graph);
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "wasm_concrete_pattern_index_not_compiled",
+                        ));
+                    };
+                    let cache_lookup = match workspace
+                        .piece_order_languages
+                        .coverage(language_id, target.pattern_index_id)
+                    {
+                        Ok(lookup) => lookup,
+                        Err(error) => {
+                            workspace.recycle_graph(graph);
+                            return Err(error);
+                        }
+                    };
+                    let coverage = match cache_lookup {
+                        CoverageCacheLookup::Hit(local_words) => {
+                            match target
+                                .pattern_index
+                                .as_deref()
+                                .expect("generic coverage requires its compiled pattern index")
+                                .expand_coverage_words(local_words.as_ref())
+                            {
+                                Ok(coverage) => coverage,
+                                Err(_) => {
+                                    workspace.recycle_graph(graph);
+                                    return Err(WasmExactSearchError::InvalidProblem(
+                                        "wasm_cached_coverage_expansion_failed",
+                                    ));
+                                }
+                            }
+                        }
+                        CoverageCacheLookup::Miss {
+                            admit_after_compute,
+                        } => {
+                            let product = match evaluator.evaluate(
+                                &graph,
+                                pattern_index,
+                                problem.initial_hold(),
+                                problem.supply().hold_enabled(),
+                                problem.supply().projects_unplaced_lookahead(),
+                                problem.supply().projects_standard_bag_lookahead(),
+                                false,
+                                false,
+                                control,
+                            ) {
+                                Ok(product) => product,
+                                Err(error) => {
+                                    workspace.recycle_graph(graph);
+                                    return Err(error);
+                                }
+                            };
+                            coverage_product_words = product.processed_words;
+                            coverage_product_states = product.active_states;
+                            coverage_product_edge_checks = product.edge_checks;
+                            if admit_after_compute {
+                                if let Err(error) = workspace.piece_order_languages.insert_coverage(
+                                    language_id,
+                                    target.pattern_index_id,
+                                    evaluator.local_coverage_words(),
+                                ) {
+                                    workspace.recycle_graph(graph);
+                                    return Err(error);
+                                }
+                            }
+                            product.coverage_bits
+                        }
+                    };
+                    if !coverage.is_empty() {
+                        witness_pattern_id = coverage
+                            .first_pattern()
+                            .map(|pattern| pattern.index() as u32);
+                        covered_patterns = Some(coverage);
+                    }
                 }
             }
         }
@@ -1429,6 +1487,10 @@ fn verify_candidate_with_projection(
                         cursor: problem.initial_hold().cursor(),
                         hold: problem.initial_hold().hold_piece(),
                     },
+                    finesse_language.as_ref().map(|language| FinessePathGuard {
+                        nodes: &language.nodes,
+                        spawn_profile: problem.spawn_profile(),
+                    }),
                 );
             }
         }
@@ -3144,6 +3206,7 @@ fn first_pattern_path(
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
     initial: CoverageState,
+    finesse_guard: Option<FinessePathGuard<'_>>,
 ) -> Vec<CorePathStep> {
     fn visit(
         graph: &BuildOrderGraph,
@@ -3152,6 +3215,7 @@ fn first_pattern_path(
         projects_unplaced_lookahead: bool,
         projects_standard_bag_lookahead: bool,
         state: CoverageState,
+        finesse_guard: Option<FinessePathGuard<'_>>,
         seen: &mut ExactHashSet<CoverageState>,
         path: &mut Vec<CorePathStep>,
     ) -> bool {
@@ -3195,6 +3259,7 @@ fn first_pattern_path(
                 projects_standard_bag_lookahead,
                 state,
                 edge.piece,
+                finesse_guard,
             ) {
                 path.push(CorePathStep::new(
                     edge.piece,
@@ -3214,6 +3279,7 @@ fn first_pattern_path(
                         node: edge.to,
                         ..next
                     },
+                    finesse_guard,
                     seen,
                     path,
                 ) {
@@ -3234,6 +3300,7 @@ fn first_pattern_path(
         projects_unplaced_lookahead,
         projects_standard_bag_lookahead,
         initial,
+        finesse_guard,
         &mut seen,
         &mut path,
     );
@@ -3244,6 +3311,7 @@ pub(super) fn representative_pattern_path(
     problem: &SearchProblem,
     graph: &BuildOrderGraph,
     sequence: &[PieceKind],
+    finesse_nodes: Option<&[PreparedFinesseNode]>,
 ) -> Vec<CorePathStep> {
     first_pattern_path(
         graph,
@@ -3256,6 +3324,10 @@ pub(super) fn representative_pattern_path(
             cursor: problem.initial_hold().cursor(),
             hold: problem.initial_hold().hold_piece(),
         },
+        finesse_nodes.map(|nodes| FinessePathGuard {
+            nodes,
+            spawn_profile: problem.spawn_profile(),
+        }),
     )
 }
 
@@ -3266,6 +3338,7 @@ fn hold_successors(
     projects_standard_bag_lookahead: bool,
     state: CoverageState,
     required_piece: PieceKind,
+    finesse_guard: Option<FinessePathGuard<'_>>,
 ) -> Vec<(&'static str, CoverageState)> {
     let cursor = state.cursor as usize;
     let Some(current) = sequence.get(cursor).copied() else {
@@ -3287,7 +3360,11 @@ fn hold_successors(
                     },
                 ));
             }
-            if state.hold == Some(required_piece) {
+            if state.hold == Some(required_piece)
+                && finesse_guard.is_none_or(|guard| {
+                    guard.current_piece_can_spawn(state.node as usize, lookahead)
+                })
+            {
                 successors.push((
                     "swap-held-with-unplaced-lookahead",
                     CoverageState {
@@ -3312,6 +3389,11 @@ fn hold_successors(
         ));
     }
     if !hold_enabled {
+        return successors;
+    }
+    if finesse_guard
+        .is_some_and(|guard| !guard.current_piece_can_spawn(state.node as usize, current))
+    {
         return successors;
     }
     if state.hold == Some(required_piece) {

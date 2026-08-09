@@ -341,6 +341,25 @@ impl ExtendedBuildProbabilitySession {
                 control,
             )
         }?;
+        self.apply_build_order_result(
+            &candidate,
+            tiling,
+            candidate_key,
+            external_ordinal,
+            build_order,
+            control,
+        )
+    }
+
+    fn apply_build_order_result(
+        &mut self,
+        candidate: &super::extended_geometry::ExtendedGeometryCandidate,
+        tiling: ExtendedTilingKey,
+        candidate_key: Option<String>,
+        external_ordinal: Option<u64>,
+        build_order: ExtendedBuildOrderResult,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
         match build_order {
             ExtendedBuildOrderResult::Incomplete {
                 searched_nodes,
@@ -375,17 +394,33 @@ impl ExtendedBuildProbabilitySession {
                 if !graph.is_live() {
                     return Ok(());
                 }
-                let product = self.coverage_evaluator.evaluate(
-                    &graph,
-                    candidate.pattern_index.as_ref(),
-                    self.problem.initial_hold(),
-                    self.problem.supply().hold_enabled(),
-                    self.problem.supply().projects_unplaced_lookahead(),
-                    self.problem.supply().projects_standard_bag_lookahead(),
-                    false,
-                    false,
-                    control,
-                )?;
+                let product = if let Some(language) = finesse_language.as_ref() {
+                    self.coverage_evaluator.evaluate_with_finesse(
+                        &graph,
+                        candidate.pattern_index.as_ref(),
+                        self.problem.initial_hold(),
+                        self.problem.supply().hold_enabled(),
+                        self.problem.supply().projects_unplaced_lookahead(),
+                        self.problem.supply().projects_standard_bag_lookahead(),
+                        false,
+                        false,
+                        &language.nodes,
+                        self.problem.spawn_profile(),
+                        control,
+                    )?
+                } else {
+                    self.coverage_evaluator.evaluate(
+                        &graph,
+                        candidate.pattern_index.as_ref(),
+                        self.problem.initial_hold(),
+                        self.problem.supply().hold_enabled(),
+                        self.problem.supply().projects_unplaced_lookahead(),
+                        self.problem.supply().projects_standard_bag_lookahead(),
+                        false,
+                        false,
+                        control,
+                    )?
+                };
                 self.coverage_product_states = self
                     .coverage_product_states
                     .saturating_add(product.active_states);
@@ -401,7 +436,8 @@ impl ExtendedBuildProbabilitySession {
                 self.witnessed_pattern_count = self
                     .witnessed_pattern_count
                     .saturating_add(u128::from(product.coverage_bits.count_ones()));
-                let rank = external_ordinal.unwrap_or(self.processed_candidate_count as u64 - 1);
+                let rank = external_ordinal
+                    .unwrap_or_else(|| self.processed_candidate_count.saturating_sub(1) as u64);
                 if self
                     .representative_rank
                     .is_none_or(|current| rank < current)
@@ -417,8 +453,14 @@ impl ExtendedBuildProbabilitySession {
                         .materialized_universe()
                         .expect("extended build probability requires a materialized universe");
                     let sequence = universe.sequence(pattern_id);
-                    let path =
-                        representative_pattern_path(&self.problem, &graph, sequence.as_ref());
+                    let path = representative_pattern_path(
+                        &self.problem,
+                        &graph,
+                        sequence.as_ref(),
+                        finesse_language
+                            .as_ref()
+                            .map(|language| language.nodes.as_slice()),
+                    );
                     if path.len() != candidate.row_ids().len() {
                         return Err(WasmExactSearchError::InvalidProblem(
                             "wasm_extended_coverage_witness_path_missing",
@@ -773,8 +815,6 @@ impl ExtendedBuildProbabilitySession {
                 "wasm_extended_finesse_distributed_annotation_state_invalid",
             ));
         }
-        self.finesse_requested = true;
-        self.finesse_languages.clear();
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -795,7 +835,8 @@ impl ExtendedBuildProbabilitySession {
             .cloned()
             .collect::<Vec<_>>();
         solution_keys.sort_unstable();
-        for solution_key in solution_keys {
+        self.reset_distributed_finesse_aggregation();
+        for (ordinal, solution_key) in solution_keys.into_iter().enumerate() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
@@ -830,32 +871,45 @@ impl ExtendedBuildProbabilitySession {
                 self.aggregation.requests_spin_coverage(),
                 control,
             )?;
-            let ExtendedBuildOrderResult::Complete {
-                graph,
-                finesse_language,
-                ..
-            } = build
-            else {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_reconstruction_incomplete",
-                ));
-            };
-            if !graph.is_live() {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_verified_solution_became_unbuildable",
-                ));
-            }
-            let language = finesse_language.ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_extended_finesse_distributed_language_missing",
-            ))?;
-            self.finesse_languages.try_reserve(1).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_distributed_language_storage_unavailable",
-                )
-            })?;
-            self.finesse_languages.push((solution_key, language));
+            self.apply_build_order_result(
+                &candidate,
+                tiling,
+                Some(solution_key),
+                Some(ordinal as u64),
+                build,
+                control,
+            )?;
         }
         Ok(())
+    }
+
+    fn reset_distributed_finesse_aggregation(&mut self) {
+        self.finesse_requested = true;
+        self.covered_patterns = if self.trivial_target {
+            PatternBitSet::all(self.covered_patterns.pattern_count())
+        } else {
+            PatternBitSet::new(self.covered_patterns.pattern_count())
+        };
+        self.buildable_tilings.clear();
+        if let Some(solution_coverage) = self.solution_coverage.as_mut() {
+            solution_coverage.clear();
+        }
+        self.spin_execution_graphs.clear();
+        self.distributed_solution_keys.clear();
+        self.finesse_languages.clear();
+        self.searched_build_nodes = 0;
+        self.reachability_states = 0;
+        self.coverage_product_states = 0;
+        self.coverage_product_edge_checks = 0;
+        self.coverage_product_words = 0;
+        self.peak_build_order_nodes = 0;
+        self.total_build_order_nodes = 0;
+        self.peak_build_scratch_bytes = 0;
+        self.witnessed_pattern_count = 0;
+        self.representative_path.clear();
+        self.representative_pattern_id = None;
+        self.representative_rank = None;
+        self.distributed_execution_constraint_materialized = false;
     }
 
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {

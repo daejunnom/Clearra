@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.7.2 - 2026-08-09
+
+- Treated finesse candidates whose active piece cannot occupy its exact spawn
+  pose as normal build failures instead of distributed finalization errors.
+- Rebuilt distributed coverage, solution coverage, solution sets, and finesse
+  reports from only the surviving compact or extended finesse languages.
+- Applied the same no-IHS spawn guard to Hold, fixed and pattern queue products,
+  visible-seven policy reconstruction, representative paths, and projected
+  standard-bag lookahead so serial and multi-worker results remain identical.
+
 ## 0.7.1 - 2026-08-09
 
 - Added opt-in finesse input analysis to Build Probability and dedicated
