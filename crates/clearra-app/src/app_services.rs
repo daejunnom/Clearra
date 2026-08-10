@@ -300,11 +300,16 @@ impl AppCoreExecutorService {
         #[cfg(not(target_family = "wasm"))]
         {
             let workers = workers.max(1).min(WorkerPolicy::hardware_worker_limit());
-            if workers > 1
-                && !query
-                    .queue_observation_policy()
-                    .requires_observation_policy()
+            if query
+                .queue_observation_policy()
+                .requires_observation_policy()
             {
+                return WasmSetupSearchBackend::execute_with_observation_workers_and_control(
+                    query, workers, control,
+                )
+                .map_err(core_error_from_wasm);
+            }
+            if workers > 1 {
                 return WasmSetupParallelCoordinator::execute_native(query, workers, control)
                     .map_err(core_error_from_wasm);
             }

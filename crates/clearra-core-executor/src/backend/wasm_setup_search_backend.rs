@@ -21,8 +21,15 @@ pub struct WasmSetupSearchSession {
 
 impl WasmSetupSearchSession {
     pub fn new(query: &SetupSearchQuery) -> Result<Self, WasmCpuSearchError> {
+        Self::new_with_observation_workers(query, 1)
+    }
+
+    pub fn new_with_observation_workers(
+        query: &SetupSearchQuery,
+        workers: usize,
+    ) -> Result<Self, WasmCpuSearchError> {
         Ok(Self {
-            inner: InnerSession::new(query).map_err(map_error)?,
+            inner: InnerSession::new_with_observation_workers(query, workers).map_err(map_error)?,
         })
     }
 
@@ -55,7 +62,15 @@ impl WasmSetupSearchBackend {
         query: &SetupSearchQuery,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
-        let mut session = WasmSetupSearchSession::new(query)?;
+        Self::execute_with_observation_workers_and_control(query, 1, control)
+    }
+
+    pub fn execute_with_observation_workers_and_control(
+        query: &SetupSearchQuery,
+        workers: usize,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        let mut session = WasmSetupSearchSession::new_with_observation_workers(query, workers)?;
         let mut last_progress = None;
         loop {
             let progress = session.coarse_progress();

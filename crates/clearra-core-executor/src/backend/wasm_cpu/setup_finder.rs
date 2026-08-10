@@ -4,6 +4,13 @@
 // owners.
 use std::{cmp::Ordering, sync::Arc};
 
+#[cfg(not(target_family = "wasm"))]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+#[cfg(all(test, not(target_family = "wasm")))]
+use std::sync::{atomic::AtomicUsize, Barrier};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::{
     pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet,
@@ -25,7 +32,8 @@ use super::{
     queue_observation_policy::QueueObservationPolicyEvaluator,
     setup_all_paths::{enumerate_setup_completion_paths, SetupSolutionPath},
     setup_coverage_graph::{
-        SetupCoverageGraph, SetupTargetBuildLanguage, SetupTargetJointLanguage,
+        SetupCoverageGraph, SetupJointSeenLanguageClasses, SetupTargetBuildLanguage,
+        SetupTargetJointLanguage, SetupTargetLanguageReachability,
     },
     setup_graph_builder::{
         cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
@@ -36,11 +44,67 @@ use super::{
     WasmExactSearchError,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::queue_observation_policy::QueueObservationCoverage;
+
 pub(super) const HOLD_STATE_COUNT: usize = 9;
 pub(super) const EXTRA_DRAW_STATE_COUNT: usize = 2;
 pub(super) const COVERAGE_WORD_LANES: usize = 2;
 pub(super) const TERMINAL_USED_HELD_CODE: u8 = 8;
 const EMPTY_COVERAGE_WORDS: [u64; COVERAGE_WORD_LANES] = [0; COVERAGE_WORD_LANES];
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservationParallelTestInjection {
+    Panic,
+    CancelBarrier,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+struct ObservationParallelTestHook {
+    injection: ObservationParallelTestInjection,
+    worker_count: usize,
+    worker_barrier: Barrier,
+    active_workers: AtomicUsize,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl ObservationParallelTestHook {
+    fn new(injection: ObservationParallelTestInjection, worker_count: usize) -> Arc<Self> {
+        assert!(worker_count > 0, "test hook requires at least one worker");
+        Arc::new(Self {
+            injection,
+            worker_count,
+            worker_barrier: Barrier::new(worker_count),
+            active_workers: AtomicUsize::new(0),
+        })
+    }
+
+    fn enter(self: &Arc<Self>) -> ObservationParallelTestWorkerGuard {
+        self.active_workers.fetch_add(1, AtomicOrdering::SeqCst);
+        ObservationParallelTestWorkerGuard {
+            hook: Arc::clone(self),
+        }
+    }
+
+    fn active_worker_count(&self) -> usize {
+        self.active_workers.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+struct ObservationParallelTestWorkerGuard {
+    hook: Arc<ObservationParallelTestHook>,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl Drop for ObservationParallelTestWorkerGuard {
+    fn drop(&mut self) {
+        self.hook
+            .active_workers
+            .fetch_sub(1, AtomicOrdering::SeqCst);
+    }
+}
 
 pub(crate) enum WasmSetupSearchAdvance {
     Pending,
@@ -68,12 +132,21 @@ enum SetupSearchStage {
 
 pub(crate) struct WasmSetupSearchSession {
     stage: SetupSearchStage,
+    observation_worker_count: usize,
 }
 
 impl WasmSetupSearchSession {
     pub fn new(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_observation_workers(query, 1)
+    }
+
+    pub fn new_with_observation_workers(
+        query: &SetupSearchQuery,
+        observation_worker_count: usize,
+    ) -> Result<Self, WasmExactSearchError> {
         Ok(Self {
             stage: SetupSearchStage::Building(SetupGraphBuildSession::new(query)?),
+            observation_worker_count: observation_worker_count.max(1),
         })
     }
 
@@ -87,6 +160,7 @@ impl WasmSetupSearchSession {
             return Ok(WasmSetupSearchAdvance::Cancelled);
         }
         let budget = work_budget.max(1);
+        let observation_worker_count = self.observation_worker_count;
         let stage = std::mem::replace(&mut self.stage, SetupSearchStage::Finished);
         match stage {
             SetupSearchStage::Building(mut builder) => match builder.advance(budget, control)? {
@@ -166,6 +240,15 @@ impl WasmSetupSearchSession {
             } => {
                 if active.is_none() {
                     if next_condition == conditions.len() {
+                        let workers_used = completed
+                            .iter()
+                            .map(|result| result.observation_workers_used)
+                            .max()
+                            .unwrap_or(1);
+                        let observation_parallel = query
+                            .queue_observation_policy()
+                            .requires_observation_policy()
+                            && workers_used > 1;
                         let result = finish_setup_result(
                             &query,
                             &graph,
@@ -174,9 +257,13 @@ impl WasmSetupSearchSession {
                             geometry_expanded_nodes,
                             tablebase_status,
                             tablebase_pruned_states,
-                            1,
-                            false,
-                            "setup-family-quotient-serial",
+                            workers_used,
+                            observation_parallel,
+                            if observation_parallel {
+                                "setup-observation-target-parallel"
+                            } else {
+                                "setup-family-quotient-serial"
+                            },
                             control,
                         );
                         let result = match result {
@@ -198,6 +285,7 @@ impl WasmSetupSearchSession {
                         query.max_setup_pieces(),
                         query.queue_observation_policy(),
                         query.path_detail(),
+                        observation_worker_count,
                         control,
                     )?);
                 }
@@ -500,6 +588,7 @@ fn cached_path_detail_result(
     Ok(Some(vec![CompletedSetupCoverage {
         report,
         candidate_boards: vec![detail.board_mask()],
+        observation_workers_used: 1,
     }]))
 }
 
@@ -543,6 +632,7 @@ enum SetupCoverageAdvance {
 pub(super) struct CompletedSetupCoverage {
     pub(super) report: SetupHoldConditionReport,
     pub(super) candidate_boards: Vec<u64>,
+    pub(super) observation_workers_used: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1189,6 +1279,8 @@ struct SetupCoverageSession {
     path_target_shape_index: Option<usize>,
     solution_paths: Option<Vec<SetupSolutionPath>>,
     observation_evaluator: Option<QueueObservationPolicyEvaluator>,
+    observation_worker_count: usize,
+    observation_workers_used: usize,
 }
 
 impl SetupCoverageSession {
@@ -1201,6 +1293,7 @@ impl SetupCoverageSession {
         max_setup_pieces: u8,
         queue_observation_policy: clearra_supply::QueueObservationPolicy,
         path_detail: Option<&clearra_problem::SetupPathDetail>,
+        observation_worker_count: usize,
         control: &ExecutionControl,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
@@ -1277,6 +1370,8 @@ impl SetupCoverageSession {
             path_target_shape_index,
             solution_paths,
             observation_evaluator,
+            observation_worker_count: observation_worker_count.max(1),
+            observation_workers_used: 1,
         })
     }
 
@@ -1584,38 +1679,223 @@ impl SetupCoverageSession {
             })
             .map(|(shape_index, _)| shape_index)
             .collect::<Vec<_>>();
+        #[cfg(not(target_arch = "wasm32"))]
+        let diagnostics = std::env::var_os("CLEARRA_SETUP_POLICY_DIAGNOSTICS").is_some();
+        self.observation_evaluator
+            .as_mut()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_observation_evaluator_missing",
+            ))?
+            .set_terminal_supply_target(None);
 
-        for shape_index in shape_indexes {
+        // Build coverage is target-specific and never shares memo states. Run
+        // every build first so switching to the terminal-aware joint oracle
+        // cannot invalidate its shared target-independent suffix cache.
+        for (ordinal, shape_index) in shape_indexes.iter().copied().enumerate() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
             let target_shape = u32::try_from(shape_index).map_err(|_| {
                 WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
             })?;
-            let (build, joint) = {
+            let reachability = SetupTargetLanguageReachability::compile(
+                &self.coverage_graph,
+                target_shape,
+                control,
+            )?;
+            let build_language = SetupTargetBuildLanguage::compile(
+                &self.coverage_graph,
+                target_shape,
+                &reachability,
+                control,
+            )?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let started = diagnostics.then(Instant::now);
+            let build = {
                 let evaluator = self.observation_evaluator.as_mut().ok_or(
                     WasmExactSearchError::InvalidProblem("setup_observation_evaluator_missing"),
                 )?;
-                evaluator.set_terminal_supply_target(None);
-                let build = evaluator.evaluate(
-                    &SetupTargetBuildLanguage::new(&self.coverage_graph, target_shape),
-                    control,
-                )?;
-                evaluator.set_terminal_supply_target(self.terminal_supply_target);
-                let joint = evaluator.evaluate(
-                    &SetupTargetJointLanguage::new(&self.coverage_graph, target_shape),
-                    control,
-                )?;
-                (build, joint)
+                evaluator.evaluate(&build_language, control)?
             };
-            let witness = setup_witness_for_coverage(&self.pattern_index, &joint.covered_patterns);
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(started) = started {
+                report_setup_policy_diagnostics(
+                    "build",
+                    ordinal,
+                    shape_indexes.len(),
+                    shape_index,
+                    started,
+                    &build,
+                );
+            }
             let accumulator = &mut self.accumulators[shape_index];
             accumulator.build_covered_patterns = build.covered_pattern_count;
-            accumulator.joint_covered_patterns = joint.covered_pattern_count;
             accumulator.build_weight = build.covered_weight;
-            accumulator.joint_weight = joint.covered_weight;
             accumulator.min_covered_locks = build.min_accepted_depth.unwrap_or(u8::MAX);
             accumulator.max_covered_locks = build.max_accepted_depth.unwrap_or(0);
+            accumulator.joint_covered_patterns = 0;
+            accumulator.joint_weight = 0.0;
+            accumulator.witness = None;
+        }
+
+        // Joint coverage is a subset of visible build coverage. Targets with
+        // no buildable observed queue can be rejected without evaluating the
+        // substantially larger PC continuation language.
+        let joint_shape_indexes = shape_indexes
+            .into_iter()
+            .filter(|shape_index| self.accumulators[*shape_index].build_covered_patterns != 0)
+            .collect::<Vec<_>>();
+        if joint_shape_indexes.is_empty() {
+            return Ok(());
+        }
+        let joint_seen = SetupJointSeenLanguageClasses::compile(&self.coverage_graph, control)?;
+        #[cfg(not(target_family = "wasm"))]
+        if self.observation_worker_count > 1 && joint_shape_indexes.len() > 1 {
+            return self.apply_joint_observation_policy_parallel(
+                joint_shape_indexes,
+                &joint_seen,
+                diagnostics,
+                control,
+            );
+        }
+        let joint_memo_domain =
+            {
+                let evaluator = self.observation_evaluator.as_mut().ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_observation_evaluator_missing"),
+                )?;
+                evaluator.set_terminal_supply_target(self.terminal_supply_target);
+                evaluator.begin_reusable_memo_domain()
+            };
+
+        let joint_target_count = joint_shape_indexes.len();
+        for (ordinal, shape_index) in joint_shape_indexes.into_iter().enumerate() {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            let target_shape = u32::try_from(shape_index).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
+            })?;
+            let reachability = SetupTargetLanguageReachability::compile(
+                &self.coverage_graph,
+                target_shape,
+                control,
+            )?;
+            let joint_language = SetupTargetJointLanguage::compile(
+                &self.coverage_graph,
+                target_shape,
+                &reachability,
+                &joint_seen,
+                joint_memo_domain,
+                control,
+            )?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let started = diagnostics.then(Instant::now);
+            let joint = {
+                let evaluator = self.observation_evaluator.as_mut().ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_observation_evaluator_missing"),
+                )?;
+                evaluator.evaluate(&joint_language, control)?
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(started) = started {
+                report_setup_policy_diagnostics(
+                    "joint",
+                    ordinal,
+                    joint_target_count,
+                    shape_index,
+                    started,
+                    &joint,
+                );
+            }
+            let witness = setup_witness_for_coverage(&self.pattern_index, &joint.covered_patterns);
+            let accumulator = &mut self.accumulators[shape_index];
+            accumulator.joint_covered_patterns = joint.covered_pattern_count;
+            accumulator.joint_weight = joint.covered_weight;
+            accumulator.witness = witness;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn apply_joint_observation_policy_parallel(
+        &mut self,
+        shape_indexes: Vec<usize>,
+        joint_seen: &SetupJointSeenLanguageClasses,
+        diagnostics: bool,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        let worker_count = self
+            .observation_worker_count
+            .max(1)
+            .min(shape_indexes.len());
+        self.observation_workers_used = self.observation_workers_used.max(worker_count);
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::new();
+        workers.try_reserve_exact(worker_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "setup_observation_parallel_worker_storage_unavailable",
+            )
+        })?;
+        {
+            let evaluator =
+                self.observation_evaluator
+                    .as_mut()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_observation_evaluator_missing",
+                    ))?;
+            evaluator.set_terminal_supply_target(self.terminal_supply_target);
+            for _ in 0..worker_count {
+                let mut worker = evaluator.fork_empty()?;
+                worker.set_peer_abort(Arc::clone(&failed));
+                let domain = worker.begin_reusable_memo_domain();
+                workers.push((worker, domain));
+            }
+        }
+
+        let target_count = shape_indexes.len();
+        let graph = self.coverage_graph.as_ref();
+        let completed = run_setup_observation_worker_jobs(
+            workers,
+            target_count,
+            failed,
+            control,
+            #[cfg(test)]
+            None,
+            |_, (evaluator, memo_domain), ordinal| {
+                let shape_index = shape_indexes[ordinal];
+                let target_shape = u32::try_from(shape_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
+                })?;
+                let reachability =
+                    SetupTargetLanguageReachability::compile(graph, target_shape, control)?;
+                let language = SetupTargetJointLanguage::compile(
+                    graph,
+                    target_shape,
+                    &reachability,
+                    joint_seen,
+                    *memo_domain,
+                    control,
+                )?;
+                let started = diagnostics.then(Instant::now);
+                let coverage = evaluator.evaluate(&language, control)?;
+                if let Some(started) = started {
+                    report_setup_policy_diagnostics(
+                        "joint",
+                        ordinal,
+                        target_count,
+                        shape_index,
+                        started,
+                        &coverage,
+                    );
+                }
+                Ok((shape_index, coverage))
+            },
+        )?;
+        for (_, (shape_index, joint)) in completed {
+            let witness = setup_witness_for_coverage(&self.pattern_index, &joint.covered_patterns);
+            let accumulator = &mut self.accumulators[shape_index];
+            accumulator.joint_covered_patterns = joint.covered_pattern_count;
+            accumulator.joint_weight = joint.covered_weight;
             accumulator.witness = witness;
         }
         Ok(())
@@ -1750,6 +2030,7 @@ impl SetupCoverageSession {
                 candidates,
             ),
             candidate_boards,
+            observation_workers_used: self.observation_workers_used,
         })
     }
 
@@ -1790,6 +2071,129 @@ impl SetupCoverageSession {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn run_setup_observation_worker_jobs<State, Output, RunJob>(
+    workers: Vec<State>,
+    target_count: usize,
+    failed: Arc<AtomicBool>,
+    control: &ExecutionControl,
+    #[cfg(test)] test_hook: Option<Arc<ObservationParallelTestHook>>,
+    run_job: RunJob,
+) -> Result<Vec<(usize, Output)>, WasmExactSearchError>
+where
+    State: Send,
+    Output: Send,
+    RunJob: Fn(usize, &mut State, usize) -> Result<Output, WasmExactSearchError> + Sync,
+{
+    let worker_count = workers.len();
+    if worker_count == 0 || target_count == 0 {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_observation_parallel_worker_count_invalid",
+        ));
+    }
+    #[cfg(test)]
+    if let Some(test_hook) = test_hook.as_ref() {
+        if test_hook.worker_count != worker_count {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_observation_parallel_test_hook_worker_count_mismatch",
+            ));
+        }
+    }
+    let batches = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for (worker_index, mut worker) in workers.into_iter().enumerate() {
+            let failed = Arc::clone(&failed);
+            let run_job = &run_job;
+            #[cfg(test)]
+            let test_hook = test_hook.as_ref().map(Arc::clone);
+            handles.push(scope.spawn(move || {
+                #[cfg(test)]
+                let _active_worker = test_hook.as_ref().map(ObservationParallelTestHook::enter);
+                let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if let Some(test_hook) = test_hook.as_ref() {
+                        test_hook.worker_barrier.wait();
+                        if test_hook.injection == ObservationParallelTestInjection::Panic
+                            && worker_index == 0
+                        {
+                            failed.store(true, AtomicOrdering::Release);
+                            panic!("injected setup observation worker panic");
+                        }
+                        if test_hook.injection == ObservationParallelTestInjection::CancelBarrier {
+                            while !control.is_cancelled() {
+                                std::thread::yield_now();
+                            }
+                        }
+                    }
+                    let mut outcomes = Vec::new();
+                    let mut ordinal = worker_index;
+                    while ordinal < target_count {
+                        if failed.load(AtomicOrdering::Acquire) || control.is_cancelled() {
+                            break;
+                        }
+                        let result = run_job(worker_index, &mut worker, ordinal);
+                        if result.is_err() {
+                            failed.store(true, AtomicOrdering::Release);
+                        }
+                        outcomes.push((ordinal, result));
+                        if failed.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        ordinal = ordinal.saturating_add(worker_count);
+                    }
+                    outcomes
+                }));
+                if guarded.is_err() {
+                    failed.store(true, AtomicOrdering::Release);
+                }
+                guarded
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect::<Vec<_>>()
+    });
+
+    let mut outcomes = Vec::new();
+    for batch in batches {
+        let batch = batch.map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_observation_parallel_worker_panicked")
+        })?;
+        let batch = batch.map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_observation_parallel_worker_panicked")
+        })?;
+        outcomes.try_reserve(batch.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "setup_observation_parallel_result_storage_unavailable",
+            )
+        })?;
+        outcomes.extend(batch);
+    }
+    outcomes.sort_by_key(|(ordinal, _)| *ordinal);
+    let mut completed = Vec::new();
+    let mut substantive_error = None;
+    let mut cancelled = false;
+    for (ordinal, result) in outcomes {
+        match result {
+            Ok(output) => completed.push((ordinal, output)),
+            Err(WasmExactSearchError::Cancelled) => cancelled = true,
+            Err(error) => {
+                if substantive_error.is_none() {
+                    substantive_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = substantive_error {
+        return Err(error);
+    }
+    if cancelled || control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    Ok(completed)
+}
+
 fn setup_witness_for_coverage(
     pattern_index: &PatternPiecePositionIndex,
     coverage: &PatternBitSet,
@@ -1800,6 +2204,37 @@ fn setup_witness_for_coverage(
         word_index: local_pattern_index / 64,
         pattern_bit: 1_u64 << (local_pattern_index % 64),
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn report_setup_policy_diagnostics(
+    phase: &str,
+    ordinal: usize,
+    total: usize,
+    shape_index: usize,
+    started: Instant,
+    coverage: &QueueObservationCoverage,
+) {
+    let metrics = coverage.metrics;
+    eprintln!(
+        "SETUP_POLICY phase={phase} target={}/{} shape={} elapsed_ms={} covered={} actions={} shared_hits={} local_values={}/{} local_zero={}/{} shared_values={}/{} shared_zero={}/{} retained_bytes={}",
+        ordinal + 1,
+        total,
+        shape_index,
+        started.elapsed().as_millis(),
+        coverage.covered_pattern_count,
+        metrics.action_checks,
+        metrics.shared_hits,
+        metrics.local_values,
+        metrics.local_value_capacity,
+        metrics.local_zero_scores,
+        metrics.local_zero_score_capacity,
+        metrics.shared_values,
+        metrics.shared_value_capacity,
+        metrics.shared_zero_scores,
+        metrics.shared_zero_score_capacity,
+        metrics.retained_bytes,
+    );
 }
 
 pub(super) fn retain_best_setup_state_per_board(

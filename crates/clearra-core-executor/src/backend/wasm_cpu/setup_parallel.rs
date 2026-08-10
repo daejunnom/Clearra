@@ -411,6 +411,7 @@ impl WasmSetupParallelCoordinator {
                     candidates,
                 ),
                 candidate_boards: result.candidate_boards,
+                observation_workers_used: 1,
             });
         }
         if control.is_cancelled() {

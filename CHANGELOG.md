@@ -13,6 +13,9 @@
   witness-pattern traversal, propagated cancellation through finalization,
   removed duplicate result caching, and accelerated visible-seven witness
   lookup while preserving the complete result set.
+- Pruned setup observation languages to target-live branches, compacted
+  observation-equivalent policy states, and parallelized native per-target
+  visible-seven finalization with deterministic reports and bounded memory.
 - Hardened forward search against queues beyond its cursor range and changed
   damage-trace reconstruction to cancellable iterative traversal without
   truncating paths.

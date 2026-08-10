@@ -10,7 +10,10 @@ use clearra_problem::{
     compile_setup_search_conditions, SetupCandidatePriority, SetupLengthPreference, SetupLimits,
     SetupPathDetail, SetupSearchQuery,
 };
-use clearra_supply::pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex};
+use clearra_supply::{
+    pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex},
+    QueueObservationPolicy,
+};
 
 use super::super::setup_representative::verify_compact_paths_against_singletons;
 
@@ -28,6 +31,188 @@ fn serial_setup_progress_maps_graph_passes_to_stable_ui_phases() {
     assert_eq!(setup_build_progress_phase(1), ("setup-graph", 2));
     assert_eq!(setup_build_progress_phase(2), ("setup-graph", 2));
     assert_eq!(setup_build_progress_phase(3), ("setup-graph", 2));
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+#[ignore = "release parity for the full visible-window setup finalizer"]
+fn visible_policy_target_workers_preserve_the_exact_setup_report() {
+    fn run(query: &SetupSearchQuery, workers: usize) -> crate::CoreExecutionResult {
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let mut session = WasmSetupSearchSession::new_with_observation_workers(query, workers)
+            .expect("setup session");
+        loop {
+            match session.advance(8_192, &control).expect("setup advance") {
+                WasmSetupSearchAdvance::Pending => {}
+                WasmSetupSearchAdvance::Completed(result) => break result,
+                WasmSetupSearchAdvance::Cancelled => panic!("setup search was not cancelled"),
+            }
+        }
+    }
+
+    let query = fixed_visible_policy_parallel_query();
+    let serial = run(&query, 1);
+    let parallel = run(&query, 4);
+
+    assert_eq!(serial.field("workers_used"), Some("1"));
+    assert_eq!(serial.field("cpu_parallel_execution"), Some("false"));
+    assert_eq!(parallel.field("workers_used"), Some("4"));
+    assert_eq!(parallel.field("cpu_parallel_execution"), Some("true"));
+    assert_eq!(
+        parallel.field("cpu_parallel_decision_reason"),
+        Some("setup-observation-target-parallel")
+    );
+    assert_eq!(
+        serial.usize_field("unique_solution_count"),
+        parallel.usize_field("unique_solution_count")
+    );
+    assert!(parallel.usize_field("unique_solution_count").unwrap_or(0) > 1);
+    assert_eq!(
+        serial.field("normalized_solution_set_hash"),
+        parallel.field("normalized_solution_set_hash")
+    );
+    assert_eq!(
+        serial.setup_finder_report().expect("serial setup report"),
+        parallel
+            .setup_finder_report()
+            .expect("parallel setup report")
+    );
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn visible_policy_parallel_cancellation_joins_all_workers() {
+    let pre_cancelled = ExecutionCancellationToken::new();
+    pre_cancelled.handle().cancel();
+    let pre_control = ExecutionControl::new(pre_cancelled);
+    let pre_result = super::run_setup_observation_worker_jobs(
+        vec![(); 4],
+        16,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        &pre_control,
+        None,
+        |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
+    );
+    assert_eq!(pre_result, Err(super::WasmExactSearchError::Cancelled));
+
+    let token = ExecutionCancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token);
+    let test_hook = super::ObservationParallelTestHook::new(
+        super::ObservationParallelTestInjection::CancelBarrier,
+        4,
+    );
+    let cancellation_hook = std::sync::Arc::clone(&test_hook);
+    let canceller = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while cancellation_hook.active_worker_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parallel setup workers did not start"
+            );
+            std::thread::yield_now();
+        }
+        handle.cancel();
+    });
+    let result = super::run_setup_observation_worker_jobs(
+        vec![(); 4],
+        16,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        &control,
+        Some(std::sync::Arc::clone(&test_hook)),
+        |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
+    );
+    canceller.join().expect("cancellation observer");
+    assert_eq!(result, Err(super::WasmExactSearchError::Cancelled));
+    assert_eq!(test_hook.active_worker_count(), 0);
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn visible_policy_parallel_panic_fails_closed_and_joins_peers() {
+    let test_hook =
+        super::ObservationParallelTestHook::new(super::ObservationParallelTestInjection::Panic, 4);
+    let control = ExecutionControl::new(ExecutionCancellationToken::new());
+    let result = super::run_setup_observation_worker_jobs(
+        vec![(); 4],
+        16,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        &control,
+        Some(std::sync::Arc::clone(&test_hook)),
+        |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
+    );
+    assert_eq!(
+        result,
+        Err(super::WasmExactSearchError::InvalidProblem(
+            "setup_observation_parallel_worker_panicked"
+        ))
+    );
+    assert_eq!(test_hook.active_worker_count(), 0);
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn visible_policy_parallel_test_hook_is_per_invocation() {
+    let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let panic_hook =
+        super::ObservationParallelTestHook::new(super::ObservationParallelTestInjection::Panic, 4);
+
+    let panic_thread = {
+        let start = std::sync::Arc::clone(&start);
+        let panic_hook = std::sync::Arc::clone(&panic_hook);
+        std::thread::spawn(move || {
+            start.wait();
+            let control = ExecutionControl::new(ExecutionCancellationToken::new());
+            super::run_setup_observation_worker_jobs(
+                vec![(); 4],
+                16,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &control,
+                Some(panic_hook),
+                |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
+            )
+        })
+    };
+    let normal_thread = {
+        let start = std::sync::Arc::clone(&start);
+        std::thread::spawn(move || {
+            start.wait();
+            let control = ExecutionControl::new(ExecutionCancellationToken::new());
+            super::run_setup_observation_worker_jobs(
+                vec![(); 4],
+                16,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &control,
+                None,
+                |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
+            )
+        })
+    };
+
+    start.wait();
+    let panic_result = panic_thread.join().expect("injected invocation");
+    let normal_result = normal_thread.join().expect("uninjected invocation");
+    assert_eq!(
+        panic_result,
+        Err(super::WasmExactSearchError::InvalidProblem(
+            "setup_observation_parallel_worker_panicked"
+        ))
+    );
+    assert_eq!(
+        normal_result,
+        Ok((0..16).map(|ordinal| (ordinal, ordinal)).collect())
+    );
+    assert_eq!(panic_hook.active_worker_count(), 0);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn fixed_visible_policy_parallel_query() -> SetupSearchQuery {
+    SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T])
+        .with_queue_based_pieces(vec![PieceKind::S, PieceKind::Z, PieceKind::J, PieceKind::L])
+        .with_max_setup_pieces(1)
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .with_tablebase_requested(false)
 }
 
 #[test]

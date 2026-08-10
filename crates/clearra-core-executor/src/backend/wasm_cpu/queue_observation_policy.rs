@@ -1,4 +1,10 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
 
 // SRP rationale: this exact queue-observation policy engine has one change reason:
 // preserving observation-equivalent actions across its trie, hold transitions,
@@ -12,7 +18,11 @@ use clearra_supply::{
     QueueObservationPolicy,
 };
 
-use super::{piece_order_language::PieceOrderLanguageCache, WasmExactSearchError};
+use super::{
+    exact_collections::{ExactHashMap, ExactHashSet},
+    piece_order_language::PieceOrderLanguageCache,
+    WasmExactSearchError,
+};
 
 const NO_NODE: u32 = u32::MAX;
 const NO_TERMINAL: u32 = u32::MAX;
@@ -31,6 +41,20 @@ pub(super) trait ObservationPieceLanguage {
     fn node(&self, node: u32) -> Option<ObservationLanguageNode>;
     fn edge_count(&self, node: u32) -> Option<usize>;
     fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)>;
+
+    fn memo_class(&self, node: u32) -> Option<u32> {
+        self.node(node).map(|_| node)
+    }
+
+    /// True only when this node's memo class has the same language semantics
+    /// in later evaluations performed by the same evaluator.
+    fn memo_reusable(&self, _node: u32) -> bool {
+        false
+    }
+
+    fn reusable_memo_domain(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -214,6 +238,15 @@ pub(super) struct QueueObservationMetrics {
     pub action_checks: usize,
     pub observation_nodes: usize,
     pub retained_bytes: usize,
+    pub local_values: usize,
+    pub local_zero_scores: usize,
+    pub shared_values: usize,
+    pub shared_zero_scores: usize,
+    pub local_value_capacity: usize,
+    pub local_zero_score_capacity: usize,
+    pub shared_value_capacity: usize,
+    pub shared_zero_score_capacity: usize,
+    pub shared_hits: usize,
 }
 
 pub(super) struct QueueObservationCoverage {
@@ -273,9 +306,17 @@ struct ObservationTrie {
     nodes: Vec<ObservationTrieNode>,
     terminals: Vec<TerminalPattern>,
     initial_observations: Vec<u32>,
+    future_classes: Vec<u32>,
     sequence_len: usize,
     materialized_sequence_len: usize,
     global_pattern_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ObservationFutureSignature {
+    children: [u32; 7],
+    subtree_weight_bits: u64,
+    subtree_count: u32,
 }
 
 impl ObservationTrie {
@@ -291,6 +332,7 @@ impl ObservationTrie {
             nodes: vec![ObservationTrieNode::root()],
             terminals: Vec::new(),
             initial_observations: Vec::new(),
+            future_classes: Vec::new(),
             sequence_len: 0,
             materialized_sequence_len: pattern_index.sequence_len(),
             global_pattern_count: pattern_index.global_pattern_count(),
@@ -338,6 +380,75 @@ impl ObservationTrie {
         trie.collect_descendants_vec(0, initial_depth, &mut initial_observations)?;
         trie.initial_observations = initial_observations;
         Ok(trie)
+    }
+
+    fn compile_future_classes(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.future_classes.len() == self.nodes.len() {
+            return Ok(());
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut classes = Vec::new();
+        classes.try_reserve_exact(self.nodes.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_observation_future_class_storage_unavailable",
+            )
+        })?;
+        classes.resize(self.nodes.len(), NO_NODE);
+        let mut interned = ExactHashMap::<ObservationFutureSignature, u32>::default();
+        let mut work = 0_u32;
+        for node_index in (0..self.nodes.len()).rev() {
+            work = work.wrapping_add(1);
+            if work & CANCELLATION_POLL_MASK == 0 && control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            let node = self.nodes[node_index];
+            let mut children = [NO_NODE; 7];
+            for (piece_index, child) in node.children.iter().copied().enumerate() {
+                if child == NO_NODE {
+                    continue;
+                }
+                children[piece_index] =
+                    *classes
+                        .get(child as usize)
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "wasm_observation_future_class_child_out_of_range",
+                        ))?;
+                if children[piece_index] == NO_NODE {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_future_class_not_topological",
+                    ));
+                }
+            }
+            let signature = ObservationFutureSignature {
+                children,
+                subtree_weight_bits: node.subtree_weight.to_bits(),
+                subtree_count: node.subtree_count,
+            };
+            let class = if let Some(class) = interned.get(&signature).copied() {
+                class
+            } else {
+                let class = u32::try_from(interned.len()).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_future_class_index_overflow",
+                    )
+                })?;
+                interned.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_future_class_storage_unavailable",
+                    )
+                })?;
+                interned.insert(signature, class);
+                class
+            };
+            classes[node_index] = class;
+        }
+        self.future_classes = classes;
+        Ok(())
     }
 
     fn insert(
@@ -543,7 +654,7 @@ impl ObservationTrie {
         hold_code: u8,
         target: Option<SetupTerminalSupplyTarget>,
         control: &ExecutionControl,
-    ) -> Result<(f64, usize), WasmExactSearchError> {
+    ) -> Result<(f64, u32), WasmExactSearchError> {
         let Some(target) = target else {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
@@ -554,10 +665,10 @@ impl ObservationTrie {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_observation_trie_node_out_of_range",
                     ))?;
-            return Ok((node.subtree_weight, node.subtree_count as usize));
+            return Ok((node.subtree_weight, node.subtree_count));
         };
         let mut weight = 0.0;
-        let mut pattern_count = 0usize;
+        let mut pattern_count = 0_u32;
         self.visit_terminals(
             root,
             |leaf, terminal| {
@@ -700,6 +811,7 @@ impl ObservationTrie {
         self.nodes.capacity() * core::mem::size_of::<ObservationTrieNode>()
             + self.terminals.capacity() * core::mem::size_of::<TerminalPattern>()
             + self.initial_observations.capacity() * core::mem::size_of::<u32>()
+            + self.future_classes.capacity() * core::mem::size_of::<u32>()
     }
 }
 
@@ -710,6 +822,10 @@ struct PolicyState {
     source_cursor: u16,
     hold_code: u8,
 }
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+struct PolicyMemoState(u128);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum SupplyAction {
@@ -728,41 +844,42 @@ struct PolicyTransition {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum PolicyChoice {
-    Reject,
-    Accept,
-    Transition(PolicyTransition),
-}
-
-#[derive(Clone, Copy, Debug)]
 struct PolicyValue {
     weight: f64,
-    pattern_count: usize,
-    choice: PolicyChoice,
+    pattern_count: u32,
 }
 
 impl PolicyValue {
     const REJECT: Self = Self {
         weight: 0.0,
         pattern_count: 0,
-        choice: PolicyChoice::Reject,
     };
 }
 
 pub(super) struct QueueObservationPolicyEvaluator {
-    trie: ObservationTrie,
+    trie: Arc<ObservationTrie>,
     policy: QueueObservationPolicy,
     initial_cursor: usize,
     initial_hold_code: u8,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     terminal_supply_target: Option<SetupTerminalSupplyTarget>,
-    memo: HashMap<PolicyState, PolicyValue>,
+    memo: ExactHashMap<PolicyMemoState, PolicyValue>,
+    zero_scores: ExactHashSet<PolicyMemoState>,
+    shared_memo: ExactHashMap<PolicyMemoState, PolicyValue>,
+    shared_zero_scores: ExactHashSet<PolicyMemoState>,
+    shared_terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    shared_memo_domain: Option<u64>,
+    next_shared_memo_domain: u64,
     selected_patterns: Vec<u32>,
     selected_min_depth: u8,
     selected_max_depth: u8,
     cancellation_poll_counter: u32,
     action_checks: usize,
+    shared_hits: usize,
+    peer_abort: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    raw_memo_keys: bool,
 }
 
 impl QueueObservationPolicyEvaluator {
@@ -792,19 +909,29 @@ impl QueueObservationPolicyEvaluator {
             projects_standard_bag_lookahead,
         )?;
         Ok(Self {
-            trie,
+            trie: Arc::new(trie),
             policy,
             initial_cursor,
             initial_hold_code: initial_hold.map_or(0, piece_code),
             hold_enabled,
             projects_unplaced_lookahead,
             terminal_supply_target,
-            memo: HashMap::new(),
+            memo: ExactHashMap::default(),
+            zero_scores: ExactHashSet::default(),
+            shared_memo: ExactHashMap::default(),
+            shared_zero_scores: ExactHashSet::default(),
+            shared_terminal_supply_target: terminal_supply_target,
+            shared_memo_domain: None,
+            next_shared_memo_domain: 0,
             selected_patterns: Vec::new(),
             selected_min_depth: u8::MAX,
             selected_max_depth: 0,
             cancellation_poll_counter: 0,
             action_checks: 0,
+            shared_hits: 0,
+            peer_abort: None,
+            #[cfg(test)]
+            raw_memo_keys: false,
         })
     }
 
@@ -813,12 +940,24 @@ impl QueueObservationPolicyEvaluator {
         language: &G,
         control: &ExecutionControl,
     ) -> Result<QueueObservationCoverage, WasmExactSearchError> {
+        self.prepare_trie(control)?;
+        if let Some(domain) = language.reusable_memo_domain() {
+            if self.shared_memo_domain != Some(domain)
+                || self.shared_terminal_supply_target != self.terminal_supply_target
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_shared_memo_domain_mismatch",
+                ));
+            }
+        }
         self.memo.clear();
+        self.zero_scores.clear();
         self.selected_patterns.clear();
         self.selected_min_depth = u8::MAX;
         self.selected_max_depth = 0;
         self.cancellation_poll_counter = 0;
         self.action_checks = 0;
+        self.shared_hits = 0;
         let root = language.root();
         let initial_observations = self.trie.initial_observations.clone();
         let mut total_weight = 0.0;
@@ -834,7 +973,7 @@ impl QueueObservationPolicyEvaluator {
             };
             let value = self.solve(language, state, control)?;
             total_weight += value.weight;
-            total_count = total_count.saturating_add(value.pattern_count);
+            total_count = total_count.saturating_add(value.pattern_count as usize);
         }
         for observation_node in initial_observations {
             self.collect_selected(
@@ -868,22 +1007,104 @@ impl QueueObservationPolicyEvaluator {
             max_accepted_depth: (self.selected_min_depth != u8::MAX)
                 .then_some(self.selected_max_depth),
             metrics: QueueObservationMetrics {
-                policy_states: self.memo.len(),
+                policy_states: self
+                    .memo
+                    .len()
+                    .saturating_add(self.zero_scores.len())
+                    .saturating_add(self.shared_memo.len())
+                    .saturating_add(self.shared_zero_scores.len()),
                 action_checks: self.action_checks,
                 observation_nodes: self.trie.nodes.len(),
                 retained_bytes: self.retained_bytes(),
+                local_values: self.memo.len(),
+                local_zero_scores: self.zero_scores.len(),
+                shared_values: self.shared_memo.len(),
+                shared_zero_scores: self.shared_zero_scores.len(),
+                local_value_capacity: self.memo.capacity(),
+                local_zero_score_capacity: self.zero_scores.capacity(),
+                shared_value_capacity: self.shared_memo.capacity(),
+                shared_zero_score_capacity: self.shared_zero_scores.capacity(),
+                shared_hits: self.shared_hits,
             },
         })
     }
 
     pub fn set_terminal_supply_target(&mut self, target: Option<SetupTerminalSupplyTarget>) {
+        if self.terminal_supply_target != target && self.shared_memo_domain.is_some() {
+            self.shared_memo.clear();
+            self.shared_zero_scores.clear();
+            self.shared_memo_domain = None;
+            self.shared_terminal_supply_target = target;
+        }
         self.terminal_supply_target = target;
+    }
+
+    pub fn fork_empty(&self) -> Result<Self, WasmExactSearchError> {
+        if self.trie.future_classes.len() != self.trie.nodes.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_trie_fork_before_prepare",
+            ));
+        }
+        Ok(Self {
+            trie: Arc::clone(&self.trie),
+            policy: self.policy,
+            initial_cursor: self.initial_cursor,
+            initial_hold_code: self.initial_hold_code,
+            hold_enabled: self.hold_enabled,
+            projects_unplaced_lookahead: self.projects_unplaced_lookahead,
+            terminal_supply_target: self.terminal_supply_target,
+            memo: ExactHashMap::default(),
+            zero_scores: ExactHashSet::default(),
+            shared_memo: ExactHashMap::default(),
+            shared_zero_scores: ExactHashSet::default(),
+            shared_terminal_supply_target: self.terminal_supply_target,
+            shared_memo_domain: None,
+            next_shared_memo_domain: 0,
+            selected_patterns: Vec::new(),
+            selected_min_depth: u8::MAX,
+            selected_max_depth: 0,
+            cancellation_poll_counter: 0,
+            action_checks: 0,
+            shared_hits: 0,
+            peer_abort: None,
+            #[cfg(test)]
+            raw_memo_keys: self.raw_memo_keys,
+        })
+    }
+
+    fn prepare_trie(&mut self, control: &ExecutionControl) -> Result<(), WasmExactSearchError> {
+        if self.trie.future_classes.len() == self.trie.nodes.len() {
+            return Ok(());
+        }
+        Arc::get_mut(&mut self.trie)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_trie_not_prepared",
+            ))?
+            .compile_future_classes(control)
+    }
+
+    pub fn begin_reusable_memo_domain(&mut self) -> u64 {
+        self.shared_memo.clear();
+        self.shared_zero_scores.clear();
+        let domain = self.next_shared_memo_domain;
+        self.next_shared_memo_domain = self.next_shared_memo_domain.wrapping_add(1);
+        self.shared_memo_domain = Some(domain);
+        self.shared_terminal_supply_target = self.terminal_supply_target;
+        domain
+    }
+
+    pub fn set_peer_abort(&mut self, abort: Arc<AtomicBool>) {
+        self.peer_abort = Some(abort);
     }
 
     pub fn retained_bytes(&self) -> usize {
         self.trie.retained_bytes()
             + self.memo.capacity()
-                * (core::mem::size_of::<PolicyState>() + core::mem::size_of::<PolicyValue>())
+                * (core::mem::size_of::<PolicyMemoState>() + core::mem::size_of::<PolicyValue>())
+            + self.zero_scores.capacity() * core::mem::size_of::<PolicyMemoState>()
+            + self.shared_memo.capacity()
+                * (core::mem::size_of::<PolicyMemoState>() + core::mem::size_of::<PolicyValue>())
+            + self.shared_zero_scores.capacity() * core::mem::size_of::<PolicyMemoState>()
             + self.selected_patterns.capacity() * core::mem::size_of::<u32>()
     }
 
@@ -894,8 +1115,24 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<PolicyValue, WasmExactSearchError> {
         self.poll_cancellation(control)?;
-        if let Some(value) = self.memo.get(&state).copied() {
-            return Ok(value);
+        let memo_state = self.memo_state(language, state)?;
+        let reusable = language.memo_reusable(state.language_node);
+        if reusable {
+            if let Some(value) = self.shared_memo.get(&memo_state).copied() {
+                self.shared_hits = self.shared_hits.saturating_add(1);
+                return Ok(value);
+            }
+            if self.shared_zero_scores.contains(&memo_state) {
+                self.shared_hits = self.shared_hits.saturating_add(1);
+                return Ok(PolicyValue::REJECT);
+            }
+        } else {
+            if let Some(value) = self.memo.get(&memo_state).copied() {
+                return Ok(value);
+            }
+            if self.zero_scores.contains(&memo_state) {
+                return Ok(PolicyValue::REJECT);
+            }
         }
         let node =
             language
@@ -914,11 +1151,22 @@ impl QueueObservationPolicyEvaluator {
             let value = PolicyValue {
                 weight,
                 pattern_count,
-                choice: PolicyChoice::Accept,
             };
-            self.memo.insert(state, value);
+            self.insert_memo(memo_state, value, reusable)?;
             return Ok(value);
         }
+        let (best, _) = self.best_transition(language, state, control, true)?;
+        self.insert_memo(memo_state, best, reusable)?;
+        Ok(best)
+    }
+
+    fn best_transition<G: ObservationPieceLanguage>(
+        &mut self,
+        language: &G,
+        state: PolicyState,
+        control: &ExecutionControl,
+        record_action_checks: bool,
+    ) -> Result<(PolicyValue, Option<PolicyTransition>), WasmExactSearchError> {
         let cursor = usize::from(state.source_cursor);
         let current_piece = self.trie.piece_at(state.observation_node, cursor);
         let next_piece = self
@@ -951,6 +1199,7 @@ impl QueueObservationPolicyEvaluator {
                     &mut best,
                     &mut best_transition,
                     control,
+                    record_action_checks,
                 )?;
             }
             if self.hold_enabled && state.hold_code != 0 && state.hold_code == desired_piece {
@@ -972,6 +1221,7 @@ impl QueueObservationPolicyEvaluator {
                         &mut best,
                         &mut best_transition,
                         control,
+                        record_action_checks,
                     )?;
                 }
             } else if self.hold_enabled && state.hold_code == 0 && next_piece == Some(desired_piece)
@@ -994,6 +1244,7 @@ impl QueueObservationPolicyEvaluator {
                         &mut best,
                         &mut best_transition,
                         control,
+                        record_action_checks,
                     )?;
                 }
             }
@@ -1016,15 +1267,123 @@ impl QueueObservationPolicyEvaluator {
                     &mut best,
                     &mut best_transition,
                     control,
+                    record_action_checks,
                 )?;
             }
         }
-        best.choice = best_transition.map_or(PolicyChoice::Reject, PolicyChoice::Transition);
-        self.memo.try_reserve(1).map_err(|_| {
+        Ok((best, best_transition))
+    }
+
+    fn memo_state<G: ObservationPieceLanguage>(
+        &self,
+        language: &G,
+        state: PolicyState,
+    ) -> Result<PolicyMemoState, WasmExactSearchError> {
+        #[cfg(test)]
+        if self.raw_memo_keys {
+            let packed = u128::from(state.language_node)
+                | (u128::from(state.observation_node) << 32)
+                | (u128::from(state.source_cursor) << 64)
+                | (u128::from(state.hold_code) << 80);
+            return Ok(PolicyMemoState(packed));
+        }
+        let observation = self.trie.nodes.get(state.observation_node as usize).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_observation_trie_node_out_of_range"),
+        )?;
+        let source_cursor = usize::from(state.source_cursor);
+        let observed_depth = usize::from(observation.depth);
+        if source_cursor > observed_depth {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_cursor_beyond_observation",
+            ));
+        }
+        let visible_len = observed_depth - source_cursor;
+        if visible_len > 7 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_visible_window_too_long",
+            ));
+        }
+        let mut visible_window = 0_u32;
+        for (offset, position) in (source_cursor..observed_depth).enumerate() {
+            let piece = self.trie.piece_at(state.observation_node, position).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_visible_piece_missing"),
+            )?;
+            visible_window |= u32::from(piece) << (offset * 3);
+        }
+
+        let mut consumed_bag_counts = 0_u32;
+        if let Some(target) = self.terminal_supply_target {
+            let first_boundary = usize::from(target.first_bag_boundary());
+            if source_cursor >= first_boundary {
+                let consumed_in_bag = (source_cursor - first_boundary) % 7;
+                let bag_start = source_cursor - consumed_in_bag;
+                let counts = self
+                    .trie
+                    .sequence_range_counts(state.observation_node, bag_start, source_cursor)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_consumed_bag_history_missing",
+                    ))?;
+                for (piece_index, count) in counts.into_iter().enumerate() {
+                    consumed_bag_counts |= u32::from(count) << (piece_index * 3);
+                }
+            }
+        }
+
+        let future_class = *self
+            .trie
+            .future_classes
+            .get(state.observation_node as usize)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_future_class_missing",
+            ))?;
+        let language_class = language.memo_class(state.language_node).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_observation_language_memo_class_missing"),
+        )?;
+        if visible_window >= (1 << 21)
+            || consumed_bag_counts >= (1 << 21)
+            || state.hold_code >= (1 << 4)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_memo_state_out_of_range",
+            ));
+        }
+        let packed = u128::from(language_class)
+            | (u128::from(future_class) << 32)
+            | (u128::from(visible_window) << 64)
+            | (u128::from(consumed_bag_counts) << 85)
+            | (u128::from(state.source_cursor) << 106)
+            | (u128::from(state.hold_code) << 122);
+        Ok(PolicyMemoState(packed))
+    }
+
+    fn insert_memo(
+        &mut self,
+        state: PolicyMemoState,
+        value: PolicyValue,
+        reusable: bool,
+    ) -> Result<(), WasmExactSearchError> {
+        if value.weight == 0.0 && value.pattern_count == 0 {
+            let zero_scores = if reusable {
+                &mut self.shared_zero_scores
+            } else {
+                &mut self.zero_scores
+            };
+            zero_scores.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_observation_policy_storage_unavailable")
+            })?;
+            zero_scores.insert(state);
+            return Ok(());
+        }
+        let memo = if reusable {
+            &mut self.shared_memo
+        } else {
+            &mut self.memo
+        };
+        memo.try_reserve(1).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_observation_policy_storage_unavailable")
         })?;
-        self.memo.insert(state, best);
-        Ok(best)
+        memo.insert(state, value);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1036,8 +1395,11 @@ impl QueueObservationPolicyEvaluator {
         best: &mut PolicyValue,
         best_transition: &mut Option<PolicyTransition>,
         control: &ExecutionControl,
+        record_action_check: bool,
     ) -> Result<(), WasmExactSearchError> {
-        self.action_checks = self.action_checks.saturating_add(1);
+        if record_action_check {
+            self.action_checks = self.action_checks.saturating_add(1);
+        }
         let value = self.transition_value(language, state, transition, control)?;
         let better = value.weight.total_cmp(&best.weight).is_gt()
             || (value.weight.total_cmp(&best.weight).is_eq()
@@ -1092,7 +1454,7 @@ impl QueueObservationPolicyEvaluator {
             &mut observation_count,
         )?;
         let mut weight = 0.0;
-        let mut pattern_count = 0usize;
+        let mut pattern_count = 0_u32;
         for observation_node in observations[..observation_count].iter().copied() {
             let value = self.solve(
                 language,
@@ -1110,7 +1472,6 @@ impl QueueObservationPolicyEvaluator {
         Ok(PolicyValue {
             weight,
             pattern_count,
-            choice: PolicyChoice::Reject,
         })
     }
 
@@ -1121,82 +1482,91 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
         self.poll_cancellation(control)?;
-        let value = self
-            .memo
-            .get(&state)
-            .copied()
-            .unwrap_or(PolicyValue::REJECT);
-        match value.choice {
-            PolicyChoice::Reject => Ok(()),
-            PolicyChoice::Accept => {
-                if value.pattern_count != 0 {
-                    let depth = language
-                        .node(state.language_node)
-                        .ok_or(WasmExactSearchError::InvalidProblem(
-                            "wasm_observation_language_node_out_of_range",
-                        ))?
-                        .depth;
-                    self.selected_min_depth = self.selected_min_depth.min(depth);
-                    self.selected_max_depth = self.selected_max_depth.max(depth);
-                }
-                self.trie.collect_accepted_patterns(
-                    state.observation_node,
-                    state.source_cursor,
-                    state.hold_code,
-                    self.terminal_supply_target,
-                    &mut self.selected_patterns,
-                    control,
-                )
+        let memo_state = self.memo_state(language, state)?;
+        let reusable = language.memo_reusable(state.language_node);
+        let memo = if reusable {
+            &self.shared_memo
+        } else {
+            &self.memo
+        };
+        let zero_scores = if reusable {
+            &self.shared_zero_scores
+        } else {
+            &self.zero_scores
+        };
+        let value = memo.get(&memo_state).copied().unwrap_or_else(|| {
+            debug_assert!(zero_scores.contains(&memo_state));
+            PolicyValue::REJECT
+        });
+        let node =
+            language
+                .node(state.language_node)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_language_node_out_of_range",
+                ))?;
+        if node.accepting {
+            if value.pattern_count != 0 {
+                self.selected_min_depth = self.selected_min_depth.min(node.depth);
+                self.selected_max_depth = self.selected_max_depth.max(node.depth);
             }
-            PolicyChoice::Transition(transition) => {
-                let _child =
-                    language
-                        .node(transition.child)
-                        .ok_or(WasmExactSearchError::InvalidProblem(
-                            "wasm_observation_language_node_out_of_range",
-                        ))?;
-                if transition.action == SupplyAction::ReleaseHeldAtTerminal {
-                    return self.collect_selected(
-                        language,
-                        PolicyState {
-                            language_node: transition.child,
-                            observation_node: state.observation_node,
-                            source_cursor: transition.source_cursor,
-                            hold_code: transition.hold_code,
-                        },
-                        control,
-                    );
-                }
-                let target_depth = usize::from(transition.source_cursor)
-                    .saturating_add(usize::from(
-                        self.policy
-                            .visible_piece_count()
-                            .expect("evaluator requires a visible window"),
-                    ))
-                    .min(self.trie.sequence_len);
-                let mut observations = [NO_NODE; MAX_REVEAL_BRANCHES];
-                let mut observation_count = 0usize;
-                self.trie.collect_revealed_descendants(
-                    state.observation_node,
-                    target_depth,
-                    &mut observations,
-                    &mut observation_count,
-                )?;
-                for observation_node in observations[..observation_count].iter().copied() {
-                    self.collect_selected(
-                        language,
-                        PolicyState {
-                            language_node: transition.child,
-                            observation_node,
-                            source_cursor: transition.source_cursor,
-                            hold_code: transition.hold_code,
-                        },
-                        control,
-                    )?;
-                }
-                Ok(())
-            }
+            return self.trie.collect_accepted_patterns(
+                state.observation_node,
+                state.source_cursor,
+                state.hold_code,
+                self.terminal_supply_target,
+                &mut self.selected_patterns,
+                control,
+            );
         }
+        let (_, Some(transition)) = self.best_transition(language, state, control, false)? else {
+            return Ok(());
+        };
+        let _child =
+            language
+                .node(transition.child)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_language_node_out_of_range",
+                ))?;
+        if transition.action == SupplyAction::ReleaseHeldAtTerminal {
+            return self.collect_selected(
+                language,
+                PolicyState {
+                    language_node: transition.child,
+                    observation_node: state.observation_node,
+                    source_cursor: transition.source_cursor,
+                    hold_code: transition.hold_code,
+                },
+                control,
+            );
+        }
+        let target_depth = usize::from(transition.source_cursor)
+            .saturating_add(usize::from(
+                self.policy
+                    .visible_piece_count()
+                    .expect("evaluator requires a visible window"),
+            ))
+            .min(self.trie.sequence_len);
+        let mut observations = [NO_NODE; MAX_REVEAL_BRANCHES];
+        let mut observation_count = 0usize;
+        self.trie.collect_revealed_descendants(
+            state.observation_node,
+            target_depth,
+            &mut observations,
+            &mut observation_count,
+        )?;
+        for observation_node in observations[..observation_count].iter().copied() {
+            self.collect_selected(
+                language,
+                PolicyState {
+                    language_node: transition.child,
+                    observation_node,
+                    source_cursor: transition.source_cursor,
+                    hold_code: transition.hold_code,
+                },
+                control,
+            )?;
+        }
+        Ok(())
     }
 
     fn poll_cancellation(
@@ -1204,7 +1574,13 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
         self.cancellation_poll_counter = self.cancellation_poll_counter.wrapping_add(1);
-        if self.cancellation_poll_counter & CANCELLATION_POLL_MASK == 0 && control.is_cancelled() {
+        if self.cancellation_poll_counter & CANCELLATION_POLL_MASK == 0
+            && (control.is_cancelled()
+                || self
+                    .peer_abort
+                    .as_ref()
+                    .is_some_and(|abort| abort.load(AtomicOrdering::Acquire)))
+        {
             return Err(WasmExactSearchError::Cancelled);
         }
         Ok(())
@@ -1270,6 +1646,7 @@ mod tests {
     use clearra_coverage::universe::{
         pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
     };
+    use clearra_problem::{compile_setup_search_conditions, SetupSearchQuery};
     use clearra_supply::{
         pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex},
         QueueObservationPolicy,
@@ -1345,6 +1722,116 @@ mod tests {
         }
     }
 
+    struct AliasedTieLanguage {
+        nodes: Vec<TestLanguageNode>,
+        memo_classes: Vec<u32>,
+    }
+
+    impl AliasedTieLanguage {
+        fn new() -> Self {
+            use PieceKind::{I, J, L, O, S, T, Z};
+
+            let mut language = Self {
+                nodes: (0..7).map(|_| TestLanguageNode::default()).collect(),
+                memo_classes: vec![0, 1, 1, 10, 20, 20, 10],
+            };
+            language.nodes[0].edges = vec![(piece_code(I), 1), (piece_code(O), 2)];
+            language.nodes[1].depth = 1;
+            language.nodes[1].edges = vec![(piece_code(T), 3), (piece_code(T), 4)];
+            language.nodes[2].depth = 1;
+            language.nodes[2].edges = vec![(piece_code(T), 5), (piece_code(T), 6)];
+            for node in &mut language.nodes[3..7] {
+                node.depth = 2;
+            }
+            language.append_path(3, &[S, Z, J, L, O, S, I], 100);
+            language.append_path(6, &[S, Z, J, L, O, S, I], 100);
+            language.append_path(4, &[S, Z, J, L, O, S, O], 200);
+            language.append_path(5, &[S, Z, J, L, O, S, O], 200);
+            language
+        }
+
+        fn append_path(&mut self, start: u32, pieces: &[PieceKind], class_base: u32) {
+            let mut node = start;
+            for (offset, piece) in pieces.iter().copied().enumerate() {
+                let child = self.nodes.len() as u32;
+                let depth = self.nodes[node as usize].depth + 1;
+                self.nodes.push(TestLanguageNode {
+                    accepting: false,
+                    depth,
+                    edges: Vec::new(),
+                });
+                self.memo_classes.push(class_base + offset as u32 + 1);
+                self.nodes[node as usize]
+                    .edges
+                    .push((piece_code(piece), child));
+                node = child;
+            }
+            self.nodes[node as usize].accepting = true;
+        }
+    }
+
+    impl ObservationPieceLanguage for AliasedTieLanguage {
+        fn root(&self) -> u32 {
+            0
+        }
+
+        fn node(&self, node: u32) -> Option<ObservationLanguageNode> {
+            self.nodes
+                .get(node as usize)
+                .map(|node| ObservationLanguageNode {
+                    accepting: node.accepting,
+                    depth: node.depth,
+                })
+        }
+
+        fn edge_count(&self, node: u32) -> Option<usize> {
+            self.nodes.get(node as usize).map(|node| node.edges.len())
+        }
+
+        fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)> {
+            self.nodes.get(node as usize)?.edges.get(index).copied()
+        }
+
+        fn memo_class(&self, node: u32) -> Option<u32> {
+            self.memo_classes.get(node as usize).copied()
+        }
+    }
+
+    struct ReusableLanguage<'a> {
+        inner: &'a AliasedTieLanguage,
+        domain: u64,
+    }
+
+    impl ObservationPieceLanguage for ReusableLanguage<'_> {
+        fn root(&self) -> u32 {
+            self.inner.root()
+        }
+
+        fn node(&self, node: u32) -> Option<ObservationLanguageNode> {
+            self.inner.node(node)
+        }
+
+        fn edge_count(&self, node: u32) -> Option<usize> {
+            self.inner.edge_count(node)
+        }
+
+        fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)> {
+            self.inner.edge(node, index)
+        }
+
+        fn memo_class(&self, node: u32) -> Option<u32> {
+            self.inner.memo_class(node)
+        }
+
+        fn memo_reusable(&self, node: u32) -> bool {
+            self.inner.node(node).is_some()
+        }
+
+        fn reusable_memo_domain(&self) -> Option<u64> {
+            Some(self.domain)
+        }
+    }
+
     fn two_hidden_suffix_universe() -> (MaterializedPatternUniverse, PatternPiecePositionIndex) {
         use PieceKind::{I, J, L, O, S, T, Z};
 
@@ -1381,6 +1868,45 @@ mod tests {
             None,
         )
         .expect("visible-seven evaluator")
+    }
+
+    fn aliased_tie_universe() -> (MaterializedPatternUniverse, PatternPiecePositionIndex) {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let i_hidden_i = vec![I, T, S, Z, J, L, O, S, I];
+        let i_hidden_o = vec![I, T, S, Z, J, L, O, S, O];
+        let o_hidden_i = vec![O, T, S, Z, J, L, O, S, I];
+        let o_hidden_o = vec![O, T, S, Z, J, L, O, S, O];
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(2),
+            PatternWeightModelId::new(2),
+            vec![
+                i_hidden_i.clone(),
+                i_hidden_i,
+                i_hidden_o.clone(),
+                i_hidden_o,
+                o_hidden_i.clone(),
+                o_hidden_i,
+                o_hidden_o.clone(),
+                o_hidden_o,
+            ],
+            vec![
+                ProbabilityValue::new(0.05).expect("weight"),
+                ProbabilityValue::new(0.2).expect("weight"),
+                ProbabilityValue::new(0.05).expect("weight"),
+                ProbabilityValue::new(0.2).expect("weight"),
+                ProbabilityValue::new(0.05).expect("weight"),
+                ProbabilityValue::new(0.2).expect("weight"),
+                ProbabilityValue::new(0.05).expect("weight"),
+                ProbabilityValue::new(0.2).expect("weight"),
+            ],
+            8,
+            true,
+            None,
+        )
+        .expect("aliased universe");
+        let index = PatternPiecePositionIndex::compile(&universe).expect("pattern index");
+        (universe, index)
     }
 
     #[test]
@@ -1431,5 +1957,255 @@ mod tests {
         let result = evaluator(&universe, &index).evaluate(&language, &control);
 
         assert!(matches!(result, Err(WasmExactSearchError::Cancelled)));
+    }
+
+    #[test]
+    fn memo_quotient_preserves_raw_tie_selected_patterns_exactly() {
+        let (universe, index) = aliased_tie_universe();
+        let language = AliasedTieLanguage::new();
+        let control = ExecutionControl::default();
+        let mut optimized = evaluator(&universe, &index);
+        let mut identity = evaluator(&universe, &index);
+        identity.raw_memo_keys = true;
+
+        let optimized_coverage = optimized
+            .evaluate(&language, &control)
+            .expect("quotient coverage");
+        let identity_coverage = identity
+            .evaluate(&language, &control)
+            .expect("identity coverage");
+
+        assert_eq!(language.memo_class(1), language.memo_class(2));
+        assert_ne!(language.edge(1, 0), language.edge(2, 0));
+        assert_eq!(
+            optimized_coverage.covered_patterns.covered_patterns(),
+            identity_coverage.covered_patterns.covered_patterns()
+        );
+        assert_eq!(
+            optimized_coverage.covered_pattern_count,
+            identity_coverage.covered_pattern_count
+        );
+        assert_eq!(
+            optimized_coverage.covered_weight,
+            identity_coverage.covered_weight
+        );
+        assert_eq!(
+            optimized_coverage.min_accepted_depth,
+            identity_coverage.min_accepted_depth
+        );
+        assert_eq!(
+            optimized_coverage.max_accepted_depth,
+            identity_coverage.max_accepted_depth
+        );
+        assert_eq!(optimized_coverage.covered_pattern_count, 4);
+        assert_eq!(optimized_coverage.covered_weight, 0.5);
+        assert!(optimized_coverage.metrics.policy_states < identity_coverage.metrics.policy_states);
+    }
+
+    #[test]
+    fn reusable_score_memo_preserves_raw_replay_on_later_evaluations() {
+        let (universe, index) = aliased_tie_universe();
+        let language = AliasedTieLanguage::new();
+        let control = ExecutionControl::default();
+        let mut evaluator = evaluator(&universe, &index);
+        let language = ReusableLanguage {
+            inner: &language,
+            domain: evaluator.begin_reusable_memo_domain(),
+        };
+
+        let first = evaluator
+            .evaluate(&language, &control)
+            .expect("first coverage");
+        let second = evaluator
+            .evaluate(&language, &control)
+            .expect("reused coverage");
+
+        assert_eq!(
+            first.covered_patterns.covered_patterns(),
+            second.covered_patterns.covered_patterns()
+        );
+        assert_eq!(first.covered_pattern_count, second.covered_pattern_count);
+        assert_eq!(first.covered_weight, second.covered_weight);
+        assert_eq!(first.min_accepted_depth, second.min_accepted_depth);
+        assert_eq!(first.max_accepted_depth, second.max_accepted_depth);
+        assert!(first.metrics.action_checks > 0);
+        assert_eq!(second.metrics.action_checks, 0);
+    }
+
+    #[test]
+    fn terminal_target_change_invalidates_the_reusable_memo_domain() {
+        use PieceKind::{I, O, S, T, Z};
+
+        let (universe, index) = aliased_tie_universe();
+        let inner = AliasedTieLanguage::new();
+        let control = ExecutionControl::default();
+        let mut evaluator = evaluator(&universe, &index);
+        let old_domain = evaluator.begin_reusable_memo_domain();
+        let old_language = ReusableLanguage {
+            inner: &inner,
+            domain: old_domain,
+        };
+        evaluator
+            .evaluate(&old_language, &control)
+            .expect("initial reusable coverage");
+
+        let target = compile_setup_search_conditions(
+            &SetupSearchQuery::default()
+                .with_remaining_pieces(vec![I, O, T, S])
+                .with_next_cycle_remaining_pieces(vec![Z]),
+        )
+        .expect("terminal condition")
+        .remove(0)
+        .terminal_supply_target()
+        .expect("terminal target");
+        evaluator.set_terminal_supply_target(Some(target));
+        assert!(matches!(
+            evaluator.evaluate(&old_language, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_memo_domain_mismatch"
+            ))
+        ));
+
+        let new_language = ReusableLanguage {
+            inner: &inner,
+            domain: evaluator.begin_reusable_memo_domain(),
+        };
+        evaluator
+            .evaluate(&new_language, &control)
+            .expect("new terminal memo domain");
+    }
+
+    #[test]
+    fn zero_valued_legal_transition_is_memoized_and_replayed() {
+        let (universe, index) = two_hidden_suffix_universe();
+        let language = TestLanguage {
+            nodes: vec![
+                TestLanguageNode {
+                    accepting: false,
+                    depth: 0,
+                    edges: vec![(piece_code(PieceKind::I), 1)],
+                },
+                TestLanguageNode {
+                    accepting: false,
+                    depth: 1,
+                    edges: Vec::new(),
+                },
+            ],
+        };
+        let mut evaluator = evaluator(&universe, &index);
+        let coverage = evaluator
+            .evaluate(&language, &ExecutionControl::default())
+            .expect("zero transition coverage");
+
+        assert_eq!(coverage.covered_pattern_count, 0);
+        assert_eq!(coverage.covered_weight, 0.0);
+        assert!(evaluator.zero_scores.len() >= 2);
+    }
+
+    #[test]
+    fn zero_valued_accept_is_not_collapsed_into_rejection() {
+        use PieceKind::{I, O, S, T, Z};
+
+        let (universe, index) = two_hidden_suffix_universe();
+        let target = compile_setup_search_conditions(
+            &SetupSearchQuery::default()
+                .with_remaining_pieces(vec![I, O, T, S])
+                .with_next_cycle_remaining_pieces(vec![Z]),
+        )
+        .expect("terminal condition")
+        .remove(0)
+        .terminal_supply_target()
+        .expect("terminal target");
+        let language = TestLanguage::from_sequences(&[Vec::new()]);
+        let mut evaluator = evaluator(&universe, &index);
+        evaluator.set_terminal_supply_target(Some(target));
+        let coverage = evaluator
+            .evaluate(&language, &ExecutionControl::default())
+            .expect("zero accept coverage");
+
+        assert_eq!(coverage.covered_pattern_count, 0);
+        assert_eq!(coverage.covered_weight, 0.0);
+        assert!(!evaluator.zero_scores.is_empty());
+    }
+
+    #[test]
+    fn memo_quotient_matches_raw_after_bag_boundary_and_terminal_hold_release() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let queue = vec![I, O, T, S, Z, J, L, I, O];
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(93),
+            PatternWeightModelId::new(94),
+            vec![queue.clone()],
+            vec![ProbabilityValue::new(1.0).expect("weight")],
+            1,
+            true,
+            None,
+        )
+        .expect("terminal hold universe");
+        let index = PatternPiecePositionIndex::compile(&universe).expect("pattern index");
+        let target = compile_setup_search_conditions(
+            &SetupSearchQuery::default()
+                .with_remaining_pieces(vec![I, O, T, S])
+                .with_next_cycle_remaining_pieces(vec![Z]),
+        )
+        .expect("terminal condition")
+        .remove(0)
+        .terminal_supply_target()
+        .expect("terminal target");
+        let mut accepted = queue;
+        accepted.push(T);
+        let language = TestLanguage::from_sequences(&[accepted]);
+        let mut optimized = QueueObservationPolicyEvaluator::new(
+            &universe,
+            &index,
+            QueueObservationPolicy::VisibleSeven,
+            0,
+            Some(T),
+            true,
+            true,
+            false,
+            Some(target),
+        )
+        .expect("optimized evaluator");
+        let mut raw = QueueObservationPolicyEvaluator::new(
+            &universe,
+            &index,
+            QueueObservationPolicy::VisibleSeven,
+            0,
+            Some(T),
+            true,
+            true,
+            false,
+            Some(target),
+        )
+        .expect("raw evaluator");
+        raw.raw_memo_keys = true;
+        let control = ExecutionControl::default();
+        let quotient = optimized
+            .evaluate(&language, &control)
+            .expect("quotient coverage");
+        let identity = raw.evaluate(&language, &control).expect("raw coverage");
+
+        assert_eq!(
+            quotient.covered_patterns.covered_patterns(),
+            identity.covered_patterns.covered_patterns()
+        );
+        assert_eq!(
+            quotient.covered_pattern_count,
+            identity.covered_pattern_count
+        );
+        assert_eq!(quotient.covered_weight, identity.covered_weight);
+        assert_eq!(quotient.min_accepted_depth, identity.min_accepted_depth);
+        assert_eq!(quotient.max_accepted_depth, identity.max_accepted_depth);
+        assert!(optimized
+            .memo
+            .keys()
+            .chain(optimized.zero_scores.iter())
+            .any(|state| {
+                let hold_code = ((state.0 >> 122) & 0xf) as u8;
+                let consumed_bag_counts = ((state.0 >> 85) & ((1_u128 << 21) - 1)) as u32;
+                hold_code == super::TERMINAL_USED_HELD_CODE && consumed_bag_counts != 0
+            }));
     }
 }
