@@ -41,6 +41,7 @@ mod setup_all_paths;
 mod setup_coverage_graph;
 mod setup_finder;
 mod setup_graph_builder;
+mod setup_observation_language;
 mod setup_parallel;
 mod setup_parallel_segmented;
 mod setup_parallel_wire;

@@ -31,13 +31,14 @@ use super::{
     piece_index,
     queue_observation_policy::QueueObservationPolicyEvaluator,
     setup_all_paths::{enumerate_setup_completion_paths, SetupSolutionPath},
-    setup_coverage_graph::{
-        SetupCoverageGraph, SetupJointSeenLanguageClasses, SetupTargetBuildLanguage,
-        SetupTargetJointLanguage, SetupTargetLanguageReachability,
-    },
+    setup_coverage_graph::SetupCoverageGraph,
     setup_graph_builder::{
         cache_setup_coverage_result, SetupGraphBuildAdvance, SetupGraphBuildSession,
         SetupSharedGraph,
+    },
+    setup_observation_language::{
+        SetupJointSeenLanguageClasses, SetupTargetBuildLanguage, SetupTargetJointLanguage,
+        SetupTargetLanguageReachability,
     },
     setup_partial_build::{PartialBuildGraph, SetupShape},
     setup_representative::{SetupRepresentativeResolver, SetupWitness as RepresentativeWitness},
