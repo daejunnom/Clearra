@@ -257,6 +257,7 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
   assert.equal(defaults.oracleRenderEnabled, false);
   assert.equal(defaults.oracleTextEnabled, false);
   assert.deepEqual(defaults.oracleAllowedChannelIds, []);
+  assert.deepEqual(defaults.oracleSfinderManGuildIds, []);
 
   const automaticRenderer = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",
@@ -305,6 +306,7 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
     "123456789012345678",
     "234567890123456789",
   ]);
+  assert.deepEqual(renderer.oracleSfinderManGuildIds, []);
   assert.equal(renderer.oracleMaxInputChars, 2_000);
   assert.equal(renderer.oracleMaxPages, 128);
   assert.equal(renderer.oracleMaxCtk3FileBytes, 8 * 1024 * 1024);
@@ -322,6 +324,32 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
   assert.equal(textProxy.oracleTextEnabled, true);
   assert.equal(textProxy.workerAuthority, "remote");
   assert.deepEqual(textProxy.oracleCommandPrefixes, ["$", ">"]);
+
+  const sfinderManCoexistence = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_ORACLE_RENDER_ENABLED: "1",
+    CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS:
+      "345678901234567890, 456789012345678901 345678901234567890",
+  });
+  assert.deepEqual(sfinderManCoexistence.oracleSfinderManGuildIds, [
+    "345678901234567890",
+    "456789012345678901",
+  ]);
+  assert.throws(
+    () => loadDiscordBotConfig({
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS: "345678901234567890",
+    }),
+    /requires Oracle message ingress/,
+  );
+  assert.throws(
+    () => loadDiscordBotConfig({
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_ORACLE_RENDER_ENABLED: "1",
+      CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS: "not-a-snowflake",
+    }),
+    /CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS is invalid/,
+  );
 
   const globalTextProxy = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",

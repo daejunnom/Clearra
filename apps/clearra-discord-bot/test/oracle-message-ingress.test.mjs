@@ -168,6 +168,260 @@ test("Oracle ingress delegates only supported messages and deduplicates accepted
   );
 });
 
+test("Sfinder-man guild ownership delegates search and ambient render before local work", async () => {
+  const handled = [];
+  const outcomes = [];
+  const ingress = createIngress(
+    {
+      acceptsOracleMessage(candidate) {
+        return candidate.content.startsWith("$path") ||
+          candidate.content.startsWith("v115@") ||
+          candidate.content.startsWith("ctk3_") ||
+          candidate.content === "__________" ||
+          candidate.attachments.some(
+            (attachment) => attachment.filename === "input.ctk3",
+          );
+      },
+      async handleOracleMessage(candidate) {
+        handled.push(candidate.id);
+      },
+      async observeOracleMessageOutcome(candidate, outcome) {
+        outcomes.push([candidate.id, outcome]);
+      },
+    },
+    {
+      oracleTextEnabled: true,
+      oracleCommandPrefixes: ["$", ">"],
+      oracleSfinderManGuildIds: ["sfinder-guild"],
+      oracleMaxConcurrentMessages: 1,
+      oracleMaxPendingMessages: 0,
+    },
+  );
+
+  for (const [id, content] of [
+    ["delegated-search", "$path --field __________ --next I"],
+    ["delegated-unknown-prefix", "$owned-by-sfinder-man"],
+    ["delegated-render", "v115@vhAAgH"],
+    ["delegated-ctk3", "ctk3_FAKE"],
+    ["delegated-grid", "__________"],
+  ]) {
+    assert.deepEqual(
+      await ingress.acceptDispatch(
+        "MESSAGE_CREATE",
+        message(id, { guild_id: "sfinder-guild", content }),
+      ),
+      { accepted: false, reason: "delegated", owner: "sfinder-man" },
+    );
+  }
+  assert.deepEqual(handled, []);
+  assert.deepEqual(outcomes, [
+    ["delegated-search", {
+      handled: false,
+      status: "delegated",
+      owner: "sfinder-man",
+      reason: "guild-owner",
+    }],
+    ["delegated-unknown-prefix", {
+      handled: false,
+      status: "delegated",
+      owner: "sfinder-man",
+      reason: "guild-owner",
+    }],
+    ["delegated-render", {
+      handled: false,
+      status: "delegated",
+      owner: "sfinder-man",
+      reason: "guild-owner",
+    }],
+    ["delegated-ctk3", {
+      handled: false,
+      status: "delegated",
+      owner: "sfinder-man",
+      reason: "guild-owner",
+    }],
+    ["delegated-grid", {
+      handled: false,
+      status: "delegated",
+      owner: "sfinder-man",
+      reason: "guild-owner",
+    }],
+  ]);
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("delegated-attachment", {
+        guild_id: "sfinder-guild",
+        content: "",
+        attachments: [{ filename: "input.ctk3" }],
+      }),
+    ),
+    { accepted: false, reason: "delegated", owner: "sfinder-man" },
+  );
+  assert.equal(outcomes.at(-1)[0], "delegated-attachment");
+  assert.equal(outcomes.at(-1)[1].status, "delegated");
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("delegated-search", {
+        guild_id: "sfinder-guild",
+        content: "$path --field __________ --next I",
+      }),
+    ),
+    { accepted: false, reason: "duplicate-message" },
+  );
+  assert.equal(outcomes.length, 6);
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("standalone-render", {
+        guild_id: "clearra-guild",
+        content: "v115@vhAAgH",
+      }),
+    ),
+    { accepted: true },
+  );
+  assert.deepEqual(handled, ["standalone-render"]);
+  assert.equal(outcomes.at(-1)[1].status, "succeeded");
+});
+
+test("Oracle ingress owns one privacy-bounded terminal log for text outcomes", async () => {
+  const lines = [];
+  let now = 100;
+  const ingress = createIngress(
+    {
+      async handleOracleMessage(candidate) {
+        if (candidate.id === "failed-log") throw new Error("private detail");
+      },
+    },
+    {
+      oracleTextEnabled: true,
+      oracleSfinderManGuildIds: ["sfinder-guild"],
+    },
+    {
+      operationalScope: "gateway",
+      now: () => now += 5,
+      logger: {
+        info(value) { lines.push(value); },
+        error(value) { lines.push(value); },
+      },
+    },
+  );
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("delegated-log", {
+        guild_id: "sfinder-guild",
+        content: "$path PRIVATE",
+      }),
+    ),
+    { accepted: false, reason: "delegated", owner: "sfinder-man" },
+  );
+  await assert.rejects(
+    ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("failed-log", { content: "$path PRIVATE" }),
+    ),
+    /Oracle message handling failed/,
+  );
+
+  assert.deepEqual(lines.map((line) => {
+    const record = JSON.parse(line);
+    return [record.kind, record.command, record.status, record.durationMs];
+  }), [
+    ["text", "path", "delegated", 5],
+    ["text", "path", "failed", 5],
+  ]);
+  assert.doesNotMatch(lines.join("\n"), /PRIVATE|sfinder-man|guild-owner/i);
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("delegated-render-log", {
+        guild_id: "sfinder-guild",
+        content: "v115@vhAAgH",
+      }),
+    ),
+    { accepted: false, reason: "delegated", owner: "sfinder-man" },
+  );
+  const renderRecord = JSON.parse(lines.at(-1));
+  assert.equal(renderRecord.kind, "render");
+  assert.equal(renderRecord.command, null);
+  assert.equal(renderRecord.status, "delegated");
+});
+
+test("Sfinder-man guild ownership never delegates Clearra self results", async () => {
+  const handled = [];
+  const outcomes = [];
+  const ingress = createIngress(
+    {
+      acceptsOracleMessage(candidate) {
+        return candidate.attachments.some(
+          (attachment) => attachment.filename === "path-result.ctk3",
+        );
+      },
+      async handleOracleMessage(candidate) {
+        handled.push(candidate.id);
+      },
+      async observeOracleMessageOutcome(candidate, outcome) {
+        outcomes.push([candidate.id, outcome.status]);
+      },
+    },
+    {
+      oracleSfinderManGuildIds: ["sfinder-guild"],
+    },
+  ).setBotUserId("clearra-bot");
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("self-result", {
+        guild_id: "sfinder-guild",
+        author: { id: "clearra-bot", bot: true },
+        webhook_id: "interaction-webhook",
+        content: "",
+        attachments: [{ filename: "path-result.ctk3" }],
+      }),
+    ),
+    { accepted: true },
+  );
+  assert.deepEqual(handled, ["self-result"]);
+  assert.deepEqual(outcomes, [["self-result", "succeeded"]]);
+});
+
+test("Sfinder-man ownership keeps Clearra-only render-file and management text local", async () => {
+  const handled = [];
+  const ingress = createIngress(
+    {
+      async handleOracleMessage(candidate) {
+        handled.push(candidate.id);
+      },
+    },
+    {
+      oracleTextEnabled: true,
+      oracleCommandPrefixes: ["$", ">"],
+      oracleSfinderManGuildIds: ["sfinder-guild"],
+    },
+  );
+
+  for (const [id, content] of [
+    ["render-file", "$render-file"],
+    ["management", ">bot-control help"],
+  ]) {
+    assert.deepEqual(
+      await ingress.acceptDispatch(
+        "MESSAGE_CREATE",
+        message(id, { guild_id: "sfinder-guild", content }),
+      ),
+      { accepted: true },
+    );
+  }
+  assert.deepEqual(handled, ["render-file", "management"]);
+});
+
 test("Oracle ingress admits only complete self-webhook message updates", async () => {
   let acceptanceCalls = 0;
   const ingress = createIngress({
@@ -501,6 +755,93 @@ test("Oracle ingress releases a worker slot when a handler fails", async () => {
   await assert.rejects(failed, /Oracle message handling failed/);
   assert.deepEqual(await next, { accepted: true });
   assert.equal(calls, 2);
+});
+
+test("Oracle ingress preserves delegated, failed, and cancelled handler outcomes exactly once", async () => {
+  const outcomes = [];
+  const ingress = createIngress({
+    async handleOracleMessage(candidate) {
+      if (candidate.id === "legacy-delegated") return false;
+      if (candidate.id === "typed-delegated") {
+        return { outcome: "delegated", owner: "sfinder-man" };
+      }
+      if (candidate.id === "typed-handled") {
+        return { outcome: "handled" };
+      }
+      if (candidate.id === "invalid-typed") {
+        return { handled: true, status: "succeeded" };
+      }
+      if (candidate.id === "cancelled") {
+        const error = new Error("cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
+      if (candidate.id === "failed") throw new Error("private failure");
+      return true;
+    },
+    async observeOracleMessageOutcome(candidate, outcome) {
+      outcomes.push([candidate.id, outcome]);
+      if (candidate.id === "observer-failure") {
+        throw new Error("observer persistence failed");
+      }
+    },
+  }, {
+    oracleMaxConcurrentMessages: 1,
+    oracleMaxPendingMessages: 1,
+  });
+
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("legacy-delegated"),
+    ),
+    { accepted: false, reason: "delegated" },
+  );
+  assert.deepEqual(
+    await ingress.acceptDispatch("MESSAGE_CREATE", message("typed-delegated")),
+    { accepted: false, reason: "delegated", owner: "sfinder-man" },
+  );
+  assert.deepEqual(
+    await ingress.acceptDispatch("MESSAGE_CREATE", message("typed-handled")),
+    { accepted: true },
+  );
+  await assert.rejects(
+    ingress.acceptDispatch("MESSAGE_CREATE", message("invalid-typed")),
+    /Oracle message handling failed/,
+  );
+  await assert.rejects(
+    ingress.acceptDispatch("MESSAGE_CREATE", message("cancelled")),
+    /Oracle message handling failed/,
+  );
+  await assert.rejects(
+    ingress.acceptDispatch("MESSAGE_CREATE", message("failed")),
+    /Oracle message handling failed/,
+  );
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("observer-failure"),
+    ),
+    { accepted: true },
+  );
+  assert.deepEqual(
+    await ingress.acceptDispatch("MESSAGE_CREATE", message("after-observer")),
+    { accepted: true },
+  );
+
+  assert.deepEqual(
+    outcomes.map(([id, outcome]) => [id, outcome.status, outcome.reason ?? null]),
+    [
+      ["legacy-delegated", "delegated", "handler-delegated"],
+      ["typed-delegated", "delegated", "handler-delegated"],
+      ["typed-handled", "succeeded", null],
+      ["invalid-typed", "failed", "handler-failed"],
+      ["cancelled", "cancelled", "handler-cancelled"],
+      ["failed", "failed", "handler-failed"],
+      ["observer-failure", "succeeded", null],
+      ["after-observer", "succeeded", null],
+    ],
+  );
 });
 
 function createIngress(overrides = {}, config = {}, dependencies = {}) {

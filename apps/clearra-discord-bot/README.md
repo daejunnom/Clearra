@@ -626,7 +626,8 @@ plain fields are rendered inside their search command and never enter ambient
 standalone detection. Standalone CTK3/Fumen
 messages also render automatically; a standalone plain field must be the whole
 plain message or whole fenced block and contain exactly 10 `#`/`_` cells per
-row for 1–24 rows.
+row for 1–24 rows. A Fumen page comment is rendered in a bounded caption area
+below the field on the matching GIF frame.
 
 `/render-file [image:<same-channel message link|ID>]`, `Apps -> Get original
 GIF`, `$render-file [image]`, and `>render-file [image]` are handled by Oracle. A
@@ -654,6 +655,14 @@ render/search/send lifecycle, and integrated automatic followups are not sent
 back through the legacy self-result renderer. Text mode requires the Developer
 Portal's privileged Message Content Intent.
 
+When Clearra and Sfinder-man intentionally coexist, list those guilds in
+`CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS`. Clearra decides ownership before queue
+admission, document decoding, attachment download, search, or rendering:
+Sfinder-man owns user text commands and ambient Fumen/CTK3 rendering in those
+guilds. Clearra still owns its private `bot-control` and `render-file` recovery
+commands, slash commands, context-menu recovery, and its own generated-result
+rendering. Delegated work is a neutral terminal outcome rather than a failure.
+
 ## Oracle and remote execution settings
 
 The active Oracle settings are:
@@ -662,6 +671,8 @@ The active Oracle settings are:
 CLEARRA_ORACLE_RENDER_ENABLED=1
 CLEARRA_ORACLE_TEXT_ENABLED=1
 CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1
+# Optional comma/space-separated guild IDs where Sfinder-man owns text/render.
+CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS=<guild IDs>
 CLEARRA_JOB_URL=https://<clearra-current-job service>/jobs
 CLEARRA_WORKER_AUTHORITY=remote
 CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1

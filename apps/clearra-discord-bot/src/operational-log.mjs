@@ -2,7 +2,7 @@ import { canonicalClearraOperationalCommand } from "./clearra/command.mjs";
 
 const SCOPES = new Set(["gateway", "interaction", "job"]);
 const KINDS = new Set(["slash", "text", "render", "search"]);
-const STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+const STATUSES = new Set(["succeeded", "failed", "cancelled", "delegated"]);
 const DISCORD_ROOT_COMMANDS = new Set([
   "best-save",
   "best-setup",

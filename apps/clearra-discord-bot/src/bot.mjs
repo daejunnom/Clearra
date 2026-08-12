@@ -1278,20 +1278,30 @@ export class Clearrabot {
     const deadlineUnixMs = Date.now() + this.searchDeadlineDurationMs(arguments_);
     this.controllers.add(controller);
     try {
-      const result = this.withSearchSlot(
+      const outcome = this.withSearchSlot(
         () => this.executor.execute(arguments_, {
           signal: controller.signal,
           deadlineUnixMs,
         }),
         { deadlineUnixMs, signal: controller.signal },
       ).then(
-        (value) => resultMessage(value, tilingOnly, {
-          maxCtk3FileBytes: this.config.maxCtk3FileBytes,
-          locale,
-          resultKind: requestedResultKind ?? publicResultKind(arguments_),
+        (value) => ({
+          outgoing: resultMessage(value, tilingOnly, {
+            maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+            locale,
+            resultKind: requestedResultKind ?? publicResultKind(arguments_),
+          }),
+          error: null,
         }),
-        (error) => textMessage(this.operationFailureText(error, locale)),
-      ).catch((error) => textMessage(this.operationFailureText(error, locale)));
+        (error) => ({
+          outgoing: textMessage(this.operationFailureText(error, locale)),
+          error,
+        }),
+      ).catch((error) => ({
+        outgoing: textMessage(this.operationFailureText(error, locale)),
+        error,
+      }));
+      const result = outcome.then(({ outgoing }) => outgoing);
       const preview = previewDocument
         ? this.buildOraclePreviewMessage(
             previewDocument,
@@ -1304,6 +1314,12 @@ export class Clearrabot {
       } else {
         await this.deliverOracleMessageResult(message, result, preview);
       }
+      // The localized Discord response is part of the user contract, while the
+      // original rejection is the lifecycle contract. Re-throw only after the
+      // response has been delivered so ingress can record failed/cancelled
+      // without turning an expected error reply into a stuck Running entry.
+      const terminal = await outcome;
+      if (terminal.error) throw terminal.error;
     } finally {
       this.controllers.delete(controller);
     }
@@ -1380,6 +1396,7 @@ export class Clearrabot {
           replyMessage(outgoing, message.id),
         );
       }
+      throw error;
     } finally {
       firstResult.resolve(
         textMessage(t(locale, "search.stopped")),

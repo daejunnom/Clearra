@@ -39,6 +39,19 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     environment.CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS,
     "CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS",
   );
+  const oracleSfinderManGuildIds = snowflakeList(
+    environment.CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS,
+    "CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS",
+  );
+  if (
+    oracleSfinderManGuildIds.length > 0 &&
+    !oracleRenderEnabled &&
+    !oracleTextEnabled
+  ) {
+    throw new Error(
+      "CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS requires Oracle message ingress.",
+    );
+  }
   const discordAdminUserIds = snowflakeList(
     environment.CLEARRA_DISCORD_ADMIN_USER_IDS,
     "CLEARRA_DISCORD_ADMIN_USER_IDS",
@@ -189,6 +202,11 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     oracleTextEnabled,
     oracleAllowedChannelIds,
     oracleAllowAllTextChannels,
+    // Coexistence is configured by guild instead of inferred from response
+    // timing. That keeps ownership deterministic when both bots receive the
+    // same Discord dispatch and prevents a late Sfinder-man response from
+    // racing a Clearra search or GIF render.
+    oracleSfinderManGuildIds,
     oracleCommandPrefixes: Object.freeze(["$", ">"]),
     oracleMaxInputChars: boundedPositiveInteger(
       environment.CLEARRA_ORACLE_MAX_INPUT_CHARS,

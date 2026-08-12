@@ -83,6 +83,7 @@ let oracleMessageIngress = new OracleMessageIngress(
   {
     fetchMessage: (channelId, messageId) =>
       rest.getChannelMessage(channelId, messageId),
+    operationalScope: "gateway",
   },
 );
 oracleMessageIngress = attachedValue(

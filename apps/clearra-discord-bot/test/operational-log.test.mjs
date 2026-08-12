@@ -68,6 +68,33 @@ test("operational command labels must resolve through a canonical product catalo
   assert.doesNotMatch(lines[0], new RegExp(unknown));
 });
 
+test("delegated text work is a terminal non-failure operational status", () => {
+  const lines = [];
+  const logger = {
+    info(value) { lines.push(["info", value]); },
+    error(value) { lines.push(["error", value]); },
+  };
+
+  assert.equal(writeOperationalLog(logger, {
+    scope: "gateway",
+    kind: "text",
+    command: "path",
+    status: "delegated",
+    durationMs: 0,
+  }), true);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0][0], "info");
+  assert.deepEqual(JSON.parse(lines[0][1]), {
+    event: "clearra.operation",
+    at: JSON.parse(lines[0][1]).at,
+    scope: "gateway",
+    kind: "text",
+    command: "path",
+    status: "delegated",
+    durationMs: 0,
+  });
+});
+
 test("the privacy allow-list covers every registered command path", () => {
   for (const command of slashCommandCatalog) {
     assert.equal(canonicalOperationalCommand(command.name), command.name);

@@ -102,9 +102,9 @@ test("internal GIF encoder emits one decodable image frame per page", () => {
   const parsed = parseGif(gif);
   assert.equal(parsed.signature, "GIF89a");
   assert.equal(parsed.width, 80);
-  assert.equal(parsed.height, 32);
+  assert.equal(parsed.height, 55);
   assert.equal(parsed.frames.length, 2);
-  assert.equal(parsed.frames[0].pixels.length, 80 * 32);
+  assert.equal(parsed.frames[0].pixels.length, 80 * 55);
   assert.notDeepEqual(parsed.frames[0].pixels, parsed.frames[1].pixels);
   assert.deepEqual(parsed.palette.slice(0, 10), [
     [30, 41, 39],
@@ -126,6 +126,17 @@ test("internal GIF encoder emits one decodable image frame per page", () => {
   assert.equal(firstFrame[(occupiedTop + 1) * pixelWidth + 1], 8);
   assert.equal(firstFrame[72], 1);
   assert.equal(firstFrame[pixelWidth + 73], 0);
+  assert.equal(firstFrame[32 * pixelWidth], 11, "comment panel separator");
+  assert.equal(
+    firstFrame.subarray(32 * pixelWidth).some((pixel) => pixel === 12),
+    true,
+    "page comment is rasterized below the board",
+  );
+  assert.equal(
+    parsed.frames[1].pixels.subarray(32 * pixelWidth).some((pixel) => pixel === 12),
+    false,
+    "a page without a comment leaves the shared panel empty",
+  );
 });
 
 test("GIF interior pixels use the GUI field editor's default mino colors", () => {

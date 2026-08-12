@@ -1294,7 +1294,7 @@ test("Oracle sends a search-first failure and later GIF together in one reply", 
   assert.deepEqual(events.map(({ kind }) => kind), ["execute"]);
 
   releaseRender();
-  assert.equal(await handling, true);
+  await assert.rejects(handling, /remote search failed/);
   assert.deepEqual(events.map(({ kind }) => kind), ["execute", "create"]);
   assert.match(
     events[1].outgoing.payload.content,

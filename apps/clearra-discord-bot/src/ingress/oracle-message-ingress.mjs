@@ -1,3 +1,14 @@
+import { writeOperationalLog } from "../operational-log.mjs";
+import { OracleMessageArbitration } from "./message-arbitration.mjs";
+import {
+  classifyOracleMessageCommand,
+  classifyOracleMessageKind,
+  delegatedOracleMessageOutcome,
+  exceptionOracleMessageOutcome,
+  normalizeOracleMessageOutcome,
+  publicOracleIngressOutcome,
+} from "./oracle-message-outcome.mjs";
+
 const GUILDS_INTENT = 1 << 0;
 const GUILD_MESSAGES_INTENT = 1 << 9;
 const DIRECT_MESSAGES_INTENT = 1 << 12;
@@ -41,6 +52,8 @@ export class OracleMessageIngress {
       config.oracleRenderEnabled || config.oracleTextEnabled,
     );
     this.textEnabled = Boolean(config.oracleTextEnabled);
+    this.messageArbitration = new OracleMessageArbitration(config);
+    this.commandPrefixes = this.messageArbitration.commandPrefixes;
     this.allowedChannelIds = new Set(
       Array.isArray(config.oracleAllowedChannelIds)
         ? config.oracleAllowedChannelIds.map(String)
@@ -66,6 +79,9 @@ export class OracleMessageIngress {
       config.oracleUserCooldownMs,
       DEFAULT_USER_COOLDOWN_MS,
     );
+    this.now = dependencies.now ?? Date.now;
+    this.logger = dependencies.logger ?? console;
+    this.operationalScope = dependencies.operationalScope ?? null;
 
     this.botUserId = null;
     this.activeMessages = 0;
@@ -106,6 +122,13 @@ export class OracleMessageIngress {
     if (rejection !== null) return rejection;
 
     const selfMessage = message.author.id === this.botUserId;
+    if (this.messageArbitration.delegatesPrefixedText(
+      message,
+      this.botUserId,
+    )) {
+      this.#rememberMessageId(message.id);
+      return this.#completeDelegation(message);
+    }
     let acceptedByHandler;
     try {
       acceptedByHandler = this.handler.acceptsOracleMessage(message, {
@@ -124,6 +147,14 @@ export class OracleMessageIngress {
     const managementMessage = this.handler.oracleAccessDecision?.(message, {
       botUserId: this.botUserId,
     })?.management === true;
+    if (this.messageArbitration.delegatesAcceptedCandidate(
+      message,
+      this.botUserId,
+      managementMessage,
+    )) {
+      this.#rememberMessageId(message.id);
+      return this.#completeDelegation(message);
+    }
     if (managementMessage) {
       this.#rememberMessageId(message.id);
       return this.#authorizeAndScheduleManagement(message);
@@ -314,6 +345,18 @@ export class OracleMessageIngress {
     void this.#run(job);
   }
 
+  async #completeDelegation(message) {
+    const startedAt = numericClock(this.now);
+    const outcome = delegatedOracleMessageOutcome();
+    await this.#observeOutcome(message, outcome);
+    this.#writeTerminalLog(message, outcome.status, startedAt);
+    return {
+      accepted: false,
+      reason: "delegated",
+      owner: "sfinder-man",
+    };
+  }
+
   #authorizeAndScheduleManagement(message) {
     if (typeof this.handler.authorizeOracleManagementMessage !== "function") {
       return { accepted: false, reason: "management-authorization-unavailable" };
@@ -340,6 +383,7 @@ export class OracleMessageIngress {
   }
 
   async #runManagement(job) {
+    const startedAt = numericClock(this.now);
     try {
       let authorized = false;
       try {
@@ -355,9 +399,16 @@ export class OracleMessageIngress {
       }
 
       try {
-        await this.handler.handleOracleMessage(job.message);
-        job.resolve({ accepted: true });
-      } catch {
+        const outcome = normalizeOracleMessageOutcome(
+          await this.handler.handleOracleMessage(job.message),
+        );
+        await this.#observeOutcome(job.message, outcome);
+        this.#writeTerminalLog(job.message, outcome.status, startedAt);
+        job.resolve(publicOracleIngressOutcome(outcome));
+      } catch (error) {
+        const outcome = exceptionOracleMessageOutcome(error);
+        await this.#observeOutcome(job.message, outcome);
+        this.#writeTerminalLog(job.message, outcome.status, startedAt);
         job.reject(new Error("Oracle message handling failed."));
       }
     } finally {
@@ -368,10 +419,18 @@ export class OracleMessageIngress {
   }
 
   async #run(job) {
+    const startedAt = numericClock(this.now);
     try {
-      await this.handler.handleOracleMessage(job.message);
-      job.resolve({ accepted: true });
-    } catch {
+      const outcome = normalizeOracleMessageOutcome(
+        await this.handler.handleOracleMessage(job.message),
+      );
+      await this.#observeOutcome(job.message, outcome);
+      this.#writeTerminalLog(job.message, outcome.status, startedAt);
+      job.resolve(publicOracleIngressOutcome(outcome));
+    } catch (error) {
+      const outcome = exceptionOracleMessageOutcome(error);
+      await this.#observeOutcome(job.message, outcome);
+      this.#writeTerminalLog(job.message, outcome.status, startedAt);
       job.reject(new Error("Oracle message handling failed."));
     } finally {
       this.activeMessages -= 1;
@@ -379,6 +438,47 @@ export class OracleMessageIngress {
         this.pendingSelfMessages.shift() ?? this.pendingUserMessages.shift();
       if (next) this.#start(next);
     }
+  }
+
+  async #observeOutcome(message, outcome) {
+    if (typeof this.handler.observeOracleMessageOutcome !== "function") return;
+    try {
+      await this.handler.observeOracleMessageOutcome(message, outcome);
+    } catch {
+      // A private status observer is not allowed to strand public ingress or
+      // retain its concurrency slot. The durable store owns its own retry and
+      // restart reconciliation policy.
+    }
+  }
+
+  #writeTerminalLog(message, status, startedAt) {
+    if (!this.operationalScope) return;
+    const completedAt = numericClock(this.now);
+    writeOperationalLog(this.logger, {
+      scope: this.operationalScope,
+      kind: classifyOracleMessageKind(
+        message?.content,
+        this.commandPrefixes,
+      ),
+      command: classifyOracleMessageCommand(
+        message?.content,
+        this.commandPrefixes,
+      ),
+      status,
+      durationMs:
+        startedAt === null || completedAt === null
+          ? null
+          : completedAt - startedAt,
+    });
+  }
+}
+
+function numericClock(clock) {
+  try {
+    const value = Number(clock());
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
   }
 }
 

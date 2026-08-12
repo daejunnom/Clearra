@@ -1,5 +1,10 @@
 import { operationCells } from "ctk3";
 
+import {
+  paintViewerCommentPanel,
+  prepareViewerCommentPanels,
+} from "./comment.mjs";
+
 const DEFAULT_TILE_SIZE = 20;
 const DEFAULT_DELAY_MS = 500;
 const DEFAULT_MAX_BYTES = 24 * 1024 * 1024;
@@ -65,17 +70,32 @@ export function renderDocumentGif(document, options = {}) {
     256 * 1024 * 1024,
   );
   const viewRows = visibleRows(document);
-  const width = document.width * tileSize;
-  const height = viewRows * tileSize;
+  const boardPixelWidth = document.width * tileSize;
+  const boardPixelHeight = viewRows * tileSize;
+  const commentPanels = prepareViewerCommentPanels(
+    document.pages,
+    boardPixelWidth,
+  );
+  const width = commentPanels?.width ?? boardPixelWidth;
+  const height = boardPixelHeight + (commentPanels?.height ?? 0);
   const writer = new ByteWriter(maxBytes);
 
   writeHeader(writer, width, height);
   writeLoopExtension(writer);
-  for (const page of document.pages) {
+  for (let pageIndex = 0; pageIndex < document.pages.length; pageIndex += 1) {
+    const page = document.pages[pageIndex];
     writeGraphicControlExtension(writer, delayMs);
     writeImageFrame(
       writer,
-      renderPage(document.width, viewRows, tileSize, page),
+      renderPage(
+        document.width,
+        viewRows,
+        tileSize,
+        page,
+        width,
+        commentPanels,
+        pageIndex,
+      ),
       width,
       height,
     );
@@ -133,9 +153,19 @@ function visibleRows(document) {
   return Math.min(31, rows);
 }
 
-function renderPage(width, rows, tileSize, page) {
-  const pixelWidth = width * tileSize;
-  const pixelHeight = rows * tileSize;
+function renderPage(
+  width,
+  rows,
+  tileSize,
+  page,
+  pixelWidth,
+  commentPanels,
+  pageIndex,
+) {
+  const boardPixelWidth = width * tileSize;
+  const boardPixelHeight = rows * tileSize;
+  const pixelHeight = boardPixelHeight + (commentPanels?.height ?? 0);
+  const boardLeft = Math.floor((pixelWidth - boardPixelWidth) / 2);
   const pixels = new Uint8Array(pixelWidth * pixelHeight);
   const cells = Array(width * rows).fill(null);
   const owners = new Uint8Array(width * rows);
@@ -154,9 +184,27 @@ function renderPage(width, rows, tileSize, page) {
   }
   for (let y = 0; y < rows; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      paintCell(pixels, pixelWidth, rows, tileSize, cells, owners, width, x, y);
+      paintCell(
+        pixels,
+        pixelWidth,
+        rows,
+        tileSize,
+        cells,
+        owners,
+        width,
+        x,
+        y,
+        boardLeft,
+      );
     }
   }
+  paintViewerCommentPanel(
+    pixels,
+    pixelWidth,
+    boardPixelHeight,
+    commentPanels,
+    pageIndex,
+  );
   return pixels;
 }
 
@@ -170,11 +218,12 @@ function paintCell(
   width,
   x,
   boardY,
+  boardLeft,
 ) {
   const color = cells[boardY * width + x];
   const owner = owners[boardY * width + x];
   const screenY = rows - boardY - 1;
-  const left = x * tileSize;
+  const left = boardLeft + x * tileSize;
   const top = screenY * tileSize;
   const fill = COLOR_INDEX.get(color) ?? 2;
 
