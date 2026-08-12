@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.7.4 - 2026-08-12
+
+- Unified PC, setup, build, damage, and spin search option normalization across
+  Web, Desktop, and native request boundaries, with fail-closed validation for
+  conflicting fallback, tiling, and inactive-mode settings.
+- Fixed B2B-preservation coverage authority across serial, distributed, and
+  WASM result paths, including strict-empty proofs, worker materialization, and
+  compact/extended wire finalization.
+- Added explicit CoverageSummary and solution-data availability states so
+  uncalculated results, true zero-solution results, partial keys, and unavailable
+  artifacts remain distinguishable on every public result surface.
+- Aligned the curated Discord command catalog, localized public result kinds,
+  packed native options, and Sfinder translators while removing raw command
+  fallbacks outside the supported compatibility contract.
+
 ## 0.7.3 - 2026-08-10
 
 - Localized Discord application commands and setup-search responses in Korean
