@@ -27,6 +27,7 @@
     buildProbabilityRequestForDesktop,
     buildProbabilityValidationCodes,
     createDefaultBuildProbabilityRequest,
+    normalizeBuildProbabilityRequest,
     trimBuildProbabilityMask,
     trimBuildProbabilityRequest,
     type BuildProbabilityRequest
@@ -141,6 +142,7 @@
   }
 
   function updateRequest(next: BuildProbabilityRequest) {
+    next = normalizeBuildProbabilityRequest(next);
     const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
     request = useAllChanged
       ? { ...next, workers: automaticWorkerCount(next.useAllLogicalProcessors) }

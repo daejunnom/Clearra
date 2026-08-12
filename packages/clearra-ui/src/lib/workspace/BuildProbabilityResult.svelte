@@ -6,6 +6,7 @@
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
+  import { workspaceSolutionCount } from './solutionSetAvailability';
   import { boardCellOccupied } from './solverWorkspaceModel';
   import {
     buildProbabilityFinesseView,
@@ -35,6 +36,7 @@
 
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: report = view.searchReport;
+  $: solutionCount = workspaceSolutionCount(report);
   $: summary = Object.fromEntries(report?.summary_fields ?? []);
   $: solutionProbabilityByKey = Object.fromEntries(
     (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
@@ -163,7 +165,7 @@
           <div class="hero-metric">
             {#if aggregation === 'tiling'}
               <span>{label('tilingCount')}</span>
-              <strong>{number(report?.unique_solution_count)}</strong>
+              <strong>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</strong>
               <small>{label('tilingOnlyWarning')}</small>
             {:else if aggregation === 'spin'}
               <span>{label('spinSearchProbability')}</span>
@@ -257,7 +259,7 @@
             </div>
           {/if}
           <dl>
-            <div><dt>{label(aggregation === 'tiling' ? 'tilingCount' : 'buildableTilings')}</dt><dd>{number(report?.unique_solution_count)}</dd></div>
+            <div><dt>{label(aggregation === 'tiling' ? 'tilingCount' : 'buildableTilings')}</dt><dd>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</dd></div>
             {#if aggregation !== 'tiling' && summary.build_mirror_included === 'true'}
               <div><dt>{label('originalBuildProbability')}</dt><dd>{workspaceProbability(language, summary.original_coverage_probability)}</dd></div>
               <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber(summary.mirror_union_added_pattern_count))}</dd></div>
@@ -270,7 +272,7 @@
       <section class="solutions-section" aria-label={label('solutions')}>
         <div class="solutions-heading">
           <h3>{label('solutions')}</h3>
-          {#if solutionKeys.length}
+          {#if solutionCount !== null && solutionKeys.length}
             <SolutionCopyFormatControl
               bind:value={copyFormat}
               {language}
@@ -278,7 +280,9 @@
             />
           {/if}
         </div>
-        {#if solutionKeys.length}
+        {#if solutionCount === null}
+          <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
+        {:else if solutionKeys.length}
           <SolutionGallery
             {solutionKeys}
             solutionProbabilities={solutionProbabilityByKey}

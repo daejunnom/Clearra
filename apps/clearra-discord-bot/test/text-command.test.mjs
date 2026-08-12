@@ -25,8 +25,9 @@ test("text command classification shares parser aliases without retaining argume
     [">score-finder PRIVATE PRIVATE", ">", "score-finder"],
     ["$sfinder score-finder PRIVATE PRIVATE", "$", "score-finder"],
     [">sfinder bestsave PRIVATE", ">", "best-save"],
-    ["$clearra sfinder path PRIVATE", "$", "path"],
-    ["$clearra pc --field PRIVATE", "$", "pc"],
+    ["$clearra sfinder path PRIVATE", "$", null],
+    ["$clearra path --field PRIVATE", "$", null],
+    ["$clearra pc --field PRIVATE", "$", null],
     ["$pc --field PRIVATE", "$", null],
     [">cat-finder PRIVATE", ">", null],
     ["$clearra sfinder catfinder PRIVATE", "$", null],
@@ -44,7 +45,7 @@ test("text command classification keeps an exact identity when arguments are mal
     [`$path --field \"${privateTail}`, "$", "path"],
     [`>score-finder \`${privateTail}`, ">", "score-finder"],
     [`$sfinder bestsave \"${privateTail}`, "$", "best-save"],
-    [`$clearra pc \"${privateTail}`, "$", "pc"],
+    [`$clearra pc \"${privateTail}`, "$", null],
   ];
 
   for (const [content, prefix, expected] of cases) {
@@ -52,31 +53,28 @@ test("text command classification keeps an exact identity when arguments are mal
   }
 });
 
-test("sfinder compatibility spellings share their slash-command identities", () => {
+test("sfinder compatibility spellings retain only translator-backed identities", () => {
   const cases = [
-    ["bestsave", "best-save"],
-    ["bestsetup", "best-setup"],
-    ["congruentcover", "congruent-cover"],
-    ["coverpercent", "cover-percent"],
-    ["dpcfinder", "dpc-finder"],
-    ["pcsetup", "pc-setup"],
-    ["scoreminimals", "score-minimals"],
-    ["setupcover", "setup-cover"],
-    ["specialcover", "special-cover"],
-    ["spincover", "spin-cover"],
+    ["bestsave", "best-save", true],
+    ["bestsetup", "best-setup", false],
+    ["congruentcover", "congruent-cover", true],
+    ["coverpercent", "cover-percent", true],
+    ["dpcfinder", "dpc-finder", false],
+    ["pcsetup", "pc-setup", false],
+    ["scoreminimals", "score-minimals", true],
+    ["setupcover", "setup-cover", true],
+    ["specialcover", "special-cover", true],
+    ["spincover", "spin-cover", true],
   ];
 
-  for (const [compatibilityName, slashName] of cases) {
+  for (const [compatibilityName, slashName, sfinderAllowed] of cases) {
     assert.equal(
       classifyClearraTextCommand(`$sfinder ${compatibilityName} PRIVATE`, "$"),
-      slashName,
+      sfinderAllowed ? slashName : null,
     );
     assert.equal(
-      classifyClearraTextCommand(
-        `>clearra sfinder ${compatibilityName} PRIVATE`,
-        ">",
-      ),
-      slashName,
+      classifyClearraTextCommand(`>clearra sfinder ${compatibilityName} PRIVATE`, ">"),
+      null,
     );
   }
 });
@@ -242,7 +240,7 @@ test("score-finder text routes preserve the fixed-queue engine syntax", () => {
       { name: "field", value: "__________" },
       { name: "next", value: "SIJSTLZO" },
       { name: "lines", value: "5" },
-      { name: "options", value: "initial_b2b=true" },
+      { name: "options", value: "initial-b2b=true" },
     ]);
     assert.deepEqual(request.argumentSets[0].slice(0, 10), [
       "sfinder",
@@ -595,40 +593,20 @@ test("bare verify aliases use the registered slash scope contract", () => {
   );
 });
 
-test("explicit clearra keeps native commands behind the existing host policy", () => {
-  assert.deepEqual(
-    parseClearraTextMessage(
-      "$clearra pc --lines 2 --workers 99 --format text",
-      "$",
-      { ...remoteExecution, workers: 3, logicalProcessors: 3 },
-    ),
-    [
-      "pc",
-      "--lines",
-      "2",
-      "--no-tablebase",
-      "--no-build-dependency-dag",
-      "--auto-workers",
-      "3",
-      "--format",
-      "json",
-      "--include-solution-data",
-    ],
-  );
-  assert.equal(
-    parseClearraTextMessage("$pc --lines 2", "$", remoteExecution),
-    null,
-  );
-
-  const request = parseClearraTextRequest(
+test("explicit clearra and noncatalog sfinder raw routes are disabled", () => {
+  for (const content of [
+    "$clearra path --field __________ --next I",
     "$clearra pc --lines 2",
-    "$",
-    remoteExecution,
-  );
-  assert.equal(request.argumentSets.length, 1);
-  assert.equal(request.arguments_, request.argumentSets[0]);
-  assert.ok(Object.isFrozen(request.argumentSets));
-  assert.ok(Object.isFrozen(request.arguments_));
+    "$sfinder pc --lines 2",
+    "$sfinder damage __________ I",
+    "$sfinder finesse search XXXX______ I __________",
+    "$sfinder pc-setup IOT",
+    "$sfinder unknown --field __________",
+  ]) {
+    assert.equal(parseClearraTextMessage(content, "$", remoteExecution), null);
+    assert.equal(classifyClearraTextCommand(content, "$"), null);
+  }
+  assert.equal(parseClearraTextMessage("$pc --lines 2", "$", remoteExecution), null);
 });
 
 test("bare PC aliases retain every automatic slash target", () => {

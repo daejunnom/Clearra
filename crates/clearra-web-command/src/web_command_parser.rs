@@ -43,6 +43,58 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct WebCommandParser;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BackendFallbackOverride {
+    value: Option<bool>,
+}
+
+impl BackendFallbackOverride {
+    fn record(&mut self, value: bool) -> Result<(), WebCommandError> {
+        if self.value.is_some() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "backend fallback policy may be specified only once",
+            ));
+        }
+        self.value = Some(value);
+        Ok(())
+    }
+
+    fn resolve(self, backend: RequestedSearchBackend) -> bool {
+        self.value
+            .unwrap_or(matches!(backend, RequestedSearchBackend::Auto))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildAggregationKind {
+    Buildability,
+    Tiling,
+    Spin,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BuildAggregationOverride {
+    value: Option<BuildAggregationKind>,
+}
+
+impl BuildAggregationOverride {
+    fn record(&mut self, value: BuildAggregationKind) -> Result<(), WebCommandError> {
+        if self.value.is_some() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "build-probability aggregation may be specified only once",
+            ));
+        }
+        self.value = Some(value);
+        Ok(())
+    }
+
+    fn resolve(self) -> BuildAggregationKind {
+        self.value.unwrap_or(BuildAggregationKind::Buildability)
+    }
+}
+
 impl WebCommandParser {
     pub fn parse(command_text: &str) -> Result<WebCommandRequest, WebCommandError> {
         Self::parse_with_worker_limit(command_text, WorkerPolicy::hardware_worker_limit())
@@ -334,6 +386,12 @@ fn parse_spin_structure_command(
                         format!("invalid --lines value '{value}'"),
                     )
                 })?;
+                if line_requirement == SpinLineRequirement::AtLeast(0) {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--lines 0+ is not a meaningful spin-structure requirement",
+                    ));
+                }
             }
             "--fill-bottom" => {
                 let value = next_value(tokens, &mut cursor, "--fill-bottom")?;
@@ -413,6 +471,12 @@ fn parse_spin_structure_command(
             "spin-structure requires --pieces",
         )
     })?;
+    if max_placements.is_some_and(|limit| u16::from(limit) > inventory.total()) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--max-placements cannot exceed the supplied piece inventory",
+        ));
+    }
     let mut query = SpinStructureQuery::new(inventory, mode);
     query.initial_board = board;
     query.height = height;
@@ -773,10 +837,40 @@ fn parse_setup_command(
                 "setup mode oracle cannot be combined with --qb",
             ));
         }
+        (Some(clearra_problem::SetupSearchMode::QueueBased), false) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "setup mode qb requires --qb observed pieces",
+            ));
+        }
         (Some(mode), _) => mode,
         (None, true) => clearra_problem::SetupSearchMode::QueueBased,
         (None, false) => clearra_problem::SetupSearchMode::ShapeOracle,
     };
+    let cycle =
+        clearra_problem::query::cycle_for_remaining_count(pieces.len()).ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "setup residue must contain between one and seven pieces",
+            )
+        })?;
+    if allow_post_cycle_borrow && cycle != 7 {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--allow-post-cycle-borrow requires exactly three remaining pieces",
+        ));
+    }
+    if let Some(next_cycle_pieces) = next_cycle_remaining_pieces.as_ref() {
+        let expected = setup_next_cycle_remaining_count(cycle);
+        if next_cycle_pieces.len() != expected {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "--next-cycle-remaining requires {expected} pieces for setup cycle {cycle}"
+                ),
+            ));
+        }
+    }
     validate_worker_options(
         workers,
         automatic_worker_limit,
@@ -830,6 +924,21 @@ fn parse_setup_command(
         request = request.with_automatic_worker_limit(workers);
     }
     Ok(request)
+}
+
+fn setup_next_cycle_remaining_count(cycle: u8) -> usize {
+    // Keep malformed text commands out of AppRequest; the compiler enforces
+    // this same cycle-derived terminal inventory invariant defensively.
+    match cycle {
+        1 => 4,
+        2 => 1,
+        3 => 5,
+        4 => 2,
+        5 => 6,
+        6 => 3,
+        7 => 7,
+        _ => 0,
+    }
 }
 
 fn parse_forward_command(
@@ -929,10 +1038,14 @@ fn parse_forward_command(
                 })?;
             }
             "--initial-combo" => {
-                initial_combo = Some(parse_positive(
-                    next_value(tokens, &mut cursor, "--initial-combo")?,
-                    "--initial-combo",
-                )?);
+                let value = next_value(tokens, &mut cursor, "--initial-combo")?;
+                let parsed = value.parse::<u16>().map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --initial-combo value '{value}'"),
+                    )
+                })?;
+                initial_combo = (parsed > 0).then_some(parsed);
             }
             "--initial-b2b" => {
                 let value = next_value(tokens, &mut cursor, "--initial-b2b")?;
@@ -942,7 +1055,7 @@ fn parse_forward_command(
                         format!("invalid --initial-b2b value '{value}'"),
                     )
                 })?;
-                initial_back_to_back = (parsed > 0).then_some(parsed - 1);
+                initial_back_to_back = parsed.checked_sub(1);
             }
             "--preserve-b2b" => {
                 line_clear_policy = ForwardLineClearPolicy::PreserveBackToBack;
@@ -974,7 +1087,13 @@ fn parse_forward_command(
                     if lines > 4 {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
-                            "spin-finder --lines must be any, 0..4, or 0+..4+",
+                            "spin-finder --lines must be any, 0..4, or 1+..4+",
+                        ));
+                    }
+                    if at_least && lines == 0 {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "spin-finder --lines at-least form must be 1+ through 4+",
                         ));
                     }
                     if at_least {
@@ -1039,6 +1158,12 @@ fn parse_forward_command(
         }
         height = height.max(minimum_height);
     }
+    if !(1..=24).contains(&height) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "forward-search --height must be between 1 and 24",
+        ));
+    }
     let piece_source = piece_source.ok_or_else(|| {
         WebCommandError::new(
             WebCommandErrorCode::MissingValue,
@@ -1049,6 +1174,21 @@ fn parse_forward_command(
             },
         )
     })?;
+    if spin_finder && spin_profile == SpinProfileId::Disabled {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "spin-finder requires an enabled --spin-profile",
+        ));
+    }
+    if spin_finder
+        && target_category == ForwardSpinCategory::Other
+        && !spin_profile.recognizes_non_t_immobile_spins()
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--spin-category other requires an all-spin or all-mini spin profile",
+        ));
+    }
     let mode = if spin_finder {
         ForwardSearchMode::SpinFinder(ForwardSpinTarget::with_line_requirement(
             target_lines,
@@ -1135,17 +1275,19 @@ fn parse_build_probability_command(
     let mut use_all_logical_processors = false;
     let mut cpu_warmup = false;
     let mut backend = RequestedSearchBackend::Cpu;
-    let mut allow_backend_fallback = false;
+    let mut backend_fallback = BackendFallbackOverride::default();
     let mut include_horizontal_mirror = true;
-    let mut aggregation = BuildProbabilityAggregation::Buildability;
-    let mut tiling_only = false;
-    let mut spin_aggregation_requested = false;
+    let mut aggregation = BuildAggregationOverride::default();
     let mut spin_profile = None;
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
+    let mut build_dependency_option_requested = false;
     let mut finesse_metric = FinesseMetric::Off;
+    let mut finesse_option_requested = false;
     let mut finesse_pattern_knowledge = FinessePatternKnowledge::Both;
+    let mut pattern_knowledge_option_requested = false;
     let mut rule = srs_plus();
+    let mut rule_requested = false;
     let mut cursor = 0usize;
 
     while cursor < tokens.len() {
@@ -1233,14 +1375,13 @@ fn parse_build_probability_command(
                         format!("invalid --backend value '{value}'"),
                     )
                 })?;
-                allow_backend_fallback = matches!(backend, RequestedSearchBackend::Auto);
             }
             "--allow-backend-fallback" => {
-                allow_backend_fallback = true;
+                backend_fallback.record(true)?;
                 cursor += 1;
             }
             "--no-backend-fallback" => {
-                allow_backend_fallback = false;
+                backend_fallback.record(false)?;
                 cursor += 1;
             }
             "--include-mirror" => {
@@ -1252,16 +1393,10 @@ fn parse_build_probability_command(
                 cursor += 1;
             }
             "--aggregate" => {
-                aggregation = match next_value(tokens, &mut cursor, "--aggregate")? {
-                    "buildability" | "build" => BuildProbabilityAggregation::Buildability,
-                    "tiling" => {
-                        tiling_only = true;
-                        BuildProbabilityAggregation::TilingOnly
-                    }
-                    "spin" => {
-                        spin_aggregation_requested = true;
-                        BuildProbabilityAggregation::spin_search(SpinProfileSelection::TSpins)
-                    }
+                let value = match next_value(tokens, &mut cursor, "--aggregate")? {
+                    "buildability" | "build" => BuildAggregationKind::Buildability,
+                    "tiling" => BuildAggregationKind::Tiling,
+                    "spin" => BuildAggregationKind::Spin,
                     value => {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
@@ -1271,10 +1406,10 @@ fn parse_build_probability_command(
                         ));
                     }
                 };
+                aggregation.record(value)?;
             }
             "--tiling-only" => {
-                tiling_only = true;
-                aggregation = BuildProbabilityAggregation::TilingOnly;
+                aggregation.record(BuildAggregationKind::Tiling)?;
                 cursor += 1;
             }
             "--spin-profile" => {
@@ -1292,10 +1427,12 @@ fn parse_build_probability_command(
             }
             "--build-dependency-dag" => {
                 precompute_build_dependencies = true;
+                build_dependency_option_requested = true;
                 cursor += 1;
             }
             "--no-build-dependency-dag" => {
                 precompute_build_dependencies = false;
+                build_dependency_option_requested = true;
                 cursor += 1;
             }
             "--finesse" => {
@@ -1306,6 +1443,7 @@ fn parse_build_probability_command(
                         format!("unsupported --finesse value '{value}'; expected off or inputs"),
                     )
                 })?;
+                finesse_option_requested = true;
             }
             "--pattern-knowledge" => {
                 let value = next_value(tokens, &mut cursor, "--pattern-knowledge")?;
@@ -1318,9 +1456,11 @@ fn parse_build_probability_command(
                             ),
                         )
                     })?;
+                pattern_knowledge_option_requested = true;
             }
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?;
+                rule_requested = true;
             }
             flag if flag.starts_with("--") => {
                 return Err(WebCommandError::new(
@@ -1343,26 +1483,43 @@ fn parse_build_probability_command(
             "--queue and --patterns are mutually exclusive",
         ));
     }
-    if let Some(profile) = spin_profile {
-        if aggregation.requests_spin_coverage() {
-            aggregation = BuildProbabilityAggregation::spin_search(profile);
-        }
-    }
+    let aggregation_kind = aggregation.resolve();
+    let tiling_only = aggregation_kind == BuildAggregationKind::Tiling;
     if tiling_only
-        && (spin_aggregation_requested
-            || spin_profile.is_some()
+        && (spin_profile.is_some()
             || preserve_back_to_back
-            || precompute_build_dependencies
-            || finesse_metric.requested())
+            || build_dependency_option_requested
+            || finesse_option_requested
+            || pattern_knowledge_option_requested
+            || rule_requested)
     {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
-            "--tiling-only cannot be combined with spin, B2B-preservation, BuildUp dependency, or finesse options",
+            "tiling aggregation cannot be combined with rule, spin, B2B-preservation, BuildUp dependency, or finesse options",
         ));
     }
-    if tiling_only {
-        aggregation = BuildProbabilityAggregation::TilingOnly;
+    if spin_profile.is_some()
+        && aggregation_kind != BuildAggregationKind::Spin
+        && !preserve_back_to_back
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--spin-profile requires --aggregate spin or --preserve-b2b",
+        ));
     }
+    if pattern_knowledge_option_requested && !finesse_metric.requested() {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--pattern-knowledge requires --finesse inputs",
+        ));
+    }
+    let aggregation = match aggregation_kind {
+        BuildAggregationKind::Buildability => BuildProbabilityAggregation::Buildability,
+        BuildAggregationKind::Tiling => BuildProbabilityAggregation::TilingOnly,
+        BuildAggregationKind::Spin => BuildProbabilityAggregation::spin_search(
+            spin_profile.unwrap_or(SpinProfileSelection::TSpins),
+        ),
+    };
     let constraint_profile = spin_profile.unwrap_or(SpinProfileSelection::TSpins);
     if !hold_enabled && hold_piece.is_some_and(|piece| piece.is_some()) {
         return Err(WebCommandError::new(
@@ -1377,6 +1534,7 @@ fn parse_build_probability_command(
         worker_hardware_limit,
     )?;
 
+    let allow_backend_fallback = backend_fallback.resolve(backend);
     let mut input = WebBuildProbabilityInput::from_words(
         base_mask.ok_or_else(|| missing_build_probability_option("--base-mask"))?,
         target_mask.ok_or_else(|| missing_build_probability_option("--target-mask"))?,
@@ -1454,10 +1612,10 @@ fn parse_pc_command(
     worker_hardware_limit: usize,
     failed_queue_requested: bool,
 ) -> Result<WebCommandRequest, WebCommandError> {
-    let mut lines = 2u8;
+    let mut lines = 4u8;
     let mut backend = RequestedSearchBackend::Auto;
     let mut gpu_device = GpuDeviceSelection::Auto;
-    let mut allow_backend_fallback = true;
+    let mut backend_fallback = BackendFallbackOverride::default();
     let mut queue: Option<String> = None;
     let mut patterns: Option<String> = None;
     let mut board_mask: Option<u64> = None;
@@ -1515,7 +1673,6 @@ fn parse_pc_command(
                         format!("invalid --backend value '{value}'"),
                     )
                 })?;
-                allow_backend_fallback = matches!(backend, RequestedSearchBackend::Auto);
             }
             "--gpu-device" => {
                 let value = next_value(tokens, &mut cursor, "--gpu-device")?;
@@ -1613,12 +1770,12 @@ fn parse_pc_command(
             }
             "--initial-b2b" => {
                 let value = next_value(tokens, &mut cursor, "--initial-b2b")?;
-                initial_b2b = Some(value.parse::<u32>().map_err(|_| {
+                initial_b2b = Some(u32::from(value.parse::<u16>().map_err(|_| {
                     WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
                         format!("invalid --initial-b2b value '{value}'"),
                     )
-                })?);
+                })?));
             }
             "--retained-traces" => {
                 let value = next_value(tokens, &mut cursor, "--retained-traces")?;
@@ -1697,11 +1854,11 @@ fn parse_pc_command(
                     })?;
             }
             "--allow-backend-fallback" => {
-                allow_backend_fallback = true;
+                backend_fallback.record(true)?;
                 cursor += 1;
             }
             "--no-backend-fallback" => {
-                allow_backend_fallback = false;
+                backend_fallback.record(false)?;
                 cursor += 1;
             }
             "--input" | "--file" | "--fixture" => {
@@ -1799,6 +1956,22 @@ fn parse_pc_command(
         }
         count_policy = PcCountPolicy::CountAll;
     }
+    if !failed_queue_requested
+        && spin_profile.is_some()
+        && !score_requested
+        && !preserve_back_to_back
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--spin-profile requires --score or --preserve-b2b",
+        ));
+    }
+    if !failed_queue_requested && initial_b2b.is_some() && !score_requested {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--initial-b2b requires --score",
+        ));
+    }
     let mut objective = if failed_queue_requested {
         ObjectivePolicy::all()
     } else {
@@ -1842,9 +2015,6 @@ fn parse_pc_command(
             "--no-hold cannot be combined with an occupied --hold slot",
         ));
     }
-    if !failed_queue_requested && spin_profile.is_some() && !preserve_back_to_back {
-        score_requested = true;
-    }
     if score_requested && !objective.score().requested() {
         objective = objective.with_score_summary();
     }
@@ -1865,6 +2035,7 @@ fn parse_pc_command(
         count_policy = PcCountPolicy::CountAll;
     }
 
+    let allow_backend_fallback = backend_fallback.resolve(backend);
     let mut request = WebCommandRequest::pc(lines, backend)
         .with_rule(rule)
         .with_worker_hardware_limit(worker_hardware_limit)

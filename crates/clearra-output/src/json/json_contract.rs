@@ -38,21 +38,23 @@ impl JsonContract {
         let summary = fields
             .iter()
             .filter(|field| {
-                field.key() != "solution_data_requested"
-                    && (!solution_data_requested
-                        || !matches!(
-                            field.key(),
-                            "solution_keys"
-                                | "solution_classes"
-                                | "solution_probabilities"
-                                | "finesse_report"
-                                | "finesse_score_data"
-                                | "hold_conditions"
-                                | "outcomes"
-                                | "regular"
-                                | "mini"
-                                | "forward_solution_data"
-                        ))
+                !matches!(
+                    field.key(),
+                    "solution_data_requested" | "solution_data_status" | "solution_data_reason"
+                ) && (!solution_data_requested
+                    || !matches!(
+                        field.key(),
+                        "solution_keys"
+                            | "solution_classes"
+                            | "solution_probabilities"
+                            | "finesse_report"
+                            | "finesse_score_data"
+                            | "hold_conditions"
+                            | "outcomes"
+                            | "regular"
+                            | "mini"
+                            | "forward_solution_data"
+                    ))
             })
             .cloned()
             .collect::<Vec<_>>();

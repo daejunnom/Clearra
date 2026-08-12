@@ -3,7 +3,7 @@ use clearra_core_domain::{
     resource::{ResourceReport, ResourceTruncationReason},
 };
 use clearra_core_ffi::NativeCoreError;
-use clearra_problem::{SearchProblem, SearchProblemPreset};
+use clearra_problem::{SearchOutputPolicy, SearchProblem, SearchProblemPreset};
 
 use crate::{
     buildup::{
@@ -225,6 +225,23 @@ fn build_result(
         field("percent_reports_probability_complete", true),
         field("coverage_probability", &probability),
     ];
+    if problem.output_policy() == SearchOutputPolicy::CoverageSummary {
+        fields.extend([
+            field(
+                "search_output_policy",
+                SearchOutputPolicy::CoverageSummary.as_str(),
+            ),
+            field("unique_solution_count", "not-calculated"),
+            field("normalized_unique_solution_count", "not-calculated"),
+            field("solution_count_calculated", false),
+            field("solution_set_materialized", false),
+            field("solution_keys_materialized_count", 0),
+            field("solution_keys_complete", false),
+            field("solution_page_available", false),
+            field("normalized_solution_set_hash", "not-calculated"),
+            field("actual_normalized_solution_set_hash", "not-calculated"),
+        ]);
+    }
     if let Some(observed) = source.observed_window_descriptor() {
         fields.push(field("observed_pattern_budget", observed.budget()));
     }

@@ -1,3 +1,4 @@
+mod backend_fallback_override;
 pub mod cli_args;
 mod cli_command_parser;
 pub mod cli_parser;

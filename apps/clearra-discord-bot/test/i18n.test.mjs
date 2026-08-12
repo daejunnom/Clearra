@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assertDiscordCatalogComplete,
+  DiscordInputError,
   matchDiscordLocale,
   operationErrorText,
   t,
@@ -21,6 +22,14 @@ test("English and Korean Discord catalogs stay complete", () => {
   assert.equal(matchDiscordLocale("ko-KR"), "ko");
   assert.equal(matchDiscordLocale("en-US"), "en");
   assert.equal(matchDiscordLocale("ja"), null);
+  assert.match(
+    validationErrorText(new DiscordInputError("options.setup_qb_bag_capacity"), "en"),
+    /seven-piece bag/u,
+  );
+  assert.match(
+    validationErrorText(new DiscordInputError("options.setup_qb_bag_capacity"), "ko"),
+    /7개 미노 백/u,
+  );
 });
 
 test("public validation and operation errors hide deployment details", () => {
@@ -181,24 +190,21 @@ test("Discord registration localizes names without redundant values or collision
   const spinOptions = globalCommands
     .find(({ name }) => name === "spin")
     ?.options.find(({ name }) => name === "options");
-  assert.deepEqual(
-    spinOptions?.choices.map(effectiveKoreanChoiceName),
-    ["T-spin 싱글", "T-spin 더블", "T-spin 트리플", "모든 T-spin"],
-  );
+  assert.equal(spinOptions?.choices, undefined);
+  assert.match(spinOptions?.description ?? "", /type=TSS/);
 
   const scoreFinder = globalCommands.find(({ name }) => name === "score-finder");
   assert.equal(scoreFinder?.name_localizations?.ko, undefined);
   assert.match(scoreFinder?.description_localizations?.ko ?? "", /Jstris.*퍼펙트 클리어/u);
-  assert.deepEqual(
-    scoreFinder?.options.find(({ name }) => name === "options")
-      ?.choices.map(effectiveKoreanChoiceName),
-    ["초기 B2B 사용 안 함 (기본값)", "초기 B2B 사용"],
+  assert.equal(
+    scoreFinder?.options.find(({ name }) => name === "options")?.choices,
+    undefined,
   );
   const scoreFinderLines = scoreFinder?.options.find(({ name }) => name === "lines");
   assert.match(scoreFinderLines?.description ?? "", /1–6/);
   assert.match(scoreFinderLines?.description_localizations?.ko ?? "", /1–6줄/u);
-  assert.doesNotMatch(scoreFinderLines?.description ?? "", /default/i);
-  assert.doesNotMatch(scoreFinderLines?.description_localizations?.ko ?? "", /4줄/u);
+  assert.match(scoreFinderLines?.description ?? "", /defaults to 4/i);
+  assert.match(scoreFinderLines?.description_localizations?.ko ?? "", /4줄/u);
 
   const pathField = globalCommands
     .find(({ name }) => name === "path")
@@ -243,6 +249,7 @@ test("Discord registration localizes names without redundant values or collision
     "next-cycle-remaining",
     "setup-length",
     "kicktable",
+    "options",
   ]);
   assert.deepEqual(
     setupRanking?.options.find(({ name }) => name === "priority")

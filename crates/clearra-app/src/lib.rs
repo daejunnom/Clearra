@@ -30,6 +30,7 @@ mod resource_contract;
 pub mod response;
 pub mod run_request;
 pub mod search_backend_warmup;
+mod search_output_surface_postprocess;
 pub mod tablebase_runtime;
 
 pub use app_command::{AppCommand, RunnableAppCommand};

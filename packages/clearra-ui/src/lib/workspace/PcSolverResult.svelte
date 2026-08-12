@@ -5,6 +5,10 @@
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
   import type { SolutionExportKeySource } from './solutionExportAsync';
+  import {
+    workspaceSolutionCount,
+    workspaceSolutionPageAvailable
+  } from './solutionSetAvailability';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -26,12 +30,12 @@
   $: report = view.searchReport;
   $: solutionKeys = report?.normalized_solution_keys ?? [];
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
-  $: solutionPageAvailable = summaryFields.solution_page_available === 'true';
-  $: solutionCount = report?.unique_solution_count ?? solutionKeys.length;
+  $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
+  $: solutionCount = workspaceSolutionCount(report);
   $: resultIncomplete = view.status === 'completed' && (
     report?.count_complete === false || view.resourceReport?.truncated === true
   );
-  $: exportKeySource = solutionPageAvailable && loadSolutionPage
+  $: exportKeySource = solutionCount !== null && solutionPageAvailable && loadSolutionPage
     ? createExportKeySource(solutionCount, loadSolutionPage)
     : null;
   $: progressPercent = view.progressTotal > 0
@@ -132,18 +136,22 @@
         <p class="incomplete" role="status">{label('playerFinderResultsIncomplete')}</p>
       {/if}
       <div class="result-summary">
-        <div><strong>{number(solutionCount)}</strong><span>{label('solutions')}</span></div>
+        <div><strong>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</strong><span>{label('solutions')}</span></div>
         <div><strong>{workspaceProbability(language, report?.coverage_probability)}</strong><span>{label('coverage')}</span></div>
-        <SolutionCopyFormatControl
-          bind:value={copyFormat}
-          {language}
-          compact
-          {solutionKeys}
-          keySource={exportKeySource}
-        />
+        {#if solutionCount !== null}
+          <SolutionCopyFormatControl
+            bind:value={copyFormat}
+            {language}
+            compact
+            {solutionKeys}
+            keySource={exportKeySource}
+          />
+        {/if}
       </div>
 
-      {#if solutionCount > 0}
+      {#if solutionCount === null}
+        <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
+      {:else if solutionCount > 0}
         <SolutionGallery
           {solutionKeys}
           {solutionCount}

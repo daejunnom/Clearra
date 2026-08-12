@@ -36,11 +36,15 @@ impl GuiFormValidator {
                 }
             }
             GuiProblemForm::ScenarioPc(scenario) => {
-                validate_piece_queue(
-                    scenario.remaining_queue(),
-                    "scenario.remaining_queue",
-                    summary,
-                );
+                if !scenario.remaining_queue_is_standard_bag()
+                    && !scenario.remaining_queue_is_pattern()
+                {
+                    validate_piece_queue(
+                        scenario.remaining_queue(),
+                        "scenario.remaining_queue",
+                        summary,
+                    );
+                }
                 validate_field_mask(
                     scenario.visible_height(),
                     scenario.initial_board_mask(),

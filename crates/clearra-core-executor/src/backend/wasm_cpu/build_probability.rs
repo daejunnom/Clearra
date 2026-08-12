@@ -432,6 +432,11 @@ pub(super) fn merge_symmetry_results(
     merged_solution_keys.dedup();
     let normalized_solutions_complete =
         merged_page_store.is_some() || normalized_identities_complete || normalized_keys_complete;
+    let search_output_policy = primary
+        .field("search_output_policy")
+        .filter(|policy| matches!(*policy, "summary" | "trace" | "coverage-rows"))
+        .unwrap_or("summary")
+        .to_owned();
     let merged_solution_hash = if let Some(store) = &merged_page_store {
         store.normalized_hash().to_owned()
     } else if normalized_identities_complete {
@@ -578,13 +583,28 @@ pub(super) fn merge_symmetry_results(
         ),
     ];
     if normalized_solutions_complete {
-        replacements.push(field(
-            "unique_solution_count",
-            merged_page_store
-                .as_ref()
-                .map_or(merged_solution_keys.len(), |store| store.len()),
-        ));
-        replacements.push(field("normalized_solution_set_hash", merged_solution_hash));
+        let merged_solution_count = merged_page_store
+            .as_ref()
+            .map_or(merged_solution_keys.len(), |store| store.len());
+        let materialized_key_count = merged_solution_keys.len();
+        let keys_complete = materialized_key_count == merged_solution_count;
+        let page_available = merged_page_store.is_some() && !keys_complete;
+        replacements.extend([
+            field("search_output_policy", &search_output_policy),
+            field("unique_solution_count", merged_solution_count),
+            field("normalized_unique_solution_count", merged_solution_count),
+            field(
+                "actual_normalized_unique_solution_count",
+                merged_solution_count,
+            ),
+            field("solution_count_calculated", true),
+            field("solution_set_materialized", true),
+            field("solution_keys_materialized_count", materialized_key_count),
+            field("solution_keys_complete", keys_complete),
+            field("solution_page_available", page_available),
+            field("normalized_solution_set_hash", &merged_solution_hash),
+            field("actual_normalized_solution_set_hash", merged_solution_hash),
+        ]);
     }
 
     let mut scoring_batches = primary.take_exact_scoring_execution_batches();
@@ -3016,6 +3036,45 @@ mod finesse_integration_tests {
 
     use super::*;
     use crate::backend::wasm_cpu::buildup::{PreparedFinesseEdge, PreparedFinesseNode};
+
+    #[test]
+    fn symmetry_merge_emits_a_complete_explicit_solution_contract() {
+        let input = CoreExecutionResult::new(
+            vec![
+                ("coverage_pattern_count".to_owned(), "1".to_owned()),
+                (
+                    "build_probability_aggregation".to_owned(),
+                    "buildability".to_owned(),
+                ),
+                ("unique_solution_count".to_owned(), "1".to_owned()),
+                ("probability_complete".to_owned(), "true".to_owned()),
+                ("count_complete".to_owned(), "true".to_owned()),
+                ("resource_truncated".to_owned(), "false".to_owned()),
+                ("resource_truncation_reason".to_owned(), "none".to_owned()),
+                ("board_storage".to_owned(), "board256-canonical".to_owned()),
+            ],
+            Vec::new(),
+        )
+        .with_coverage_pattern_words(vec![1])
+        .with_normalized_solution_keys(vec!["solution".to_owned()]);
+
+        let merged = merge_symmetry_results(
+            vec![input],
+            false,
+            false,
+            &WeightedPatternSet::uniform(1).expect("uniform weights"),
+            false,
+        )
+        .expect("symmetry merge");
+        let availability = merged.execution_report().solution_set_availability();
+
+        assert_eq!(merged.field("search_output_policy"), Some("summary"));
+        assert!(availability.contract_valid());
+        assert!(availability.solution_set_materialized());
+        assert!(
+            availability.materialized_key_count_matches(merged.normalized_solution_keys().len())
+        );
+    }
 
     fn probability(value: f64) -> ProbabilityValue {
         ProbabilityValue::new(value).expect("test probability is valid")

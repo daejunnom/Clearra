@@ -1,10 +1,13 @@
+// SRP rationale: this module has one behavior-level change reason: adapting the typed in-process
+// App command lifecycle, from preparation through cooperative execution and report projection, to
+// the public WASM host contract.
 use std::{fmt, sync::Arc};
 
 use clearra_app::{
     AppContext, AppCoreExecutorService, AppRequest, AppServices, CooperativeAppAdvance,
     CooperativeAppExecution, ExecutionControl,
 };
-use clearra_core_executor::TilingSolutionPageStore;
+use clearra_core_executor::{CoreExecutionResult, TilingSolutionPageStore};
 use clearra_host_contract::{AppResponse as HostAppResponse, Diagnostic, DiagnosticReport};
 use clearra_web_command::{WebCommandError, WebCommandParser, WebCommandRequest};
 
@@ -37,6 +40,11 @@ pub struct WasmSearchReport {
     pub packing_candidate_set_digest: String,
     pub packing_candidate_keys: Vec<String>,
     pub unique_solution_count: usize,
+    pub solution_count_calculated: bool,
+    pub solution_set_materialized: bool,
+    pub solution_keys_materialized_count: usize,
+    pub solution_keys_complete: bool,
+    pub solution_page_available: bool,
     pub normalized_solution_set_hash: String,
     pub normalized_solution_keys: Vec<String>,
     pub solution_probabilities: Vec<WasmSolutionProbability>,
@@ -307,6 +315,11 @@ impl WasmSearchReport {
                 .to_owned(),
                 solution_found: !outcomes.is_empty(),
                 unique_solution_count: outcomes.len(),
+                solution_count_calculated: true,
+                solution_set_materialized: true,
+                solution_keys_materialized_count: 0,
+                solution_keys_complete: false,
+                solution_page_available: false,
                 count_complete: result.complete(),
                 probability_complete: result.complete(),
                 searched_nodes: usize::try_from(result.visited_states()).unwrap_or(usize::MAX),
@@ -349,6 +362,31 @@ impl WasmSearchReport {
             }
             None => return None,
         };
+        let solution_availability = result.execution_report().solution_set_availability();
+        let finesse_score_exception = result
+            .finesse_report()
+            .is_some_and(|report| report.mode() == "score");
+        let solution_contract_valid = solution_availability.contract_valid()
+            && solution_availability
+                .materialized_key_count_matches(result.normalized_solution_keys().len());
+        let solution_count_calculated =
+            solution_contract_valid && solution_availability.solution_count_calculated();
+        let solution_set_materialized =
+            solution_contract_valid && solution_availability.solution_set_materialized();
+        let solution_keys_materialized_count = if solution_contract_valid {
+            solution_availability.solution_keys_materialized_count()
+        } else {
+            0
+        };
+        let solution_keys_complete =
+            solution_contract_valid && solution_availability.solution_keys_complete();
+        let solution_page_available =
+            solution_contract_valid && solution_availability.solution_page_available();
+        let unique_solution_count = if solution_count_calculated {
+            result.usize_field("unique_solution_count").unwrap_or(0)
+        } else {
+            0
+        };
         Some(Self {
             backend_selected,
             workers_used: result.usize_field("workers_used").unwrap_or(1),
@@ -381,102 +419,129 @@ impl WasmSearchReport {
                 .field("packing_candidate_set_digest")
                 .unwrap_or("0000000000000000")
                 .to_owned(),
-            packing_candidate_keys: result.packing_candidate_keys().to_vec(),
-            unique_solution_count: result.usize_field("unique_solution_count").unwrap_or(0),
+            packing_candidate_keys: if solution_set_materialized {
+                result.packing_candidate_keys().to_vec()
+            } else {
+                Vec::new()
+            },
+            unique_solution_count,
+            solution_count_calculated,
+            solution_set_materialized,
+            solution_keys_materialized_count,
+            solution_keys_complete,
+            solution_page_available,
             normalized_solution_set_hash: result
                 .field("normalized_solution_set_hash")
-                .unwrap_or("cts1:cbf29ce484222325")
+                .filter(|_| solution_set_materialized)
+                .unwrap_or("not-calculated")
                 .to_owned(),
-            normalized_solution_keys: result.normalized_solution_keys().to_vec(),
-            solution_probabilities: result
-                .solution_probabilities()
-                .iter()
-                .map(|entry| WasmSolutionProbability {
-                    solution_key: entry.solution_key().to_owned(),
-                    probability: canonical_probability_field(Some(entry.probability())),
-                    covered_pattern_count: entry.covered_pattern_count(),
-                    pattern_count: entry.pattern_count(),
-                    probability_complete: entry.probability_complete(),
-                })
-                .collect(),
-            solution_average_scores: result
-                .solution_average_scores()
-                .iter()
-                .map(|entry| WasmSolutionAverageScore {
-                    solution_key: entry.solution_key().to_owned(),
-                    average_score: entry.average_score().to_owned(),
-                    covered_pattern_count: entry.covered_pattern_count(),
-                    pattern_count: entry.pattern_count(),
-                    score_complete: entry.score_complete(),
-                })
-                .collect(),
-            finesse_report: result.finesse_report().map(|report| WasmFinesseReport {
-                mode: report.mode().to_owned(),
-                metric: report.metric().to_owned(),
-                pattern_knowledge: report.pattern_knowledge().to_owned(),
-                complete: report.complete(),
-                exact_total_inputs: report.exact_total_inputs().map(ToOwned::to_owned),
-                representative_witness: report.representative_witness().map(|witness| {
-                    WasmFinesseRepresentativeWitness {
-                        policy: witness.policy().to_owned(),
-                        solution_key: witness.solution_key().map(ToOwned::to_owned),
-                        pattern_ids: witness.pattern_ids().to_vec(),
-                        queue: witness
-                            .queue()
-                            .iter()
-                            .map(|piece| piece.as_ascii().to_string())
-                            .collect(),
-                        total_inputs: witness.total_inputs(),
-                        input_sequence: witness
-                            .input_sequence()
-                            .iter()
-                            .map(|input| input.as_str().to_owned())
-                            .collect(),
-                        placements: witness
-                            .placements()
-                            .iter()
-                            .map(|placement| WasmFinessePlacement {
-                                piece: placement.piece().as_ascii().to_string(),
-                                rotation: placement.rotation().quarter_turns(),
-                                x: placement.x(),
-                                y: placement.y(),
-                            })
-                            .collect(),
-                    }
-                }),
-                policy_results: report
-                    .policy_results()
+            normalized_solution_keys: if solution_set_materialized {
+                result.normalized_solution_keys().to_vec()
+            } else {
+                Vec::new()
+            },
+            solution_probabilities: if solution_set_materialized {
+                result
+                    .solution_probabilities()
                     .iter()
-                    .map(|policy| WasmFinessePolicyResult {
-                        policy: policy.policy().to_owned(),
-                        overall_average_inputs: policy.overall_average_inputs().to_owned(),
-                        complete: policy.complete(),
-                        oracle_on_covered_average_inputs: policy
-                            .oracle_on_covered_average_inputs()
-                            .map(ToOwned::to_owned),
-                        information_penalty_inputs: policy
-                            .information_penalty_inputs()
-                            .map(ToOwned::to_owned),
-                        success_probability_gap: policy
-                            .success_probability_gap()
-                            .map(ToOwned::to_owned),
-                        successful_probability_mass: policy
-                            .successful_probability_mass()
-                            .map(ToOwned::to_owned),
-                        successful_unique_queue_count: policy.successful_unique_queue_count(),
-                        total_unique_queue_count: policy.total_unique_queue_count(),
-                        solution_averages: policy
-                            .solution_averages()
-                            .iter()
-                            .map(|solution| WasmFinesseSolutionAverage {
-                                solution_key: solution.solution_key().to_owned(),
-                                average_inputs: solution.average_inputs().to_owned(),
-                                complete: solution.complete(),
-                            })
-                            .collect(),
+                    .map(|entry| WasmSolutionProbability {
+                        solution_key: entry.solution_key().to_owned(),
+                        probability: canonical_probability_field(Some(entry.probability())),
+                        covered_pattern_count: entry.covered_pattern_count(),
+                        pattern_count: entry.pattern_count(),
+                        probability_complete: entry.probability_complete(),
                     })
-                    .collect(),
-            }),
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            solution_average_scores: if solution_set_materialized {
+                result
+                    .solution_average_scores()
+                    .iter()
+                    .map(|entry| WasmSolutionAverageScore {
+                        solution_key: entry.solution_key().to_owned(),
+                        average_score: entry.average_score().to_owned(),
+                        covered_pattern_count: entry.covered_pattern_count(),
+                        pattern_count: entry.pattern_count(),
+                        score_complete: entry.score_complete(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            finesse_report: result
+                .finesse_report()
+                .filter(|report| {
+                    solution_set_materialized || finesse_score_exception && report.mode() == "score"
+                })
+                .map(|report| WasmFinesseReport {
+                    mode: report.mode().to_owned(),
+                    metric: report.metric().to_owned(),
+                    pattern_knowledge: report.pattern_knowledge().to_owned(),
+                    complete: report.complete(),
+                    exact_total_inputs: report.exact_total_inputs().map(ToOwned::to_owned),
+                    representative_witness: report.representative_witness().map(|witness| {
+                        WasmFinesseRepresentativeWitness {
+                            policy: witness.policy().to_owned(),
+                            solution_key: witness.solution_key().map(ToOwned::to_owned),
+                            pattern_ids: witness.pattern_ids().to_vec(),
+                            queue: witness
+                                .queue()
+                                .iter()
+                                .map(|piece| piece.as_ascii().to_string())
+                                .collect(),
+                            total_inputs: witness.total_inputs(),
+                            input_sequence: witness
+                                .input_sequence()
+                                .iter()
+                                .map(|input| input.as_str().to_owned())
+                                .collect(),
+                            placements: witness
+                                .placements()
+                                .iter()
+                                .map(|placement| WasmFinessePlacement {
+                                    piece: placement.piece().as_ascii().to_string(),
+                                    rotation: placement.rotation().quarter_turns(),
+                                    x: placement.x(),
+                                    y: placement.y(),
+                                })
+                                .collect(),
+                        }
+                    }),
+                    policy_results: report
+                        .policy_results()
+                        .iter()
+                        .map(|policy| WasmFinessePolicyResult {
+                            policy: policy.policy().to_owned(),
+                            overall_average_inputs: policy.overall_average_inputs().to_owned(),
+                            complete: policy.complete(),
+                            oracle_on_covered_average_inputs: policy
+                                .oracle_on_covered_average_inputs()
+                                .map(ToOwned::to_owned),
+                            information_penalty_inputs: policy
+                                .information_penalty_inputs()
+                                .map(ToOwned::to_owned),
+                            success_probability_gap: policy
+                                .success_probability_gap()
+                                .map(ToOwned::to_owned),
+                            successful_probability_mass: policy
+                                .successful_probability_mass()
+                                .map(ToOwned::to_owned),
+                            successful_unique_queue_count: policy.successful_unique_queue_count(),
+                            total_unique_queue_count: policy.total_unique_queue_count(),
+                            solution_averages: policy
+                                .solution_averages()
+                                .iter()
+                                .map(|solution| WasmFinesseSolutionAverage {
+                                    solution_key: solution.solution_key().to_owned(),
+                                    average_inputs: solution.average_inputs().to_owned(),
+                                    complete: solution.complete(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                }),
             build_variant_count: result
                 .field("build_variant_count")
                 .and_then(|value| value.parse().ok())
@@ -566,26 +631,38 @@ impl WasmSearchReport {
                 .field("resource_truncation_reason")
                 .unwrap_or("none")
                 .to_owned(),
-            representative_candidate_id: result
-                .field("representative_candidate_id")
-                .filter(|value| *value != "none")
-                .map(ToOwned::to_owned),
-            representative_pattern_id: result
-                .field("representative_pattern_id")
-                .and_then(|value| value.parse().ok()),
-            representative_path: result
-                .path_steps()
-                .iter()
-                .map(|step| WasmSearchPathStep {
-                    piece: step.piece().as_ascii().to_string(),
-                    rotation: step.rotation(),
-                    x: step.x(),
-                    y: step.y(),
-                    hold: step.hold().to_owned(),
-                    cleared_lines: step.cleared_lines(),
+            representative_candidate_id: solution_set_materialized
+                .then(|| {
+                    result
+                        .field("representative_candidate_id")
+                        .filter(|value| *value != "none")
+                        .map(ToOwned::to_owned)
                 })
-                .collect(),
-            summary_fields: result.summary_fields(),
+                .flatten(),
+            representative_pattern_id: solution_set_materialized
+                .then(|| {
+                    result
+                        .field("representative_pattern_id")
+                        .and_then(|value| value.parse().ok())
+                })
+                .flatten(),
+            representative_path: if solution_set_materialized {
+                result
+                    .path_steps()
+                    .iter()
+                    .map(|step| WasmSearchPathStep {
+                        piece: step.piece().as_ascii().to_string(),
+                        rotation: step.rotation(),
+                        x: step.x(),
+                        y: step.y(),
+                        hold: step.hold().to_owned(),
+                        cleared_lines: step.cleared_lines(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            summary_fields: result.fail_closed_solution_summary_fields(),
             forward_search_kind: None,
             forward_initial_board_mask: None,
             maximum_damage: None,
@@ -692,6 +769,7 @@ impl WasmExecutionResult {
         let tiling_solution_page_store = response
             .render_model()
             .and_then(|model| model.core_result())
+            .filter(|result| solution_page_store_is_public(result))
             .and_then(|result| result.tiling_solution_page_store())
             .cloned();
         Self {
@@ -717,6 +795,23 @@ impl WasmExecutionResult {
     pub fn tiling_solution_page_store(&self) -> Option<&Arc<TilingSolutionPageStore>> {
         self.tiling_solution_page_store.as_ref()
     }
+}
+
+pub(crate) fn solution_page_store_is_public(result: &CoreExecutionResult) -> bool {
+    let availability = result.execution_report().solution_set_availability();
+    let Some(store) = result.tiling_solution_page_store() else {
+        return false;
+    };
+    let normalized_solution_count = result
+        .usize_field("normalized_unique_solution_count")
+        .or_else(|| result.usize_field("unique_solution_count"));
+    availability.contract_valid()
+        && availability.solution_count_calculated()
+        && availability.solution_set_materialized()
+        && availability.solution_page_available()
+        && availability.materialized_key_count_matches(result.normalized_solution_keys().len())
+        && normalized_solution_count == Some(store.len())
+        && store.len() > availability.solution_keys_materialized_count()
 }
 
 #[derive(Clone, Debug)]

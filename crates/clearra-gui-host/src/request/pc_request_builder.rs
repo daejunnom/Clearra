@@ -61,6 +61,7 @@ impl PcRequestBuilder {
             objective,
         )?;
         let mut query = OpeningPcSearchQuery::new(target)
+            .with_queue(PcQueueInput::standard_7_bag())
             .with_rule(parse_rule_profile(form.rule())?)
             .with_objective(objective)
             .with_queue_observation_policy(form.queue_observation_policy())

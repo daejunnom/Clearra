@@ -14,6 +14,49 @@ use crate::{
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AppResponseRenderer;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SolutionDataStatus {
+    NotRequested,
+    Unavailable,
+    Partial,
+    Complete,
+}
+
+impl SolutionDataStatus {
+    fn for_request(requested: bool, materialized: bool, complete: bool) -> Self {
+        if !requested {
+            Self::NotRequested
+        } else if !materialized {
+            Self::Unavailable
+        } else if complete {
+            Self::Complete
+        } else {
+            Self::Partial
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not-requested",
+            Self::Unavailable => "unavailable",
+            Self::Partial => "partial",
+            Self::Complete => "complete",
+        }
+    }
+
+    const fn exposes_artifacts(self) -> bool {
+        matches!(self, Self::Partial | Self::Complete)
+    }
+
+    const fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Unavailable => Some("solution-set-not-materialized"),
+            Self::Partial => Some("solution-set-incomplete"),
+            Self::NotRequested | Self::Complete => None,
+        }
+    }
+}
+
 impl AppResponseRenderer {
     pub fn render(
         response: AppResponse,
@@ -65,8 +108,26 @@ fn render_success(
         | AppRenderModel::Scenario(result)
         | AppRenderModel::Cover(result)
         | AppRenderModel::Percent(result) => {
-            let mut fields = SummaryRenderContract::render_fields(result.summary_fields());
-            if !result.solution_probabilities().is_empty() {
+            let mut fields =
+                SummaryRenderContract::render_fields(result.fail_closed_solution_summary_fields());
+            let solution_availability = result.execution_report().solution_set_availability();
+            let finesse_score_exception = result
+                .finesse_report()
+                .is_some_and(|report| report.mode() == "score");
+            let solution_contract_valid = solution_availability.contract_valid()
+                && solution_availability
+                    .materialized_key_count_matches(result.normalized_solution_keys().len());
+            let solution_set_materialized =
+                solution_contract_valid && solution_availability.solution_set_materialized();
+            let solution_keys_complete =
+                solution_contract_valid && solution_availability.solution_keys_complete();
+            let solution_data_status = SolutionDataStatus::for_request(
+                include_solution_data,
+                solution_set_materialized,
+                solution_keys_complete,
+            );
+            append_solution_data_contract(&mut fields, solution_data_status, format);
+            if solution_set_materialized && !result.solution_probabilities().is_empty() {
                 fields.push(RenderField::new(
                     "solution_probabilities",
                     RenderFieldValue::array(result.solution_probabilities().iter().map(|entry| {
@@ -92,25 +153,24 @@ fn render_success(
                     })),
                 ));
             }
-            if let Some(report) = result.finesse_report() {
+            if let Some(report) = result.finesse_report().filter(|report| {
+                solution_set_materialized || finesse_score_exception && report.mode() == "score"
+            }) {
                 fields.push(RenderField::new(
                     "finesse_report",
                     finesse_report_value(report),
                 ));
             }
-            if include_solution_data {
-                fields.extend([
-                    RenderField::new("solution_data_requested", true),
-                    RenderField::new(
-                        "solution_keys",
-                        RenderFieldValue::array(
-                            result
-                                .normalized_solution_keys()
-                                .iter()
-                                .map(RenderFieldValue::string),
-                        ),
+            if solution_data_status.exposes_artifacts() {
+                fields.extend([RenderField::new(
+                    "solution_keys",
+                    RenderFieldValue::array(
+                        result
+                            .normalized_solution_keys()
+                            .iter()
+                            .map(RenderFieldValue::string),
                     ),
-                ]);
+                )]);
                 if result
                     .finesse_report()
                     .is_some_and(|report| report.mode() == "score")
@@ -333,9 +393,11 @@ fn render_success(
                     })),
                 ),
             ]);
-            if include_solution_data {
-                fields.push(RenderField::new("solution_data_requested", true));
-            }
+            append_solution_data_contract(
+                &mut fields,
+                SolutionDataStatus::for_request(include_solution_data, true, report.complete()),
+                format,
+            );
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
                 fields,
@@ -429,110 +491,103 @@ fn render_success(
                 ),
                 RenderField::new("outcomes", outcomes),
             ];
-            if include_solution_data {
-                fields.extend([
-                    RenderField::new("solution_data_requested", true),
-                    RenderField::new(
-                        "forward_solution_data",
-                        RenderFieldValue::object([
-                            (
-                                "initial_board",
-                                RenderFieldValue::string(board_mask_hex(result.initial_board())),
-                            ),
-                            (
-                                "outcomes",
-                                RenderFieldValue::array(result.outcomes().iter().map(|outcome| {
-                                    RenderFieldValue::object([
-                                        ("id", RenderFieldValue::from(outcome.id())),
-                                        (
-                                            "source_pattern_index",
-                                            RenderFieldValue::from(outcome.source_pattern_index()),
-                                        ),
-                                        (
-                                            "source_queue",
-                                            RenderFieldValue::string(
-                                                outcome
-                                                    .source_queue()
-                                                    .iter()
-                                                    .map(|piece| piece.as_ascii())
-                                                    .collect::<String>(),
-                                            ),
-                                        ),
-                                        (
-                                            "group",
+            let solution_data_status =
+                SolutionDataStatus::for_request(include_solution_data, true, result.complete());
+            append_solution_data_contract(&mut fields, solution_data_status, format);
+            if solution_data_status.exposes_artifacts() {
+                fields.extend([RenderField::new(
+                    "forward_solution_data",
+                    RenderFieldValue::object([
+                        (
+                            "initial_board",
+                            RenderFieldValue::string(board_mask_hex(result.initial_board())),
+                        ),
+                        (
+                            "outcomes",
+                            RenderFieldValue::array(result.outcomes().iter().map(|outcome| {
+                                RenderFieldValue::object([
+                                    ("id", RenderFieldValue::from(outcome.id())),
+                                    (
+                                        "source_pattern_index",
+                                        RenderFieldValue::from(outcome.source_pattern_index()),
+                                    ),
+                                    (
+                                        "source_queue",
+                                        RenderFieldValue::string(
                                             outcome
-                                                .group()
-                                                .map_or(RenderFieldValue::Null, |group| {
-                                                    RenderFieldValue::string(group.as_str())
-                                                }),
+                                                .source_queue()
+                                                .iter()
+                                                .map(|piece| piece.as_ascii())
+                                                .collect::<String>(),
                                         ),
-                                        (
-                                            "spin_piece",
-                                            outcome.spin_piece().map_or(
-                                                RenderFieldValue::Null,
-                                                |piece| {
-                                                    RenderFieldValue::string(
-                                                        piece.as_ascii().to_string(),
-                                                    )
-                                                },
-                                            ),
+                                    ),
+                                    (
+                                        "group",
+                                        outcome.group().map_or(RenderFieldValue::Null, |group| {
+                                            RenderFieldValue::string(group.as_str())
+                                        }),
+                                    ),
+                                    (
+                                        "spin_piece",
+                                        outcome.spin_piece().map_or(
+                                            RenderFieldValue::Null,
+                                            |piece| {
+                                                RenderFieldValue::string(
+                                                    piece.as_ascii().to_string(),
+                                                )
+                                            },
                                         ),
-                                        ("spin_mini", RenderFieldValue::bool(outcome.spin_mini())),
-                                        (
-                                            "spin_lines",
-                                            RenderFieldValue::from(outcome.spin_lines()),
-                                        ),
-                                        (
-                                            "total_damage",
-                                            RenderFieldValue::from(outcome.total_damage()),
-                                        ),
-                                        (
-                                            "final_board",
-                                            RenderFieldValue::string(board_mask_hex(
-                                                outcome.final_board(),
-                                            )),
-                                        ),
-                                        (
-                                            "path",
-                                            RenderFieldValue::array(outcome.path().iter().map(
-                                                |step| {
-                                                    RenderFieldValue::object([
-                                                        (
-                                                            "piece",
-                                                            RenderFieldValue::string(
-                                                                step.piece().as_ascii().to_string(),
-                                                            ),
+                                    ),
+                                    ("spin_mini", RenderFieldValue::bool(outcome.spin_mini())),
+                                    ("spin_lines", RenderFieldValue::from(outcome.spin_lines())),
+                                    (
+                                        "total_damage",
+                                        RenderFieldValue::from(outcome.total_damage()),
+                                    ),
+                                    (
+                                        "final_board",
+                                        RenderFieldValue::string(board_mask_hex(
+                                            outcome.final_board(),
+                                        )),
+                                    ),
+                                    (
+                                        "path",
+                                        RenderFieldValue::array(outcome.path().iter().map(
+                                            |step| {
+                                                RenderFieldValue::object([
+                                                    (
+                                                        "piece",
+                                                        RenderFieldValue::string(
+                                                            step.piece().as_ascii().to_string(),
                                                         ),
-                                                        (
-                                                            "placement_mask",
-                                                            RenderFieldValue::string(
-                                                                board_mask_hex(
-                                                                    step.placement_mask(),
-                                                                ),
-                                                            ),
+                                                    ),
+                                                    (
+                                                        "placement_mask",
+                                                        RenderFieldValue::string(board_mask_hex(
+                                                            step.placement_mask(),
+                                                        )),
+                                                    ),
+                                                    (
+                                                        "cleared_row_mask",
+                                                        RenderFieldValue::from(
+                                                            step.cleared_row_mask(),
                                                         ),
-                                                        (
-                                                            "cleared_row_mask",
-                                                            RenderFieldValue::from(
-                                                                step.cleared_row_mask(),
-                                                            ),
-                                                        ),
-                                                        (
-                                                            "board_after",
-                                                            RenderFieldValue::string(
-                                                                board_mask_hex(step.board_after()),
-                                                            ),
-                                                        ),
-                                                    ])
-                                                },
-                                            )),
-                                        ),
-                                    ])
-                                })),
-                            ),
-                        ]),
-                    ),
-                ]);
+                                                    ),
+                                                    (
+                                                        "board_after",
+                                                        RenderFieldValue::string(board_mask_hex(
+                                                            step.board_after(),
+                                                        )),
+                                                    ),
+                                                ])
+                                            },
+                                        )),
+                                    ),
+                                ])
+                            })),
+                        ),
+                    ]),
+                )]);
             }
             CliOutput::success(CommandRenderer::render(
                 model.kind().as_str(),
@@ -761,7 +816,13 @@ fn render_success(
                     })),
                 ),
             ];
-            if include_solution_data {
+            let solution_data_status = SolutionDataStatus::for_request(
+                include_solution_data,
+                query.is_some(),
+                result.complete,
+            );
+            append_solution_data_contract(&mut fields, solution_data_status, format);
+            if solution_data_status.exposes_artifacts() {
                 let encode_solution_key =
                     |outcome: &SpinStructureOutcome, query: &SpinStructureQuery| {
                         let mut operations = outcome.logical_operations().to_vec();
@@ -796,7 +857,6 @@ fn render_success(
                     .chain(result.mini.iter().map(|_| "mini"))
                     .collect::<Vec<_>>();
                 fields.extend([
-                    RenderField::new("solution_data_requested", true),
                     RenderField::new(
                         "solution_keys",
                         RenderFieldValue::array(solution_keys.iter().map(RenderFieldValue::string)),
@@ -837,6 +897,29 @@ fn render_success(
             }
         }
     }
+}
+
+fn append_solution_data_contract(
+    fields: &mut Vec<RenderField>,
+    status: SolutionDataStatus,
+    format: RenderFormat,
+) {
+    if format != RenderFormat::Json {
+        return;
+    }
+    fields.extend([
+        RenderField::new(
+            "solution_data_requested",
+            status != SolutionDataStatus::NotRequested,
+        ),
+        RenderField::new("solution_data_status", status.as_str()),
+        RenderField::new(
+            "solution_data_reason",
+            status
+                .reason()
+                .map_or(RenderFieldValue::Null, RenderFieldValue::string),
+        ),
+    ]);
 }
 
 fn finesse_report_value(report: &clearra_app::FinesseReport) -> RenderFieldValue {

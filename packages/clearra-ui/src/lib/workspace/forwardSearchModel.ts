@@ -4,12 +4,12 @@ import {
   parseBrowserQueueInput,
   type RuleProfile,
   type SpinProfile
-} from './solverWorkspaceModel';
-import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
-import { isValidForwardChain, MAX_FORWARD_CHAIN } from './forwardSearchLimits';
+} from './solverWorkspaceModel.ts';
+import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost.ts';
+import { isValidForwardChain, MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 
 const MAX_DAMAGE = 0xffff_ffff;
-export { MAX_FORWARD_CHAIN } from './forwardSearchLimits';
+export { MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 
 export type ForwardTool = 'damage' | 'spin-finder';
 export type ForwardDamageAggregation = 'maximum' | 'at-least';
@@ -152,10 +152,10 @@ export function buildForwardSearchCommand(
 export function forwardSearchRequestForDesktop(
   request: ForwardSearchRequest,
   language: 'en' | 'ko',
-  _workers: number
+  workers: number
 ): ClearraDesktopRequest {
   const queue = parseBrowserQueueInput(request.queue);
-  return buildDesktopAppRequest({
+  const common = {
     command: request.tool,
     language,
     visible_height: request.height,
@@ -166,16 +166,28 @@ export function forwardSearchRequestForDesktop(
     rule: request.rule,
     spin_profile: request.spinProfile,
     preserve_b2b: request.preserveB2B,
-    initial_combo: request.initialCombo,
-    initial_b2b: request.initialB2B,
-    damage_aggregation: request.damageAggregation,
-    minimum_damage: request.minimumDamage,
-    spin_lines: request.spinLines,
-    spin_category: request.spinCategory,
-    workers: 0,
+    workers: Math.max(1, Math.trunc(workers)),
     use_all_logical_processors: request.useAllLogicalProcessors,
     backend: 'cpu',
     allow_backend_fallback: false
+  } as const;
+  if (request.tool === 'damage') {
+    return buildDesktopAppRequest({
+      ...common,
+      command: request.tool,
+      initial_combo: request.initialCombo,
+      initial_b2b: request.initialB2B,
+      damage_aggregation: request.damageAggregation,
+      ...(request.damageAggregation === 'at-least'
+        ? { minimum_damage: request.minimumDamage }
+        : {})
+    });
+  }
+  return buildDesktopAppRequest({
+    ...common,
+    command: request.tool,
+    spin_lines: request.spinLines,
+    spin_category: request.spinCategory
   });
 }
 

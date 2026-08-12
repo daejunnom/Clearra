@@ -25,6 +25,29 @@ fn wasm_command_compiles_to_app_request() {
 }
 
 #[test]
+fn bare_web_pc_preserves_the_web_surface_defaults_through_app_projection() {
+    let parsed = WebCommandParser::parse("clearra pc").expect("bare web pc command");
+    assert_eq!(parsed.lines(), 4);
+    assert_eq!(parsed.backend().as_str(), "auto");
+    assert!(parsed.allow_backend_fallback());
+
+    let request = parsed.to_app_request().expect("bare web pc AppRequest");
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected AppCommand::Pc");
+    };
+    assert_eq!(command.query().target().lines(), 4);
+    assert_eq!(
+        command.query().objective().kind(),
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+    );
+    assert_eq!(
+        command.query().execution_policy().backend().as_str(),
+        "auto"
+    );
+    assert!(command.query().execution_policy().allow_backend_fallback());
+}
+
+#[test]
 fn percent_command_compiles_to_coverage_summary_request() {
     let request = WebCommandParser::parse(
         "clearra percent I --fixed --min-len 1 --max-patterns 8 --failed-count 3",
@@ -657,11 +680,9 @@ fn setup_command_requires_both_path_detail_options() {
 #[test]
 fn setup_command_requires_observed_pieces_in_queue_based_mode() {
     let error = WebCommandParser::parse("clearra setup --remaining TI --mode qb")
-        .expect("parsed command")
-        .to_app_request()
-        .expect_err("QB mode without observations must fail");
+        .expect_err("QB mode without observations must fail at the parser boundary");
 
-    assert_eq!(error.code(), WebCommandErrorCode::MissingValue);
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
 }
 
 #[test]
@@ -697,6 +718,113 @@ fn setup_command_rejects_oracle_mode_with_observed_qb_pieces() {
         let error =
             WebCommandParser::parse(command).expect_err("oracle and QB observations must conflict");
         assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
+fn setup_mode_qb_borrow_and_next_cycle_pairs_fail_closed_at_the_parser_boundary() {
+    let invalid = [
+        "clearra setup --remaining TI --mode qb",
+        "clearra setup --mode qb --remaining TI",
+        "clearra setup --remaining TI --mode oracle --qb OS",
+        "clearra setup --remaining TI --qb OS --mode oracle",
+        "clearra setup --remaining TI --allow-post-cycle-borrow",
+        "clearra setup --allow-post-cycle-borrow --remaining TI",
+        "clearra setup --remaining TI --next-cycle-remaining O",
+        "clearra setup --next-cycle-remaining O --remaining TI",
+        "clearra setup --remaining IOT --allow-post-cycle-borrow --next-cycle-remaining I",
+        "clearra setup --remaining IOT --next-cycle-remaining I --allow-post-cycle-borrow",
+    ];
+    for command in invalid {
+        let error = WebCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+
+    for command in [
+        "clearra setup --remaining TI --mode qb --qb OS --next-cycle-remaining OOSITZ",
+        "clearra setup --remaining TI --next-cycle-remaining OOSITZ --qb OS --mode qb",
+        "clearra setup --remaining IOT --allow-post-cycle-borrow --next-cycle-remaining IOTSZJL",
+        "clearra setup --next-cycle-remaining IOTSZJL --allow-post-cycle-borrow --remaining IOT",
+    ] {
+        WebCommandParser::parse(command)
+            .unwrap_or_else(|error| panic!("failed to parse '{command}': {error:?}"))
+            .to_app_request()
+            .unwrap_or_else(|error| panic!("failed to project '{command}': {error:?}"));
+    }
+}
+
+#[test]
+fn setup_mode_qb_borrow_and_next_cycle_cartesian_matrix_reaches_the_real_parser() {
+    let residues = [("TI", "OOSITZ", "O", false), ("IOT", "IOTSZJL", "I", true)];
+    let modes = [None, Some("oracle"), Some("qb")];
+    let observed_groups = [None, Some("OS")];
+    let next_cycle_groups = [None, Some(true), Some(false)];
+
+    for (remaining, valid_next, invalid_next, borrow_allowed) in residues {
+        for mode in modes {
+            for observed in observed_groups {
+                for borrow in [false, true] {
+                    for next_cycle_valid in next_cycle_groups {
+                        let mut options = Vec::new();
+                        if let Some(mode) = mode {
+                            options.push(format!("--mode {mode}"));
+                        }
+                        if let Some(observed) = observed {
+                            options.push(format!("--qb {observed}"));
+                        }
+                        if borrow {
+                            options.push("--allow-post-cycle-borrow".to_owned());
+                        }
+                        if let Some(valid) = next_cycle_valid {
+                            options.push(format!(
+                                "--next-cycle-remaining {}",
+                                if valid { valid_next } else { invalid_next }
+                            ));
+                        }
+
+                        let expected_valid = !matches!((mode, observed), (Some("qb"), None))
+                            && !matches!((mode, observed), (Some("oracle"), Some(_)))
+                            && (!borrow || borrow_allowed)
+                            && next_cycle_valid != Some(false);
+                        for reverse in [false, true] {
+                            let mut ordered = options.clone();
+                            if reverse {
+                                ordered.reverse();
+                            }
+                            let command = if reverse {
+                                format!(
+                                    "clearra setup {} --remaining {remaining}",
+                                    ordered.join(" ")
+                                )
+                            } else {
+                                format!(
+                                    "clearra setup --remaining {remaining} {}",
+                                    ordered.join(" ")
+                                )
+                            };
+                            match WebCommandParser::parse(&command) {
+                                Ok(parsed) if expected_valid => {
+                                    parsed.to_app_request().unwrap_or_else(|error| {
+                                        panic!("failed to project '{command}': {error:?}")
+                                    });
+                                }
+                                Err(error) if !expected_valid => {
+                                    assert_eq!(
+                                        error.code(),
+                                        WebCommandErrorCode::InvalidValue,
+                                        "{command}"
+                                    );
+                                }
+                                Ok(_) => panic!("expected parser rejection: {command}"),
+                                Err(error) => {
+                                    panic!("unexpected parser rejection for '{command}': {error:?}")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1225,6 +1353,83 @@ fn build_probability_tiling_only_rejects_buildup_only_options() {
 }
 
 #[test]
+fn build_probability_tiling_rejects_explicit_inactive_options_in_either_order() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    for option in [
+        "--rule srs-plus",
+        "--spin-profile t-spins",
+        "--preserve-b2b",
+        "--build-dependency-dag",
+        "--no-build-dependency-dag",
+        "--finesse off",
+        "--pattern-knowledge both",
+    ] {
+        for command in [
+            format!("{base} --tiling-only {option}"),
+            format!("{base} {option} --tiling-only"),
+        ] {
+            let error = WebCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        }
+    }
+}
+
+#[test]
+fn build_probability_rejects_conflicting_aggregation_selectors_in_either_order() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    for (left, right) in [
+        ("--tiling-only", "--aggregate buildability"),
+        ("--tiling-only", "--aggregate spin"),
+        ("--aggregate buildability", "--aggregate spin"),
+    ] {
+        for command in [
+            format!("{base} {left} {right}"),
+            format!("{base} {right} {left}"),
+        ] {
+            let error = WebCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        }
+    }
+
+    for command in [
+        format!("{base} --aggregate tiling --tiling-only"),
+        format!("{base} --tiling-only --tiling-only"),
+        format!("{base} --aggregate spin --aggregate spin"),
+    ] {
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+#[test]
+fn build_probability_rejects_orphan_spin_and_pattern_knowledge_options_in_either_order() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    for option in ["--spin-profile t-spins", "--pattern-knowledge both"] {
+        for command in [
+            format!("{base} --aggregate buildability {option}"),
+            format!("{base} {option} --aggregate buildability"),
+        ] {
+            let error = WebCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        }
+    }
+
+    for command in [
+        format!("{base} --aggregate spin --spin-profile all-mini-plus"),
+        format!("{base} --spin-profile all-mini-plus --aggregate spin"),
+        format!("{base} --preserve-b2b --spin-profile all-mini-plus"),
+        format!("{base} --spin-profile all-mini-plus --preserve-b2b"),
+        format!("{base} --finesse inputs --pattern-knowledge visible-7"),
+        format!("{base} --pattern-knowledge visible-7 --finesse inputs"),
+    ] {
+        WebCommandParser::parse(&command)
+            .unwrap_or_else(|error| panic!("failed to parse '{command}': {error:?}"))
+            .to_app_request()
+            .unwrap_or_else(|error| panic!("failed to project '{command}': {error:?}"));
+    }
+}
+
+#[test]
 fn browser_command_accepts_completed_group_followed_by_bag_permutation() {
     WebCommandParser::parse(
         "clearra pc --lines 2 --backend cpu --patterns [^TSZ]!P4 --max-patterns 20160",
@@ -1368,6 +1573,101 @@ fn web_command_preserves_gpu_device_and_warmup_in_the_typed_request() {
     assert_eq!(policy.gpu_device().as_display_string(), "3");
     assert!(policy.gpu_warmup());
     assert!(policy.allow_backend_fallback());
+}
+
+#[test]
+fn pc_and_build_backend_fallback_are_order_independent_across_the_bounded_matrix() {
+    let backends = ["auto", "cpu", "gpu", "hybrid"];
+    let overrides = [
+        (None, None),
+        (Some("--allow-backend-fallback"), Some(true)),
+        (Some("--no-backend-fallback"), Some(false)),
+    ];
+
+    for family in ["pc", "build"] {
+        for backend in backends {
+            for (fallback_option, explicit_value) in overrides {
+                let expected = explicit_value.unwrap_or(backend == "auto");
+                let orders: &[bool] = if fallback_option.is_some() {
+                    &[false, true]
+                } else {
+                    &[false]
+                };
+                for fallback_first in orders {
+                    let backend_arguments = format!("--backend {backend}");
+                    let arguments = match (fallback_option, fallback_first) {
+                        (Some(option), true) => format!("{option} {backend_arguments}"),
+                        (Some(option), false) => format!("{backend_arguments} {option}"),
+                        (None, _) => backend_arguments,
+                    };
+                    assert_backend_fallback_policy(family, &arguments, backend, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pc_and_build_backend_fallback_preserve_surface_defaults() {
+    assert_backend_fallback_policy("pc", "", "auto", true);
+    assert_backend_fallback_policy("build", "", "cpu", false);
+}
+
+#[test]
+fn pc_and_build_reject_conflicting_backend_fallback_flags_in_either_order() {
+    for family in ["pc", "build"] {
+        for arguments in [
+            "--allow-backend-fallback --backend gpu --no-backend-fallback",
+            "--no-backend-fallback --backend auto --allow-backend-fallback",
+            "--allow-backend-fallback --backend gpu --allow-backend-fallback",
+            "--no-backend-fallback --backend auto --no-backend-fallback",
+        ] {
+            let command = backend_fallback_command(family, arguments);
+            let error = WebCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        }
+    }
+}
+
+fn assert_backend_fallback_policy(
+    family: &str,
+    arguments: &str,
+    expected_backend: &str,
+    expected_fallback: bool,
+) {
+    let command = backend_fallback_command(family, arguments);
+    let parsed = WebCommandParser::parse(&command)
+        .unwrap_or_else(|error| panic!("failed to parse '{command}': {error:?}"));
+    assert_eq!(
+        parsed.allow_backend_fallback(),
+        expected_fallback,
+        "typed request: {command}"
+    );
+    let request = parsed
+        .to_app_request()
+        .unwrap_or_else(|error| panic!("failed to build AppRequest for '{command}': {error:?}"));
+    let policy = match request.command() {
+        AppCommand::Pc(command) => command.query().execution_policy(),
+        AppCommand::BuildProbability(command) => command.query().core_query().execution_policy(),
+        _ => panic!("unexpected command family for '{command}'"),
+    };
+    assert_eq!(policy.backend().as_str(), expected_backend, "{command}");
+    assert_eq!(
+        policy.allow_backend_fallback(),
+        expected_fallback,
+        "AppRequest policy: {command}"
+    );
+}
+
+fn backend_fallback_command(family: &str, arguments: &str) -> String {
+    let base = match family {
+        "pc" => "clearra pc --lines 2",
+        "build" => {
+            "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror"
+        }
+        _ => panic!("unsupported backend fallback test family '{family}'"),
+    };
+    format!("{base} {arguments}")
 }
 
 #[test]
@@ -1566,6 +1866,1264 @@ fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
         damage_pattern.code(),
         WebCommandErrorCode::UnsupportedCommand
     );
+}
+
+const SEARCH_OPTION_CONTRACT: &str =
+    include_str!("../../../tests/fixtures/contracts/search_option_contract.tsv");
+
+#[derive(Clone, Copy, Debug)]
+struct ForwardContractSelection {
+    option: &'static str,
+    value: &'static str,
+}
+
+fn forward_contract_values(family: &str, option: &str) -> Vec<&'static str> {
+    let row = SEARCH_OPTION_CONTRACT
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find(|line| {
+            let mut columns = line.split('\t');
+            columns.next() == Some(family) && columns.next() == Some(option)
+        })
+        .unwrap_or_else(|| panic!("missing search contract row {family}.{option}"));
+    row.split('\t')
+        .nth(3)
+        .expect("contract valid representatives")
+        .split('|')
+        .collect()
+}
+
+fn forward_contract_invalid_values(family: &str, option: &str) -> Vec<&'static str> {
+    let row = SEARCH_OPTION_CONTRACT
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find(|line| {
+            let mut columns = line.split('\t');
+            columns.next() == Some(family) && columns.next() == Some(option)
+        })
+        .unwrap_or_else(|| panic!("missing search contract row {family}.{option}"));
+    match row
+        .split('\t')
+        .nth(4)
+        .expect("contract invalid representatives")
+    {
+        "-" => Vec::new(),
+        values => values.split('|').collect(),
+    }
+}
+
+fn forward_contract_command(family: &str, selections: &[ForwardContractSelection]) -> String {
+    let mut tokens = vec![
+        "clearra".to_owned(),
+        family.to_owned(),
+        "--board-mask".to_owned(),
+        "0".to_owned(),
+    ];
+    if !selections
+        .iter()
+        .any(|selection| selection.option == "source")
+    {
+        tokens.extend(["--queue".to_owned(), "T".to_owned()]);
+    }
+    let implicit_minimum_damage = family == "damage"
+        && selections
+            .iter()
+            .any(|selection| selection.option == "damage-mode" && selection.value == "at-least")
+        && !selections
+            .iter()
+            .any(|selection| selection.option == "minimum-damage");
+    for selection in selections {
+        match (selection.option, selection.value) {
+            ("height", value) => tokens.extend(["--height".to_owned(), value.to_owned()]),
+            ("source", "fixed") => tokens.extend(["--queue".to_owned(), "T".to_owned()]),
+            ("source", "pattern") if family == "spin-finder" => {
+                tokens.extend(["--patterns".to_owned(), "P1".to_owned()]);
+            }
+            ("hold", "on") => tokens.push("--hold".to_owned()),
+            ("hold", "off") => tokens.push("--no-hold".to_owned()),
+            ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
+            ("spin-profile", value) => {
+                tokens.extend(["--spin-profile".to_owned(), value.to_owned()]);
+            }
+            ("damage-mode", "maximum" | "at-least") if family == "damage" => {}
+            ("minimum-damage", value) if family == "damage" => {
+                tokens.extend(["--minimum-damage".to_owned(), value.to_owned()]);
+            }
+            ("initial-combo", value) => {
+                tokens.extend(["--initial-combo".to_owned(), value.to_owned()]);
+            }
+            ("initial-b2b", value) => {
+                tokens.extend(["--initial-b2b".to_owned(), value.to_owned()]);
+            }
+            ("preserve-b2b", "on") => tokens.push("--preserve-b2b".to_owned()),
+            ("preserve-b2b", "off") => {}
+            ("lines", value) if family == "spin-finder" => {
+                tokens.extend(["--lines".to_owned(), value.to_owned()]);
+            }
+            ("category", value) if family == "spin-finder" => {
+                tokens.extend(["--spin-category".to_owned(), value.to_owned()]);
+            }
+            ("workers", value) => tokens.extend(["--workers".to_owned(), value.to_owned()]),
+            _ => panic!(
+                "unsupported {family} contract selection {}={}",
+                selection.option, selection.value
+            ),
+        }
+    }
+    if implicit_minimum_damage {
+        tokens.extend(["--minimum-damage".to_owned(), "1".to_owned()]);
+    }
+    tokens.join(" ")
+}
+
+fn spin_finder_contract_case_is_valid(selections: &[ForwardContractSelection]) -> bool {
+    let profile = selections
+        .iter()
+        .find(|selection| selection.option == "spin-profile")
+        .map_or(SpinProfileId::TSpins, |selection| {
+            SpinProfileId::parse(selection.value).expect("fixture spin profile")
+        });
+    let category = selections
+        .iter()
+        .find(|selection| selection.option == "category")
+        .map_or(ForwardSpinCategory::Any, |selection| {
+            match selection.value {
+                "any" => ForwardSpinCategory::Any,
+                "t" => ForwardSpinCategory::T,
+                "other" => ForwardSpinCategory::Other,
+                value => panic!("fixture spin category {value}"),
+            }
+        });
+    profile != SpinProfileId::Disabled
+        && (category != ForwardSpinCategory::Other || profile.recognizes_non_t_immobile_spins())
+}
+
+fn assert_forward_contract_projection(
+    family: &str,
+    selections: &[ForwardContractSelection],
+    expected_valid: bool,
+) {
+    let command = forward_contract_command(family, selections);
+    match WebCommandParser::parse_with_worker_limit(&command, 65) {
+        Ok(parsed) if expected_valid => {
+            let request = parsed
+                .to_app_request()
+                .unwrap_or_else(|error| panic!("failed to project '{command}': {error:?}"));
+            assert_eq!(request.command_kind().as_str(), family, "{command}");
+            if family == "damage" {
+                let AppCommand::Damage(damage_command) = request.command() else {
+                    panic!("expected AppCommand::Damage for '{command}'");
+                };
+                let explicit_minimum = selections
+                    .iter()
+                    .find(|selection| selection.option == "minimum-damage")
+                    .map(|selection| {
+                        selection
+                            .value
+                            .parse::<u32>()
+                            .expect("fixture minimum damage")
+                    });
+                let at_least = selections.iter().any(|selection| {
+                    selection.option == "damage-mode" && selection.value == "at-least"
+                });
+                let expected = explicit_minimum
+                    .map(ForwardSearchMode::DamageAtLeast)
+                    .unwrap_or_else(|| {
+                        if at_least {
+                            ForwardSearchMode::DamageAtLeast(1)
+                        } else {
+                            ForwardSearchMode::MaximumDamage
+                        }
+                    });
+                assert_eq!(damage_command.query().mode(), expected, "{command}");
+            }
+        }
+        Err(error) if !expected_valid => {
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        }
+        Ok(_) => panic!("expected parser rejection: {command}"),
+        Err(error) => panic!("unexpected parser rejection for '{command}': {error:?}"),
+    }
+}
+
+#[test]
+fn damage_fixture_exposed_options_reach_every_single_and_ordered_pair_cartesian_projection() {
+    assert_eq!(
+        forward_contract_values("damage", "damage-mode"),
+        ["maximum", "at-least"]
+    );
+    let default = WebCommandParser::parse("clearra damage --board-mask 0 --queue T")
+        .expect("default maximum-damage command")
+        .to_app_request()
+        .expect("maximum-damage AppRequest");
+    let AppCommand::Damage(command) = default.command() else {
+        panic!("expected AppCommand::Damage");
+    };
+    assert_eq!(command.query().mode(), ForwardSearchMode::MaximumDamage);
+
+    let options = [
+        "height",
+        "source",
+        "hold",
+        "rule",
+        "spin-profile",
+        "damage-mode",
+        "minimum-damage",
+        "initial-combo",
+        "initial-b2b",
+        "preserve-b2b",
+        "workers",
+    ];
+    let values = options
+        .iter()
+        .map(|option| forward_contract_values("damage", option))
+        .collect::<Vec<_>>();
+    let mut cases = 0_usize;
+    for (option, representatives) in options.iter().zip(&values) {
+        for value in representatives {
+            assert_forward_contract_projection(
+                "damage",
+                &[ForwardContractSelection { option, value }],
+                true,
+            );
+            cases += 1;
+        }
+    }
+    for left in 0..options.len() {
+        for right in (left + 1)..options.len() {
+            for left_value in &values[left] {
+                for right_value in &values[right] {
+                    for selections in [
+                        [
+                            ForwardContractSelection {
+                                option: options[left],
+                                value: left_value,
+                            },
+                            ForwardContractSelection {
+                                option: options[right],
+                                value: right_value,
+                            },
+                        ],
+                        [
+                            ForwardContractSelection {
+                                option: options[right],
+                                value: right_value,
+                            },
+                            ForwardContractSelection {
+                                option: options[left],
+                                value: left_value,
+                            },
+                        ],
+                    ] {
+                        if selections.iter().any(|selection| {
+                            selection.option == "damage-mode" && selection.value == "maximum"
+                        }) && selections
+                            .iter()
+                            .any(|selection| selection.option == "minimum-damage")
+                        {
+                            continue;
+                        }
+                        assert_forward_contract_projection("damage", &selections, true);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 1_107, "exact damage production parser cases");
+}
+
+#[test]
+fn spin_finder_fixture_exposed_options_reach_every_single_and_ordered_pair_cartesian_projection() {
+    let options = [
+        "height",
+        "source",
+        "hold",
+        "rule",
+        "spin-profile",
+        "lines",
+        "category",
+        "initial-combo",
+        "initial-b2b",
+        "preserve-b2b",
+        "workers",
+    ];
+    let values = options
+        .iter()
+        .map(|option| forward_contract_values("spin-finder", option))
+        .collect::<Vec<_>>();
+    let mut cases = 0_usize;
+    for (option, representatives) in options.iter().zip(&values) {
+        for value in representatives {
+            let selections = [ForwardContractSelection { option, value }];
+            assert_forward_contract_projection(
+                "spin-finder",
+                &selections,
+                spin_finder_contract_case_is_valid(&selections),
+            );
+            cases += 1;
+        }
+    }
+    for left in 0..options.len() {
+        for right in (left + 1)..options.len() {
+            for left_value in &values[left] {
+                for right_value in &values[right] {
+                    for selections in [
+                        [
+                            ForwardContractSelection {
+                                option: options[left],
+                                value: left_value,
+                            },
+                            ForwardContractSelection {
+                                option: options[right],
+                                value: right_value,
+                            },
+                        ],
+                        [
+                            ForwardContractSelection {
+                                option: options[right],
+                                value: right_value,
+                            },
+                            ForwardContractSelection {
+                                option: options[left],
+                                value: left_value,
+                            },
+                        ],
+                    ] {
+                        let expected_valid = spin_finder_contract_case_is_valid(&selections);
+                        assert_forward_contract_projection(
+                            "spin-finder",
+                            &selections,
+                            expected_valid,
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 1_661, "exact spin-finder production parser cases");
+}
+
+#[test]
+fn forward_fixture_dependency_contradictions_are_invalid_in_both_orders() {
+    for (profile, category) in [
+        ("disabled", "any"),
+        ("t-spins", "other"),
+        ("t-spins-plus", "other"),
+    ] {
+        for selections in [
+            [
+                ForwardContractSelection {
+                    option: "spin-profile",
+                    value: profile,
+                },
+                ForwardContractSelection {
+                    option: "category",
+                    value: category,
+                },
+            ],
+            [
+                ForwardContractSelection {
+                    option: "category",
+                    value: category,
+                },
+                ForwardContractSelection {
+                    option: "spin-profile",
+                    value: profile,
+                },
+            ],
+        ] {
+            assert_forward_contract_projection("spin-finder", &selections, false);
+        }
+    }
+
+    for (family, expected_code) in [
+        ("damage", WebCommandErrorCode::UnsupportedCommand),
+        ("spin-finder", WebCommandErrorCode::InvalidValue),
+    ] {
+        for command in [
+            format!("clearra {family} --board-mask 0 --queue T --patterns P1"),
+            format!("clearra {family} --board-mask 0 --patterns P1 --queue T"),
+        ] {
+            let error = WebCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), expected_code, "{command}");
+        }
+    }
+}
+
+#[test]
+fn forward_fixture_invalid_representatives_fail_at_the_authoritative_parser_boundary() {
+    let relevant = [
+        ("damage", "height"),
+        ("damage", "source"),
+        ("damage", "minimum-damage"),
+        ("damage", "initial-combo"),
+        ("damage", "initial-b2b"),
+        ("damage", "workers"),
+        ("spin-finder", "height"),
+        ("spin-finder", "source"),
+        ("spin-finder", "spin-profile"),
+        ("spin-finder", "lines"),
+        ("spin-finder", "category"),
+        ("spin-finder", "initial-combo"),
+        ("spin-finder", "initial-b2b"),
+        ("spin-finder", "workers"),
+    ];
+    let mut cases = 0_usize;
+    let mut damage_cases = 0_usize;
+    let mut spin_cases = 0_usize;
+    for (family, option) in relevant {
+        for value in forward_contract_invalid_values(family, option) {
+            let (command, expected_code) = match (family, option, value) {
+                ("damage", "source", "pattern") => (
+                    "clearra damage --board-mask 0 --patterns P1".to_owned(),
+                    WebCommandErrorCode::UnsupportedCommand,
+                ),
+                (_, "source", "both") => (
+                    format!("clearra {family} --board-mask 0 --queue T --patterns P1"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "source", "empty") => (
+                    format!("clearra {family} --board-mask 0 --queue Q"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "height", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --height {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "spin-profile", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --spin-profile {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "minimum-damage", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --minimum-damage {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "initial-combo", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --initial-combo {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "initial-b2b", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --initial-b2b {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "lines", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --lines {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "category", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --spin-category {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                (_, "workers", value) => (
+                    format!("clearra {family} --board-mask 0 --queue T --workers {value}"),
+                    WebCommandErrorCode::InvalidValue,
+                ),
+                _ => panic!("unmapped invalid fixture representative {family}.{option}={value}"),
+            };
+            let error = WebCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), expected_code, "{family}.{option}={value}");
+            cases += 1;
+            if family == "damage" {
+                damage_cases += 1;
+            } else {
+                spin_cases += 1;
+            }
+        }
+    }
+    assert_eq!(damage_cases, 8, "damage invalid fixture representatives");
+    assert_eq!(spin_cases, 12, "spin invalid fixture representatives");
+    assert_eq!(cases, 20, "all forward invalid fixture representatives");
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SearchContractSelection<'a> {
+    option: &'a str,
+    value: &'a str,
+}
+
+fn project_contract_command(command: &str) -> Result<clearra_app::AppRequest, WebCommandError> {
+    WebCommandParser::parse_with_worker_limit(command, 65)?.to_app_request()
+}
+
+fn assert_order_independent_contract_projection(
+    family: &str,
+    left: SearchContractSelection<'_>,
+    right: SearchContractSelection<'_>,
+    command: impl Fn(&[SearchContractSelection<'_>]) -> String,
+    expected_valid: bool,
+) {
+    let forward_command = command(&[left, right]);
+    let reverse_command = command(&[right, left]);
+    let forward = project_contract_command(&forward_command);
+    let reverse = project_contract_command(&reverse_command);
+
+    match (forward, reverse) {
+        (Ok(forward), Ok(reverse)) => {
+            assert!(
+                expected_valid,
+                "{family} pair should be rejected: {forward_command}"
+            );
+            assert_eq!(
+                forward, reverse,
+                "{family}: {forward_command} <> {reverse_command}"
+            );
+        }
+        (Err(forward), Err(reverse)) => {
+            assert!(
+                !expected_valid,
+                "{family} pair should be accepted: {forward_command}"
+            );
+            assert_eq!(forward.code(), reverse.code(), "{family}: error code");
+            assert_eq!(
+                forward.message(),
+                reverse.message(),
+                "{family}: error message"
+            );
+            assert_eq!(forward.code(), WebCommandErrorCode::InvalidValue);
+        }
+        (forward, reverse) => panic!(
+            "{family} option order changed acceptance: {forward_command} => {forward:?}; \
+             {reverse_command} => {reverse:?}"
+        ),
+    }
+}
+
+fn pc_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
+    let failed_queue = selections
+        .iter()
+        .any(|selection| selection.option == "score-mode" && selection.value == "failed-queue");
+    let mut tokens = vec![
+        "clearra".to_owned(),
+        if failed_queue { "failed-queue" } else { "pc" }.to_owned(),
+    ];
+    if !selections
+        .iter()
+        .any(|selection| selection.option == "lines")
+    {
+        tokens.extend(["--lines".to_owned(), "4".to_owned()]);
+    }
+    if !selections
+        .iter()
+        .any(|selection| selection.option == "source")
+    {
+        tokens.extend(["--queue".to_owned(), "IOTSZJLIOTSZJLIOTSZJL".to_owned()]);
+    }
+    for selection in selections {
+        match (selection.option, selection.value) {
+            ("lines", value) => tokens.extend(["--lines".to_owned(), value.to_owned()]),
+            ("source", "fixed") => {
+                tokens.extend(["--queue".to_owned(), "IOTSZJLIOTSZJLIOTSZJL".to_owned()])
+            }
+            ("source", "pattern") => {
+                tokens.extend(["--patterns".to_owned(), "P7P7P7".to_owned()]);
+            }
+            ("source", "empty") => {}
+            // Opening PC represents an empty enabled hold by omission; the
+            // valued `--hold empty` spelling belongs to scenario PC input.
+            ("hold", "on") => {}
+            ("hold", "off") => tokens.push("--no-hold".to_owned()),
+            ("queue-knowledge", value) => {
+                tokens.extend(["--queue-knowledge".to_owned(), value.to_owned()]);
+            }
+            ("score-mode", "off" | "failed-queue") => {}
+            ("score-mode", "minimum-cover") => {
+                tokens.extend(["--objective".to_owned(), "minimum-cover".to_owned()]);
+            }
+            ("score-mode", "summary") => tokens.push("--score".to_owned()),
+            ("score-mode", "tiling") => tokens.push("--tiling-only".to_owned()),
+            ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
+            ("spin-profile", value) => {
+                tokens.extend(["--spin-profile".to_owned(), value.to_owned()]);
+            }
+            ("preserve-b2b", "on") => tokens.push("--preserve-b2b".to_owned()),
+            ("preserve-b2b", "off") => {}
+            ("initial-b2b", value) => {
+                tokens.extend(["--initial-b2b".to_owned(), value.to_owned()]);
+            }
+            ("solution-probabilities", "on") => {
+                tokens.push("--solution-probabilities".to_owned());
+            }
+            ("solution-probabilities", "off") => {}
+            ("backend", value) => tokens.extend(["--backend".to_owned(), value.to_owned()]),
+            ("fallback", "default") => {}
+            ("fallback", "allow") => tokens.push("--allow-backend-fallback".to_owned()),
+            ("fallback", "deny") => tokens.push("--no-backend-fallback".to_owned()),
+            ("workers", value) => tokens.extend(["--workers".to_owned(), value.to_owned()]),
+            ("tablebase", "on") => tokens.push("--tablebase".to_owned()),
+            ("tablebase", "off") => tokens.push("--no-tablebase".to_owned()),
+            ("dependency-dag", "on") => tokens.push("--build-dependency-dag".to_owned()),
+            ("dependency-dag", "off") => tokens.push("--no-build-dependency-dag".to_owned()),
+            ("gpu-device", value) => {
+                tokens.extend(["--gpu-device".to_owned(), value.to_owned()]);
+            }
+            _ => panic!(
+                "unsupported PC contract selection {}={}",
+                selection.option, selection.value
+            ),
+        }
+    }
+    tokens.join(" ")
+}
+
+fn build_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
+    let mut tokens = vec![
+        "clearra".to_owned(),
+        "build-probability".to_owned(),
+        "--base-mask".to_owned(),
+        "0".to_owned(),
+        "--target-mask".to_owned(),
+        "15".to_owned(),
+    ];
+    if !selections
+        .iter()
+        .any(|selection| selection.option == "height")
+    {
+        tokens.extend(["--height".to_owned(), "8".to_owned()]);
+    }
+    if !selections
+        .iter()
+        .any(|selection| selection.option == "source")
+    {
+        tokens.extend(["--queue".to_owned(), "I".to_owned()]);
+    }
+    for selection in selections {
+        match (selection.option, selection.value) {
+            ("height", value) => tokens.extend(["--height".to_owned(), value.to_owned()]),
+            ("source", "fixed") => tokens.extend(["--queue".to_owned(), "I".to_owned()]),
+            ("source", "pattern") => {
+                tokens.extend(["--patterns".to_owned(), "P1".to_owned()]);
+            }
+            ("source", "empty") => {}
+            ("hold", "on") => tokens.extend(["--hold".to_owned(), "empty".to_owned()]),
+            ("hold", "off") => tokens.push("--no-hold".to_owned()),
+            ("aggregation", value) => {
+                tokens.extend(["--aggregate".to_owned(), value.to_owned()]);
+            }
+            ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
+            ("spin-profile", value) => {
+                tokens.extend(["--spin-profile".to_owned(), value.to_owned()]);
+            }
+            ("preserve-b2b", "on") => tokens.push("--preserve-b2b".to_owned()),
+            ("preserve-b2b", "off") => {}
+            ("dependency-dag", "on") => tokens.push("--build-dependency-dag".to_owned()),
+            ("dependency-dag", "off") => tokens.push("--no-build-dependency-dag".to_owned()),
+            ("finesse", value) => tokens.extend(["--finesse".to_owned(), value.to_owned()]),
+            ("pattern-knowledge", value) => {
+                tokens.extend(["--pattern-knowledge".to_owned(), value.to_owned()]);
+            }
+            ("mirror", "on") => tokens.push("--include-mirror".to_owned()),
+            ("mirror", "off") => tokens.push("--no-mirror".to_owned()),
+            ("backend", value) => tokens.extend(["--backend".to_owned(), value.to_owned()]),
+            ("fallback", "default") => {}
+            ("fallback", "allow") => tokens.push("--allow-backend-fallback".to_owned()),
+            ("fallback", "deny") => tokens.push("--no-backend-fallback".to_owned()),
+            ("workers", value) => tokens.extend(["--workers".to_owned(), value.to_owned()]),
+            _ => panic!(
+                "unsupported build contract selection {}={}",
+                selection.option, selection.value
+            ),
+        }
+    }
+    tokens.join(" ")
+}
+
+fn spin_structure_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
+    let mut tokens = vec!["clearra".to_owned(), "spin-structure".to_owned()];
+    if !selections
+        .iter()
+        .any(|selection| selection.option == "inventory")
+    {
+        tokens.extend(["--pieces".to_owned(), "IOTSZJL".to_owned()]);
+    }
+    tokens.extend(["--height".to_owned(), "24".to_owned()]);
+    if selections
+        .iter()
+        .any(|selection| selection.option == "fill-bottom")
+        && !selections
+            .iter()
+            .any(|selection| selection.option == "fill-top")
+    {
+        tokens.extend(["--fill-top".to_owned(), "24".to_owned()]);
+    }
+    for selection in selections {
+        match (selection.option, selection.value) {
+            ("inventory", value) => tokens.extend(["--pieces".to_owned(), value.to_owned()]),
+            ("fill-bottom", value) => {
+                tokens.extend(["--fill-bottom".to_owned(), value.to_owned()]);
+            }
+            ("fill-top", value) => tokens.extend(["--fill-top".to_owned(), value.to_owned()]),
+            ("max-placements", value) => {
+                tokens.extend(["--max-placements".to_owned(), value.to_owned()]);
+            }
+            ("minimality", value) => {
+                tokens.extend(["--minimality".to_owned(), value.to_owned()]);
+            }
+            ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
+            ("spin-profile", value) => {
+                tokens.extend(["--spin-profile".to_owned(), value.to_owned()]);
+            }
+            ("lines", value) => tokens.extend(["--lines".to_owned(), value.to_owned()]),
+            ("workers", value) => tokens.extend(["--workers".to_owned(), value.to_owned()]),
+            _ => panic!(
+                "unsupported spin-structure contract selection {}={}",
+                selection.option, selection.value
+            ),
+        }
+    }
+    tokens.join(" ")
+}
+
+fn setup_contract_remaining(selections: &[SearchContractSelection<'_>]) -> &'static str {
+    if let Some(remaining) = selection_value(selections, "remaining") {
+        return match remaining {
+            "I" => "I",
+            "IOT" => "IOT",
+            "IOTS" => "IOTS",
+            "IOTSZJL" => "IOTSZJL",
+            _ => panic!("unsupported setup remaining fixture value {remaining}"),
+        };
+    }
+
+    if selection_enabled(selections, "post-cycle-borrow") {
+        return "IOT";
+    }
+    match selection_value(selections, "next-cycle-remaining") {
+        Some("I") => "IOTS",
+        Some("IOTS") => "IOTSZJL",
+        Some("IOTSZJL") => "IOT",
+        Some(value) => panic!("unsupported next-cycle fixture value {value}"),
+        None => "IOTSZJL",
+    }
+}
+
+fn setup_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
+    let mut tokens = vec!["clearra".to_owned(), "setup".to_owned()];
+    if selection_value(selections, "remaining").is_none() {
+        tokens.extend([
+            "--remaining".to_owned(),
+            setup_contract_remaining(selections).to_owned(),
+        ]);
+    }
+    if selection_value(selections, "mode") == Some("qb")
+        && selection_value(selections, "qb").is_none()
+    {
+        tokens.extend(["--qb".to_owned(), "OS".to_owned()]);
+    }
+
+    for selection in selections {
+        match (selection.option, selection.value) {
+            ("mode", value) => tokens.extend(["--mode".to_owned(), value.to_owned()]),
+            ("remaining", value) => {
+                tokens.extend(["--remaining".to_owned(), value.to_owned()]);
+            }
+            ("qb", value) => tokens.extend(["--qb".to_owned(), value.to_owned()]),
+            // The public full-queue spelling intentionally projects to the
+            // authoritative Web parser's equivalent oracle policy.
+            ("queue-knowledge", "full-queue") => {
+                tokens.extend(["--queue-knowledge".to_owned(), "oracle".to_owned()]);
+            }
+            ("queue-knowledge", value) => {
+                tokens.extend(["--queue-knowledge".to_owned(), value.to_owned()]);
+            }
+            ("next-cycle-remaining", value) => {
+                tokens.extend(["--next-cycle-remaining".to_owned(), value.to_owned()]);
+            }
+            ("post-cycle-borrow", "on") => {
+                tokens.push("--allow-post-cycle-borrow".to_owned());
+            }
+            ("post-cycle-borrow", "off") => {}
+            ("priority", value) => {
+                tokens.extend(["--priority".to_owned(), value.to_owned()]);
+            }
+            ("length", value) => {
+                tokens.extend(["--setup-length".to_owned(), value.to_owned()]);
+            }
+            ("max-setup-pieces", value) => {
+                tokens.extend(["--max-setup-pieces".to_owned(), value.to_owned()]);
+            }
+            ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
+            ("tablebase", "on") => tokens.push("--tablebase".to_owned()),
+            ("tablebase", "off") => tokens.push("--no-tablebase".to_owned()),
+            ("workers", value) => {
+                tokens.extend(["--workers".to_owned(), value.to_owned()]);
+            }
+            _ => panic!(
+                "unsupported setup contract selection {}={}",
+                selection.option, selection.value
+            ),
+        }
+    }
+    tokens.join(" ")
+}
+
+fn setup_contract_expected_next_count(remaining_count: usize) -> usize {
+    match remaining_count {
+        7 => 4,
+        4 => 1,
+        1 => 5,
+        5 => 2,
+        2 => 6,
+        6 => 3,
+        3 => 7,
+        _ => panic!("fixture residue count must be one through seven"),
+    }
+}
+
+fn setup_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> bool {
+    if selection_value(selections, "mode") == Some("oracle")
+        && selection_value(selections, "qb").is_some()
+    {
+        return false;
+    }
+
+    let remaining_count = setup_contract_remaining(selections).len();
+    if selection_enabled(selections, "post-cycle-borrow") && remaining_count != 3 {
+        return false;
+    }
+    if let Some(next_cycle) = selection_value(selections, "next-cycle-remaining") {
+        if next_cycle.len() != setup_contract_expected_next_count(remaining_count) {
+            return false;
+        }
+    }
+    true
+}
+
+fn assert_complete_contract_matrix(
+    family: &str,
+    options: &[&str],
+    command: impl Copy + Fn(&[SearchContractSelection<'_>]) -> String,
+    expected_valid: impl Copy + Fn(&[SearchContractSelection<'_>]) -> bool,
+) -> usize {
+    let values = options
+        .iter()
+        .map(|option| forward_contract_values(family, option))
+        .collect::<Vec<_>>();
+    let mut cases = 0;
+    for (option, representatives) in options.iter().zip(&values) {
+        for value in representatives {
+            let selections = [SearchContractSelection { option, value }];
+            let invocation = command(&selections);
+            match (
+                project_contract_command(&invocation),
+                expected_valid(&selections),
+            ) {
+                (Ok(_), true) => {}
+                (Err(error), false) => assert_eq!(
+                    error.code(),
+                    WebCommandErrorCode::InvalidValue,
+                    "{family}.{option}={value}: {invocation}"
+                ),
+                (Ok(_), false) => panic!("{family} singleton should be rejected: {invocation}"),
+                (Err(error), true) => {
+                    panic!("{family} singleton should be accepted: {invocation}: {error:?}")
+                }
+            }
+            cases += 1;
+        }
+    }
+    for left in 0..options.len() {
+        for right in (left + 1)..options.len() {
+            for left_value in &values[left] {
+                for right_value in &values[right] {
+                    let selections = [
+                        SearchContractSelection {
+                            option: options[left],
+                            value: left_value,
+                        },
+                        SearchContractSelection {
+                            option: options[right],
+                            value: right_value,
+                        },
+                    ];
+                    assert_order_independent_contract_projection(
+                        family,
+                        selections[0],
+                        selections[1],
+                        command,
+                        expected_valid(&selections),
+                    );
+                    cases += 2;
+                }
+            }
+        }
+    }
+    cases
+}
+
+fn selection_value<'a>(
+    selections: &'a [SearchContractSelection<'a>],
+    option: &str,
+) -> Option<&'a str> {
+    selections
+        .iter()
+        .find(|selection| selection.option == option)
+        .map(|selection| selection.value)
+}
+
+fn selection_enabled(selections: &[SearchContractSelection<'_>], option: &str) -> bool {
+    selection_value(selections, option) == Some("on")
+}
+
+fn pc_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> bool {
+    let mode = selection_value(selections, "score-mode").unwrap_or("off");
+    let preserves_b2b = selection_enabled(selections, "preserve-b2b");
+    let has_spin_profile = selection_value(selections, "spin-profile").is_some();
+    let has_initial_b2b = selection_value(selections, "initial-b2b").is_some();
+
+    if mode == "tiling" {
+        return selection_value(selections, "rule").is_none()
+            && !has_spin_profile
+            && !preserves_b2b
+            && !has_initial_b2b
+            && !selection_enabled(selections, "solution-probabilities")
+            && !selection_enabled(selections, "tablebase")
+            && !selection_enabled(selections, "dependency-dag")
+            && selection_value(selections, "queue-knowledge") != Some("visible-7");
+    }
+    if mode == "failed-queue"
+        && (has_initial_b2b
+            || selection_enabled(selections, "solution-probabilities")
+            || (has_spin_profile && !preserves_b2b))
+    {
+        return false;
+    }
+    if has_spin_profile && mode != "summary" && !preserves_b2b {
+        return false;
+    }
+    if has_initial_b2b && mode != "summary" {
+        return false;
+    }
+    true
+}
+
+fn build_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> bool {
+    let aggregation = selection_value(selections, "aggregation").unwrap_or("buildability");
+    let preserves_b2b = selection_enabled(selections, "preserve-b2b");
+    let has_spin_profile = selection_value(selections, "spin-profile").is_some();
+    let finesse = selection_value(selections, "finesse");
+    let has_pattern_knowledge = selection_value(selections, "pattern-knowledge").is_some();
+
+    if aggregation == "tiling" {
+        return selection_value(selections, "rule").is_none()
+            && !has_spin_profile
+            && !preserves_b2b
+            && selection_value(selections, "dependency-dag").is_none()
+            && finesse.is_none()
+            && !has_pattern_knowledge;
+    }
+    if has_spin_profile && aggregation != "spin" && !preserves_b2b {
+        return false;
+    }
+    if has_pattern_knowledge && finesse != Some("inputs") {
+        return false;
+    }
+    true
+}
+
+fn spin_structure_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> bool {
+    if selection_value(selections, "spin-profile") == Some("t-spin-simple") {
+        return false;
+    }
+    if let (Some(bottom), Some(top)) = (
+        selection_value(selections, "fill-bottom"),
+        selection_value(selections, "fill-top"),
+    ) {
+        if bottom.parse::<u8>().expect("fixture fill bottom")
+            >= top.parse::<u8>().expect("fixture fill top")
+        {
+            return false;
+        }
+    }
+    if let (Some(inventory), Some(max_placements)) = (
+        selection_value(selections, "inventory"),
+        selection_value(selections, "max-placements"),
+    ) {
+        if max_placements
+            .parse::<usize>()
+            .expect("fixture max placements")
+            > inventory.len()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn pc_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_pair() {
+    let options = [
+        "lines",
+        "source",
+        "hold",
+        "queue-knowledge",
+        "score-mode",
+        "rule",
+        "spin-profile",
+        "preserve-b2b",
+        "initial-b2b",
+        "solution-probabilities",
+        "backend",
+        "fallback",
+        "workers",
+        "tablebase",
+        "dependency-dag",
+        "gpu-device",
+    ];
+    assert_eq!(
+        assert_complete_contract_matrix(
+            "pc",
+            &options,
+            pc_contract_command,
+            pc_contract_case_is_valid,
+        ),
+        2_279
+    );
+}
+
+#[test]
+fn build_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_pair() {
+    let options = [
+        "height",
+        "source",
+        "hold",
+        "aggregation",
+        "rule",
+        "spin-profile",
+        "preserve-b2b",
+        "dependency-dag",
+        "finesse",
+        "pattern-knowledge",
+        "mirror",
+        "backend",
+        "fallback",
+        "workers",
+    ];
+    assert_eq!(
+        assert_complete_contract_matrix(
+            "build",
+            &options,
+            build_contract_command,
+            build_contract_case_is_valid,
+        ),
+        1_664
+    );
+}
+
+#[test]
+fn setup_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_pair() {
+    let options = [
+        "mode",
+        "remaining",
+        "qb",
+        "queue-knowledge",
+        "next-cycle-remaining",
+        "post-cycle-borrow",
+        "priority",
+        "length",
+        "max-setup-pieces",
+        "rule",
+        "tablebase",
+        "workers",
+    ];
+    assert_eq!(
+        assert_complete_contract_matrix(
+            "setup",
+            &options,
+            setup_contract_command,
+            setup_contract_case_is_valid,
+        ),
+        1_216
+    );
+}
+
+#[test]
+fn spin_structure_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_pair() {
+    let options = [
+        "inventory",
+        "fill-bottom",
+        "fill-top",
+        "max-placements",
+        "minimality",
+        "rule",
+        "spin-profile",
+        "lines",
+        "workers",
+    ];
+    assert_eq!(
+        assert_complete_contract_matrix(
+            "spin-finder",
+            &options,
+            spin_structure_contract_command,
+            spin_structure_contract_case_is_valid,
+        ),
+        1_337
+    );
+}
+
+#[test]
+fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_parser() {
+    let mut pc_cases = 0_usize;
+    for option in [
+        "lines",
+        "source",
+        "queue-knowledge",
+        "spin-profile",
+        "initial-b2b",
+        "fallback",
+        "workers",
+        "gpu-device",
+    ] {
+        for value in forward_contract_invalid_values("pc", option) {
+            let command = match (option, value) {
+                ("lines", value) => format!("clearra pc --lines {value}"),
+                ("source", "both") => {
+                    "clearra pc --lines 4 --queue IOTSZJL --patterns P7".to_owned()
+                }
+                ("queue-knowledge", value) => {
+                    format!("clearra pc --lines 4 --queue-knowledge {value}")
+                }
+                ("spin-profile", value) => {
+                    format!("clearra pc --lines 4 --score --spin-profile {value}")
+                }
+                ("initial-b2b", value) => {
+                    format!("clearra pc --lines 4 --score --initial-b2b {value}")
+                }
+                ("fallback", "allow+deny") => concat!(
+                    "clearra pc --lines 4 --allow-backend-fallback ",
+                    "--no-backend-fallback"
+                )
+                .to_owned(),
+                ("workers", value) => format!("clearra pc --lines 4 --workers {value}"),
+                ("gpu-device", value) => {
+                    format!("clearra pc --lines 4 --gpu-device {value}")
+                }
+                _ => panic!("unmapped invalid PC fixture value {option}={value}"),
+            };
+            let error = project_contract_command(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            pc_cases += 1;
+        }
+    }
+
+    let mut build_cases = 0_usize;
+    for option in [
+        "height",
+        "source",
+        "spin-profile",
+        "finesse",
+        "pattern-knowledge",
+        "workers",
+    ] {
+        for value in forward_contract_invalid_values("build", option) {
+            let base = "clearra build-probability --base-mask 0 --target-mask 15";
+            let command = match (option, value) {
+                ("height", value) => format!("{base} --height {value} --queue I"),
+                ("source", "both") => {
+                    format!("{base} --height 8 --queue I --patterns P1")
+                }
+                ("spin-profile", value) => {
+                    format!("{base} --height 8 --queue I --aggregate spin --spin-profile {value}")
+                }
+                ("finesse", value) => {
+                    format!("{base} --height 8 --queue I --finesse {value}")
+                }
+                ("pattern-knowledge", value) => format!(
+                    "{base} --height 8 --queue I --finesse inputs --pattern-knowledge {value}"
+                ),
+                ("workers", value) => {
+                    format!("{base} --height 8 --queue I --workers {value}")
+                }
+                _ => panic!("unmapped invalid build fixture value {option}={value}"),
+            };
+            let error = project_contract_command(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            build_cases += 1;
+        }
+    }
+
+    let mut structure_cases = 0_usize;
+    for option in [
+        "inventory",
+        "fill-bottom",
+        "fill-top",
+        "max-placements",
+        "minimality",
+        "spin-profile",
+        "lines",
+        "workers",
+    ] {
+        for value in forward_contract_invalid_values("spin-finder", option) {
+            let command = match option {
+                "inventory" => format!("clearra spin-structure --pieces {value}"),
+                "fill-bottom" => format!(
+                    "clearra spin-structure --pieces IOTSZJL --height 24 --fill-bottom {value} --fill-top 24"
+                ),
+                "fill-top" => format!(
+                    "clearra spin-structure --pieces IOTSZJL --height 24 --fill-top {value}"
+                ),
+                "max-placements" => format!(
+                    "clearra spin-structure --pieces IOTSZJL --max-placements {value}"
+                ),
+                "minimality" => format!(
+                    "clearra spin-structure --pieces IOTSZJL --minimality {value}"
+                ),
+                "spin-profile" => format!(
+                    "clearra spin-structure --pieces IOTSZJL --spin-profile {value}"
+                ),
+                "lines" => {
+                    format!("clearra spin-structure --pieces IOTSZJL --lines {value}")
+                }
+                "workers" => {
+                    format!("clearra spin-structure --pieces IOTSZJL --workers {value}")
+                }
+                _ => unreachable!(),
+            };
+            let error = project_contract_command(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            structure_cases += 1;
+        }
+    }
+
+    assert_eq!(pc_cases, 10);
+    assert_eq!(build_cases, 7);
+    assert_eq!(structure_cases, 12);
+}
+
+#[test]
+fn setup_invalid_fixture_values_reach_the_authoritative_parser() {
+    let mut cases = 0_usize;
+    for option in [
+        "remaining",
+        "qb",
+        "queue-knowledge",
+        "next-cycle-remaining",
+        "max-setup-pieces",
+        "workers",
+    ] {
+        for value in forward_contract_invalid_values("setup", option) {
+            let command = match option {
+                "remaining" => format!("clearra setup --remaining {value}"),
+                "qb" => format!("clearra setup --mode qb --remaining I --qb {value}"),
+                "queue-knowledge" => {
+                    format!("clearra setup --remaining IOTSZJL --queue-knowledge {value}")
+                }
+                "next-cycle-remaining" => {
+                    format!("clearra setup --remaining IOTSZJL --next-cycle-remaining {value}")
+                }
+                "max-setup-pieces" => {
+                    format!("clearra setup --remaining IOTSZJL --max-setup-pieces {value}")
+                }
+                "workers" => format!("clearra setup --remaining IOTSZJL --workers {value}"),
+                _ => unreachable!(),
+            };
+            let error = project_contract_command(&command).expect_err(&command);
+            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 7);
 }
 
 #[test]

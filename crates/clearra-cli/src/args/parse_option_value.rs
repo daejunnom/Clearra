@@ -45,20 +45,6 @@ pub(crate) fn parse_u16_option(
         })
 }
 
-pub(crate) fn parse_u32_option(
-    args: &[String],
-    index: usize,
-    option: &'static str,
-) -> Result<u32, CliParseError> {
-    let value = option_value(args, index, option)?;
-    value
-        .parse::<u32>()
-        .map_err(|_| CliParseError::InvalidValue {
-            option,
-            value: value.to_owned(),
-        })
-}
-
 pub(crate) fn parse_usize_option(
     args: &[String],
     index: usize,

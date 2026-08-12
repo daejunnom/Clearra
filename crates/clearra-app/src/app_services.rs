@@ -46,6 +46,7 @@ use crate::{
     diagnostics::AppDiagnosticReport,
     execution_constraint_postprocess::apply_execution_constraints,
     io::{AppFilePolicy, AppFileResolver},
+    search_output_surface_postprocess::finalize_coverage_summary_public_surface,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,11 +173,12 @@ impl AppCoreExecutorService {
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
         let result = apply_execution_constraints(result, control)?;
-        if result.field("search_kind") == Some("build-probability") {
+        let result = if result.field("search_kind") == Some("build-probability") {
             apply_build_spin_postprocess(result, control)
         } else {
             apply_pc_postprocess(result, control)
-        }
+        }?;
+        Ok(finalize_coverage_summary_public_surface(result))
     }
 
     pub fn materialize_pc_scoring_partition(
@@ -354,6 +356,13 @@ impl AppCoreExecutorService {
         if control.is_cancelled() {
             return Err(CoreExecutionError::Cancelled);
         }
+        if matches!(self.backend, AppCoreExecutorBackend::NativeCore)
+            && problem.objective().execution_constraints().requested()
+        {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "native_core_execution_constraints_not_supported",
+            });
+        }
         let result = match self.backend {
             AppCoreExecutorBackend::NativeCore => {
                 CoreExecutor::execute_with_control(problem, control)
@@ -469,7 +478,8 @@ impl AppCoreExecutorService {
                 control,
             )?;
             let result = apply_execution_constraints(result, control)?;
-            return apply_build_spin_postprocess(result, control);
+            let result = apply_build_spin_postprocess(result, control)?;
+            return Ok(finalize_coverage_summary_public_surface(result));
         }
         let result = match self.backend {
             AppCoreExecutorBackend::WasmCpu => WasmBuildProbabilityBackend::execute_with_control(
@@ -485,7 +495,8 @@ impl AppCoreExecutorService {
             }),
         }?;
         let result = apply_execution_constraints(result, control)?;
-        apply_build_spin_postprocess(result, control)
+        let result = apply_build_spin_postprocess(result, control)?;
+        Ok(finalize_coverage_summary_public_surface(result))
     }
 }
 fn apply_pc_postprocess(
@@ -1095,6 +1106,38 @@ mod solution_average_score_tests {
         assert_eq!(reports[1].average_score(), "10");
         assert_eq!(reports[1].covered_pattern_count(), 1);
         assert!(reports[1].score_complete());
+    }
+}
+
+#[cfg(test)]
+mod execution_constraint_backend_tests {
+    use clearra_core_domain::{execution_cancellation::ExecutionControl, pc::pc_target::PcTarget};
+    use clearra_core_executor::CoreExecutionError;
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::OpeningPcSearchQuery;
+    use clearra_problem::ProblemCompiler;
+
+    use super::AppCoreExecutorService;
+
+    #[test]
+    fn native_core_fails_closed_for_execution_constraints() {
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        );
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("opening PC problem");
+
+        let error = AppCoreExecutorService::default()
+            .execute_with_control(&problem, &ExecutionControl::default())
+            .expect_err("NativeCore must not silently skip execution constraints");
+
+        assert_eq!(
+            error,
+            CoreExecutionError::RuntimeUnavailable {
+                component: "native_core_execution_constraints_not_supported",
+            }
+        );
     }
 }
 

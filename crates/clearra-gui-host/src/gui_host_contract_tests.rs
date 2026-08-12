@@ -110,6 +110,7 @@ mod case_gui_opening_pc_preserves_hold_selection_without_queue_override {
         };
 
         assert!(!command.query().hold_policy().is_enabled());
+        assert_eq!(command.query().queue().mode(), "standard-7-bag");
     }
 }
 

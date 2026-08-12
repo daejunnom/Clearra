@@ -587,9 +587,6 @@ impl WebCommandRequest {
             .with_gpu_warmup(self.gpu_warmup)
             .with_tablebase_requested(self.tablebase_requested)
             .with_precompute_build_dependencies(self.precompute_build_dependencies);
-        if matches!(self.backend, RequestedSearchBackend::Auto) {
-            policy = policy.with_allow_backend_fallback(true);
-        }
         if let Some(max_patterns) = self.max_patterns {
             policy = policy.with_max_patterns(max_patterns);
         }

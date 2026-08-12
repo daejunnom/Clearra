@@ -15,6 +15,7 @@ import {
 const EMPTY_FOUR_ROWS = emptyGrid(4);
 const EMPTY_EIGHT_ROWS = emptyGrid(8);
 const BUILTIN_KICKTABLES = ["srs-plus", "srs", "srs-x", "jstris-180"];
+const NATIVE_KICKTABLES = [...BUILTIN_KICKTABLES, "no-kick"];
 const SPIN_STRUCTURE_LINES = [
   "any",
   "0",
@@ -222,6 +223,7 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
     "field",
     "next",
     "kicktable",
+    "options",
     "locale",
   ]);
   assert.deepEqual(componentNames(modalFor("spin-structure")), [
@@ -258,8 +260,8 @@ test("setup ranking Modals preserve command defaults within Discord's five-compo
     );
     assertStringSelect(
       component(modal, "queue-knowledge"),
-      ["oracle", "visible-7"],
-      "oracle",
+      ["full-queue", "visible-7"],
+      "full-queue",
     );
     assert.equal(componentNames(modal).includes("next-cycle-remaining"), false);
     assert.equal(componentNames(modal).includes("setup-length"), false);
@@ -281,7 +283,7 @@ test("setup ranking Modals preserve command defaults within Discord's five-compo
     { name: "queue-knowledge", value: "visible-7" },
   ]);
   assertStringSelect(component(preselected, "kicktable"), [
-    "srs-plus", "srs", "srs-x", "jstris-180",
+    "srs-plus", "srs", "srs-x", "jstris-180", "no-kick",
   ], "srs-x");
   assertStringSelect(component(preselected, "priority"), ["all", "build", "pc"], "build");
   assertStringSelect(
@@ -291,7 +293,7 @@ test("setup ranking Modals preserve command defaults within Discord's five-compo
   );
   assertStringSelect(
     component(preselected, "queue-knowledge"),
-    ["oracle", "visible-7"],
+    ["full-queue", "visible-7"],
     "visible-7",
   );
 });
@@ -303,14 +305,14 @@ test("setup ranking Modal submits explicit defaults and rejects hidden-option lo
     selectLabel("kicktable", ["srs-plus"]),
     selectLabel("priority", ["build"]),
     selectLabel("max-setup-pieces", ["9"]),
-    selectLabel("queue-knowledge", ["oracle"]),
+    selectLabel("queue-knowledge", ["full-queue"]),
   ]);
   const command = findFieldModalCommand(interaction);
   assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
     remaining: "IOTS",
     priority: "build",
     "max-setup-pieces": 9,
-    "queue-knowledge": "oracle",
+    "queue-knowledge": "full-queue",
     kicktable: "srs-plus",
   });
 
@@ -387,8 +389,8 @@ test("v4 lines, kicktable, hold, spin type, language, and verify scope use strin
   );
   assertStringSelect(
     component(scoreFinder, "options"),
-    ["initial_b2b=false", "initial_b2b=true"],
-    "initial_b2b=false",
+    ["initial-b2b=false", "initial-b2b=true"],
+    "initial-b2b=false",
   );
 
   const spinStructure = modalFor("spin-structure");
@@ -404,7 +406,7 @@ test("v4 lines, kicktable, hold, spin type, language, and verify scope use strin
   );
   assertStringSelect(
     component(spinStructure, "kicktable"),
-    BUILTIN_KICKTABLES,
+    NATIVE_KICKTABLES,
     "srs-plus",
   );
   assert.equal(componentNames(spinStructure).includes("locale"), false);
@@ -553,7 +555,7 @@ test("score-finder Modal submits explicit row and initial-B2B defaults", () => {
     textLabel("next", "SIJSTLZO"),
     selectLabel("lines", ["4"]),
     selectLabel("kicktable", ["srs-plus"]),
-    selectLabel("options", ["initial_b2b=false"]),
+    selectLabel("options", ["initial-b2b=false"]),
   ]);
   const command = findFieldModalCommand(interaction);
   assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
@@ -561,7 +563,7 @@ test("score-finder Modal submits explicit row and initial-B2B defaults", () => {
     next: "SIJSTLZO",
     lines: 4,
     kicktable: "srs-plus",
-    options: "initial_b2b=false",
+    options: "initial-b2b=false",
   });
 });
 

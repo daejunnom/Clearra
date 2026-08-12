@@ -1,8 +1,9 @@
 use super::{
+    backend_fallback_override::record_backend_fallback_override,
     execution_backend_aliases::resolve_cpu_execution_aliases,
     has_help,
     parse_option_value::{
-        option_value, parse_u32_option, parse_u8_option, parse_usize_option, unknown_option,
+        option_value, parse_u16_option, parse_u8_option, parse_usize_option, unknown_option,
     },
     CliHelpTopic, CliParseError, ParsedCliCommand, PcArgs,
 };
@@ -98,7 +99,7 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 index += 2;
             }
             "--initial-b2b" => {
-                initial_b2b = Some(parse_u32_option(args, index, "--initial-b2b")?);
+                initial_b2b = Some(u32::from(parse_u16_option(args, index, "--initial-b2b")?));
                 index += 2;
             }
             "--rule" => {
@@ -184,11 +185,11 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 index += 2;
             }
             "--allow-backend-fallback" => {
-                allow_backend_fallback = Some(true);
+                record_backend_fallback_override(&mut allow_backend_fallback, true)?;
                 index += 1;
             }
             "--no-backend-fallback" => {
-                allow_backend_fallback = Some(false);
+                record_backend_fallback_override(&mut allow_backend_fallback, false)?;
                 index += 1;
             }
             "--solution-probabilities" => {

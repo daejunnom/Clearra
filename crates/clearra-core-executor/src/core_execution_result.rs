@@ -155,6 +155,11 @@ impl CoreExecutionResult {
         self
     }
 
+    pub fn without_tiling_solution_page_store(mut self) -> Self {
+        self.tiling_solution_page_store = None;
+        self
+    }
+
     pub fn with_normalized_solution_identities(
         mut self,
         identities: Vec<StandardBoard64TilingIdentity>,
@@ -252,6 +257,13 @@ impl CoreExecutionResult {
         self
     }
 
+    pub fn without_postprocess_score_cells(mut self) -> Self {
+        self.postprocess_score_cells.clear();
+        self.postprocess_score_cells_complete = false;
+        self.postprocess_score_profile_id = None;
+        self
+    }
+
     pub fn with_postprocess_spin_coverages(
         mut self,
         coverages: Vec<CorePostProcessSpinCoverage>,
@@ -267,6 +279,49 @@ impl CoreExecutionResult {
 
     pub fn with_finesse_report(mut self, report: FinesseReport) -> Self {
         self.finesse_report = Some(report);
+        self
+    }
+
+    /// Removes a finesse-search report whose witnesses and per-solution rows no longer have an
+    /// authoritative solution set. Finesse score is independent of a searched solution set and
+    /// therefore remains valid.
+    pub fn without_finesse_search_report(mut self) -> Self {
+        if self
+            .finesse_report
+            .as_ref()
+            .is_some_and(|report| report.mode() != "score")
+        {
+            self.finesse_report = None;
+        }
+        self
+    }
+
+    /// Canonicalizes invalid declared availability fields and physically removes every private
+    /// solution authority before a result crosses a public application boundary.
+    pub fn into_fail_closed_public_solution_surface(mut self) -> Self {
+        self.fields = self.fail_closed_solution_summary_fields();
+        self.postprocess_replay_trace = None;
+        self.postprocess_executions.clear();
+        self.postprocess_execution_complete = false;
+        self.postprocess_pattern_weights.clear();
+        self.packing_candidate_keys.clear();
+        self.normalized_solution_keys.clear();
+        self.normalized_solution_identities.clear();
+        self.representative_solution_identity = None;
+        self.solution_coverages.clear();
+        self.normalized_solution_coverages.clear();
+        self.solution_probabilities.clear();
+        self.solution_average_scores.clear();
+        self.exact_scoring_execution_batches.clear();
+        self.spin_coverage_execution_batches.clear();
+        self.postprocess_score_cells.clear();
+        self.postprocess_score_cells_complete = false;
+        self.postprocess_score_profile_id = None;
+        self.postprocess_spin_coverages.clear();
+        self.tiling_solution_page_store = None;
+        self = self.without_finesse_search_report();
+        self.execution_report =
+            SearchExecutionReport::from_summary_fields(&self.fields, Vec::new());
         self
     }
 }
@@ -319,6 +374,128 @@ impl CoreExecutionResult {
 impl CoreExecutionResult {
     pub fn summary_fields(&self) -> Vec<(String, String)> {
         self.fields.clone()
+    }
+
+    pub fn fail_closed_solution_summary_fields(&self) -> Vec<(String, String)> {
+        let availability = self.execution_report.solution_set_availability();
+        let has_declared_policy = self
+            .fields
+            .iter()
+            .any(|(key, _)| key == "search_output_policy");
+        let coverage_summary = self
+            .fields
+            .iter()
+            .any(|(key, value)| key == "search_output_policy" && value == "coverage-summary");
+        if !coverage_summary
+            && ((!availability.uses_explicit_contract() && !has_declared_policy)
+                || (availability.contract_valid()
+                    && availability
+                        .materialized_key_count_matches(self.normalized_solution_keys.len())))
+        {
+            return self.summary_fields();
+        }
+
+        const SOLUTION_AVAILABILITY_KEYS: &[&str] = &[
+            "search_output_policy",
+            "unique_solution_count",
+            "normalized_unique_solution_count",
+            "actual_normalized_unique_solution_count",
+            "total_solution_count",
+            "solution_count_calculated",
+            "solution_set_materialized",
+            "solution_keys_materialized_count",
+            "solution_keys_complete",
+            "solution_page_available",
+            "normalized_solution_set_hash",
+            "actual_normalized_solution_set_hash",
+            "mirror_unique_solution_count",
+            "mirror_normalized_solution_set_hash",
+            "original_unique_solution_count",
+            "coverage_row_count",
+            "b2b_preserving_candidate_pattern_count",
+            "pattern_verified_execution_count",
+            "minimum_cover_source_solution_count",
+            "minimum_cover_selected_solution_count",
+            "solution_trace_count",
+            "unique_solution_trace_count",
+            "solution_path_count",
+            "solution_probability_count",
+            "objective_solution_traces",
+            "objective_unique_solution_traces",
+            "post_pc_solution_count",
+            "b2b_preserving_solution_count",
+        ];
+        let search_output_policy = self
+            .fields
+            .iter()
+            .filter(|(key, _)| key == "search_output_policy")
+            .map(|(_, value)| value.as_str())
+            .find(|value| *value == "coverage-summary")
+            .or_else(|| {
+                self.field("search_output_policy")
+                    .filter(|value| matches!(*value, "summary" | "trace" | "coverage-rows"))
+            })
+            .map(ToOwned::to_owned);
+        let mut fields = self
+            .fields
+            .iter()
+            .filter(|(key, _)| !SOLUTION_AVAILABILITY_KEYS.contains(&key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(search_output_policy) = search_output_policy {
+            fields.push(("search_output_policy".to_owned(), search_output_policy));
+        }
+        fields.extend([
+            (
+                "unique_solution_count".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            (
+                "normalized_unique_solution_count".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            ("solution_count_calculated".to_owned(), "false".to_owned()),
+            ("solution_set_materialized".to_owned(), "false".to_owned()),
+            (
+                "solution_keys_materialized_count".to_owned(),
+                "0".to_owned(),
+            ),
+            ("solution_keys_complete".to_owned(), "false".to_owned()),
+            ("solution_page_available".to_owned(), "false".to_owned()),
+            (
+                "normalized_solution_set_hash".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            (
+                "actual_normalized_solution_set_hash".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+        ]);
+        for key in [
+            "total_solution_count",
+            "actual_normalized_unique_solution_count",
+            "mirror_unique_solution_count",
+            "original_unique_solution_count",
+            "mirror_normalized_solution_set_hash",
+            "coverage_row_count",
+            "b2b_preserving_candidate_pattern_count",
+            "pattern_verified_execution_count",
+            "minimum_cover_source_solution_count",
+            "minimum_cover_selected_solution_count",
+            "solution_trace_count",
+            "unique_solution_trace_count",
+            "solution_path_count",
+            "solution_probability_count",
+            "objective_solution_traces",
+            "objective_unique_solution_traces",
+            "post_pc_solution_count",
+            "b2b_preserving_solution_count",
+        ] {
+            if self.field(key).is_some() {
+                fields.push((key.to_owned(), "not-calculated".to_owned()));
+            }
+        }
+        fields
     }
 }
 impl CoreExecutionResult {
@@ -477,4 +654,175 @@ fn field_value<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str>
     fields
         .iter()
         .find_map(|(field_key, value)| (field_key == key).then_some(value.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{CoreExecutionResult, FinesseReport, TilingSolutionPageStore};
+
+    #[test]
+    fn without_tiling_solution_page_store_removes_attached_private_authority() {
+        let store = Arc::new(
+            TilingSolutionPageStore::new(0, Vec::new(), Vec::new())
+                .expect("empty synthetic page store"),
+        );
+        let result =
+            CoreExecutionResult::new(Vec::new(), Vec::new()).with_tiling_solution_page_store(store);
+
+        assert!(result.tiling_solution_page_store().is_some());
+        assert!(result
+            .without_tiling_solution_page_store()
+            .tiling_solution_page_store()
+            .is_none());
+    }
+
+    #[test]
+    fn public_fail_closed_surface_physically_removes_attached_solution_authority() {
+        let store = Arc::new(
+            TilingSolutionPageStore::new(0, Vec::new(), Vec::new())
+                .expect("empty synthetic page store"),
+        );
+        let result = CoreExecutionResult::new(
+            vec![
+                ("search_output_policy".to_owned(), "summray".to_owned()),
+                ("unique_solution_count".to_owned(), "1".to_owned()),
+            ],
+            Vec::new(),
+        )
+        .with_packing_candidate_keys(vec!["private-packing-key".to_owned()])
+        .with_normalized_solution_keys(vec!["private-solution-key".to_owned()])
+        .with_tiling_solution_page_store(store)
+        .with_finesse_report(FinesseReport::new(
+            "search",
+            "oracle",
+            true,
+            None,
+            Vec::new(),
+        ));
+
+        let public = result.into_fail_closed_public_solution_surface();
+
+        assert_eq!(
+            public.field("unique_solution_count"),
+            Some("not-calculated")
+        );
+        assert!(public.packing_candidate_keys().is_empty());
+        assert!(public.normalized_solution_keys().is_empty());
+        assert!(public.tiling_solution_page_store().is_none());
+        assert!(public.finesse_report().is_none());
+    }
+
+    #[test]
+    fn malformed_explicit_availability_is_canonicalized_to_unavailable() {
+        let result = CoreExecutionResult::new(
+            vec![
+                (
+                    "search_output_policy".to_owned(),
+                    "coverage-summary".to_owned(),
+                ),
+                ("unique_solution_count".to_owned(), "7".to_owned()),
+                (
+                    "normalized_unique_solution_count".to_owned(),
+                    "not-calculated".to_owned(),
+                ),
+                (
+                    "normalized_solution_set_hash".to_owned(),
+                    "not-calculated".to_owned(),
+                ),
+                (
+                    "actual_normalized_solution_set_hash".to_owned(),
+                    "not-calculated".to_owned(),
+                ),
+                ("solution_count_calculated".to_owned(), "true".to_owned()),
+                ("solution_set_materialized".to_owned(), "true".to_owned()),
+                (
+                    "solution_keys_materialized_count".to_owned(),
+                    "7".to_owned(),
+                ),
+                ("solution_keys_complete".to_owned(), "true".to_owned()),
+                ("solution_page_available".to_owned(), "true".to_owned()),
+            ],
+            Vec::new(),
+        )
+        .with_normalized_solution_keys(vec!["fake".to_owned()]);
+
+        let fields = result.fail_closed_solution_summary_fields();
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find_map(|(field_key, value)| (field_key == key).then_some(value.as_str()))
+        };
+        assert_eq!(field("search_output_policy"), Some("coverage-summary"));
+        assert_eq!(field("unique_solution_count"), Some("not-calculated"));
+        assert_eq!(field("solution_count_calculated"), Some("false"));
+        assert_eq!(field("solution_set_materialized"), Some("false"));
+        assert_eq!(field("solution_keys_materialized_count"), Some("0"));
+        assert_eq!(field("solution_keys_complete"), Some("false"));
+        assert_eq!(field("solution_page_available"), Some("false"));
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|(key, _)| key == "solution_count_calculated")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_policy_canonicalizes_numeric_and_hash_authority() {
+        let result = CoreExecutionResult::new(
+            vec![
+                ("search_output_policy".to_owned(), "summray".to_owned()),
+                ("unique_solution_count".to_owned(), "9".to_owned()),
+                (
+                    "normalized_unique_solution_count".to_owned(),
+                    "7".to_owned(),
+                ),
+                ("total_solution_count".to_owned(), "11".to_owned()),
+                (
+                    "actual_normalized_unique_solution_count".to_owned(),
+                    "7".to_owned(),
+                ),
+                (
+                    "normalized_solution_set_hash".to_owned(),
+                    "cts1:fake".to_owned(),
+                ),
+                (
+                    "actual_normalized_solution_set_hash".to_owned(),
+                    "cts1:fake".to_owned(),
+                ),
+                (
+                    "mirror_normalized_solution_set_hash".to_owned(),
+                    "cts1:mirror".to_owned(),
+                ),
+                ("b2b_preserving_solution_count".to_owned(), "5".to_owned()),
+            ],
+            Vec::new(),
+        );
+
+        let fields = result.fail_closed_solution_summary_fields();
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find_map(|(field_key, value)| (field_key == key).then_some(value.as_str()))
+        };
+        for key in [
+            "unique_solution_count",
+            "normalized_unique_solution_count",
+            "total_solution_count",
+            "actual_normalized_unique_solution_count",
+            "normalized_solution_set_hash",
+            "actual_normalized_solution_set_hash",
+            "mirror_normalized_solution_set_hash",
+            "b2b_preserving_solution_count",
+        ] {
+            assert_eq!(field(key), Some("not-calculated"), "{key}");
+        }
+        assert_eq!(field("solution_count_calculated"), Some("false"));
+        assert_eq!(field("solution_set_materialized"), Some("false"));
+        assert_eq!(field("solution_page_available"), Some("false"));
+        assert_eq!(field("search_output_policy"), None);
+    }
 }

@@ -39,9 +39,6 @@ const SFINDER_SEARCH_COMMANDS = new Set([
   "spin-cover",
   "spin",
   "score-finder",
-  "pc-setup",
-  "best-setup",
-  "dpc-finder",
 ]);
 const SFINDER_COMMANDS = new Set([...SFINDER_SEARCH_COMMANDS, "verify"]);
 const ALLOWED_COMMANDS = new Set([...NATIVE_COMMANDS, "sfinder"]);
@@ -73,6 +70,7 @@ const FORWARD_SEARCH_COMMANDS = new Set([
   "damage",
   "spin-finder",
   "spin-structure",
+  "finesse",
 ]);
 const SETUP_SEARCH_COMMANDS = new Set(["setup", "setup-finder"]);
 const SFINDER_REVERSE_SEARCH_COMMANDS = new Set([
@@ -97,12 +95,6 @@ const SFINDER_FORWARD_SEARCH_COMMANDS = new Set([
   "spin-cover",
   "spin",
 ]);
-const SFINDER_SETUP_SEARCH_COMMANDS = new Set([
-  "pc-setup",
-  "best-setup",
-  "dpc-finder",
-]);
-
 const DEFAULT_SEARCH_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_REVERSE_SEARCH_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_FORWARD_SEARCH_TIMEOUT_MS = 15 * 60_000;
@@ -124,7 +116,6 @@ export function searchTimeoutClass(arguments_) {
   const subcommand = normalizedSearchCommand(arguments_[1]);
   if (!subcommand) return "default";
   const canonical = normalizeSfinderCommand(subcommand);
-  if (SFINDER_SETUP_SEARCH_COMMANDS.has(canonical)) return "setup";
   if (SFINDER_REVERSE_SEARCH_COMMANDS.has(canonical)) return "reverse";
   if (SFINDER_FORWARD_SEARCH_COMMANDS.has(canonical)) return "forward";
   return "default";
@@ -238,15 +229,13 @@ const CONTROLLED_OPTIONS = new Map([
 ]);
 
 export function parseClearraMessage(content, prefix = "!", execution = {}) {
-  const trimmed = content.trim();
-  if (!trimmed.startsWith(prefix)) return null;
-  const body = trimmed.slice(prefix.length).trim();
-  if (!body) return null;
-  const tokens = tokenizeCommand(body);
-  const first = tokens[0]?.toLowerCase();
-  if (first === "clearra") tokens.shift();
-  else if (!ALLOWED_COMMANDS.has(first)) return null;
-  return prepareClearraArguments(tokens, execution);
+  // The catalog-aware text ingress owns every executable text alias. Keeping
+  // this legacy raw parser fail-closed prevents older imports from restoring
+  // the removed `!clearra ...` or noncatalog `!sfinder ...` escape hatch.
+  void content;
+  void prefix;
+  void execution;
+  return null;
 }
 
 export function prepareClearraArguments(tokens, execution = {}) {

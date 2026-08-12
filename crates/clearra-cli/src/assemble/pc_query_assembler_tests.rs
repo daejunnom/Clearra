@@ -8,9 +8,38 @@ fn assembles_supported_mvp_pc_query() {
     let query = PcQueryAssembler::assemble(&PcArgs::new(4)).expect("query");
 
     assert_eq!(query.target().lines(), 4);
-    assert_eq!(query.queue().mode(), "observed");
+    assert_eq!(query.queue().mode(), "standard-7-bag");
+    assert_eq!(query.queue().len(), 7);
     assert!(query.hold_policy().is_enabled());
     assert_eq!(query.objective().kind(), ObjectiveKind::All);
+    assert_eq!(
+        query.execution_policy().requested_backend(),
+        clearra_pc_graph::request::RequestedSearchBackend::Auto
+    );
+    assert!(query.execution_policy().allow_backend_fallback());
+}
+
+#[test]
+fn preserves_nonempty_observed_queue_mode() {
+    let query = PcQueryAssembler::assemble(&PcArgs::new(2).with_queue("IO", false))
+        .expect("observed queue query");
+
+    assert_eq!(query.queue().mode(), "observed");
+    assert_eq!(query.queue().len(), 2);
+}
+
+#[test]
+fn concrete_native_pc_backends_default_to_denying_fallback() {
+    for backend in ["cpu", "gpu", "hybrid"] {
+        let query =
+            PcQueryAssembler::assemble(&PcArgs::new(2).with_backend(Some(backend.to_owned())))
+                .expect("concrete backend query");
+
+        assert!(
+            !query.execution_policy().allow_backend_fallback(),
+            "backend={backend}"
+        );
+    }
 }
 
 #[test]

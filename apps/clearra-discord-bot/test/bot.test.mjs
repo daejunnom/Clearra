@@ -19,6 +19,7 @@ import {
   slashCommandCatalog,
 } from "../src/discord/slash-command-catalog.mjs";
 import { DiscordLocalePreferences } from "../src/discord/locale-preferences.mjs";
+import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
 import { decodeViewerDocument } from "../src/viewer/document.mjs";
 
 const REPRESENTED_SFINDER_COMMANDS = [
@@ -49,6 +50,9 @@ const REPRESENTED_SFINDER_COMMANDS = [
 ];
 
 test("slash catalog registers only curated active commands", () => {
+  assert.equal(slashCommandCatalog.length, 29);
+  assert.equal(globalCommands.length, 30);
+  assert.equal(globalCommands.filter(({ type }) => type === 3).length, 1);
   assert.deepEqual(
     slashCommandCatalog.map((command) => command.name),
     ["help", "render-file", "channel-settings", "server-settings", "finesse", ...REPRESENTED_SFINDER_COMMANDS],
@@ -152,11 +156,11 @@ test("slash catalog registers only curated active commands", () => {
   assert.equal(findSlashCommand("cat-finder"), null);
   assert.deepEqual(
     findSlashCommand("damage").registration.options.map(({ name }) => name),
-    ["next", "field", "kicktable"],
+    ["next", "field", "kicktable", "options"],
   );
   assert.deepEqual(
     findSlashCommand("spin-structure").registration.options.map(({ name }) => name),
-    ["pieces", "field", "lines", "profile", "kicktable"],
+    ["pieces", "field", "lines", "profile", "kicktable", "options"],
   );
   assert.deepEqual(
     findSlashCommand("spin-structure").registration.options
@@ -186,13 +190,30 @@ test("slash catalog registers only curated active commands", () => {
       "next-cycle-remaining",
       "setup-length",
       "kicktable",
+      "options",
     ],
+  );
+  assert.match(
+    findSlashCommand("score-finder").registration.options
+      .find(({ name }) => name === "lines").description,
+    /defaults to 4/,
   );
   assert.equal(globalCommands.some(({ name }) => name === "clearra"), false);
   assert.equal(globalCommands.some(({ name }) => name === "view"), false);
 });
 
 test("registered command metadata and every help page stay inside Discord limits", () => {
+  const validateOption = (option) => {
+    assert.match(option.name, /^[-_a-z0-9]{1,32}$/);
+    assert.ok(option.description.length >= 1 && option.description.length <= 100);
+    assert.ok((option.options?.length ?? 0) <= 25);
+    assert.ok((option.choices?.length ?? 0) <= 25);
+    for (const choice of option.choices ?? []) {
+      assert.ok(choice.name.length >= 1 && choice.name.length <= 100);
+      assert.ok(String(choice.value).length >= 1 && String(choice.value).length <= 100);
+    }
+    for (const child of option.options ?? []) validateOption(child);
+  };
   for (const command of globalCommands) {
     if (command.type === 3) {
       assert.ok(command.name.length >= 1 && command.name.length <= 32);
@@ -203,15 +224,7 @@ test("registered command metadata and every help page stay inside Discord limits
     assert.match(command.name, /^[-_a-z0-9]{1,32}$/);
     assert.ok(command.description.length >= 1 && command.description.length <= 100);
     assert.ok(command.options.length <= 25);
-    for (const option of command.options) {
-      assert.match(option.name, /^[-_a-z0-9]{1,32}$/);
-      assert.ok(option.description.length >= 1 && option.description.length <= 100);
-      assert.ok((option.choices?.length ?? 0) <= 25);
-      for (const choice of option.choices ?? []) {
-        assert.ok(choice.name.length >= 1 && choice.name.length <= 100);
-        assert.ok(String(choice.value).length >= 1 && String(choice.value).length <= 100);
-      }
-    }
+    for (const option of command.options) validateOption(option);
   }
 
   assert.ok(formatSlashCommandHelp().length <= 2_000);
@@ -261,7 +274,7 @@ test("registered command metadata and every help page stay inside Discord limits
   assert.match(koreanScoreFinderHelp, /패턴이 아닌 정확한/u);
   assert.match(koreanScoreFinderHelp, /1–6줄 중 원하는 퍼펙트 클리어 목표 높이/u);
   assert.doesNotMatch(koreanScoreFinderHelp, /기본값은 4줄/u);
-  assert.match(koreanScoreFinderHelp, /initial_b2b=false/);
+  assert.match(koreanScoreFinderHelp, /initial-b2b=true\|false/);
   assert.doesNotMatch(koreanScoreFinderHelp, /최대 대미지/u);
   const koreanDamageHelp = formatSlashCommandHelp("damage", "ko");
   assert.match(koreanDamageHelp, /최대 대미지/u);
@@ -603,7 +616,7 @@ test("field Modal submit reuses the slash parser, interaction locale, and serial
     },
     {
       maxConcurrentSearches: 1,
-      interactionDeadlineMs: 1_000,
+      interactionDeadlineMs: 5_000,
       searchTimeoutMs: 1_000,
     },
     {
@@ -1510,7 +1523,8 @@ test("compute slash output combines one input GIF without a separate followup", 
   await bot.handleInteraction(slashInteraction("path", [
     { name: "field", value: source },
     { name: "next", value: "*p2" },
-    { name: "options", value: "clear=2 hold=avoid" },
+    { name: "lines", value: 2 },
+    { name: "options", value: "hold=avoid" },
   ]));
   assert.equal(edits.length, 1);
   assert.equal(followups.length, 0);
@@ -1606,7 +1620,7 @@ test("search solutions are returned as one color-preserving CTK3 attachment", as
             stderr: "",
             stdout: JSON.stringify({
               schema_version: 2,
-              kind: "pc",
+              kind: "pc-scenario",
               summary: {
                 count_complete: true,
                 coverage_probability: 0.625,
@@ -1645,7 +1659,7 @@ test("search solutions are returned as one color-preserving CTK3 attachment", as
     (file) => file.contentType === CTK3_FILE_MIME_TYPE,
   );
   assert.ok(ctk3File);
-  assert.equal(ctk3File.name, "pc-result.ctk3");
+  assert.equal(ctk3File.name, "path-result.ctk3");
   assert.match(edits[0].payload.content, /Coverage probability: 62\.5%/);
   const document = decodeCtk3(new TextDecoder().decode(ctk3File.bytes));
   assert.deepEqual(document.pages[0].cells.slice(0, 6), [
@@ -1694,7 +1708,7 @@ test("score-finder projects the internal PC scenario kind onto its Discord artif
   );
 
   assert.equal(messages.length, 1);
-  assert.match(messages[0].payload.content, /Clearra score-finder completed\./);
+  assert.match(messages[0].payload.content, /Clearra Jstris-score perfect-clear search completed\./);
   assert.doesNotMatch(messages[0].payload.content, /pc-scenario/);
   assert.equal(messages[0].files[0].name, "score-finder-result.ctk3");
 });
@@ -1722,7 +1736,7 @@ test("zero-solution search output omits a stale initial-only CTK3 attachment", a
             stderr: "",
             stdout: JSON.stringify({
               schema_version: 2,
-              kind: "pc",
+              kind: "pc-scenario",
               summary: {
                 count_complete: true,
                 total_solution_count: 0,
@@ -1744,12 +1758,12 @@ test("zero-solution search output omits a stale initial-only CTK3 attachment", a
 
   await bot.runInteractionCommand(
     slashInteraction("path", []),
-    ["pc", "--lines", "2"],
+    ["sfinder", "path", "--lines", "2"],
   );
 
   assert.equal(messages.length, 1);
   assert.deepEqual(messages[0].files, []);
-  assert.match(messages[0].payload.content, /Clearra pc completed\./);
+  assert.match(messages[0].payload.content, /Clearra path search completed\./);
   assert.match(messages[0].payload.content, /Solutions: 0/);
   assert.doesNotMatch(
     messages[0].payload.content,
@@ -1757,9 +1771,8 @@ test("zero-solution search output omits a stale initial-only CTK3 attachment", a
   );
 });
 
-test("Korean structured build kinds use the build-probability result name", async () => {
+test("Korean structured build commands use the requested public result name", async () => {
   const messages = [];
-  const kinds = ["build-probability", "build_coverage"];
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -1774,7 +1787,7 @@ test("Korean structured build kinds use the build-probability result name", asyn
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
-              kind: kinds.shift(),
+              kind: "build-probability",
               summary: { coverage_probability: 0.5 },
             }),
           };
@@ -1798,7 +1811,7 @@ test("Korean structured build kinds use the build-probability result name", asyn
 
   assert.equal(messages.length, 2);
   for (const message of messages) {
-    assert.match(message.payload.content, /Clearra 구축 확률 탐색/u);
+    assert.match(message.payload.content, /Clearra 목표 셋업 확률 탐색/u);
     assert.match(message.payload.content, /커버 확률: 50%/u);
   }
 });
@@ -2066,7 +2079,7 @@ test("score-finder keeps its public result kind when the engine reports pc-scena
   assert.match(messages[1].payload.content, /대미지 탐색/u);
 });
 
-test("Discord replaces an unrecognized structured kind with the requested public command", async () => {
+test("Discord fails closed on an unrecognized structured result kind", async () => {
   const messages = [];
   const bot = new Clearrabot(
     {
@@ -2096,11 +2109,11 @@ test("Discord replaces an unrecognized structured kind with the requested public
     ["spin-structure"],
   );
 
-  assert.match(messages[0].payload.content, /Clearra spin-structure search completed\./);
+  assert.match(messages[0].payload.content, /inconsistent result/i);
   assert.doesNotMatch(messages[0].payload.content, /private|worker|engine/i);
 });
 
-test("score-finder does not hide an unexpected engine result kind", async () => {
+test("score-finder fails closed on an unexpected engine result kind", async () => {
   const messages = [];
   const bot = new Clearrabot(
     {
@@ -2127,8 +2140,356 @@ test("score-finder does not hide an unexpected engine result kind", async () => 
     ["sfinder", "score-finder"],
   );
 
-  assert.match(messages[0].payload.content, /Clearra damage completed\./);
-  assert.doesNotMatch(messages[0].payload.content, /score-finder/);
+  assert.match(messages[0].payload.content, /inconsistent result/i);
+  assert.doesNotMatch(messages[0].payload.content, /score-finder|damage/);
+});
+
+test("every public search result kind has an exact allowed engine kind and EN/KO label", async () => {
+  const labels = {
+    path: ["path search", "경로 탐색"],
+    percent: ["perfect-clear probability", "퍼펙트 클리어 확률 계산"],
+    chance: ["perfect-clear probability", "퍼펙트 클리어 확률 계산"],
+    minimals: ["minimum-cover perfect-clear search", "최소 커버 퍼펙트 클리어 탐색"],
+    score: ["Jstris-score perfect-clear search", "Jstris 점수 퍼펙트 클리어 탐색"],
+    score_minimals: ["minimum-cover Jstris-score search", "최소 커버 Jstris 점수 탐색"],
+    saves: ["perfect-clear save analysis", "퍼펙트 클리어 세이브 분석"],
+    best_save: ["perfect-clear save analysis", "퍼펙트 클리어 세이브 분석"],
+    cover: ["build-coverage search", "구축 커버리지 탐색"],
+    setup: ["target-setup probability search", "목표 셋업 확률 탐색"],
+    congruent: ["target-setup probability search", "목표 셋업 확률 탐색"],
+    congruent_cover: ["target-setup probability search", "목표 셋업 확률 탐색"],
+    setup_cover: ["target-cover probability search", "목표 커버 확률 탐색"],
+    cover_percent: ["target-cover probability search", "목표 커버 확률 탐색"],
+    special_cover: ["T-spin coverage search", "T-spin 커버리지 탐색"],
+    spin_cover: ["forward T-spin search", "정방향 T-spin 탐색"],
+    spin: ["forward T-spin search", "정방향 T-spin 탐색"],
+    score_finder: ["Jstris-score perfect-clear search", "Jstris 점수 퍼펙트 클리어 탐색"],
+    damage: ["damage search", "대미지 탐색"],
+    spin_structure: ["spin-structure search", "스핀 구조 탐색"],
+    pc_setup: ["joint setup search", "종합 셋업 탐색"],
+    best_setup: ["build-first setup search", "구축 우선 셋업 탐색"],
+    dpc_finder: ["PC-first setup search", "PC 우선 셋업 탐색"],
+    finesse_search: ["finesse search", "피네스 탐색"],
+    finesse_score: ["finesse score", "피네스 계산"],
+    verify: ["verification", "검증"],
+  };
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 26);
+  assert.equal(Object.isFrozen(DISCORD_PUBLIC_SEARCH_CONTRACT), true);
+  assert.equal(
+    DISCORD_PUBLIC_SEARCH_CONTRACT.every((entry) =>
+      Object.isFrozen(entry) && Object.isFrozen(entry.engineKinds)
+    ),
+    true,
+  );
+  assert.equal(
+    DISCORD_PUBLIC_SEARCH_CONTRACT.filter(({ id }) => id !== "verify").length,
+    25,
+  );
+  assert.deepEqual(
+    new Set(DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ resultKey }) => resultKey)),
+    new Set(Object.keys(labels)),
+  );
+  assert.deepEqual(
+    new Set(DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ id }) => id)),
+    new Set(slashCommandCatalog
+      .filter(({ kind }) => kind === "search")
+      .flatMap((command) => command.input === "finesse"
+        ? Object.keys(command.subcommands).map((name) => `finesse-${name}`)
+        : [command.name])),
+  );
+  const messages = [];
+  let engineKind = "";
+  let finesse = false;
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: engineKind,
+              summary: {},
+              ...(finesse ? { finesse_report: {} } : {}),
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  for (const { id: publicKind, engineKinds, resultKey } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
+    engineKind = engineKinds.at(-1);
+    const [english, korean] = labels[resultKey];
+    finesse = publicKind.startsWith("finesse-");
+    const argv = finesse
+      ? ["finesse", publicKind.slice("finesse-".length)]
+      : findSlashCommand(publicKind).argvPrefix;
+    for (const [locale, label] of [["en", english], ["ko", korean]]) {
+      const before = messages.length;
+      await bot.runInteractionCommand(
+        slashInteraction(finesse ? "finesse" : publicKind, []),
+        argv,
+        null,
+        locale,
+      );
+      assert.equal(messages.length, before + 1, `${publicKind}/${locale}`);
+      assert.equal(
+        messages.at(-1).split("\n", 1)[0],
+        locale === "ko"
+          ? `Clearra ${label}을(를) 완료했습니다.`
+          : `Clearra ${label} completed.`,
+        `${publicKind}/${locale}`,
+      );
+    }
+  }
+});
+
+test("public aliases reject every formerly broad alternate engine kind in EN and KO", async () => {
+  const cases = [
+    ...DISCORD_PUBLIC_SEARCH_CONTRACT
+      .filter(({ engineKinds }) => engineKinds.length === 1 && engineKinds[0] === "pc-scenario")
+      .flatMap(({ id }) => [[id, "pc"], [id, "percent"]]),
+    ...DISCORD_PUBLIC_SEARCH_CONTRACT
+      .filter(({ engineKinds }) => engineKinds.length === 1 && engineKinds[0] === "build-probability")
+      .filter(({ id }) => !id.startsWith("finesse-"))
+      .map(({ id }) => [id, "build-coverage"]),
+  ];
+  const messages = [];
+  let engineKind = "";
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({ kind: engineKind, summary: {} }),
+          };
+        },
+      },
+    },
+  );
+
+  for (const [publicKind, forbiddenEngine] of cases) {
+    engineKind = forbiddenEngine;
+    for (const [locale, expected] of [
+      ["en", "Clearra returned an inconsistent result. Please retry the command."],
+      ["ko", "Clearra 결과가 요청한 명령과 일치하지 않습니다. 명령어를 다시 실행해 주세요."],
+    ]) {
+      await bot.runInteractionCommand(
+        slashInteraction(publicKind, []),
+        findSlashCommand(publicKind).argvPrefix,
+        null,
+        locale,
+      );
+      assert.equal(messages.at(-1), expected, `${publicKind}/${forbiddenEngine}/${locale}`);
+    }
+  }
+  assert.equal(messages.length, 50);
+});
+
+test("structured result kind mismatches return the stable localized consistency error", async () => {
+  const messages = [];
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({ kind: "private-engine-kind", summary: {} }),
+          };
+        },
+      },
+    },
+  );
+  for (const [locale, expected] of [
+    ["en", "Clearra returned an inconsistent result. Please retry the command."],
+    ["ko", "Clearra 결과가 요청한 명령과 일치하지 않습니다. 명령어를 다시 실행해 주세요."],
+  ]) {
+    await bot.runInteractionCommand(
+      slashInteraction("best-save", []),
+      findSlashCommand("best-save").argvPrefix,
+      null,
+      locale,
+    );
+    assert.equal(messages.at(-1), expected);
+  }
+});
+
+test("CoverageSummary distinguishes not-calculated solution counts from calculated zero", async () => {
+  const messages = [];
+  let calculated;
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: "pc-scenario",
+              summary: {
+                solution_count_calculated: calculated,
+                total_solution_count: 0,
+                unique_solution_count: calculated === true ? 0 : "not-calculated",
+                normalized_unique_solution_count: 0,
+              },
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  for (const [locale, notCalculated] of [
+    ["en", "Solution count: Not calculated"],
+    ["ko", "해법 수: 계산하지 않음"],
+  ]) {
+    for (const legacyOrExplicitFalse of [false, undefined]) {
+      calculated = legacyOrExplicitFalse;
+      await bot.runInteractionCommand(
+        slashInteraction("path", []),
+        findSlashCommand("path").argvPrefix,
+        null,
+        locale,
+      );
+      assert.match(messages.at(-1), new RegExp(notCalculated));
+      assert.doesNotMatch(messages.at(-1), /(?:Solutions|Unique solutions|Normalized solutions|해법): 0/u);
+    }
+
+    calculated = true;
+    await bot.runInteractionCommand(
+      slashInteraction("path", []),
+      findSlashCommand("path").argvPrefix,
+      null,
+      locale,
+    );
+    assert.doesNotMatch(messages.at(-1), /Not calculated|계산하지 않음/u);
+    if (locale === "en") {
+      assert.match(messages.at(-1), /Solutions: 0/);
+      assert.match(messages.at(-1), /Unique solutions: 0/);
+      assert.match(messages.at(-1), /Normalized solutions: 0/);
+    } else {
+      assert.match(messages.at(-1), /해법: 0/);
+      assert.match(messages.at(-1), /고유 해법: 0/);
+      assert.match(messages.at(-1), /정규화 해법: 0/);
+    }
+  }
+});
+
+test("CoverageSummary availability fails closed atomically without Discord artifacts in EN and KO", async () => {
+  const messages = [];
+  let summary;
+  const staleKey =
+    "ctk1|initial=0000000000000003|placements=T:000000000000003c,I:0000000000003c00";
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              schema_version: 2,
+              kind: "pc-scenario",
+              summary,
+              contract: {
+                artifacts: {
+                  schema_version: "clearra.solution-data.v1",
+                  solution_keys: [staleKey],
+                },
+              },
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  const canonical = () => ({
+    search_output_policy: "coverage-summary",
+    unique_solution_count: "not-calculated",
+    normalized_unique_solution_count: "not-calculated",
+    solution_count_calculated: false,
+    solution_set_materialized: false,
+    solution_keys_materialized_count: 0,
+    solution_keys_complete: false,
+    solution_page_available: false,
+    normalized_solution_set_hash: "not-calculated",
+    actual_normalized_solution_set_hash: "not-calculated",
+    mirror_normalized_solution_set_hash: "not-calculated",
+  });
+  const malformedCases = [
+    ["canonical", canonical()],
+    ["malformed policy", { ...canonical(), search_output_policy: "coverage_summary" }],
+    ["inconsistent calculated", { ...canonical(), solution_count_calculated: true }],
+    ["inconsistent materialized", { ...canonical(), solution_set_materialized: true }],
+    ["inconsistent key count", { ...canonical(), solution_keys_materialized_count: 1 }],
+    ["stale normalized count", { ...canonical(), normalized_unique_solution_count: 0 }],
+    ["stale normalized hash", { ...canonical(), normalized_solution_set_hash: "cts1:stale" }],
+    ["stale mirror hash", { ...canonical(), mirror_normalized_solution_set_hash: "cts1:stale" }],
+  ];
+  const missingPolicy = canonical();
+  delete missingPolicy.search_output_policy;
+  malformedCases.push(["missing policy", missingPolicy]);
+  const missingPageFlag = canonical();
+  delete missingPageFlag.solution_page_available;
+  malformedCases.push(["missing page flag", missingPageFlag]);
+
+  for (const [locale, notCalculated] of [
+    ["en", "Solution count: Not calculated"],
+    ["ko", "해법 수: 계산하지 않음"],
+  ]) {
+    for (const [label, candidate] of malformedCases) {
+      summary = candidate;
+      await bot.runInteractionCommand(
+        slashInteraction("path", []),
+        findSlashCommand("path").argvPrefix,
+        null,
+        locale,
+      );
+      const message = messages.at(-1);
+      assert.deepEqual(message.files, [], `${locale}/${label}: stale artifact`);
+      assert.match(message.payload.content, new RegExp(notCalculated), `${locale}/${label}`);
+      assert.doesNotMatch(
+        message.payload.content,
+        /(?:Solutions|Unique solutions|Normalized solutions|해법): 0/u,
+        `${locale}/${label}: fake zero`,
+      );
+    }
+  }
 });
 
 test("tiling-only result delivery warns before Discord output", async () => {
@@ -2487,10 +2848,18 @@ test("gateway applies a five-minute reverse deadline and a fourteen-minute Disco
     [0, ["pc", "--lines", "4"]],
     [1, ["damage", "--queue", "I"]],
     [2, ["setup-finder", "--remaining", "IOTSZJL"]],
+    [3, ["finesse", "search"]],
+    [4, ["finesse", "score"]],
   ]) {
     await bot.runInteractionCommand(
       slashInteraction(
-        ordinal === 0 ? "path" : ordinal === 1 ? "damage" : "pc-setup",
+        ordinal === 0
+          ? "path"
+          : ordinal === 1
+            ? "damage"
+            : ordinal === 2
+              ? "pc-setup"
+              : "finesse",
         [],
         undefined,
         discordSnowflakeAt(createdAt + ordinal),
@@ -2505,6 +2874,8 @@ test("gateway applies a five-minute reverse deadline and a fourteen-minute Disco
       createdAt + 5 * 60_000,
       createdAt + 1 + 14 * 60_000,
       createdAt + 2 + 14 * 60_000,
+      createdAt + 3 + 840_000,
+      createdAt + 4 + 840_000,
     ],
   );
 });

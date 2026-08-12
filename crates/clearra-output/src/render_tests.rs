@@ -125,6 +125,44 @@ fn json_exposes_solution_artifacts_only_when_the_host_requests_them() {
 }
 
 #[test]
+fn json_solution_data_contract_distinguishes_all_availability_states() {
+    for (status, reason, artifacts_expected) in [
+        ("not-requested", RenderFieldValue::Null, false),
+        (
+            "unavailable",
+            RenderFieldValue::string("solution-set-not-materialized"),
+            false,
+        ),
+        (
+            "partial",
+            RenderFieldValue::string("solution-set-incomplete"),
+            true,
+        ),
+        ("complete", RenderFieldValue::Null, true),
+    ] {
+        let message = RenderMessage::new("pc")
+            .with_value("solution_data_requested", status != "not-requested")
+            .with_value("solution_data_status", status)
+            .with_value("solution_data_reason", reason)
+            .with_value(
+                "solution_keys",
+                RenderFieldValue::array([RenderFieldValue::string("ctk1|example")]),
+            );
+
+        let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+
+        assert!(
+            rendered.contains(&format!("\"status\":\"{status}\"")),
+            "{rendered}"
+        );
+        assert_eq!(rendered.contains("\"artifacts\""), artifacts_expected);
+        assert!(!rendered.contains("solution_data_status"));
+        assert!(!rendered.contains("solution_data_requested"));
+        assert!(!rendered.contains("solution_data_reason"));
+    }
+}
+
+#[test]
 fn dispatches_message_to_fumen_like_writer() {
     let message = RenderMessage::new("pc").with_field("lines", "2");
 

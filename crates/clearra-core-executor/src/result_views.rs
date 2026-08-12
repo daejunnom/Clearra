@@ -456,7 +456,7 @@ mod search_execution_report {
 
     use super::{
         BackendReport, BuildUpResult, BuildVariantView, CoverageResult, ObjectiveResult,
-        PackingResult, ReplayTrace,
+        PackingResult, ReplayTrace, SolutionSetAvailability,
     };
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -468,6 +468,7 @@ mod search_execution_report {
         coverage_result: CoverageResult,
         objective_result: ObjectiveResult,
         replay_trace: ReplayTrace,
+        solution_set_availability: SolutionSetAvailability,
     }
 
     impl SearchExecutionReport {
@@ -488,7 +489,16 @@ mod search_execution_report {
                 coverage_result,
                 objective_result,
                 replay_trace,
+                solution_set_availability: SolutionSetAvailability::default(),
             }
+        }
+
+        pub fn with_solution_set_availability(
+            mut self,
+            solution_set_availability: SolutionSetAvailability,
+        ) -> Self {
+            self.solution_set_availability = solution_set_availability;
+            self
         }
     }
     impl SearchExecutionReport {
@@ -502,6 +512,7 @@ mod search_execution_report {
                 ObjectiveResult::from_summary_fields(fields),
                 ReplayTrace::from_summary_fields(fields, steps),
             )
+            .with_solution_set_availability(SolutionSetAvailability::from_summary_fields(fields))
         }
     }
     impl SearchExecutionReport {
@@ -539,6 +550,277 @@ mod search_execution_report {
             &self.replay_trace
         }
     }
+    impl SearchExecutionReport {
+        pub fn solution_set_availability(&self) -> &SolutionSetAvailability {
+            &self.solution_set_availability
+        }
+    }
+}
+mod solution_set_availability {
+    use super::summary_fields::{field_value, optional_usize_field};
+
+    const EXPLICIT_MARKER_KEYS: [&str; 5] = [
+        "solution_count_calculated",
+        "solution_set_materialized",
+        "solution_keys_materialized_count",
+        "solution_keys_complete",
+        "solution_page_available",
+    ];
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum AvailabilityContractSource {
+        #[default]
+        Unavailable,
+        Explicit,
+        Legacy,
+    }
+
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct SolutionSetAvailability {
+        solution_count_calculated: bool,
+        solution_set_materialized: bool,
+        solution_keys_materialized_count: usize,
+        solution_keys_complete: bool,
+        solution_page_available: bool,
+        contract_source: AvailabilityContractSource,
+        contract_valid: bool,
+    }
+
+    impl SolutionSetAvailability {
+        pub fn new(
+            solution_count_calculated: bool,
+            solution_set_materialized: bool,
+            solution_keys_materialized_count: usize,
+            solution_keys_complete: bool,
+            solution_page_available: bool,
+        ) -> Self {
+            Self {
+                solution_count_calculated,
+                solution_set_materialized,
+                solution_keys_materialized_count,
+                solution_keys_complete,
+                solution_page_available,
+                contract_source: AvailabilityContractSource::Explicit,
+                contract_valid: true,
+            }
+        }
+
+        pub fn from_summary_fields(fields: &[(String, String)]) -> Self {
+            if fields
+                .iter()
+                .any(|(key, value)| key == "search_output_policy" && value == "coverage-summary")
+            {
+                return explicit_availability(fields, true).unwrap_or_else(explicit_unavailable);
+            }
+
+            if EXPLICIT_MARKER_KEYS
+                .iter()
+                .any(|key| field_value(fields, key).is_some())
+            {
+                return explicit_availability(fields, false).unwrap_or_else(explicit_unavailable);
+            }
+
+            legacy_availability(fields)
+        }
+
+        pub fn solution_count_calculated(&self) -> bool {
+            self.solution_count_calculated
+        }
+
+        pub fn solution_set_materialized(&self) -> bool {
+            self.solution_set_materialized
+        }
+
+        pub fn solution_keys_materialized_count(&self) -> usize {
+            self.solution_keys_materialized_count
+        }
+
+        pub fn solution_keys_complete(&self) -> bool {
+            self.solution_keys_complete
+        }
+
+        pub fn solution_page_available(&self) -> bool {
+            self.solution_page_available
+        }
+
+        pub fn contract_valid(&self) -> bool {
+            self.contract_valid
+        }
+
+        pub fn uses_explicit_contract(&self) -> bool {
+            self.contract_source == AvailabilityContractSource::Explicit
+        }
+
+        pub fn uses_legacy_inference(&self) -> bool {
+            self.contract_source == AvailabilityContractSource::Legacy
+        }
+
+        pub fn materialized_key_count_matches(&self, actual_key_count: usize) -> bool {
+            self.uses_legacy_inference()
+                || self.solution_keys_materialized_count == actual_key_count
+        }
+    }
+
+    fn explicit_availability(
+        fields: &[(String, String)],
+        coverage_summary: bool,
+    ) -> Option<SolutionSetAvailability> {
+        let policy = single_field_value(fields, "search_output_policy")?;
+        if coverage_summary {
+            if policy != "coverage-summary"
+                || single_field_value(fields, "unique_solution_count")? != "not-calculated"
+                || single_field_value(fields, "normalized_unique_solution_count")?
+                    != "not-calculated"
+                || single_field_value(fields, "normalized_solution_set_hash")? != "not-calculated"
+                || single_field_value(fields, "actual_normalized_solution_set_hash")?
+                    != "not-calculated"
+                || optional_existing_count_is_not_calculated(
+                    fields,
+                    "mirror_normalized_solution_set_hash",
+                )? == Some(false)
+                || optional_existing_count_is_not_calculated(fields, "total_solution_count")?
+                    == Some(false)
+            {
+                return None;
+            }
+        } else if !matches!(policy, "summary" | "trace" | "coverage-rows") {
+            return None;
+        }
+
+        let solution_count_calculated = single_bool_field(fields, "solution_count_calculated")?;
+        let solution_set_materialized = single_bool_field(fields, "solution_set_materialized")?;
+        let solution_keys_materialized_count =
+            single_usize_field(fields, "solution_keys_materialized_count")?;
+        let solution_keys_complete = single_bool_field(fields, "solution_keys_complete")?;
+        let solution_page_available = single_bool_field(fields, "solution_page_available")?;
+
+        if !solution_count_calculated {
+            if solution_set_materialized
+                || solution_keys_materialized_count != 0
+                || solution_keys_complete
+                || solution_page_available
+                || single_field_value(fields, "unique_solution_count")? != "not-calculated"
+                || optional_existing_count_is_not_calculated(
+                    fields,
+                    "normalized_unique_solution_count",
+                )? == Some(false)
+                || optional_existing_count_is_not_calculated(fields, "total_solution_count")?
+                    == Some(false)
+            {
+                return None;
+            }
+            return Some(SolutionSetAvailability::new(false, false, 0, false, false));
+        }
+
+        if coverage_summary || !solution_set_materialized {
+            return None;
+        }
+        let unique_solution_count = single_field_value(fields, "unique_solution_count")
+            .and_then(|value| value.parse::<usize>().ok())?;
+        let normalized_solution_count =
+            optional_single_usize_field(fields, "normalized_unique_solution_count")?
+                .unwrap_or(unique_solution_count);
+        let _total_solution_count = optional_single_usize_field(fields, "total_solution_count")?;
+        if solution_keys_materialized_count > normalized_solution_count
+            || (solution_keys_complete
+                && solution_keys_materialized_count != normalized_solution_count)
+            || (solution_page_available
+                && (solution_keys_complete
+                    || solution_keys_materialized_count >= normalized_solution_count))
+        {
+            return None;
+        }
+
+        Some(SolutionSetAvailability::new(
+            true,
+            true,
+            solution_keys_materialized_count,
+            solution_keys_complete,
+            solution_page_available,
+        ))
+    }
+
+    fn legacy_availability(fields: &[(String, String)]) -> SolutionSetAvailability {
+        let policy_is_legacy_compatible =
+            match single_optional_field_value(fields, "search_output_policy") {
+                Ok(None) => true,
+                Ok(Some("summary" | "trace" | "coverage-rows")) => true,
+                Ok(Some(_)) | Err(()) => false,
+            };
+        if !policy_is_legacy_compatible {
+            return SolutionSetAvailability::default();
+        }
+        let solution_count_calculated = optional_usize_field(fields, "unique_solution_count")
+            .is_some()
+            || optional_usize_field(fields, "total_solution_count").is_some();
+        SolutionSetAvailability {
+            solution_count_calculated,
+            solution_set_materialized: solution_count_calculated,
+            solution_keys_materialized_count: 0,
+            solution_keys_complete: solution_count_calculated,
+            solution_page_available: false,
+            contract_source: AvailabilityContractSource::Legacy,
+            contract_valid: true,
+        }
+    }
+
+    fn explicit_unavailable() -> SolutionSetAvailability {
+        SolutionSetAvailability {
+            contract_source: AvailabilityContractSource::Explicit,
+            ..SolutionSetAvailability::default()
+        }
+    }
+
+    fn single_field_value<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        single_optional_field_value(fields, key).ok().flatten()
+    }
+
+    fn single_optional_field_value<'a>(
+        fields: &'a [(String, String)],
+        key: &str,
+    ) -> Result<Option<&'a str>, ()> {
+        let mut values = fields
+            .iter()
+            .filter_map(|(field_key, value)| (field_key == key).then_some(value.as_str()));
+        let value = values.next();
+        if values.next().is_some() {
+            Err(())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn single_bool_field(fields: &[(String, String)], key: &str) -> Option<bool> {
+        match single_field_value(fields, key)? {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn single_usize_field(fields: &[(String, String)], key: &str) -> Option<usize> {
+        single_field_value(fields, key)?.parse().ok()
+    }
+
+    fn optional_single_usize_field(
+        fields: &[(String, String)],
+        key: &str,
+    ) -> Option<Option<usize>> {
+        match single_optional_field_value(fields, key).ok()? {
+            Some(value) => Some(Some(value.parse().ok()?)),
+            None => Some(None),
+        }
+    }
+
+    fn optional_existing_count_is_not_calculated(
+        fields: &[(String, String)],
+        key: &str,
+    ) -> Option<Option<bool>> {
+        match single_optional_field_value(fields, key).ok()? {
+            Some(value) => Some(Some(value == "not-calculated")),
+            None => Some(None),
+        }
+    }
 }
 mod summary_fields {
     pub(super) fn field_value<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -548,15 +830,19 @@ mod summary_fields {
     }
 
     pub(super) fn bool_field(fields: &[(String, String)], key: &str) -> bool {
-        field_value(fields, key)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(false)
+        optional_bool_field(fields, key).unwrap_or(false)
     }
 
     pub(super) fn usize_field(fields: &[(String, String)], key: &str) -> usize {
-        field_value(fields, key)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
+        optional_usize_field(fields, key).unwrap_or(0)
+    }
+
+    pub(super) fn optional_bool_field(fields: &[(String, String)], key: &str) -> Option<bool> {
+        field_value(fields, key).and_then(|value| value.parse().ok())
+    }
+
+    pub(super) fn optional_usize_field(fields: &[(String, String)], key: &str) -> Option<usize> {
+        field_value(fields, key).and_then(|value| value.parse().ok())
     }
 }
 
@@ -570,6 +856,7 @@ pub use packing_candidate_view::PackingCandidateView;
 pub use packing_result::PackingResult;
 pub use replay_trace::ReplayTrace;
 pub use search_execution_report::SearchExecutionReport;
+pub use solution_set_availability::SolutionSetAvailability;
 
 #[cfg(test)]
 #[path = "result_views_tests.rs"]

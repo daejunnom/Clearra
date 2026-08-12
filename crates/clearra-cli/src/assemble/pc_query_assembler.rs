@@ -132,7 +132,9 @@ fn parse_queue(args: &PcArgs) -> Result<PcQueueInput, PcQueryAssemblyError> {
         }
     };
 
-    if args.fixed_queue() {
+    if !args.fixed_queue() && args.queue().trim().is_empty() {
+        Ok(PcQueueInput::standard_7_bag())
+    } else if args.fixed_queue() {
         PieceSequenceAssembler::parse_fixed_sequence(args.queue())
             .map(PcQueueInput::fixed_sequence)
             .map_err(|error| match error {

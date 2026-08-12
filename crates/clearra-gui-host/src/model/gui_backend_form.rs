@@ -43,6 +43,7 @@ pub struct GuiBackendForm {
     use_all_logical_processors: bool,
     deterministic: bool,
     precompute_build_dependencies: bool,
+    tablebase_requested: bool,
     memory_budget_mb: u32,
     candidate_budget: u32,
     pattern_budget: u32,
@@ -155,6 +156,12 @@ impl GuiBackendForm {
     }
 }
 impl GuiBackendForm {
+    pub const fn with_tablebase_requested(mut self, value: bool) -> Self {
+        self.tablebase_requested = value;
+        self
+    }
+}
+impl GuiBackendForm {
     pub const fn workers_requested(&self) -> Option<u16> {
         if self.workers_explicit {
             Some(self.workers)
@@ -176,6 +183,11 @@ impl GuiBackendForm {
 impl GuiBackendForm {
     pub const fn precompute_build_dependencies(&self) -> bool {
         self.precompute_build_dependencies
+    }
+}
+impl GuiBackendForm {
+    pub const fn tablebase_requested(&self) -> bool {
+        self.tablebase_requested
     }
 }
 impl GuiBackendForm {
@@ -206,6 +218,7 @@ impl Default for GuiBackendForm {
             use_all_logical_processors: false,
             deterministic: true,
             precompute_build_dependencies: false,
+            tablebase_requested: false,
             memory_budget_mb: 0,
             candidate_budget: 4096,
             pattern_budget: 1024,

@@ -1489,7 +1489,7 @@ impl WasmExactSearchSession {
             if let Some(solution_coverage) = solution_coverage {
                 self.merge_solution_coverage(candidate.identity, &solution_coverage)?;
             }
-            if self.problem.output_policy().retains_solution_set() {
+            if retains_buildable_identity_evidence(&self.problem) {
                 let identity = TilingIdentityEntry::new(candidate.identity);
                 if !self.buildable_identities.contains(&identity)
                     && self.buildable_identities.try_reserve(1).is_err()
@@ -2868,6 +2868,13 @@ fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())
 }
 
+pub(super) fn retains_buildable_identity_evidence(problem: &SearchProblem) -> bool {
+    // CoverageSummary still hides identities in `build_result`; requested execution constraints
+    // retain them only long enough to build the authoritative post-processing graph.
+    problem.output_policy().retains_solution_set()
+        || problem.objective().execution_constraints().requested()
+}
+
 fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityMetrics) {
     total.lock_queries = total.lock_queries.saturating_add(next.lock_queries);
     total.harddrop_queries = total.harddrop_queries.saturating_add(next.harddrop_queries);
@@ -2894,6 +2901,18 @@ mod tests {
     use crate::tiling_solution_store::{
         pack_tiling_row_ids, read_packed_tiling_row, PackedTilingRows, PACKED_TILING_MAX_ROW_ID,
     };
+    use crate::WasmCpuSearchBackend;
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
+    };
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     #[test]
     fn compact_tiling_rows_round_trip_across_word_boundaries() {
@@ -2916,6 +2935,52 @@ mod tests {
         assert!(pack_tiling_row_ids(&[3, 3]).is_none());
         assert!(pack_tiling_row_ids(&[4, 3]).is_none());
         assert!(pack_tiling_row_ids(&[PACKED_TILING_MAX_ROW_ID + 1]).is_none());
+    }
+
+    #[test]
+    fn coverage_summary_b2b_retains_internal_graph_and_coverage_evidence() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_retained_trace_limit(0)
+        .with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        );
+        let problem = ProblemCompiler::compile_scenario_percent(&query).expect("problem");
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("coverage-summary B2B producer");
+
+        assert_eq!(
+            result.field("search_output_policy"),
+            Some("coverage-summary")
+        );
+        assert_eq!(result.coverage_pattern_words(), &[1]);
+        assert_eq!(result.solution_coverages().len(), 1);
+        assert_eq!(result.normalized_solution_coverages().len(), 1);
+        let batch = result
+            .exact_scoring_execution_batch()
+            .expect("B2B execution evidence batch");
+        assert!(batch.complete());
+        assert_eq!(batch.graphs().len(), 1);
+        assert_eq!(
+            batch.graphs()[0].identity(),
+            result.solution_coverages()[0].identity()
+        );
+        assert_eq!(
+            result.solution_coverages()[0]
+                .covered_patterns()
+                .count_ones(),
+            1
+        );
+        assert!(result.normalized_solution_identities().is_empty());
+        assert!(result.path_steps().is_empty());
     }
 
     #[test]

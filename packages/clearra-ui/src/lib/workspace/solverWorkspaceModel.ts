@@ -1,4 +1,12 @@
 import type { ClearraDesktopRequest } from '../host';
+import {
+  searchExecutionCommandArguments,
+  searchExecutionDesktopFields,
+  type SearchBackend,
+  type SearchExecutionRequest
+} from './searchExecutionModel.ts';
+
+export type { SearchBackend } from './searchExecutionModel.ts';
 
 export type ScoreMode = 'tiling' | 'off' | 'minimum-cover' | 'summary' | 'failed-queue';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
@@ -10,7 +18,6 @@ export type SpinProfile =
   | 'all-spin-plus'
   | 'all-mini'
   | 'all-mini-plus';
-export type SearchBackend = 'auto' | 'cpu' | 'gpu' | 'hybrid';
 export type QueueKnowledge = 'oracle' | 'visible-7';
 export type SolverHoldPiece = 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
 
@@ -75,23 +82,35 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
 export function normalizeWorkspaceRequest(
   request: SolverWorkspaceRequest
 ): SolverWorkspaceRequest {
+  if (request.scoreMode === 'tiling') {
+    return {
+      ...request,
+      queueKnowledge: 'oracle',
+      rule: 'srs-plus',
+      scoreProfile: 'tetrio',
+      spinProfile: 't-spins',
+      preserveB2B: false,
+      initialB2B: 0,
+      solutionProbabilities: false,
+      tablebaseEnabled: false,
+      precomputeBuildDependencies: false
+    };
+  }
+  const nonScoring = request.scoreMode !== 'summary';
   if (request.scoreMode === 'failed-queue') {
     return {
       ...request,
+      scoreProfile: 'tetrio',
+      spinProfile: request.preserveB2B ? request.spinProfile : 't-spins',
       initialB2B: 0,
       solutionProbabilities: false
     };
   }
-  if (request.scoreMode !== 'tiling') return request;
   return {
     ...request,
-    queueKnowledge: 'oracle',
-    rule: 'srs-plus',
-    preserveB2B: false,
-    initialB2B: 0,
-    solutionProbabilities: false,
-    tablebaseEnabled: false,
-    precomputeBuildDependencies: false
+    scoreProfile: nonScoring ? 'tetrio' : request.scoreProfile,
+    spinProfile: nonScoring && !request.preserveB2B ? 't-spins' : request.spinProfile,
+    initialB2B: nonScoring ? 0 : request.initialB2B
   };
 }
 
@@ -343,7 +362,9 @@ export function workspaceValidationCodes(
   if (!Number.isInteger(request.lines) || request.lines < 1 || request.lines > 6) {
     errors.push('target_lines_invalid');
   }
-  if (!parseBrowserQueueInput(request.queue)) errors.push('queue_invalid');
+  if (request.queue.trim() !== '' && !parseBrowserQueueInput(request.queue)) {
+    errors.push('queue_invalid');
+  }
   const normalized = clearCompletedRows(request.boardMask, request.lines);
   const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);
   if (emptyCells === 0) errors.push('scenario_full');
@@ -351,7 +372,7 @@ export function workspaceValidationCodes(
   if (!Number.isInteger(request.workers) || request.workers < 1) {
     errors.push('worker_count_invalid');
   }
-  if (!Number.isInteger(request.initialB2B) || request.initialB2B < 0) {
+  if (!Number.isInteger(request.initialB2B) || request.initialB2B < 0 || request.initialB2B > 0xffff) {
     errors.push('initial_b2b_invalid');
   }
   if (request.gpuDevice !== 'auto' && !/^\d+$/.test(request.gpuDevice)) {
@@ -389,9 +410,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   }
   tokens.push(
     '--count',
-    request.scoreMode === 'off' || request.scoreMode === 'tiling' ? 'unique' : 'all',
-    '--backend',
-    request.backend
+    request.scoreMode === 'off' || request.scoreMode === 'tiling' ? 'unique' : 'all'
   );
   if (request.scoreMode !== 'tiling') {
     tokens.push('--rule', request.rule);
@@ -414,17 +433,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     }
     if (request.preserveB2B) tokens.push('--preserve-b2b');
   }
-  if (request.gpuDevice !== 'auto' && request.backend !== 'cpu') {
-    tokens.push('--gpu-device', request.gpuDevice);
-  }
-  tokens.push(
-    '--allow-backend-fallback',
-    '--workers',
-    String(Math.max(1, Math.trunc(request.workers))),
-    '--cpu-warmup'
-  );
-  if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
-  if (request.backend !== 'cpu') tokens.push('--gpu-warmup');
+  tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
   if (request.maxPatterns !== undefined) {
     tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
   }
@@ -447,7 +456,7 @@ export function workspaceRequestForDesktop(
     hold_enabled: request.holdEnabled,
     queue_knowledge: request.queueKnowledge,
     hold_piece: request.holdEnabled ? request.holdPiece ?? 'empty' : 'empty',
-    backend: request.backend,
+    ...searchExecutionDesktopFields(workspaceSearchExecution(request)),
     rule: request.rule,
     board_mask: boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
     visible_height: request.lines,
@@ -459,6 +468,7 @@ export function workspaceRequestForDesktop(
     spin_profile: request.spinProfile,
     preserve_b2b: request.preserveB2B,
     precompute_build_dependencies: request.precomputeBuildDependencies,
+    tablebase_requested: request.tablebaseEnabled,
     // The general PC/failed-queue workspace does not request finesse. Keep the
     // new desktop bridge fields explicit so it cannot inherit a prior job's
     // build-probability policy.
@@ -466,16 +476,22 @@ export function workspaceRequestForDesktop(
     pattern_knowledge: 'both',
     initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
     solution_probabilities: request.solutionProbabilities,
-    // Desktop worker selection is automatic and must use the native host's
-    // logical-processor count rather than the WebView's hardware hint.
-    workers: 0,
-    use_all_logical_processors: request.useAllLogicalProcessors,
-    gpu_device: request.gpuDevice,
-    allow_backend_fallback: true,
     memory_budget_mb: 0,
     candidate_budget: 10_000_000,
     pattern_budget: request.maxPatterns === undefined
       ? 5040
       : Math.max(1, Math.trunc(request.maxPatterns))
+  };
+}
+
+function workspaceSearchExecution(request: SolverWorkspaceRequest): SearchExecutionRequest {
+  return {
+    backend: request.backend,
+    gpuDevice: request.gpuDevice,
+    workers: request.workers,
+    useAllLogicalProcessors: request.useAllLogicalProcessors,
+    allowBackendFallback: request.backend === 'auto',
+    cpuWarmup: true,
+    gpuWarmup: true
   };
 }

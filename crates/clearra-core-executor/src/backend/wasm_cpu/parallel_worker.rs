@@ -20,6 +20,7 @@ use super::{
     geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, TargetGroup},
     parallel_coverage::SharedCoverage,
     reachability::ReachabilityMetrics,
+    result::retains_buildable_identity_evidence,
     WasmExactSearchError,
 };
 
@@ -439,10 +440,7 @@ fn run_branch(
                         "wasm_geometry_candidate_target_out_of_range",
                     ),
                 )?;
-                let solution_probabilities_requested =
-                    problem.solution_probability_policy().requested();
-                let solution_coverage_required = solution_probabilities_requested
-                    || problem.objective().kind() == ObjectiveKind::MinimumCover;
+                let solution_coverage_required = retains_solution_coverage_evidence(problem);
                 let coverage_already_known = workspace.standard_bag_coverage_complete()
                     || shared_coverage.is_superset(target.possible_patterns.as_ref());
                 let witness_mode = CandidateWitnessMode::for_candidate(
@@ -491,7 +489,7 @@ fn run_branch(
                     candidate,
                     result,
                     solution_coverage,
-                    problem.output_policy().retains_solution_set(),
+                    retains_buildable_identity_evidence(problem),
                     problem.output_policy().retains_representative_trace(),
                 )?;
                 local_ordinal = local_ordinal.saturating_add(1);
@@ -510,6 +508,12 @@ fn run_branch(
     ))
 }
 
+fn retains_solution_coverage_evidence(problem: &SearchProblem) -> bool {
+    problem.solution_probability_policy().requested()
+        || problem.objective().kind() == ObjectiveKind::MinimumCover
+        || problem.objective().execution_constraints().requested()
+}
+
 fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityMetrics) {
     total.lock_queries = total.lock_queries.saturating_add(next.lock_queries);
     total.harddrop_queries = total.harddrop_queries.saturating_add(next.harddrop_queries);
@@ -525,4 +529,93 @@ fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityM
     total.exhaustive_searches = total
         .exhaustive_searches
         .saturating_add(next.exhaustive_searches);
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::{
+        retains_buildable_identity_evidence, retains_solution_coverage_evidence,
+        CandidateBuildResult, GeometryCandidate, GeometryCatalog, WorkerAggregate,
+    };
+
+    #[test]
+    fn coverage_summary_b2b_worker_retains_identity_and_solution_coverage_evidence() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_retained_trace_limit(0)
+        .with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        );
+        let problem = ProblemCompiler::compile_scenario_percent(&query).expect("problem");
+        assert!(retains_buildable_identity_evidence(&problem));
+        assert!(retains_solution_coverage_evidence(&problem));
+
+        let catalog = GeometryCatalog::compile(&problem).expect("catalog");
+        let candidate = (0..catalog.skeleton_count())
+            .find_map(|row_id| {
+                GeometryCandidate::from_rows(&catalog, 0, &[u32::try_from(row_id).expect("row id")])
+            })
+            .expect("one-row geometry candidate");
+        let coverage = PatternBitSet::from_words(1, vec![1]).expect("coverage");
+        let result = CandidateBuildResult {
+            buildable: true,
+            covered_patterns: Some(coverage.clone()),
+            symbolic_coverage_root: None,
+            observation_language_root: None,
+            symbolic_covered_pattern_count: 0,
+            witness_pattern_id: Some(0),
+            build_variant_count: 1,
+            count_complete: true,
+            representative_path: Vec::new(),
+            graph_nodes: 1,
+            coverage_product_words: 1,
+            coverage_product_states: 1,
+            coverage_product_edge_checks: 1,
+            feasibility_states: 1,
+            feasibility_rejected: false,
+            reachability_states: 1,
+            retained_bytes: 0,
+            finesse_language: None,
+        };
+        let mut aggregate = WorkerAggregate {
+            count_complete: true,
+            ..WorkerAggregate::default()
+        };
+
+        aggregate
+            .observe(
+                0,
+                0,
+                candidate,
+                result,
+                Some(coverage.clone()),
+                retains_buildable_identity_evidence(&problem),
+                false,
+            )
+            .expect("worker evidence");
+
+        assert_eq!(aggregate.buildable_identities, vec![candidate.identity]);
+        assert_eq!(
+            aggregate.solution_coverage.get(&candidate.identity),
+            Some(&coverage)
+        );
+        assert!(aggregate.representative.is_none());
+    }
 }

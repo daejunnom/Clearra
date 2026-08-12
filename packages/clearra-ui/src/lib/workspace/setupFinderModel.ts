@@ -1,6 +1,6 @@
-import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient';
-import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
-import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel';
+import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient.ts';
+import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost.ts';
+import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel.ts';
 
 export type SetupCandidatePriority = 'all' | 'build' | 'pc';
 export type SetupLengthPreference = 'auto' | 'longer' | 'shorter';
@@ -216,7 +216,9 @@ export function setupFinderRequestForDesktop(
     language,
     rule: request.rule,
     queue_knowledge: request.queueKnowledge,
-    workers: detail === undefined ? 0 : Math.max(1, Math.trunc(workers)),
+    // Full setup search shares the normalized worker budget used by Web argv.
+    // Path-detail lookup is not a parallel search and keeps the host sentinel.
+    workers: detail === undefined ? Math.max(1, Math.trunc(workers)) : 0,
     use_all_logical_processors: useAllLogicalProcessors,
     tablebase_requested: request.tablebaseEnabled,
     setup_mode: request.searchMode,

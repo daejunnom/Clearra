@@ -111,6 +111,16 @@ fn scenario_coverage_summary_routes_to_percent_service() {
         Some("pattern-bitset-union")
     );
     assert_eq!(result.coverage_pattern_words(), &[1]);
+    assert_eq!(
+        result.field("search_output_policy"),
+        Some("coverage-summary")
+    );
+    assert_eq!(
+        result.field("unique_solution_count"),
+        Some("not-calculated")
+    );
+    assert_eq!(result.bool_field("solution_count_calculated"), Some(false));
+    assert_eq!(result.bool_field("solution_set_materialized"), Some(false));
 }
 
 #[cfg(feature = "native-c-core")]
@@ -132,6 +142,16 @@ fn opening_coverage_summary_routes_to_percent_service() {
     assert_eq!(result.field("problem_preset"), Some("opening-pc"));
     assert_eq!(result.field("probability_complete"), Some("true"));
     assert_eq!(result.coverage_pattern_words(), &[1]);
+    assert_eq!(
+        result.field("search_output_policy"),
+        Some("coverage-summary")
+    );
+    assert_eq!(
+        result.field("unique_solution_count"),
+        Some("not-calculated")
+    );
+    assert_eq!(result.bool_field("solution_count_calculated"), Some(false));
+    assert_eq!(result.bool_field("solution_keys_complete"), Some(false));
 }
 
 fn expected_solver_backend() -> &'static str {

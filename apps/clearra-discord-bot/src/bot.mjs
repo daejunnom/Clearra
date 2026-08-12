@@ -62,6 +62,7 @@ import {
   buildSlashCommandArgumentPlan,
   readHelpArgument,
 } from "./discord/slash-command-input.mjs";
+import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "./discord/public-search-contract.mjs";
 import { BoundedGifRenderer } from "./viewer/async-gif.mjs";
 import {
   decodeViewerFile,
@@ -77,6 +78,9 @@ import {
   buildClearraViewerUrl,
 } from "./viewer/link.mjs";
 import { buildSearchPreviewDocument } from "./viewer/search-preview.mjs";
+
+// SRP rationale: this module has one behavior-level change reason: coordinating
+// a Discord request from ingress through bounded execution and response delivery.
 
 const RESULT_LIMIT = 1900;
 const DISCORD_CONTENT_LIMIT = 2000;
@@ -409,6 +413,7 @@ export class Clearrabot {
         argumentSets[0],
         previewDocument,
         locale,
+        catalogPublicResultKind(executionCommand),
       );
     } else {
       await this.runInteractionCommandSeries(
@@ -416,6 +421,7 @@ export class Clearrabot {
         argumentSets,
         previewDocument,
         locale,
+        catalogPublicResultKind(executionCommand),
       );
     }
     return true;
@@ -695,6 +701,7 @@ export class Clearrabot {
     argumentSets,
     previewDocument = null,
     locale = "en",
+    requestedResultKind = null,
   ) {
     const controller = new AbortController();
     const deadlineUnixMs = interactionDeadlineUnixMs(
@@ -735,7 +742,8 @@ export class Clearrabot {
             resultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
               locale,
-              resultKind: publicResultKind(arguments_),
+              resultKind: requestedResultKind ??
+                interactionPublicResultKind(interaction, arguments_),
             }),
             t(locale, "search.auto_target", {
               lines: pcLineLabel(arguments_),
@@ -769,6 +777,7 @@ export class Clearrabot {
     arguments_,
     previewDocument = null,
     locale = "en",
+    requestedResultKind = null,
   ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
@@ -789,7 +798,8 @@ export class Clearrabot {
         (value) => resultMessage(value, tilingOnly, {
           maxCtk3FileBytes: this.config.maxCtk3FileBytes,
           locale,
-          resultKind: publicResultKind(arguments_),
+          resultKind: requestedResultKind ??
+            interactionPublicResultKind(interaction, arguments_),
         }),
         (error) => textMessage(this.operationFailureText(error, locale)),
       ).catch((error) => textMessage(this.operationFailureText(error, locale)));
@@ -987,6 +997,7 @@ export class Clearrabot {
         prepared.argumentSets,
         prepared.previewDocument,
         prepared.locale,
+        prepared.resultKind,
       );
     } else if (prepared.arguments_) {
       await this.runOracleMessageCommand(
@@ -994,6 +1005,7 @@ export class Clearrabot {
         prepared.arguments_,
         prepared.previewDocument,
         prepared.locale,
+        prepared.resultKind,
       );
     }
     return prepared.handled;
@@ -1170,6 +1182,7 @@ export class Clearrabot {
       argumentSets,
       automaticPcTargets: textRequest?.automaticPcTargets === true,
       locale,
+      resultKind: catalogPublicResultKind(textRequest?.command),
       previewDocument:
         (textRequest?.command
           ? safeSearchPreviewDocument(
@@ -1258,6 +1271,7 @@ export class Clearrabot {
     arguments_,
     previewDocument,
     locale = "en",
+    requestedResultKind = null,
   ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
@@ -1274,7 +1288,7 @@ export class Clearrabot {
         (value) => resultMessage(value, tilingOnly, {
           maxCtk3FileBytes: this.config.maxCtk3FileBytes,
           locale,
-          resultKind: publicResultKind(arguments_),
+          resultKind: requestedResultKind ?? publicResultKind(arguments_),
         }),
         (error) => textMessage(this.operationFailureText(error, locale)),
       ).catch((error) => textMessage(this.operationFailureText(error, locale)));
@@ -1300,6 +1314,7 @@ export class Clearrabot {
     argumentSets,
     previewDocument = null,
     locale = "en",
+    requestedResultKind = null,
   ) {
     const controller = new AbortController();
     const deadlineUnixMs = Date.now() + Math.min(
@@ -1336,7 +1351,7 @@ export class Clearrabot {
             resultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
               locale,
-              resultKind: publicResultKind(arguments_),
+              resultKind: requestedResultKind ?? publicResultKind(arguments_),
             }),
             t(locale, "search.auto_target", {
               lines: pcLineLabel(arguments_),
@@ -1694,14 +1709,17 @@ function resultMessage(result, tilingOnly = false, options = {}) {
   const locale = options.locale ?? "en";
   if (result.exitCode === 0 && result.stdout) {
     const parsed = parseStructuredResult(result.stdout);
-    const structured = parsed
-      ? {
-          ...parsed,
-          kind: requestedStructuredResultKind(parsed, options.resultKind),
-        }
-      : parsed;
+    const resultKind = parsed
+      ? requestedStructuredResultKind(parsed, options.resultKind)
+      : null;
+    if (parsed && resultKind === null) {
+      return textMessage(t(locale, "error.result_consistency"));
+    }
+    const structured = parsed ? { ...parsed, kind: resultKind } : parsed;
     if (structured) {
-      const ctk3 = buildCtk3Result(parsed);
+      const ctk3 = coverageSummaryDisposition(structured.summary) === "non-coverage"
+        ? buildCtk3Result(parsed)
+        : null;
       if (ctk3) return ctk3ResultMessage(structured, ctk3, tilingOnly, options);
       const empty = structuredCompleteness(structured.summary, structured.finesse_report);
       return textMessage(
@@ -1751,7 +1769,8 @@ function resultMessage(result, tilingOnly = false, options = {}) {
 function requestedStructuredResultKind(structured, fallback) {
   if (
     isPlainObject(structured?.finesse_report) &&
-    (fallback === "finesse-search" || fallback === "finesse-score")
+    (fallback === "finesse-search" || fallback === "finesse-score") &&
+    publicStructuredResultKind(structured?.kind, fallback) === fallback
   ) return fallback;
   return publicStructuredResultKind(structured?.kind, fallback);
 }
@@ -1769,6 +1788,23 @@ function publicResultKind(arguments_) {
   }
   const direct = namespace.replaceAll("_", "-");
   return PUBLIC_RESULT_KINDS.has(direct) ? direct : "search";
+}
+
+function catalogPublicResultKind(command) {
+  if (command?.subcommand === "search" || command?.subcommand === "score") {
+    return `finesse-${command.subcommand}`;
+  }
+  const name = String(command?.name ?? "")
+    .toLowerCase()
+    .replaceAll("_", "-");
+  return PUBLIC_RESULT_KINDS.has(name) ? name : null;
+}
+
+function interactionPublicResultKind(interaction, arguments_) {
+  const name = String(interaction?.data?.name ?? "")
+    .toLowerCase()
+    .replaceAll("_", "-");
+  return PUBLIC_RESULT_KINDS.has(name) ? name : publicResultKind(arguments_);
 }
 
 function ctk3ResultMessage(structured, ctk3, tilingOnly, options) {
@@ -1837,7 +1873,19 @@ function structuredResultSummary(
   );
   const summary = structured.summary;
   if (summary && typeof summary === "object" && !Array.isArray(summary)) {
+    const solutionCountCalculated =
+      coverageSummaryDisposition(summary) === "non-coverage" &&
+      summary.solution_count_calculated !== false &&
+      ![...SOLUTION_COUNT_SUMMARY_FIELDS].some((key) =>
+        String(summary[key] ?? "").trim().toLowerCase() === "not-calculated"
+      );
+    if (!solutionCountCalculated) {
+      lines.push(t(locale, "summary.solution_count_not_calculated"));
+    }
     for (const key of RESULT_SUMMARY_FIELDS) {
+      if (!solutionCountCalculated && SOLUTION_COUNT_SUMMARY_FIELDS.has(key)) {
+        continue;
+      }
       const value = summary[key];
       if (typeof value === "string" || typeof value === "number") {
         lines.push(`${t(locale, `summary.${key}`)}: ${summaryValue(key, value)}`);
@@ -1879,43 +1927,21 @@ function publicStructuredResultKind(value, fallback = "search") {
   const normalized = typeof value === "string"
     ? value.toLowerCase().replaceAll("_", "-")
     : "";
-  if (PUBLIC_RESULT_KINDS.has(normalized)) return normalized;
-  return PUBLIC_RESULT_KINDS.has(fallback) ? fallback : "search";
+  const requested = typeof fallback === "string"
+    ? fallback.toLowerCase().replaceAll("_", "-")
+    : "search";
+  return PUBLIC_RESULT_KIND_CONTRACT.get(requested)?.has(normalized)
+    ? requested
+    : null;
 }
 
 function friendlyResultKind(value, locale) {
-  const kind = safeResultKind(value);
-  const normalizedKind = kind.replaceAll("_", "-");
-  if (normalizedKind === "spin-structure") {
-    return t(locale, "result.kind.spin_structure");
-  }
-  if (normalizedKind === "finesse-search" || normalizedKind === "finesse-score") {
-    return t(locale, `result.kind.${normalizedKind.replace("-", "_")}`);
-  }
-  if (locale === "en") return kind;
-  const translationKind =
-    normalizedKind === "pc" || normalizedKind.includes("perfect-clear")
-      ? "pc"
-      : normalizedKind.includes("path")
-        ? "path"
-        : normalizedKind.includes("score-finder")
-          ? "score"
-          : normalizedKind.includes("setup")
-            ? "setup"
-            : normalizedKind.includes("build")
-              ? "build"
-              : normalizedKind.includes("cover") || normalizedKind.includes("percent") || normalizedKind.includes("chance")
-                ? "cover"
-                : normalizedKind.includes("damage") || normalizedKind.includes("best-save")
-                  ? "damage"
-                  : normalizedKind.includes("spin")
-                    ? "spin"
-                    : normalizedKind.includes("verify")
-                      ? "verify"
-                      : null;
-  return t(locale, translationKind
-    ? `result.kind.${translationKind}`
-    : "result.generic_kind");
+  const normalized = safeResultKind(value).replaceAll("_", "-");
+  const publicKind = PUBLIC_RESULT_KIND_CONTRACT.has(normalized)
+    ? normalized
+    : "search";
+  const resultKey = PUBLIC_RESULT_KEYS.get(publicKind) ?? "search";
+  return t(locale, `result.kind.public.${resultKey}`);
 }
 
 function structuredCompleteness(summary, finesseReport = null) {
@@ -1997,6 +2023,31 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function coverageSummaryDisposition(summary) {
+  if (!isPlainObject(summary)) return "non-coverage";
+  const policy = summary.search_output_policy;
+  const coverageCandidate = isCoverageSummarySpelling(policy) ||
+    COVERAGE_SUMMARY_REQUIRED_FIELDS.slice(1).some(([key, expected]) =>
+      expected === "not-calculated" && summary[key] === expected
+    );
+  if (!coverageCandidate) return "non-coverage";
+
+  const requiredFieldsAreCanonical = COVERAGE_SUMMARY_REQUIRED_FIELDS.every(
+    ([key, expected]) => summary[key] === expected,
+  );
+  const optionalFieldsAreCanonical = COVERAGE_SUMMARY_OPTIONAL_SENTINELS.every(
+    (key) => !Object.hasOwn(summary, key) || summary[key] === "not-calculated",
+  );
+  return requiredFieldsAreCanonical && optionalFieldsAreCanonical
+    ? "canonical"
+    : "invalid";
+}
+
+function isCoverageSummarySpelling(value) {
+  return typeof value === "string" &&
+    value.trim().toLowerCase().replaceAll("_", "-") === "coverage-summary";
+}
+
 function nonNegativeFiniteNumber(value) {
   const number = typeof value === "number"
     ? value
@@ -2038,43 +2089,61 @@ const RESULT_SUMMARY_FIELDS = Object.freeze([
   "maximum_damage",
 ]);
 
-const PUBLIC_RESULT_KINDS = new Set([
-  "search",
-  "pc",
-  "path",
-  "percent",
-  "chance",
-  "minimals",
-  "score",
-  "score-minimals",
-  "saves",
-  "best-save",
-  "cover",
-  "setup",
-  "congruent",
-  "congruent-cover",
-  "setup-cover",
-  "cover-percent",
-  "special-cover",
-  "build-probability",
-  "build-coverage",
-  "spin-cover",
-  "spin",
-  "score-finder",
-  "damage",
-  "spin-structure",
-  "pc-setup",
-  "best-setup",
-  "dpc-finder",
-  "verify",
-  "finesse-search",
-  "finesse-score",
+const PUBLIC_RESULT_KIND_CONTRACT = new Map([
+  ["search", new Set([
+    "pc",
+    "pc-scenario",
+    "percent",
+    "build-probability",
+    "build-coverage",
+    "setup",
+    "damage",
+    "spin-finder",
+    "spin-structure",
+    "verify",
+    "verify-kicks",
+  ])],
+  ...DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ id, engineKinds }) => [
+    id,
+    new Set(engineKinds),
+  ]),
 ]);
+const PUBLIC_RESULT_KEYS = new Map(
+  DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ id, resultKey }) => [id, resultKey]),
+);
+const PUBLIC_RESULT_KINDS = new Set(PUBLIC_RESULT_KIND_CONTRACT.keys());
 
 const PROBABILITY_SUMMARY_FIELDS = new Set([
   "coverage_probability",
   "probability",
   "weighted_probability",
+]);
+
+const SOLUTION_COUNT_SUMMARY_FIELDS = new Set([
+  "total_solution_count",
+  "unique_solution_count",
+  "normalized_unique_solution_count",
+]);
+
+const COVERAGE_SUMMARY_REQUIRED_FIELDS = Object.freeze([
+  ["search_output_policy", "coverage-summary"],
+  ["unique_solution_count", "not-calculated"],
+  ["normalized_unique_solution_count", "not-calculated"],
+  ["solution_count_calculated", false],
+  ["solution_set_materialized", false],
+  ["solution_keys_materialized_count", 0],
+  ["solution_keys_complete", false],
+  ["solution_page_available", false],
+  ["normalized_solution_set_hash", "not-calculated"],
+  ["actual_normalized_solution_set_hash", "not-calculated"],
+]);
+
+const COVERAGE_SUMMARY_OPTIONAL_SENTINELS = Object.freeze([
+  "total_solution_count",
+  "actual_normalized_unique_solution_count",
+  "mirror_unique_solution_count",
+  "original_unique_solution_count",
+  "mirror_normalized_solution_set_hash",
 ]);
 
 function mergeViewerDocuments(...groups) {

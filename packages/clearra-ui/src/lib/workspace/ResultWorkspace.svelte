@@ -7,6 +7,10 @@
   import type { ScoreMode } from './solverWorkspaceModel';
   import type { SolutionCopyFormat } from './solutionExport';
   import type { SolutionExportKeySource } from './solutionExportAsync';
+  import {
+    workspaceSolutionCount,
+    workspaceSolutionPageAvailable
+  } from './solutionSetAvailability';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -34,6 +38,7 @@
   const SOLUTION_EXPORT_PAGE_SIZE = 1_000;
 
   $: report = view.searchReport;
+  $: solutionCount = workspaceSolutionCount(report);
   $: canonicalSolutionKeys = report?.normalized_solution_keys ?? [];
   $: solutionProbabilityByKey = Object.fromEntries(
     (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
@@ -75,7 +80,7 @@
     failedQueueCopyComplete = false;
   }
   $: tilingOnly = summaryFields.objective === 'tiling';
-  $: solutionPageAvailable = summaryFields.solution_page_available === 'true';
+  $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
   $: tilingProgress = tilingOnly || (!report && tilingOnlyRequested);
   $: scoringRequested = summaryFields.score_requested === 'true';
   $: progressMode = failedQueueResult
@@ -140,10 +145,11 @@
   }
 
   function createSolutionExportKeySource(): SolutionExportKeySource | null {
+    if (solutionCount === null) return null;
     const loader = loadSolutionPage;
     const lazy = solutionPageAvailable && Boolean(loader);
     const localKeys = solutionKeys;
-    const keyCount = lazy ? (report?.unique_solution_count ?? 0) : localKeys.length;
+    const keyCount = lazy ? solutionCount : localKeys.length;
     if (keyCount < 1) return null;
     return {
       keyCount,
@@ -298,7 +304,7 @@
       </section>
     {:else}
       <div class="metric-grid" class:tiling-only={tilingOnly}>
-        <article><span>{label(tilingOnly ? 'tilingCount' : 'solutionCount')}</span><strong>{number(report?.unique_solution_count)}</strong></article>
+        <article><span>{label(tilingOnly ? 'tilingCount' : 'solutionCount')}</span><strong>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</strong></article>
         {#if !tilingOnly}
           <article><span>{label('coverage')}</span><strong>{workspaceProbability(language, report?.coverage_probability)}</strong></article>
           <article><span>{label('buildVariants')}</span><strong>{exactBuildVariantCount()}</strong></article>
@@ -314,17 +320,21 @@
       <section class="solutions-section" aria-label={label('solutions')}>
         <div class="solutions-heading">
           <h2>{label('solutions')}</h2>
-          <SolutionCopyFormatControl
-            bind:value={copyFormat}
-            {language}
-            {solutionKeys}
-            keySource={solutionExportKeySource}
-          />
+          {#if solutionCount !== null}
+            <SolutionCopyFormatControl
+              bind:value={copyFormat}
+              {language}
+              {solutionKeys}
+              keySource={solutionExportKeySource}
+            />
+          {/if}
         </div>
-        {#if solutionKeys.length}
+        {#if solutionCount === null}
+          <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
+        {:else if solutionKeys.length}
           <SolutionGallery
             {solutionKeys}
-            solutionCount={report?.unique_solution_count ?? solutionKeys.length}
+            {solutionCount}
             loadSolutionPage={solutionPageAvailable ? loadSolutionPage : null}
             solutionProbabilities={solutionProbabilityByKey}
             solutionAverageScores={solutionAverageScoreByKey}

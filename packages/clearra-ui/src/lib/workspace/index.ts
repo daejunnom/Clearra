@@ -9,6 +9,7 @@ export * from './buildProbabilityModel';
 export * from './buildProbabilityFinesse';
 export * from './forwardSearchModel';
 export * from './solverWorkspaceModel';
+export * from './solutionSetAvailability';
 export * from './setupFinderModel';
 export * from './workspaceI18n';
 export * from './workspaceNavigation';

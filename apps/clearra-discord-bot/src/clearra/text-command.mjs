@@ -1,11 +1,12 @@
 import {
-  canonicalClearraOperationalCommand,
-  parseClearraMessage as parseRawClearraMessage,
   prepareClearraArguments,
   tokenizeCommand,
 } from "./command.mjs";
 import { findSlashCommand } from "../discord/slash-command-catalog.mjs";
-import { buildSlashCommandArgumentPlan } from "../discord/slash-command-input.mjs";
+import {
+  buildSlashCommandArgumentPlan,
+  DISCORD_PACKED_OPTION_KEYS,
+} from "../discord/slash-command-input.mjs";
 
 const HOST_CONTROLLED_OPTIONS = new Map([
   ["--tablebase", 0],
@@ -55,6 +56,30 @@ const OPTION_ALIASES = new Map([
   ["--document", "document"],
 ]);
 
+const PACKED_TEXT_OPTIONS = new Map([
+  ["--mode", "mode"],
+  ["--qb", "qb"],
+  ["--post-cycle-borrow", "post-cycle-borrow"],
+  ["--minimum-damage", "minimum-damage"],
+  ["--initial-combo", "initial-combo"],
+  ["--initial-b2b", "initial-b2b"],
+  ["--spin-profile", "spin-profile"],
+  ["--fill-bottom", "fill-bottom"],
+  ["--fill-top", "fill-top"],
+  ["--max-placements", "max-placements"],
+  ["--minimality", "minimality"],
+  ["--source-pieces", "source-pieces"],
+  ["--aggregate", "aggregation"],
+  ["--aggregation", "aggregation"],
+]);
+
+const PACKED_BOOLEAN_FLAGS = new Map([
+  ["--allow-post-cycle-borrow", ["post-cycle-borrow", "on"]],
+  ["--no-post-cycle-borrow", ["post-cycle-borrow", "off"]],
+  ["--preserve-b2b", ["preserve-b2b", "on"]],
+  ["--no-preserve-b2b", ["preserve-b2b", "off"]],
+]);
+
 export function parseClearraTextMessage(
   content,
   prefix = "!",
@@ -70,14 +95,7 @@ export function parseClearraTextRequest(
 ) {
   const resolution = resolveTextCommand(content, prefix);
   if (!resolution) return null;
-  const { tokens, first, explicitSfinder, command, argumentStart } = resolution;
-  if (first === "clearra") {
-    return rawRequest(parseRawClearraMessage(content, prefix, execution));
-  }
-
-  if (explicitSfinder && !command) {
-    return rawRequest(parseRawClearraMessage(content, prefix, execution));
-  }
+  const { tokens, explicitSfinder, command, argumentStart } = resolution;
   if (!explicitSfinder && command?.kind === "help") {
     return helpRequest(command, tokens.slice(1));
   }
@@ -109,8 +127,8 @@ export function parseClearraTextRequest(
 /**
  * Returns only the allow-listed command identity selected by the text parser.
  * Arguments are never retained. This deliberately shares command resolution
- * with parseClearraTextRequest so aliases and the explicit sfinder/clearra
- * routes cannot drift away from private operational telemetry.
+ * with parseClearraTextRequest so aliases and the curated explicit sfinder
+ * route cannot drift away from private operational telemetry.
  */
 export function classifyClearraTextCommand(content, prefix = "!") {
   let resolution;
@@ -127,26 +145,10 @@ export function classifyClearraTextCommand(content, prefix = "!") {
 }
 
 function commandIdentityFromResolution(resolution) {
-  const { tokens, first, explicitSfinder, command } = resolution;
-  if (first === "clearra") {
-    return publicTextCommandIdentity(
-      canonicalClearraOperationalCommand(tokens.slice(1)),
-    );
-  }
-  if (explicitSfinder && !command) {
-    return publicTextCommandIdentity(
-      canonicalClearraOperationalCommand(tokens),
-    );
-  }
+  const { command } = resolution;
   return command?.subcommand
     ? `${command.rootName ?? command.name}.${command.subcommand}`
     : command?.name ?? null;
-}
-
-function publicTextCommandIdentity(value) {
-  return typeof value === "string" && value.startsWith("sfinder.")
-    ? value.slice("sfinder.".length)
-    : value;
 }
 
 function resolveTextCommandHead(content, prefix) {
@@ -162,16 +164,22 @@ function resolveTextCommandHead(content, prefix) {
   const tokens = body.split(/\s+/u, 3);
   if (usesRetiredCatFinderName(tokens)) return null;
   const first = tokens[0]?.toLowerCase();
-  const explicitSfinder = first === "sfinder";
-  const commandName = explicitSfinder ? tokens[1] : first;
-  const root = findSlashCommand(normalizeCatalogName(commandName));
-  const command = resolveFinesseTextVariant(root, tokens, explicitSfinder ? 2 : 1, false);
+  if (first === "clearra") return null;
+  let namespaceEnd = 0;
+  const explicitSfinder = tokens[namespaceEnd]?.toLowerCase() === "sfinder";
+  if (explicitSfinder) namespaceEnd += 1;
+  const commandName = tokens[namespaceEnd];
+  const candidate = findSlashCommand(normalizeCatalogName(commandName));
+  const root = explicitSfinder && candidate?.argvPrefix?.[0] !== "sfinder"
+    ? null
+    : candidate;
+  const command = resolveFinesseTextVariant(root, tokens, namespaceEnd + 1, false);
   return {
     tokens,
     first,
     explicitSfinder,
     command,
-    argumentStart: explicitSfinder ? 2 : 1,
+    argumentStart: command?.subcommand ? namespaceEnd + 2 : namespaceEnd + 1,
   };
 }
 
@@ -185,10 +193,16 @@ function resolveTextCommand(content, prefix) {
   const tokens = tokenizeTextCommand(body);
   if (usesRetiredCatFinderName(tokens)) return null;
   const first = tokens[0]?.toLowerCase();
-  const explicitSfinder = first === "sfinder";
-  const commandName = explicitSfinder ? tokens[1] : first;
-  const root = findSlashCommand(normalizeCatalogName(commandName));
-  const baseArgumentStart = explicitSfinder ? 2 : 1;
+  if (first === "clearra") return null;
+  let namespaceEnd = 0;
+  const explicitSfinder = tokens[namespaceEnd]?.toLowerCase() === "sfinder";
+  if (explicitSfinder) namespaceEnd += 1;
+  const commandName = tokens[namespaceEnd];
+  const candidate = findSlashCommand(normalizeCatalogName(commandName));
+  const root = explicitSfinder && candidate?.argvPrefix?.[0] !== "sfinder"
+    ? null
+    : candidate;
+  const baseArgumentStart = namespaceEnd + 1;
   const command = resolveFinesseTextVariant(root, tokens, baseArgumentStart, true);
   return {
     tokens,
@@ -210,7 +224,7 @@ function resolveFinesseTextVariant(command, tokens, subcommandIndex, strict) {
 }
 
 function usesRetiredCatFinderName(tokens) {
-  let cursor = tokens[0]?.toLowerCase() === "clearra" ? 1 : 0;
+  let cursor = 0;
   if (tokens[cursor]?.toLowerCase() === "sfinder") cursor += 1;
   const name = normalizeCatalogName(tokens[cursor]);
   return name === "cat-finder" || name === "catfinder";
@@ -227,19 +241,6 @@ function nonSearchRequest(command, tokens) {
     rawOptions: Object.freeze(
       rawOptions.map((option) => Object.freeze({ ...option })),
     ),
-  });
-}
-
-function rawRequest(arguments_) {
-  if (!arguments_) return null;
-  const argumentSets = freezeArgumentSets([arguments_]);
-  return Object.freeze({
-    argumentSets,
-    arguments_: argumentSets[0],
-    automaticPcTargets: false,
-    command: null,
-    helpTarget: null,
-    rawOptions: Object.freeze([]),
   });
 }
 
@@ -319,6 +320,11 @@ function readCatalogTextOptions(command, tokens) {
       settings.push("hold=avoid");
       continue;
     }
+    const booleanPacked = PACKED_BOOLEAN_FLAGS.get(parsed.name);
+    if (booleanPacked && supportsPackedKey(command, booleanPacked[0])) {
+      settings.push(`${booleanPacked[0]}=${booleanPacked[1]}`);
+      continue;
+    }
     if (parsed.name === "--hold" || parsed.name === "-h") {
       const value = optionValue(tokens, index, parsed, "--hold");
       if (parsed.value === null) index += 1;
@@ -341,6 +347,13 @@ function readCatalogTextOptions(command, tokens) {
       }
       continue;
     }
+    const packedKey = PACKED_TEXT_OPTIONS.get(parsed.name);
+    if (packedKey && supportsPackedKey(command, packedKey)) {
+      const value = optionValue(tokens, index, parsed, parsed.name);
+      if (parsed.value === null) index += 1;
+      settings.push(`${packedKey}=${value}`);
+      continue;
+    }
 
     const optionName = OPTION_ALIASES.get(parsed.name);
     if (!optionName) {
@@ -359,7 +372,39 @@ function readCatalogTextOptions(command, tokens) {
     if (existing) existing.value = `${existing.value} ${settings.join(" ")}`;
     else options.push({ name: "options", value: settings.join(" ") });
   }
+  const packed = options.find(({ name }) => name === "options");
+  if (packed) packed.value = canonicalPackedOptions(command, packed.value);
   return options;
+}
+
+function supportsPackedKey(command, key) {
+  return DISCORD_PACKED_OPTION_KEYS[command.input]?.includes(key) === true;
+}
+
+function canonicalPackedOptions(command, source) {
+  const order = DISCORD_PACKED_OPTION_KEYS[command.input] ?? [];
+  const settings = new Map();
+  for (const token of tokenizeCommand(String(source))) {
+    const equals = token.indexOf("=");
+    if (equals <= 0 || equals === token.length - 1) {
+      throw new Error(`/${command.name} options must use space-separated key=value entries.`);
+    }
+    let key = token.slice(0, equals).trim().toLowerCase().replaceAll("_", "-");
+    if (command.input.startsWith("finesse-") && ["queue-knowledge", "pattern-knowledge"].includes(key)) {
+      key = "knowledge";
+    }
+    if (!order.includes(key)) {
+      throw new Error(`/${command.name} does not support options key '${key}'.`);
+    }
+    if (settings.has(key)) {
+      throw new Error(`/${command.name} options key '${key}' may be specified only once.`);
+    }
+    settings.set(key, token.slice(equals + 1).trim());
+  }
+  return order
+    .filter((key) => settings.has(key))
+    .map((key) => `${key}=${settings.get(key)}`)
+    .join(" ");
 }
 
 function appendPositionals(command, options, positional) {
@@ -430,10 +475,23 @@ function optionValue(tokens, index, parsed, name) {
 }
 
 function normalizeCatalogName(value) {
-  return typeof value === "string"
-    ? value.trim().toLowerCase().replaceAll("_", "-")
-    : "";
+  if (typeof value !== "string") return "";
+  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
+  return TEXT_COMPATIBILITY_NAMES.get(normalized) ?? normalized;
 }
+
+const TEXT_COMPATIBILITY_NAMES = new Map([
+  ["bestsave", "best-save"],
+  ["bestsetup", "best-setup"],
+  ["congruentcover", "congruent-cover"],
+  ["coverpercent", "cover-percent"],
+  ["dpcfinder", "dpc-finder"],
+  ["pcsetup", "pc-setup"],
+  ["scoreminimals", "score-minimals"],
+  ["setupcover", "setup-cover"],
+  ["specialcover", "special-cover"],
+  ["spincover", "spin-cover"],
+]);
 
 function tokenizeTextCommand(source) {
   if (!source.includes("```")) return tokenizeCommand(source);

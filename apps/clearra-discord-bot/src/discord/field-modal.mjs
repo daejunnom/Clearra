@@ -1,5 +1,6 @@
 import {
   BUILTIN_KICKTABLES,
+  NATIVE_BUILTIN_KICKTABLES,
   findSlashCommand,
   localizedSlashCommandName,
   resolveSlashCommandInvocation,
@@ -37,7 +38,7 @@ const INPUT_SCHEMAS = Object.freeze({
   cover: schema(["base", "target", "next", "kicktable", "options"], ["base", "target", "next"], ["base", "target"]),
   colored: schema(["field", "next", "kicktable"], ["field", "next"], ["field"]),
   spin: schema(["field", "next", "kicktable", "options"], ["field", "next"], ["field"]),
-  "fixed-next": schema(["field", "next", "kicktable"], ["field", "next"], ["field"]),
+  "fixed-next": schema(["field", "next", "kicktable", "options"], ["field", "next"], ["field"]),
   "score-fixed-next": schema(["field", "next", "lines", "kicktable", "options"], ["field", "next"], ["field"]),
   "spin-structure": schema(
     ["pieces", "field", "lines", "profile", "kicktable"],
@@ -473,10 +474,13 @@ function modalSelectSpec(command, name, locale = "en") {
     );
   }
   if (name === "kicktable") {
+    const kicktables = nativeKicktableInput(input)
+      ? NATIVE_BUILTIN_KICKTABLES
+      : BUILTIN_KICKTABLES;
     return selectSpec(
       "srs-plus",
       korean ? "내장 킥테이블 선택" : "Choose a built-in kick table",
-      BUILTIN_KICKTABLES.map(({ name: label, value }) => ({
+      kicktables.map(({ name: label, value }) => ({
         label: korean && value === "srs-plus" ? "SRS+ (기본값)" : label,
         value,
       })),
@@ -516,12 +520,12 @@ function modalSelectSpec(command, name, locale = "en") {
   }
   if (input === "remaining" && name === "queue-knowledge") {
     return selectSpec(
-      "oracle",
+      "full-queue",
       korean ? "큐 공개 범위 선택" : "Choose queue knowledge",
       [
         {
           label: korean ? "전체 미래 큐 (기본값)" : "Full future queue (default)",
-          value: "oracle",
+          value: "full-queue",
         },
         {
           label: korean ? "공개 7개" : "Visible 7 pieces",
@@ -540,16 +544,16 @@ function modalSelectSpec(command, name, locale = "en") {
   }
   if (name === "options" && input === "score-fixed-next") {
     return selectSpec(
-      "initial_b2b=false",
+      "initial-b2b=false",
       korean ? "초기 B2B 상태 선택" : "Choose initial B2B state",
       [
         {
           label: korean ? "초기 B2B 사용 안 함 (기본값)" : "Initial B2B disabled (default)",
-          value: "initial_b2b=false",
+          value: "initial-b2b=false",
         },
         {
           label: korean ? "초기 B2B 사용" : "Initial B2B enabled",
-          value: "initial_b2b=true",
+          value: "initial-b2b=true",
         },
       ],
     );
@@ -611,6 +615,16 @@ function selectSpec(defaultValue, placeholder, options) {
   });
 }
 
+function nativeKicktableInput(input) {
+  return [
+    "fixed-next",
+    "remaining",
+    "spin-structure",
+    "finesse-search",
+    "finesse-score",
+  ].includes(input);
+}
+
 function normalizeSelectValue(input, name, raw) {
   if (name === "lines") return String(raw);
   if (name === "kicktable") return String(raw).trim().toLowerCase();
@@ -641,10 +655,10 @@ function normalizeSelectValue(input, name, raw) {
   if (name === "options" && input === "score-fixed-next") {
     const value = String(raw).trim().toLowerCase().replaceAll("-", "_");
     if (["initial_b2b=true", "initial_b2b=yes", "initial_b2b=on"].includes(value)) {
-      return "initial_b2b=true";
+      return "initial-b2b=true";
     }
     if (["initial_b2b=false", "initial_b2b=no", "initial_b2b=off"].includes(value)) {
-      return "initial_b2b=false";
+      return "initial-b2b=false";
     }
     return value;
   }
@@ -689,6 +703,8 @@ function modalLabelText(input, name, locale = "en") {
         ? "T-spin 목표"
         : input === "score-fixed-next"
           ? "초기 B2B"
+          : input === "fixed-next"
+            ? "대미지 탐색 설정"
           : input.startsWith("finesse-")
             ? "홀드 및 큐 공개 정책"
             : "홀드 정책",
@@ -713,6 +729,8 @@ function modalLabelText(input, name, locale = "en") {
       ? "T-spin target"
       : input === "score-fixed-next"
         ? "Initial B2B"
+        : input === "fixed-next"
+          ? "Damage search settings"
         : input.startsWith("finesse-")
           ? "Hold and queue knowledge"
           : "Hold policy",
@@ -747,6 +765,8 @@ function modalDescription(input, name, locale = "en") {
       ? "TSM은 지원하지 않습니다."
       : input === "score-fixed-next"
         ? "초기 B2B 상태를 선택하며 기본값은 사용 안 함입니다."
+        : input === "fixed-next"
+          ? "대미지 설정을 공백으로 구분한 key=value 형식으로 입력합니다."
         : input.startsWith("finesse-")
           ? "홀드 사용 여부와 전체 큐/공개 7개 계산 범위를 선택합니다."
           : "홀드 사용 여부를 선택합니다.";
@@ -775,6 +795,8 @@ function modalDescription(input, name, locale = "en") {
     ? "TSM remains intentionally unavailable."
     : input === "score-fixed-next"
       ? "Choose the initial B2B state; disabled is the default."
+      : input === "fixed-next"
+        ? "Enter damage settings as space-separated key=value entries."
       : input.startsWith("finesse-")
         ? "Choose hold and full-queue/visible-7 calculation scope."
         : "Use or avoid hold.";

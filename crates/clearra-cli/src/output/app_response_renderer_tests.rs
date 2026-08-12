@@ -135,6 +135,7 @@ fn fixed_queue_finesse_score_cli_json_preserves_the_typed_public_contract() {
     .to_owned();
     let value: serde_json::Value = serde_json::from_str(&rendered).expect("score CLI JSON");
 
+    assert_eq!(value["contract"]["solution_data"]["status"], "complete");
     assert_eq!(value["finesse_report"]["mode"], "score");
     assert_eq!(value["finesse_report"]["exact_total_inputs"], "1");
     assert_eq!(
@@ -149,6 +150,51 @@ fn fixed_queue_finesse_score_cli_json_preserves_the_typed_public_contract() {
         !rendered.contains("wasm-cpu-finesse-score"),
         "the browser adapter fallback must not leak into CLI output"
     );
+}
+
+#[test]
+fn coverage_summary_solution_data_request_is_explicitly_unavailable_without_artifacts() {
+    let status = SolutionDataStatus::for_request(true, false, false);
+    assert!(!status.exposes_artifacts());
+    let mut fields = SummaryRenderContract::render_fields(vec![
+        (
+            "unique_solution_count".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        ("solution_count_calculated".to_owned(), "false".to_owned()),
+    ]);
+    append_solution_data_contract(&mut fields, status, RenderFormat::Json);
+    let rendered = CommandRenderer::render("percent", fields, RenderFormat::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("percent CLI JSON");
+
+    assert_eq!(value["summary"]["unique_solution_count"], "not-calculated");
+    assert_eq!(value["summary"]["solution_count_calculated"], false);
+    assert_eq!(value["contract"]["solution_data"]["requested"], true);
+    assert_eq!(value["contract"]["solution_data"]["status"], "unavailable");
+    assert_eq!(
+        value["contract"]["solution_data"]["reason"],
+        "solution-set-not-materialized"
+    );
+    assert!(value["contract"].get("artifacts").is_none());
+}
+
+#[test]
+fn coverage_summary_text_preserves_not_calculated_without_json_contract_metadata() {
+    let mut fields = SummaryRenderContract::render_fields(vec![(
+        "unique_solution_count".to_owned(),
+        "not-calculated".to_owned(),
+    )]);
+    append_solution_data_contract(
+        &mut fields,
+        SolutionDataStatus::for_request(true, false, false),
+        RenderFormat::TextVerbose,
+    );
+    let rendered = CommandRenderer::render("percent", fields, RenderFormat::TextVerbose);
+
+    assert!(rendered.contains("unique_solution_count: not-calculated"));
+    assert!(!rendered.contains("unique_solution_count: 0"));
+    assert!(!rendered.contains("solution_data_status"));
+    assert!(!rendered.contains("solution_data_requested"));
 }
 
 #[test]
@@ -192,6 +238,7 @@ fn spin_structure_json_exposes_logical_ctk3_artifacts_without_large_result_array
 
     assert_eq!(value["kind"], "spin-structure");
     assert_eq!(value["summary"]["workers_used"], 2);
+    assert_eq!(value["contract"]["solution_data"]["status"], "complete");
     assert!(value["summary"]["result_count"].as_u64().unwrap_or(0) > 0);
     assert!(value["summary"].get("regular").is_none());
     assert!(value["summary"].get("mini").is_none());

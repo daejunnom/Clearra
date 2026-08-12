@@ -7,8 +7,8 @@ import {
   parseBrowserQueueInput,
   type RuleProfile,
   type SpinProfile
-} from './solverWorkspaceModel';
-import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost';
+} from './solverWorkspaceModel.ts';
+import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost.ts';
 import {
   buildProbabilityFinesseCommandArguments,
   buildProbabilityFinesseDesktopFields,
@@ -16,7 +16,12 @@ import {
   DEFAULT_BUILD_PROBABILITY_PATTERN_KNOWLEDGE,
   type BuildProbabilityFinesseMetric,
   type BuildProbabilityPatternKnowledge
-} from './buildProbabilityFinesse';
+} from './buildProbabilityFinesse.ts';
+import {
+  searchExecutionCommandArguments,
+  searchExecutionDesktopFields,
+  type SearchExecutionRequest
+} from './searchExecutionModel.ts';
 
 export type BuildProbabilityRequest = {
   height: number;
@@ -62,6 +67,30 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
   };
 }
 
+export function normalizeBuildProbabilityRequest(
+  request: BuildProbabilityRequest
+): BuildProbabilityRequest {
+  if (request.aggregation === 'tiling') {
+    return {
+      ...request,
+      rule: 'srs-plus',
+      spinProfile: 't-spins',
+      preserveB2B: false,
+      precomputeBuildDependencies: false,
+      finesse: 'off',
+      patternKnowledge: 'both'
+    };
+  }
+  return {
+    ...request,
+    spinProfile:
+      request.aggregation === 'spin' || request.preserveB2B
+        ? request.spinProfile
+        : 't-spins',
+    patternKnowledge: request.finesse === 'inputs' ? request.patternKnowledge : 'both'
+  };
+}
+
 export function buildTargetPieceCount(request: BuildProbabilityRequest): number | null {
   const cells = occupiedCellCount(trimBuildProbabilityMask(request.targetMask, request.height));
   return cells > 0 && cells % 4 === 0 ? cells / 4 : null;
@@ -74,7 +103,9 @@ export function buildProbabilityValidationCodes(
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('target_lines_invalid');
   }
-  if (!parseBrowserQueueInput(request.queue)) errors.push('queue_invalid');
+  if (request.queue.trim() !== '' && !parseBrowserQueueInput(request.queue)) {
+    errors.push('queue_invalid');
+  }
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
   const targetCellCount = occupiedCellCount(target);
@@ -88,6 +119,7 @@ export function buildProbabilityValidationCodes(
 }
 
 export function buildProbabilityCommand(request: BuildProbabilityRequest): string {
+  request = normalizeBuildProbabilityRequest(request);
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
   const parsedQueue = parseBrowserQueueInput(request.queue);
@@ -127,12 +159,7 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
   tokens.push(
     mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
   );
-  tokens.push(
-    '--workers',
-    String(Math.max(1, Math.trunc(request.workers))),
-    '--cpu-warmup'
-  );
-  if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
+  tokens.push(...searchExecutionCommandArguments(buildProbabilitySearchExecution(request)));
   tokens.push(...buildProbabilityFinesseCommandArguments(request.finesse, request.patternKnowledge));
   return tokens.join(' ');
 }
@@ -141,6 +168,7 @@ export function buildProbabilityRequestForDesktop(
   request: BuildProbabilityRequest,
   language: 'en' | 'ko'
 ): ClearraDesktopRequest {
+  request = normalizeBuildProbabilityRequest(request);
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
   const parsedQueue = parseBrowserQueueInput(request.queue);
@@ -160,14 +188,25 @@ export function buildProbabilityRequestForDesktop(
     precompute_build_dependencies: request.precomputeBuildDependencies,
     ...buildProbabilityFinesseDesktopFields(request.finesse, request.patternKnowledge),
     include_horizontal_mirror: mirrorBoardMask(existing, request.height) === existing,
-    workers: 0,
-    use_all_logical_processors: request.useAllLogicalProcessors,
-    backend: 'cpu',
-    allow_backend_fallback: false,
+    ...searchExecutionDesktopFields(buildProbabilitySearchExecution(request)),
     memory_budget_mb: 0,
     candidate_budget: 0,
     pattern_budget: 0
   });
+}
+
+function buildProbabilitySearchExecution(
+  request: BuildProbabilityRequest
+): SearchExecutionRequest {
+  return {
+    backend: 'cpu',
+    gpuDevice: 'auto',
+    workers: request.workers,
+    useAllLogicalProcessors: request.useAllLogicalProcessors,
+    allowBackendFallback: false,
+    cpuWarmup: true,
+    gpuWarmup: false
+  };
 }
 
 export function trimBuildProbabilityRequest(

@@ -492,7 +492,8 @@ test("structured PC options use CTK3 masks directly without Fumen conversion", (
   const arguments_ = buildSlashCommandArguments(findSlashCommand("path"), [
     { name: "field", value: ctk3 },
     { name: "next", value: "*!" },
-    { name: "options", value: "clear=2 hold=avoid" },
+    { name: "lines", value: 2 },
+    { name: "options", value: "hold=avoid" },
   ]);
 
   assert.deepEqual(arguments_, [
@@ -759,7 +760,7 @@ test("optional settings are command-specific and cannot override host policy", (
         { name: "lines", value: 4 },
         { name: "options", value: "clear=4" },
       ]),
-    /may not be specified together/,
+    /does not support options key 'clear'/,
   );
   assert.throws(
     () =>
@@ -775,7 +776,7 @@ test("optional settings are command-specific and cannot override host policy", (
         ...base,
         { name: "options", value: "clear=4 lines=3" },
       ]),
-    /may be specified only once/,
+    /does not support options key 'clear'/,
   );
   assert.throws(
     () =>

@@ -3,6 +3,7 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
+    normalizeBuildProbabilityRequest,
     type BuildProbabilityRequest,
     type BuildProbabilityValidationCode
   } from './buildProbabilityModel';
@@ -19,17 +20,11 @@
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 
   function patch(change: Partial<BuildProbabilityRequest>) {
-    dispatch('change', { ...request, ...change });
+    dispatch('change', normalizeBuildProbabilityRequest({ ...request, ...change }));
   }
 
   function setAggregation(aggregation: BuildProbabilityRequest['aggregation']) {
-    patch({
-      aggregation,
-      preserveB2B: aggregation === 'tiling' ? false : request.preserveB2B,
-      precomputeBuildDependencies:
-        aggregation === 'tiling' ? false : request.precomputeBuildDependencies,
-      finesse: aggregation === 'tiling' ? 'off' : request.finesse
-    });
+    patch({ aggregation });
   }
 </script>
 

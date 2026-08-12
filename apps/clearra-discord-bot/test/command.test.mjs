@@ -16,6 +16,8 @@ import {
   defaultSearchWorkersPerSession,
   loadDiscordBotConfig,
 } from "../src/config.mjs";
+import { findSlashCommand } from "../src/discord/slash-command-catalog.mjs";
+import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
 
 test("Clearrabot applies direction-specific search and interaction limits", () => {
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
@@ -43,15 +45,17 @@ test("search timeout policy classifies native and sfinder argv consistently", ()
     [["build-probability"], "forward"],
     [["sfinder", "spin-cover"], "forward"],
     [["sfinder", "setup"], "forward"],
+    [["finesse", "search"], "forward"],
+    [["finesse", "score"], "forward"],
     [["setup-finder", "--remaining", "TI"], "setup"],
-    [["sfinder", "pcsetup"], "setup"],
+    [["setup-finder"], "setup"],
     [["verify", "pc"], "default"],
   ];
   for (const [arguments_, expected] of examples) {
     assert.equal(searchTimeoutClass(arguments_), expected, arguments_.join(" "));
   }
   assert.equal(isSetupSearchArguments(["setup-finder"]), true);
-  assert.equal(isSetupSearchArguments(["sfinder", "best-setup"]), true);
+  assert.equal(isSetupSearchArguments(["setup-finder"]), true);
   assert.equal(isSetupSearchArguments(["sfinder", "setup"]), false);
 });
 
@@ -78,7 +82,6 @@ test("every represented sfinder search keeps its direction-specific deadline", (
     "spin-cover",
     "spin",
   ];
-  const setup = ["pc-setup", "best-setup", "dpc-finder"];
 
   for (const command of reverse) {
     assert.equal(searchTimeoutClass(["sfinder", command]), "reverse", command);
@@ -88,9 +91,9 @@ test("every represented sfinder search keeps its direction-specific deadline", (
     assert.equal(searchTimeoutClass(["sfinder", command]), "forward", command);
     assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 900_000, command);
   }
-  for (const command of setup) {
-    assert.equal(searchTimeoutClass(["sfinder", command]), "setup", command);
-    assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 900_000, command);
+  for (const command of ["pc-setup", "best-setup", "dpc-finder"]) {
+    assert.equal(searchTimeoutClass(["setup-finder"]), "setup", command);
+    assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000, command);
   }
 });
 
@@ -98,6 +101,8 @@ test("search timeout policy gives reverse five minutes and forward/setup fifteen
   assert.equal(searchTimeoutMsForArguments(["pc"]), 300_000);
   assert.equal(searchTimeoutMsForArguments(["damage"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000);
+  assert.equal(searchTimeoutMsForArguments(["finesse", "search"]), 900_000);
+  assert.equal(searchTimeoutMsForArguments(["finesse", "score"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["verify"]), 180_000);
 
   const policy = {
@@ -108,7 +113,26 @@ test("search timeout policy gives reverse five minutes and forward/setup fifteen
   assert.equal(searchTimeoutMsForArguments(["verify"], policy), 11);
   assert.equal(searchTimeoutMsForArguments(["sfinder", "path"], policy), 22);
   assert.equal(searchTimeoutMsForArguments(["spin-finder"], policy), 33);
-  assert.equal(searchTimeoutMsForArguments(["sfinder", "dpc-finder"], policy), 33);
+  assert.equal(searchTimeoutMsForArguments(["setup-finder"], policy), 33);
+});
+
+test("the frozen public Discord contract matches every runtime timeout class", () => {
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 26);
+  for (const { id, timeoutClass } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
+    const arguments_ = id.startsWith("finesse-")
+      ? ["finesse", id.slice("finesse-".length)]
+      : findSlashCommand(id).argvPrefix;
+    assert.equal(searchTimeoutClass(arguments_), timeoutClass, id);
+    assert.equal(
+      searchTimeoutMsForArguments(arguments_),
+      timeoutClass === "reverse"
+        ? 300_000
+        : timeoutClass === "forward" || timeoutClass === "setup"
+          ? 900_000
+          : 180_000,
+      id,
+    );
+  }
 });
 
 test("directional search timeout settings remain independently configurable", () => {
@@ -447,16 +471,8 @@ test("Discord commands always use the Clearra exact product path", () => {
       "text",
     ],
   );
-  assert.deepEqual(parseClearraMessage("!setup --remaining SZ --priority pc"), [
-    "setup",
-    "--remaining",
-    "SZ",
-    "--priority",
-    "pc",
-    "--no-tablebase",
-    "--format",
-    "text",
-  ]);
+  assert.equal(parseClearraMessage("!setup --remaining SZ --priority pc"), null);
+  assert.equal(parseClearraMessage("!clearra pc --lines 2"), null);
   assert.deepEqual(
     prepareClearraArguments(
       ["pc", "--lines", "2", "--format", "text", "--include-solution-data"],
@@ -628,9 +644,13 @@ test("Discord exposes curated sfinder commands through native worker policy", ()
     prepareClearraArguments(["sfinder", "verify", "kicks"], { workers: 3 }),
     ["sfinder", "verify", "kicks", "--format", "text"],
   );
-  assert.deepEqual(
+  assert.equal(
     parseClearraMessage("!sfinder pc_setup IOTS", "!", { workers: 2 }),
-    ["sfinder", "pc_setup", "IOTS", "--auto-workers", "2", "--format", "text"],
+    null,
+  );
+  assert.throws(
+    () => prepareClearraArguments(["sfinder", "pc_setup", "IOTS"]),
+    /does not expose/,
   );
 });
 

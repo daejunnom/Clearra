@@ -69,13 +69,42 @@ where
     if has_diagnostic_payload(fields) {
         members.push(("diagnostics".to_owned(), diagnostics_contract(fields)));
     }
-    if matches!(
+    if let Some(status) = solution_data_status(fields) {
+        members.push((
+            "solution_data".to_owned(),
+            solution_data_contract(fields, &status),
+        ));
+        if matches!(status.as_str(), "partial" | "complete") {
+            members.push(("artifacts".to_owned(), solution_artifacts_contract(fields)));
+        }
+    } else if matches!(
         field_value(fields, "solution_data_requested"),
         Some(JsonValue::Bool(true))
     ) {
+        members.push((
+            "solution_data".to_owned(),
+            solution_data_contract(fields, "complete"),
+        ));
         members.push(("artifacts".to_owned(), solution_artifacts_contract(fields)));
     }
     JsonValue::object(members)
+}
+
+fn solution_data_status(fields: &[JsonField]) -> Option<String> {
+    match field_value(fields, "solution_data_status") {
+        Some(JsonValue::String(status)) => Some(status),
+        _ => None,
+    }
+}
+
+fn solution_data_contract(fields: &[JsonField], status: &str) -> JsonValue {
+    let requested = status != "not-requested";
+    let reason = field_value(fields, "solution_data_reason").unwrap_or(JsonValue::Null);
+    JsonValue::object([
+        ("requested", JsonValue::Bool(requested)),
+        ("status", JsonValue::string(status)),
+        ("reason", reason),
+    ])
 }
 
 fn solution_artifacts_contract(fields: &[JsonField]) -> JsonValue {

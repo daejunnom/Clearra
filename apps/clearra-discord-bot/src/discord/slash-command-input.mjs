@@ -1,12 +1,24 @@
 import { documentDecoder, isCtk3, operationCells } from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
 
-import { tokenizeCommand } from "../clearra/command.mjs";
 import { decodeViewerDocument } from "../viewer/document.mjs";
+import { DiscordInputError } from "./i18n.mjs";
+import {
+  booleanSetting,
+  damagePackedArguments,
+  finessePackedArguments,
+  parseSettings,
+  setupFinderPackedArguments,
+  spinStructurePackedArguments,
+} from "./slash-packed-options.mjs";
+
+export { DISCORD_PACKED_OPTION_KEYS } from "./slash-packed-options.mjs";
+
+// SRP rationale: this module has one behavior-level change reason: decoding every
+// Discord search input surface into the canonical typed Clearra argv contract.
 
 const FIELD_MAX_LENGTH = 6000;
 const NEXT_MAX_LENGTH = 2048;
-const SETTINGS_MAX_LENGTH = 256;
 const VERIFY_SCOPES = new Set(["pc", "setup", "cover", "build", "kicks"]);
 const SPIN_TYPES = new Set(["TSS", "TSD", "TST", "TSPIN", "T-SPIN", "ANY"]);
 const SPIN_STRUCTURE_PROFILES = new Set([
@@ -17,7 +29,8 @@ const SPIN_STRUCTURE_PROFILES = new Set([
   "all-spin",
   "all-spin-plus",
 ]);
-const BUILTIN_KICKTABLES = new Set(["srs-plus", "srs", "srs-x", "jstris-180"]);
+const SFINDER_KICKTABLES = new Set(["srs-plus", "srs", "srs-x", "jstris-180"]);
+const NATIVE_KICKTABLES = new Set([...SFINDER_KICKTABLES, "no-kick"]);
 const SETUP_PRIORITIES = new Set(["all", "build", "pc"]);
 const SETUP_QUEUE_KNOWLEDGE = new Set(["oracle", "visible-7"]);
 const SETUP_LENGTHS = new Set(["auto", "longer", "shorter"]);
@@ -61,7 +74,10 @@ export function buildSlashCommandArguments(command, rawOptions = []) {
         ...kicktableArguments(values),
       ], { wideField: true });
     case "fixed-next":
-      return fieldAndNextArguments(command, values, kicktableArguments(values), {
+      return fieldAndNextArguments(command, values, [
+        ...damagePackedArguments(command, values),
+        ...kicktableArguments(values, true),
+      ], {
         fixedNext: true,
         wideField: true,
       });
@@ -164,6 +180,19 @@ export function normalizeSearchField(source, options = {}) {
 }
 
 export function normalizeFinesseDocument(source) {
+  try {
+    return normalizeFinesseDocumentUnchecked(source);
+  } catch (error) {
+    if (error instanceof DiscordInputError) throw error;
+    throw new DiscordInputError(
+      "document.invalid",
+      {},
+      error instanceof Error ? error.message : "document is invalid.",
+    );
+  }
+}
+
+function normalizeFinesseDocumentUnchecked(source) {
   const value = requiredString(source, "document", FIELD_MAX_LENGTH);
   const input = extractSlashFieldSource(value);
   if (input.format !== "ctk3" && input.format !== "fumen") {
@@ -373,8 +402,8 @@ function finesseSearchArguments(command, values) {
     "--height",
     String(Math.max(1, base.height, target.height)),
     ...finesseNextArguments(values),
-    ...finesseSettings(command, values),
-    ...kicktableArguments(values),
+    ...finessePackedArguments(command, values),
+    ...kicktableArguments(values, true),
   ];
 }
 
@@ -389,8 +418,8 @@ function finesseScoreArguments(command, values) {
     "--placements",
     document.placements.join(","),
     ...finesseNextArguments(values),
-    ...finesseSettings(command, values),
-    ...kicktableArguments(values),
+    ...finessePackedArguments(command, values),
+    ...kicktableArguments(values, true),
   ];
 }
 
@@ -418,8 +447,18 @@ function spinStructureArguments(command, values) {
     .toLowerCase()
     .replaceAll("_", "-");
   if (!SPIN_STRUCTURE_PROFILES.has(profile)) {
-    throw new Error("profile must be T-Spins, T-Spins+, All-Mini(+), or All-Spin(+).");
+    throw new DiscordInputError(
+      "profile.invalid",
+      {},
+      "profile must be T-Spins, T-Spins+, All-Mini(+), or All-Spin(+).",
+    );
   }
+  const settings = spinStructurePackedArguments(
+    command,
+    values,
+    field.height,
+    pieces.length,
+  );
   return [
     ...command.argvPrefix,
     "--board-mask-v1",
@@ -430,17 +469,35 @@ function spinStructureArguments(command, values) {
     lines,
     "--spin-profile",
     profile,
-    ...kicktableArguments(values),
+    ...settings,
+    ...kicktableArguments(values, true),
   ];
 }
 
 function validatedNext(values, fixed) {
-  const next = requiredText(values, "next", NEXT_MAX_LENGTH);
+  let next;
+  try {
+    next = requiredText(values, "next", NEXT_MAX_LENGTH);
+  } catch (error) {
+    throw new DiscordInputError(
+      "source.invalid",
+      {},
+      error instanceof Error ? error.message : "next source is invalid.",
+    );
+  }
   if (next.startsWith("-")) {
-    throw new Error("next must be a queue or pattern, not a command-line option.");
+    throw new DiscordInputError(
+      "source.invalid",
+      {},
+      "next must be a queue or pattern, not a command-line option.",
+    );
   }
   if (fixed && !/^[IOTSZJL]+$/i.test(next)) {
-    throw new Error("next must be an exact queue containing only IOTSZJL pieces.");
+    throw new DiscordInputError(
+      "source.invalid",
+      {},
+      "next must be an exact queue containing only IOTSZJL pieces.",
+    );
   }
   return fixed ? next.toUpperCase() : next;
 }
@@ -893,11 +950,7 @@ function safelyDecodeURIComponent(value) {
 }
 
 function pcSettings(command, values) {
-  const settings = parseSettings(command, values, new Map([
-    ["clear", "clear"],
-    ["lines", "clear"],
-    ["hold", "hold"],
-  ]));
+  const settings = parseSettings(command, values, new Map([["hold", "hold"]]));
   const output = [];
   const selectedLines = optionalInteger(
     values,
@@ -905,17 +958,8 @@ function pcSettings(command, values) {
     1,
     DISCORD_PC_FIELD_MAX_ROWS,
   );
-  if (selectedLines !== null && settings.has("clear")) {
-    throw new Error("lines and legacy options clear/lines may not be specified together.");
-  }
   if (selectedLines !== null) {
     output.push("--lines", String(selectedLines));
-  } else if (settings.has("clear")) {
-    const clear = settings.get("clear");
-    if (!/^[1-6]$/.test(clear)) {
-      throw new Error("options clear must be an integer from 1 through 6.");
-    }
-    output.push("--lines", clear);
   }
   if (settings.has("hold")) {
     output.push("--hold", booleanSetting(settings.get("hold"), "hold"));
@@ -972,7 +1016,7 @@ function setupFinderArguments(command, values) {
     optionalText(values, "priority", 16) ?? defaultPriority,
   );
   if (!SETUP_PRIORITIES.has(priority)) {
-    throw new Error("priority must be all, build, or pc.");
+    throw invalidOption("priority", "priority must be all, build, or pc.");
   }
 
   const output = [
@@ -992,7 +1036,10 @@ function setupFinderArguments(command, values) {
     const requested = normalizedSetupChoice(queueKnowledge);
     const normalized = requested === "full-queue" ? "oracle" : requested;
     if (!SETUP_QUEUE_KNOWLEDGE.has(normalized)) {
-      throw new Error("queue-knowledge must be full-queue or visible-7.");
+      throw invalidOption(
+        "queue-knowledge",
+        "queue-knowledge must be full-queue or visible-7.",
+      );
     }
     output.push("--queue-knowledge", normalized);
   }
@@ -1005,7 +1052,8 @@ function setupFinderArguments(command, values) {
     );
     const expected = nextCycleRemainingCount(remaining.length);
     if (nextCycleRemaining.length !== expected) {
-      throw new Error(
+      throw invalidOption(
+        "next-cycle-remaining",
         `next-cycle-remaining must contain exactly ${expected} piece${expected === 1 ? "" : "s"} when remaining contains ${remaining.length}.`,
       );
     }
@@ -1016,11 +1064,15 @@ function setupFinderArguments(command, values) {
   if (setupLength !== null) {
     const normalized = normalizedSetupChoice(setupLength);
     if (!SETUP_LENGTHS.has(normalized)) {
-      throw new Error("setup-length must be auto, longer, or shorter.");
+      throw invalidOption(
+        "setup-length",
+        "setup-length must be auto, longer, or shorter.",
+      );
     }
     output.push("--setup-length", normalized);
   }
-  output.push(...kicktableArguments(values));
+  output.push(...setupFinderPackedArguments(command, values, remaining));
+  output.push(...kicktableArguments(values, true));
   return output;
 }
 
@@ -1031,7 +1083,7 @@ function normalizedSetupChoice(value) {
 function setupInventory(value, name) {
   const pieces = pieceInventory(value, name);
   if (pieces.length < 1 || pieces.length > 7) {
-    throw new Error(`${name} must contain from 1 through 7 pieces.`);
+    throw invalidOption(name, `${name} must contain from 1 through 7 pieces.`);
   }
   const counts = new Map();
   for (const piece of pieces) {
@@ -1041,7 +1093,8 @@ function setupInventory(value, name) {
     [...counts.values()].some((count) => count > 2) ||
     [...counts.values()].filter((count) => count === 2).length > 1
   ) {
-    throw new Error(
+    throw invalidOption(
+      name,
       `${name} allows at most one piece kind twice; no piece may appear three times.`,
     );
   }
@@ -1052,76 +1105,16 @@ function nextCycleRemainingCount(remainingCount) {
   return ({ 7: 4, 4: 1, 1: 5, 5: 2, 2: 6, 6: 3, 3: 7 })[remainingCount];
 }
 
-function finesseSettings(command, values) {
-  const settings = parseSettings(command, values, new Map([
-    ["hold", "hold"],
-    ["knowledge", "knowledge"],
-    ["queue-knowledge", "knowledge"],
-    ["pattern-knowledge", "knowledge"],
-  ]));
-  const output = [];
-  const hold = settings.has("hold")
-    ? booleanSetting(settings.get("hold"), "hold")
-    : "true";
-  if (hold === "true") output.push("--hold", "empty");
-  else output.push("--no-hold");
-
-  const requestedKnowledge = (settings.get("knowledge") ?? "both")
-    .trim()
-    .toLowerCase()
-    .replaceAll("_", "-");
-  const knowledge = requestedKnowledge === "full-queue" ? "oracle" : requestedKnowledge;
-  if (!["both", "oracle", "visible-7"].includes(knowledge)) {
-    throw new Error("options knowledge must be both, full-queue, or visible-7.");
-  }
-  output.push("--pattern-knowledge", knowledge);
-  return output;
-}
-
-function parseSettings(command, values, aliases) {
-  const source = optionalText(values, "options", SETTINGS_MAX_LENGTH);
-  const settings = new Map();
-  if (!source) return settings;
-  for (const token of tokenizeCommand(source)) {
-    const equals = token.indexOf("=");
-    if (equals <= 0 || equals === token.length - 1) {
-      throw new Error(
-        `/${command.name} options must use space-separated key=value entries.`,
-      );
-    }
-    const suppliedKey = token.slice(0, equals).trim().toLowerCase();
-    const key = aliases.get(suppliedKey);
-    if (!key) {
-      throw new Error(`/${command.name} does not support options key '${suppliedKey}'.`);
-    }
-    if (settings.has(key)) {
-      throw new Error(`/${command.name} options key '${key}' may be specified only once.`);
-    }
-    settings.set(key, token.slice(equals + 1).trim());
-  }
-  return settings;
-}
-
-function booleanSetting(value, name) {
-  switch (value.toLowerCase()) {
-    case "true":
-    case "yes":
-    case "on":
-    case "use":
-      return "true";
-    case "false":
-    case "no":
-    case "off":
-    case "avoid":
-      return "false";
-    default:
-      throw new Error(`options ${name} must be use or avoid (true or false).`);
-  }
-}
-
 function pieceInventory(value, name = "remaining") {
   if (!/^[IOTSZJL]+$/i.test(value)) {
-    throw new Error(`${name} must contain only IOTSZJL pieces.`);
+    if (name === "pieces") {
+      throw new DiscordInputError(
+        "pieces.invalid",
+        {},
+        "pieces must contain only IOTSZJL pieces.",
+      );
+    }
+    throw invalidOption(name, `${name} must contain only IOTSZJL pieces.`);
   }
   return value.toUpperCase();
 }
@@ -1135,8 +1128,9 @@ function allowedOptionNames(input) {
     case "cover":
       return new Set(["base", "target", "next", "options", "kicktable"]);
     case "colored":
-    case "fixed-next":
       return new Set(["field", "next", "kicktable"]);
+    case "fixed-next":
+      return new Set(["field", "next", "kicktable", "options"]);
     case "score-fixed-next":
       return new Set(["field", "next", "lines", "options", "kicktable"]);
     case "remaining":
@@ -1148,9 +1142,10 @@ function allowedOptionNames(input) {
         "next-cycle-remaining",
         "setup-length",
         "kicktable",
+        "options",
       ]);
     case "spin-structure":
-      return new Set(["pieces", "field", "lines", "profile", "kicktable"]);
+      return new Set(["pieces", "field", "lines", "profile", "kicktable", "options"]);
     case "verify":
       return new Set(["scope"]);
     case "finesse-search":
@@ -1162,13 +1157,16 @@ function allowedOptionNames(input) {
   }
 }
 
-function kicktableArguments(values) {
+function kicktableArguments(values, native = false) {
   const selected = optionalText(values, "kicktable", 32);
   if (!selected) return [];
   const normalized = selected.toLowerCase();
-  if (!BUILTIN_KICKTABLES.has(normalized)) {
+  const supported = native ? NATIVE_KICKTABLES : SFINDER_KICKTABLES;
+  if (!supported.has(normalized)) {
     throw new Error(
-      "kicktable must be srs-plus, srs, srs-x, or jstris-180; custom kick tables are unavailable.",
+      native
+        ? "kicktable must be srs-plus, srs, srs-x, jstris-180, or no-kick; custom kick tables are unavailable."
+        : "kicktable must be srs-plus, srs, srs-x, or jstris-180; custom kick tables are unavailable.",
     );
   }
   return ["--rule", normalized];
@@ -1209,9 +1207,16 @@ function optionalInteger(values, name, minimum, maximum) {
     ? Number(raw.trim())
     : raw;
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw new Error(`${name} must be an integer from ${minimum} through ${maximum}.`);
+    throw invalidOption(
+      name,
+      `${name} must be an integer from ${minimum} through ${maximum}.`,
+    );
   }
   return value;
+}
+
+function invalidOption(option, message) {
+  return new DiscordInputError("options.invalid", { option }, message);
 }
 
 function requiredString(value, name, maxLength) {

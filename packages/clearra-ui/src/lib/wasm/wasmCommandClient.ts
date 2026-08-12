@@ -283,6 +283,11 @@ export type ClearraWasmSearchReport = {
   packing_candidate_set_digest: string;
   packing_candidate_keys: string[];
   unique_solution_count: number;
+  solution_count_calculated: boolean;
+  solution_set_materialized: boolean;
+  solution_keys_materialized_count: number;
+  solution_keys_complete: boolean;
+  solution_page_available: boolean;
   normalized_solution_set_hash: string;
   normalized_solution_keys: string[];
   solution_probabilities: ClearraSolutionProbability[];

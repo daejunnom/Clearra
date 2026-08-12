@@ -3,9 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
 import type { ClearraWasmSearchReport } from '../wasm/wasmCommandClient';
 
-export type ClearraDesktopRequest = {
+type ClearraDesktopRequestBase = {
   app_request_model: 'clearra-app/AppRequest';
-  command: 'pc' | 'pc-scenario' | 'setup' | 'build-probability' | 'damage' | 'spin-finder';
   language: 'en' | 'ko';
   lines: number;
   queue: string;
@@ -28,7 +27,6 @@ export type ClearraDesktopRequest = {
   precompute_build_dependencies: boolean;
   finesse: 'off' | 'inputs';
   pattern_knowledge: 'both' | 'oracle' | 'visible-7';
-  initial_b2b: number;
   board_mask: string;
   visible_height: number;
   piece_window: number | null;
@@ -57,12 +55,53 @@ export type ClearraDesktopRequest = {
   target_mask?: string;
   build_aggregation?: 'buildability' | 'tiling' | 'spin';
   include_horizontal_mirror?: boolean;
-  initial_combo?: number;
-  damage_aggregation?: 'maximum' | 'at-least';
-  minimum_damage?: number;
-  spin_lines?: 'any' | '0' | '1' | '2' | '3' | '4' | '1+' | '2+' | '3+' | '4+';
-  spin_category?: 'any' | 't' | 'other';
 };
+
+type ClearraDesktopPcRequest = ClearraDesktopRequestBase & {
+  command: 'pc' | 'pc-scenario';
+  initial_b2b: number;
+  initial_combo?: never;
+  damage_aggregation?: never;
+  minimum_damage?: never;
+  spin_lines?: never;
+  spin_category?: never;
+};
+
+type ClearraDesktopDamageRequest = ClearraDesktopRequestBase & {
+  command: 'damage';
+  initial_combo: number;
+  initial_b2b: number;
+  damage_aggregation: 'maximum' | 'at-least';
+  minimum_damage?: number;
+  spin_lines?: never;
+  spin_category?: never;
+};
+
+type ClearraDesktopSpinFinderRequest = ClearraDesktopRequestBase & {
+  command: 'spin-finder';
+  initial_combo?: never;
+  initial_b2b?: never;
+  damage_aggregation?: never;
+  minimum_damage?: never;
+  spin_lines: 'any' | '0' | '1' | '2' | '3' | '4' | '1+' | '2+' | '3+' | '4+';
+  spin_category: 'any' | 't' | 'other';
+};
+
+type ClearraDesktopNonForwardRequest = ClearraDesktopRequestBase & {
+  command: 'setup' | 'build-probability';
+  initial_combo?: never;
+  initial_b2b?: never;
+  damage_aggregation?: never;
+  minimum_damage?: never;
+  spin_lines?: never;
+  spin_category?: never;
+};
+
+export type ClearraDesktopRequest =
+  | ClearraDesktopPcRequest
+  | ClearraDesktopDamageRequest
+  | ClearraDesktopSpinFinderRequest
+  | ClearraDesktopNonForwardRequest;
 
 export type ClearraDesktopAppResponse = {
   status: 'success' | 'validation-failed' | 'unsupported' | 'execution-failed';
@@ -119,9 +158,9 @@ export type ClearraDesktopJobEvent = {
 export function buildDesktopAppRequest(
   input: Partial<ClearraDesktopRequest>
 ): ClearraDesktopRequest {
-  return {
+  const command = input.command ?? 'pc';
+  const base: ClearraDesktopRequestBase = {
     app_request_model: 'clearra-app/AppRequest',
-    command: input.command ?? 'pc',
     language: input.language ?? 'en',
     lines: input.lines ?? 2,
     queue: input.queue ?? '',
@@ -138,7 +177,6 @@ export function buildDesktopAppRequest(
     precompute_build_dependencies: input.precompute_build_dependencies ?? false,
     finesse: input.finesse ?? 'off',
     pattern_knowledge: input.pattern_knowledge ?? 'both',
-    initial_b2b: input.initial_b2b ?? 0,
     board_mask: input.board_mask ?? '0x0000000000000000',
     visible_height: input.visible_height ?? input.lines ?? 2,
     piece_window: input.piece_window ?? null,
@@ -147,7 +185,8 @@ export function buildDesktopAppRequest(
     workers: input.workers ?? 0,
     use_all_logical_processors: input.use_all_logical_processors ?? false,
     gpu_device: input.gpu_device ?? 'auto',
-    allow_backend_fallback: input.allow_backend_fallback ?? true,
+    allow_backend_fallback:
+      input.allow_backend_fallback ?? ((input.backend ?? 'auto') === 'auto'),
     memory_budget_mb: input.memory_budget_mb ?? 0,
     candidate_budget: input.candidate_budget ?? 10_000_000,
     pattern_budget: input.pattern_budget ?? 5040,
@@ -166,12 +205,37 @@ export function buildDesktopAppRequest(
     target_mask: input.target_mask ?? '0x0',
     build_aggregation: input.build_aggregation ?? 'buildability',
     include_horizontal_mirror: input.include_horizontal_mirror ?? true,
-    initial_combo: input.initial_combo ?? 0,
-    damage_aggregation: input.damage_aggregation ?? 'maximum',
-    minimum_damage: input.minimum_damage ?? 0,
-    spin_lines: input.spin_lines ?? 'any',
-    spin_category: input.spin_category ?? 'any'
   };
+
+  if (command === 'damage') {
+    const damageAggregation = input.damage_aggregation ?? 'maximum';
+    return {
+      ...base,
+      command,
+      initial_combo: input.initial_combo ?? 0,
+      initial_b2b: input.initial_b2b ?? 0,
+      damage_aggregation: damageAggregation,
+      ...(damageAggregation === 'at-least'
+        ? { minimum_damage: input.minimum_damage ?? 0 }
+        : {})
+    };
+  }
+  if (command === 'spin-finder') {
+    return {
+      ...base,
+      command,
+      spin_lines: input.spin_lines ?? 'any',
+      spin_category: input.spin_category ?? 'any'
+    };
+  }
+  if (command === 'pc' || command === 'pc-scenario') {
+    return {
+      ...base,
+      command,
+      initial_b2b: input.initial_b2b ?? 0
+    };
+  }
+  return { ...base, command };
 }
 
 export async function runRequest(

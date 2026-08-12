@@ -17,6 +17,8 @@ pub use web_pc_scenario_input::WebPcScenarioInput;
 pub use web_virtual_file::WebVirtualFileHandle;
 
 #[cfg(test)]
+mod search_option_contract_tests;
+#[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
 mod web_build_probability_input;

@@ -1,8 +1,14 @@
 // SRP rationale: this test module has one behavior-level change reason: verifying the complete public WASM command and JSON envelope contract.
 
-use clearra_app::{AppCommand, AppContext, AppCoreExecutorService, AppServices};
+use clearra_app::{
+    AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppResponse, AppServices,
+    FinesseReport,
+};
+use clearra_core_executor::CoreExecutionResult;
 use clearra_host_contract::AppStatus;
 use serde_json::Value;
+
+use crate::wasm_command_runtime::solution_page_store_is_public;
 
 use super::*;
 
@@ -131,6 +137,235 @@ fn tiling_only_returns_exact_geometry_without_buildup_or_probability() {
     assert_eq!(report.total_build_order_nodes, 0);
     assert_eq!(report.coverage_product_edge_checks, 0);
     assert!(report.count_complete);
+    assert!(report.solution_count_calculated);
+    assert!(report.solution_set_materialized);
+    assert!(report.solution_keys_complete);
+}
+
+#[test]
+fn coverage_summary_reports_not_calculated_solution_availability_without_a_fake_zero() {
+    let app_response = AppResponse::success(AppRenderModel::Percent(CoreExecutionResult::new(
+        vec![
+            ("backend_requested".to_owned(), "cpu".to_owned()),
+            ("backend_selected".to_owned(), "wasm-cpu".to_owned()),
+            (
+                "search_output_policy".to_owned(),
+                "coverage-summary".to_owned(),
+            ),
+            (
+                "unique_solution_count".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            (
+                "normalized_unique_solution_count".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            (
+                "normalized_solution_set_hash".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            (
+                "actual_normalized_solution_set_hash".to_owned(),
+                "not-calculated".to_owned(),
+            ),
+            ("solution_count_calculated".to_owned(), "false".to_owned()),
+            ("solution_set_materialized".to_owned(), "false".to_owned()),
+            (
+                "solution_keys_materialized_count".to_owned(),
+                "0".to_owned(),
+            ),
+            ("solution_keys_complete".to_owned(), "false".to_owned()),
+            ("solution_page_available".to_owned(), "false".to_owned()),
+        ],
+        Vec::new(),
+    )));
+    let report = WasmSearchReport::from_response(&app_response).expect("percent search report");
+    let core_result = app_response
+        .render_model()
+        .and_then(|model| model.core_result())
+        .expect("synthetic core result");
+
+    assert_eq!(report.unique_solution_count, 0);
+    assert!(!report.solution_count_calculated);
+    assert!(!report.solution_set_materialized);
+    assert_eq!(report.solution_keys_materialized_count, 0);
+    assert!(!report.solution_keys_complete);
+    assert!(!report.solution_page_available);
+    assert!(!solution_page_store_is_public(core_result));
+
+    let json = serialize_search_report_from_app_response(&app_response)
+        .expect("serialized percent search report");
+    let value: Value = serde_json::from_str(&json).expect("percent search report JSON");
+    assert_eq!(value["unique_solution_count"], 0);
+    assert_eq!(value["solution_count_calculated"], false);
+    assert_eq!(value["solution_set_materialized"], false);
+    assert_eq!(value["solution_keys_materialized_count"], 0);
+    assert_eq!(value["solution_keys_complete"], false);
+    assert_eq!(value["solution_page_available"], false);
+
+    let execution = WasmExecutionResult::from_app_response(app_response, false);
+    assert!(execution.tiling_solution_page_store().is_none());
+}
+
+#[test]
+fn calculated_complete_empty_solution_set_remains_an_actual_zero() {
+    let app_response = AppResponse::success(AppRenderModel::Percent(CoreExecutionResult::new(
+        vec![
+            ("backend_selected".to_owned(), "wasm-cpu".to_owned()),
+            ("search_output_policy".to_owned(), "summary".to_owned()),
+            ("unique_solution_count".to_owned(), "0".to_owned()),
+            (
+                "normalized_unique_solution_count".to_owned(),
+                "0".to_owned(),
+            ),
+            ("solution_count_calculated".to_owned(), "true".to_owned()),
+            ("solution_set_materialized".to_owned(), "true".to_owned()),
+            (
+                "solution_keys_materialized_count".to_owned(),
+                "0".to_owned(),
+            ),
+            ("solution_keys_complete".to_owned(), "true".to_owned()),
+            ("solution_page_available".to_owned(), "false".to_owned()),
+        ],
+        Vec::new(),
+    )));
+    let core_result = app_response
+        .render_model()
+        .and_then(|model| model.core_result())
+        .expect("synthetic core result");
+    assert!(!solution_page_store_is_public(core_result));
+
+    let execution = WasmExecutionResult::from_app_response(app_response, false);
+    let report = execution.search_report().expect("empty search report");
+
+    assert_eq!(report.unique_solution_count, 0);
+    assert!(report.solution_count_calculated);
+    assert!(report.solution_set_materialized);
+    assert!(report.solution_keys_complete);
+    assert!(!report.solution_page_available);
+    assert!(execution.tiling_solution_page_store().is_none());
+}
+
+#[test]
+fn malformed_coverage_summary_availability_is_unavailable_without_artifacts() {
+    let valid_fields = vec![
+        ("backend_selected".to_owned(), "wasm-cpu".to_owned()),
+        (
+            "search_output_policy".to_owned(),
+            "coverage-summary".to_owned(),
+        ),
+        (
+            "unique_solution_count".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        (
+            "normalized_unique_solution_count".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        (
+            "normalized_solution_set_hash".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        (
+            "actual_normalized_solution_set_hash".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+        ("solution_count_calculated".to_owned(), "false".to_owned()),
+        ("solution_set_materialized".to_owned(), "false".to_owned()),
+        (
+            "solution_keys_materialized_count".to_owned(),
+            "0".to_owned(),
+        ),
+        ("solution_keys_complete".to_owned(), "false".to_owned()),
+        ("solution_page_available".to_owned(), "false".to_owned()),
+    ];
+    let malformed_cases = [
+        ("unique_solution_count", "0"),
+        ("normalized_unique_solution_count", "0"),
+        ("normalized_solution_set_hash", "cts1:fake"),
+        ("actual_normalized_solution_set_hash", "cts1:fake"),
+        ("solution_count_calculated", "true"),
+        ("solution_set_materialized", "true"),
+        ("solution_keys_materialized_count", "1"),
+        ("solution_keys_complete", "true"),
+        ("solution_page_available", "true"),
+    ];
+
+    for (key, value) in malformed_cases {
+        let mut fields = valid_fields.clone();
+        fields
+            .iter_mut()
+            .find(|(field_key, _)| field_key == key)
+            .expect("coverage availability key")
+            .1 = value.to_owned();
+        let app_response = AppResponse::success(AppRenderModel::Percent(
+            CoreExecutionResult::new(fields, Vec::new())
+                .with_normalized_solution_keys(vec!["fake-solution-key".to_owned()])
+                .with_packing_candidate_keys(vec!["fake-packing-key".to_owned()]),
+        ));
+        let execution = WasmExecutionResult::from_app_response(app_response, false);
+        let report = execution.search_report().expect("synthetic search report");
+
+        assert!(!report.solution_count_calculated, "malformed {key}");
+        assert!(!report.solution_set_materialized, "malformed {key}");
+        assert_eq!(
+            report.solution_keys_materialized_count, 0,
+            "malformed {key}"
+        );
+        assert!(!report.solution_keys_complete, "malformed {key}");
+        assert!(!report.solution_page_available, "malformed {key}");
+        assert_eq!(report.unique_solution_count, 0, "malformed {key}");
+        assert!(
+            report.normalized_solution_keys.is_empty(),
+            "malformed {key}"
+        );
+        assert!(report.packing_candidate_keys.is_empty(), "malformed {key}");
+        assert_eq!(report.normalized_solution_set_hash, "not-calculated");
+        assert!(
+            execution.tiling_solution_page_store().is_none(),
+            "malformed {key}"
+        );
+        let summary = report
+            .summary_fields
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            summary.get("unique_solution_count").map(String::as_str),
+            Some("not-calculated"),
+            "malformed {key}"
+        );
+        assert_eq!(
+            summary.get("solution_count_calculated").map(String::as_str),
+            Some("false"),
+            "malformed {key}"
+        );
+    }
+}
+
+#[test]
+fn invalid_contract_hides_finesse_search_but_keeps_score_exception() {
+    let fields = vec![
+        ("backend_selected".to_owned(), "wasm-cpu".to_owned()),
+        (
+            "search_output_policy".to_owned(),
+            "coverage-summary".to_owned(),
+        ),
+        (
+            "unique_solution_count".to_owned(),
+            "not-calculated".to_owned(),
+        ),
+    ];
+    for (mode, expected_report) in [("search", false), ("score", true)] {
+        let response = AppResponse::success(AppRenderModel::Percent(
+            CoreExecutionResult::new(fields.clone(), Vec::new())
+                .with_finesse_report(FinesseReport::new(mode, "oracle", true, None, Vec::new())),
+        ));
+        let report = WasmSearchReport::from_response(&response).expect("WASM search report");
+        assert_eq!(report.finesse_report.is_some(), expected_report, "{mode}");
+        assert!(!report.solution_set_materialized, "{mode}");
+        assert!(report.normalized_solution_keys.is_empty(), "{mode}");
+    }
 }
 
 #[test]
@@ -617,6 +852,8 @@ fn all_piece_spin_profiles_do_not_promote_an_upward_mobile_o_clear() {
             "{profile} must reject the first ordinary O double before the final perfect clear"
         );
         assert_eq!(report.unique_solution_count, 0, "{profile}");
+        assert!(report.solution_count_calculated, "{profile}");
+        assert!(report.solution_set_materialized, "{profile}");
         assert_eq!(report.covered_pattern_count, 0, "{profile}");
     }
 }

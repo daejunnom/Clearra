@@ -127,6 +127,7 @@
         <input
           type="number"
           min="0"
+          max="65535"
           step="1"
           value={request.initialB2B}
           disabled={tilingOnly || failedQueueOnly || request.scoreMode !== 'summary'}

@@ -3,11 +3,13 @@
 
   import { updateWasmCommandText, wasmWorkerState } from './wasmWorkerStore';
   import { WasmTerminalWorkerController } from './WasmTerminalWorkerController';
+  import { workspaceSolutionCount } from '../workspace/solutionSetAvailability';
 
   export let workerFactory: (() => Worker) | null = null;
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
   $: state = $wasmWorkerState;
+  $: solutionCount = workspaceSolutionCount(state.searchReport);
   $: workerController.setWorkerFactory(workerFactory);
 
   onDestroy(() => workerController.dispose());
@@ -85,7 +87,7 @@
         </div>
         <div>
           <dt>Solutions</dt>
-          <dd>{state.searchReport?.unique_solution_count ?? 'pending'}</dd>
+          <dd>{state.searchReport ? (solutionCount ?? 'not calculated') : 'pending'}</dd>
         </div>
         <div>
           <dt>Solution hash</dt>

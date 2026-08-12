@@ -390,6 +390,101 @@ fn solution_data_requires_structured_json_output() {
 }
 
 #[test]
+fn native_pc_backend_fallback_override_is_explicit_and_conflict_checked() {
+    for arguments in [
+        ["--allow-backend-fallback", "--no-backend-fallback"],
+        ["--no-backend-fallback", "--allow-backend-fallback"],
+    ] {
+        assert_eq!(
+            CliParser::parse(["clearra", "pc", "--lines", "2", arguments[0], arguments[1],]),
+            Err(CliParseError::InvalidValue {
+                option: "--backend-fallback",
+                value: "choose exactly one of --allow-backend-fallback or --no-backend-fallback"
+                    .to_owned(),
+            })
+        );
+    }
+
+    let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc"])
+        .expect("native PC defaults")
+        .into_command()
+    else {
+        panic!("PC command");
+    };
+    assert_eq!(default_pc.lines(), 2);
+    assert_eq!(default_pc.objective(), "all");
+    assert_eq!(default_pc.allow_backend_fallback(), None);
+}
+
+#[test]
+fn native_pc_initial_b2b_uses_the_cross_surface_u16_domain() {
+    let ParsedCliCommand::Pc(maximum) =
+        CliParser::parse(["clearra", "pc", "--initial-b2b", "65535"])
+            .expect("maximum initial B2B")
+            .into_command()
+    else {
+        panic!("PC command");
+    };
+    assert_eq!(maximum.initial_b2b(), Some(65_535));
+
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "--initial-b2b", "65536"]),
+        Err(CliParseError::InvalidValue {
+            option: "--initial-b2b",
+            value: "65536".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn native_pc_backend_and_fallback_projection_is_order_independent() {
+    for (backend, fallback) in [
+        ("auto", "--allow-backend-fallback"),
+        ("auto", "--no-backend-fallback"),
+        ("cpu", "--allow-backend-fallback"),
+        ("cpu", "--no-backend-fallback"),
+        ("gpu", "--allow-backend-fallback"),
+        ("gpu", "--no-backend-fallback"),
+        ("hybrid", "--allow-backend-fallback"),
+        ("hybrid", "--no-backend-fallback"),
+    ] {
+        let backend_first = CliParser::parse(["clearra", "pc", "--backend", backend, fallback])
+            .expect("backend-first PC invocation");
+        let fallback_first = CliParser::parse(["clearra", "pc", fallback, "--backend", backend])
+            .expect("fallback-first PC invocation");
+
+        assert_eq!(
+            backend_first, fallback_first,
+            "backend={backend} {fallback}"
+        );
+    }
+}
+
+#[test]
+fn native_pc_scenario_rejects_backend_fallback_conflicts_in_both_orders() {
+    for arguments in [
+        ["--allow-backend-fallback", "--no-backend-fallback"],
+        ["--no-backend-fallback", "--allow-backend-fallback"],
+    ] {
+        assert_eq!(
+            CliParser::parse([
+                "clearra",
+                "pc-scenario",
+                "--fixture",
+                "tests/fixtures/pc/example.json",
+                arguments[0],
+                arguments[1],
+            ]),
+            Err(CliParseError::InvalidValue {
+                option: "--backend-fallback",
+                value: "choose exactly one of --allow-backend-fallback or --no-backend-fallback"
+                    .to_owned(),
+            })
+        );
+    }
+}
+
+#[test]
 fn parses_text_output_verbosity_as_global_option() {
     let verbose =
         CliParser::parse(["clearra", "pc", "--verbose", "--lines", "2"]).expect("verbose");
@@ -462,10 +557,13 @@ fn parses_command_specific_help_as_help_topic() {
 fn parses_spin_structure_help_without_executing_the_search() {
     for flag in ["--help", "-h"] {
         let invocation = CliParser::parse(["clearra", "spin-structure", flag]).expect("help");
-        assert_eq!(
-            invocation.into_command(),
-            ParsedCliCommand::Help(CliHelpTopic::SpinStructure)
-        );
+        let ParsedCliCommand::Help(topic) = invocation.into_command() else {
+            panic!("expected spin-structure help");
+        };
+        assert_eq!(topic, CliHelpTopic::SpinStructure);
+        let output = topic.into_output(LanguageId::En);
+        assert!(output.stdout().contains("--lines any|0..4|1+..4+"));
+        assert!(!output.stdout().contains("0+..4+"));
     }
 }
 

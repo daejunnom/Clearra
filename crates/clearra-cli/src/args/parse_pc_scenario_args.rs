@@ -1,4 +1,5 @@
 use super::{
+    backend_fallback_override::record_backend_fallback_override,
     execution_backend_aliases::resolve_cpu_execution_aliases,
     parse_option_value::{option_value, parse_u16_option, parse_usize_option, unknown_option},
     parse_piece_arg::parse_single_char,
@@ -160,11 +161,11 @@ pub(crate) fn parse_pc_scenario(args: &[String]) -> Result<ParsedCliCommand, Cli
                 index += 2;
             }
             "--allow-backend-fallback" => {
-                allow_backend_fallback = Some(true);
+                record_backend_fallback_override(&mut allow_backend_fallback, true)?;
                 index += 1;
             }
             "--no-backend-fallback" => {
-                allow_backend_fallback = Some(false);
+                record_backend_fallback_override(&mut allow_backend_fallback, false)?;
                 index += 1;
             }
             "--verify-expected" => {

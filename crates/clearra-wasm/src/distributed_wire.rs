@@ -4,8 +4,8 @@ use clearra_core_domain::{
 };
 use clearra_core_executor::{
     tiling_solution_store::PackedTilingRows, CoreExecutionResult, CorePathStep,
-    CorePostProcessScoreCell, CorePostProcessSpinCoverage, SolutionCoverage, WasmCandidatePacket,
-    WasmPackedTilingIdentity, WasmTilingRootChunk,
+    CorePostProcessScoreCell, CorePostProcessSpinCoverage, NormalizedSolutionCoverage,
+    SolutionCoverage, WasmCandidatePacket, WasmPackedTilingIdentity, WasmTilingRootChunk,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 
@@ -13,7 +13,7 @@ const CANDIDATE_MAGIC: u32 = 0x4342_4131;
 const PARTIAL_MAGIC: u32 = 0x5052_5431;
 const PARTIAL_BATCH_MAGIC: u32 = 0x5052_4231;
 const TILING_ROOT_CHUNK_MAGIC: u32 = 0x5452_4331;
-const WIRE_VERSION: u32 = 7;
+const WIRE_VERSION: u32 = 8;
 const MAX_WIRE_ITEMS: usize = 16_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +197,15 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
     };
     let coverage = result.coverage_pattern_words();
     let solution_coverage = result.solution_coverages();
+    // PC and compact-build workers produce board64 authority and a reconstructable normalized
+    // duplicate, while extended-build workers only produce normalized authority. Their mergers
+    // consume those respective representations, so carry normalized coverage only when board64
+    // coverage is unavailable instead of doubling the worker payload.
+    let normalized_solution_coverage = if solution_coverage.is_empty() {
+        result.normalized_solution_coverages()
+    } else {
+        &[]
+    };
     let score_cells = result.postprocess_score_cells();
     let spin_coverages = result.postprocess_spin_coverages();
     let estimated = fields
@@ -221,6 +230,16 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
             solution_coverage
                 .iter()
                 .map(|entry| 160 + entry.covered_patterns().word_count() * 8)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            normalized_solution_coverage
+                .iter()
+                .map(|entry| {
+                    16usize
+                        .saturating_add(entry.solution_key().len())
+                        .saturating_add(entry.covered_patterns().word_count() * 8)
+                })
                 .sum::<usize>(),
         )
         .saturating_add(
@@ -286,6 +305,15 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
     put_u32(&mut output, solution_coverage.len() as u32);
     for entry in solution_coverage {
         encode_identity(&mut output, entry.identity());
+        put_u32(&mut output, entry.covered_patterns().pattern_count() as u32);
+        put_u32(&mut output, entry.covered_patterns().word_count() as u32);
+        for word in entry.covered_patterns().words() {
+            put_u64(&mut output, *word);
+        }
+    }
+    put_u32(&mut output, normalized_solution_coverage.len() as u32);
+    for entry in normalized_solution_coverage {
+        put_bytes(&mut output, entry.solution_key().as_bytes());
         put_u32(&mut output, entry.covered_patterns().pattern_count() as u32);
         put_u32(&mut output, entry.covered_patterns().word_count() as u32);
         for word in entry.covered_patterns().words() {
@@ -432,6 +460,36 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
             .map_err(|_| DistributedWireError("partial_solution_coverage_invalid"))?;
         solution_coverage.push(SolutionCoverage::new(identity, covered_patterns));
     }
+    let normalized_solution_coverage_count = reader.count()?;
+    let mut normalized_solution_coverage = Vec::new();
+    normalized_solution_coverage
+        .try_reserve_exact(normalized_solution_coverage_count)
+        .map_err(|_| {
+            DistributedWireError("partial_normalized_solution_coverage_allocation_failed")
+        })?;
+    for _ in 0..normalized_solution_coverage_count {
+        let solution_key = reader.string()?;
+        let pattern_count = reader.count()?;
+        let word_count = reader.count()?;
+        if word_count != pattern_count.div_ceil(u64::BITS as usize) {
+            return Err(DistributedWireError(
+                "partial_normalized_solution_coverage_shape_invalid",
+            ));
+        }
+        let mut words = Vec::new();
+        words.try_reserve_exact(word_count).map_err(|_| {
+            DistributedWireError("partial_normalized_solution_coverage_allocation_failed")
+        })?;
+        for _ in 0..word_count {
+            words.push(reader.u64()?);
+        }
+        let covered_patterns = PatternBitSet::from_words(pattern_count, words)
+            .map_err(|_| DistributedWireError("partial_normalized_solution_coverage_invalid"))?;
+        normalized_solution_coverage.push(NormalizedSolutionCoverage::new(
+            solution_key,
+            covered_patterns,
+        ));
+    }
     let score_shard = match reader.u8()? {
         0 => None,
         1 => {
@@ -515,6 +573,7 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
         .with_representative_solution_identity(representative)
         .with_coverage_pattern_words(coverage)
         .with_solution_coverages(solution_coverage)
+        .with_normalized_solution_coverages(normalized_solution_coverage)
         .with_postprocess_spin_coverages(spin_coverages);
     Ok(match score_shard {
         Some((profile_id, complete, cells)) => {
@@ -780,6 +839,41 @@ mod tests {
             decode_partial_result(&encode_partial_result(&result)).expect("tiling partial result");
 
         assert!(decoded.normalized_solution_keys().is_empty());
+    }
+
+    #[test]
+    fn partial_wire_round_trips_extended_normalized_solution_coverage() {
+        let coverage = NormalizedSolutionCoverage::new(
+            "extended-board-candidate",
+            PatternBitSet::from_words(65, vec![0x5, 0x1]).expect("coverage bitset"),
+        );
+        let result = CoreExecutionResult::new(Vec::new(), Vec::new())
+            .with_normalized_solution_coverages(vec![coverage.clone()]);
+
+        let decoded =
+            decode_partial_result(&encode_partial_result(&result)).expect("partial result");
+
+        assert_eq!(decoded.normalized_solution_coverages(), &[coverage]);
+        assert!(decoded.solution_coverages().is_empty());
+    }
+
+    #[test]
+    fn partial_wire_prefers_board64_solution_coverage_over_its_normalized_duplicate() {
+        let identity = StandardBoard64TilingIdentity::from_placements(0, std::iter::empty())
+            .expect("empty identity");
+        let patterns = PatternBitSet::from_words(65, vec![0x5, 0x1]).expect("coverage bitset");
+        let result = CoreExecutionResult::new(Vec::new(), Vec::new())
+            .with_solution_coverages(vec![SolutionCoverage::new(identity, patterns.clone())])
+            .with_normalized_solution_coverages(vec![NormalizedSolutionCoverage::new(
+                "reconstructable-duplicate",
+                patterns,
+            )]);
+
+        let decoded =
+            decode_partial_result(&encode_partial_result(&result)).expect("partial result");
+
+        assert_eq!(decoded.solution_coverages(), result.solution_coverages());
+        assert!(decoded.normalized_solution_coverages().is_empty());
     }
 
     #[test]

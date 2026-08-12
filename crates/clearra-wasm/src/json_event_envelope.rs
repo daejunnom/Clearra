@@ -377,6 +377,20 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
         write_string_array(output, &report.packing_candidate_keys)
     });
     object.number("unique_solution_count", report.unique_solution_count);
+    object.boolean(
+        "solution_count_calculated",
+        report.solution_count_calculated,
+    );
+    object.boolean(
+        "solution_set_materialized",
+        report.solution_set_materialized,
+    );
+    object.number(
+        "solution_keys_materialized_count",
+        report.solution_keys_materialized_count,
+    );
+    object.boolean("solution_keys_complete", report.solution_keys_complete);
+    object.boolean("solution_page_available", report.solution_page_available);
     object.string(
         "normalized_solution_set_hash",
         &report.normalized_solution_set_hash,

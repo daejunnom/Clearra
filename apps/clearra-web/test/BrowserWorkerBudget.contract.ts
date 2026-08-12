@@ -59,9 +59,12 @@ assert.match(buildForwardSearchCommand(fullForward, 12), /--use-all-cpu-threads(
 const pc = { ...createDefaultWorkspaceRequest(), useAllLogicalProcessors: true, workers: 12 };
 assert.match(buildWorkspaceCommand(pc), /--workers 12(?:\s|$)/);
 assert.match(buildWorkspaceCommand(pc), /--use-all-cpu-threads(?:\s|$)/);
-assert.equal(workspaceRequestForDesktop(pc, 'en').workers, 0);
+assert.equal(workspaceRequestForDesktop(pc, 'en').workers, pc.workers);
 assert.equal(workspaceRequestForDesktop(pc, 'en').use_all_logical_processors, true);
-assert.equal(workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en').workers, 0);
+assert.equal(
+  workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en').workers,
+  createDefaultWorkspaceRequest().workers
+);
 assert.equal(
   workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en').use_all_logical_processors,
   false
@@ -74,19 +77,19 @@ const build = {
 };
 assert.match(buildProbabilityCommand(build), /--workers 12(?:\s|$)/);
 assert.match(buildProbabilityCommand(build), /--use-all-cpu-threads(?:\s|$)/);
-assert.equal(buildProbabilityRequestForDesktop(build, 'en').workers, 0);
+assert.equal(buildProbabilityRequestForDesktop(build, 'en').workers, build.workers);
 assert.equal(buildProbabilityRequestForDesktop(build, 'en').use_all_logical_processors, true);
 assert.equal(
   buildProbabilityRequestForDesktop(createDefaultBuildProbabilityRequest(), 'en').workers,
-  0
+  createDefaultBuildProbabilityRequest().workers
 );
 
-assert.equal(setupFinderRequestForDesktop(fullSetup, 'en', 12).workers, 0);
+assert.equal(setupFinderRequestForDesktop(fullSetup, 'en', 12).workers, 12);
 assert.equal(
   setupFinderRequestForDesktop(fullSetup, 'en', 12).use_all_logical_processors,
   true
 );
-assert.equal(setupFinderRequestForDesktop(setup, 'en', 11).workers, 0);
+assert.equal(setupFinderRequestForDesktop(setup, 'en', 11).workers, 11);
 assert.equal(
   setupFinderRequestForDesktop(
     fullSetup,
@@ -94,7 +97,7 @@ assert.equal(
     1,
     { setupId: 'setup-1', conditionId: 'condition-1' }
   ).workers,
-  1
+  0
 );
 assert.equal(
   setupFinderRequestForDesktop(
@@ -105,9 +108,9 @@ assert.equal(
   ).use_all_logical_processors,
   false
 );
-assert.equal(forwardSearchRequestForDesktop(fullForward, 'en', 12).workers, 0);
+assert.equal(forwardSearchRequestForDesktop(fullForward, 'en', 12).workers, 12);
 assert.equal(
   forwardSearchRequestForDesktop(fullForward, 'en', 12).use_all_logical_processors,
   true
 );
-assert.equal(forwardSearchRequestForDesktop(forward, 'en', 11).workers, 0);
+assert.equal(forwardSearchRequestForDesktop(forward, 'en', 11).workers, 11);

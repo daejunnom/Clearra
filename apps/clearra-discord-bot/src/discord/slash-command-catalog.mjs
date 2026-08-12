@@ -4,6 +4,9 @@ import {
   DISCORD_WIDE_FIELD_MAX_ROWS,
 } from "./slash-command-input.mjs";
 
+// SRP rationale: this module has one behavior-level change reason: defining the
+// complete localized Discord application-command registration metadata contract.
+
 const SUB_COMMAND_OPTION = 1;
 const STRING_OPTION = 3;
 const INTEGER_OPTION = 4;
@@ -23,6 +26,11 @@ export const BUILTIN_KICKTABLES = Object.freeze([
   Object.freeze({ name: "SRS", value: "srs" }),
   Object.freeze({ name: "SRS-X", value: "srs-x" }),
   Object.freeze({ name: "Jstris 180", value: "jstris-180" }),
+]);
+
+export const NATIVE_BUILTIN_KICKTABLES = Object.freeze([
+  ...BUILTIN_KICKTABLES,
+  Object.freeze({ name: "No kicks", value: "no-kick" }),
 ]);
 
 const PC_COMMANDS = Object.freeze([
@@ -458,7 +466,14 @@ function registrationOptions(input) {
         settingsOption(input),
       ]);
     case "fixed-next":
-      return Object.freeze([nextOption(true), fieldOption(input), kicktableOption()]);
+      return Object.freeze([
+        nextOption(true),
+        fieldOption(input),
+        kicktableOption(true),
+        nativeSettingsOption(
+          "Options: hold, spin-profile, minimum-damage, initial-combo, initial-b2b, preserve-b2b",
+        ),
+      ]);
     case "score-fixed-next":
       return Object.freeze([
         nextOption(true),
@@ -485,7 +500,10 @@ function registrationOptions(input) {
           64,
         ),
         setupLengthOption(),
-        kicktableOption(),
+        kicktableOption(true),
+        nativeSettingsOption(
+          "Options: mode, qb, and post-cycle-borrow as space-separated key=value entries",
+        ),
       ]);
     case "spin-structure":
       return Object.freeze([
@@ -498,7 +516,10 @@ function registrationOptions(input) {
         fieldOption(input),
         spinStructureLinesOption(),
         spinStructureProfileOption(),
-        kicktableOption(),
+        kicktableOption(true),
+        nativeSettingsOption(
+          "Options: fill-bottom, fill-top, max-placements, and minimality as key=value entries",
+        ),
       ]);
     case "verify":
       return Object.freeze([verifyScopeOption()]);
@@ -513,8 +534,8 @@ function registrationOptions(input) {
           "base",
           `Starting field (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): static CTK3/Fumen/URL or grid:row/row`,
         ),
-        kicktableOption(),
-        finesseSettingsOption(),
+        kicktableOption(true),
+        finesseSettingsOption("search"),
       ]);
     case "finesse-score":
       return Object.freeze([
@@ -525,37 +546,23 @@ function registrationOptions(input) {
           DOCUMENT_MAX_LENGTH,
         ),
         nextOption(false),
-        kicktableOption(),
-        finesseSettingsOption(),
+        kicktableOption(true),
+        finesseSettingsOption("score"),
       ]);
     default:
       throw new Error(`Unknown slash-command input contract: ${input}`);
   }
 }
 
-function finesseSettingsOption() {
-  const choices = [];
-  for (const [holdName, hold] of [["Use hold", "use"], ["Avoid hold", "avoid"]]) {
-    for (const [knowledgeName, knowledge] of [
-      ["Full queue and visible 7", "both"],
-      ["Full queue", "oracle"],
-      ["Visible 7", "visible-7"],
-    ]) {
-      choices.push(Object.freeze({
-        name: `${holdName} · ${knowledgeName}${hold === "use" && knowledge === "both" ? " (default)" : ""}`,
-        value: `hold=${hold} knowledge=${knowledge}`,
-      }));
-    }
-  }
-  return Object.freeze({
-    ...stringOption(
-      "options",
-      "Hold and queue-knowledge policy; defaults to hold=use knowledge=both",
-      false,
-      OPTIONAL_SETTINGS_MAX_LENGTH,
-    ),
-    choices: Object.freeze(choices),
-  });
+function finesseSettingsOption(mode) {
+  return stringOption(
+    "options",
+    mode === "search"
+      ? "Options: hold, knowledge, source-pieces, aggregation, spin-profile, preserve-b2b"
+      : "Options: hold, knowledge, and source-pieces as key=value entries",
+    false,
+    OPTIONAL_SETTINGS_MAX_LENGTH,
+  );
 }
 
 function fieldOption(input) {
@@ -592,7 +599,7 @@ function catLinesOption() {
   return Object.freeze({
     type: INTEGER_OPTION,
     name: "lines",
-    description: `Perfect-clear target height 1–${DISCORD_PC_FIELD_MAX_ROWS}`,
+    description: `Perfect-clear target height 1–${DISCORD_PC_FIELD_MAX_ROWS}; defaults to 4`,
     required: false,
     min_value: 1,
     max_value: DISCORD_PC_FIELD_MAX_ROWS,
@@ -657,7 +664,7 @@ function nextOption(fixed) {
   );
 }
 
-function kicktableOption() {
+function kicktableOption(native = false) {
   return Object.freeze({
     ...stringOption(
       "kicktable",
@@ -665,7 +672,7 @@ function kicktableOption() {
       false,
       32,
     ),
-    choices: BUILTIN_KICKTABLES,
+    choices: native ? NATIVE_BUILTIN_KICKTABLES : BUILTIN_KICKTABLES,
   });
 }
 
@@ -710,7 +717,7 @@ function setupQueueKnowledgeOption() {
       16,
     ),
     choices: Object.freeze([
-      Object.freeze({ name: "Full future queue", value: "oracle" }),
+      Object.freeze({ name: "Full future queue", value: "full-queue" }),
       Object.freeze({ name: "Visible 7 pieces", value: "visible-7" }),
     ]),
   });
@@ -733,43 +740,32 @@ function setupLengthOption() {
 }
 
 function settingsOption(input) {
-  const choices = input === "spin"
-    ? [
-        ["T-spin single", "type=TSS"],
-        ["T-spin double", "type=TSD"],
-        ["T-spin triple", "type=TST"],
-        ["Any T-spin", "type=ANY"],
-      ]
-    : [
-        ["Use hold", "hold=use"],
-        ["Avoid hold", "hold=avoid"],
-      ];
-  return Object.freeze({
-    ...stringOption(
-      "options",
-      input === "spin" ? "T-spin target type; TSM is unavailable" : "Hold policy",
-      false,
-      OPTIONAL_SETTINGS_MAX_LENGTH,
-    ),
-    choices: Object.freeze(
-      choices.map(([name, value]) => Object.freeze({ name, value })),
-    ),
-  });
+  return stringOption(
+    "options",
+      input === "spin"
+        ? "T-spin target type as type=TSS|TSD|TST|ANY; TSM is unavailable"
+      : "Hold policy as hold=use|avoid",
+    false,
+    OPTIONAL_SETTINGS_MAX_LENGTH,
+  );
 }
 
 function catSettingsOption() {
-  return Object.freeze({
-    ...stringOption(
-      "options",
-      "Initial back-to-back state; defaults to false",
-      false,
-      OPTIONAL_SETTINGS_MAX_LENGTH,
-    ),
-    choices: Object.freeze([
-      Object.freeze({ name: "Initial B2B disabled (default)", value: "initial_b2b=false" }),
-      Object.freeze({ name: "Initial B2B enabled", value: "initial_b2b=true" }),
-    ]),
-  });
+  return stringOption(
+    "options",
+    "Initial back-to-back state as initial-b2b=true|false; defaults to false",
+    false,
+    OPTIONAL_SETTINGS_MAX_LENGTH,
+  );
+}
+
+function nativeSettingsOption(description) {
+  return stringOption(
+    "options",
+    description,
+    false,
+    OPTIONAL_SETTINGS_MAX_LENGTH,
+  );
 }
 
 function verifyScopeOption() {
@@ -868,21 +864,21 @@ function syntax(entry, locale = "en") {
       case "spin":
         return `/${entry.name} next:<패턴> field:<격자|CTK3|v115 Fumen|URL> [kicktable:<내장 프로필>] [options:type=TSS]`;
       case "fixed-next":
-        return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [kicktable:<내장 프로필>]`;
+        return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [kicktable:<내장 프로필>] [options:<hold spin-profile minimum-damage initial-combo initial-b2b preserve-b2b>]`;
       case "score-fixed-next":
-        return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:initial_b2b=false]`;
+        return `/${entry.name} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:initial-b2b=false]`;
       case "remaining":
-        return `/${entry.name} remaining:<순서 없는 IOTSZJL 목록> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<정확한 목록>] [setup-length:<auto|longer|shorter>] [kicktable:<내장 프로필>]`;
+        return `/${entry.name} remaining:<순서 없는 IOTSZJL 목록> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<정확한 목록>] [setup-length:<auto|longer|shorter>] [kicktable:<내장 프로필>] [options:<mode qb post-cycle-borrow>]`;
       case "spin-structure":
-        return `/${entry.name} pieces:<순서 없는 IOTSZJL 목록> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<내장 프로필>]`;
+        return `/${entry.name} pieces:<순서 없는 IOTSZJL 목록> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<내장 프로필>] [options:<fill-bottom fill-top max-placements minimality>]`;
       case "verify":
         return `/${entry.name} [scope:<pc|setup|cover|build|kicks>]`;
       case "finesse":
-        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>] | /finesse score document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>]";
+        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>] | /finesse score document:<operation 포함 문서> next:<큐|패턴> [options:<hold knowledge source-pieces>]";
       case "finesse-search":
-        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>]";
+        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>]";
       case "finesse-score":
-        return "/finesse score document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [kicktable:<내장 프로필>] [options:<홀드·큐 공개 정책>]";
+        return "/finesse score document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [options:<hold knowledge source-pieces>]";
       default:
         throw new Error(`Unknown slash-command input contract: ${entry.input}`);
     }
@@ -899,21 +895,21 @@ function syntax(entry, locale = "en") {
     case "spin":
       return `/${entry.name} next:<pattern> field:<grid|document|URL> [kicktable:<built-in>] [options:type=TSS]`;
     case "fixed-next":
-      return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [kicktable:<built-in>]`;
+      return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [kicktable:<built-in>] [options:<hold spin-profile minimum-damage initial-combo initial-b2b preserve-b2b>]`;
     case "score-fixed-next":
-      return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:initial_b2b=false]`;
+      return `/${entry.name} next:<exact IOTSZJL queue> field:<grid|document|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:initial-b2b=false]`;
     case "remaining":
-      return `/${entry.name} remaining:<unordered IOTSZJL inventory> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>]`;
+      return `/${entry.name} remaining:<unordered IOTSZJL inventory> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>] [options:<mode qb post-cycle-borrow>]`;
     case "spin-structure":
-      return `/${entry.name} pieces:<unordered IOTSZJL inventory> field:<grid:top-row/next-row|document|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<built-in>]`;
+      return `/${entry.name} pieces:<unordered IOTSZJL inventory> field:<grid:top-row/next-row|document|URL> [lines:<any|0..4|1+..4+>] [profile:<T-Spins|T-Spins+|All-Mini(+)|All-Spin(+)>] [kicktable:<built-in>] [options:<fill-bottom fill-top max-placements minimality>]`;
     case "verify":
       return `/${entry.name} [scope:<pc|setup|cover|build|kicks>]`;
     case "finesse":
-      return "/finesse search target:<target cells> next:<queue|pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>] | /finesse score document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [kicktable:<built-in>] [options:<hold and knowledge>]";
+      return "/finesse search target:<target> next:<queue|pattern> base:<base> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>] | /finesse score document:<operations> next:<queue|pattern> [options:<hold knowledge source-pieces>]";
     case "finesse-search":
-      return "/finesse search target:<target cells> next:<queue|pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>]";
+      return "/finesse search target:<target cells> next:<queue|pattern> base:<starting field> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>]";
     case "finesse-score":
-      return "/finesse score document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [kicktable:<built-in>] [options:<hold and knowledge>]";
+      return "/finesse score document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [options:<hold knowledge source-pieces>]";
     default:
       throw new Error(`Unknown slash-command input contract: ${entry.input}`);
   }
@@ -922,6 +918,7 @@ function syntax(entry, locale = "en") {
 function inputHelp(entry, locale = "en") {
   if (locale === "ko") return koreanInputHelp(entry);
   const kickHelp = "`kicktable` is one of `srs-plus`, `srs`, `srs-x`, or `jstris-180`; Clearra defaults to `srs-plus`.";
+  const nativeKickHelp = "`kicktable` is `srs-plus`, `srs`, `srs-x`, `jstris-180`, or `no-kick`; Clearra defaults to `srs-plus`.";
   switch (entry.input) {
     case "render-file":
       return [
@@ -935,7 +932,7 @@ function inputHelp(entry, locale = "en") {
       return [
         `\`field\` is a top-first 10-column grid of 1–${DISCORD_PC_FIELD_MAX_ROWS} rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty.`,
         "`next` accepts fixed IOTSZJL queues, `*pN`/`*!`, `P<N>`, piece groups/complements, and `;` alternatives. Letters are case-insensitive; automatic PC alternatives must have equal length.",
-        `\`lines\` accepts every height 1–${DISCORD_PC_FIELD_MAX_ROWS}, including odd values. Input-form \`Auto\` evaluates all 1–${DISCORD_PC_FIELD_MAX_ROWS}-row targets from the field and queue, then searches the valid targets serially. \`options\` selects \`hold=use|avoid\`.`,
+        `\`lines\` accepts every height 1–${DISCORD_PC_FIELD_MAX_ROWS}, including odd values. Input-form \`Auto\` evaluates all 1–${DISCORD_PC_FIELD_MAX_ROWS}-row targets serially. \`options\` accepts only \`hold=use|avoid\`.`,
         kickHelp,
       ];
     case "cover":
@@ -960,12 +957,13 @@ function inputHelp(entry, locale = "en") {
     case "fixed-next":
       return [
         `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows or one static document/URL. In a grid, use \`#\` for filled and \`_\` for empty. \`next\` must be one exact IOTSZJL queue, not a pattern.`,
-        kickHelp,
+        "`options` keys are `hold`, `spin-profile`, `minimum-damage`, `initial-combo`, `initial-b2b`, and `preserve-b2b`. Minimum damage selects at-least mode; zero combo is omitted.",
+        nativeKickHelp,
       ];
     case "score-fixed-next":
       return [
         `\`field\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} top-first rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty. \`next\` must be one exact IOTSZJL queue, not a pattern.`,
-        `\`lines\` accepts every perfect-clear target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS}. \`options\` selects whether the initial back-to-back state is enabled and defaults to \`initial_b2b=false\`.`,
+        `\`lines\` accepts every perfect-clear target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS}. \`options\` accepts only \`initial-b2b=true|false\` and defaults to false.`,
         kickHelp,
       ];
     case "remaining":
@@ -975,7 +973,8 @@ function inputHelp(entry, locale = "en") {
         "`max-setup-pieces` accepts 1–10 and defaults to 9; choose 10 to include complete perfect clears. `queue-knowledge` is `full-queue` (default) or `visible-7`.",
         "`next-cycle-remaining` is an exact unordered inventory for the following cycle. Its required count is determined by `remaining` (7→4, 4→1, 1→5, 5→2, 2→6, 6→3, 3→7), with the same duplicate rule.",
         "`setup-length` is `auto`, `longer`, or `shorter`. Auto favors longer setups for `all`/`build` and shorter setups for `pc`.",
-        kickHelp,
+        "`options` keys are `mode`, `qb`, and `post-cycle-borrow`. QB mode requires `qb`; borrowing is limited to cycle 7 (`remaining` has three pieces).",
+        nativeKickHelp,
       ];
     case "spin-structure":
       return [
@@ -983,7 +982,8 @@ function inputHelp(entry, locale = "en") {
         `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty.`,
         "`profile` selects T-Spins, T-Spins+, All-Mini(+), or All-Spin(+). Regular and Mini results are always reported separately; `+` adds the exact immobile-T fallback.",
         "`lines` applies to the terminal spin and defaults to `1+`. Results are subset-minimal across the supplied inventory.",
-        kickHelp,
+        "`options` keys are `fill-bottom`, `fill-top`, `max-placements`, and `minimality`. Fill bottom must be below fill top.",
+        nativeKickHelp,
       ];
     case "verify":
       return [
@@ -992,22 +992,23 @@ function inputHelp(entry, locale = "en") {
     case "finesse":
       return [
         "Use `search` to find minimum-input builds, or `score` to calculate the minimum inputs for a placement sequence.",
-        "`options` selects hold and `both|full-queue|visible-7` queue knowledge. The default is `hold=use knowledge=both`.",
+        "Search `options`: `hold`, `knowledge`, `source-pieces`, `aggregation`, `spin-profile`, `preserve-b2b`. Score accepts only `hold`, `knowledge`, `source-pieces`.",
         "Finesse counts inputs, not frames; hard drop and hold each cost one input.",
+        nativeKickHelp,
       ];
     case "finesse-search":
       return [
         "`base` is the starting field and `target` contains only cells to add. Both accept one static CTK3/v115 Fumen/URL or a 1–24-row grid.",
         "`next` accepts either one exact IOTSZJL queue or the supported pattern grammar. Exact queues are evaluated as fixed queues.",
-        "`options` selects hold and `both|full-queue|visible-7` queue knowledge; the default is `hold=use knowledge=both`.",
-        kickHelp,
+        "`options` keys are `hold`, `knowledge`, `source-pieces`, `aggregation`, `spin-profile`, and `preserve-b2b`; tiling is unavailable. Defaults are `hold=empty knowledge=both`.",
+        nativeKickHelp,
       ];
     case "finesse-score":
       return [
         "`document` must be CTK3 or v115 Fumen, and every page must contain one placement operation in sequence. Static fields and plain grids are not accepted here.",
         "`next` accepts either one exact IOTSZJL queue or the supported pattern grammar. The result is a minimum-input score for the supplied placements, not a reconstruction of past play.",
-        "`options` selects hold and `both|full-queue|visible-7` queue knowledge; the default is `hold=use knowledge=both`.",
-        kickHelp,
+        "`options` keys are exactly `hold`, `knowledge`, and `source-pieces`; the default is `hold=empty knowledge=both`.",
+        nativeKickHelp,
       ];
     default:
       throw new Error(`Unknown slash-command input contract: ${entry.input}`);
@@ -1016,6 +1017,7 @@ function inputHelp(entry, locale = "en") {
 
 function koreanInputHelp(entry) {
   const kickHelp = "`kicktable`은 `srs-plus`, `srs`, `srs-x`, `jstris-180` 중 하나이며 기본값은 `srs-plus`입니다.";
+  const nativeKickHelp = "`kicktable`은 `srs-plus`, `srs`, `srs-x`, `jstris-180`, `no-kick` 중 하나이며 기본값은 `srs-plus`입니다.";
   switch (entry.input) {
     case "render-file":
       return [
@@ -1029,7 +1031,7 @@ function koreanInputHelp(entry) {
       return [
         `\`field\`에는 위쪽 줄부터 적은 10열 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력합니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸입니다.`,
         "`next`에는 고정 IOTSZJL 큐, `*pN`/`*!`, `P<N>`, 미노 그룹·여집합, `;` 대안을 사용할 수 있습니다. 영문 대소문자를 구분하지 않으며 자동 PC 대안의 길이는 같아야 합니다.",
-        `\`lines\`에는 홀수를 포함해 1–${DISCORD_PC_FIELD_MAX_ROWS} 중 원하는 높이를 지정할 수 있습니다. 입력 창의 \`자동\`은 필드와 넥스트를 바탕으로 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체를 판정한 뒤 성립하는 목표를 직렬 탐색합니다. \`options\`에서는 홀드 사용 여부를 선택합니다.`,
+        `\`lines\`에는 홀수를 포함해 1–${DISCORD_PC_FIELD_MAX_ROWS} 중 원하는 높이를 지정합니다. 입력 창에서 \`자동\`을 고르면 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체 목표를 순서대로 판정합니다. \`options\`에는 \`hold=use|avoid\`만 사용할 수 있습니다.`,
         kickHelp,
       ];
     case "cover":
@@ -1054,12 +1056,13 @@ function koreanInputHelp(entry) {
     case "fixed-next":
       return [
         `\`field\`는 위쪽 줄부터 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 또는 정적 문서/URL 하나를 받습니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력해야 합니다.`,
-        kickHelp,
+        "`options` 키는 `hold`, `spin-profile`, `minimum-damage`, `initial-combo`, `initial-b2b`, `preserve-b2b`입니다.",
+        nativeKickHelp,
       ];
     case "score-fixed-next":
       return [
         `\`field\`는 위쪽 줄부터 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 또는 정적 CTK3/v115 Fumen/URL 하나를 받습니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력해야 합니다.`,
-        `\`lines\`에는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 중 원하는 퍼펙트 클리어 목표 높이를 지정할 수 있습니다. \`options\`에서는 초기 B2B 상태를 선택하며 기본값은 \`initial_b2b=false\`입니다.`,
+        `\`lines\`에는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 중 원하는 퍼펙트 클리어 목표 높이를 지정할 수 있습니다. \`options\`에는 \`initial-b2b=true|false\`만 사용하며 기본값은 false입니다.`,
         kickHelp,
       ];
     case "remaining":
@@ -1069,7 +1072,8 @@ function koreanInputHelp(entry) {
         "`max-setup-pieces`는 1–10이며 기본값은 9입니다. 완성된 PC까지 포함하려면 10을 선택합니다. `queue-knowledge`는 전체 미래 큐를 쓰는 `full-queue`(기본값) 또는 `visible-7`입니다.",
         "`next-cycle-remaining`은 다음 회차에 남을 정확한 순서 없는 미노 목록입니다. 필요한 개수는 `remaining`에 따라 7→4, 4→1, 1→5, 5→2, 2→6, 6→3, 3→7이며 중복 규칙은 같습니다.",
         "`setup-length`는 `auto`, `longer`, `shorter` 중 하나입니다. 자동은 `all`/`build`에서 긴 셋업, `pc`에서 짧은 셋업을 우선합니다.",
-        kickHelp,
+        "`options` 키는 `mode`, `qb`, `post-cycle-borrow`입니다. QB 모드에는 `qb`가 필요하며 빌리기는 remaining 3개인 7회차에서만 허용됩니다.",
+        nativeKickHelp,
       ];
     case "spin-structure":
       return [
@@ -1077,29 +1081,31 @@ function koreanInputHelp(entry) {
         `\`field\`에는 위쪽 줄부터 적은 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력합니다. 격자에서 \`#\`은 채움, \`_\`는 빈칸입니다.`,
         "`profile`은 T-Spins, T-Spins+, All-Mini(+), All-Spin(+) 중 하나입니다. Regular와 Mini는 항상 따로 출력하며 `+`는 정확한 immobile T 판정을 추가합니다.",
         "`lines`는 마지막 스핀이 지우는 줄에 적용되며 기본값은 `1+`입니다. 결과는 입력 미노 안에서 부분집합 최소 구조입니다.",
-        kickHelp,
+        "`options` 키는 `fill-bottom`, `fill-top`, `max-placements`, `minimality`입니다.",
+        nativeKickHelp,
       ];
     case "verify":
       return ["`pc`, `setup`, `cover`, `build`, `kicks` 중 하나를 고르세요. 모든 검증을 실행하려면 입력 창에서 `전체`를 고르거나 `scope`를 생략하세요."];
     case "finesse":
       return [
         "`search`는 최소 입력 구축 경로를 찾고, `score`는 지정한 배치 순서의 최소 입력 수를 계산합니다.",
-        "`options`에서 홀드와 `both|full-queue|visible-7` 큐 공개 정책을 고릅니다. 기본값은 `hold=use knowledge=both`입니다.",
+        "탐색 `options`는 `hold`, `knowledge`, `source-pieces`, `aggregation`, `spin-profile`, `preserve-b2b`이며 계산은 앞의 세 키만 받습니다.",
         "피네스는 프레임이 아닌 입력 수를 세며, 하드 드롭과 홀드는 각각 1입력입니다.",
+        nativeKickHelp,
       ];
     case "finesse-search":
       return [
         "`base`는 시작 필드이고 `target`에는 추가할 칸만 입력합니다. 두 필드 모두 정적 CTK3/v115 Fumen/URL 또는 1–24줄 격자를 받습니다.",
         "`next`에는 정확한 IOTSZJL 큐 하나 또는 지원되는 패턴 문법을 입력합니다. 정확한 큐는 고정 큐로 계산합니다.",
-        "`options`에서 홀드와 `both|full-queue|visible-7` 큐 공개 정책을 고르며 기본값은 `hold=use knowledge=both`입니다.",
-        kickHelp,
+        "`options` 키는 `hold`, `knowledge`, `source-pieces`, `aggregation`, `spin-profile`, `preserve-b2b`이며 tiling은 지원하지 않습니다.",
+        nativeKickHelp,
       ];
     case "finesse-score":
       return [
         "`document`에는 모든 페이지에 배치 operation이 하나씩 있는 CTK3 또는 v115 Fumen을 입력합니다. 정적 필드와 일반 격자는 받지 않습니다.",
         "`next`에는 정확한 IOTSZJL 큐 하나 또는 지원되는 패턴 문법을 입력합니다. 결과는 주어진 배치의 최소 입력 점수이며 과거 플레이를 복원한 값이 아닙니다.",
-        "`options`에서 홀드와 `both|full-queue|visible-7` 큐 공개 정책을 고르며 기본값은 `hold=use knowledge=both`입니다.",
-        kickHelp,
+        "`options` 키는 `hold`, `knowledge`, `source-pieces`만 허용합니다.",
+        nativeKickHelp,
       ];
     default:
       throw new Error(`Unknown slash-command input contract: ${entry.input}`);
@@ -1235,6 +1241,7 @@ function koreanChoiceName(name, value, path = "") {
   if (path.endsWith(".queue-knowledge")) {
     return ({
       oracle: "전체 미래 큐",
+      "full-queue": "전체 미래 큐",
       "visible-7": "공개 7개",
     })[value] ?? name;
   }
@@ -1275,6 +1282,7 @@ function koreanChoiceName(name, value, path = "") {
   if (value === "build") return "빌드";
   if (value === "kicks") return "킥";
   if (name === "SRS+ (default)") return "SRS+ (기본값)";
+  if (value === "no-kick") return "킥 없음";
   return name;
 }
 
@@ -1399,13 +1407,15 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "render-file.image": "현재 채널의 Clearra 미리보기 메시지 링크 또는 ID이며 생략하면 최근 파일을 찾습니다",
   "score-finder.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",
   "score-finder.field": `1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 필드: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
-  "score-finder.lines": `퍼펙트 클리어 목표 높이는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 중 하나를 지정할 수 있습니다`,
+  "score-finder.lines": `퍼펙트 클리어 목표 높이는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄이며 기본값은 4줄입니다`,
   "score-finder.options": "초기 B2B 상태이며 기본값은 사용 안 함입니다",
   "damage.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",
+  "damage.options": "hold, spin-profile, minimum-damage, initial-combo, initial-b2b, preserve-b2b 설정",
   "spin-structure.pieces": "순서 없는 IOTSZJL 미노 목록이며 반복 문자는 수량을 보존합니다",
   "spin-structure.field": `1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 필드: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
   "spin-structure.lines": "마지막 스핀이 지우는 줄 수이며 기본값은 한 줄 이상입니다",
   "spin-structure.profile": "Regular와 Mini를 분리하는 스핀 판정 프로필입니다",
+  "spin-structure.options": "fill-bottom, fill-top, max-placements, minimality 설정",
   next: "넥스트 큐 또는 패턴이며 생략하면 입력 창에서 작성합니다",
   field: "10열 필드: grid:줄/줄 또는 CTK3/Fumen/문서, 여러 줄은 입력 창 사용",
   lines: `PC 목표 높이 1–${DISCORD_PC_FIELD_MAX_ROWS}이며 생략하면 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체를 자동 판정합니다`,
@@ -1419,6 +1429,9 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "queue-knowledge": "셋업 순위 계산에 공개되는 큐 범위이며 기본값은 전체 미래 큐입니다",
   "next-cycle-remaining": "다음 회차에 남아야 하는 정확한 순서 없는 미노 목록입니다",
   "setup-length": "셋업 길이 선호도이며 자동은 선택한 정렬 기준을 따릅니다",
+  "pc-setup.options": "mode, qb, post-cycle-borrow 셋업 설정",
+  "best-setup.options": "mode, qb, post-cycle-borrow 셋업 설정",
+  "dpc-finder.options": "mode, qb, post-cycle-borrow 셋업 설정",
   scope: "검증 범위",
   "verify.scope": "실행할 검증 그룹이며 생략하면 모든 검증을 실행합니다",
   language: "ClearraBot 응답과 입력 창에 사용할 언어",
@@ -1427,9 +1440,9 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "finesse.score": "CTK3 또는 Fumen 배치 순서의 최소 입력 수를 계산합니다",
   "finesse.search.target": `추가할 목표 칸 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: 정적 CTK3/Fumen/문서 링크 또는 grid:줄/줄`,
   "finesse.search.base": `시작 필드 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: 정적 CTK3/Fumen/문서 링크 또는 grid:줄/줄`,
-  "finesse.search.options": "홀드와 큐 공개 정책이며 기본값은 홀드 사용 및 두 정책 계산입니다",
+  "finesse.search.options": "hold, knowledge, source-pieces, aggregation, spin-profile, preserve-b2b 설정",
   "finesse.score.document": "모든 페이지에 배치 operation이 하나씩 있는 CTK3 또는 v115 Fumen 문서",
-  "finesse.score.options": "홀드와 큐 공개 정책이며 기본값은 홀드 사용 및 두 정책 계산입니다",
+  "finesse.score.options": "hold, knowledge, source-pieces 설정",
   "channel-settings.language-show": "현재 채널에 적용되는 언어를 표시합니다",
   "channel-settings.language-set": "현재 채널의 응답 언어를 설정합니다",
   "channel-settings.language-reset": "현재 채널의 언어 설정을 삭제합니다",
@@ -1442,9 +1455,52 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "server-settings.resume": "이 서버의 Clearra 명령을 다시 활성화합니다",
 });
 
-export const globalCommands = Object.freeze(
-  [
-    ...slashCommandCatalog.map(localizedRegistration),
-    ...messageCommandCatalog.map(localizedRegistration),
-  ],
-);
+export function assertDiscordRegistrationLimits(commands) {
+  if (!Array.isArray(commands) || commands.length > 100) {
+    throw new Error("Discord global command count exceeds the supported limit.");
+  }
+  for (const command of commands) {
+    assertRegistrationNode(command, `/${command?.name ?? "unknown"}`, true);
+  }
+}
+
+function assertRegistrationNode(node, path, command = false) {
+  const name = String(node?.name ?? "");
+  const maximumNameLength = command && node?.type === MESSAGE_COMMAND ? 32 : 32;
+  if (name.length < 1 || name.length > maximumNameLength) {
+    throw new Error(`${path} name exceeds Discord's 1–${maximumNameLength} character limit.`);
+  }
+  if (node?.description !== undefined) {
+    const description = String(node.description);
+    if (description.length < 1 || description.length > 100) {
+      throw new Error(`${path} description exceeds Discord's 1–100 character limit.`);
+    }
+  }
+  const options = node?.options ?? [];
+  if (!Array.isArray(options) || options.length > 25) {
+    throw new Error(`${path} exposes more than 25 Discord options.`);
+  }
+  for (const option of options) {
+    const optionPath = `${path} ${option?.name ?? "unknown"}`;
+    const choices = option?.choices ?? [];
+    if (!Array.isArray(choices) || choices.length > 25) {
+      throw new Error(`${optionPath} exposes more than 25 Discord choices.`);
+    }
+    for (const choice of choices) {
+      if (String(choice?.name ?? "").length < 1 || String(choice.name).length > 100) {
+        throw new Error(`${optionPath} has a choice name outside Discord's 1–100 character limit.`);
+      }
+      if (typeof choice?.value === "string" && choice.value.length > 100) {
+        throw new Error(`${optionPath} has a string choice value longer than 100 characters.`);
+      }
+    }
+    assertRegistrationNode(option, optionPath);
+  }
+}
+
+const GLOBAL_COMMANDS = [
+  ...slashCommandCatalog.map(localizedRegistration),
+  ...messageCommandCatalog.map(localizedRegistration),
+];
+assertDiscordRegistrationLimits(GLOBAL_COMMANDS);
+export const globalCommands = Object.freeze(GLOBAL_COMMANDS);

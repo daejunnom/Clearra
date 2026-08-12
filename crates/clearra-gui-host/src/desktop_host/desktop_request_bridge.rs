@@ -124,7 +124,7 @@ mod form_parser {
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
     };
-    use clearra_pc_graph::request::WorkerPolicy;
+    use clearra_pc_graph::request::{GpuDeviceSelection, RequestedSearchBackend, WorkerPolicy};
     use clearra_problem::{
         BuildProbabilityAggregation, FinesseMetric, FinessePatternKnowledge,
         SetupCandidatePriority, SetupLengthPreference, SetupPathDetail, SetupSearchMode,
@@ -147,7 +147,7 @@ mod form_parser {
         let value: Value = serde_json::from_str(request_json)
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
         validate_app_request_envelope(&value)?;
-        let command = value.get("command").and_then(Value::as_str).unwrap_or("pc");
+        let command = text_or_default(&value, &["command"], "pc")?;
         let request = match command {
             "pc" | "pc-scenario" => {
                 let state = desktop_form_builds_app_request(request_json)?;
@@ -160,10 +160,15 @@ mod form_parser {
             "damage" | "spin-finder" => build_forward_app_request(&value, command)?,
             _ => unreachable!("desktop command allowlist validated before dispatch"),
         };
-        let language = value
-            .get("language")
-            .and_then(Value::as_str)
-            .and_then(LanguageId::parse)
+        let language = optional_text(&value, &["language"])?
+            .map(|language| {
+                LanguageId::parse(language).ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "invalid desktop language '{language}'"
+                    ))
+                })
+            })
+            .transpose()?
             .unwrap_or(LanguageId::En);
         Ok(request.with_language(language))
     }
@@ -175,38 +180,21 @@ mod form_parser {
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
         validate_app_request_envelope(&value)?;
 
-        let command = value.get("command").and_then(Value::as_str).unwrap_or("pc");
-        let language = value
-            .get("language")
-            .and_then(Value::as_str)
-            .unwrap_or("en");
-        let lines = value
-            .get("lines")
-            .and_then(Value::as_u64)
-            .and_then(|lines| u8::try_from(lines).ok())
-            .unwrap_or(2);
-        let rule = value
-            .get("rule")
-            .and_then(Value::as_str)
-            .unwrap_or("srs-plus");
-        let backend = value
-            .get("backend")
-            .and_then(Value::as_str)
-            .unwrap_or("auto");
-        let queue = value.get("queue").and_then(Value::as_str).unwrap_or("");
-        let patterns = value.get("patterns").and_then(Value::as_str).unwrap_or("");
+        let command = text_or_default(&value, &["command"], "pc")?;
+        let language = text_or_default(&value, &["language"], "en")?;
+        let lines = optional_u8_any(&value, &["lines"])?.unwrap_or(2);
+        let rule = text_or_default(&value, &["rule"], "srs-plus")?;
+        let backend = text_or_default(&value, &["backend"], "auto")?;
+        let queue = text_or_default(&value, &["queue"], "")?;
+        let patterns = text_or_default(&value, &["patterns"], "")?;
         if !queue.trim().is_empty() && !patterns.trim().is_empty() {
             return Err(DesktopTauriCommandError::invalid_request(
                 "desktop queue and patterns are mutually exclusive",
             ));
         }
-        let hold_enabled = value
-            .get("hold_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let queue_observation_policy = value
-            .get("queue_knowledge")
-            .and_then(Value::as_str)
+        let hold_enabled = bool_or_default(&value, &["hold_enabled"], true)?;
+        let count_policy = text_or_default(&value, &["count_policy"], "unique")?;
+        let queue_observation_policy = optional_text(&value, &["queue_knowledge"])?
             .map(|value| {
                 QueueObservationPolicy::from_keyword(value).ok_or_else(|| {
                     DesktopTauriCommandError::invalid_request(format!(
@@ -226,26 +214,16 @@ mod form_parser {
             ),
             "pc" => GuiProblemForm::opening_pc_fixed_queue(lines, rule, queue, hold_enabled),
             "pc-scenario" => {
-                let visible_height = value
-                    .get("visible_height")
-                    .and_then(Value::as_u64)
-                    .and_then(|height| u8::try_from(height).ok())
-                    .unwrap_or(lines);
+                let visible_height = optional_u8_any(&value, &["visible_height"])?.unwrap_or(lines);
                 let board_mask = parse_board_mask(value.get("board_mask"))?;
-                let piece_window = value
-                    .get("piece_window")
-                    .and_then(Value::as_u64)
-                    .and_then(|count| usize::try_from(count).ok())
+                let piece_window = optional_usize_any(&value, &["piece_window"])?
+                    .filter(|piece_window| *piece_window > 0)
                     .ok_or_else(|| {
                         DesktopTauriCommandError::invalid_request(
                             "desktop scenario PC requires a positive piece_window",
                         )
                     })?;
                 let hold_piece = parse_hold_piece(value.get("hold_piece"))?;
-                let count_policy = value
-                    .get("count_policy")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unique");
                 if queue.trim().is_empty() && patterns.trim().is_empty() {
                     GuiProblemForm::scenario_pc_standard_bag_with_execution_input(
                         visible_height,
@@ -286,27 +264,48 @@ mod form_parser {
                 ))
             }
         };
-        let score_mode = value
-            .get("score_mode")
-            .and_then(Value::as_str)
-            .unwrap_or("off");
-        let initial_b2b = optional_u32(&value, "initial_b2b")?.unwrap_or(0);
-        let score_profile = value
-            .get("score_profile")
-            .and_then(Value::as_str)
-            .unwrap_or("tetrio");
-        let spin_profile = value
-            .get("spin_profile")
-            .and_then(Value::as_str)
-            .unwrap_or("t-spins");
-        let solution_probabilities = value
-            .get("solution_probabilities")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let preserve_b2b = value
-            .get("preserve_b2b")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let score_mode = text_or_default(&value, &["score_mode"], "off")?;
+        let initial_b2b = optional_u16(&value, "initial_b2b")?
+            .map(u32::from)
+            .unwrap_or(0);
+        let score_profile = text_or_default(&value, &["score_profile"], "tetrio")?;
+        let spin_profile = text_or_default(&value, &["spin_profile"], "t-spins")?;
+        let solution_probabilities = bool_or_default(&value, &["solution_probabilities"], false)?;
+        let preserve_b2b = bool_or_default(&value, &["preserve_b2b"], false)?;
+        let precompute_build_dependencies =
+            bool_or_default(&value, &["precompute_build_dependencies"], false)?;
+        let tablebase_requested =
+            bool_or_default(&value, &["tablebase_requested", "tablebase_enabled"], false)?;
+        let finesse = text_or_default(&value, &["finesse"], "off")?;
+        let pattern_knowledge = text_or_default(&value, &["pattern_knowledge"], "both")?;
+        let score_active = score_mode == "summary";
+        if (!score_active && initial_b2b != 0)
+            || (!score_active && score_profile != "tetrio")
+            || (!score_active && !preserve_b2b && spin_profile != "t-spins")
+            || (score_mode == "failed-queue" && solution_probabilities)
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop PC request contains an option that is inactive for its score mode",
+            ));
+        }
+        if score_mode == "tiling"
+            && (rule != "srs-plus"
+                || count_policy != "unique"
+                || score_profile != "tetrio"
+                || spin_profile != "t-spins"
+                || initial_b2b != 0
+                || preserve_b2b
+                || solution_probabilities
+                || precompute_build_dependencies
+                || tablebase_requested
+                || queue_observation_policy.requires_observation_policy()
+                || finesse != "off"
+                || pattern_knowledge != "both")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop tiling-only PC request contains a noncanonical inactive option",
+            ));
+        }
         let problem_form = problem_form
             .with_queue_observation_policy(queue_observation_policy)
             .with_score_input(score_mode, initial_b2b)
@@ -314,12 +313,10 @@ mod form_parser {
             .with_back_to_back_preservation(preserve_b2b)
             .with_solution_probabilities(solution_probabilities);
 
-        let mut backend_form = GuiBackendForm::from_backend_id(backend).with_allow_fallback(
-            value
-                .get("allow_backend_fallback")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-        );
+        let allow_backend_fallback =
+            bool_or_default(&value, &["allow_backend_fallback"], backend == "auto")?;
+        let mut backend_form =
+            GuiBackendForm::from_backend_id(backend).with_allow_fallback(allow_backend_fallback);
         if let Some(workers) = optional_u16(&value, "workers")? {
             backend_form = backend_form.with_workers(workers);
         }
@@ -327,16 +324,13 @@ mod form_parser {
             optional_bool(
                 &value,
                 &["use_all_logical_processors", "use_all_cpu_threads"],
-            )
+            )?
             .unwrap_or(false),
         );
-        backend_form = backend_form.with_precompute_build_dependencies(
-            value
-                .get("precompute_build_dependencies")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        );
-        if let Some(device) = value.get("gpu_device").and_then(Value::as_str) {
+        backend_form =
+            backend_form.with_precompute_build_dependencies(precompute_build_dependencies);
+        backend_form = backend_form.with_tablebase_requested(tablebase_requested);
+        if let Some(device) = optional_text(&value, &["gpu_device"])? {
             backend_form = backend_form.with_gpu_device(device);
         }
         if let Some(memory) = optional_u32(&value, "memory_budget_mb")? {
@@ -367,12 +361,12 @@ mod form_parser {
         let allow_post_cycle_borrow = optional_bool(
             value,
             &["setup_allow_post_cycle_borrow", "allow_post_cycle_borrow"],
-        )
+        )?
         .unwrap_or(false);
         let mut request = WebCommandRequest::setup(remaining, allow_post_cycle_borrow)
             .with_rule(parse_desktop_rule(value)?);
 
-        let search_mode = optional_text(value, &["setup_mode", "search_mode", "mode"])
+        let search_mode = optional_text(value, &["setup_mode", "search_mode", "mode"])?
             .map(|mode| {
                 SetupSearchMode::from_keyword(mode).ok_or_else(|| {
                     DesktopTauriCommandError::invalid_request(format!(
@@ -385,7 +379,7 @@ mod form_parser {
         request = request.with_setup_search_mode(search_mode);
 
         if let Some(queue_based) =
-            optional_nonempty_text(value, &["setup_qb", "qb_queue", "queue_based_pieces"])
+            optional_nonempty_text(value, &["setup_qb", "qb_queue", "queue_based_pieces"])?
         {
             request = request.with_setup_queue_based_pieces(parse_pieces(
                 queue_based,
@@ -399,7 +393,7 @@ mod form_parser {
                 "next_cycle_remaining",
                 "next_cycle_remaining_pieces",
             ],
-        ) {
+        )? {
             request = request.with_setup_next_cycle_remaining_pieces(parse_pieces(
                 next_cycle,
                 "setup next-cycle remaining pieces",
@@ -407,7 +401,7 @@ mod form_parser {
         }
 
         let candidate_priority =
-            optional_text(value, &["setup_priority", "candidate_priority", "priority"])
+            optional_text(value, &["setup_priority", "candidate_priority", "priority"])?
                 .map(|priority| {
                     SetupCandidatePriority::from_keyword(priority).ok_or_else(|| {
                         DesktopTauriCommandError::invalid_request(format!(
@@ -417,7 +411,7 @@ mod form_parser {
                 })
                 .transpose()?
                 .unwrap_or_default();
-        let length_preference = optional_text(value, &["setup_length", "length_preference"])
+        let length_preference = optional_text(value, &["setup_length", "length_preference"])?
             .map(|preference| {
                 SetupLengthPreference::from_keyword(preference).ok_or_else(|| {
                     DesktopTauriCommandError::invalid_request(format!(
@@ -434,7 +428,7 @@ mod form_parser {
                 optional_u8_any(value, &["setup_max_pieces", "max_setup_pieces"])?.unwrap_or(9),
             );
 
-        let queue_observation = optional_text(value, &["queue_knowledge"])
+        let queue_observation = optional_text(value, &["queue_knowledge"])?
             .map(|policy| {
                 QueueObservationPolicy::from_keyword(policy).ok_or_else(|| {
                     DesktopTauriCommandError::invalid_request(format!(
@@ -447,16 +441,16 @@ mod form_parser {
         request = request
             .with_queue_observation_policy(queue_observation)
             .with_tablebase_requested(
-                optional_bool(value, &["tablebase_requested", "tablebase_enabled"])
+                optional_bool(value, &["tablebase_requested", "tablebase_enabled"])?
                     .unwrap_or(false),
             );
 
         let setup_id =
-            optional_nonempty_text(value, &["setup_path_setup_id", "paths_for", "setup_id"]);
+            optional_nonempty_text(value, &["setup_path_setup_id", "paths_for", "setup_id"])?;
         let condition_id = optional_nonempty_text(
             value,
             &["setup_path_condition_id", "condition", "condition_id"],
-        );
+        )?;
         match (setup_id, condition_id) {
             (Some(setup_id), Some(condition_id)) => {
                 let detail =
@@ -482,8 +476,13 @@ mod form_parser {
     fn build_probability_app_request(
         value: &Value,
     ) -> Result<AppRequest, DesktopTauriCommandError> {
+        if bool_or_default(value, &["tablebase_requested", "tablebase_enabled"], false)? {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop build-probability does not support tablebase",
+            ));
+        }
         let base_words = parse_board_words(
-            first_value(value, &["base_mask", "existing_mask"]),
+            optional_value(value, &["base_mask", "existing_mask"])?,
             "base_mask",
         )?;
         let target_words = parse_board_words(value.get("target_mask"), "target_mask")?;
@@ -494,7 +493,7 @@ mod form_parser {
             ));
         }
 
-        let spin_profile_text = optional_text(value, &["spin_profile"]);
+        let spin_profile_text = optional_text(value, &["spin_profile"])?;
         let spin_profile = spin_profile_text
             .map(|profile| {
                 SpinProfileSelection::parse(profile).ok_or_else(|| {
@@ -505,9 +504,11 @@ mod form_parser {
             })
             .transpose()?
             .unwrap_or(SpinProfileSelection::TSpins);
-        let aggregation_text =
-            optional_text(value, &["build_aggregation", "aggregation", "aggregate"])
-                .unwrap_or("buildability");
+        let aggregation_text = text_or_default(
+            value,
+            &["build_aggregation", "aggregation", "aggregate"],
+            "buildability",
+        )?;
         let aggregation = match aggregation_text {
             "buildability" | "build" => BuildProbabilityAggregation::Buildability,
             "tiling" | "tiling-only" => BuildProbabilityAggregation::TilingOnly,
@@ -518,31 +519,49 @@ mod form_parser {
                 )));
             }
         };
-        let preserve_b2b = optional_bool(value, &["preserve_b2b"]).unwrap_or(false);
+        let preserve_b2b = bool_or_default(value, &["preserve_b2b"], false)?;
         let precompute_build_dependencies =
-            optional_bool(value, &["precompute_build_dependencies"]).unwrap_or(false);
-        let finesse_text = optional_text(value, &["finesse"]).unwrap_or("off");
+            bool_or_default(value, &["precompute_build_dependencies"], false)?;
+        let finesse_text = text_or_default(value, &["finesse"], "off")?;
         let finesse_metric = FinesseMetric::parse(finesse_text).ok_or_else(|| {
             DesktopTauriCommandError::invalid_request(format!(
                 "invalid desktop build-probability finesse '{finesse_text}'"
             ))
         })?;
-        let pattern_knowledge_text = optional_text(value, &["pattern_knowledge"]).unwrap_or("both");
+        let pattern_knowledge_text = text_or_default(value, &["pattern_knowledge"], "both")?;
         let pattern_knowledge =
             FinessePatternKnowledge::parse(pattern_knowledge_text).ok_or_else(|| {
                 DesktopTauriCommandError::invalid_request(format!(
                     "invalid desktop build-probability pattern_knowledge '{pattern_knowledge_text}'"
                 ))
             })?;
-        if matches!(aggregation, BuildProbabilityAggregation::TilingOnly)
-            && (preserve_b2b || precompute_build_dependencies || finesse_metric.requested())
+        if !finesse_metric.requested() && pattern_knowledge != FinessePatternKnowledge::Both {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop build-probability pattern_knowledge requires finesse inputs",
+            ));
+        }
+        if !aggregation.requests_spin_coverage()
+            && !preserve_b2b
+            && spin_profile != SpinProfileSelection::TSpins
         {
             return Err(DesktopTauriCommandError::invalid_request(
-                "desktop tiling-only build probability cannot request spin, B2B, BuildUp dependencies, or finesse",
+                "desktop build-probability spin_profile requires spin aggregation or B2B preservation",
+            ));
+        }
+        if matches!(aggregation, BuildProbabilityAggregation::TilingOnly)
+            && (preserve_b2b
+                || precompute_build_dependencies
+                || finesse_metric.requested()
+                || spin_profile != SpinProfileSelection::TSpins
+                || pattern_knowledge != FinessePatternKnowledge::Both
+                || text_or_default(value, &["rule"], "srs-plus")? != "srs-plus")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop tiling-only build probability contains a noncanonical inactive option",
             ));
         }
 
-        let hold_enabled = optional_bool(value, &["hold_enabled"]).unwrap_or(true);
+        let hold_enabled = bool_or_default(value, &["hold_enabled"], true)?;
         let hold_piece = parse_hold_piece_kind(value.get("hold_piece"))?;
         if !hold_enabled && hold_piece.is_some() {
             return Err(DesktopTauriCommandError::invalid_request(
@@ -553,7 +572,7 @@ mod form_parser {
             .with_hold_piece(hold_piece)
             .with_allow_hold(hold_enabled)
             .with_horizontal_mirror_included(
-                optional_bool(value, &["include_mirror", "include_horizontal_mirror"])
+                optional_bool(value, &["include_mirror", "include_horizontal_mirror"])?
                     .unwrap_or(true),
             )
             .with_aggregation(aggregation)
@@ -573,7 +592,29 @@ mod form_parser {
             .with_rule(parse_desktop_rule(value)?)
             .with_hold_enabled(hold_enabled)
             .with_precompute_build_dependencies(precompute_build_dependencies)
-            .with_cpu_warmup(optional_bool(value, &["cpu_warmup"]).unwrap_or(false));
+            .with_cpu_warmup(bool_or_default(value, &["cpu_warmup"], false)?)
+            .with_gpu_warmup(bool_or_default(value, &["gpu_warmup"], false)?);
+        let backend_text = text_or_default(value, &["backend"], "cpu")?;
+        let backend = RequestedSearchBackend::parse(backend_text).ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop build-probability backend '{backend_text}'"
+            ))
+        })?;
+        request = request
+            .with_backend(backend)
+            .with_allow_backend_fallback(bool_or_default(
+                value,
+                &["allow_backend_fallback"],
+                backend == RequestedSearchBackend::Auto,
+            )?);
+        if let Some(device_text) = optional_text(value, &["gpu_device"])? {
+            let device = GpuDeviceSelection::parse(device_text).ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "invalid desktop build-probability gpu_device '{device_text}'"
+                ))
+            })?;
+            request = request.with_gpu_device(device);
+        }
         request = apply_queue(request, value)?;
         if matches!(aggregation, BuildProbabilityAggregation::TilingOnly) {
             request = request.with_objective(ObjectivePolicy::tiling());
@@ -596,7 +637,7 @@ mod form_parser {
                 "desktop forward-search height must be between 1 and 24",
             ));
         }
-        let board_words = match first_value(value, &["board_mask", "initial_board_mask"]) {
+        let board_words = match optional_value(value, &["board_mask", "initial_board_mask"])? {
             Some(board) => parse_board_words(Some(board), "board_mask")?,
             None => [0; 4],
         };
@@ -604,7 +645,7 @@ mod form_parser {
 
         let piece_source = parse_forward_piece_source(value, command == "spin-finder")?;
         let rule = parse_desktop_rule(value)?;
-        let spin_profile_text = optional_text(value, &["spin_profile"]).unwrap_or("t-spins");
+        let spin_profile_text = text_or_default(value, &["spin_profile"], "t-spins")?;
         let spin_profile = SpinProfileId::parse(spin_profile_text).ok_or_else(|| {
             DesktopTauriCommandError::invalid_request(format!(
                 "invalid desktop forward-search spin_profile '{spin_profile_text}'"
@@ -613,11 +654,17 @@ mod form_parser {
         let initial_combo = optional_u16_any(value, &["initial_combo"])?
             .and_then(|combo| (combo > 0).then_some(combo));
         let initial_back_to_back =
-            optional_u16_any(value, &["initial_b2b"])?.and_then(|b2b| (b2b > 0).then_some(b2b - 1));
+            optional_u16_any(value, &["initial_b2b"])?.and_then(|b2b| (b2b > 0).then(|| b2b - 1));
         let mode = if command == "damage" {
-            match optional_text(value, &["damage_aggregation", "aggregation"]).unwrap_or("maximum")
-            {
-                "maximum" | "max" => ForwardSearchMode::MaximumDamage,
+            match text_or_default(value, &["damage_aggregation", "aggregation"], "maximum")? {
+                "maximum" | "max" => {
+                    if optional_value(value, &["minimum_damage"])?.is_some() {
+                        return Err(DesktopTauriCommandError::invalid_request(
+                            "desktop maximum damage search cannot contain minimum_damage",
+                        ));
+                    }
+                    ForwardSearchMode::MaximumDamage
+                }
                 "at-least" | "minimum" => ForwardSearchMode::DamageAtLeast(
                     optional_u32_any(value, &["minimum_damage"])?.ok_or_else(|| {
                         DesktopTauriCommandError::invalid_request(
@@ -632,12 +679,26 @@ mod form_parser {
                 }
             }
         } else {
+            if optional_value(value, &["aggregation"])?.is_some() {
+                return Err(DesktopTauriCommandError::invalid_request(
+                    "desktop spin-finder request cannot contain damage aggregation options",
+                ));
+            }
+            let spin_category =
+                parse_spin_category(text_or_default(value, &["spin_category"], "any")?)?;
+            if spin_category == ForwardSpinCategory::Other
+                && !spin_profile.recognizes_non_t_immobile_spins()
+            {
+                return Err(DesktopTauriCommandError::invalid_request(
+                    "desktop spin_category other requires a non-T spin profile",
+                ));
+            }
             ForwardSearchMode::SpinFinder(ForwardSpinTarget::with_line_requirement(
-                parse_spin_line_requirement(first_value(value, &["spin_lines", "lines"]))?,
-                parse_spin_category(optional_text(value, &["spin_category"]).unwrap_or("any"))?,
+                parse_spin_line_requirement(optional_value(value, &["spin_lines"])?)?,
+                spin_category,
             ))
         };
-        let line_clear_policy = if optional_bool(value, &["preserve_b2b"]).unwrap_or(false) {
+        let line_clear_policy = if bool_or_default(value, &["preserve_b2b"], false)? {
             ForwardLineClearPolicy::PreserveBackToBack
         } else {
             ForwardLineClearPolicy::Any
@@ -646,7 +707,7 @@ mod form_parser {
             Board256Mask::from_words(board_words),
             height,
             piece_source,
-            optional_bool(value, &["hold_enabled"]).unwrap_or(true),
+            bool_or_default(value, &["hold_enabled"], true)?,
             rule.id(),
             spin_profile,
             initial_combo,
@@ -686,7 +747,7 @@ mod form_parser {
     fn parse_desktop_rule(
         value: &Value,
     ) -> Result<clearra_rules::profile::rule_profile::RuleProfile, DesktopTauriCommandError> {
-        parse_rule_profile(optional_text(value, &["rule"]).unwrap_or("srs-plus"))
+        parse_rule_profile(text_or_default(value, &["rule"], "srs-plus")?)
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))
     }
 
@@ -694,8 +755,8 @@ mod form_parser {
         mut request: WebCommandRequest,
         value: &Value,
     ) -> Result<WebCommandRequest, DesktopTauriCommandError> {
-        let queue = optional_nonempty_text(value, &["queue"]);
-        let patterns = optional_nonempty_text(value, &["patterns"]);
+        let queue = optional_nonempty_text(value, &["queue"])?;
+        let patterns = optional_nonempty_text(value, &["patterns"])?;
         match (queue, patterns) {
             (Some(_), Some(_)) => Err(DesktopTauriCommandError::invalid_request(
                 "desktop queue and patterns are mutually exclusive",
@@ -748,7 +809,7 @@ mod form_parser {
             optional_bool(
                 value,
                 &["use_all_logical_processors", "use_all_cpu_threads"],
-            )
+            )?
             .unwrap_or(false),
         );
         if let Some(workers) = workers {
@@ -796,8 +857,8 @@ mod form_parser {
         value: &Value,
         allow_patterns: bool,
     ) -> Result<ForwardPieceSource, DesktopTauriCommandError> {
-        let queue = optional_nonempty_text(value, &["queue"]);
-        let patterns = optional_nonempty_text(value, &["patterns"]);
+        let queue = optional_nonempty_text(value, &["queue"])?;
+        let patterns = optional_nonempty_text(value, &["patterns"])?;
         match (queue, patterns) {
             (Some(_), Some(_)) => Err(DesktopTauriCommandError::invalid_request(
                 "desktop forward search queue and patterns are mutually exclusive",
@@ -1009,8 +1070,24 @@ mod form_parser {
         Ok(())
     }
 
-    fn first_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
-        keys.iter().find_map(|key| value.get(*key))
+    fn optional_value<'a>(
+        value: &'a Value,
+        keys: &[&str],
+    ) -> Result<Option<&'a Value>, DesktopTauriCommandError> {
+        let mut found = None;
+        for key in keys {
+            let Some(entry) = value.get(*key) else {
+                continue;
+            };
+            if found.is_some() {
+                return Err(DesktopTauriCommandError::invalid_request(format!(
+                    "desktop {} aliases are mutually exclusive",
+                    keys[0]
+                )));
+            }
+            found = Some(entry);
+        }
+        Ok(found)
     }
 
     fn required_text<'a>(
@@ -1018,43 +1095,74 @@ mod form_parser {
         keys: &[&str],
         field_name: &str,
     ) -> Result<&'a str, DesktopTauriCommandError> {
-        optional_nonempty_text(value, keys).ok_or_else(|| {
+        optional_nonempty_text(value, keys)?.ok_or_else(|| {
             DesktopTauriCommandError::invalid_request(format!(
                 "desktop request requires {field_name}"
             ))
         })
     }
 
-    fn optional_text<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
-        first_value(value, keys).and_then(Value::as_str)
+    fn text_or_default<'a>(
+        value: &'a Value,
+        keys: &[&str],
+        default: &'a str,
+    ) -> Result<&'a str, DesktopTauriCommandError> {
+        Ok(optional_text(value, keys)?.unwrap_or(default))
     }
 
-    fn optional_nonempty_text<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
-        optional_text(value, keys)
+    fn optional_text<'a>(
+        value: &'a Value,
+        keys: &[&str],
+    ) -> Result<Option<&'a str>, DesktopTauriCommandError> {
+        optional_typed(value, keys, "a string", Value::as_str)
+    }
+
+    fn optional_nonempty_text<'a>(
+        value: &'a Value,
+        keys: &[&str],
+    ) -> Result<Option<&'a str>, DesktopTauriCommandError> {
+        Ok(optional_text(value, keys)?
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.is_empty()))
     }
 
-    fn optional_bool(value: &Value, keys: &[&str]) -> Option<bool> {
-        first_value(value, keys).and_then(Value::as_bool)
+    fn bool_or_default(
+        value: &Value,
+        keys: &[&str],
+        default: bool,
+    ) -> Result<bool, DesktopTauriCommandError> {
+        Ok(optional_bool(value, keys)?.unwrap_or(default))
+    }
+
+    fn optional_bool(
+        value: &Value,
+        keys: &[&str],
+    ) -> Result<Option<bool>, DesktopTauriCommandError> {
+        optional_typed(value, keys, "a boolean", Value::as_bool)
+    }
+
+    fn optional_typed<'a, T>(
+        value: &'a Value,
+        keys: &[&str],
+        expected: &str,
+        parse: impl FnOnce(&'a Value) -> Option<T>,
+    ) -> Result<Option<T>, DesktopTauriCommandError> {
+        let Some(entry) = optional_value(value, keys)? else {
+            return Ok(None);
+        };
+        parse(entry).map(Some).ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop {} must be {expected}",
+                keys[0]
+            ))
+        })
     }
 
     fn optional_u64_any(
         value: &Value,
         keys: &[&str],
     ) -> Result<Option<u64>, DesktopTauriCommandError> {
-        let Some(entry) = first_value(value, keys) else {
-            return Ok(None);
-        };
-        if entry.is_null() {
-            return Ok(None);
-        }
-        entry.as_u64().map(Some).ok_or_else(|| {
-            DesktopTauriCommandError::invalid_request(format!(
-                "desktop {} must be a nonnegative integer",
-                keys[0]
-            ))
-        })
+        optional_typed(value, keys, "a nonnegative integer", Value::as_u64)
     }
 
     fn optional_u8_any(
@@ -1146,9 +1254,12 @@ mod form_parser {
     }
 
     fn parse_hold_piece(value: Option<&Value>) -> Result<Option<char>, DesktopTauriCommandError> {
-        let Some(value) = value.and_then(Value::as_str) else {
+        let Some(value) = value else {
             return Ok(None);
         };
+        let value = value.as_str().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("hold_piece must be a string")
+        })?;
         if matches!(value, "empty" | "none") {
             return Ok(None);
         }
@@ -1165,38 +1276,368 @@ mod form_parser {
     }
 
     fn optional_u16(value: &Value, key: &str) -> Result<Option<u16>, DesktopTauriCommandError> {
-        value
-            .get(key)
-            .map(|entry| {
-                entry
-                    .as_u64()
-                    .and_then(|number| u16::try_from(number).ok())
-                    .ok_or_else(|| {
-                        DesktopTauriCommandError::invalid_request(format!("{key} must fit in u16"))
-                    })
-            })
-            .transpose()
+        optional_u16_any(value, &[key])
     }
 
     fn optional_u32(value: &Value, key: &str) -> Result<Option<u32>, DesktopTauriCommandError> {
-        value
-            .get(key)
-            .map(|entry| {
-                entry
-                    .as_u64()
-                    .and_then(|number| u32::try_from(number).ok())
-                    .ok_or_else(|| {
-                        DesktopTauriCommandError::invalid_request(format!("{key} must fit in u32"))
-                    })
-            })
-            .transpose()
+        optional_u32_any(value, &[key])
+    }
+
+    #[derive(Clone, Copy)]
+    enum CanonicalInactiveValue {
+        Text(&'static str),
+        Bool(bool),
+        U64(u64),
+        Null,
+        ZeroMask,
+        Absent,
+    }
+
+    impl CanonicalInactiveValue {
+        fn matches(self, value: &Value) -> bool {
+            match self {
+                Self::Text(expected) => value.as_str() == Some(expected),
+                Self::Bool(expected) => value.as_bool() == Some(expected),
+                Self::U64(expected) => value.as_u64() == Some(expected),
+                Self::Null => value.is_null(),
+                Self::ZeroMask => is_zero_mask(value),
+                Self::Absent => false,
+            }
+        }
+    }
+
+    struct InactiveFieldRule {
+        key: &'static str,
+        canonical: CanonicalInactiveValue,
+        active_commands: &'static [&'static str],
+    }
+
+    const PC_COMMANDS: &[&str] = &["pc", "pc-scenario"];
+    const PC_SCENARIO_COMMAND: &[&str] = &["pc-scenario"];
+    const SETUP_COMMAND: &[&str] = &["setup"];
+    const BUILD_COMMAND: &[&str] = &["build-probability"];
+    const DAMAGE_COMMAND: &[&str] = &["damage"];
+    const SPIN_FINDER_COMMAND: &[&str] = &["spin-finder"];
+    const PC_AND_SETUP_COMMANDS: &[&str] = &["pc", "pc-scenario", "setup"];
+    const PC_AND_BUILD_COMMANDS: &[&str] = &["pc", "pc-scenario", "build-probability"];
+    const PC_SCENARIO_AND_BUILD_COMMANDS: &[&str] = &["pc-scenario", "build-probability"];
+    const PC_BUILD_FORWARD_COMMANDS: &[&str] = &[
+        "pc",
+        "pc-scenario",
+        "build-probability",
+        "damage",
+        "spin-finder",
+    ];
+    const PC_SCENARIO_AND_FORWARD_COMMANDS: &[&str] = &["pc-scenario", "damage", "spin-finder"];
+    const SCENARIO_BUILD_FORWARD_COMMANDS: &[&str] =
+        &["pc-scenario", "build-probability", "damage", "spin-finder"];
+    const PC_AND_DAMAGE_COMMANDS: &[&str] = &["pc", "pc-scenario", "damage"];
+    const ALL_NON_SETUP_COMMANDS: &[&str] = &[
+        "pc",
+        "pc-scenario",
+        "build-probability",
+        "damage",
+        "spin-finder",
+    ];
+
+    const INACTIVE_FIELD_RULES: &[InactiveFieldRule] = &[
+        InactiveFieldRule {
+            key: "lines",
+            canonical: CanonicalInactiveValue::U64(2),
+            active_commands: PC_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "queue",
+            canonical: CanonicalInactiveValue::Text(""),
+            active_commands: ALL_NON_SETUP_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "patterns",
+            canonical: CanonicalInactiveValue::Text(""),
+            active_commands: ALL_NON_SETUP_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "queue_knowledge",
+            canonical: CanonicalInactiveValue::Text("oracle"),
+            active_commands: PC_AND_SETUP_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "hold_enabled",
+            canonical: CanonicalInactiveValue::Bool(true),
+            active_commands: PC_BUILD_FORWARD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "hold_piece",
+            canonical: CanonicalInactiveValue::Text("empty"),
+            active_commands: PC_SCENARIO_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "score_mode",
+            canonical: CanonicalInactiveValue::Text("off"),
+            active_commands: PC_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "score_profile",
+            canonical: CanonicalInactiveValue::Text("tetrio"),
+            active_commands: PC_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "spin_profile",
+            canonical: CanonicalInactiveValue::Text("t-spins"),
+            active_commands: PC_BUILD_FORWARD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "preserve_b2b",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: PC_BUILD_FORWARD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "precompute_build_dependencies",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "finesse",
+            canonical: CanonicalInactiveValue::Text("off"),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "pattern_knowledge",
+            canonical: CanonicalInactiveValue::Text("both"),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "initial_b2b",
+            canonical: CanonicalInactiveValue::U64(0),
+            active_commands: PC_AND_DAMAGE_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "board_mask",
+            canonical: CanonicalInactiveValue::ZeroMask,
+            active_commands: PC_SCENARIO_AND_FORWARD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "visible_height",
+            canonical: CanonicalInactiveValue::U64(2),
+            active_commands: SCENARIO_BUILD_FORWARD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "piece_window",
+            canonical: CanonicalInactiveValue::Null,
+            active_commands: PC_SCENARIO_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "count_policy",
+            canonical: CanonicalInactiveValue::Text("unique"),
+            active_commands: PC_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "solution_probabilities",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: PC_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "gpu_device",
+            canonical: CanonicalInactiveValue::Text("auto"),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "memory_budget_mb",
+            canonical: CanonicalInactiveValue::U64(0),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "candidate_budget",
+            canonical: CanonicalInactiveValue::U64(10_000_000),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "pattern_budget",
+            canonical: CanonicalInactiveValue::U64(5040),
+            active_commands: PC_AND_BUILD_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "tablebase_requested",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: PC_AND_SETUP_COMMANDS,
+        },
+        InactiveFieldRule {
+            key: "cpu_warmup",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: BUILD_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "gpu_warmup",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: BUILD_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_mode",
+            canonical: CanonicalInactiveValue::Text("oracle"),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_remaining",
+            canonical: CanonicalInactiveValue::Text("IOTSZJL"),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_qb",
+            canonical: CanonicalInactiveValue::Text(""),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_next_cycle_remaining",
+            canonical: CanonicalInactiveValue::Text(""),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_allow_post_cycle_borrow",
+            canonical: CanonicalInactiveValue::Bool(false),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_priority",
+            canonical: CanonicalInactiveValue::Text("all"),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_length",
+            canonical: CanonicalInactiveValue::Text("auto"),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_max_pieces",
+            canonical: CanonicalInactiveValue::U64(9),
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_path_setup_id",
+            canonical: CanonicalInactiveValue::Absent,
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "setup_path_condition_id",
+            canonical: CanonicalInactiveValue::Absent,
+            active_commands: SETUP_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "base_mask",
+            canonical: CanonicalInactiveValue::ZeroMask,
+            active_commands: BUILD_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "target_mask",
+            canonical: CanonicalInactiveValue::ZeroMask,
+            active_commands: BUILD_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "build_aggregation",
+            canonical: CanonicalInactiveValue::Text("buildability"),
+            active_commands: BUILD_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "include_horizontal_mirror",
+            canonical: CanonicalInactiveValue::Bool(true),
+            active_commands: BUILD_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "initial_combo",
+            canonical: CanonicalInactiveValue::U64(0),
+            active_commands: DAMAGE_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "damage_aggregation",
+            canonical: CanonicalInactiveValue::Text("maximum"),
+            active_commands: DAMAGE_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "minimum_damage",
+            canonical: CanonicalInactiveValue::U64(0),
+            active_commands: DAMAGE_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "spin_lines",
+            canonical: CanonicalInactiveValue::Text("any"),
+            active_commands: SPIN_FINDER_COMMAND,
+        },
+        InactiveFieldRule {
+            key: "spin_category",
+            canonical: CanonicalInactiveValue::Text("any"),
+            active_commands: SPIN_FINDER_COMMAND,
+        },
+    ];
+
+    fn validate_command_inactive_fields(
+        value: &Value,
+        command: &str,
+    ) -> Result<(), DesktopTauriCommandError> {
+        for rule in INACTIVE_FIELD_RULES {
+            if rule.active_commands.contains(&command) {
+                continue;
+            }
+            let Some(actual) = value.get(rule.key) else {
+                continue;
+            };
+            if !rule.canonical.matches(actual) {
+                return Err(inactive_field_error(command, rule.key));
+            }
+        }
+        if !PC_AND_BUILD_COMMANDS.contains(&command) {
+            validate_canonical_inactive_backend(value, command)?;
+        }
+        Ok(())
+    }
+
+    fn validate_canonical_inactive_backend(
+        value: &Value,
+        command: &str,
+    ) -> Result<(), DesktopTauriCommandError> {
+        let backend = value
+            .get("backend")
+            .map(Value::as_str)
+            .unwrap_or(Some("auto"));
+        let default_fallback = backend == Some("auto");
+        let fallback = value
+            .get("allow_backend_fallback")
+            .map(Value::as_bool)
+            .unwrap_or(Some(default_fallback));
+        if !matches!(
+            (backend, fallback),
+            (Some("auto"), Some(true)) | (Some("cpu"), Some(false))
+        ) {
+            let field = if !matches!(backend, Some("auto" | "cpu")) {
+                "backend"
+            } else {
+                "allow_backend_fallback"
+            };
+            return Err(inactive_field_error(command, field));
+        }
+        Ok(())
+    }
+
+    fn inactive_field_error(command: &str, key: &str) -> DesktopTauriCommandError {
+        DesktopTauriCommandError::invalid_request(format!(
+            "desktop {command} inactive field '{key}' must keep its canonical default"
+        ))
+    }
+
+    fn is_zero_mask(value: &Value) -> bool {
+        if value.as_u64() == Some(0) {
+            return true;
+        }
+        let Some(text) = value.as_str() else {
+            return false;
+        };
+        let digits = text
+            .strip_prefix("0x")
+            .or_else(|| text.strip_prefix("0X"))
+            .unwrap_or(text);
+        !digits.is_empty() && digits.bytes().all(|digit| digit == b'0')
     }
 
     fn validate_app_request_envelope(value: &Value) -> Result<(), DesktopTauriCommandError> {
-        let model = value
-            .get("app_request_model")
-            .and_then(Value::as_str)
-            .unwrap_or("clearra-app/AppRequest");
+        let model = text_or_default(value, &["app_request_model"], "clearra-app/AppRequest")?;
         if model != "clearra-app/AppRequest" {
             return Err(DesktopTauriCommandError::invalid_request(
                 "desktop host accepts only clearra-app/AppRequest JSON",
@@ -1207,15 +1648,16 @@ mod form_parser {
                 "desktop host does not parse CLI text",
             ));
         }
+        let command = text_or_default(value, &["command"], "pc")?;
         if !matches!(
-            value.get("command").and_then(Value::as_str).unwrap_or("pc"),
+            command,
             "pc" | "pc-scenario" | "setup" | "build-probability" | "damage" | "spin-finder"
         ) {
             return Err(DesktopTauriCommandError::invalid_request(
                 "desktop request bridge supports pc, pc-scenario, setup, build-probability, damage, and spin-finder commands",
             ));
         }
-        Ok(())
+        validate_command_inactive_fields(value, command)
     }
 }
 mod get_job_events {
@@ -1491,10 +1933,13 @@ mod tests {
     use clearra_forward_search::{
         ForwardLineClearPolicy, ForwardSearchMode, ForwardSpinCategory, ForwardSpinLineRequirement,
     };
+    use clearra_pc_graph::request::{GpuDeviceSelection, RequestedSearchBackend};
     use clearra_problem::{
         BuildProbabilityAggregation, SetupCandidatePriority, SetupLengthPreference, SetupSearchMode,
     };
     use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
+    use clearra_web_command::WebCommandParser;
+    use serde_json::{json, Value};
 
     use crate::GuiProblemForm;
 
@@ -1502,6 +1947,197 @@ mod tests {
         form_parser::{desktop_form_builds_app_request, desktop_request_builds_app_request},
         DesktopTauriCommandBridge,
     };
+
+    fn canonical_desktop_search_request(command: &str) -> Value {
+        let mut request: Value = serde_json::from_str(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "language": "en",
+                "lines": 2,
+                "queue": "",
+                "patterns": "",
+                "queue_knowledge": "oracle",
+                "hold_enabled": true,
+                "hold_piece": "empty",
+                "backend": "auto",
+                "rule": "srs-plus",
+                "score_mode": "off",
+                "score_profile": "tetrio",
+                "spin_profile": "t-spins",
+                "preserve_b2b": false,
+                "precompute_build_dependencies": false,
+                "finesse": "off",
+                "pattern_knowledge": "both",
+                "board_mask": "0x0000000000000000",
+                "visible_height": 2,
+                "piece_window": null,
+                "count_policy": "unique",
+                "solution_probabilities": false,
+                "workers": 0,
+                "use_all_logical_processors": false,
+                "gpu_device": "auto",
+                "allow_backend_fallback": true,
+                "memory_budget_mb": 0,
+                "candidate_budget": 10000000,
+                "pattern_budget": 5040,
+                "tablebase_requested": false,
+                "setup_mode": "oracle",
+                "setup_remaining": "IOTSZJL",
+                "setup_qb": "",
+                "setup_next_cycle_remaining": "",
+                "setup_allow_post_cycle_borrow": false,
+                "setup_priority": "all",
+                "setup_length": "auto",
+                "setup_max_pieces": 9,
+                "base_mask": "0x0",
+                "target_mask": "0x0",
+                "build_aggregation": "buildability",
+                "include_horizontal_mirror": true
+            }"#,
+        )
+        .expect("canonical desktop request JSON");
+        let object = request
+            .as_object_mut()
+            .expect("canonical desktop request is an object");
+        object.insert("command".into(), json!(command));
+        match command {
+            "pc" => {
+                object.insert("initial_b2b".into(), json!(0));
+            }
+            "pc-scenario" => {
+                object.insert("piece_window".into(), json!(1));
+                object.insert("initial_b2b".into(), json!(0));
+            }
+            "setup" => {
+                object.insert("backend".into(), json!("cpu"));
+                object.insert("allow_backend_fallback".into(), json!(false));
+                object.insert("workers".into(), json!(1));
+            }
+            "build-probability" => {
+                object.insert("backend".into(), json!("cpu"));
+                object.insert("allow_backend_fallback".into(), json!(false));
+                object.insert("queue".into(), json!("I"));
+                object.insert("target_mask".into(), json!("0xf"));
+                object.insert("candidate_budget".into(), json!(0));
+                object.insert("pattern_budget".into(), json!(0));
+                object.insert("workers".into(), json!(1));
+            }
+            "damage" => {
+                object.insert("backend".into(), json!("cpu"));
+                object.insert("allow_backend_fallback".into(), json!(false));
+                object.insert("queue".into(), json!("T"));
+                object.insert("initial_combo".into(), json!(0));
+                object.insert("initial_b2b".into(), json!(0));
+                object.insert("damage_aggregation".into(), json!("maximum"));
+                object.insert("workers".into(), json!(1));
+            }
+            "spin-finder" => {
+                object.insert("backend".into(), json!("cpu"));
+                object.insert("allow_backend_fallback".into(), json!(false));
+                object.insert("queue".into(), json!("T"));
+                object.insert("spin_lines".into(), json!("any"));
+                object.insert("spin_category".into(), json!("any"));
+                object.insert("workers".into(), json!(1));
+            }
+            _ => panic!("unsupported canonical desktop command: {command}"),
+        }
+        request
+    }
+
+    #[test]
+    fn desktop_ui_base_canonical_defaults_are_accepted_for_every_search_surface() {
+        for command in [
+            "pc",
+            "pc-scenario",
+            "setup",
+            "build-probability",
+            "damage",
+            "spin-finder",
+        ] {
+            let request = canonical_desktop_search_request(command);
+            desktop_request_builds_app_request(&request.to_string()).unwrap_or_else(|error| {
+                panic!("canonical UI base DTO must build for {command}: {error}")
+            });
+        }
+
+        let mut legacy_damage = canonical_desktop_search_request("damage");
+        legacy_damage.as_object_mut().expect("damage DTO").extend([
+            ("spin_lines".into(), json!("any")),
+            ("spin_category".into(), json!("any")),
+        ]);
+        desktop_request_builds_app_request(&legacy_damage.to_string())
+            .expect("legacy canonical spin defaults on damage remain compatible");
+
+        let mut legacy_spin = canonical_desktop_search_request("spin-finder");
+        legacy_spin.as_object_mut().expect("spin DTO").extend([
+            ("initial_combo".into(), json!(0)),
+            ("initial_b2b".into(), json!(0)),
+            ("damage_aggregation".into(), json!("maximum")),
+            ("minimum_damage".into(), json!(0)),
+        ]);
+        desktop_request_builds_app_request(&legacy_spin.to_string())
+            .expect("legacy canonical damage defaults on spin-finder remain compatible");
+    }
+
+    #[test]
+    fn desktop_search_surfaces_reject_noncanonical_or_malformed_inactive_fields() {
+        let cases = vec![
+            ("pc", "initial_combo", json!("bad")),
+            ("pc", "initial_combo", json!(1)),
+            ("pc", "setup_mode", json!("qb")),
+            ("pc", "build_aggregation", json!("spin")),
+            ("pc", "cpu_warmup", json!(true)),
+            ("pc-scenario", "setup_max_pieces", json!(10)),
+            ("pc-scenario", "target_mask", json!(15)),
+            ("pc-scenario", "damage_aggregation", json!("at-least")),
+            ("pc-scenario", "spin_category", json!("t")),
+            ("setup", "backend", json!(7)),
+            ("setup", "backend", json!("gpu")),
+            ("setup", "allow_backend_fallback", json!(true)),
+            ("setup", "score_mode", json!("summary")),
+            ("setup", "initial_b2b", json!(1)),
+            ("setup", "target_mask", json!(15)),
+            ("setup", "spin_lines", json!("2+")),
+            ("build-probability", "initial_b2b", json!("bad")),
+            ("build-probability", "initial_b2b", json!(1)),
+            ("build-probability", "score_mode", json!("summary")),
+            ("build-probability", "setup_mode", json!("qb")),
+            ("build-probability", "initial_combo", json!(1)),
+            ("build-probability", "spin_category", json!("t")),
+            ("damage", "backend", json!(7)),
+            ("damage", "backend", json!("gpu")),
+            ("damage", "allow_backend_fallback", json!(true)),
+            ("damage", "score_mode", json!("summary")),
+            ("damage", "setup_mode", json!("qb")),
+            ("damage", "target_mask", json!(15)),
+            ("damage", "spin_lines", json!("2+")),
+            ("spin-finder", "backend", json!(7)),
+            ("spin-finder", "backend", json!("gpu")),
+            ("spin-finder", "allow_backend_fallback", json!(true)),
+            ("spin-finder", "score_mode", json!("summary")),
+            ("spin-finder", "initial_combo", json!("bad")),
+            ("spin-finder", "initial_combo", json!(1)),
+            ("spin-finder", "damage_aggregation", json!("at-least")),
+        ];
+
+        for (command, field, invalid) in cases {
+            let mut request = canonical_desktop_search_request(command);
+            request
+                .as_object_mut()
+                .expect("desktop request object")
+                .insert(field.into(), invalid);
+            let error = desktop_request_builds_app_request(&request.to_string())
+                .expect_err("inactive field must fail closed");
+            assert_eq!(error.code(), "desktop-invalid-request", "{command}.{field}");
+            assert_eq!(
+                error.message(),
+                format!(
+                    "desktop {command} inactive field '{field}' must keep its canonical default"
+                ),
+                "{command}.{field}"
+            );
+        }
+    }
 
     #[test]
     fn desktop_request_defaults_hold_on_and_preserves_explicit_off() {
@@ -1533,6 +2169,218 @@ mod tests {
             panic!("expected opening PC form");
         };
         assert!(!disabled_form.hold_enabled());
+    }
+
+    #[test]
+    fn desktop_empty_pc_sources_build_the_shared_standard_seven_bag_projection() {
+        let opening = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "queue": "",
+                "patterns": ""
+            }"#,
+        )
+        .expect("desktop opening standard-bag request");
+        let AppCommand::Pc(opening) = opening.command() else {
+            panic!("expected opening PC command");
+        };
+        assert_eq!(opening.query().queue().mode(), "standard-7-bag");
+
+        let scenario = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 4,
+                "visible_height": 4,
+                "board_mask": 0,
+                "piece_window": 10,
+                "queue": "",
+                "patterns": ""
+            }"#,
+        )
+        .expect("desktop scenario standard-bag request");
+        let AppCommand::Scenario(scenario) = scenario.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(scenario.query().remaining_queue().mode(), "standard-7-bag");
+
+        let pattern = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 2,
+                "visible_height": 2,
+                "board_mask": 0,
+                "piece_window": 5,
+                "queue": "",
+                "patterns": "[IOTSZ]!"
+            }"#,
+        )
+        .expect("desktop scenario pattern request");
+        let AppCommand::Scenario(pattern) = pattern.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            pattern.query().remaining_queue().mode(),
+            "materialized-pattern-expression"
+        );
+    }
+
+    #[test]
+    fn desktop_backend_omission_defaults_match_web_for_all_four_backends() {
+        for (backend, expected_fallback) in [
+            ("auto", true),
+            ("cpu", false),
+            ("gpu", false),
+            ("hybrid", false),
+        ] {
+            let desktop_json = format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc",
+                    "lines": 2,
+                    "backend": "{backend}"
+                }}"#
+            );
+            let desktop = desktop_request_builds_app_request(&desktop_json)
+                .expect("desktop backend-default request");
+            let web = WebCommandParser::parse(&format!("clearra pc --lines 2 --backend {backend}"))
+                .expect("web backend-default request")
+                .to_app_request()
+                .expect("web backend-default AppRequest");
+
+            assert_eq!(
+                desktop.backend_policy().allow_backend_fallback(),
+                expected_fallback,
+                "desktop {backend} fallback default"
+            );
+            assert_eq!(
+                desktop.backend_policy(),
+                web.backend_policy(),
+                "Desktop/Web backend projection for {backend}"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_backend_explicit_fallback_boole_override_surface_defaults() {
+        for (backend, explicit) in [
+            ("auto", false),
+            ("cpu", true),
+            ("gpu", true),
+            ("hybrid", true),
+        ] {
+            let state = desktop_form_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc",
+                    "lines": 2,
+                    "backend": "{backend}",
+                    "allow_backend_fallback": {explicit}
+                }}"#
+            ))
+            .expect("desktop explicit backend fallback");
+            assert_eq!(state.backend_form().allow_fallback(), explicit, "{backend}");
+        }
+    }
+
+    #[test]
+    fn desktop_typed_search_families_reject_present_malformed_fields() {
+        let cases = [
+            (
+                "pc lines string",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc","lines":"2"}"#,
+                "desktop lines must be a nonnegative integer",
+            ),
+            (
+                "pc backend number",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc","backend":7}"#,
+                "desktop backend must be a string",
+            ),
+            (
+                "pc fallback string",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc","backend":"cpu","allow_backend_fallback":"false"}"#,
+                "desktop allow_backend_fallback must be a boolean",
+            ),
+            (
+                "pc initial B2B overflow",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc","initial_b2b":65536}"#,
+                "desktop initial_b2b must fit in u16",
+            ),
+            (
+                "pc-scenario boolean string",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc-scenario","lines":2,"board_mask":0,"piece_window":1,"hold_enabled":"true"}"#,
+                "desktop hold_enabled must be a boolean",
+            ),
+            (
+                "pc-scenario zero piece window",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc-scenario","lines":2,"board_mask":0,"piece_window":0}"#,
+                "desktop scenario PC requires a positive piece_window",
+            ),
+            (
+                "setup null boolean",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"setup","setup_remaining":"IOTS","setup_allow_post_cycle_borrow":null}"#,
+                "desktop setup_allow_post_cycle_borrow must be a boolean",
+            ),
+            (
+                "build-probability boolean string",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"build-probability","height":1,"base_mask":0,"target_mask":15,"queue":"I","preserve_b2b":"false"}"#,
+                "desktop preserve_b2b must be a boolean",
+            ),
+            (
+                "build-probability backend number",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"build-probability","height":1,"base_mask":0,"target_mask":15,"queue":"I","backend":7}"#,
+                "desktop backend must be a string",
+            ),
+            (
+                "damage integer string",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"damage","queue":"I","initial_combo":"2"}"#,
+                "desktop initial_combo must be a nonnegative integer",
+            ),
+            (
+                "spin-finder category boolean",
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"spin-finder","patterns":"[T]!","spin_category":false}"#,
+                "desktop spin_category must be a string",
+            ),
+        ];
+
+        for (name, request, expected_message) in cases {
+            let error = desktop_request_builds_app_request(request)
+                .expect_err("present malformed typed field must fail closed");
+            assert_eq!(error.code(), "desktop-invalid-request", "{name}");
+            assert_eq!(error.message(), expected_message, "{name}");
+        }
+    }
+
+    #[test]
+    fn desktop_typed_alias_conflicts_fail_closed_before_projection() {
+        let cases = [
+            (
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"pc","lines":2,"use_all_logical_processors":true,"use_all_cpu_threads":false}"#,
+                "desktop use_all_logical_processors aliases are mutually exclusive",
+            ),
+            (
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"setup","setup_remaining":"IOTS","setup_mode":"oracle","mode":"qb"}"#,
+                "desktop setup_mode aliases are mutually exclusive",
+            ),
+            (
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"build-probability","height":1,"visible_height":null,"base_mask":0,"target_mask":15,"queue":"I"}"#,
+                "desktop height aliases are mutually exclusive",
+            ),
+            (
+                r#"{"app_request_model":"clearra-app/AppRequest","command":"damage","queue":"I","board_mask":0,"initial_board_mask":"malformed"}"#,
+                "desktop board_mask aliases are mutually exclusive",
+            ),
+        ];
+
+        for (request, expected_message) in cases {
+            let error = desktop_request_builds_app_request(request)
+                .expect_err("typed aliases must be mutually exclusive");
+            assert_eq!(error.code(), "desktop-invalid-request");
+            assert_eq!(error.message(), expected_message);
+        }
     }
 
     #[test]
@@ -1581,6 +2429,185 @@ mod tests {
         )
         .expect("desktop dependency DAG request");
         assert!(enabled_state.backend_form().precompute_build_dependencies());
+    }
+
+    #[test]
+    fn desktop_pc_preserves_explicit_tablebase_policy() {
+        for requested in [false, true] {
+            let request = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 2,
+                    "visible_height": 2,
+                    "board_mask": 0,
+                    "piece_window": 5,
+                    "tablebase_requested": {requested}
+                }}"#
+            ))
+            .expect("desktop PC tablebase request");
+            let AppCommand::Scenario(command) = request.command() else {
+                panic!("expected scenario PC command");
+            };
+            assert_eq!(
+                command.query().execution_policy().tablebase_requested(),
+                requested
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_tiling_requests_reject_noncanonical_inactive_options() {
+        desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 2,
+                "visible_height": 2,
+                "board_mask": 0,
+                "piece_window": 5,
+                "score_mode": "tiling"
+            }"#,
+        )
+        .expect("canonical desktop tiling PC request");
+
+        for option in [
+            r#""rule": "srs""#,
+            r#""count_policy": "all""#,
+            r#""score_profile": "guideline""#,
+            r#""spin_profile": "all-spin""#,
+            r#""initial_b2b": 1"#,
+            r#""preserve_b2b": true"#,
+            r#""solution_probabilities": true"#,
+            r#""precompute_build_dependencies": true"#,
+            r#""tablebase_requested": true"#,
+            r#""queue_knowledge": "visible-7""#,
+            r#""finesse": "inputs""#,
+            r#""pattern_knowledge": "oracle""#,
+        ] {
+            let error = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 2,
+                    "visible_height": 2,
+                    "board_mask": 0,
+                    "piece_window": 5,
+                    "score_mode": "tiling",
+                    {option}
+                }}"#
+            ))
+            .expect_err(option);
+            assert_eq!(error.code(), "desktop-invalid-request");
+        }
+
+        for option in [
+            r#""rule": "srs""#,
+            r#""spin_profile": "all-spin""#,
+            r#""preserve_b2b": true"#,
+            r#""precompute_build_dependencies": true"#,
+            r#""finesse": "inputs""#,
+            r#""pattern_knowledge": "oracle""#,
+        ] {
+            let error = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "build-probability",
+                    "height": 1,
+                    "base_mask": 0,
+                    "target_mask": 15,
+                    "queue": "I",
+                    "build_aggregation": "tiling",
+                    {option}
+                }}"#
+            ))
+            .expect_err(option);
+            assert_eq!(error.code(), "desktop-invalid-request", "{option}");
+        }
+
+        for tablebase in ["true", "\"yes\""] {
+            let error = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "build-probability",
+                    "height": 1,
+                    "base_mask": 0,
+                    "target_mask": 15,
+                    "queue": "I",
+                    "tablebase_requested": {tablebase}
+                }}"#
+            ))
+            .expect_err(tablebase);
+            assert!(error.to_string().contains("tablebase"));
+        }
+    }
+
+    #[test]
+    fn desktop_requests_reject_inactive_score_spin_and_knowledge_options() {
+        for option in [
+            r#""initial_b2b": 1"#,
+            r#""score_profile": "guideline""#,
+            r#""spin_profile": "all-spin""#,
+            r#""score_mode": "failed-queue", "solution_probabilities": true"#,
+        ] {
+            desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 2,
+                    "visible_height": 2,
+                    "board_mask": 0,
+                    "piece_window": 5,
+                    {option}
+                }}"#
+            ))
+            .expect_err(option);
+        }
+
+        for option in [
+            r#""spin_profile": "all-spin""#,
+            r#""pattern_knowledge": "oracle""#,
+        ] {
+            desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "build-probability",
+                    "height": 1,
+                    "base_mask": 0,
+                    "target_mask": 15,
+                    "queue": "I",
+                    {option}
+                }}"#
+            ))
+            .expect_err(option);
+        }
+    }
+
+    #[test]
+    fn desktop_build_probability_preserves_backend_fallback_and_device_projection() {
+        let request = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "build-probability",
+                "height": 1,
+                "base_mask": 0,
+                "target_mask": 15,
+                "queue": "I",
+                "backend": "gpu",
+                "gpu_device": "2",
+                "allow_backend_fallback": true,
+                "gpu_warmup": true
+            }"#,
+        )
+        .expect("desktop build backend request");
+        let AppCommand::BuildProbability(command) = request.command() else {
+            panic!("expected build-probability command");
+        };
+        let policy = command.query().core_query().execution_policy();
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Gpu);
+        assert!(policy.allow_backend_fallback());
+        assert_eq!(policy.gpu_device(), &GpuDeviceSelection::Index(2));
+        assert!(policy.gpu_warmup());
     }
 
     #[test]
@@ -1793,6 +2820,46 @@ mod tests {
             query.line_clear_policy(),
             ForwardLineClearPolicy::PreserveBackToBack
         );
+    }
+
+    #[test]
+    fn desktop_forward_commands_reject_cross_mode_and_inactive_options() {
+        for request_json in [
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "damage",
+                "queue": "T",
+                "minimum_damage": 1
+            }"#,
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "damage",
+                "queue": "T",
+                "spin_lines": "2+"
+            }"#,
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "spin-finder",
+                "queue": "T",
+                "damage_aggregation": "at-least"
+            }"#,
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "spin-finder",
+                "queue": "T",
+                "minimum_damage": 1
+            }"#,
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "spin-finder",
+                "queue": "T",
+                "spin_profile": "t-spins",
+                "spin_category": "other"
+            }"#,
+        ] {
+            desktop_request_builds_app_request(request_json)
+                .expect_err("inactive forward-search option must fail closed");
+        }
     }
 
     #[test]
