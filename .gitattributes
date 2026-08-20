@@ -1,5 +1,8 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+apps/clearra-discord-bot/scripts/restore-oracle-release text eol=lf
+scripts/release/create-exact-source-archive.mjs text eol=lf
+scripts/release/exact-source-tar-contract.mjs text eol=lf
 tools/asset-import/*.svg text eol=lf
 assets/skins/**/*.json text eol=lf

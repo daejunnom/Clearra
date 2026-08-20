@@ -2,7 +2,7 @@ name: Publish Product Release
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -20,6 +20,27 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate exact source archive regression coverage
+        shell: bash
+        run: node --test scripts/release/create-exact-source-archive.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs
+      - name: Archive the exact accepted source on Linux
+        shell: bash
+        run: |
+          archive_path="$RUNNER_TEMP/clearra-exact-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
+          archive_owned=false
+          if [[ -e "$archive_path" ]]; then
+            echo 'exact source archive output already exists' >&2
+            exit 2
+          fi
+          trap 'if [[ "$archive_owned" == true ]]; then rm -f -- "$archive_path"; fi' EXIT
+          node scripts/release/create-exact-source-archive.mjs \
+            --source-commit "$GITHUB_SHA" \
+            --output "$archive_path"
+          archive_owned=true
+          test -s "$archive_path"
       - name: Resolve release version
         id: version
         shell: bash
@@ -124,6 +145,27 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
+      - name: Validate Windows exact source archive regression coverage
+        shell: pwsh
+        run: node --test scripts/release/create-exact-source-archive.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs
+      - name: Archive the exact accepted source on Windows
+        shell: pwsh
+        run: |
+          $archivePath = Join-Path $env:RUNNER_TEMP ("clearra-exact-source-" + [Guid]::NewGuid().ToString("N") + ".tar.gz")
+          $archiveOwned = $false
+          try {
+            node scripts/release/create-exact-source-archive.mjs `
+              --source-commit $env:GITHUB_SHA `
+              --output $archivePath
+            if ($LASTEXITCODE -ne 0) { throw "exact source archive failed" }
+            $archiveOwned = $true
+            $archive = Get-Item -LiteralPath $archivePath
+            if (-not $archive.Length) { throw "exact source archive is empty" }
+          } finally {
+            if ($archiveOwned -and (Test-Path -LiteralPath $archivePath)) {
+              Remove-Item -LiteralPath $archivePath -Force
+            }
+          }
       - uses: actions/cache@v4
         with:
           path: |
@@ -298,7 +340,8 @@ jobs:
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [metadata, release-acceptance, linux-cli, windows-products, discord-bot]
+    needs:
+      [metadata, release-acceptance, linux-cli, windows-products, discord-bot]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

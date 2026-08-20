@@ -36,6 +36,181 @@ function Get-ReleaseSourceSurface {
     return $parts -join "`n"
 }
 
+function Assert-ReleaseYamlKeyAllowlist {
+    param(
+        [string]$Text,
+        [int]$Indentation,
+        [string[]]$AllowedKeys,
+        [string]$Contract
+    )
+
+    $prefix = ' ' * $Indentation
+    foreach ($line in ($Text -split '\r?\n')) {
+        if (-not $line.StartsWith($prefix, [System.StringComparison]::Ordinal) -or
+            $line.Length -le $Indentation -or
+            $line[$Indentation] -eq ' ') {
+            continue
+        }
+        $content = $line.Substring($Indentation)
+        if ($content.StartsWith('#', [System.StringComparison]::Ordinal)) {
+            continue
+        }
+        $match = [regex]::Match($content, '^([A-Za-z0-9_-]+):')
+        if (-not $match.Success -or $AllowedKeys -notcontains $match.Groups[1].Value) {
+            Add-ArchitectureError "$Contract contains a noncanonical YAML key: '$content'"
+        }
+    }
+}
+
+function Assert-ReleaseYamlExactKeySet {
+    param(
+        [string]$Text,
+        [int]$Indentation,
+        [string[]]$ExpectedKeys,
+        [string]$Contract
+    )
+
+    $prefix = ' ' * $Indentation
+    $actualKeys = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($Text -split '\r?\n')) {
+        if (-not $line.StartsWith($prefix, [System.StringComparison]::Ordinal) -or
+            $line.Length -le $Indentation -or
+            $line[$Indentation] -eq ' ') {
+            continue
+        }
+        $content = $line.Substring($Indentation)
+        if ($content.StartsWith('#', [System.StringComparison]::Ordinal)) {
+            continue
+        }
+        $match = [regex]::Match($content, '^([A-Za-z0-9_-]+):')
+        if (-not $match.Success) {
+            Add-ArchitectureError "$Contract contains a noncanonical YAML key: '$content'"
+            continue
+        }
+        $actualKeys.Add($match.Groups[1].Value)
+    }
+
+    $actualUnique = @($actualKeys | Sort-Object -Unique)
+    $expectedUnique = @($ExpectedKeys | Sort-Object -Unique)
+    $missing = @($ExpectedKeys | Where-Object { $actualKeys -notcontains $_ })
+    if ($actualKeys.Count -ne $ExpectedKeys.Count -or
+        $actualUnique.Count -ne $ExpectedKeys.Count -or
+        $expectedUnique.Count -ne $ExpectedKeys.Count -or
+        $missing.Count -ne 0) {
+        Add-ArchitectureError "$Contract keys must be exactly [$($ExpectedKeys -join ', ')], got [$($actualKeys -join ', ')]"
+    }
+}
+
+function Assert-ReleaseYamlExactScalar {
+    param(
+        [string]$Text,
+        [int]$Indentation,
+        [string]$Key,
+        [string]$ExpectedValue,
+        [string]$Contract
+    )
+
+    $prefix = ' ' * $Indentation
+    $pattern = '(?m)^' + [regex]::Escape($prefix + $Key + ':') +
+        '\s*' + [regex]::Escape($ExpectedValue) + '\s*$'
+    if ([regex]::Matches($Text, $pattern).Count -ne 1) {
+        Add-ArchitectureError "$Contract must be exactly '${Key}: $ExpectedValue'"
+    }
+}
+
+function Assert-ReleaseYamlExactLiteralScript {
+    param(
+        [string]$Text,
+        [string[]]$ExpectedLines,
+        [string]$Contract
+    )
+
+    $normalized = $Text.Replace("`r`n", "`n")
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($normalized -split "`n")) {
+        $lines.Add($line)
+    }
+    $runIndexes = @()
+    for ($index = 0; $index -lt $lines.Count; $index += 1) {
+        if ($lines[$index] -match '^ {8}run: \|\s*$') {
+            $runIndexes += $index
+        }
+    }
+    if ($runIndexes.Count -ne 1) {
+        Add-ArchitectureError "$Contract must contain exactly one literal run block"
+        return
+    }
+
+    $actualLines = [System.Collections.Generic.List[string]]::new()
+    for ($index = $runIndexes[0] + 1; $index -lt $lines.Count; $index += 1) {
+        $line = $lines[$index]
+        if (-not $line.StartsWith('          ', [System.StringComparison]::Ordinal)) {
+            Add-ArchitectureError "$Contract contains a noncanonical script line: '$line'"
+            return
+        }
+        $actualLines.Add($line.Substring(10))
+    }
+    while ($actualLines.Count -gt 0 -and $actualLines[$actualLines.Count - 1] -eq '') {
+        $actualLines.RemoveAt($actualLines.Count - 1)
+    }
+    if ($actualLines.Count -ne $ExpectedLines.Count) {
+        Add-ArchitectureError "$Contract must match the canonical fail-closed script exactly"
+        return
+    }
+    for ($index = 0; $index -lt $ExpectedLines.Count; $index += 1) {
+        if (-not [string]::Equals(
+                $actualLines[$index],
+                $ExpectedLines[$index],
+                [System.StringComparison]::Ordinal
+            )) {
+            Add-ArchitectureError "$Contract must match the canonical fail-closed script exactly"
+            return
+        }
+    }
+}
+
+function Assert-ReleaseExactStepSkeleton {
+    param(
+        [string]$Text,
+        [string[]]$ExpectedSteps,
+        [string]$Contract
+    )
+
+    $actualSteps = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($Text.Replace("`r`n", "`n") -split "`n")) {
+        if ($line.StartsWith('      -', [System.StringComparison]::Ordinal)) {
+            $actualSteps.Add($line.Substring(6))
+        }
+    }
+    if ($actualSteps.Count -ne $ExpectedSteps.Count) {
+        Add-ArchitectureError "$Contract steps must match the canonical protected prelude exactly"
+        return
+    }
+    for ($index = 0; $index -lt $ExpectedSteps.Count; $index += 1) {
+        if (-not [string]::Equals(
+                $actualSteps[$index],
+                $ExpectedSteps[$index],
+                [System.StringComparison]::Ordinal
+            )) {
+            Add-ArchitectureError "$Contract steps must match the canonical protected prelude exactly"
+            return
+        }
+    }
+}
+
+function Assert-ReleaseExactText {
+    param(
+        [string]$Text,
+        [string]$Expected,
+        [string]$Contract
+    )
+
+    $actual = $Text.Replace("`r`n", "`n")
+    if (-not [string]::Equals($actual, $Expected, [System.StringComparison]::Ordinal)) {
+        Add-ArchitectureError "$Contract must match the canonical protected step exactly"
+    }
+}
+
 function Invoke-ReleaseForbiddenApiValidation {
     Assert-ForbiddenAlgorithmMarkersAbsent @(
         'MeetInTheMiddlePacking', 'mitm_pc_backend', 'half_join_pc',
@@ -319,11 +494,17 @@ function Invoke-ReleaseIdentityGateValidation {
     $productProcessSurface = Read-Text 'scripts/lib/product-process-surface.ps1'
     $remoteTagVerifier = Read-Text 'scripts/release/verify-remote-annotated-tag.mjs'
     $remoteTagVerifierTest = Read-Text 'scripts/release/verify-remote-annotated-tag.test.mjs'
+    $gitAttributes = Read-Text '.gitattributes'
+    $exactSourceArchive = Read-Text 'scripts/release/create-exact-source-archive.mjs'
+    $exactSourceTarContract = Read-Text 'scripts/release/exact-source-tar-contract.mjs'
+    $exactSourceArchiveTest = Read-Text 'scripts/release/create-exact-source-archive.test.mjs'
+    $releaseCliSmokeTest = Read-Text 'scripts/tools/validate-release-cli-smokes.test.mjs'
 
     foreach ($required in @(
         'validate-release-metadata.mjs',
         'node --test scripts/release/validate-release-metadata.test.mjs',
         'node --test scripts/release/verify-remote-annotated-tag.test.mjs',
+        'node --test scripts/release/create-exact-source-archive.test.mjs',
         'validate-release-cli-smokes.mjs',
         'release tag must point at the exact current main commit',
         'release tag is no longer the exact current main commit',
@@ -342,6 +523,20 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($release -notlike "*$required*") {
             Add-ArchitectureError "Product release workflow is missing exact release identity gate '$required'"
+        }
+    }
+    foreach ($required in @(
+        'rejects workflow defaults that can replace protected shells',
+        'rejects a preceding step that can poison protected executable resolution',
+        'rejects a skipped dependency injected into the metadata root job',
+        'rejects a wrong runner whose comment contains the expected runner',
+        'rejects a custom shell that only echoes the protected script path',
+        'rejects a parent-commit archive hidden behind the expected SHA comment',
+        'rejects publication dependencies spoofed in a later job',
+        'rejects ownership transfer moved before the archive helper succeeds'
+    )) {
+        if ($releaseCliSmokeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Release CLI smoke gate regression coverage is missing '$required'"
         }
     }
     foreach ($workflow in @(
@@ -445,6 +640,378 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($remoteTagVerifierTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Remote annotated-tag regression coverage is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'core.autocrlf=false',
+        'core.eol=lf',
+        'tar.umask=0022',
+        '["--no-replace-objects", ...args]',
+        'get-tar-commit-id',
+        '["hash-object", "--no-filters", "--", helperPath]',
+        'exact-source-tar-contract.mjs',
+        '["ls-tree", "-r", "-t", "-z", "--full-tree", sourceCommit]',
+        'gzipSync(rawTar, { level: 9 })',
+        'gunzipSync(readFileSync(outputPath)).equals(rawTar)',
+        'archive output already exists',
+        'canonical Git archive contains a different commit',
+        'unlinkSync(outputPath)'
+    )) {
+        if ($exactSourceArchive.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Exact source archive helper is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'expectedEntryKind',
+        'mode === "100644"',
+        'mode === "100755"',
+        'mode === "120000"',
+        'gitBlobOid(objectFormat, content)',
+        'tar header checksum mismatch',
+        'duplicate source tar path',
+        'source tar is missing Git tree path',
+        'unsupported source tar member type',
+        'symlink target is dangling or outside the source tree',
+        'key !== "path" && key !== "linkpath"'
+    )) {
+        if ($exactSourceTarContract.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Exact source tar payload verifier is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'exports every exact commit byte, 0644/0755 mode, safe symlink, and embedded identity with autocrlf enabled',
+        'rejects committed eol=crlf archive conversion and deletes output',
+        'rejects committed export-ignore archive omission and deletes output',
+        'rejects committed export-subst archive mutation and deletes output',
+        'rejects uncommitted info attributes archive omission and deletes output',
+        'rejects helper-module drift from the accepted commit before creating output',
+        'rejects raw helper drift hidden by an assume-unchanged index flag',
+        'rejects helper modules absent from the accepted commit before creating output',
+        'refuses to overwrite an existing archive path',
+        'rejects a noncanonical source commit before creating output',
+        'ignores local Git replacement refs and archives the canonical accepted object',
+        'long regular path must exercise a PAX path record',
+        'long symlink target must exercise a PAX linkpath record',
+        'production tar verifier rejects duplicate paths, unsupported types, bad checksums, and truncation'
+    )) {
+        if ($exactSourceArchiveTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Exact source archive regression coverage is missing '$required'"
+        }
+    }
+    Assert-ReleaseYamlExactKeySet `
+        -Text $release `
+        -Indentation 0 `
+        -ExpectedKeys @('name', 'on', 'permissions', 'env', 'jobs') `
+        -Contract 'Release workflow top level'
+    $releaseEnvironmentStart = $release.IndexOf("`nenv:", [System.StringComparison]::Ordinal)
+    $releaseJobsStart = $release.IndexOf("`njobs:", [System.StringComparison]::Ordinal)
+    if ($releaseEnvironmentStart -lt 0 -or $releaseJobsStart -le $releaseEnvironmentStart) {
+        Add-ArchitectureError 'Release workflow environment boundary is missing'
+    }
+    else {
+        $releaseEnvironment = $release.Substring(
+            $releaseEnvironmentStart,
+            $releaseJobsStart - $releaseEnvironmentStart
+        )
+        Assert-ReleaseYamlExactKeySet `
+            -Text $releaseEnvironment `
+            -Indentation 2 `
+            -ExpectedKeys @('CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID') `
+            -Contract 'Release workflow environment'
+        foreach ($identityVariable in @('CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID')) {
+            Assert-ReleaseYamlExactScalar `
+                -Text $releaseEnvironment `
+                -Indentation 2 `
+                -Key $identityVariable `
+                -ExpectedValue '${{ github.sha }}' `
+                -Contract "Release workflow $identityVariable"
+        }
+    }
+    $metadataJobStart = $release.IndexOf("`n  metadata:", [System.StringComparison]::Ordinal)
+    $linuxJobStart = $release.IndexOf("`n  linux-cli:", [System.StringComparison]::Ordinal)
+    $discordJobStart = $release.IndexOf("`n  discord-bot:", [System.StringComparison]::Ordinal)
+    $releaseAcceptanceJobStart = $release.IndexOf("`n  release-acceptance:", [System.StringComparison]::Ordinal)
+    $windowsProductsJobStart = $release.IndexOf("`n  windows-products:", [System.StringComparison]::Ordinal)
+    $publishBoundaryStart = $release.IndexOf("`n  publish:", [System.StringComparison]::Ordinal)
+    if ($metadataJobStart -lt 0 -or
+        $linuxJobStart -le $metadataJobStart -or
+        $discordJobStart -le $linuxJobStart -or
+        $releaseAcceptanceJobStart -le $discordJobStart -or
+        $windowsProductsJobStart -le $releaseAcceptanceJobStart -or
+        $publishBoundaryStart -le $windowsProductsJobStart) {
+        Add-ArchitectureError 'Exact source archive workflow job boundaries are missing'
+    }
+    else {
+        $metadataJob = $release.Substring($metadataJobStart, $linuxJobStart - $metadataJobStart)
+        $linuxJob = $release.Substring($linuxJobStart, $discordJobStart - $linuxJobStart)
+        $discordJob = $release.Substring($discordJobStart, $releaseAcceptanceJobStart - $discordJobStart)
+        $releaseAcceptanceJob = $release.Substring(
+            $releaseAcceptanceJobStart,
+            $windowsProductsJobStart - $releaseAcceptanceJobStart
+        )
+        $windowsProductsJob = $release.Substring(
+            $windowsProductsJobStart,
+            $publishBoundaryStart - $windowsProductsJobStart
+        )
+        Assert-ReleaseYamlExactKeySet `
+            -Text $metadataJob `
+            -Indentation 4 `
+            -ExpectedKeys @('outputs', 'runs-on', 'steps') `
+            -Contract 'Linux metadata job'
+        Assert-ReleaseYamlExactKeySet `
+            -Text $releaseAcceptanceJob `
+            -Indentation 4 `
+            -ExpectedKeys @('needs', 'runs-on', 'timeout-minutes', 'steps') `
+            -Contract 'Windows canonical acceptance job'
+        Assert-ReleaseYamlExactScalar `
+            -Text $metadataJob `
+            -Indentation 4 `
+            -Key 'runs-on' `
+            -ExpectedValue 'ubuntu-latest' `
+            -Contract 'Linux metadata runner'
+        Assert-ReleaseYamlExactScalar `
+            -Text $releaseAcceptanceJob `
+            -Indentation 4 `
+            -Key 'needs' `
+            -ExpectedValue 'metadata' `
+            -Contract 'Windows canonical acceptance dependency'
+        Assert-ReleaseYamlExactScalar `
+            -Text $releaseAcceptanceJob `
+            -Indentation 4 `
+            -Key 'runs-on' `
+            -ExpectedValue 'windows-latest' `
+            -Contract 'Windows canonical acceptance runner'
+        foreach ($job in @(
+            @{ Name = 'Linux CLI'; Text = $linuxJob; Runner = 'ubuntu-latest' },
+            @{ Name = 'Discord'; Text = $discordJob; Runner = 'ubuntu-latest' },
+            @{ Name = 'Windows products'; Text = $windowsProductsJob; Runner = 'windows-latest' }
+        )) {
+            Assert-ReleaseYamlExactKeySet `
+                -Text $job.Text `
+                -Indentation 4 `
+                -ExpectedKeys @('needs', 'runs-on', 'steps') `
+                -Contract "$($job.Name) job"
+            Assert-ReleaseYamlExactScalar `
+                -Text $job.Text `
+                -Indentation 4 `
+                -Key 'needs' `
+                -ExpectedValue 'metadata' `
+                -Contract "$($job.Name) dependency"
+            Assert-ReleaseYamlExactScalar `
+                -Text $job.Text `
+                -Indentation 4 `
+                -Key 'runs-on' `
+                -ExpectedValue $job.Runner `
+                -Contract "$($job.Name) runner"
+        }
+
+        $linuxRegressionStart = $metadataJob.IndexOf(
+            "`n      - name: Validate exact source archive regression coverage",
+            [System.StringComparison]::Ordinal
+        )
+        $linuxArchiveStart = $metadataJob.IndexOf(
+            "`n      - name: Archive the exact accepted source on Linux",
+            [System.StringComparison]::Ordinal
+        )
+        $linuxArchiveEnd = $metadataJob.IndexOf(
+            "`n      - name: Resolve release version",
+            [System.StringComparison]::Ordinal
+        )
+        $windowsRegressionStart = $releaseAcceptanceJob.IndexOf(
+            "`n      - name: Validate Windows exact source archive regression coverage",
+            [System.StringComparison]::Ordinal
+        )
+        $windowsArchiveStart = $releaseAcceptanceJob.IndexOf(
+            "`n      - name: Archive the exact accepted source on Windows",
+            [System.StringComparison]::Ordinal
+        )
+        $windowsArchiveEnd = $releaseAcceptanceJob.IndexOf(
+            "`n      - uses: actions/cache@v4",
+            [System.StringComparison]::Ordinal
+        )
+        if ($linuxRegressionStart -lt 0 -or
+            $linuxArchiveStart -le $linuxRegressionStart -or
+            $linuxArchiveEnd -le $linuxArchiveStart -or
+            $windowsRegressionStart -lt 0 -or
+            $windowsArchiveStart -le $windowsRegressionStart -or
+            $windowsArchiveEnd -le $windowsArchiveStart) {
+            Add-ArchitectureError 'Exact source archive workflow step boundaries are missing or out of order'
+        }
+        else {
+            $linuxRegressionStep = $metadataJob.Substring(
+                $linuxRegressionStart,
+                $linuxArchiveStart - $linuxRegressionStart
+            )
+            $linuxArchiveStep = $metadataJob.Substring(
+                $linuxArchiveStart,
+                $linuxArchiveEnd - $linuxArchiveStart
+            )
+            $windowsRegressionStep = $releaseAcceptanceJob.Substring(
+                $windowsRegressionStart,
+                $windowsArchiveStart - $windowsRegressionStart
+            )
+            $windowsArchiveStep = $releaseAcceptanceJob.Substring(
+                $windowsArchiveStart,
+                $windowsArchiveEnd - $windowsArchiveStart
+            )
+            $linuxStepsStart = $metadataJob.IndexOf("`n    steps:", [System.StringComparison]::Ordinal)
+            $windowsStepsStart = $releaseAcceptanceJob.IndexOf("`n    steps:", [System.StringComparison]::Ordinal)
+            if ($linuxStepsStart -lt 0 -or
+                $linuxStepsStart -ge $linuxRegressionStart -or
+                $windowsStepsStart -lt 0 -or
+                $windowsStepsStart -ge $windowsRegressionStart) {
+                Add-ArchitectureError 'Exact source archive protected step preludes are missing'
+            }
+            else {
+                $linuxProtectedPrelude = $metadataJob.Substring(
+                    $linuxStepsStart,
+                    $linuxArchiveEnd - $linuxStepsStart
+                )
+                $windowsProtectedPrelude = $releaseAcceptanceJob.Substring(
+                    $windowsStepsStart,
+                    $windowsArchiveEnd - $windowsStepsStart
+                )
+                Assert-ReleaseExactStepSkeleton `
+                    -Text $linuxProtectedPrelude `
+                    -ExpectedSteps @(
+                        '- uses: actions/checkout@v4',
+                        '- uses: actions/setup-node@v4',
+                        '- name: Validate exact source archive regression coverage',
+                        '- name: Archive the exact accepted source on Linux'
+                    ) `
+                    -Contract 'Linux exact source archive protected prelude'
+                Assert-ReleaseExactStepSkeleton `
+                    -Text $windowsProtectedPrelude `
+                    -ExpectedSteps @(
+                        '- uses: actions/checkout@v4',
+                        '- uses: actions/setup-node@v4',
+                        '- name: Validate Windows exact source archive regression coverage',
+                        '- name: Archive the exact accepted source on Windows'
+                    ) `
+                    -Contract 'Windows exact source archive protected prelude'
+                Assert-ReleaseExactText `
+                    -Text $metadataJob.Substring(
+                        $linuxStepsStart,
+                        $linuxRegressionStart - $linuxStepsStart
+                    ) `
+                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22" `
+                    -Contract 'Linux protected checkout and Node setup'
+                Assert-ReleaseExactText `
+                    -Text $releaseAcceptanceJob.Substring(
+                        $windowsStepsStart,
+                        $windowsRegressionStart - $windowsStepsStart
+                    ) `
+                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22`n          cache: npm`n          cache-dependency-path: package-lock.json" `
+                    -Contract 'Windows protected checkout and Node setup'
+            }
+            foreach ($step in @(
+                @{ Name = 'Linux archive regression'; Text = $linuxRegressionStep; Shell = 'bash' },
+                @{ Name = 'Linux accepted source archive'; Text = $linuxArchiveStep; Shell = 'bash' },
+                @{ Name = 'Windows archive regression'; Text = $windowsRegressionStep; Shell = 'pwsh' },
+                @{ Name = 'Windows accepted source archive'; Text = $windowsArchiveStep; Shell = 'pwsh' }
+            )) {
+                Assert-ReleaseYamlExactKeySet `
+                    -Text $step.Text `
+                    -Indentation 8 `
+                    -ExpectedKeys @('shell', 'run') `
+                    -Contract "$($step.Name) step"
+                Assert-ReleaseYamlExactScalar `
+                    -Text $step.Text `
+                    -Indentation 8 `
+                    -Key 'shell' `
+                    -ExpectedValue $step.Shell `
+                    -Contract "$($step.Name) shell"
+            }
+            if ($linuxRegressionStep -notmatch '(?m)^        run: node --test scripts/release/create-exact-source-archive\.test\.mjs scripts/tools/validate-release-cli-smokes\.test\.mjs\s*$' -or
+                $windowsRegressionStep -notmatch '(?m)^        run: node --test scripts/release/create-exact-source-archive\.test\.mjs scripts/tools/validate-release-cli-smokes\.test\.mjs\s*$') {
+                Add-ArchitectureError 'Exact source archive regression steps must execute the real test command'
+            }
+            Assert-ReleaseYamlExactLiteralScript `
+                -Text $linuxArchiveStep `
+                -ExpectedLines @(
+                    'archive_path="$RUNNER_TEMP/clearra-exact-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"',
+                    'archive_owned=false',
+                    'if [[ -e "$archive_path" ]]; then',
+                    '  echo ''exact source archive output already exists'' >&2',
+                    '  exit 2',
+                    'fi',
+                    'trap ''if [[ "$archive_owned" == true ]]; then rm -f -- "$archive_path"; fi'' EXIT',
+                    'node scripts/release/create-exact-source-archive.mjs \',
+                    '  --source-commit "$GITHUB_SHA" \',
+                    '  --output "$archive_path"',
+                    'archive_owned=true',
+                    'test -s "$archive_path"'
+                ) `
+                -Contract 'Linux accepted source archive script'
+            Assert-ReleaseYamlExactLiteralScript `
+                -Text $windowsArchiveStep `
+                -ExpectedLines @(
+                    '$archivePath = Join-Path $env:RUNNER_TEMP ("clearra-exact-source-" + [Guid]::NewGuid().ToString("N") + ".tar.gz")',
+                    '$archiveOwned = $false',
+                    'try {',
+                    '  node scripts/release/create-exact-source-archive.mjs `',
+                    '    --source-commit $env:GITHUB_SHA `',
+                    '    --output $archivePath',
+                    '  if ($LASTEXITCODE -ne 0) { throw "exact source archive failed" }',
+                    '  $archiveOwned = $true',
+                    '  $archive = Get-Item -LiteralPath $archivePath',
+                    '  if (-not $archive.Length) { throw "exact source archive is empty" }',
+                    '} finally {',
+                    '  if ($archiveOwned -and (Test-Path -LiteralPath $archivePath)) {',
+                    '    Remove-Item -LiteralPath $archivePath -Force',
+                    '  }',
+                    '}'
+                ) `
+                -Contract 'Windows accepted source archive script'
+        }
+    }
+
+    $publishJobStart = $release.IndexOf("`n  publish:", [System.StringComparison]::Ordinal)
+    if ($publishJobStart -lt 0) {
+        Add-ArchitectureError 'Release publish job is missing'
+    }
+    else {
+        $publishJob = $release.Substring($publishJobStart)
+        $publishRemainder = $publishJob.Substring("`n  publish:".Length)
+        $publishStepsIndex = $publishJob.IndexOf("`n    steps:", [System.StringComparison]::Ordinal)
+        $laterPublishJob = $false
+        foreach ($line in ($publishRemainder -split '\r?\n')) {
+            if ($line -match '^ {2}\S' -and $line -notmatch '^ {2}#') {
+                $laterPublishJob = $true
+                break
+            }
+        }
+        if ($laterPublishJob -or $publishStepsIndex -lt 0) {
+            Add-ArchitectureError 'Release publish must remain the final workflow job'
+        }
+        else {
+            $publishHeader = $publishJob.Substring(0, $publishStepsIndex)
+            Assert-ReleaseYamlExactKeySet `
+                -Text $publishHeader `
+                -Indentation 4 `
+                -ExpectedKeys @('if', 'needs', 'runs-on') `
+                -Contract 'Release publish header'
+            Assert-ReleaseYamlExactScalar `
+                -Text $publishHeader `
+                -Indentation 4 `
+                -Key 'runs-on' `
+                -ExpectedValue 'ubuntu-latest' `
+                -Contract 'Release publish runner'
+            if ([regex]::Matches($publishHeader, '(?m)^    needs\s*:').Count -ne 1 -or
+                $publishHeader -notmatch '(?m)^    needs:\s*\r?\n      \[metadata, release-acceptance, linux-cli, windows-products, discord-bot\]\s*$' -or
+                [regex]::Matches($publishHeader, '(?m)^    if\s*:').Count -ne 1 -or
+                $publishHeader -notmatch '(?m)^    if: github\.ref_type == ''tag''\s*$') {
+                Add-ArchitectureError 'Release publish must depend on every exact acceptance job and run only for tags'
+            }
+        }
+    }
+    foreach ($required in @(
+        'apps/clearra-discord-bot/scripts/restore-oracle-release text eol=lf',
+        'scripts/release/create-exact-source-archive.mjs text eol=lf',
+        'scripts/release/exact-source-tar-contract.mjs text eol=lf'
+    )) {
+        if ($gitAttributes.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Executable release helper LF checkout contract is missing '$required'"
         }
     }
     $lateMainIndex = $release.LastIndexOf(
@@ -856,12 +1423,22 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'Never submit the working tree (`gcloud builds submit ... .`)',
-        'git archive --format=tar --output=$archivePath $sourceCommit',
+        'node scripts/release/create-exact-source-archive.mjs',
+        '--source-commit $sourceCommit',
+        '--output $archivePath',
+        'source.tar.gz',
+        'tar -xzf $archivePath -C $configContext',
+        'The local `.tar.gz` itself is the Cloud Build source boundary',
+        'tracked public-source',
+        'transfer it with its SHA-256',
+        'recheck the digest',
+        'extract it on Oracle',
+        'separately frozen private overlay',
         'cloudbuild-current-job-service.yaml',
         'cloudbuild-command-sync.yaml',
         'cloudbuild-job-service.yaml',
         'same-full-40-character-accepted-commit',
-        '$archiveContext'
+        '$configContext'
     )) {
         if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Cloud deployment contract is missing exact-archive marker '$required'"
@@ -871,28 +1448,36 @@ function Invoke-ReleaseIdentityGateValidation {
         $cloudDeploy,
         '(?m)^\s*gcloud builds submit\s+`\s*$'
     ).Count
-    $archiveContextArgumentCount = [regex]::Matches(
+    $archiveSourceArgumentCount = [regex]::Matches(
         $cloudDeploy,
-        '(?m)^\s+\$archiveContext\s*$'
+        '(?m)^\s+\$archivePath\s*$'
     ).Count
-    $gitArchiveCount = [regex]::Matches(
+    $exactArchiveCount = [regex]::Matches(
         $cloudDeploy,
-        '(?m)^\s*git archive --format=tar --output=\$archivePath \$sourceCommit\s*$'
+        '(?m)^\s*node scripts/release/create-exact-source-archive\.mjs `\r?\n\s+--source-commit \$sourceCommit `\r?\n\s+--output \$archivePath\s*$'
     ).Count
     if ($cloudBuildSubmissionCount -lt 3 -or
-        $archiveContextArgumentCount -ne $cloudBuildSubmissionCount -or
-        $gitArchiveCount -ne $cloudBuildSubmissionCount) {
-        Add-ArchitectureError 'Every documented Cloud Build submission, including command sync, must use a fresh exact git-archive context'
+        $archiveSourceArgumentCount -ne $cloudBuildSubmissionCount -or
+        $exactArchiveCount -ne $cloudBuildSubmissionCount) {
+        Add-ArchitectureError 'Every documented Cloud Build submission, including command sync, must submit the verified exact .tar.gz directly'
+    }
+    if ($cloudDeploy -match '(?m)^\s*git(?:\s+-c\s+core\.autocrlf=false)?\s+archive\b') {
+        Add-ArchitectureError 'Cloud deployment documentation must use the tested exact source archive helper, not a raw Git archive command'
     }
     if ($cloudDeploy -match '(?m)^\s*\.\s*$' -or
         $cloudDeploy -match '(?m)^\s*gcloud\s+builds\s+submit\b[^\r\n]*\s\.\s*$') {
         Add-ArchitectureError 'Cloud deployment documentation must never submit the mutable current directory as a build context'
     }
     foreach ($required in @(
-        'command-sync build must come from a fresh temporary `git archive` context',
-        'git archive --format=tar --output=$archivePath $sourceCommit',
-        'Join-Path $archiveContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"',
-        '$archiveContext'
+        'command-sync build must come from a fresh temporary commit-byte archive context',
+        'node scripts/release/create-exact-source-archive.mjs',
+        '--source-commit $sourceCommit',
+        '--output $archivePath',
+        'source.tar.gz',
+        'tar -xzf $archivePath -C $configContext',
+        'Join-Path $configContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"',
+        '$configContext',
+        'The verified archive'
     )) {
         if ($cloudReadme.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Discord deployment README is missing exact-archive marker '$required'"
@@ -902,18 +1487,21 @@ function Invoke-ReleaseIdentityGateValidation {
         $cloudReadme,
         '(?m)^\s*gcloud builds submit\s+`\s*$'
     ).Count
-    $readmeArchiveContextArgumentCount = [regex]::Matches(
+    $readmeArchiveSourceArgumentCount = [regex]::Matches(
         $cloudReadme,
-        '(?m)^\s+\$archiveContext\s*$'
+        '(?m)^\s+\$archivePath\s*$'
     ).Count
-    $readmeGitArchiveCount = [regex]::Matches(
+    $readmeExactArchiveCount = [regex]::Matches(
         $cloudReadme,
-        '(?m)^\s*git archive --format=tar --output=\$archivePath \$sourceCommit\s*$'
+        '(?m)^\s*node scripts/release/create-exact-source-archive\.mjs `\r?\n\s+--source-commit \$sourceCommit `\r?\n\s+--output \$archivePath\s*$'
     ).Count
     if ($readmeBuildSubmissionCount -lt 1 -or
-        $readmeArchiveContextArgumentCount -ne $readmeBuildSubmissionCount -or
-        $readmeGitArchiveCount -ne $readmeBuildSubmissionCount) {
-        Add-ArchitectureError 'Every Discord deployment README Cloud Build submission must use a fresh exact git-archive context'
+        $readmeArchiveSourceArgumentCount -ne $readmeBuildSubmissionCount -or
+        $readmeExactArchiveCount -ne $readmeBuildSubmissionCount) {
+        Add-ArchitectureError 'Every Discord deployment README Cloud Build submission must submit the verified exact .tar.gz directly'
+    }
+    if ($cloudReadme -match '(?m)^\s*git(?:\s+-c\s+core\.autocrlf=false)?\s+archive\b') {
+        Add-ArchitectureError 'Discord deployment README must use the tested exact source archive helper, not a raw Git archive command'
     }
     if ($cloudReadme -match '(?m)^\s*\.\s*$' -or
         $cloudReadme -match '(?m)^\s*gcloud\s+builds\s+submit\b[^\r\n]*\s\.\s*$') {
@@ -1295,7 +1883,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $buildIndex = $deploymentDoc.Text.IndexOf(
-            '$buildConfig = Join-Path $archiveContext',
+            '$buildConfig = Join-Path $configContext',
             [System.StringComparison]::Ordinal
         )
         $deployIndex = $deploymentDoc.Text.IndexOf(

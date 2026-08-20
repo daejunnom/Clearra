@@ -385,10 +385,13 @@ build step. Dependency installation and the CTK3 package build run in preceding
 secret-free steps; only the final registration process receives the token. Run
 the config with the dedicated `clearra-command-sync` service account; do not
 grant that account Cloud Run deployment or Artifact Registry write access. A
-command-sync build must come from a fresh temporary `git archive` context of
-the same full accepted commit as the verified runtime; never submit the working
-tree or `.`. The exact command and cleanup procedure are pinned in
-`CLOUD_RUN_JOB_SERVICE.md`. A release must preserve this order:
+command-sync build must come from a fresh temporary commit-byte archive context
+of the same full accepted commit as the verified runtime. The canonical archive
+helper forces deterministic LF/modes and verifies every tar path, blob byte,
+mode, and safe symlink against that commit before producing a `.tar.gz`; never
+submit the working tree, `.`, or a Windows-extracted copy. The verified archive
+itself is the Cloud Build source. The exact command and cleanup procedure are
+pinned in `CLOUD_RUN_JOB_SERVICE.md`. A release must preserve this order:
 
 ```text
 Oracle release -> Gateway/Modal/job verification -> command sync
@@ -616,8 +619,8 @@ $sourceCommit = "<full-40-character-git-commit>"
 $repository = "daejunnom/Clearra"
 $buildServiceAccount = "projects/$projectId/serviceAccounts/clearra-build@$projectId.iam.gserviceaccount.com"
 $archiveRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("clearra-current-job-" + [Guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $archiveRoot "source.tar"
-$archiveContext = Join-Path $archiveRoot "context"
+$archivePath = Join-Path $archiveRoot "source.tar.gz"
+$configContext = Join-Path $archiveRoot "config"
 
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   throw "sourceCommit must be the full lowercase accepted commit SHA"
@@ -636,20 +639,23 @@ node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs 
 if ($LASTEXITCODE -ne 0) { throw "Cloud runtime IAM bootstrap/preflight failed" }
 
 try {
-  New-Item -ItemType Directory -Path $archiveContext -Force | Out-Null
-  git archive --format=tar --output=$archivePath $sourceCommit
-  if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
-  tar -xf $archivePath -C $archiveContext
-  if ($LASTEXITCODE -ne 0) { throw "archive extraction failed" }
+  New-Item -ItemType Directory -Path $configContext -Force | Out-Null
+  node scripts/release/create-exact-source-archive.mjs `
+    --source-commit $sourceCommit `
+    --output $archivePath
+  if ($LASTEXITCODE -ne 0) { throw "exact source archive failed" }
+  tar -xzf $archivePath -C $configContext `
+    apps/clearra-discord-bot/cloudbuild-current-job-service.yaml
+  if ($LASTEXITCODE -ne 0) { throw "build config extraction failed" }
 
-  $buildConfig = Join-Path $archiveContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"
+  $buildConfig = Join-Path $configContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"
   gcloud builds submit `
     --project=$projectId `
     --region=asia-northeast1 `
     --service-account=$buildServiceAccount `
     --config=$buildConfig `
     --substitutions=_REGION=asia-northeast1,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-$sourceCommit,_SOURCE_COMMIT=$sourceCommit `
-    $archiveContext
+    $archivePath
   if ($LASTEXITCODE -ne 0) { throw "Cloud Build submission failed" }
 } finally {
   if (Test-Path -LiteralPath $archiveRoot) {

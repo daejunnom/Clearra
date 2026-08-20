@@ -56,7 +56,13 @@ if ($LASTEXITCODE -ne 0) { throw "Policy Troubleshooter API prerequisite failed"
 ## Build the current-source image
 
 Build in Tokyo and use an immutable source-revision tag. The build context must
-be a temporary archive of the exact commit that passed canonical acceptance.
+be a temporary commit-byte archive of the exact commit that passed canonical
+acceptance. The archive helper forces LF export and deterministic modes, rejects
+local drift in either helper module, and compares every tar directory, regular
+file byte sequence, executable mode, and safe symlink against the accepted Git
+tree before producing a `.tar.gz`. This prevents Git attributes or a Windows Git
+setting from rewriting, omitting, substituting, or changing the mode of tracked
+source while exporting the commit.
 Never submit the working tree (`gcloud builds submit ... .`): tracked dirty
 changes and untracked files are outside the approved source identity.
 
@@ -67,8 +73,8 @@ $repository = "daejunnom/Clearra"
 $tag = "source-$sourceCommit"
 $buildServiceAccount = "projects/$projectId/serviceAccounts/clearra-build@$projectId.iam.gserviceaccount.com"
 $archiveRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("clearra-current-job-" + [Guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $archiveRoot "source.tar"
-$archiveContext = Join-Path $archiveRoot "context"
+$archivePath = Join-Path $archiveRoot "source.tar.gz"
+$configContext = Join-Path $archiveRoot "config"
 
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   throw "sourceCommit must be the full lowercase accepted commit SHA"
@@ -87,20 +93,23 @@ node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs 
 if ($LASTEXITCODE -ne 0) { throw "Cloud runtime IAM bootstrap/preflight failed" }
 
 try {
-  New-Item -ItemType Directory -Path $archiveContext -Force | Out-Null
-  git archive --format=tar --output=$archivePath $sourceCommit
-  if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
-  tar -xf $archivePath -C $archiveContext
-  if ($LASTEXITCODE -ne 0) { throw "archive extraction failed" }
+  New-Item -ItemType Directory -Path $configContext -Force | Out-Null
+  node scripts/release/create-exact-source-archive.mjs `
+    --source-commit $sourceCommit `
+    --output $archivePath
+  if ($LASTEXITCODE -ne 0) { throw "exact source archive failed" }
+  tar -xzf $archivePath -C $configContext `
+    apps/clearra-discord-bot/cloudbuild-current-job-service.yaml
+  if ($LASTEXITCODE -ne 0) { throw "build config extraction failed" }
 
-  $buildConfig = Join-Path $archiveContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"
+  $buildConfig = Join-Path $configContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"
   gcloud builds submit `
     --project=$projectId `
     --region=asia-northeast1 `
     --service-account=$buildServiceAccount `
     --config=$buildConfig `
     --substitutions="_REGION=asia-northeast1,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=$tag,_SOURCE_COMMIT=$sourceCommit" `
-    $archiveContext
+    $archivePath
   if ($LASTEXITCODE -ne 0) { throw "Cloud Build submission failed" }
 } finally {
   if (Test-Path -LiteralPath $archiveRoot) {
@@ -115,6 +124,12 @@ service repeats those probes before opening its listen port. Its final stage
 contains the CLI, job-service and command-policy sources, production Node
 dependencies, and built CTK3 package. Secrets are runtime bindings, never build
 arguments or image contents.
+
+The local `.tar.gz` itself is the Cloud Build source boundary. Do not submit a
+Windows-extracted directory, because that would discard the verified Unix mode
+and symlink contract. The same verified archive is the tracked public-source
+layer for an Oracle candidate: transfer it with its SHA-256, recheck the digest,
+and extract it on Oracle before applying the separately frozen private overlay.
 
 The full source commit is also baked into the image as both the source and
 engine build identity. The image build rejects missing, abbreviated, or
@@ -596,10 +611,12 @@ do not cap Cloud Run's eight-worker job.
 ## Exact-SHA command synchronization
 
 Command synchronization is a release mutation and must use a fresh temporary
-`git archive` context of the same accepted commit as the healthy Oracle/runtime
-release. It must not use a checkout directory, reuse a prior extracted context,
-or submit `.`. Perform this only after the runtime identity and bounded smoke
-job checks have passed:
+commit-byte archive context of the same accepted commit as the healthy
+Oracle/runtime release. It must use the canonical archive helper and submit the
+verified `.tar.gz` itself, not inherit the operator's Git line-ending settings,
+use a checkout directory, reuse a prior extracted context, or submit `.`.
+Perform this only after the runtime identity and bounded smoke job checks have
+passed:
 
 ```powershell
 $projectId = gcloud config get-value project
@@ -607,8 +624,8 @@ $sourceCommit = "<same-full-40-character-accepted-commit>"
 $repository = "daejunnom/Clearra"
 $serviceName = "clearra-current-job"
 $archiveRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("clearra-command-sync-" + [Guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $archiveRoot "source.tar"
-$archiveContext = Join-Path $archiveRoot "context"
+$archivePath = Join-Path $archiveRoot "source.tar.gz"
+$configContext = Join-Path $archiveRoot "config"
 
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   throw "sourceCommit must be the full lowercase accepted commit SHA"
@@ -630,18 +647,21 @@ node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs `
 if ($LASTEXITCODE -ne 0) { throw "accepted runtime preflight failed before command sync" }
 
 try {
-  New-Item -ItemType Directory -Path $archiveContext -Force | Out-Null
-  git archive --format=tar --output=$archivePath $sourceCommit
-  if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
-  tar -xf $archivePath -C $archiveContext
-  if ($LASTEXITCODE -ne 0) { throw "archive extraction failed" }
+  New-Item -ItemType Directory -Path $configContext -Force | Out-Null
+  node scripts/release/create-exact-source-archive.mjs `
+    --source-commit $sourceCommit `
+    --output $archivePath
+  if ($LASTEXITCODE -ne 0) { throw "exact source archive failed" }
+  tar -xzf $archivePath -C $configContext `
+    apps/clearra-discord-bot/cloudbuild-command-sync.yaml
+  if ($LASTEXITCODE -ne 0) { throw "command-sync config extraction failed" }
 
-  $syncConfig = Join-Path $archiveContext "apps/clearra-discord-bot/cloudbuild-command-sync.yaml"
+  $syncConfig = Join-Path $configContext "apps/clearra-discord-bot/cloudbuild-command-sync.yaml"
   gcloud builds submit `
     --project=$projectId `
     --region=asia-northeast1 `
     --config=$syncConfig `
-    $archiveContext
+    $archivePath
   if ($LASTEXITCODE -ne 0) { throw "command-sync Cloud Build submission failed" }
 } finally {
   if (Test-Path -LiteralPath $archiveRoot) {
@@ -662,8 +682,8 @@ $cliSha256 = "<verified-64-character-release-asset-sha256>"
 $sourceCommit = "<full-40-character-wrapper-source-commit>"
 $engineBuildId = "<full-40-character-v0.5.1-engine-commit>"
 $archiveRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("clearra-legacy-job-" + [Guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $archiveRoot "source.tar"
-$archiveContext = Join-Path $archiveRoot "context"
+$archivePath = Join-Path $archiveRoot "source.tar.gz"
+$configContext = Join-Path $archiveRoot "config"
 
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   throw "sourceCommit must be the full lowercase wrapper commit SHA"
@@ -674,20 +694,23 @@ if ($LASTEXITCODE -ne 0 -or $resolvedCommit -cne $sourceCommit) {
 }
 
 try {
-  New-Item -ItemType Directory -Path $archiveContext -Force | Out-Null
-  git archive --format=tar --output=$archivePath $sourceCommit
-  if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
-  tar -xf $archivePath -C $archiveContext
-  if ($LASTEXITCODE -ne 0) { throw "archive extraction failed" }
+  New-Item -ItemType Directory -Path $configContext -Force | Out-Null
+  node scripts/release/create-exact-source-archive.mjs `
+    --source-commit $sourceCommit `
+    --output $archivePath
+  if ($LASTEXITCODE -ne 0) { throw "exact source archive failed" }
+  tar -xzf $archivePath -C $configContext `
+    apps/clearra-discord-bot/cloudbuild-job-service.yaml
+  if ($LASTEXITCODE -ne 0) { throw "legacy build config extraction failed" }
 
-  $buildConfig = Join-Path $archiveContext "apps/clearra-discord-bot/cloudbuild-job-service.yaml"
+  $buildConfig = Join-Path $configContext "apps/clearra-discord-bot/cloudbuild-job-service.yaml"
   gcloud builds submit `
     --project=$projectId `
     --region=asia-northeast1 `
     --service-account=$buildServiceAccount `
     --config=$buildConfig `
     --substitutions="_IMAGE=$image,_CLEARRA_VERSION=0.5.1,_CLEARRA_CLI_SHA256=$cliSha256,_SOURCE_COMMIT=$sourceCommit,_ENGINE_BUILD_ID=$engineBuildId" `
-    $archiveContext
+    $archivePath
   if ($LASTEXITCODE -ne 0) { throw "legacy Cloud Build submission failed" }
 } finally {
   if (Test-Path -LiteralPath $archiveRoot) {
