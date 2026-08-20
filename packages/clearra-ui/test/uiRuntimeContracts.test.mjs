@@ -181,6 +181,52 @@ test('one main-thread capability snapshot survives a lower worker hardware repor
   assert.match(ctkDrawerSource, /workers: documentWorkerCount/u);
 });
 
+test('root worker runtime imports stay outside the component-bearing WASM barrel', () => {
+  const packageMetadata = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+  );
+  const rootWorkerSource = readFileSync(
+    new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url),
+    'utf8'
+  );
+  const wasmBarrelSource = readFileSync(
+    new URL('../src/lib/wasm/index.ts', import.meta.url),
+    'utf8'
+  );
+
+  assert.equal(
+    packageMetadata.exports['./wasm-host'],
+    './src/lib/wasm/hostCapabilitySnapshot.ts'
+  );
+  assert.match(wasmBarrelSource, /WasmTerminalShell\.svelte/u);
+  assert.match(
+    rootWorkerSource,
+    /import\s*\{[^;]*createHostCapabilitySnapshot[^;]*\}\s*from '@clearra\/ui\/wasm-host';/u
+  );
+  assert.doesNotMatch(
+    rootWorkerSource,
+    /import\s*\{[^;]*\}\s*from '@clearra\/ui\/wasm';/u
+  );
+  for (const file of [
+    'clearraWorker.ts',
+    'WasmJobRunner.ts',
+    'ClearraProductJobRunner.ts',
+    'DistributedWasmJobRunner.ts',
+    'clearraWasmRuntime.ts'
+  ]) {
+    const source = readFileSync(
+      new URL(`../../../apps/clearra-web/src/workers/${file}`, import.meta.url),
+      'utf8'
+    );
+    const barrelImports = source.match(
+      /import[^;]*from '@clearra\/ui\/wasm';/gu
+    ) ?? [];
+    for (const declaration of barrelImports) {
+      assert.match(declaration, /^import\s+type\b/u, file);
+    }
+  }
+});
+
 test('CPU-only policies suppress GPU warmup in build and forward production paths', () => {
   const normalized = production.normalizeRuntimeWarmupPolicy({
     backend: 'cpu',

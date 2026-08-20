@@ -3,11 +3,11 @@ import {
   isHostCapabilitySnapshot,
   normalizeRuntimeWarmupPolicy,
   resolveWorkerAuthority,
-  type ClearraWasmWorkerEvent,
   type HostCapabilitySnapshot,
   type RuntimeWarmupPolicy,
   type WorkerAuthorityReport
-} from '@clearra/ui/wasm';
+} from '@clearra/ui/wasm-host';
+import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 
 import { ClearraProductJobRunner } from './ClearraProductJobRunner';
 import {
