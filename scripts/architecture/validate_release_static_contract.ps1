@@ -464,6 +464,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $candidateSmoke = Read-Text 'apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs'
     $candidateSmokeTest = Read-Text 'apps/clearra-discord-bot/test/cloud-run-candidate-smoke.test.mjs'
     $oracleProofProducer = Read-Text 'apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs'
+    $oracleRuntimeAuthority = Read-Text 'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs'
     $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
     $oracleRollbackProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs'
     $oracleRestore = Read-Text 'apps/clearra-discord-bot/scripts/restore-oracle-release'
@@ -1587,7 +1588,11 @@ function Invoke-ReleaseIdentityGateValidation {
             'restore-oracle-release',
             'produce-oracle-deployment-proof.mjs rollback',
             'verify-oracle-rollback-proof.mjs',
-            '--prior-runtime-identity-sha256 $priorRuntimeIdentitySha256',
+            '--prior-runtime-authority-kind $priorRuntimeAuthorityKind',
+            '--prior-runtime-authority-sha256 $priorRuntimeAuthoritySha256',
+            'clearra.rollback.legacy-health-no-runtime.v1',
+            'missing identity never falls back',
+            'prior Cloud revision changed during rollback authority capture',
             '$serviceRolledBack = gcloud run services describe $serviceName',
             'prior Cloud revision did not become the sole 100-percent revision',
             '$candidateTaggedAfter = @($serviceAfter.status.traffic',
@@ -1749,7 +1754,6 @@ function Invoke-ReleaseIdentityGateValidation {
         'active Oracle release is outside the immutable release root',
         'active Oracle settings must be a root-owned regular file',
         'active Oracle job URL must be a credential-free HTTPS /jobs URL',
-        'prior Cloud runtime health identity is unavailable',
         '/etc/clearra-gateway/settings.pre-v0.7.5-',
         'openSync(temporaryPath, "wx", 0o600)',
         'linkSync(temporaryPath, backupPath)'
@@ -1763,7 +1767,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'active Oracle settings digest does not match the expected snapshot',
         'current Oracle Gateway process has no READY record',
         'Oracle Gateway has no fresh successful bounded end-to-end operation',
-        'restored prior runtime identity digest does not match the captured authority',
+        'restored prior runtime authority does not match the captured authority',
         '/run/clearra-deploy',
         'directoryMetadata.uid !== 0',
         '(directoryMetadata.mode & 0o777) !== 0o700',
@@ -1771,6 +1775,24 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($oracleProofProducer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Trusted Oracle proof producer is missing observation/security marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.rollback.runtime-authority.v1',
+        'clearra.rollback.runtime-identity.v1',
+        'clearra.rollback.legacy-health-no-runtime.v1',
+        '^v0\.7\.4-([0-9a-f]{7})$',
+        '^clearra-current-job-v075-([0-9a-f]{7})$',
+        'legacyRelease[1] !== legacyRevision[1]',
+        'assertPriorRuntimeAuthorityContext',
+        'Object.hasOwn(health, "runtime")',
+        'RUNTIME_HEALTH_KEYS',
+        'RUNTIME_IDENTITY_KEYS',
+        'dynamic-nonnegative-safe-integer',
+        'normalizeRuntimeIdentity(runtime)'
+    )) {
+        if ($oracleRuntimeAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle runtime authority is missing fail-closed marker '$required'"
         }
     }
     foreach ($proofConsumer in @(
@@ -1786,6 +1808,15 @@ function Invoke-ReleaseIdentityGateValidation {
             if ($proofConsumer.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
                 Add-ArchitectureError "Oracle $($proofConsumer.Name) proof consumer is missing one-shot root-only marker '$required'"
             }
+        }
+    }
+    foreach ($authorityConsumer in @(
+        @{ Name = 'capture'; Text = $oracleRollbackCapture; Marker = 'observePriorRuntimeAuthority' },
+        @{ Name = 'producer'; Text = $oracleProofProducer; Marker = 'observePriorRuntimeAuthority' },
+        @{ Name = 'rollback proof'; Text = $oracleRollbackProof; Marker = 'assertPriorRuntimeAuthorityContext' }
+    )) {
+        if ($authorityConsumer.Text.IndexOf($authorityConsumer.Marker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle $($authorityConsumer.Name) does not independently consume the runtime-authority context"
         }
     }
     foreach ($required in @(
@@ -1811,10 +1842,13 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($testContract in @(
-        @{ Name = 'capture'; Text = $oracleRollbackCaptureTest; Marker = 'freezes exact prior release, settings, job, and runtime' },
+        @{ Name = 'capture'; Text = $oracleRollbackCaptureTest; Marker = 'freezes exact v0.7.4 legacy authority without inventing identity' },
+        @{ Name = 'capture-v2'; Text = $oracleRollbackCaptureTest; Marker = 'rejects health or identity key drift before backup' },
         @{ Name = 'producer'; Text = $oracleProofProducerTest; Marker = 'rejects stale settings, process, and operation evidence' },
+        @{ Name = 'producer-v2'; Text = $oracleProofProducerTest; Marker = 'preserves strict v2 runtime authority' },
         @{ Name = 'candidate'; Text = $oracleCandidateProofTest; Marker = 'rejects every stale deployment authority' },
         @{ Name = 'rollback'; Text = $oracleRollbackProofTest; Marker = 'rejects stale authority and missing live checks' },
+        @{ Name = 'rollback-context'; Text = $oracleRollbackProofTest; Marker = 'independently rejects broadened legacy context' },
         @{ Name = 'restore'; Text = $oracleRestoreTest; Marker = 'keeps the service stopped after every partial or unverified restore' },
         @{ Name = 'tree'; Text = $oracleReleaseDigestTest; Marker = 'rejects an external or mutable symlink target' }
     )) {

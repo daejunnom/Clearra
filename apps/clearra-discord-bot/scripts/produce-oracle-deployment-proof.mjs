@@ -16,6 +16,7 @@ import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 
 import { currentRuntimeIdentityForCommit } from "../src/job-service/runtime-identity.mjs";
+import { observePriorRuntimeAuthority } from "./oracle-runtime-authority.mjs";
 import { releaseTreeSha256 } from "./release-tree-digest.mjs";
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
@@ -28,7 +29,11 @@ const SETTINGS_PATH = "/etc/clearra-gateway/settings";
 const SERVICE_NAME = "clearra-gateway.service";
 
 export function produceOracleCandidateProof(options, dependencies = {}) {
-  const sourceCommit = requiredMatch(options?.sourceCommit, COMMIT_PATTERN, "source commit");
+  const sourceCommit = requiredMatch(
+    options?.sourceCommit,
+    COMMIT_PATTERN,
+    "source commit",
+  );
   const candidateUrl = canonicalOrigin(options?.candidateUrl, "candidate URL");
   const candidateRevision = requiredMatch(
     options?.candidateRevision,
@@ -68,9 +73,11 @@ export function produceOracleCandidateProof(options, dependencies = {}) {
         CLEARRA_JOB_URL: jobUrl,
         CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: sourceCommit,
         CLEARRA_EXPECTED_ENGINE_BUILD_ID: sourceCommit,
-        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: runtimeIdentity.contractSchemaVersion,
+        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION:
+          runtimeIdentity.contractSchemaVersion,
         CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID: runtimeIdentity.supplySemanticsId,
-        CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION: runtimeIdentity.artifactSchemaVersion,
+        CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION:
+          runtimeIdentity.artifactSchemaVersion,
       },
     },
     dependencies,
@@ -113,10 +120,11 @@ export function produceOracleRollbackProof(options, dependencies = {}) {
     SHA256_PATTERN,
     "prior Oracle release tree digest",
   );
-  const priorRuntimeIdentitySha256 = requiredMatch(
-    options?.priorRuntimeIdentitySha256,
+  const priorRuntimeAuthorityKind = options?.priorRuntimeAuthorityKind;
+  const priorRuntimeAuthoritySha256 = requiredMatch(
+    options?.priorRuntimeAuthoritySha256,
     SHA256_PATTERN,
-    "prior runtime identity digest",
+    "prior runtime authority digest",
   );
   const deploymentNonce = requiredMatch(
     options?.deploymentNonce,
@@ -142,8 +150,16 @@ export function produceOracleRollbackProof(options, dependencies = {}) {
   } catch {
     throw new Error("restored prior runtime health identity is unavailable");
   }
-  if (runtimeIdentitySha256(priorHealth?.runtime) !== priorRuntimeIdentitySha256) {
-    throw new Error("restored prior runtime identity digest does not match the captured authority");
+  const observedRuntimeAuthority = observePriorRuntimeAuthority({
+    kind: priorRuntimeAuthorityKind,
+    priorRevision,
+    priorOracleReleaseId,
+    health: priorHealth,
+  });
+  if (observedRuntimeAuthority.sha256 !== priorRuntimeAuthoritySha256) {
+    throw new Error(
+      "restored prior runtime authority does not match the captured authority",
+    );
   }
   inspectActiveOracle(
     {
@@ -160,7 +176,8 @@ export function produceOracleRollbackProof(options, dependencies = {}) {
     priorOracleReleaseId,
     priorOracleReleaseSha256,
     priorOracleSettingsSha256,
-    priorRuntimeIdentitySha256,
+    priorRuntimeAuthorityKind: observedRuntimeAuthority.kind,
+    priorRuntimeAuthoritySha256,
     priorJobUrl,
     deploymentNonce,
     gatewayReady: true,
@@ -170,39 +187,42 @@ export function produceOracleRollbackProof(options, dependencies = {}) {
   return proof;
 }
 
-export function runtimeIdentitySha256(identity) {
-  if (!identity || typeof identity !== "object" || Array.isArray(identity)) {
-    throw new Error("runtime identity digest input must be an object");
-  }
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalJson(identity)), "utf8")
-    .digest("hex");
-}
-
 function inspectActiveOracle(options, dependencies) {
   const run = dependencies.run ?? runCommand;
-  const readText = dependencies.readText ?? ((path) => readFileSync(path, "utf8"));
+  const readText =
+    dependencies.readText ?? ((path) => readFileSync(path, "utf8"));
   const resolvePath = dependencies.realpath ?? realpathSync;
   const expectedRelease = `${RELEASE_ROOT}/${options.oracleReleaseId}`;
   const activeRelease = normalizePath(resolvePath(CURRENT_LINK));
   if (activeRelease !== expectedRelease) {
-    throw new Error("active Oracle symlink does not match the expected immutable release");
+    throw new Error(
+      "active Oracle symlink does not match the expected immutable release",
+    );
   }
-  const computeReleaseDigest = dependencies.releaseTreeSha256 ?? releaseTreeSha256;
+  const computeReleaseDigest =
+    dependencies.releaseTreeSha256 ?? releaseTreeSha256;
   if (
     options.oracleReleaseSha256 !== undefined &&
     computeReleaseDigest(activeRelease) !== options.oracleReleaseSha256
   ) {
-    throw new Error("active Oracle release tree digest does not match the expected artifact");
+    throw new Error(
+      "active Oracle release tree digest does not match the expected artifact",
+    );
   }
   const settings = readText(SETTINGS_PATH);
-  const actualSettingsSha256 = createHash("sha256").update(settings, "utf8").digest("hex");
+  const actualSettingsSha256 = createHash("sha256")
+    .update(settings, "utf8")
+    .digest("hex");
   if (actualSettingsSha256 !== options.oracleSettingsSha256) {
-    throw new Error("active Oracle settings digest does not match the expected snapshot");
+    throw new Error(
+      "active Oracle settings digest does not match the expected snapshot",
+    );
   }
   assertExactSettings(settings, options.expectedSettings);
 
-  if (run("/usr/bin/systemctl", ["is-active", SERVICE_NAME]).trim() !== "active") {
+  if (
+    run("/usr/bin/systemctl", ["is-active", SERVICE_NAME]).trim() !== "active"
+  ) {
     throw new Error("Oracle Gateway service is not active");
   }
   const pid = run("/usr/bin/systemctl", [
@@ -212,10 +232,13 @@ function inspectActiveOracle(options, dependencies) {
     "--value",
     SERVICE_NAME,
   ]).trim();
-  if (!/^[2-9][0-9]*$/.test(pid)) throw new Error("Oracle Gateway MainPID is invalid");
+  if (!/^[2-9][0-9]*$/.test(pid))
+    throw new Error("Oracle Gateway MainPID is invalid");
   const processCwd = normalizePath(resolvePath(`/proc/${pid}/cwd`));
   if (processCwd !== `${expectedRelease}/apps/clearra-discord-bot`) {
-    throw new Error("Oracle Gateway process is not running from the expected release");
+    throw new Error(
+      "Oracle Gateway process is not running from the expected release",
+    );
   }
   const journal = run("/usr/bin/journalctl", [
     `_SYSTEMD_UNIT=${SERVICE_NAME}`,
@@ -243,7 +266,9 @@ function inspectActiveOracle(options, dependencies) {
         Date.parse(record.at) >= verifiedAfterMs,
     );
   if (!operation) {
-    throw new Error("Oracle Gateway has no fresh successful bounded end-to-end operation");
+    throw new Error(
+      "Oracle Gateway has no fresh successful bounded end-to-end operation",
+    );
   }
 }
 
@@ -263,7 +288,9 @@ function assertExactSettings(serialized, expected) {
   for (const [key, expectedValue] of Object.entries(expected)) {
     const actual = values.get(key) ?? [];
     if (actual.length !== 1 || actual[0] !== expectedValue) {
-      throw new Error(`active Oracle setting ${key} does not match the deployment proof`);
+      throw new Error(
+        `active Oracle setting ${key} does not match the deployment proof`,
+      );
     }
   }
 }
@@ -273,8 +300,13 @@ function writeOneShotProof(path, proof) {
   const proofDirectory = dirname(proofPath);
   const proofKind = proof.sourceCommit ? "candidate" : "rollback";
   const expectedName = `clearra-oracle-${proofKind}-${proof.deploymentNonce}.json`;
-  if (proofDirectory !== "/run/clearra-deploy" || basename(proofPath) !== expectedName) {
-    throw new Error("Oracle deployment proof path must use its nonce-bound root-only namespace");
+  if (
+    proofDirectory !== "/run/clearra-deploy" ||
+    basename(proofPath) !== expectedName
+  ) {
+    throw new Error(
+      "Oracle deployment proof path must use its nonce-bound root-only namespace",
+    );
   }
   const directoryMetadata = lstatSync(proofDirectory);
   if (
@@ -283,7 +315,9 @@ function writeOneShotProof(path, proof) {
     directoryMetadata.uid !== 0 ||
     (directoryMetadata.mode & 0o777) !== 0o700
   ) {
-    throw new Error("Oracle deployment proof directory must be root-owned mode 0700");
+    throw new Error(
+      "Oracle deployment proof directory must be root-owned mode 0700",
+    );
   }
   const temporaryPath = `${proofPath}.tmp`;
   let descriptor;
@@ -356,7 +390,10 @@ function canonicalJobUrl(value) {
 function canonicalTimestamp(value) {
   const text = typeof value === "string" ? value.trim() : "";
   const timestamp = Date.parse(text);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== text) {
+  if (
+    !Number.isFinite(timestamp) ||
+    new Date(timestamp).toISOString() !== text
+  ) {
     throw new Error("verified-after must be a canonical ISO timestamp");
   }
   return text;
@@ -380,21 +417,6 @@ function parseJsonLine(line) {
   }
 }
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) return value.map(canonicalJson);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, canonicalJson(value[key])]),
-    );
-  }
-  if (["string", "number", "boolean"].includes(typeof value) || value === null) {
-    return value;
-  }
-  throw new Error("runtime identity contains a non-JSON value");
-}
-
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -412,7 +434,8 @@ async function main() {
       "prior-oracle-release-id": { type: "string" },
       "prior-oracle-release-sha256": { type: "string" },
       "prior-oracle-settings-sha256": { type: "string" },
-      "prior-runtime-identity-sha256": { type: "string" },
+      "prior-runtime-authority-kind": { type: "string" },
+      "prior-runtime-authority-sha256": { type: "string" },
       "prior-job-url": { type: "string" },
     },
     strict: true,
@@ -443,11 +466,14 @@ async function main() {
         priorOracleReleaseId: values["prior-oracle-release-id"],
         priorOracleReleaseSha256: values["prior-oracle-release-sha256"],
         priorOracleSettingsSha256: values["prior-oracle-settings-sha256"],
-        priorRuntimeIdentitySha256: values["prior-runtime-identity-sha256"],
+        priorRuntimeAuthorityKind: values["prior-runtime-authority-kind"],
+        priorRuntimeAuthoritySha256: values["prior-runtime-authority-sha256"],
         priorJobUrl: values["prior-job-url"],
       });
     } else {
-      throw new Error("Oracle deployment proof mode must be candidate or rollback");
+      throw new Error(
+        "Oracle deployment proof mode must be candidate or rollback",
+      );
     }
     console.log("oracle_deployment_proof=produced");
   } catch {

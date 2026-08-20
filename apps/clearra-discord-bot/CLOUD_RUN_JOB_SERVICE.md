@@ -298,6 +298,7 @@ $revisionSuffix = "v075-" + $sourceCommit.Substring(0, 7)
 $candidateTag = "candidate-" + $sourceCommit.Substring(0, 7)
 $runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
 $jobBearerSecret = "clearra-job-token"
+$priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
 $oracleCandidateReleaseId = "<immutable-candidate-Oracle-release-ID>"
 $oracleCandidateReleaseSha256 = "<candidate-Oracle-release-tree-SHA-256>"
 $oracleCandidateSettingsSha256 = "<candidate-non-secret-settings-SHA-256>"
@@ -325,6 +326,12 @@ $oracleRollbackProofPath = "/run/clearra-deploy/clearra-oracle-rollback-$deploym
 # must be root:root mode 0755 regular non-symlink files. An ubuntu-owned,
 # group/other-writable, or mode-0666 launcher is stale authority and must fail
 # before capture, candidate activation, or service mutation.
+# The explicit legacy authority kind is a one-time v0.7.4 migration bridge. It
+# accepts only an exact `v0.7.4-<sha7>` Oracle release paired with
+# `clearra-current-job-v075-<same-sha7>` and exactly the legacy
+# `status`/`activeJobs`/`workerLimit` health profile. It never synthesizes a
+# runtime identity. Future v2 rollbacks must instead explicitly use
+# `clearra.rollback.runtime-identity.v1`; missing identity never falls back.
 # Before every operation, the trusted wrapper independently computes the exact
 # script-release tree digest (without executing candidate-supplied code), rejects
 # dangling or out-of-tree links, and compares it with `--script-release-sha256`.
@@ -345,12 +352,14 @@ $priorRevision = [string]$priorTraffic[0].revisionName
 
 # The authenticated private wrapper runs the tracked capture helper as root on
 # Oracle before either Cloud or Oracle mutation. It returns only non-secret
-# release/settings/runtime digests and the root-owned settings backup path.
+# release/settings/runtime-authority digests and the root-owned settings backup
+# path.
 $priorCaptureJson = & $oracleRemoteWrapper `
   --operation capture-rollback-authority `
   --script-release-id $oracleCandidateReleaseId `
   --script-release-sha256 $oracleCandidateReleaseSha256 `
   --prior-revision $priorRevision `
+  --prior-runtime-authority-kind $priorRuntimeAuthorityKind `
   --deployment-nonce $deploymentNonce
 if ($LASTEXITCODE -ne 0) { throw "prior Oracle rollback authority capture failed" }
 try { $priorCapture = $priorCaptureJson | ConvertFrom-Json } catch {
@@ -363,7 +372,8 @@ if ($priorCapture.priorRevision -cne $priorRevision -or
     $priorCapture.priorOracleReleaseSha256 -cnotmatch '^[0-9a-f]{64}$' -or
     $priorCapture.priorOracleSettingsBackup -cnotmatch '^/etc/clearra-gateway/settings\.pre-v0\.7\.5-[0-9a-f]{64}$' -or
     $priorCapture.priorOracleSettingsSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-    $priorCapture.priorRuntimeIdentitySha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    $priorCapture.priorRuntimeAuthorityKind -cne $priorRuntimeAuthorityKind -or
+    $priorCapture.priorRuntimeAuthoritySha256 -cnotmatch '^[0-9a-f]{64}$' -or
     $priorCapture.priorJobUrl -cnotmatch '^https://[^/]+/jobs$') {
   throw "prior Oracle rollback authority capture is incomplete"
 }
@@ -372,8 +382,21 @@ $priorOracleReleaseId = [string]$priorCapture.priorOracleReleaseId
 $priorOracleReleaseSha256 = [string]$priorCapture.priorOracleReleaseSha256
 $priorOracleSettingsBackup = [string]$priorCapture.priorOracleSettingsBackup
 $priorOracleSettingsSha256 = [string]$priorCapture.priorOracleSettingsSha256
-$priorRuntimeIdentitySha256 = [string]$priorCapture.priorRuntimeIdentitySha256
+$priorRuntimeAuthorityKind = [string]$priorCapture.priorRuntimeAuthorityKind
+$priorRuntimeAuthoritySha256 = [string]$priorCapture.priorRuntimeAuthoritySha256
 $priorJobUrl = [string]$priorCapture.priorJobUrl
+
+# Bracket the stable-URL health observation with the exact immutable revision.
+# Any concurrent traffic drift invalidates the captured authority before deploy.
+$serviceAfterCapture = gcloud run services describe $serviceName `
+  --project=$projectId --region=asia-northeast1 --format=json | ConvertFrom-Json
+$priorTrafficAfterCapture = @($serviceAfterCapture.status.traffic | Where-Object {
+  [int]$_.percent -eq 100
+})
+if ($priorTrafficAfterCapture.Count -ne 1 -or
+    $priorTrafficAfterCapture[0].revisionName -cne $priorRevision) {
+  throw "prior Cloud revision changed during rollback authority capture"
+}
 
 gcloud run deploy $serviceName `
   --project=$projectId `
@@ -474,7 +497,8 @@ if ($candidateOracleExit -ne 0) {
     --prior-release-sha256 $priorOracleReleaseSha256 `
     --prior-settings-backup $priorOracleSettingsBackup `
     --prior-settings-sha256 $priorOracleSettingsSha256 `
-    --prior-runtime-identity-sha256 $priorRuntimeIdentitySha256 `
+    --prior-runtime-authority-kind $priorRuntimeAuthorityKind `
+    --prior-runtime-authority-sha256 $priorRuntimeAuthoritySha256 `
     --prior-job-url $priorJobUrl `
     --prior-revision $priorRevision `
     --proof $oracleRollbackProofPath `
@@ -544,7 +568,8 @@ if ($activeRolledBack.Count -ne 1 -or $activeRolledBack[0].revisionName -ne $pri
   --prior-release-sha256 $priorOracleReleaseSha256 `
   --prior-settings-backup $priorOracleSettingsBackup `
   --prior-settings-sha256 $priorOracleSettingsSha256 `
-  --prior-runtime-identity-sha256 $priorRuntimeIdentitySha256 `
+  --prior-runtime-authority-kind $priorRuntimeAuthorityKind `
+  --prior-runtime-authority-sha256 $priorRuntimeAuthoritySha256 `
   --prior-job-url $priorJobUrl `
   --prior-revision $priorRevision `
   --proof $oracleRollbackProofPath `

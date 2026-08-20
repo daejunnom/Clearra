@@ -5,8 +5,12 @@ import test from "node:test";
 import {
   produceOracleCandidateProof,
   produceOracleRollbackProof,
-  runtimeIdentitySha256,
 } from "../scripts/produce-oracle-deployment-proof.mjs";
+import {
+  observePriorRuntimeAuthority,
+  PRIOR_RUNTIME_IDENTITY_KIND,
+  PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
+} from "../scripts/oracle-runtime-authority.mjs";
 
 const sourceCommit = "7".repeat(40);
 const deploymentNonce = "9".repeat(64);
@@ -24,6 +28,21 @@ const candidateSettings = [
 const candidateSettingsSha256 = createHash("sha256")
   .update(candidateSettings, "utf8")
   .digest("hex");
+const priorRevision = "clearra-current-job-v075-0438d85";
+const priorReleaseId = "v0.7.4-0438d85";
+const legacyHealth = Object.freeze({
+  status: "ok",
+  activeJobs: 0,
+  workerLimit: 8,
+});
+const runtimeIdentity = Object.freeze({
+  schema: "clearra.runtime.identity.v2",
+  sourceCommit: "4".repeat(40),
+  engineBuildId: "4".repeat(40),
+  contractSchemaVersion: "clearra.search.contract.v2",
+  supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
+  artifactSchemaVersion: "clearra.solution-data.v1",
+});
 
 test("trusted Oracle producer observes active candidate and fresh bounded operation", () => {
   let written;
@@ -69,30 +88,39 @@ test("trusted Oracle producer rejects stale settings, process, and operation evi
   };
   assert.throws(
     () =>
-      produceOracleCandidateProof(options, fakeRuntime({
-        releaseId: "v0.7.5-stale",
-        releaseSha256: "a".repeat(64),
-        settings: candidateSettings,
-      })),
+      produceOracleCandidateProof(
+        options,
+        fakeRuntime({
+          releaseId: "v0.7.5-stale",
+          releaseSha256: "a".repeat(64),
+          settings: candidateSettings,
+        }),
+      ),
     /active Oracle symlink/u,
   );
   assert.throws(
     () =>
-      produceOracleCandidateProof(options, fakeRuntime({
-        releaseId: options.oracleReleaseId,
-        releaseSha256: "a".repeat(64),
-        settings: candidateSettings.replace(sourceCommit, "6".repeat(40)),
-      })),
+      produceOracleCandidateProof(
+        options,
+        fakeRuntime({
+          releaseId: options.oracleReleaseId,
+          releaseSha256: "a".repeat(64),
+          settings: candidateSettings.replace(sourceCommit, "6".repeat(40)),
+        }),
+      ),
     /settings digest/u,
   );
   assert.throws(
     () =>
-      produceOracleCandidateProof(options, fakeRuntime({
-        releaseId: options.oracleReleaseId,
-        releaseSha256: "a".repeat(64),
-        settings: candidateSettings,
-        operationAt: "2026-08-19T23:59:59.000Z",
-      })),
+      produceOracleCandidateProof(
+        options,
+        fakeRuntime({
+          releaseId: options.oracleReleaseId,
+          releaseSha256: "a".repeat(64),
+          settings: candidateSettings,
+          operationAt: "2026-08-19T23:59:59.000Z",
+        }),
+      ),
     /fresh successful bounded/u,
   );
 });
@@ -102,58 +130,132 @@ test("trusted Oracle producer binds rollback to restored prior deployment", () =
   const priorSettingsSha256 = createHash("sha256")
     .update(priorSettings, "utf8")
     .digest("hex");
-  const priorRuntimeIdentity = {
-    sourceCommit: "4".repeat(40),
-    engineBuildId: "4".repeat(40),
-    contractRevision: "clearra.search.contract.legacy-v1",
+  const priorRuntimeAuthority = observePriorRuntimeAuthority({
+    kind: PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
+    priorRevision,
+    priorOracleReleaseId: priorReleaseId,
+    health: legacyHealth,
+  });
+  const options = {
+    proofPath: "/tmp/clearra-oracle-rollback-test.json",
+    priorRevision,
+    priorOracleReleaseId: priorReleaseId,
+    priorOracleReleaseSha256: "b".repeat(64),
+    priorOracleSettingsSha256: priorSettingsSha256,
+    priorRuntimeAuthorityKind: priorRuntimeAuthority.kind,
+    priorRuntimeAuthoritySha256: priorRuntimeAuthority.sha256,
+    priorJobUrl: "https://stable.example.run.app/jobs",
+    deploymentNonce,
+    verifiedAfter,
   };
-  const priorRuntimeIdentitySha256 = runtimeIdentitySha256(priorRuntimeIdentity);
   const proof = produceOracleRollbackProof(
-    {
-      proofPath: "/tmp/clearra-oracle-rollback-test.json",
-      priorRevision: "clearra-current-job-v074-0438d85",
-      priorOracleReleaseId: "v0.7.4-0438d85-v6rollback",
-      priorOracleReleaseSha256: "b".repeat(64),
-      priorOracleSettingsSha256: priorSettingsSha256,
-      priorRuntimeIdentitySha256,
-      priorJobUrl: "https://stable.example.run.app/jobs",
-      deploymentNonce,
-      verifiedAfter,
-    },
+    options,
     fakeRuntime({
-      releaseId: "v0.7.4-0438d85-v6rollback",
+      releaseId: priorReleaseId,
       releaseSha256: "b".repeat(64),
       settings: priorSettings,
       operationAt: "2026-08-20T00:00:02.000Z",
-      healthRuntimeIdentity: priorRuntimeIdentity,
+      health: { ...legacyHealth, activeJobs: 1 },
     }),
   );
-  assert.equal(proof.priorRevision, "clearra-current-job-v074-0438d85");
+  assert.equal(proof.priorRevision, priorRevision);
+  assert.equal(
+    proof.priorRuntimeAuthorityKind,
+    PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
+  );
+  assert.equal(proof.priorRuntimeAuthoritySha256, priorRuntimeAuthority.sha256);
   assert.equal(proof.gatewayReady, true);
   assert.equal(proof.boundedJobSucceeded, true);
 
+  for (const [label, health, error] of [
+    ["worker drift", { ...legacyHealth, workerLimit: 7 }, /runtime authority/u],
+    [
+      "identity appeared",
+      { ...legacyHealth, runtime: runtimeIdentity },
+      /must not contain/u,
+    ],
+    ["profile drift", { ...legacyHealth, extra: true }, /fields do not match/u],
+  ]) {
+    assert.throws(
+      () =>
+        produceOracleRollbackProof(
+          options,
+          fakeRuntime({
+            releaseId: priorReleaseId,
+            releaseSha256: "b".repeat(64),
+            settings: priorSettings,
+            health,
+          }),
+        ),
+      error,
+      label,
+    );
+  }
+});
+
+test("trusted Oracle rollback producer preserves strict v2 runtime authority", () => {
+  const priorSettings = "CLEARRA_JOB_URL=https://stable.example.run.app/jobs\n";
+  const priorSettingsSha256 = createHash("sha256")
+    .update(priorSettings, "utf8")
+    .digest("hex");
+  const capturedHealth = { ...legacyHealth, runtime: runtimeIdentity };
+  const authority = observePriorRuntimeAuthority({
+    kind: PRIOR_RUNTIME_IDENTITY_KIND,
+    priorRevision,
+    priorOracleReleaseId: priorReleaseId,
+    health: capturedHealth,
+  });
+  const options = {
+    proofPath: "/tmp/clearra-oracle-rollback-test.json",
+    priorRevision,
+    priorOracleReleaseId: priorReleaseId,
+    priorOracleReleaseSha256: "b".repeat(64),
+    priorOracleSettingsSha256: priorSettingsSha256,
+    priorRuntimeAuthorityKind: authority.kind,
+    priorRuntimeAuthoritySha256: authority.sha256,
+    priorJobUrl: "https://stable.example.run.app/jobs",
+    deploymentNonce,
+    verifiedAfter,
+  };
+  const dependencies = {
+    releaseId: priorReleaseId,
+    releaseSha256: "b".repeat(64),
+    settings: priorSettings,
+  };
+
+  assert.doesNotThrow(() =>
+    produceOracleRollbackProof(
+      options,
+      fakeRuntime({
+        ...dependencies,
+        health: { ...capturedHealth, activeJobs: 1 },
+      }),
+    ),
+  );
   assert.throws(
     () =>
       produceOracleRollbackProof(
-        {
-          proofPath: "/tmp/clearra-oracle-rollback-test.json",
-          priorRevision: "clearra-current-job-v074-0438d85",
-          priorOracleReleaseId: "v0.7.4-0438d85-v6rollback",
-          priorOracleReleaseSha256: "b".repeat(64),
-          priorOracleSettingsSha256: priorSettingsSha256,
-          priorRuntimeIdentitySha256,
-          priorJobUrl: "https://stable.example.run.app/jobs",
-          deploymentNonce,
-          verifiedAfter,
-        },
+        options,
         fakeRuntime({
-          releaseId: "v0.7.4-0438d85-v6rollback",
-          releaseSha256: "b".repeat(64),
-          settings: priorSettings,
-          healthRuntimeIdentity: { ...priorRuntimeIdentity, engineBuildId: "5".repeat(40) },
+          ...dependencies,
+          health: {
+            ...capturedHealth,
+            runtime: { ...runtimeIdentity, extra: true },
+          },
         }),
       ),
-    /runtime identity digest/u,
+    /identity fields do not match/u,
+  );
+  assert.throws(
+    () =>
+      produceOracleRollbackProof(
+        options,
+        fakeRuntime({
+          ...dependencies,
+          health: legacyHealth,
+        }),
+      ),
+    /identity is unavailable/u,
   );
 });
 
@@ -162,11 +264,7 @@ function fakeRuntime({
   releaseSha256 = "a".repeat(64),
   settings,
   operationAt = "2026-08-20T00:00:01.000Z",
-  healthRuntimeIdentity = {
-    sourceCommit: "4".repeat(40),
-    engineBuildId: "4".repeat(40),
-    contractRevision: "clearra.search.contract.legacy-v1",
-  },
+  health = { ...legacyHealth, runtime: runtimeIdentity },
   writeProof = () => {},
 }) {
   const releasePath = `/opt/clearra/releases/${releaseId}`;
@@ -179,12 +277,15 @@ function fakeRuntime({
     },
     realpath(path) {
       if (path === "/opt/clearra/current") return releasePath;
-      if (path === "/proc/4242/cwd") return `${releasePath}/apps/clearra-discord-bot`;
+      if (path === "/proc/4242/cwd")
+        return `${releasePath}/apps/clearra-discord-bot`;
       throw new Error(`unexpected realpath ${path}`);
     },
     run(command, arguments_) {
-      if (command === "/usr/bin/systemctl" && arguments_[0] === "is-active") return "active\n";
-      if (command === "/usr/bin/systemctl" && arguments_[0] === "show") return "4242\n";
+      if (command === "/usr/bin/systemctl" && arguments_[0] === "is-active")
+        return "active\n";
+      if (command === "/usr/bin/systemctl" && arguments_[0] === "show")
+        return "4242\n";
       if (command === "/usr/bin/journalctl") {
         return [
           "Oracle Gateway connected as ClearraBot; Gateway slash ingress enabled.",
@@ -201,7 +302,7 @@ function fakeRuntime({
         ].join("\n");
       }
       if (command === "/usr/bin/curl") {
-        return JSON.stringify({ runtime: healthRuntimeIdentity });
+        return JSON.stringify(health);
       }
       throw new Error(`unexpected command ${command}`);
     },

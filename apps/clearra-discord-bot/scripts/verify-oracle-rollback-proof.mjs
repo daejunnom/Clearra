@@ -3,6 +3,8 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
+import { assertPriorRuntimeAuthorityContext } from "./oracle-runtime-authority.mjs";
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const RELEASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PROOF_MAX_BYTES = 4096;
@@ -28,10 +30,16 @@ export function verifyOracleRollbackProof(proof, expected) {
     SHA256_PATTERN,
     "prior Oracle release tree digest",
   );
-  const priorRuntimeIdentitySha256 = requiredMatch(
-    expected?.priorRuntimeIdentitySha256,
+  const { kind: priorRuntimeAuthorityKind } =
+    assertPriorRuntimeAuthorityContext(
+      expected?.priorRuntimeAuthorityKind,
+      priorRevision,
+      priorOracleReleaseId,
+    );
+  const priorRuntimeAuthoritySha256 = requiredMatch(
+    expected?.priorRuntimeAuthoritySha256,
     SHA256_PATTERN,
-    "prior runtime identity digest",
+    "prior runtime authority digest",
   );
   const deploymentNonce = requiredMatch(
     expected?.deploymentNonce,
@@ -51,27 +59,33 @@ export function verifyOracleRollbackProof(proof, expected) {
     "priorOracleReleaseSha256",
     "priorOracleSettingsSha256",
     "priorRevision",
-    "priorRuntimeIdentitySha256",
+    "priorRuntimeAuthorityKind",
+    "priorRuntimeAuthoritySha256",
   ];
   const actualKeys = Object.keys(proof).sort();
   if (
     actualKeys.length !== expectedKeys.length ||
     actualKeys.some((key, index) => key !== expectedKeys[index])
   ) {
-    throw new Error("Oracle rollback proof must contain exactly the approved fields");
+    throw new Error(
+      "Oracle rollback proof must contain exactly the approved fields",
+    );
   }
   if (
     proof.priorRevision !== priorRevision ||
     proof.priorOracleReleaseId !== priorOracleReleaseId ||
     proof.priorOracleReleaseSha256 !== priorOracleReleaseSha256 ||
     proof.priorOracleSettingsSha256 !== priorOracleSettingsSha256 ||
-    proof.priorRuntimeIdentitySha256 !== priorRuntimeIdentitySha256 ||
+    proof.priorRuntimeAuthorityKind !== priorRuntimeAuthorityKind ||
+    proof.priorRuntimeAuthoritySha256 !== priorRuntimeAuthoritySha256 ||
     proof.priorJobUrl !== priorJobUrl ||
     proof.deploymentNonce !== deploymentNonce ||
     proof.gatewayReady !== true ||
     proof.boundedJobSucceeded !== true
   ) {
-    throw new Error("Oracle rollback proof does not match the captured prior deployment");
+    throw new Error(
+      "Oracle rollback proof does not match the captured prior deployment",
+    );
   }
   return Object.freeze({ priorRevision, priorOracleReleaseId, priorJobUrl });
 }
@@ -79,12 +93,19 @@ export function verifyOracleRollbackProof(proof, expected) {
 export function consumeOracleRollbackProof(path, expected, dependencies = {}) {
   const proofPath = (dependencies.resolvePath ?? resolve)(String(path ?? ""));
   const expectedName = `clearra-oracle-rollback-${expected?.deploymentNonce}.json`;
-  if (dirname(proofPath) !== "/run/clearra-deploy" || basename(proofPath) !== expectedName) {
-    throw new Error("Oracle rollback proof path is not nonce-bound to the root-only namespace");
+  if (
+    dirname(proofPath) !== "/run/clearra-deploy" ||
+    basename(proofPath) !== expectedName
+  ) {
+    throw new Error(
+      "Oracle rollback proof path is not nonce-bound to the root-only namespace",
+    );
   }
   const inspect = dependencies.lstat ?? lstatSync;
-  const read = dependencies.readText ?? ((candidate) => readFileSync(candidate, "utf8"));
-  const remove = dependencies.remove ?? ((candidate) => rmSync(candidate, { force: false }));
+  const read =
+    dependencies.readText ?? ((candidate) => readFileSync(candidate, "utf8"));
+  const remove =
+    dependencies.remove ?? ((candidate) => rmSync(candidate, { force: false }));
   const metadata = inspect(proofPath);
   if (
     !metadata.isFile() ||
@@ -92,7 +113,9 @@ export function consumeOracleRollbackProof(path, expected, dependencies = {}) {
     metadata.uid !== 0 ||
     (metadata.mode & 0o777) !== 0o600
   ) {
-    throw new Error("Oracle rollback proof must be a root-owned mode-0600 regular file");
+    throw new Error(
+      "Oracle rollback proof must be a root-owned mode-0600 regular file",
+    );
   }
   if (metadata.size < 2 || metadata.size > PROOF_MAX_BYTES) {
     throw new Error("Oracle rollback proof size is invalid");
@@ -123,7 +146,9 @@ function canonicalJobUrl(value) {
     url.hash ||
     url.pathname !== "/jobs"
   ) {
-    throw new Error("prior Oracle job URL must be a credential-free HTTPS /jobs URL");
+    throw new Error(
+      "prior Oracle job URL must be a credential-free HTTPS /jobs URL",
+    );
   }
   return url.href;
 }
@@ -142,7 +167,8 @@ async function main() {
       "prior-oracle-release-id": { type: "string" },
       "prior-oracle-release-sha256": { type: "string" },
       "prior-oracle-settings-sha256": { type: "string" },
-      "prior-runtime-identity-sha256": { type: "string" },
+      "prior-runtime-authority-kind": { type: "string" },
+      "prior-runtime-authority-sha256": { type: "string" },
       "prior-job-url": { type: "string" },
       "deployment-nonce": { type: "string" },
     },
@@ -154,7 +180,8 @@ async function main() {
       priorOracleReleaseId: values["prior-oracle-release-id"],
       priorOracleReleaseSha256: values["prior-oracle-release-sha256"],
       priorOracleSettingsSha256: values["prior-oracle-settings-sha256"],
-      priorRuntimeIdentitySha256: values["prior-runtime-identity-sha256"],
+      priorRuntimeAuthorityKind: values["prior-runtime-authority-kind"],
+      priorRuntimeAuthoritySha256: values["prior-runtime-authority-sha256"],
       priorJobUrl: values["prior-job-url"],
       deploymentNonce: values["deployment-nonce"],
     });

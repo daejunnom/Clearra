@@ -15,9 +15,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 
-import {
-  runtimeIdentitySha256,
-} from "./produce-oracle-deployment-proof.mjs";
+import { observePriorRuntimeAuthority } from "./oracle-runtime-authority.mjs";
 import { releaseTreeSha256 } from "./release-tree-digest.mjs";
 
 const RELEASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -37,10 +35,13 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     SHA256_PATTERN,
     "deployment nonce",
   );
+  const priorRuntimeAuthorityKind = options?.priorRuntimeAuthorityKind;
   const resolvePath = dependencies.realpath ?? realpathSync;
-  const readSettings = dependencies.readSettings ?? ((path) => readFileSync(path));
+  const readSettings =
+    dependencies.readSettings ?? ((path) => readFileSync(path));
   const inspect = dependencies.lstat ?? lstatSync;
-  const computeReleaseDigest = dependencies.releaseTreeSha256 ?? releaseTreeSha256;
+  const computeReleaseDigest =
+    dependencies.releaseTreeSha256 ?? releaseTreeSha256;
   const run = dependencies.run ?? runCommand;
   const writeBackup = dependencies.writeBackup ?? writeSettingsBackup;
 
@@ -50,7 +51,9 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     priorOracleRelease !== `${RELEASE_ROOT}/${priorOracleReleaseId}` ||
     !RELEASE_PATTERN.test(priorOracleReleaseId)
   ) {
-    throw new Error("active Oracle release is outside the immutable release root");
+    throw new Error(
+      "active Oracle release is outside the immutable release root",
+    );
   }
   const priorOracleReleaseSha256 = computeReleaseDigest(priorOracleRelease);
   if (!SHA256_PATTERN.test(priorOracleReleaseSha256)) {
@@ -66,7 +69,9 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     throw new Error("active Oracle settings must be a root-owned regular file");
   }
   const settingsBytes = readSettings(SETTINGS_PATH);
-  const priorOracleSettingsSha256 = createHash("sha256").update(settingsBytes).digest("hex");
+  const priorOracleSettingsSha256 = createHash("sha256")
+    .update(settingsBytes)
+    .digest("hex");
   const settingsText = Buffer.from(settingsBytes).toString("utf8");
   const priorJobUrl = exactSetting(settingsText, "CLEARRA_JOB_URL");
   const healthUrl = canonicalHealthUrl(priorJobUrl);
@@ -85,9 +90,13 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
   } catch {
     throw new Error("prior Cloud runtime health identity is unavailable");
   }
-  const priorRuntimeIdentitySha256 = runtimeIdentitySha256(health?.runtime);
-  const priorOracleSettingsBackup =
-    `/etc/clearra-gateway/settings.pre-v0.7.5-${deploymentNonce}`;
+  const priorRuntimeAuthority = observePriorRuntimeAuthority({
+    kind: priorRuntimeAuthorityKind,
+    priorRevision,
+    priorOracleReleaseId,
+    health,
+  });
+  const priorOracleSettingsBackup = `/etc/clearra-gateway/settings.pre-v0.7.5-${deploymentNonce}`;
   writeBackup(priorOracleSettingsBackup, settingsBytes);
 
   return Object.freeze({
@@ -97,7 +106,8 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     priorOracleReleaseSha256,
     priorOracleSettingsBackup,
     priorOracleSettingsSha256,
-    priorRuntimeIdentitySha256,
+    priorRuntimeAuthorityKind: priorRuntimeAuthority.kind,
+    priorRuntimeAuthoritySha256: priorRuntimeAuthority.sha256,
     priorJobUrl,
     deploymentNonce,
   });
@@ -109,7 +119,9 @@ function writeSettingsBackup(path, bytes) {
     dirname(backupPath) !== "/etc/clearra-gateway" ||
     !basename(backupPath).startsWith("settings.pre-v0.7.5-")
   ) {
-    throw new Error("Oracle settings backup path is outside the approved namespace");
+    throw new Error(
+      "Oracle settings backup path is outside the approved namespace",
+    );
   }
   const temporaryPath = `${backupPath}.tmp`;
   let descriptor;
@@ -149,7 +161,9 @@ function exactSetting(serialized, key) {
     url.hash ||
     url.pathname !== "/jobs"
   ) {
-    throw new Error("active Oracle job URL must be a credential-free HTTPS /jobs URL");
+    throw new Error(
+      "active Oracle job URL must be a credential-free HTTPS /jobs URL",
+    );
   }
   return `${url.origin}/jobs`;
 }
@@ -185,6 +199,7 @@ async function main() {
   const { values } = parseArgs({
     options: {
       "prior-revision": { type: "string" },
+      "prior-runtime-authority-kind": { type: "string" },
       "deployment-nonce": { type: "string" },
     },
     strict: true,
@@ -195,6 +210,7 @@ async function main() {
     }
     const captured = captureOracleRollbackAuthority({
       priorRevision: values["prior-revision"],
+      priorRuntimeAuthorityKind: values["prior-runtime-authority-kind"],
       deploymentNonce: values["deployment-nonce"],
     });
     console.log(JSON.stringify(captured));

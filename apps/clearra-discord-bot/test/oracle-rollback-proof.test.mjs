@@ -5,13 +5,15 @@ import {
   consumeOracleRollbackProof,
   verifyOracleRollbackProof,
 } from "../scripts/verify-oracle-rollback-proof.mjs";
+import { PRIOR_RUNTIME_LEGACY_HEALTH_KIND } from "../scripts/oracle-runtime-authority.mjs";
 
 const expected = Object.freeze({
-  priorRevision: "clearra-current-job-v074-0438d85",
-  priorOracleReleaseId: "v0.7.4-0438d85-v6rollback",
+  priorRevision: "clearra-current-job-v075-0438d85",
+  priorOracleReleaseId: "v0.7.4-0438d85",
   priorOracleReleaseSha256: "a".repeat(64),
   priorOracleSettingsSha256: "7".repeat(64),
-  priorRuntimeIdentitySha256: "8".repeat(64),
+  priorRuntimeAuthorityKind: PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
+  priorRuntimeAuthoritySha256: "8".repeat(64),
   priorJobUrl: "https://clearra-current-job.example.run.app/jobs",
   deploymentNonce: "9".repeat(64),
 });
@@ -35,23 +37,69 @@ test("Oracle rollback proof rejects stale authority and missing live checks", ()
     ["priorOracleReleaseId", "v0.7.4-stale"],
     ["priorOracleReleaseSha256", "3".repeat(64)],
     ["priorOracleSettingsSha256", "6".repeat(64)],
-    ["priorRuntimeIdentitySha256", "5".repeat(64)],
+    ["priorRuntimeAuthorityKind", "clearra.rollback.runtime-identity.v1"],
+    ["priorRuntimeAuthoritySha256", "5".repeat(64)],
     ["priorJobUrl", "https://stale.example.run.app/jobs"],
     ["deploymentNonce", "4".repeat(64)],
   ]) {
     assert.throws(
-      () => verifyOracleRollbackProof(proof, { ...expected, [field]: replacement }),
-      /does not match the captured prior deployment/u,
+      () =>
+        verifyOracleRollbackProof(proof, { ...expected, [field]: replacement }),
+      /does not match the captured prior deployment|restricted to the matching v0\.7\.4/u,
     );
   }
   assert.throws(
-    () => verifyOracleRollbackProof({ ...proof, gatewayReady: false }, expected),
+    () =>
+      verifyOracleRollbackProof({ ...proof, gatewayReady: false }, expected),
     /does not match the captured prior deployment/u,
   );
   assert.throws(
-    () => verifyOracleRollbackProof({ ...proof, boundedJobSucceeded: false }, expected),
+    () =>
+      verifyOracleRollbackProof(
+        { ...proof, boundedJobSucceeded: false },
+        expected,
+      ),
     /does not match the captured prior deployment/u,
   );
+});
+
+test("Oracle rollback proof rejects the removed identity field and every key drift", () => {
+  assert.throws(
+    () =>
+      verifyOracleRollbackProof(
+        { ...proof, priorRuntimeIdentitySha256: "8".repeat(64) },
+        expected,
+      ),
+    /exactly the approved fields/u,
+  );
+  const { priorRuntimeAuthorityKind: _removedKind, ...missingKind } = proof;
+  assert.throws(
+    () => verifyOracleRollbackProof(missingKind, expected),
+    /exactly the approved fields/u,
+  );
+});
+
+test("Oracle rollback consumer independently rejects broadened legacy context", () => {
+  for (const replacement of [
+    {
+      priorRevision: "clearra-current-job-v074-0438d85",
+      priorOracleReleaseId: "v0.7.4-0438d85",
+    },
+    {
+      priorRevision: "clearra-current-job-v075-0438d85",
+      priorOracleReleaseId: "v0.7.4-0438d85-extra",
+    },
+    {
+      priorRevision: "clearra-current-job-v075-deadbee",
+      priorOracleReleaseId: "v0.7.4-0438d85",
+    },
+  ]) {
+    const broadened = { ...expected, ...replacement };
+    assert.throws(
+      () => verifyOracleRollbackProof({ ...proof, ...replacement }, broadened),
+      /restricted to the matching v0\.7\.4/u,
+    );
+  }
 });
 
 test("Oracle rollback proof file is root-only and consumed exactly once", () => {
@@ -76,5 +124,8 @@ test("Oracle rollback proof file is root-only and consumed exactly once", () => 
   };
   consumeOracleRollbackProof(path, expected, dependencies);
   assert.equal(present, false);
-  assert.throws(() => consumeOracleRollbackProof(path, expected, dependencies), /missing/u);
+  assert.throws(
+    () => consumeOracleRollbackProof(path, expected, dependencies),
+    /missing/u,
+  );
 });

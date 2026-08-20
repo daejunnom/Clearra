@@ -28,8 +28,9 @@
 - Strengthened Discord and release provenance with a shared five-field product
   identity across CLI, WASM, Desktop, Cloud jobs, and Gateway; production
   remote-execution fail-closed checks; immutable exact-commit build contexts;
-  zero-traffic tagged Cloud Run cutovers; and re-runnable accepted-SHA Pages
-  and Release gates.
+  zero-traffic tagged Cloud Run cutovers; an explicit downgrade-resistant
+  v0.7.4 rollback authority that never fabricates missing runtime identity; and
+  re-runnable accepted-SHA Pages and Release gates.
 
 ## 0.7.4 - 2026-08-12
 
