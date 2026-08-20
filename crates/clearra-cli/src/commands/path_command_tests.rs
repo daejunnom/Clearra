@@ -27,10 +27,8 @@ fn path_command_renders_retained_solution_trace_steps() {
         "retained_trace_count: {}",
         expected_path_retained_trace_count()
     )));
-    assert!(output.stdout().contains("score_post_processing: true"));
-    assert!(output
-        .stdout()
-        .contains("score_accuracy_level: basic-approximation"));
+    assert!(output.stdout().contains("score_post_processing: false"));
+    assert!(output.stdout().contains("score_accuracy_level: none"));
     assert!(output.stdout().contains("trace_steps:"));
 }
 
@@ -54,7 +52,7 @@ fn path_command_reports_trace_requirement_when_no_solution_trace_exists() {
 
 fn expected_path_solution_count() -> usize {
     if cfg!(feature = "native-c-core") {
-        1536
+        4
     } else {
         1
     }
@@ -62,7 +60,7 @@ fn expected_path_solution_count() -> usize {
 
 fn expected_path_retained_trace_count() -> usize {
     if cfg!(feature = "native-c-core") {
-        64
+        4
     } else {
         1
     }

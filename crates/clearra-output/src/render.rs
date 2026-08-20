@@ -169,14 +169,17 @@ impl RenderExactOutputGate {
 pub struct RenderFormatDispatcher;
 
 impl RenderFormatDispatcher {
-    pub fn render(message: &RenderMessage, format: RenderFormat) -> String {
+    pub fn render(
+        message: &RenderMessage,
+        format: RenderFormat,
+    ) -> Result<String, clearra_fumen::codec::FumenLikeWriteError> {
         match format {
             RenderFormat::Text | RenderFormat::TextVerbose | RenderFormat::TextDiagnostics => {
-                TextWriter::lines(
-                    &message.text_lines_with_profile(format.text_profile().expect("text profile")),
-                )
+                Ok(TextWriter::lines(&message.text_lines_with_profile(
+                    format.text_profile().expect("text profile"),
+                )))
             }
-            RenderFormat::Json => JsonWriter::write(&message.json_contract()),
+            RenderFormat::Json => Ok(JsonWriter::write(&message.json_contract())),
             RenderFormat::FumenLike => {
                 FumenLikeWriter::write(&FumenLikeTrace::new(message.fumen_pages()))
             }
@@ -187,14 +190,14 @@ impl RenderFormatDispatcher {
     pub fn render_replay_trace(
         trace: &clearra_replay::ReplayTrace,
         format: RenderFormat,
-    ) -> String {
+    ) -> Result<String, clearra_fumen::codec::FumenLikeWriteError> {
         match format {
             RenderFormat::Text | RenderFormat::TextVerbose | RenderFormat::TextDiagnostics => {
-                TextWriter::replay_trace(trace)
+                Ok(TextWriter::replay_trace(trace))
             }
-            RenderFormat::Json => {
-                JsonWriter::write(&crate::json::JsonContract::from_replay_trace(trace))
-            }
+            RenderFormat::Json => Ok(JsonWriter::write(
+                &crate::json::JsonContract::from_replay_trace(trace),
+            )),
             RenderFormat::FumenLike => FumenLikeWriter::write_replay_trace(trace),
         }
     }

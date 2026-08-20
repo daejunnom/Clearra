@@ -18,6 +18,32 @@ import {
 } from "../src/config.mjs";
 import { findSlashCommand } from "../src/discord/slash-command-catalog.mjs";
 import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
+import {
+  ARTIFACT_SCHEMA_VERSION,
+  LEGACY_SEARCH_CONTRACT_REVISION,
+  RUNTIME_IDENTITY_SCHEMA,
+  SEARCH_CONTRACT_REVISION,
+  SUPPLY_SEMANTICS_ID,
+} from "../src/job-service/runtime-identity.mjs";
+
+const TEST_RUNTIME_IDENTITY = Object.freeze({
+  schema: RUNTIME_IDENTITY_SCHEMA,
+  sourceCommit: "1".repeat(40),
+  engineBuildId: "1".repeat(40),
+  contractSchemaVersion: SEARCH_CONTRACT_REVISION,
+  supplySemanticsId: SUPPLY_SEMANTICS_ID,
+  artifactSchemaVersion: ARTIFACT_SCHEMA_VERSION,
+});
+const TEST_REMOTE_RUNTIME_ENVIRONMENT = Object.freeze({
+  CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: TEST_RUNTIME_IDENTITY.sourceCommit,
+  CLEARRA_EXPECTED_ENGINE_BUILD_ID: TEST_RUNTIME_IDENTITY.engineBuildId,
+  CLEARRA_EXPECTED_JOB_CONTRACT_REVISION:
+    TEST_RUNTIME_IDENTITY.contractSchemaVersion,
+  CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID:
+    TEST_RUNTIME_IDENTITY.supplySemanticsId,
+  CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION:
+    TEST_RUNTIME_IDENTITY.artifactSchemaVersion,
+});
 
 test("Clearrabot applies direction-specific search and interaction limits", () => {
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
@@ -52,7 +78,11 @@ test("search timeout policy classifies native and sfinder argv consistently", ()
     [["verify", "pc"], "default"],
   ];
   for (const [arguments_, expected] of examples) {
-    assert.equal(searchTimeoutClass(arguments_), expected, arguments_.join(" "));
+    assert.equal(
+      searchTimeoutClass(arguments_),
+      expected,
+      arguments_.join(" "),
+    );
   }
   assert.equal(isSetupSearchArguments(["setup-finder"]), true);
   assert.equal(isSetupSearchArguments(["setup-finder"]), true);
@@ -85,15 +115,27 @@ test("every represented sfinder search keeps its direction-specific deadline", (
 
   for (const command of reverse) {
     assert.equal(searchTimeoutClass(["sfinder", command]), "reverse", command);
-    assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 300_000, command);
+    assert.equal(
+      searchTimeoutMsForArguments(["sfinder", command]),
+      300_000,
+      command,
+    );
   }
   for (const command of forward) {
     assert.equal(searchTimeoutClass(["sfinder", command]), "forward", command);
-    assert.equal(searchTimeoutMsForArguments(["sfinder", command]), 900_000, command);
+    assert.equal(
+      searchTimeoutMsForArguments(["sfinder", command]),
+      900_000,
+      command,
+    );
   }
   for (const command of ["pc-setup", "best-setup", "dpc-finder"]) {
     assert.equal(searchTimeoutClass(["setup-finder"]), "setup", command);
-    assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000, command);
+    assert.equal(
+      searchTimeoutMsForArguments(["setup-finder"]),
+      900_000,
+      command,
+    );
   }
 });
 
@@ -148,10 +190,11 @@ test("directional search timeout settings remain independently configurable", ()
   assert.equal(config.forwardSearchTimeoutMs, 3_000);
   assert.equal(config.setupProgressNoticeMs, 4_000);
   assert.throws(
-    () => loadDiscordBotConfig({
-      DISCORD_TOKEN: "test-token",
-      CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "0",
-    }),
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "0",
+      }),
     /numeric setting is invalid/,
   );
 });
@@ -178,10 +221,11 @@ test("Discord bot administrator IDs are an immutable validated allow-list", () =
   ]);
   assert.equal(Object.isFrozen(config.discordAdminUserIds), true);
   assert.throws(
-    () => loadDiscordBotConfig({
-      DISCORD_TOKEN: "test-token",
-      CLEARRA_DISCORD_ADMIN_USER_IDS: "not-a-snowflake",
-    }),
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_DISCORD_ADMIN_USER_IDS: "not-a-snowflake",
+      }),
     /CLEARRA_DISCORD_ADMIN_USER_IDS is invalid/,
   );
 });
@@ -207,10 +251,11 @@ test("Discord HTTP interaction ingress is retired in favor of Oracle Gateway", (
   assert.equal("publicKey" in config, false);
   assert.equal("interactionPath" in config, false);
   assert.throws(
-    () => loadDiscordBotConfig({
-      K_SERVICE: "stale-interaction-service",
-      DISCORD_TOKEN: "test-token",
-    }),
+    () =>
+      loadDiscordBotConfig({
+        K_SERVICE: "stale-interaction-service",
+        DISCORD_TOKEN: "test-token",
+      }),
     /must run on Oracle, not Cloud Run/,
   );
 });
@@ -218,6 +263,7 @@ test("Discord HTTP interaction ingress is retired in favor of Oracle Gateway", (
 test("Clearrabot validates and configures the HTTP job service", () => {
   const config = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",
+    ...TEST_REMOTE_RUNTIME_ENVIRONMENT,
     CLEARRA_JOB_URL: "https://jobs.example.test/clearra/jobs",
     CLEARRA_JOB_TOKEN: "opaque-test-token",
     CLEARRA_JOB_POLL_INTERVAL_MS: "40",
@@ -252,6 +298,135 @@ test("Clearrabot validates and configures the HTTP job service", () => {
   );
 });
 
+test("production remote execution requires exact source and engine identities", () => {
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        NODE_ENV: "production",
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+        CLEARRA_JOB_TOKEN: "job-token",
+        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+        CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID: SUPPLY_SEMANTICS_ID,
+        CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION: ARTIFACT_SCHEMA_VERSION,
+      }),
+    /full Git commit SHA/,
+  );
+  const config = loadDiscordBotConfig({
+    NODE_ENV: "production",
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+    CLEARRA_JOB_TOKEN: "job-token",
+    ...TEST_REMOTE_RUNTIME_ENVIRONMENT,
+  });
+  assert.deepEqual(config.expectedJobRuntimeIdentity, TEST_RUNTIME_IDENTITY);
+});
+
+test("external remote execution requires explicit endpoint and exact current identity without NODE_ENV", () => {
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_WORKER_AUTHORITY: "remote",
+        CLEARRA_JOB_TOKEN: "job-token",
+      }),
+    /requires an explicit CLEARRA_JOB_URL/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+        CLEARRA_JOB_TOKEN: "job-token",
+      }),
+    /must declare its contract schema version/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_WORKER_AUTHORITY: "gateway",
+        CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+        CLEARRA_JOB_TOKEN: "job-token",
+      }),
+    /must declare its contract schema version/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+        CLEARRA_JOB_TOKEN: "job-token",
+        CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "1".repeat(40),
+        CLEARRA_EXPECTED_ENGINE_BUILD_ID: "1".repeat(40),
+        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION:
+          LEGACY_SEARCH_CONTRACT_REVISION,
+        CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID:
+          "clearra.supply.legacy-v1",
+        CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION:
+          "clearra.solution-data.legacy-v1",
+      }),
+    /External or production remote Clearra execution requires clearra\.search\.contract\.v2/,
+  );
+});
+
+test("production remote execution requires an explicit HTTPS job URL", () => {
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        NODE_ENV: "production",
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_TOKEN: "job-token",
+        CLEARRA_WORKER_AUTHORITY: "remote",
+        CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "1".repeat(40),
+        CLEARRA_EXPECTED_ENGINE_BUILD_ID: "1".repeat(40),
+        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+      }),
+    /requires an explicit CLEARRA_JOB_URL/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        NODE_ENV: "production",
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_JOB_URL: "http://127.0.0.1:8787/jobs",
+        CLEARRA_JOB_TOKEN: "job-token",
+        CLEARRA_WORKER_AUTHORITY: "remote",
+        CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "1".repeat(40),
+        CLEARRA_EXPECTED_ENGINE_BUILD_ID: "1".repeat(40),
+        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+      }),
+    /requires an explicit HTTPS CLEARRA_JOB_URL/,
+  );
+});
+
+test("production remote execution requires the current search contract", () => {
+  const environment = {
+    NODE_ENV: "production",
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
+    CLEARRA_JOB_TOKEN: "job-token",
+    CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "1".repeat(40),
+    CLEARRA_EXPECTED_ENGINE_BUILD_ID: "1".repeat(40),
+  };
+  assert.throws(
+    () => loadDiscordBotConfig(environment),
+    /must declare its contract schema version/,
+  );
+  assert.throws(
+    () =>
+      loadDiscordBotConfig({
+        ...environment,
+        CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: LEGACY_SEARCH_CONTRACT_REVISION,
+        CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID:
+          "clearra.supply.legacy-v1",
+        CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION:
+          "clearra.solution-data.legacy-v1",
+      }),
+    new RegExp(`requires ${SEARCH_CONTRACT_REVISION.replaceAll(".", "\\.")}`),
+  );
+});
+
 test("Oracle rendering is explicit while ambient text stays allow-listed and remote", () => {
   const defaults = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
   assert.equal(defaults.oracleRenderEnabled, false);
@@ -277,6 +452,7 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
     () =>
       loadDiscordBotConfig({
         DISCORD_TOKEN: "test-token",
+        ...TEST_REMOTE_RUNTIME_ENVIRONMENT,
         CLEARRA_ORACLE_RENDER_ENABLED: "1",
         CLEARRA_ORACLE_TEXT_ENABLED: "1",
         CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS: "123456789012345678",
@@ -287,6 +463,7 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
     () =>
       loadDiscordBotConfig({
         DISCORD_TOKEN: "test-token",
+        ...TEST_REMOTE_RUNTIME_ENVIRONMENT,
         CLEARRA_ORACLE_RENDER_ENABLED: "1",
         CLEARRA_ORACLE_TEXT_ENABLED: "1",
         CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
@@ -315,6 +492,7 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
 
   const textProxy = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",
+    ...TEST_REMOTE_RUNTIME_ENVIRONMENT,
     CLEARRA_ORACLE_RENDER_ENABLED: "1",
     CLEARRA_ORACLE_TEXT_ENABLED: "1",
     CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS: "123456789012345678",
@@ -336,23 +514,26 @@ test("Oracle rendering is explicit while ambient text stays allow-listed and rem
     "456789012345678901",
   ]);
   assert.throws(
-    () => loadDiscordBotConfig({
-      DISCORD_TOKEN: "test-token",
-      CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS: "345678901234567890",
-    }),
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS: "345678901234567890",
+      }),
     /requires Oracle message ingress/,
   );
   assert.throws(
-    () => loadDiscordBotConfig({
-      DISCORD_TOKEN: "test-token",
-      CLEARRA_ORACLE_RENDER_ENABLED: "1",
-      CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS: "not-a-snowflake",
-    }),
+    () =>
+      loadDiscordBotConfig({
+        DISCORD_TOKEN: "test-token",
+        CLEARRA_ORACLE_RENDER_ENABLED: "1",
+        CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS: "not-a-snowflake",
+      }),
     /CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS is invalid/,
   );
 
   const globalTextProxy = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",
+    ...TEST_REMOTE_RUNTIME_ENVIRONMENT,
     CLEARRA_ORACLE_RENDER_ENABLED: "1",
     CLEARRA_ORACLE_TEXT_ENABLED: "1",
     CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS: "1",
@@ -499,7 +680,10 @@ test("Discord commands always use the Clearra exact product path", () => {
       "text",
     ],
   );
-  assert.equal(parseClearraMessage("!setup --remaining SZ --priority pc"), null);
+  assert.equal(
+    parseClearraMessage("!setup --remaining SZ --priority pc"),
+    null,
+  );
   assert.equal(parseClearraMessage("!clearra pc --lines 2"), null);
   assert.deepEqual(
     prepareClearraArguments(
@@ -714,10 +898,7 @@ test("spin-structure uses the native parallel policy and a canonical operational
     "--format",
     "text",
   ]);
-  assert.equal(
-    canonicalClearraOperationalCommand(prepared),
-    "spin-structure",
-  );
+  assert.equal(canonicalClearraOperationalCommand(prepared), "spin-structure");
   assert.equal(
     canonicalClearraOperationalCommand("spin-structure"),
     "spin-structure",
@@ -858,6 +1039,49 @@ test("Clearra executor submits argv-specific reverse and forward deadlines", asy
   assert.deepEqual(
     submitted.map(({ deadlineUnixMs }) => deadlineUnixMs),
     [15_000, 25_000, 25_000, 12_000],
+  );
+});
+
+test("Clearra executor sends and verifies the exact runtime identity", async () => {
+  let submitted;
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
+    expectedRuntimeIdentity: TEST_RUNTIME_IDENTITY,
+    createJobId: () => "job-identity-1",
+    fetch: async (_url, request) => {
+      submitted = JSON.parse(request.body);
+      return jobResponse({
+        id: submitted.id,
+        state: "completed",
+        runtime: TEST_RUNTIME_IDENTITY,
+        result: { exitCode: 0, signal: null, stdout: "", stderr: "" },
+      });
+    },
+  });
+  await executor.execute(["pc", "--lines", "4"]);
+  assert.deepEqual(submitted.expectedRuntime, TEST_RUNTIME_IDENTITY);
+
+  const mismatched = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
+    expectedRuntimeIdentity: TEST_RUNTIME_IDENTITY,
+    createJobId: () => "job-identity-2",
+    fetch: async () =>
+      jobResponse({
+        id: "job-identity-2",
+        state: "completed",
+        runtime: {
+          ...TEST_RUNTIME_IDENTITY,
+          sourceCommit: "2".repeat(40),
+          engineBuildId: "2".repeat(40),
+        },
+        result: { exitCode: 0, signal: null, stdout: "", stderr: "" },
+      }),
+  });
+  await assert.rejects(
+    mismatched.execute(["pc", "--lines", "4"]),
+    /runtime identity does not match/,
   );
 });
 

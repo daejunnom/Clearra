@@ -1,6 +1,7 @@
 <script lang="ts">
   import { AlertTriangle, Check, Copy } from '@lucide/svelte';
 
+  import { writeClipboardText } from './clipboardText';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import {
     encodeFinesseWitnessCtk,
@@ -17,8 +18,11 @@
   export let language: WorkspaceLanguage;
 
   let state: 'idle' | 'copied' | 'failed' = 'idle';
-  let failureKey: 'solutionCopyFailed' | 'fumenCopyHeightUnsupported' =
-    'solutionCopyFailed';
+  let failureKey:
+    | 'solutionCopyFailed'
+    | 'fumenCopyHeightUnsupported'
+    | 'fumenCommentTooLong'
+    | 'invalidFumenComment' = 'solutionCopyFailed';
   let timer = 0;
 
   $: label = (
@@ -35,16 +39,25 @@
       const source = format === 'ctk' && finesseWitness
         ? encodeFinesseWitnessCtk(finesseWitness)
         : encodeSolution(page, format);
-      await navigator.clipboard.writeText(source);
+      await writeClipboardText(source);
       failureKey = 'solutionCopyFailed';
       setState('copied');
     } catch (error) {
-      failureKey =
-        error instanceof SolutionExportError && error.code === 'fumen-height-unsupported'
-          ? 'fumenCopyHeightUnsupported'
-          : 'solutionCopyFailed';
+      failureKey = solutionCopyFailureKey(error);
       setState('failed');
     }
+  }
+
+  function solutionCopyFailureKey(error: unknown): typeof failureKey {
+    const code = error instanceof SolutionExportError
+      ? error.code
+      : error instanceof Error
+        ? error.message
+        : '';
+    if (code === 'fumen-height-unsupported') return 'fumenCopyHeightUnsupported';
+    if (code === 'fumen-comment-too-long') return 'fumenCommentTooLong';
+    if (code === 'invalid-fumen-comment') return 'invalidFumenComment';
+    return 'solutionCopyFailed';
   }
 
   function setState(next: typeof state) {
@@ -81,14 +94,21 @@
     cursor: pointer;
     display: inline-flex;
     flex: 0 0 auto;
-    height: 28px;
+    min-height: 28px;
     justify-content: center;
     padding: 0;
-    width: 28px;
+    min-width: 28px;
   }
 
   button:disabled {
     cursor: default;
     opacity: .35;
+  }
+
+  @media (pointer: coarse) {
+    button {
+      min-height: 44px;
+      min-width: 44px;
+    }
   }
 </style>

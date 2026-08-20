@@ -22,7 +22,7 @@ fn fixture_fumens_roundtrip_through_clearra_trace_contract() {
         fixture_count += 1;
         let encoded = fs::read_to_string(&path).expect("fumen fixture");
         let trace = FumenLikeReader::read(encoded.trim()).expect("fixture must decode");
-        let reencoded = FumenLikeWriter::write(&trace);
+        let reencoded = FumenLikeWriter::write(&trace).expect("reencoded fixture");
         let decoded_again = FumenLikeReader::read(&reencoded).expect("roundtrip decode");
 
         assert_eq!(decoded_again, trace, "fixture roundtrip failed: {path:?}");

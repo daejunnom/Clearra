@@ -7,8 +7,8 @@ use clearra_core_ffi::problem::{
 };
 use clearra_core_ffi::{
     CBuildVariantView, CBuildVariantViewError, CNativeBuildVariantView, CPackingCandidate,
-    C_BUILDUP_HOLD_BRANCH_CURRENT, C_BUILDUP_HOLD_BRANCH_STORE_CURRENT,
-    C_BUILDUP_HOLD_BRANCH_SWAP_HELD,
+    C_BUILDUP_HOLD_BRANCH_CURRENT, C_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL,
+    C_BUILDUP_HOLD_BRANCH_STORE_CURRENT, C_BUILDUP_HOLD_BRANCH_SWAP_HELD,
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_replay::{BuildVariantOperation, HoldDecision};
@@ -299,6 +299,13 @@ fn hold_decisions_from_trace_steps(
                 stored_piece: replay_piece_from_c(step.incoming_piece)?,
                 drawn_piece: replay_piece_from_c(step.piece)?,
             }),
+            C_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL => {
+                Ok(HoldDecision::ReleaseHeldAtTerminal {
+                    held_piece: replay_piece_from_c(step.held_piece_before).map_err(|_| {
+                        BuildVariantReplayEvidenceError::MissingHeldPiece { step_index }
+                    })?,
+                })
+            }
             branch_kind => {
                 Err(BuildVariantReplayEvidenceError::UnsupportedHoldBranch { branch_kind })
             }

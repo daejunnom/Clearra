@@ -15,8 +15,14 @@
     Trash2,
     Upload
   } from '@lucide/svelte';
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { getContext, onDestroy, onMount, tick } from 'svelte';
 
+  import {
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
+    sharedBrowserHostCapabilitySnapshot,
+    type HostCapabilitySnapshot
+  } from '../wasm';
   import { writeClipboardText } from './clipboardText';
   import CtkColorBoardEditor from './CtkColorBoardEditor.svelte';
   import { CtkDrawerDocument } from './ctkDrawerDocument';
@@ -44,6 +50,7 @@
     encodeFieldDocumentAsync,
     openFieldDocument
   } from './fieldInterchange';
+  import { fieldImportFailureMessageKey } from './fieldImportFailure';
   import {
     CTK3_FILE_ACCEPT,
     installGlobalDocumentDrop,
@@ -55,12 +62,20 @@
   import {
     preferredWorkspaceLanguage,
     workspaceMessage,
-    type WorkspaceLanguage
+    type WorkspaceLanguage,
+    type WorkspaceMessageKey
   } from './workspaceI18n';
 
   type CopyState = 'idle' | 'loading' | 'copied' | 'failed';
   export let initialDocument: string | undefined = undefined;
   export let viewerMode = false;
+
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const documentWorkerCount = automaticWorkerAuthority(
+    hostCapabilitySnapshot
+  ).workersEffective;
 
   let language: WorkspaceLanguage = 'en';
   let currentPage = blankPage(8);
@@ -71,6 +86,7 @@
   let pendingImportSource: string | null = null;
   let importSummary = '';
   let importFailed = false;
+  let importFailureKey: WorkspaceMessageKey = 'fieldImportInvalid';
   let importLoading = false;
   let pageLoading = false;
   let copyFormat: 'fumen' | 'ctk' = 'ctk';
@@ -134,11 +150,17 @@
     window.addEventListener('pageshow', handlePageShow);
     const removeDocumentPaste = installGlobalDocumentPaste({
       importSource: importPastedDocument,
-      importFailed: () => (importFailed = true)
+      importFailed: () => {
+        importFailureKey = 'fieldImportInvalid';
+        importFailed = true;
+      }
     });
     const removeDocumentDrop = installGlobalDocumentDrop({
       importSource: importPastedDocument,
-      importFailed: () => (importFailed = true),
+      importFailed: () => {
+        importFailureKey = 'fieldImportInvalid';
+        importFailed = true;
+      },
       dragActive: (active) => (documentDragActive = active)
     });
     return () => {
@@ -318,6 +340,7 @@
       previewPages = new Map(previewPages).set(nextIndex, clonePage(page));
     } catch (error) {
       if (!isAbortError(error) && token === pageLoadToken && !closed) {
+        importFailureKey = fieldImportFailureMessageKey(error);
         importFailed = true;
       }
     } finally {
@@ -335,6 +358,7 @@
       throwIfAborted(lifecycleController.signal);
       const source = sourceOverride ?? pendingImportSource ?? importValue;
       const reader = openFieldDocument(source, {
+        workers: documentWorkerCount,
         workerFactory: createCtkDocumentWorker,
         signal: lifecycleController.signal
       });
@@ -352,7 +376,10 @@
       importFailed = false;
     } catch (error) {
       nextModel?.close();
-      if (!isAbortError(error) && !closed) importFailed = true;
+      if (!isAbortError(error) && !closed) {
+        importFailureKey = fieldImportFailureMessageKey(error);
+        importFailed = true;
+      }
     } finally {
       if (pendingImportModel === nextModel) pendingImportModel = null;
       if (!closed) importLoading = false;
@@ -371,8 +398,11 @@
     if (!file) return;
     try {
       await importPastedDocument(await sourceFromCtk3File(file));
-    } catch {
-      if (!closed) importFailed = true;
+    } catch (error) {
+      if (!closed) {
+        importFailureKey = fieldImportFailureMessageKey(error);
+        importFailed = true;
+      }
     }
   }
 
@@ -435,13 +465,17 @@
     if (original) return original;
     if (format === 'ctk') {
       return encodeCtk3PageSourceAsync(documentModel, {
+        workers: documentWorkerCount,
         workerFactory: createCtkDocumentWorker,
         signal
       });
     }
     const materialized = await documentModel.materialize(signal);
     throwIfAborted(signal);
-    return encodeFieldDocumentAsync(materialized, format, { signal });
+    return encodeFieldDocumentAsync(materialized, format, {
+      signal,
+      workers: documentWorkerCount
+    });
   }
 
   function setCopyState(next: 'copied' | 'failed') {
@@ -522,6 +556,7 @@
     pendingImportSource = null;
     importSummary = '';
     importValue = (event.currentTarget as HTMLTextAreaElement).value;
+    importFailureKey = 'fieldImportInvalid';
     importFailed = false;
   }
 
@@ -532,6 +567,7 @@
     pendingImportSource = source;
     importValue = '';
     importSummary = documentSummary(source.length);
+    importFailureKey = 'fieldImportInvalid';
     importFailed = false;
   }
 
@@ -833,7 +869,7 @@
         {label('loadCtk3File')}
       </button>
       {#if importFailed}
-        <p class="error" role="alert">{label('fieldImportInvalid')}</p>
+        <p class="error" role="alert">{label(importFailureKey)}</p>
       {/if}
     </div>
 

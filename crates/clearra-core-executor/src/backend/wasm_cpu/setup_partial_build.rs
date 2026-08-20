@@ -1237,7 +1237,7 @@ mod tests {
     use super::*;
     use crate::backend::wasm_cpu::{
         geometry::{pack_piece_counts, GeometryFamilyCompileAdvance, GeometryFamilyCompileSession},
-        packing_projection_hold_enabled,
+        packing_hold_projection,
         setup_finder::compile_setup_admissible_prefixes,
     };
     use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
@@ -1507,10 +1507,11 @@ mod tests {
                 .piece_source()
                 .materialized_universe()
                 .expect("materialized universe");
-            let family = universe.packing_multiset_family(
+            let family = universe.packing_multiset_family_for_execution(
                 10,
                 problem.initial_hold(),
-                packing_projection_hold_enabled(problem),
+                problem.supply().hold_enabled(),
+                packing_hold_projection(problem),
             );
             target_keys.extend(family.groups().iter().map(|group| group.key()));
         }
@@ -1634,10 +1635,11 @@ mod tests {
                 .piece_source()
                 .materialized_universe()
                 .expect("materialized universe");
-            let family = universe.packing_multiset_family(
+            let family = universe.packing_multiset_family_for_execution(
                 10,
                 problem.initial_hold(),
-                packing_projection_hold_enabled(problem),
+                problem.supply().hold_enabled(),
+                packing_hold_projection(problem),
             );
             target_keys.extend(family.groups().iter().map(|group| group.key()));
         }

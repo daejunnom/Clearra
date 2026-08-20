@@ -337,6 +337,21 @@ fn scenario_pc_command_accepts_visible_seven_queue_knowledge() {
 }
 
 #[test]
+fn pc_and_scenario_commands_reject_visible_seven_minimum_cover() {
+    for command in [
+        "clearra pc --lines 4 --patterns P7P4 --queue-knowledge visible-7 --objective minimum-cover",
+        "clearra pc --lines 4 --patterns P7P4 --board-mask 0 --height 4 --pieces 10 --queue-knowledge visible-7 --objective minimum-cover",
+    ] {
+        let error = WebCommandParser::parse(command)
+            .expect_err("visible-7 minimum-cover must fail before AppRequest construction");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert!(error
+            .message()
+            .contains("visible-seven-minimum-cover-unsupported"));
+    }
+}
+
+#[test]
 fn opening_pc_command_preserves_observed_source_piece_count() {
     let request = WebCommandParser::parse("clearra pc --lines 4 --backend cpu --source-pieces 10")
         .expect("web command")

@@ -45,20 +45,24 @@
         on:click={() => (value = 'ctk')}
       >CTK3</button>
     </div>
-    <SolutionCopyAllButton
-      format={value}
-      {language}
-      {solutionKeys}
-      {loadPages}
-      {keySource}
-    />
-    {#if value === 'ctk'}
-      <SolutionDownloadButton
+    <div class="copy-primary-action">
+      <SolutionCopyAllButton
+        format={value}
         {language}
         {solutionKeys}
         {loadPages}
         {keySource}
       />
+    </div>
+    {#if value === 'ctk'}
+      <div class="download-action">
+        <SolutionDownloadButton
+          {language}
+          {solutionKeys}
+          {loadPages}
+          {keySource}
+        />
+      </div>
     {/if}
   </div>
 </div>
@@ -71,6 +75,7 @@
     gap: 20px;
     justify-content: space-between;
     min-width: 0;
+    max-width: 100%;
     padding: 10px 12px;
   }
   .copy-format.compact { background: transparent; justify-content: flex-end; padding: 0; }
@@ -107,6 +112,18 @@
     flex: 0 0 auto;
     gap: 7px;
     flex-wrap: wrap;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .copy-primary-action,
+  .download-action {
+    min-width: 0;
+  }
+
+  .copy-primary-action :global(button),
+  .download-action :global(button) {
+    max-width: 100%;
   }
 
   button {
@@ -140,7 +157,31 @@
     .copy-actions {
       align-items: stretch;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) repeat(2, auto);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      width: 100%;
     }
+
+    .segments {
+      grid-column: 1 / -1;
+      width: 100%;
+    }
+
+    .copy-primary-action :global(button),
+    .download-action :global(button) {
+      justify-content: center;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      padding-inline: 7px;
+      width: 100%;
+    }
+  }
+
+  @media (max-width: 360px) {
+    .copy-actions { grid-template-columns: minmax(0, 1fr); }
+    .segments { grid-column: 1; }
+  }
+
+  @media (pointer: coarse) {
+    button { min-height: 44px; }
   }
 </style>

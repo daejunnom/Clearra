@@ -912,6 +912,7 @@ struct WitnessProductState {
     subset: u16,
     extra_draw: u8,
     hold_code: u8,
+    terminal_projection_consumed: bool,
     active_patterns: u64,
 }
 
@@ -920,6 +921,7 @@ struct FixedWitnessProductState {
     subset: u16,
     extra_draw: u8,
     hold_code: u8,
+    terminal_projection_consumed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -969,6 +971,7 @@ struct FixedWitnessBranch {
     desired_piece: u8,
     next_extra_draw: u8,
     next_hold_code: u8,
+    terminal_projection_consumed: bool,
     hold_kind: &'static str,
 }
 
@@ -976,6 +979,7 @@ const EMPTY_FIXED_WITNESS_BRANCH: FixedWitnessBranch = FixedWitnessBranch {
     desired_piece: 0,
     next_extra_draw: 0,
     next_hold_code: 0,
+    terminal_projection_consumed: false,
     hold_kind: "",
 };
 
@@ -1704,6 +1708,7 @@ fn find_first_pattern_witness(
             subset: 0,
             extra_draw: 0,
             hold_code: initial_hold_code,
+            terminal_projection_consumed: false,
         };
         let accepted = visit_fixed_witness_state(
             problem,
@@ -1758,6 +1763,7 @@ fn find_first_pattern_witness(
             subset: 0,
             extra_draw: 0,
             hold_code: initial_hold_code,
+            terminal_projection_consumed: false,
             active_patterns,
         };
         if let Some(accepted_bits) = visit_witness_state(
@@ -1801,6 +1807,8 @@ fn fixed_witness_branches(
     sequence: &[PieceKind],
     queue_position: usize,
     hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    terminal_step: bool,
     state: FixedWitnessProductState,
 ) -> FixedWitnessBranches {
     let mut branches = FixedWitnessBranches {
@@ -1808,6 +1816,23 @@ fn fixed_witness_branches(
         len: 0,
     };
     let Some(current_piece) = sequence.get(queue_position).copied() else {
+        if super::terminal_hold_projection::finite_terminal_release_allowed(
+            sequence.len(),
+            queue_position,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            state.terminal_projection_consumed,
+            state.hold_code != 0,
+            terminal_step,
+        ) {
+            branches.push(FixedWitnessBranch {
+                desired_piece: state.hold_code,
+                next_extra_draw: state.extra_draw,
+                next_hold_code: 0,
+                terminal_projection_consumed: true,
+                hold_kind: "release-held-at-terminal",
+            });
+        }
         return branches;
     };
     let current_code = witness_piece_code(current_piece);
@@ -1815,6 +1840,7 @@ fn fixed_witness_branches(
         desired_piece: current_code,
         next_extra_draw: state.extra_draw,
         next_hold_code: state.hold_code,
+        terminal_projection_consumed: state.terminal_projection_consumed,
         hold_kind: "use-current",
     });
     if !hold_enabled {
@@ -1828,6 +1854,7 @@ fn fixed_witness_branches(
                 desired_piece: state.hold_code,
                 next_extra_draw: state.extra_draw,
                 next_hold_code: current_code,
+                terminal_projection_consumed: state.terminal_projection_consumed,
                 hold_kind: "swap-held",
             });
         }
@@ -1837,6 +1864,7 @@ fn fixed_witness_branches(
                 desired_piece: witness_piece_code(next_piece),
                 next_extra_draw: 1,
                 next_hold_code: current_code,
+                terminal_projection_consumed: state.terminal_projection_consumed,
                 hold_kind: "store-current-use-next",
             });
         }
@@ -1890,6 +1918,8 @@ fn visit_fixed_witness_state(
         sequence,
         queue_position,
         problem.supply().hold_enabled(),
+        problem.supply().projects_unplaced_lookahead(),
+        depth.saturating_add(1) == projection.operation_count(),
         state,
     );
     for branch in branches.iter() {
@@ -1918,6 +1948,7 @@ fn visit_fixed_witness_state(
                 subset: edge.to as u16,
                 extra_draw: branch.next_extra_draw,
                 hold_code: branch.next_hold_code,
+                terminal_projection_consumed: branch.terminal_projection_consumed,
             };
             if visit_fixed_witness_state(
                 problem,
@@ -2005,6 +2036,57 @@ fn visit_witness_state(
             continue;
         };
         let desired_piece = witness_piece_code(edge.piece);
+        if super::terminal_hold_projection::finite_terminal_release_allowed(
+            pattern_index.sequence_len(),
+            queue_position,
+            problem.supply().hold_enabled(),
+            problem.supply().projects_unplaced_lookahead(),
+            state.terminal_projection_consumed,
+            state.hold_code != 0,
+            edge.to as usize == projection.all_placed,
+        ) && state.hold_code == desired_piece
+        {
+            let terminal_patterns = super::terminal_hold_projection::terminal_release_pattern_word(
+                pattern_index,
+                queue_position,
+                word_index,
+                state.active_patterns,
+                problem.supply().projects_standard_bag_lookahead(),
+            );
+            if terminal_patterns != 0 {
+                path.push(WitnessStep {
+                    edge,
+                    hold_kind: "release-held-at-terminal",
+                });
+                let next = WitnessProductState {
+                    subset: edge.to as u16,
+                    hold_code: 0,
+                    terminal_projection_consumed: true,
+                    active_patterns: terminal_patterns,
+                    ..state
+                };
+                if let Some(accepted) = visit_witness_state(
+                    problem,
+                    catalog,
+                    candidate,
+                    projection,
+                    pattern_index,
+                    word_index,
+                    next,
+                    workspace,
+                    transition_cache,
+                    failed,
+                    path,
+                    visited_product_states,
+                    completion,
+                    feasibility,
+                    control,
+                )? {
+                    return Ok(Some(accepted));
+                }
+                path.pop();
+            }
+        }
         let use_current = state.active_patterns
             & pattern_index.piece_word_with_projected_standard_bag_lookahead(
                 queue_position,
@@ -2116,6 +2198,7 @@ fn visit_witness_state(
                     subset: edge.to as u16,
                     extra_draw: 1,
                     hold_code: current_piece,
+                    terminal_projection_consumed: state.terminal_projection_consumed,
                     active_patterns: store_bits,
                 };
                 if let Some(accepted) = visit_witness_state(
@@ -3539,13 +3622,20 @@ mod fixed_witness_tests {
             subset: 0,
             extra_draw,
             hold_code: hold.map_or(0, witness_piece_code),
+            terminal_projection_consumed: false,
         }
     }
 
     #[test]
     fn fixed_queue_without_hold_only_uses_current_piece() {
-        let branches =
-            fixed_witness_branches(&[PieceKind::I, PieceKind::O], 0, false, state(0, None));
+        let branches = fixed_witness_branches(
+            &[PieceKind::I, PieceKind::O],
+            0,
+            false,
+            false,
+            false,
+            state(0, None),
+        );
         let actual = branches
             .iter()
             .map(|branch| (branch.desired_piece, branch.hold_kind))
@@ -3558,8 +3648,14 @@ mod fixed_witness_tests {
 
     #[test]
     fn fixed_queue_occupied_hold_can_swap_with_current() {
-        let branches =
-            fixed_witness_branches(&[PieceKind::I], 0, true, state(0, Some(PieceKind::O)));
+        let branches = fixed_witness_branches(
+            &[PieceKind::I],
+            0,
+            true,
+            false,
+            false,
+            state(0, Some(PieceKind::O)),
+        );
         let actual = branches
             .iter()
             .map(|branch| {
@@ -3589,15 +3685,27 @@ mod fixed_witness_tests {
 
     #[test]
     fn fixed_queue_equal_current_and_hold_has_one_semantic_branch() {
-        let branches =
-            fixed_witness_branches(&[PieceKind::I], 0, true, state(0, Some(PieceKind::I)));
+        let branches = fixed_witness_branches(
+            &[PieceKind::I],
+            0,
+            true,
+            false,
+            false,
+            state(0, Some(PieceKind::I)),
+        );
         assert_eq!(branches.iter().count(), 1);
     }
 
     #[test]
     fn fixed_queue_empty_hold_can_store_current_and_use_next() {
-        let branches =
-            fixed_witness_branches(&[PieceKind::I, PieceKind::O], 0, true, state(0, None));
+        let branches = fixed_witness_branches(
+            &[PieceKind::I, PieceKind::O],
+            0,
+            true,
+            false,
+            false,
+            state(0, None),
+        );
         let stored = branches
             .iter()
             .find(|branch| branch.hold_kind == "store-current-use-next")
@@ -3608,10 +3716,49 @@ mod fixed_witness_tests {
     }
 
     #[test]
-    fn fixed_queue_does_not_release_hold_after_source_exhaustion() {
-        let branches =
-            fixed_witness_branches(&[PieceKind::I], 1, true, state(0, Some(PieceKind::O)));
-        assert_eq!(branches.iter().count(), 0);
+    fn fixed_queue_releases_hold_once_at_the_projected_terminal_step() {
+        let branches = fixed_witness_branches(
+            &[PieceKind::I],
+            1,
+            true,
+            true,
+            true,
+            state(0, Some(PieceKind::O)),
+        );
+        let branch = branches.iter().next().expect("terminal release branch");
+        assert_eq!(branches.iter().count(), 1);
+        assert_eq!(branch.desired_piece, witness_piece_code(PieceKind::O));
+        assert_eq!(branch.next_hold_code, 0);
+        assert!(branch.terminal_projection_consumed);
+        assert_eq!(branch.hold_kind, "release-held-at-terminal");
+    }
+
+    #[test]
+    fn fixed_queue_terminal_release_is_fail_closed_outside_the_exact_terminal_state() {
+        let mut consumed = state(0, Some(PieceKind::O));
+        consumed.terminal_projection_consumed = true;
+        for branches in [
+            fixed_witness_branches(
+                &[PieceKind::I],
+                1,
+                true,
+                false,
+                true,
+                state(0, Some(PieceKind::O)),
+            ),
+            fixed_witness_branches(
+                &[PieceKind::I],
+                1,
+                true,
+                true,
+                false,
+                state(0, Some(PieceKind::O)),
+            ),
+            fixed_witness_branches(&[PieceKind::I], 1, true, true, true, state(0, None)),
+            fixed_witness_branches(&[PieceKind::I], 1, true, true, true, consumed),
+        ] {
+            assert_eq!(branches.iter().count(), 0);
+        }
     }
 }
 // SRP rationale: this module has one behavior-level change reason: exact WASM BuildUp state expansion and trace preservation.

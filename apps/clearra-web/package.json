@@ -12,7 +12,9 @@
     "dev:wsl": "npm run sync && npm run wasm:build:wsl && vite --host 127.0.0.1 --port 4194 --strictPort",
     "prebuild": "npm run sync && npm run wasm:build",
     "build": "vite build && node scripts/prepare-pages-fallback.mjs",
-    "build:wsl": "npm run sync && npm run wasm:build:wsl && vite build"
+    "build:wsl": "npm run sync && npm run wasm:build:wsl && vite build",
+    "pretest": "npm run sync",
+    "test": "npm exec tsc -- --noEmit -p tsconfig.contract.json && node ../../scripts/tools/run-typescript-contracts.mjs ./test"
   },
   "dependencies": {
     "@clearra/ui": "0.1.0",

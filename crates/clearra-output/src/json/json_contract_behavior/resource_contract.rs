@@ -140,3 +140,42 @@ mod case_observed_truncated_universe_not_renormalized {
         );
     }
 }
+
+mod case_probability_not_calculated_is_not_resource_truncation {
+    use super::*;
+
+    #[test]
+    fn probability_not_calculated_is_not_resource_truncation() {
+        let contract = JsonContract::from_render_message(
+            "pc",
+            &[
+                RenderField::new("resource_truncated", RenderFieldValue::bool(false)),
+                RenderField::new("probability_calculated", RenderFieldValue::bool(false)),
+                RenderField::new("probability_complete", RenderFieldValue::bool(false)),
+                RenderField::new("supply_probability_complete", RenderFieldValue::bool(false)),
+                RenderField::new(
+                    "resource_probability_complete",
+                    RenderFieldValue::bool(false),
+                ),
+            ],
+        );
+
+        let JsonValue::Object(root) = contract.root() else {
+            panic!("root object");
+        };
+        let resource_report = object_member(&root, "resource_report");
+
+        assert_eq!(
+            member_value(resource_report, "truncated"),
+            &JsonValue::Bool(false)
+        );
+        assert_eq!(
+            member_value(resource_report, "truncation_reason"),
+            &JsonValue::Null
+        );
+        assert_eq!(
+            member_value(resource_report, "probability_complete"),
+            &JsonValue::Bool(false)
+        );
+    }
+}

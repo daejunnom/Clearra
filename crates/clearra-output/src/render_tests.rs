@@ -11,7 +11,7 @@ fn dispatches_message_to_text_writer() {
 
     assert_eq!(
         RenderFormatDispatcher::render(&message, RenderFormat::Text),
-        "kind: pc\nlines: 2"
+        Ok("kind: pc\nlines: 2".to_owned())
     );
 }
 
@@ -29,7 +29,7 @@ fn pc_text_default_is_human_sized() {
         .with_value("score_event_basis", "sample")
         .with_value("coverage_row_view", "raw");
 
-    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Text);
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Text).expect("text");
 
     assert!(rendered.contains("kind: pc"));
     assert!(rendered.contains("status: searched"));
@@ -50,8 +50,8 @@ fn probability_is_percent_only_at_the_human_text_boundary() {
         .with_value("coverage_probability", RenderFieldValue::number("0.625"))
         .with_value("probability_complete", true);
 
-    let text = RenderFormatDispatcher::render(&message, RenderFormat::Text);
-    let json = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+    let text = RenderFormatDispatcher::render(&message, RenderFormat::Text).expect("text");
+    let json = RenderFormatDispatcher::render(&message, RenderFormat::Json).expect("json");
 
     assert!(text.contains("coverage_probability: 62.5%"));
     assert!(text.contains("probability_complete: true"));
@@ -65,7 +65,8 @@ fn pc_text_verbose_contains_executor_flow() {
         .with_value("lines", 2usize)
         .with_value("executor_flow", "rust-shell-to-core");
 
-    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::TextVerbose);
+    let rendered =
+        RenderFormatDispatcher::render(&message, RenderFormat::TextVerbose).expect("text");
 
     assert!(rendered.contains("lines: 2"));
     assert!(rendered.contains("executor_flow: rust-shell-to-core"));
@@ -77,7 +78,7 @@ fn pc_json_still_contains_full_contract() {
         .with_value("lines", 2usize)
         .with_value("executor_flow", "rust-shell-to-core");
 
-    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json).expect("json");
 
     assert!(rendered.contains("\"lines\":2"));
     assert!(rendered.contains("\"executor_flow\":\"rust-shell-to-core\""));
@@ -87,7 +88,7 @@ fn pc_json_still_contains_full_contract() {
 fn dispatches_message_to_json_writer() {
     let message = RenderMessage::new("pc").with_value("lines", 2usize);
 
-    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+    let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json).expect("json");
     assert!(rendered.contains("\"schema_version\":2"));
     assert!(rendered.contains("\"kind\":\"pc\""));
     assert!(rendered.contains("\"summary\":{\"lines\":2}"));
@@ -114,7 +115,7 @@ fn json_exposes_solution_artifacts_only_when_the_host_requests_them() {
             "solution_classes",
             RenderFieldValue::array([RenderFieldValue::string("regular")]),
         );
-    let exposed = RenderFormatDispatcher::render(&exposed, RenderFormat::Json);
+    let exposed = RenderFormatDispatcher::render(&exposed, RenderFormat::Json).expect("json");
     assert!(exposed.contains("\"summary\":{}"));
     assert!(exposed.contains("\"artifacts\""));
     assert!(exposed.contains("\"schema_version\":\"clearra.solution-data.v1\""));
@@ -149,7 +150,7 @@ fn json_solution_data_contract_distinguishes_all_availability_states() {
                 RenderFieldValue::array([RenderFieldValue::string("ctk1|example")]),
             );
 
-        let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json);
+        let rendered = RenderFormatDispatcher::render(&message, RenderFormat::Json).expect("json");
 
         assert!(
             rendered.contains(&format!("\"status\":\"{status}\"")),
@@ -168,7 +169,7 @@ fn dispatches_message_to_fumen_like_writer() {
 
     assert_eq!(
         RenderFormatDispatcher::render(&message, RenderFormat::FumenLike),
-        "v115@vhAAgWVArORoDlcRPEjI8vBsOprDz4K6BSAAAA"
+        Ok("v115@vhAAgWVArORoDlcRPEjI8vBsOprDz4K6BSAAAA".to_owned())
     );
 }
 
@@ -190,16 +191,29 @@ fn dispatches_replay_trace_to_all_output_formats() {
 
     assert!(
         RenderFormatDispatcher::render_replay_trace(&trace, RenderFormat::Text)
+            .expect("text replay")
             .contains("kind: replay-trace")
     );
     assert!(
         RenderFormatDispatcher::render_replay_trace(&trace, RenderFormat::Json)
+            .expect("json replay")
             .contains("\"kind\":\"replay-trace\"")
     );
     assert!(
         RenderFormatDispatcher::render_replay_trace(&trace, RenderFormat::FumenLike)
+            .expect("fumen replay")
             .starts_with("v115@")
     );
+}
+
+#[test]
+fn oversized_fumen_output_fails_closed_without_panicking() {
+    let message = RenderMessage::new("x".repeat(4096));
+
+    assert!(matches!(
+        RenderFormatDispatcher::render(&message, RenderFormat::FumenLike),
+        Err(clearra_fumen::codec::FumenLikeWriteError::CommentTooLong { .. })
+    ));
 }
 
 #[test]

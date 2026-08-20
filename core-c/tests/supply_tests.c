@@ -141,7 +141,7 @@ static void fixed_sequence_passed_to_c_queue_view(void) {
 }static void hold_automaton_uses_current_piece(void) {
     clr_hold_automaton_state state = {
         11u, 3u, 2u, 0xfeedu, 77u, CLR_PIECE_NONE, 1u,
-        {0u, 0u, 0u, 0u, 0u, 0u}};
+        0u, 0u, {0u, 0u, 0u, 0u}};
     clr_hold_automaton_step step;
 
     uint32_t status = clearra_hold_automaton_apply(
@@ -158,7 +158,7 @@ static void fixed_sequence_passed_to_c_queue_view(void) {
 }static void hold_automaton_swaps_held_piece(void) {
     clr_hold_automaton_state state = {
         11u, 3u, 2u, 0xfeedu, 77u, CLR_PIECE_T, 0u,
-        {0u, 0u, 0u, 0u, 0u, 0u}};
+        0u, 0u, {0u, 0u, 0u, 0u}};
     clr_hold_automaton_step step;
 
     uint32_t status = clearra_hold_automaton_apply(
@@ -175,7 +175,7 @@ static void fixed_sequence_passed_to_c_queue_view(void) {
 }static void hold_automaton_stores_current_then_uses_next(void) {
     clr_hold_automaton_state state = {
         11u, 3u, 2u, 0xfeedu, 77u, CLR_PIECE_NONE, 1u,
-        {0u, 0u, 0u, 0u, 0u, 0u}};
+        0u, 0u, {0u, 0u, 0u, 0u}};
     clr_hold_automaton_step step;
 
     uint32_t status = clearra_hold_automaton_apply(
@@ -192,7 +192,7 @@ static void fixed_sequence_passed_to_c_queue_view(void) {
 }static void hold_automaton_preserves_long_carryover(void) {
     clr_hold_automaton_state state = {
         11u, 3u, 9u, 0xabcu, 77u, CLR_PIECE_L, 0u,
-        {0u, 0u, 0u, 0u, 0u, 0u}};
+        0u, 0u, {0u, 0u, 0u, 0u}};
     clr_hold_automaton_step step;
 
     uint32_t status = clearra_hold_automaton_apply(
@@ -209,7 +209,7 @@ static void fixed_sequence_passed_to_c_queue_view(void) {
 }static void hold_automaton_state_in_buildup_memo_key(void) {
     clr_hold_automaton_state state = {
         11u, 3u, 2u, 0xfeedu, 77u, CLR_PIECE_J, 0u,
-        {0u, 0u, 0u, 0u, 0u, 0u}};
+        1u, 1u, {0u, 0u, 0u, 0u}};
 
     clr_buildup_hold_automaton_memo_key key =
         clearra_buildup_hold_automaton_memo_key(&state);
@@ -220,7 +220,15 @@ static void fixed_sequence_passed_to_c_queue_view(void) {
     EXPECT_U32((uint32_t)key.bag_remainder_key, 0xfeedu);
     EXPECT_U32((uint32_t)key.provenance_id, 77u);
     EXPECT_U32(key.hold_piece, CLR_PIECE_J);
-    EXPECT_TRUE(clearra_buildup_hold_automaton_memo_key_hash(&key) != 0u);
+    EXPECT_U32(key.terminal_projection_consumed, 1u);
+    EXPECT_U32(key.terminal_projection_provenance, 1u);
+    uint64_t terminal_hash =
+        clearra_buildup_hold_automaton_memo_key_hash(&key);
+    EXPECT_TRUE(terminal_hash != 0u);
+    key.terminal_projection_consumed = 0u;
+    key.terminal_projection_provenance = 0u;
+    EXPECT_TRUE(clearra_buildup_hold_automaton_memo_key_hash(&key) !=
+                terminal_hash);
 }int main(void) {
     fixed_sequence_passed_to_c_queue_view();
     bag_pattern_passed_to_c_queue_view();

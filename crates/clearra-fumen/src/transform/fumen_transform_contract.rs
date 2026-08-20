@@ -1,5 +1,7 @@
 use crate::{
-    codec::{FumenLikeReadError, FumenLikeReader, FumenLikeTrace, FumenLikeWriter},
+    codec::{
+        FumenLikeReadError, FumenLikeReader, FumenLikeTrace, FumenLikeWriteError, FumenLikeWriter,
+    },
     transform::{
         CombineTransform, GrayoutTransform, MirrorTransform, PageShiftTransform, SplitTransform,
     },
@@ -10,7 +12,7 @@ pub struct FumenTransformContract;
 
 impl FumenTransformContract {
     pub fn page_roundtrip(trace: &FumenLikeTrace) -> Result<FumenLikeTrace, FumenTransformError> {
-        let encoded = FumenLikeWriter::write(trace);
+        let encoded = FumenLikeWriter::write(trace).map_err(FumenTransformError::Write)?;
         FumenLikeReader::read(&encoded).map_err(FumenTransformError::Read)
     }
 }
@@ -90,6 +92,7 @@ impl FumenTransformContract {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FumenTransformError {
     Read(FumenLikeReadError),
+    Write(FumenLikeWriteError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

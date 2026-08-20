@@ -15,6 +15,7 @@ mod diagnostics_policy;
 mod job_event;
 mod locale_policy;
 mod output_policy;
+mod product_build_identity;
 mod query_envelope;
 mod render_capability_report;
 mod resource_budget;
@@ -34,6 +35,10 @@ pub use job_event::{
 };
 pub use locale_policy::LocalePolicy;
 pub use output_policy::OutputPolicy;
+pub use product_build_identity::{
+    ProductBuildIdentity, ARTIFACT_SCHEMA_VERSION, COMPILED_ENGINE_BUILD_ID,
+    COMPILED_SOURCE_COMMIT, CONTRACT_SCHEMA_VERSION, SUPPLY_SEMANTICS_ID, UNVERIFIED_LOCAL_BUILD,
+};
 pub use query_envelope::QueryEnvelope;
 pub use render_capability_report::RenderCapabilityReport;
 pub use resource_budget::ResourceBudget;

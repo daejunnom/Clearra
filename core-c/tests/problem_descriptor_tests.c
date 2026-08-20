@@ -1,5 +1,6 @@
 #include "clr_problem.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -110,10 +111,67 @@ static void set_board_descriptor(
     EXPECT_U64(buildup.piece_source.piece_source_id,
                packing.piece_source.piece_source_id);
     EXPECT_U64(buildup.buildup_flags, 0);
+    EXPECT_U64(buildup.terminal_projection_policy_version,
+               CLR_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION);
+    EXPECT_U64(buildup.terminal_projection_policy,
+               CLR_BUILDUP_TERMINAL_PROJECTION_DISABLED);
+    EXPECT_U64(offsetof(clr_buildup_problem,
+                        terminal_projection_policy_version),
+               sizeof(clr_buildup_problem) - 4u);
+    EXPECT_U64(sizeof(clr_hold_automaton_state), 40u);
+    EXPECT_U64(offsetof(clr_hold_automaton_state, hold_piece), 32u);
+    EXPECT_U64(offsetof(clr_hold_automaton_state, hold_empty), 33u);
+    EXPECT_U64(
+        offsetof(clr_hold_automaton_state, terminal_projection_consumed), 34u);
+    EXPECT_U64(
+        offsetof(clr_hold_automaton_state, terminal_projection_provenance),
+        35u);
+    EXPECT_U64(offsetof(clr_hold_automaton_state, reserved), 36u);
+    EXPECT_U64(
+        offsetof(clr_buildup_hold_automaton_memo_key,
+                 terminal_projection_consumed),
+        34u);
+    EXPECT_U64(
+        offsetof(clr_buildup_hold_automaton_memo_key,
+                 terminal_projection_provenance),
+        35u);
+}static void buildup_terminal_projection_policy_is_versioned_and_fail_closed(void) {
+    clr_buildup_problem buildup =
+        clr_buildup_problem_from_packing(valid_problem());
+
+    EXPECT_TRUE(clr_buildup_problem_is_valid(&buildup));
+
+    buildup.terminal_projection_policy_version = 0u;
+    EXPECT_FALSE(clr_buildup_problem_is_valid(&buildup));
+    buildup.terminal_projection_policy_version =
+        CLR_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION;
+
+    buildup.terminal_projection_policy =
+        CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD;
+    EXPECT_FALSE(clr_buildup_problem_is_valid(&buildup));
+    buildup.buildup_flags = CLR_BUILDUP_FLAG_HOLD_ENABLED;
+    EXPECT_TRUE(clr_buildup_problem_is_valid(&buildup));
+
+    buildup.source_execution_mode = CLR_BUILDUP_SOURCE_STANDARD_BAG_AUTOMATON;
+    EXPECT_FALSE(clr_buildup_problem_is_valid(&buildup));
+    buildup.source_execution_mode = CLR_BUILDUP_SOURCE_CONCRETE_PATTERN;
+    EXPECT_TRUE(clr_buildup_problem_is_valid(&buildup));
+
+    buildup.initial_hold_automaton.terminal_projection_consumed = 1u;
+    EXPECT_FALSE(clr_buildup_problem_is_valid(&buildup));
+    buildup.initial_hold_automaton.terminal_projection_consumed = 0u;
+    buildup.initial_hold_automaton.terminal_projection_provenance = 1u;
+    EXPECT_FALSE(clr_buildup_problem_is_valid(&buildup));
+    buildup.initial_hold_automaton.terminal_projection_provenance = 0u;
+    EXPECT_TRUE(clr_buildup_problem_is_valid(&buildup));
+
+    buildup.terminal_projection_reserved = 1u;
+    EXPECT_FALSE(clr_buildup_problem_is_valid(&buildup));
 }int main(void) {
     compact_problem_preserves_search_problem_fields();
     packing_problem_masks_are_validated_against_search_height();
     buildup_problem_wraps_packing_problem();
+    buildup_terminal_projection_policy_is_versioned_and_fail_closed();
     puts("core-c problem descriptor tests passed");
     return 0;
 }

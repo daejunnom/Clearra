@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Search, Square, X } from '@lucide/svelte';
-  import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
+  import { createEventDispatcher, getContext, onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
 
   import {
@@ -13,17 +13,22 @@
     updateDesktopRequest
   } from '../../stores';
   import {
+    CPU_ONLY_RUNTIME_WARMUP_POLICY,
+    DEFAULT_RUNTIME_WARMUP_POLICY,
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
     clearWasmTerminalResult,
+    sharedBrowserHostCapabilitySnapshot,
     updateWasmCommandText,
     wasmWorkerState,
-    WasmTerminalWorkerController
+    WasmTerminalWorkerController,
+    type HostCapabilitySnapshot
   } from '../../wasm';
   import PcSolverResult from '../PcSolverResult.svelte';
   import SetupFinderResult from '../SetupFinderResult.svelte';
   import { setupFinderRequestForDesktop } from '../setupFinderModel';
   import {
     buildWorkspaceCommand,
-    defaultBrowserWorkerCount,
     workspaceRequestForDesktop
   } from '../solverWorkspaceModel';
   import {
@@ -55,7 +60,13 @@
   type FinderKind = 'pc' | 'setup';
 
   const dispatch = createEventDispatcher<{ openchange: boolean }>();
-  const workerController = new WasmTerminalWorkerController(workerFactory);
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const workerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
   let launcher: HTMLButtonElement;
   let closeButton: HTMLButtonElement;
   let drawer: HTMLElement;
@@ -69,7 +80,7 @@
   let elapsedMs = 0;
   let runStartedAt = 0;
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
-  let hardwareConcurrency = 1;
+  const hardwareConcurrency = hostCapabilitySnapshot.reportedLogicalProcessors;
   let lastStateRevision: number | null = null;
   let previousOpen = open;
   let restoreLauncherFocus = true;
@@ -115,7 +126,6 @@
   }
 
   onMount(() => {
-    hardwareConcurrency = Math.max(1, Math.floor(navigator.hardwareConcurrency || 1));
     if (runtime === 'desktop') resumeDesktopJobPolling();
   });
 
@@ -169,7 +179,12 @@
       startElapsedTimer();
       if (runtime === 'web') {
         clearWasmTerminalResult();
-        workerController.prewarm(prepared.request.workers, false);
+        workerController.prewarm(
+          prepared.request.workers,
+          false,
+          DEFAULT_RUNTIME_WARMUP_POLICY,
+          automaticWorkerAuthority(hostCapabilitySnapshot)
+        );
         updateWasmCommandText(buildWorkspaceCommand(prepared.request));
         if (!workerController.run()) stopElapsedTimer();
       } else {
@@ -185,13 +200,18 @@
       issue = prepared.issue;
       return;
     }
-    const workers = defaultBrowserWorkerCount(hardwareConcurrency);
+    const workers = automaticWorkerAuthority(hostCapabilitySnapshot).workersEffective;
     resultKind = 'setup';
     setupSearchMode = prepared.request.searchMode;
     startElapsedTimer();
     if (runtime === 'web') {
       clearWasmTerminalResult();
-      workerController.prewarm(workers, false);
+      workerController.prewarm(
+        workers,
+        false,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(hostCapabilitySnapshot)
+      );
       updateWasmCommandText(buildPlayerSetupFinderCommand(prepared.request, workers));
       if (!workerController.run()) stopElapsedTimer();
     } else {
@@ -407,7 +427,7 @@
           {elapsedMs}
           targetLines={resultTargetLines}
           loadSolutionPage={runtime === 'web'
-            ? (offset, limit) => workerController.loadSolutionPage(offset, limit)
+            ? (offset, limit, signal) => workerController.loadSolutionPage(offset, limit, signal)
             : null}
         />
       </div>

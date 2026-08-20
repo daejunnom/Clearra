@@ -19,7 +19,7 @@ fn read_output_golden(file_name: &str) -> String {
 }
 
 fn render_json(message: &RenderMessage) -> String {
-    RenderFormatDispatcher::render(message, RenderFormat::Json)
+    RenderFormatDispatcher::render(message, RenderFormat::Json).expect("JSON golden")
 }
 
 fn spin_probability_message() -> RenderMessage {
@@ -267,7 +267,8 @@ mod case_text_output_marks_representative_trace {
                 .with_value("trace_retention_truncated", true)
                 .with_value("trace_retention_reason", "representative-retained-trace"),
             RenderFormat::Text,
-        );
+        )
+        .expect("text golden");
 
         assert!(rendered.contains("total_solution_count: 12"));
         assert!(rendered.contains("retained_trace_count: 1"));
@@ -292,7 +293,8 @@ mod case_verbose_output_contains_backend_report {
                 .with_value("gpu_trust_state", "fallback-used")
                 .with_value("gpu_worker_state", "unavailable"),
             RenderFormat::TextVerbose,
-        );
+        )
+        .expect("verbose golden");
 
         assert!(rendered.contains("backend_report: attached"));
         assert!(rendered.contains("backend_fallback_reason: gpu_feature_disabled"));
@@ -317,7 +319,8 @@ mod case_diagnostics_output_contains_evidence {
                     "Use --backend cpu or enable GPU support.",
                 ),
             RenderFormat::TextDiagnostics,
-        );
+        )
+        .expect("diagnostic golden");
 
         assert!(rendered.contains("diagnostic_code: W_BACKEND_FALLBACK_USED"));
         assert!(
@@ -387,7 +390,8 @@ mod case_resource_report_in_verbose_text {
                 .with_value("resource_truncation_reason", "candidate_budget_exceeded")
                 .with_value("resource_probability_complete", false),
             RenderFormat::TextVerbose,
-        );
+        )
+        .expect("resource golden");
 
         assert!(rendered.contains("resource_truncated: true"));
         assert!(rendered.contains("resource_truncation_reason: candidate_budget_exceeded"));

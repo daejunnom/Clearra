@@ -32,6 +32,7 @@ pub struct WasmSearchReport {
     pub cpu_warmup_performed: bool,
     pub supply_window_resolution: String,
     pub projects_unplaced_lookahead: bool,
+    pub projects_standard_bag_lookahead: bool,
     pub source_sequence_length: usize,
     pub total_possible_pattern_count: String,
     pub solution_found: bool,
@@ -403,6 +404,9 @@ impl WasmSearchReport {
                 .to_owned(),
             projects_unplaced_lookahead: result
                 .bool_field("projects_unplaced_lookahead")
+                .unwrap_or(false),
+            projects_standard_bag_lookahead: result
+                .bool_field("projects_standard_bag_lookahead")
                 .unwrap_or(false),
             source_sequence_length: result.usize_field("source_sequence_length").unwrap_or(0),
             total_possible_pattern_count: result

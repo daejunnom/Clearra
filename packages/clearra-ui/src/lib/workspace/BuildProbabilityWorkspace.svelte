@@ -1,6 +1,6 @@
 <script lang="ts">
   import { TriangleAlert } from '@lucide/svelte';
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { getContext, onDestroy, onMount, tick } from 'svelte';
 
   import {
     cancelDesktopJob,
@@ -13,10 +13,15 @@
   } from '../stores';
 
   import {
+    CPU_ONLY_RUNTIME_WARMUP_POLICY,
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
     clearWasmTerminalResult,
+    sharedBrowserHostCapabilitySnapshot,
     updateWasmCommandText,
     wasmWorkerState,
-    WasmTerminalWorkerController
+    WasmTerminalWorkerController,
+    type HostCapabilitySnapshot
   } from '../wasm';
   import BuildProbabilityBoardEditor from './BuildProbabilityBoardEditor.svelte';
   import BuildProbabilityControls from './BuildProbabilityControls.svelte';
@@ -32,14 +37,19 @@
     trimBuildProbabilityRequest,
     type BuildProbabilityRequest
   } from './buildProbabilityModel';
-  import { defaultBrowserWorkerCount, defaultWorkerCount } from './solverWorkspaceModel';
   import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let workerFactory: (() => Worker) | null = null;
   export let runtime: 'web' | 'desktop' = 'web';
 
-  const workerController = new WasmTerminalWorkerController(workerFactory);
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const workerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
   let request = createDefaultBuildProbabilityRequest();
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
@@ -53,6 +63,10 @@
   let workspaceShell: { scrollWorkspaceIntoView: () => void } | null = null;
 
   $: workerController.setWorkerFactory(workerFactory);
+  $: workerAuthority = automaticWorkerAuthority(
+    hostCapabilitySnapshot,
+    request.useAllLogicalProcessors
+  );
   $: runtimeView = runtime === 'web'
     ? workspaceViewFromWasm($wasmWorkerState)
     : workspaceViewFromDesktop($desktopJobState);
@@ -65,7 +79,17 @@
     language = preferredWorkspaceLanguage(localStorage.getItem('clearra-language') ?? navigator.language);
     const workers = automaticWorkerCount(request.useAllLogicalProcessors);
     request = { ...request, workers };
-    if (runtime === 'web') workerController.prewarm(workers);
+    if (runtime === 'web') {
+      workerController.prewarm(
+        workers,
+        false,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
+    }
     else resumeDesktopJobPolling();
     const handlePageHide = () => disposeWorkspace();
     window.addEventListener('pagehide', handlePageHide);
@@ -127,33 +151,44 @@
   async function run() {
     if (active || validationCodes.length) return;
     continuationApplied = false;
-    resultHeight = request.height;
-    resultExistingMask = request.existingMask;
-    resultTargetMask = request.targetMask;
-    resultAggregation = request.aggregation;
+    const executionRequest = normalizeBuildProbabilityRequest(request);
+    resultHeight = executionRequest.height;
+    resultExistingMask = executionRequest.existingMask;
+    resultTargetMask = executionRequest.targetMask;
+    resultAggregation = executionRequest.aggregation;
     if (runtime === 'web') {
-      updateWasmCommandText(buildProbabilityCommand(request));
+      updateWasmCommandText(buildProbabilityCommand(executionRequest));
       if (workerController.run()) startElapsedTimer();
       return;
     }
     startElapsedTimer();
-    updateDesktopRequest(buildProbabilityRequestForDesktop(request, language));
+    updateDesktopRequest(buildProbabilityRequestForDesktop(executionRequest, language));
     await startDesktopJob();
   }
 
   function updateRequest(next: BuildProbabilityRequest) {
-    next = normalizeBuildProbabilityRequest(next);
     const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
     request = useAllChanged
       ? { ...next, workers: automaticWorkerCount(next.useAllLogicalProcessors) }
       : next;
-    if (runtime === 'web' && useAllChanged) workerController.prewarm(request.workers);
+    if (runtime === 'web' && useAllChanged) {
+      workerController.prewarm(
+        request.workers,
+        false,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
+    }
   }
 
   function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
-    return runtime === 'web'
-      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
-      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+    return automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      useAllLogicalProcessors
+    ).workersEffective;
   }
 
   async function cancel() {
@@ -191,7 +226,7 @@
 
 <svelte:head>
   <title>{label('buildProbability')} · Clearra</title>
-  <meta name="description" content="Exact fixed-field build probability workspace" />
+  <meta name="description" content="Exact full-future/oracle build probability workspace; finesse queue-information policies are reported separately" />
 </svelte:head>
 
 <WorkspaceShell
@@ -233,7 +268,7 @@
     on:change={(event) => setMasks(event.detail.existingMask, event.detail.targetMask)}
     on:import={(event) => importExisting(event.detail.existingMask, event.detail.height)}
   />
-  <BuildProbabilityControls slot="controls" {request} {language} {validationCodes} on:change={(event) => updateRequest(event.detail)} />
+  <BuildProbabilityControls slot="controls" {request} {language} {validationCodes} {workerAuthority} on:change={(event) => updateRequest(event.detail)} />
   <BuildProbabilityResult
     slot="result"
     view={runtimeView}
@@ -243,6 +278,9 @@
     existingMask={resultExistingMask}
     targetMask={resultTargetMask}
     aggregation={resultAggregation}
+    loadSolutionPage={runtime === 'web'
+      ? (offset, limit, signal) => workerController.loadSolutionPage(offset, limit, signal)
+      : null}
     on:continue={(event) => continueFromCompletedBuild(event.detail.existingMask, event.detail.height)}
   />
 </WorkspaceShell>

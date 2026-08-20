@@ -26,7 +26,9 @@ pub struct CHoldAutomatonStateDescriptor {
     pub provenance_id: u64,
     pub hold_piece: u8,
     pub hold_empty: u8,
-    pub reserved: [u8; 6],
+    pub terminal_projection_consumed: u8,
+    pub terminal_projection_provenance: u8,
+    pub reserved: [u8; 4],
 }
 
 pub struct HoldAutomatonDescriptorCompiler;
@@ -41,7 +43,9 @@ impl HoldAutomatonDescriptorCompiler {
             provenance_id: u64::from(provenance_fingerprint(state.provenance.0)),
             hold_piece: state.hold_piece.map_or(C_PIECE_NONE, piece_to_c),
             hold_empty: u8::from(state.hold_empty),
-            reserved: [0; 6],
+            terminal_projection_consumed: 0,
+            terminal_projection_provenance: 0,
+            reserved: [0; 4],
         }
     }
 }

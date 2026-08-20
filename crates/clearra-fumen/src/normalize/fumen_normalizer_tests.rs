@@ -178,7 +178,7 @@ fn decode_source_setup(path: &str) -> crate::codec::SourceFumenSetup {
 }
 
 fn normalize_trace_pages(pages: Vec<String>) -> crate::normalize::NormalizedFumenDocument {
-    let encoded = FumenLikeWriter::write(&FumenLikeTrace::new(pages));
+    let encoded = FumenLikeWriter::write(&FumenLikeTrace::new(pages)).expect("synthetic fumen");
     FumenNormalizer::normalize(&encoded).expect("normalized synthetic trace")
 }
 

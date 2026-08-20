@@ -121,10 +121,18 @@ fn render_success(
                 solution_contract_valid && solution_availability.solution_set_materialized();
             let solution_keys_complete =
                 solution_contract_valid && solution_availability.solution_keys_complete();
+            let solution_data_available = solution_set_materialized || finesse_score_exception;
+            let solution_data_complete = if solution_set_materialized {
+                solution_keys_complete
+            } else {
+                result
+                    .finesse_report()
+                    .is_some_and(|report| report.mode() == "score" && report.complete())
+            };
             let solution_data_status = SolutionDataStatus::for_request(
                 include_solution_data,
-                solution_set_materialized,
-                solution_keys_complete,
+                solution_data_available,
+                solution_data_complete,
             );
             append_solution_data_contract(&mut fields, solution_data_status, format);
             if solution_set_materialized && !result.solution_probabilities().is_empty() {
@@ -217,11 +225,7 @@ fn render_success(
                     ));
                 }
             }
-            CliOutput::success(CommandRenderer::render(
-                model.kind().as_str(),
-                fields,
-                format,
-            ))
+            CommandRenderer::render_output(model.kind().as_str(), fields, format)
         }
         AppRenderModel::Setup(result) => {
             let mut fields = SummaryRenderContract::render_fields(result.summary_fields());
@@ -398,11 +402,7 @@ fn render_success(
                 SolutionDataStatus::for_request(include_solution_data, true, report.complete()),
                 format,
             );
-            CliOutput::success(CommandRenderer::render(
-                model.kind().as_str(),
-                fields,
-                format,
-            ))
+            CommandRenderer::render_output(model.kind().as_str(), fields, format)
         }
         AppRenderModel::Damage(result) | AppRenderModel::SpinFinder(result) => {
             let outcomes = RenderFieldValue::array(result.outcomes().iter().map(|outcome| {
@@ -589,11 +589,7 @@ fn render_success(
                     ]),
                 )]);
             }
-            CliOutput::success(CommandRenderer::render(
-                model.kind().as_str(),
-                fields,
-                format,
-            ))
+            CommandRenderer::render_output(model.kind().as_str(), fields, format)
         }
         AppRenderModel::SpinStructure(result) => {
             let render_structure_operation = |operation: StructureOperation| {
@@ -872,11 +868,7 @@ fn render_success(
                     ),
                 ]);
             }
-            CliOutput::success(CommandRenderer::render(
-                model.kind().as_str(),
-                fields,
-                format,
-            ))
+            CommandRenderer::render_output(model.kind().as_str(), fields, format)
         }
         AppRenderModel::CoverMessage(message)
         | AppRenderModel::ScenarioMessage(message)
@@ -889,11 +881,11 @@ fn render_success(
             if let Some(raw) = message.raw_body() {
                 CliOutput::success(raw.to_owned())
             } else {
-                CliOutput::success(CommandRenderer::render(
+                CommandRenderer::render_output(
                     message.kind().as_str(),
                     message.fields().to_vec(),
                     format,
-                ))
+                )
             }
         }
     }

@@ -67,6 +67,8 @@ void same_multiset_different_queue_changes_buildability(void);
 void hold_disabled_uses_actual_queue_order(void);
 void hold_enabled_long_carryover_uses_piece_source_pattern(void);
 void long_hold_carryover_uses_bag_epoch_and_remainder(void);
+void terminal_projection_branch_is_exactly_once_and_terminal_only(void);
+void terminal_projection_builds_with_occupied_initial_hold(void);
 void piece_source_reader_rejects_provenance_mismatch(void);
 void hold_transition_updates_bag_epoch_and_remainder_from_piece_source_pattern(void);
 void bag_universe_pattern_id_controls_sequence(void);
@@ -153,6 +155,8 @@ int main(void) {
     hold_disabled_uses_actual_queue_order();
     hold_enabled_long_carryover_uses_piece_source_pattern();
     long_hold_carryover_uses_bag_epoch_and_remainder();
+    terminal_projection_branch_is_exactly_once_and_terminal_only();
+    terminal_projection_builds_with_occupied_initial_hold();
     piece_source_reader_rejects_provenance_mismatch();
     hold_transition_updates_bag_epoch_and_remainder_from_piece_source_pattern();
     bag_universe_pattern_id_controls_sequence();

@@ -1,7 +1,12 @@
 <script lang="ts">
   import { AlertTriangle, Check, Copy, LoaderCircle } from '@lucide/svelte';
-  import { onDestroy, onMount } from 'svelte';
+  import { getContext, onDestroy, onMount } from 'svelte';
 
+  import {
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    sharedBrowserHostCapabilitySnapshot,
+    type HostCapabilitySnapshot
+  } from '../wasm/hostCapabilitySnapshot';
   import { writeClipboardText } from './clipboardText';
   import {
     SolutionExportError,
@@ -14,7 +19,12 @@
     encodeSolutionPagesForClipboard,
     type SolutionExportKeySource
   } from './solutionExportAsync';
-  import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import {
+    workspaceMessage,
+    workspaceSolutionCopyFailureKey,
+    type WorkspaceLanguage,
+    type WorkspaceSolutionCopyFailureKey
+  } from './workspaceI18n';
 
   export let format: SolutionCopyFormat = 'ctk';
   export let language: WorkspaceLanguage;
@@ -24,12 +34,12 @@
     | null = null;
   export let keySource: SolutionExportKeySource | null = null;
 
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+
   let state: 'idle' | 'loading' | 'copied' | 'failed' = 'idle';
-  let failureKey:
-    | 'solutionCopyFailed'
-    | 'solutionCopyTooLarge'
-    | 'fumenCopyHeightUnsupported' =
-    'solutionCopyFailed';
+  let failureKey: WorkspaceSolutionCopyFailureKey = 'solutionCopyFailed';
   let timer = 0;
   let copyController: AbortController | null = null;
   let destroyed = false;
@@ -71,17 +81,20 @@
       let encoded: string;
       if (keySource) {
         encoded = await encodeSolutionKeySourceForClipboard(keySource, format, {
-          signal: controller.signal
+          signal: controller.signal,
+          hostCapabilitySnapshot
         });
       } else if (loadPages) {
         const pages = await loadPages(controller.signal);
         throwIfAborted(controller.signal);
         encoded = await encodeSolutionPagesForClipboard(pages, format, {
-          signal: controller.signal
+          signal: controller.signal,
+          hostCapabilitySnapshot
         });
       } else {
         encoded = await encodeSolutionKeysForClipboard(solutionKeys, format, {
-          signal: controller.signal
+          signal: controller.signal,
+          hostCapabilitySnapshot
         });
       }
       await writeClipboardText(encoded, controller.signal);
@@ -93,14 +106,7 @@
         if (!destroyed && copyController === controller) state = 'idle';
         return;
       }
-      failureKey =
-        error instanceof SolutionExportError &&
-        error.code === 'fumen-height-unsupported'
-          ? 'fumenCopyHeightUnsupported'
-          : error instanceof SolutionExportError &&
-              error.code === 'clipboard-output-too-large'
-            ? 'solutionCopyTooLarge'
-            : 'solutionCopyFailed';
+      failureKey = solutionCopyFailureKey(error);
       setTerminalState('failed');
     } finally {
       if (copyController === controller) copyController = null;
@@ -143,6 +149,15 @@
 
   function isAbortError(error: unknown): boolean {
     return error instanceof Error && error.name === 'AbortError';
+  }
+
+  function solutionCopyFailureKey(error: unknown): typeof failureKey {
+    const code = error instanceof SolutionExportError
+      ? error.code
+      : error instanceof Error
+        ? error.message
+        : '';
+    return workspaceSolutionCopyFailureKey(code);
   }
 </script>
 
@@ -202,5 +217,9 @@
 
   @keyframes spin {
     to { transform: rotate(360deg); }
+  }
+
+  @media (pointer: coarse) {
+    .copy-all { min-height: 44px; }
   }
 </style>

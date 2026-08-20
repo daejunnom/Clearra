@@ -22,3 +22,11 @@ fn rejects_carriage_return_newlines() {
         Err(FumenLikeTraceError::CarriageReturn { index: 0 })
     );
 }
+
+#[test]
+fn accepts_unicode_comment_pages() {
+    let page = "주석 100% 😀".to_owned();
+    let trace = FumenLikeTrace::try_new(vec![page.clone()]).expect("unicode trace");
+
+    assert_eq!(trace.pages(), &[page]);
+}

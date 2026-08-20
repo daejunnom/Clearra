@@ -1,7 +1,9 @@
+use clearra_pc_graph::request::PcSearchContractError;
 use clearra_supply::PatternUniverseMaterializationError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProblemCompileError {
+    PcSearchContract(PcSearchContractError),
     UnsupportedOpeningPreset {
         lines: u8,
     },

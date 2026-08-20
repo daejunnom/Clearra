@@ -189,10 +189,11 @@ The compact runtime files are `core-c/src/rules/rule_profile.c`,
 `srs_kicks.c`, `no_kick.c`, `kick_table.c`, and `spawn_profile.c`, with
 `rules.h` as the internal C contract. `clearra_rule_profile_from_descriptor`
 converts `clr_rule_profile_descriptor` values into `ClearraCompactRuleProfile`.
-The compact runtime supports SRS, SRS+, Jstris 180, and NoKick built-ins.
-SRS-X reaches this boundary only through a verified imported descriptor; ASC,
-ARS, unverified imported, and custom rules return explicit unsupported status
-instead of falling back.
+The compact runtime supports SRS, SRS+, Jstris 180, and NoKick direct built-ins.
+Canonical SRS-X is projected through the verified descriptor ABI: the Rust
+compiler materializes the authoritative built-in SRS-X transition table and
+passes its verified compact representation to C. ASC and ARS remain unsupported;
+unverified imported and custom rules are rejected instead of falling back.
 
 The C descriptor conversion preserves kick transition count, 180 support flag,
 NoKick zero-offset-only behavior, unsupported rule status, and SRS+ capability
@@ -1177,14 +1178,17 @@ The rules/kicks flow is:
 
 `RuleProfile + optional VerifiedKickTableProfile -> RuleDescriptorCompiler -> clr_rule_profile_descriptor -> clearra_rule_profile_from_descriptor -> ClearraCompactRuleProfile`
 
-SRS, SRS+, Jstris 180, and NoKick compile to built-in C descriptors using
+SRS, SRS+, Jstris 180, and NoKick compile to direct built-in C descriptors using
 `CLR_KICK_SRS_90`, `CLR_KICK_SRS_PLUS_180`, `CLR_KICK_JSTRIS_180`, and
 `CLR_KICK_NO_KICK`.
-Imported kick tables compile only through `VerifiedKickTableProfile`; the
-verified transitions are copied into the descriptor as compact piece/rotation
-offset sequences. Unverified extension profiles such as SRS-X are rejected by
-`RuleDescriptorCompiler` before `CPackingProblemBuilder` can produce a C
-problem, so C execution never receives an unverified profile.
+Canonical SRS-X is projected through the verified descriptor ABI:
+`RuleDescriptorCompiler` materializes `SrsKicks::srs_x_profile()` as a
+`VerifiedKickTableProfile` before producing its C descriptor. Imported kick tables compile only through
+`VerifiedKickTableProfile`; the verified transitions
+are copied into the descriptor as compact piece/rotation offset sequences.
+Unverified imported and custom profiles, plus unsupported ASC and ARS profiles, are rejected by
+`RuleDescriptorCompiler` before `CPackingProblemBuilder` can
+produce a C problem, so C execution never receives an unverified profile.
 
 The C runtime accepts a descriptor with `has_verified_kick_profile` only when
 the descriptor includes a bounded verified transition table. It then constructs
@@ -1580,9 +1584,10 @@ Rule capability schema, rules CLI output, and rule editor schema expose the same
 readiness vocabulary: `supports_exact_180`, `c_compact_descriptor_ready`, and
 `unsupported_backend_reason`. `rules verify` reports missing transition,
 duplicate transition, and unsupported annotation counts without treating an
-unverified input as imported. `rules import` rejects unverified profiles, and
-profiles outside the direct compact surface, such as SRS-X, ASC, and ARS, must disclose
-disabled or unsupported backend reasons before execution.
+unverified input as imported. `rules import` rejects unverified profiles.
+Canonical SRS-X reports `c_compact_descriptor_ready` through its verified
+projection, while ASC, ARS, and unverified custom profiles must disclose disabled
+or unsupported backend reasons before execution.
 
 ## M23 Supply Runtime
 

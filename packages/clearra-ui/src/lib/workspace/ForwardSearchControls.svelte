@@ -14,11 +14,14 @@
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
+  import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
+  import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let request: ForwardSearchRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: ForwardSearchValidationCode[];
+  export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: ForwardSearchRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -111,6 +114,7 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('useAllThreads')}</span>
       </label>
+      <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
 
   {#if request.tool === 'damage'}

@@ -1,16 +1,20 @@
 export {
   Ctk3CodecError,
+  Ctk3PageLimitError,
   CTK3_BUNDLE_PREFIX,
   CTK3_MAX_BUNDLE_PAGES,
   CTK3_MAX_SEGMENT_PAGES,
   CTK3_PREFIX,
   decodeCtk3,
+  decodeCtk3Exact,
   decodeCtk3Segment,
   defaultCtk3Flags,
   encodeCtk3,
   encodeCtk3Bundle,
   encodeCtk3Compact,
   inspectCtk3,
+  inspectCtk3Exact,
+  inspectCtk3WithinPageLimit,
   isCtk3,
   splitCtk3Segments,
   type Ctk3Color,
@@ -59,6 +63,18 @@ export {
   type PageRefs,
   type Pages,
 } from "./fumenCompatibility.js";
+export {
+  escapeFumenComment,
+  FUMEN_COMMENT_MAX_ESCAPED_LENGTH,
+  FumenCommentCodecError,
+  type FumenCommentCodecErrorCode,
+} from "./fumenComment.js";
+export {
+  decodeFumenWithinPageLimit,
+  FUMEN_MAX_PAGES,
+  FUMEN_MAX_SOURCE_CHARACTERS,
+  inspectFumenPageCount,
+} from "./fumenLimits.js";
 export {
   CTK3_FILE_EXTENSION,
   CTK3_FILE_MIME_TYPE,

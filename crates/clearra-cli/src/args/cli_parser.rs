@@ -120,6 +120,16 @@ pub enum CliHelpTopic {
     Verify,
     SpinStructure,
     Sfinder,
+    Product(ProductHelpTopic),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductHelpTopic {
+    BuildProbability,
+    Finesse,
+    Damage,
+    SpinFinder,
+    MappedCompatibility,
 }
 
 impl CliHelpTopic {
@@ -129,6 +139,9 @@ impl CliHelpTopic {
             &TranslationKey::new("cli.help.top_level"),
             "Clearra command line",
         );
+        if let Self::Product(topic) = self {
+            return CliOutput::success(format!("{title}\n{}", topic.help_body()));
+        }
         CliOutput::success(format!(
             "{title}\n{}",
             match self {
@@ -136,7 +149,7 @@ impl CliHelpTopic {
                     "usage: clearra [--format text|json|fumen-like] [--lang en|ko] [--verbose] [--diagnostics] [--verbose-paths] [--include-solution-data] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build-probability|finesse|damage|spin-finder|spin-structure|build-coverage|rules|scoring|convert|continue|verify|sfinder> [options]\nglobal options may appear before or after the command\nfinesse search: clearra finesse search --base-mask HEX --target-mask HEX --height N (--queue QUEUE | --patterns PATTERN) [--hold empty|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]\nfinesse score: clearra finesse score --initial-mask HEX --height N --placements PIECE:rotation:x:y,... (--queue QUEUE | --patterns PATTERN) [--hold empty|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]\nbuild-probability finesse: add --finesse inputs [--pattern-knowledge both|oracle|visible-7]\nspin-structure searches an unordered piece inventory and keeps Regular and Mini structures separate; it does not change spin-finder or damage\nspin-structure usage: --pieces IOTSZ [--spin-profile t-spins|t-spins-plus|all-mini|all-mini-plus|all-spin|all-spin-plus] [--lines any|0..4|1+..4+] [--height 4..24] [--fill-bottom N --fill-top N] [--minimality subset-minimal|minimum-piece-count] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads]\n--include-solution-data is a JSON-only host integration surface for exact CTK3 export data\nlegacy Clearra aliases: path=pc-replay, setup=setup-finder, cover=build-coverage\nSfinder-man-style native mappings are isolated under: clearra sfinder <command>; they are not complete solution-finder 1.43 CLI parity\ntry opening preset: clearra pc --lines 2"
                 }
                 Self::Pc => {
-                    "usage: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]\n--auto-workers caps adaptive CPU parallelism without forcing small searches onto the parallel path\n--tiling-only enumerates exact geometry tilings without BuildUp or probability calculation; results may include solutions that cannot be built, hold still determines the reachable supply multiset, and rule, scoring, B2B, visible-7, tablebase, dependency-DAG, and per-solution probability options are unavailable"
+                    "usage: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]\n--auto-workers caps adaptive CPU parallelism without forcing small searches onto the parallel path\n--tiling-only enumerates exact geometry tilings without BuildUp or probability calculation; results may include solutions that cannot be built, hold still determines the reachable supply multiset, and rule, scoring, B2B, visible-7, tablebase, dependency-DAG, and per-solution probability options are unavailable"
                 }
                 Self::PcScenario => {
                     "usage: clearra pc-scenario --fixture tests/fixtures/pc/example.json [--verify-expected] [--solution-probabilities] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu]\n   or: clearra pc-scenario --field 0x... --queue IOTSZJ --max-pieces 6 [--solution-probabilities] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]\ncompiles a scenario preset into a SearchProblem; per-solution probability output preserves canonical CLI solution order"
@@ -173,8 +186,31 @@ impl CliHelpTopic {
                 Self::Sfinder => {
                     "usage: clearra sfinder <command> [legacy positional arguments] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads]\nClearra-native mappings: path, chance, percent, minimals, score, score-minimals, saves, best-save, cover, setup, congruent, congruent-cover, cover-percent, special-cover, spin-cover, spin, setup-cover, score-finder, pc-setup, best-setup, dpc-finder, verify\nThis is a limited Sfinder-man-style dialect, not complete solution-finder 1.43 CLI parity; unsupported legacy parameters fail explicitly\nClearra path/setup/cover keep their historical Clearra meanings; use this namespace for the mapped legacy meanings\nSfinder queue spellings such as *p4, *!, and [OISZ]p2 are normalized at this boundary\n--auto-workers limits adaptive parallelism without forcing small searches into the worker path; --workers explicitly requests a fixed pool"
                 }
+                Self::Product(_) => unreachable!("product help returned above"),
             }
         ))
+    }
+}
+
+impl ProductHelpTopic {
+    fn help_body(self) -> &'static str {
+        match self {
+            Self::BuildProbability => {
+                "usage: clearra build-probability --initial-mask HEX --target-mask HEX --height 1..24 (--queue QUEUE | --patterns PATTERN) [--hold|--no-hold] [--aggregation buildability|tiling|spin] [--spin-profile PROFILE] [--preserve-b2b] [--rule RULE] [--build-dependency-dag|--no-build-dependency-dag] [--finesse off|inputs] [--pattern-knowledge both|oracle|visible-7] [--mirror|--no-mirror] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--cpu-warmup] [--gpu-warmup] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]\nThe primary metric is full-future oracle build probability; --pattern-knowledge affects only finesse aggregation."
+            }
+            Self::Finesse => {
+                "usage: clearra finesse search --base-mask HEX --target-mask HEX --height N (--queue QUEUE | --patterns PATTERN) [--hold empty|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE] [--workers N|--auto-workers N]\n   or: clearra finesse score --initial-mask HEX --height N --placements PIECE:rotation:x:y,... (--queue QUEUE | --patterns PATTERN) [--hold empty|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]"
+            }
+            Self::Damage => {
+                "usage: clearra damage --board-mask HEX --height 1..24 --queue QUEUE [--hold|--no-hold] [--spin-profile PROFILE] [--initial-combo N] [--initial-b2b N] [--preserve-b2b] [--minimum-damage N] [--rule RULE] [--workers N|--auto-workers N]"
+            }
+            Self::SpinFinder => {
+                "usage: clearra spin-finder --board-mask HEX --height 1..24 (--queue QUEUE | --patterns PATTERN) [--hold|--no-hold] [--spin-profile PROFILE] [--lines any|0..4|1+..4+] [--spin-category any|t|other] [--initial-combo N] [--initial-b2b N] [--preserve-b2b] [--rule RULE] [--workers N|--auto-workers N]"
+            }
+            Self::MappedCompatibility => {
+                "usage: clearra <mapped-command> [legacy-compatible options]\nThis command is a curated compatibility mapping. Use `clearra sfinder --help` for the represented command inventory; parameters outside that inventory fail explicitly."
+            }
+        }
     }
 }
 

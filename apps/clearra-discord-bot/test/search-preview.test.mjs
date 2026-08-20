@@ -24,6 +24,8 @@ test("slash input preview emits CTK3 and preserves CTK3 piece colors", () => {
     decodeCtk3(preview.source).pages[0].cells,
     ["I", "O", "T", "S", "Z", "J", "L", "G", null, null],
   );
+  assert.equal(preview.document.pages[0].comment, undefined);
+  assert.equal(decodeCtk3(preview.source).pages[0].comment, undefined);
 });
 
 test("grid preview treats lowercase pieces as their colors and occupancy markers as gray", () => {
@@ -35,6 +37,7 @@ test("grid preview treats lowercase pieces as their colors and occupancy markers
   assert.deepEqual(preview.document.pages[0].cells, [
     "I", "O", "T", "S", "Z", "J", "L", "G", "G", null,
   ]);
+  assert.equal(preview.document.pages[0].comment, undefined);
 });
 
 test("spin-structure compact grids preserve completed rows in the input preview", () => {
@@ -100,4 +103,52 @@ test("cover preview preserves completed target rows before search-side completio
     decodeCtk3(preview.source).pages[1].cells,
     Array(20).fill("G"),
   );
+});
+
+test("preview preserves source comments without manufacturing board labels", () => {
+  const source = encodeCtk3({
+    width: 10,
+    pages: [{
+      height: 1,
+      cells: ["T", "T", "T", "T", ...Array(6).fill(null)],
+      comment: "source note",
+    }],
+  });
+  const preview = buildSearchPreviewDocument(findSlashCommand("path"), [
+    { name: "field", value: source },
+    { name: "next", value: "T" },
+  ]);
+
+  assert.equal(preview.document.pages[0].comment, "source note");
+  assert.equal(decodeCtk3(preview.source).pages[0].comment, "source note");
+  assert.doesNotMatch(preview.source, /Input field|Base field|Target delta/u);
+});
+
+test("cover preview keeps only source-authored comments", () => {
+  const base = encodeCtk3({
+    width: 10,
+    pages: [{
+      height: 1,
+      cells: ["G", ...Array(9).fill(null)],
+      comment: "base note",
+    }],
+  });
+  const target = encodeCtk3({
+    width: 10,
+    pages: [{
+      height: 1,
+      cells: [null, "I", "I", "I", "I", ...Array(5).fill(null)],
+      comment: "target note",
+    }],
+  });
+  const preview = buildSearchPreviewDocument(findSlashCommand("cover"), [
+    { name: "base", value: base },
+    { name: "target", value: target },
+    { name: "next", value: "I" },
+  ]);
+
+  assert.equal(preview.document.pages[0].comment, "base note");
+  assert.equal(decodeCtk3(preview.source).pages[0].comment, "base note");
+  assert.equal(preview.document.pages[1].comment, "target note");
+  assert.equal(decodeCtk3(preview.source).pages[1].comment, "target note");
 });

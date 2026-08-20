@@ -11,6 +11,14 @@ use super::{
     C_NATIVE_BUILDUP_MAX_OPERATIONS,
 };
 
+#[cfg(feature = "native-c-core")]
+use super::CoreCNative;
+#[cfg(all(test, feature = "native-c-core"))]
+use super::CLEARRA_CORE_ABI_VERSION_EXPECTED;
+
+#[cfg(all(test, feature = "native-c-core"))]
+use std::cell::Cell;
+
 pub const C_BUILDUP_STATUS_OK: i32 = 0;
 pub const C_BUILDUP_STATUS_INVALID_ARGUMENT: i32 = 1;
 pub const C_BUILDUP_STATUS_INVALID_PROBLEM: i32 = 2;
@@ -112,7 +120,64 @@ pub struct NativeBuildUpCountOutcome {
 pub struct NativeBuildUpWorkspace {
     buffer: Box<CNativeBuildVariantBuffer>,
     #[cfg(feature = "native-c-core")]
+    abi_status: Result<(), NativeCoreError>,
+    #[cfg(feature = "native-c-core")]
     native_workspace: Option<crate::raw::buildup_workspace::RawBuildUpWorkspace>,
+}
+
+#[cfg(all(test, feature = "native-c-core"))]
+thread_local! {
+    static TEST_WORKSPACE_ABI_OVERRIDE: Cell<Option<i32>> = const { Cell::new(None) };
+    static TEST_WORKSPACE_RAW_C_ENTRY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "native-c-core")]
+fn ensure_workspace_abi() -> Result<(), NativeCoreError> {
+    #[cfg(test)]
+    if let Some(actual) = TEST_WORKSPACE_ABI_OVERRIDE.with(Cell::get) {
+        return if actual == CLEARRA_CORE_ABI_VERSION_EXPECTED {
+            Ok(())
+        } else {
+            Err(NativeCoreError::AbiMismatch {
+                expected: CLEARRA_CORE_ABI_VERSION_EXPECTED,
+                actual,
+            })
+        };
+    }
+
+    CoreCNative::ensure_abi()
+}
+
+#[cfg(feature = "native-c-core")]
+fn record_workspace_raw_c_entry() {
+    #[cfg(test)]
+    TEST_WORKSPACE_RAW_C_ENTRY_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(all(test, feature = "native-c-core"))]
+struct TestWorkspaceAbiOverrideReset {
+    previous_abi: Option<i32>,
+    previous_entry_count: usize,
+}
+
+#[cfg(all(test, feature = "native-c-core"))]
+impl Drop for TestWorkspaceAbiOverrideReset {
+    fn drop(&mut self) {
+        TEST_WORKSPACE_ABI_OVERRIDE.with(|value| value.set(self.previous_abi));
+        TEST_WORKSPACE_RAW_C_ENTRY_COUNT.with(|count| count.set(self.previous_entry_count));
+    }
+}
+
+#[cfg(all(test, feature = "native-c-core"))]
+fn with_test_workspace_abi_override(test_abi: i32, test: impl FnOnce()) -> usize {
+    let reset = TestWorkspaceAbiOverrideReset {
+        previous_abi: TEST_WORKSPACE_ABI_OVERRIDE.with(|value| value.replace(Some(test_abi))),
+        previous_entry_count: TEST_WORKSPACE_RAW_C_ENTRY_COUNT.with(|count| count.replace(0)),
+    };
+    test();
+    let entry_count = TEST_WORKSPACE_RAW_C_ENTRY_COUNT.with(Cell::get);
+    drop(reset);
+    entry_count
 }
 
 pub struct NativeBuildUpWorkspaceOutcome<'a> {
@@ -128,10 +193,21 @@ impl NativeBuildUpWorkspaceOutcome<'_> {
 
 impl NativeBuildUpWorkspace {
     pub fn new() -> Self {
+        #[cfg(feature = "native-c-core")]
+        let abi_status = ensure_workspace_abi();
+        #[cfg(feature = "native-c-core")]
+        let native_workspace = if abi_status.is_ok() {
+            record_workspace_raw_c_entry();
+            crate::raw::buildup_workspace::RawBuildUpWorkspace::create()
+        } else {
+            None
+        };
         Self {
             buffer: crate::raw::buildup_buffer::zeroed_build_variant_buffer(),
             #[cfg(feature = "native-c-core")]
-            native_workspace: crate::raw::buildup_workspace::RawBuildUpWorkspace::create(),
+            abi_status,
+            #[cfg(feature = "native-c-core")]
+            native_workspace,
         }
     }
 
@@ -139,10 +215,14 @@ impl NativeBuildUpWorkspace {
         let buffer_bytes = self.host_buffer_bytes();
         #[cfg(feature = "native-c-core")]
         {
-            return buffer_bytes.saturating_add(self.native_workspace.as_ref().map_or(
-                0,
-                crate::raw::buildup_workspace::RawBuildUpWorkspace::retained_bytes,
-            ));
+            if self.abi_status.is_err() {
+                return buffer_bytes;
+            }
+            let native_bytes = self.native_workspace.as_ref().map_or(0, |workspace| {
+                record_workspace_raw_c_entry();
+                workspace.retained_bytes()
+            });
+            return buffer_bytes.saturating_add(native_bytes);
         }
         #[cfg(not(feature = "native-c-core"))]
         buffer_bytes
@@ -154,10 +234,16 @@ impl NativeBuildUpWorkspace {
 
     #[cfg(feature = "native-c-core")]
     pub(crate) fn raw_pointer(&mut self) -> Result<*mut core::ffi::c_void, NativeCoreError> {
+        self.ensure_abi()?;
         self.native_workspace
             .as_mut()
             .map(crate::raw::buildup_workspace::RawBuildUpWorkspace::as_mut_ptr)
             .ok_or(NativeCoreError::Unavailable)
+    }
+
+    #[cfg(feature = "native-c-core")]
+    fn ensure_abi(&self) -> Result<(), NativeCoreError> {
+        self.abi_status
     }
 
     #[cfg(feature = "native-c-core")]
@@ -166,6 +252,8 @@ impl NativeBuildUpWorkspace {
         problem: &CBuildUpProblem,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<i32, NativeCoreError> {
+        self.ensure_abi()?;
+        record_workspace_raw_c_entry();
         let _execution_control =
             crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
         let status = self
@@ -194,6 +282,8 @@ impl NativeBuildUpWorkspace {
         problem: &CBuildUpProblem,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<NativeBuildUpWorkspaceOutcome<'_>, NativeCoreError> {
+        self.ensure_abi()?;
+        record_workspace_raw_c_entry();
         let _execution_control =
             crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
         let status = match self.native_workspace.as_mut() {
@@ -226,6 +316,8 @@ impl NativeBuildUpWorkspace {
         limits: &CNativeBuildUpEnumerationLimits,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<NativeBuildUpWorkspaceOutcome<'_>, NativeCoreError> {
+        self.ensure_abi()?;
+        record_workspace_raw_c_entry();
         let _execution_control =
             crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
         let status = match self.native_workspace.as_mut() {
@@ -260,6 +352,8 @@ impl NativeBuildUpWorkspace {
         problem: &CBuildUpProblem,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<super::BuildUpGeometryLanguage, NativeCoreError> {
+        self.ensure_abi()?;
+        record_workspace_raw_c_entry();
         let _execution_control =
             crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
         let workspace = self
@@ -281,6 +375,8 @@ impl NativeBuildUpWorkspace {
         transition_mode: super::BuildUpGeometryTransitionMode,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<super::BuildUpGeometryLanguageV2, NativeCoreError> {
+        self.ensure_abi()?;
+        record_workspace_raw_c_entry();
         let _execution_control =
             crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
         let workspace = self

@@ -1,4 +1,7 @@
-import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
+import type {
+  ClearraSearchProgressCountKey,
+  ClearraSearchProgressTelemetry
+} from '../wasm/wasmCommandClient';
 import type { WorkspaceMessageKey } from './workspaceI18n';
 import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
@@ -30,7 +33,7 @@ export type WorkspaceProgressStage = {
 
 export type WorkspaceProgressMetric = {
   labelKey: WorkspaceMessageKey;
-  value: string;
+  value: string | null;
   total: string | null;
   kind: 'count';
 };
@@ -181,16 +184,34 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
     telemetry.producer_complete || isFinalizingPhase(phase) || phase === 'draining';
   const predictedCandidates = predictedCandidateTotal(telemetry);
   const candidateGenerationStarted =
-    telemetry.candidates_emitted > 0 || predictedCandidates !== null;
+    telemetryPositive(telemetry, 'candidates_emitted', telemetry.candidates_emitted) ||
+    (telemetry.availability.geometry_family_count &&
+      telemetry.geometry_family_count !== null);
   const verificationStarted =
     verify !== undefined &&
-    (telemetry.candidates_verified > 0 ||
-      telemetry.coverage_checks > 0 ||
+    (telemetryPositive(
+      telemetry,
+      'candidates_verified',
+      telemetry.candidates_verified
+    ) ||
+      telemetryPositive(telemetry, 'coverage_checks', telemetry.coverage_checks) ||
       producerDone);
+  const verificationCompletionEvidence =
+    verify !== undefined &&
+    (telemetryExactPositive(
+      telemetry,
+      'candidates_verified',
+      telemetry.candidates_verified
+    ) ||
+      telemetryExactPositive(
+        telemetry,
+        'coverage_checks',
+        telemetry.coverage_checks
+      ));
 
   if (geometry) {
     geometry.status =
-      producerDone || verificationStarted
+      producerDone || verificationCompletionEvidence
         ? 'complete'
         : phase === 'searching'
           ? 'running'
@@ -198,27 +219,47 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
     if (candidateGenerationStarted) {
       applyMetric(
         geometry,
-        telemetry.candidates_emitted,
+        telemetryCount(
+          telemetry,
+          'candidates_emitted',
+          telemetry.candidates_emitted
+        ),
         predictedCandidates
       );
     } else {
-      applyMetric(geometry, telemetry.geometry_nodes, null);
+      applyMetric(
+        geometry,
+        telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes),
+        null
+      );
     }
-    addMetric(geometry, 'progressMetricNodes', telemetry.geometry_nodes);
+    addMetric(
+      geometry,
+      'progressMetricNodes',
+      telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes)
+    );
     if (candidateGenerationStarted) {
       addMetric(
         geometry,
         'progressMetricCandidates',
-        telemetry.candidates_emitted,
+        telemetryCount(
+          telemetry,
+          'candidates_emitted',
+          telemetry.candidates_emitted
+        ),
         predictedCandidates
       );
     }
-    if (telemetry.pass_count > 1) {
+    if (telemetry.availability.pass_count && telemetry.pass_count > 1) {
       addMetric(
         geometry,
         'progressMetricPass',
-        Math.min(telemetry.pass_index + 1, telemetry.pass_count),
-        telemetry.pass_count
+        telemetryCompositeCount(
+          telemetry,
+          ['pass_index', 'pass_count'],
+          Math.min(telemetry.pass_index + 1, telemetry.pass_count)
+        ),
+        telemetryCount(telemetry, 'pass_count', telemetry.pass_count)
       );
     }
   }
@@ -231,11 +272,23 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
           : 'pending';
     applyMetric(
       verify,
-      telemetry.candidates_verified,
+      telemetryCount(
+        telemetry,
+        'candidates_verified',
+        telemetry.candidates_verified
+      ),
       predictedCandidates
     );
-    addMetric(verify, 'progressMetricBuildNodes', telemetry.build_nodes);
-    addMetric(verify, 'progressMetricChecks', telemetry.coverage_checks);
+    addMetric(
+      verify,
+      'progressMetricBuildNodes',
+      telemetryCount(telemetry, 'build_nodes', telemetry.build_nodes)
+    );
+    addMetric(
+      verify,
+      'progressMetricChecks',
+      telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks)
+    );
     if (telemetry.worker_count > 0) {
       addMetric(
         verify,
@@ -263,25 +316,46 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   const phase = telemetry.phase;
   const producerDone =
     telemetry.producer_complete || phase === 'draining' || isFinalizingPhase(phase);
-  const exactPipeline = telemetry.pass_count >= 4;
+  const exactPipeline =
+    telemetry.availability.pass_index &&
+    telemetry.exactness.pass_index &&
+    telemetry.availability.pass_count &&
+    telemetry.exactness.pass_count &&
+    telemetry.pass_count >= 4;
   const pipelineStage = exactPipeline
     ? Math.min(telemetry.pass_index, telemetry.pass_count - 1)
     : null;
   const geometryCompiled = exactPipeline
     ? (pipelineStage ?? 0) >= 1 || producerDone
-    : telemetry.candidates_emitted > 0 || producerDone;
+    : telemetryExactPositive(
+          telemetry,
+          'candidates_emitted',
+          telemetry.candidates_emitted
+        ) || producerDone;
   const graphStarted =
     (pipelineStage !== null && pipelineStage >= 1) ||
-    telemetry.producer_build_nodes > 0 ||
-    telemetry.candidates_emitted > 0 ||
+    telemetryPositive(
+      telemetry,
+      'producer_build_nodes',
+      telemetry.producer_build_nodes
+    ) ||
+    telemetryPositive(telemetry, 'candidates_emitted', telemetry.candidates_emitted) ||
     producerDone;
   const graphComplete = exactPipeline
     ? (pipelineStage ?? 0) >= 3 || producerDone
-    : telemetry.candidates_emitted > 0 || producerDone;
+    : telemetryExactPositive(
+          telemetry,
+          'candidates_emitted',
+          telemetry.candidates_emitted
+        ) || producerDone;
   const tasksStarted =
     (pipelineStage !== null && pipelineStage >= 3) ||
-    telemetry.candidates_emitted > 0 ||
-    telemetry.candidates_verified > 0 ||
+    telemetryPositive(telemetry, 'candidates_emitted', telemetry.candidates_emitted) ||
+    telemetryPositive(
+      telemetry,
+      'candidates_verified',
+      telemetry.candidates_verified
+    ) ||
     producerDone;
 
   if (geometry) {
@@ -291,7 +365,11 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
         : phase === 'searching'
           ? 'running'
           : 'pending';
-    applyMetric(geometry, telemetry.geometry_nodes, null);
+    applyMetric(
+      geometry,
+      telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes),
+      null
+    );
   }
   if (graph) {
     graph.status =
@@ -300,18 +378,42 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
         : graphStarted
           ? 'running'
           : 'pending';
-    if (graph.status === 'running' && telemetry.layer_total > 0) {
-      applyMetric(graph, telemetry.layer_done, telemetry.layer_total);
+    if (
+      graph.status === 'running' &&
+      telemetry.availability.layer_total &&
+      telemetry.layer_total > 0
+    ) {
+      applyMetric(
+        graph,
+        telemetryCount(telemetry, 'layer_done', telemetry.layer_done),
+        telemetryCount(telemetry, 'layer_total', telemetry.layer_total)
+      );
       addMetric(
         graph,
         'progressMetricLayerWork',
-        telemetry.layer_done,
-        telemetry.layer_total
+        telemetryCount(telemetry, 'layer_done', telemetry.layer_done),
+        telemetryCount(telemetry, 'layer_total', telemetry.layer_total)
       );
     } else {
-      applyMetric(graph, telemetry.producer_build_nodes, null);
+      applyMetric(
+        graph,
+        telemetryCount(
+          telemetry,
+          'producer_build_nodes',
+          telemetry.producer_build_nodes
+        ),
+        null
+      );
     }
-    addMetric(graph, 'progressMetricBuildNodes', telemetry.producer_build_nodes);
+    addMetric(
+      graph,
+      'progressMetricBuildNodes',
+      telemetryCount(
+        telemetry,
+        'producer_build_nodes',
+        telemetry.producer_build_nodes
+      )
+    );
   }
   if (tasks) {
     tasks.status =
@@ -322,20 +424,44 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
           : 'pending';
     applyMetric(
       tasks,
-      telemetry.candidates_verified,
-      telemetry.geometry_family_count
+      telemetryCount(
+        telemetry,
+        'candidates_verified',
+        telemetry.candidates_verified
+      ),
+      exactTelemetryCount(
+        telemetry,
+        'geometry_family_count',
+        telemetry.geometry_family_count
+      )
     );
     addMetric(
       tasks,
       'progressMetricDispatched',
-      telemetry.candidates_emitted,
-      telemetry.geometry_family_count
+      telemetryCount(
+        telemetry,
+        'candidates_emitted',
+        telemetry.candidates_emitted
+      ),
+      telemetryCount(
+        telemetry,
+        'geometry_family_count',
+        telemetry.geometry_family_count
+      )
     );
     addMetric(
       tasks,
       'progressMetricReduced',
-      telemetry.producer_coverage_checks,
-      telemetry.geometry_family_count
+      telemetryCount(
+        telemetry,
+        'producer_coverage_checks',
+        telemetry.producer_coverage_checks
+      ),
+      telemetryCount(
+        telemetry,
+        'geometry_family_count',
+        telemetry.geometry_family_count
+      )
     );
     if (telemetry.worker_count > 0) {
       addMetric(
@@ -369,21 +495,35 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
     else prepare.status = searchStarted ? 'complete' : 'running';
   }
   if (patterns) {
-    const done = telemetry ? telemetry.pass_index : input.forwardPatternDone ?? 0;
-    const total = telemetry ? telemetry.pass_count : input.forwardPatternTotal ?? 0;
+    const rawDone = telemetry ? telemetry.pass_index : input.forwardPatternDone ?? 0;
+    const rawTotal = telemetry ? telemetry.pass_count : input.forwardPatternTotal ?? 0;
+    const done = telemetry
+      ? telemetryCount(telemetry, 'pass_index', telemetry.pass_index)
+      : rawDone;
+    const total = telemetry
+      ? telemetryCount(telemetry, 'pass_count', telemetry.pass_count)
+      : rawTotal;
     const producerDone =
       telemetry?.producer_complete ||
       telemetry?.phase === 'draining' ||
       telemetry?.phase === 'postprocessing' ||
       telemetry?.phase === 'merging';
+    const exactPatternCompletion = telemetry
+      ? telemetry.availability.pass_index &&
+        telemetry.exactness.pass_index &&
+        telemetry.availability.pass_count &&
+        telemetry.exactness.pass_count &&
+        rawTotal > 0 &&
+        rawDone >= rawTotal
+      : rawTotal > 0 && rawDone >= rawTotal;
     patterns.status =
-      producerDone || (total > 0 && done >= total)
+      producerDone || exactPatternCompletion
         ? 'complete'
         : searchStarted
           ? 'running'
           : 'pending';
-    applyMetric(patterns, done, total > 0 ? total : null);
-    addMetric(patterns, 'progressMetricPatterns', done, total > 0 ? total : null);
+    applyMetric(patterns, done, rawTotal > 0 ? total : null);
+    addMetric(patterns, 'progressMetricPatterns', done, rawTotal > 0 ? total : null);
   }
   if (forward) {
     const forwardDone = telemetry !== null && (
@@ -398,33 +538,65 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
           ? 'running'
           : 'pending';
     if (telemetry) {
-      if (telemetry.layer_count > 0) {
-        const currentLayer = Math.min(
+      if (telemetry.availability.layer_count && telemetry.layer_count > 0) {
+        const currentLayerRaw = Math.min(
           telemetry.layer_index + 1,
           telemetry.layer_count
         );
-        applyMetric(forward, currentLayer, telemetry.layer_count);
-        const currentLayerFraction =
-          telemetry.layer_total > 0
-            ? Math.min(1, telemetry.layer_done / telemetry.layer_total)
-            : 0;
-        forward.percent = Math.min(
-          100,
-          ((Math.min(telemetry.layer_index, telemetry.layer_count) +
-            currentLayerFraction) /
-            telemetry.layer_count) *
-            100
+        applyMetric(
+          forward,
+          telemetryCompositeCount(
+            telemetry,
+            ['layer_index', 'layer_count'],
+            currentLayerRaw
+          ),
+          telemetryCount(telemetry, 'layer_count', telemetry.layer_count)
         );
+        const exactLayerProgress = [
+          'layer_index',
+          'layer_count',
+          'layer_done',
+          'layer_total'
+        ].every(
+          (key) =>
+            telemetry.availability[key as ClearraSearchProgressCountKey] &&
+            telemetry.exactness[key as ClearraSearchProgressCountKey]
+        );
+        if (exactLayerProgress) {
+          const currentLayerFraction =
+            telemetry.layer_total > 0
+              ? Math.min(1, telemetry.layer_done / telemetry.layer_total)
+              : 0;
+          forward.percent = Math.min(
+            100,
+            ((Math.min(telemetry.layer_index, telemetry.layer_count) +
+              currentLayerFraction) /
+              telemetry.layer_count) *
+              100
+          );
+        } else {
+          forward.percent = null;
+        }
         addMetric(
           forward,
           'progressMetricLayerWork',
-          telemetry.layer_done,
-          telemetry.layer_total > 0 ? telemetry.layer_total : null
+          telemetryCount(telemetry, 'layer_done', telemetry.layer_done),
+          telemetry.layer_total > 0
+            ? telemetryCount(telemetry, 'layer_total', telemetry.layer_total)
+            : null
         );
       } else {
-        applyMetric(forward, telemetry.geometry_nodes, null);
+        applyMetric(
+          forward,
+          telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes),
+          null
+        );
       }
-      addMetric(forward, 'progressMetricStates', telemetry.geometry_nodes);
+      addMetric(
+        forward,
+        'progressMetricStates',
+        telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes)
+      );
       if (telemetry.worker_count > 0) {
         addMetric(
           forward,
@@ -453,18 +625,40 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
       if (input.profile === 'damage') {
         applyMetric(
           classify,
-          telemetry.candidates_verified,
-          telemetry.producer_complete ? telemetry.candidates_emitted : null
+          telemetryCount(
+            telemetry,
+            'candidates_verified',
+            telemetry.candidates_verified
+          ),
+          telemetry.producer_complete
+            ? exactTelemetryCount(
+                telemetry,
+                'candidates_emitted',
+                telemetry.candidates_emitted
+              )
+            : null
         );
         addMetric(
           classify,
           'progressMetricDispatched',
-          telemetry.candidates_emitted
+          telemetryCount(
+            telemetry,
+            'candidates_emitted',
+            telemetry.candidates_emitted
+          )
         );
       } else {
-        applyMetric(classify, telemetry.coverage_checks, null);
+        applyMetric(
+          classify,
+          telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks),
+          null
+        );
       }
-      addMetric(classify, 'progressMetricLegalLocks', telemetry.coverage_checks);
+      addMetric(
+        classify,
+        'progressMetricLegalLocks',
+        telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks)
+      );
     }
   }
 }
@@ -533,24 +727,26 @@ function stage(
 
 function applyMetric(
   stageValue: WorkspaceProgressStage,
-  done: number | string,
+  done: number | string | null,
   total: number | string | null
 ) {
-  stageValue.done = normalizeCount(done);
+  stageValue.done = done === null ? null : normalizeCount(done);
   stageValue.total = total === null ? null : normalizeCount(total);
   stageValue.percent =
-    stageValue.total === null ? null : exactPercent(stageValue.done, stageValue.total);
+    stageValue.done === null || stageValue.total === null
+      ? null
+      : exactPercent(stageValue.done, stageValue.total);
 }
 
 function addMetric(
   stageValue: WorkspaceProgressStage,
   labelKey: WorkspaceMessageKey,
-  value: number | string,
+  value: number | string | null,
   total: number | string | null = null
 ) {
   stageValue.metrics.push({
     labelKey,
-    value: normalizeCount(value),
+    value: value === null ? null : normalizeCount(value),
     total: total === null ? null : normalizeCount(total),
     kind: 'count'
   });
@@ -559,8 +755,73 @@ function addMetric(
 function predictedCandidateTotal(
   telemetry: ClearraSearchProgressTelemetry
 ): string | null {
-  if (telemetry.geometry_family_count !== null) return telemetry.geometry_family_count;
-  return telemetry.producer_complete ? String(telemetry.candidates_emitted) : null;
+  if (telemetry.geometry_family_count !== null) {
+    return exactTelemetryCount(
+      telemetry,
+      'geometry_family_count',
+      telemetry.geometry_family_count
+    );
+  }
+  return telemetry.producer_complete
+    ? exactTelemetryCount(
+        telemetry,
+        'candidates_emitted',
+        telemetry.candidates_emitted
+      )
+    : null;
+}
+
+function telemetryCount(
+  telemetry: ClearraSearchProgressTelemetry,
+  key: ClearraSearchProgressCountKey,
+  value: number | string | null
+): string | null {
+  if (value === null || !telemetry.availability[key]) return null;
+  const normalized = normalizeCount(value);
+  return telemetry.exactness[key] ? normalized : `≈${normalized}`;
+}
+
+function telemetryCompositeCount(
+  telemetry: ClearraSearchProgressTelemetry,
+  keys: ClearraSearchProgressCountKey[],
+  value: number | string
+): string | null {
+  if (!keys.every((key) => telemetry.availability[key])) return null;
+  const normalized = normalizeCount(value);
+  return keys.every((key) => telemetry.exactness[key])
+    ? normalized
+    : `≈${normalized}`;
+}
+
+function exactTelemetryCount(
+  telemetry: ClearraSearchProgressTelemetry,
+  key: ClearraSearchProgressCountKey,
+  value: number | string | null
+): string | null {
+  if (
+    value === null ||
+    !telemetry.availability[key] ||
+    !telemetry.exactness[key]
+  ) {
+    return null;
+  }
+  return normalizeCount(value);
+}
+
+function telemetryPositive(
+  telemetry: ClearraSearchProgressTelemetry,
+  key: ClearraSearchProgressCountKey,
+  value: number
+): boolean {
+  return telemetry.availability[key] && Number.isFinite(value) && value > 0;
+}
+
+function telemetryExactPositive(
+  telemetry: ClearraSearchProgressTelemetry,
+  key: ClearraSearchProgressCountKey,
+  value: number
+): boolean {
+  return telemetry.exactness[key] && telemetryPositive(telemetry, key, value);
 }
 
 function normalizeCount(value: number | string): string {

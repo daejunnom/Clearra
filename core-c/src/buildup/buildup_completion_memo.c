@@ -103,6 +103,10 @@ static bool entry_matches(
            entry->deleted_count == key->deleted_line_state.deleted_count &&
            entry->hold_piece == key->hold_automaton_state.hold_piece &&
            entry->hold_empty == key->hold_automaton_state.hold_empty &&
+           entry->terminal_projection_consumed ==
+               key->hold_automaton_state.terminal_projection_consumed &&
+           entry->terminal_projection_provenance ==
+               key->hold_automaton_state.terminal_projection_provenance &&
            entry->cleared_lines == key->cleared_lines;
 }
 
@@ -124,6 +128,10 @@ static void entry_store(
     entry->deleted_count = key->deleted_line_state.deleted_count;
     entry->hold_piece = key->hold_automaton_state.hold_piece;
     entry->hold_empty = key->hold_automaton_state.hold_empty;
+    entry->terminal_projection_consumed =
+        key->hold_automaton_state.terminal_projection_consumed;
+    entry->terminal_projection_provenance =
+        key->hold_automaton_state.terminal_projection_provenance;
     entry->cleared_lines = key->cleared_lines;
 }
 

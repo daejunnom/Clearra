@@ -5,6 +5,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
 
   import { openFieldDocument } from './fieldInterchange';
+  import { fieldImportFailureMessageKey } from './fieldImportFailure';
   import type { Ctk3Page } from './ctk3Codec';
   import { lockedPageCells, operationCells } from './ctkPageTools';
   import PlayerBoard from './player/PlayerBoard.svelte';
@@ -87,6 +88,7 @@
   let capturingAction: PlayerBindingAction | null = null;
   let initialFieldText = '';
   let fieldInvalid = false;
+  let fieldFailureKey: WorkspaceMessageKey = 'playerImportInvalid';
   let notice = '';
   let animationFrame = 0;
   let lastFrameAt = 0;
@@ -421,8 +423,9 @@
       notice = label('playerFieldLoaded');
       renderCurrent(true);
       stopLoop();
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted || generation !== fieldLoadGeneration || destroyed) return;
+      fieldFailureKey = fieldImportFailureMessageKey(error, 'playerImportInvalid');
       fieldInvalid = true;
       notice = '';
     } finally {
@@ -439,6 +442,7 @@
     baseStartingBoardCells = [];
     engine?.pause();
     elapsedMs = 0;
+    fieldFailureKey = 'playerImportInvalid';
     fieldInvalid = false;
     notice = label('playerFieldCleared');
     renderCurrent(true);
@@ -733,12 +737,14 @@
           {capturingAction}
           {initialFieldText}
           {fieldInvalid}
+          {fieldFailureKey}
           on:settingschange={(event) => applyUiSettings(event.detail)}
           on:capturebinding={requestBindingCapture}
           on:cancelbinding={cancelBindingCapture}
           on:restoredefaults={() => (notice = label('playerSettingsReset'))}
           on:fieldinput={(event) => {
             initialFieldText = event.detail.source;
+            fieldFailureKey = 'playerImportInvalid';
             fieldInvalid = false;
           }}
           on:loadfield={(event) => void loadStartingField(event.detail.source)}

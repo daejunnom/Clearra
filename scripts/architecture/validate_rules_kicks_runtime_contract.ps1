@@ -3,7 +3,10 @@
 function Invoke-RulesKicksRuntimeValidation() {
 foreach ($requiredPath in @(
             "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler.rs",
+            "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler_tests.rs",
+            "crates/clearra-core-ffi/src/rules/custom_rule_descriptor_compiler_tests.rs",
             "crates/clearra-core-ffi/src/rules/mod.rs",
+            "crates/clearra-core-executor/src/packing/packing_runner_tests.rs",
             "core-c/include/clr_rules.h",
             "core-c/src/rules/rule_profile.c",
             "core-c/tests/rule_profile_tests.c"
@@ -41,6 +44,8 @@ foreach ($requiredMarker in @(
     }
 $ruleDescriptorCompiler = @(
         Read-Text "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler.rs"
+        Read-Text "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler_tests.rs"
+        Read-Text "crates/clearra-core-ffi/src/rules/custom_rule_descriptor_compiler_tests.rs"
         Read-Text "crates/clearra-core-ffi/src/rules/rule_capability_descriptor.rs"
         Read-Text "crates/clearra-core-ffi/src/rules/imported_kick_descriptor_compiler.rs"
         Read-Text "crates/clearra-core-ffi/src/rules/kick_table_identity_mapper.rs"
@@ -58,7 +63,8 @@ foreach ($requiredMarker in @(
             "KickTransitionCountTooLarge",
             "KickOffsetSequenceTooLong",
             "imported_verified_kick_profile_compiles_to_c_descriptor",
-            "unverified_extension_profile_is_rejected_before_c_execution"
+            "builtin_srs_x_projects_the_canonical_verified_table_to_c",
+            "unverified_custom_rule_rejected_before_execution"
         )) {
         if ($ruleDescriptorCompiler -notlike "*$requiredMarker*") {
             Add-ArchitectureError "M22 RuleDescriptorCompiler must connect Rust rules to C descriptors marker '$requiredMarker'"
@@ -81,12 +87,15 @@ foreach ($forbiddenMarker in @(
             Add-ArchitectureError "M22 CPackingProblemBuilder must not own rule/kick mapping marker '$forbiddenMarker'"
         }
     }
-$packingRunner = Read-Text "crates/clearra-core-executor/src/packing/packing_runner.rs"
+$packingRunner = @(
+        Read-Text "crates/clearra-core-executor/src/packing/packing_runner.rs"
+        Read-Text "crates/clearra-core-executor/src/packing/packing_runner_tests.rs"
+    ) -join "`n"
 $packingMetrics = Read-Text "crates/clearra-core-executor/src/packing/packing_metrics.rs"
 $packingSurface = "$packingRunner`n$packingMetrics"
 foreach ($requiredMarker in @(
             "verified_imported_kick_profile_reaches_c_packing_descriptor",
-            "unverified_extension_rule_is_rejected_before_candidate_generation",
+            "builtin_srs_x_uses_the_canonical_verified_table_during_native_packing",
             "has_verified_kick_profile",
             "verified_transition_count"
         )) {
@@ -120,9 +129,10 @@ foreach ($requiredMarker in @(
             "X1 MVP2 Rule / Kick Expansion",
             "clearra-rules",
             "RuleProfile + optional VerifiedKickTableProfile -> RuleDescriptorCompiler -> clr_rule_profile_descriptor -> clearra_rule_profile_from_descriptor -> ClearraCompactRuleProfile",
-            "SRS, SRS+, Jstris 180, and NoKick compile to built-in C descriptors",
+            "SRS, SRS+, Jstris 180, and NoKick compile to direct built-in C descriptors",
+            "Canonical SRS-X is projected through the verified descriptor ABI",
             "Imported kick tables compile only through",
-            "Unverified extension profiles such as SRS-X are rejected",
+            "Unverified imported and custom profiles, plus unsupported ASC and ARS profiles, are rejected",
             "supports_exact_180",
             "c_compact_descriptor_ready",
             "unsupported_backend_reason"

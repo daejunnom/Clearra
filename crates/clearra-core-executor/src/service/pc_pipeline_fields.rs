@@ -361,6 +361,7 @@ mod pipeline_fields {
     }
 }
 mod result_contract_fields {
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 
     use crate::{buildup::BuildUpRunResult, packing::PackingRunResult, service::field};
@@ -460,7 +461,14 @@ mod result_contract_fields {
             ),
             field("unique_trace_count", buildup.unique_trace_count()),
             field("coverage_row_count", buildup.coverage_row_count()),
-            field("coverage_probability", buildup.coverage_probability()),
+            field(
+                "coverage_probability",
+                if objective_policy.kind() == ObjectiveKind::Tiling {
+                    "not-calculated"
+                } else {
+                    buildup.coverage_probability()
+                },
+            ),
         ]
     }
 }

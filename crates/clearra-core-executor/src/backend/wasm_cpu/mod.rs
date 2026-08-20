@@ -49,6 +49,7 @@ mod setup_partial_build;
 mod setup_representative;
 mod setup_suffix_coverage;
 mod standard_bag_coverage;
+mod terminal_hold_projection;
 mod tiling_parallel;
 #[cfg(feature = "webgpu-search")]
 mod webgpu_distributed;
@@ -94,13 +95,16 @@ pub(super) enum WasmExactSearchError {
 
 const MAX_BOARD64_PIECES: usize = 15;
 
-// Empty-hold terminal projection needs only the materialized queue multiset.
-// An occupied initial hold is itself a placed-piece source and must remain in
-// the Packing projection even when the replacing lookahead stays unplaced.
-fn packing_projection_hold_enabled(problem: &clearra_problem::SearchProblem) -> bool {
-    problem.supply().hold_enabled()
-        && (!problem.supply().projects_unplaced_lookahead()
-            || problem.initial_hold().hold_piece().is_some())
+fn packing_hold_projection(
+    problem: &clearra_problem::SearchProblem,
+) -> clearra_supply::pattern_universe::PackingHoldProjection {
+    if problem.supply().projects_unplaced_lookahead()
+        && !problem.supply().projects_standard_bag_lookahead()
+    {
+        clearra_supply::pattern_universe::PackingHoldProjection::ReleaseHeldAtTerminal
+    } else {
+        clearra_supply::pattern_universe::PackingHoldProjection::PreserveFinalHoldLanguage
+    }
 }
 
 fn ensure_connected_kick_profile(

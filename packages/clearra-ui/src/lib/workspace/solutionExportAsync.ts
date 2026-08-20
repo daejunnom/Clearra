@@ -1,4 +1,8 @@
-import { defaultWorkerCount } from './solverWorkspaceModel';
+import {
+  automaticWorkerAuthority,
+  sharedBrowserHostCapabilitySnapshot,
+  type HostCapabilitySnapshot
+} from '../wasm/hostCapabilitySnapshot';
 import {
   CTK3_MAX_BUNDLE_PAGES,
   encodeCtk3PageSourceAsync,
@@ -34,6 +38,8 @@ type ExportWorkerResponse =
 
 export type SolutionExportAsyncOptions = {
   signal?: AbortSignal;
+  /** Main-thread capability authority; export workers must not re-probe the host. */
+  hostCapabilitySnapshot?: HostCapabilitySnapshot;
 };
 
 export type SolutionExportKeySource = {
@@ -93,7 +99,8 @@ export async function encodeSolutionKeySource(
         },
         {
           workerFactory: createCtkDocumentWorker,
-          signal: options.signal
+          signal: options.signal,
+          workers: exportWorkerCount(source.keyCount, options.hostCapabilitySnapshot)
         }
       );
     }
@@ -101,7 +108,11 @@ export async function encodeSolutionKeySource(
       return encodeCtkKeySourceWithoutWorkers(source, options.signal);
     }
     try {
-      return await encodeCtkKeySourceWithWorkerPool(source, options.signal);
+      return await encodeCtkKeySourceWithWorkerPool(
+        source,
+        options.signal,
+        options.hostCapabilitySnapshot
+      );
     } catch (error) {
       rethrowIfAborted(error, options.signal);
       return encodeCtkKeySourceWithoutWorkers(source, options.signal);
@@ -144,7 +155,8 @@ export async function encodeSolutionPagesForClipboard(
       },
       {
         workerFactory: createCtkDocumentWorker,
-        signal: options.signal
+        signal: options.signal,
+        workers: exportWorkerCount(pages.length, options.hostCapabilitySnapshot)
       }
     );
   }
@@ -175,7 +187,11 @@ export async function encodeSolutionKeysForClipboard(
       return encodeCtkWithoutWorkers(keys, options.signal);
     }
     try {
-      return await encodeCtkWithWorkerPool(keys, options.signal);
+      return await encodeCtkWithWorkerPool(
+        keys,
+        options.signal,
+        options.hostCapabilitySnapshot
+      );
     } catch (error) {
       rethrowIfAborted(error, options.signal);
       return encodeCtkWithoutWorkers(keys, options.signal);
@@ -217,13 +233,11 @@ function encodeCtkWithoutWorkers(
 
 async function encodeCtkWithWorkerPool(
   keys: readonly string[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  hostCapabilitySnapshot?: HostCapabilitySnapshot
 ): Promise<string> {
   const taskCount = Math.ceil(keys.length / CTK_SOLUTION_SEGMENT_SIZE);
-  const workerCount = Math.min(
-    taskCount,
-    defaultWorkerCount(globalThis.navigator?.hardwareConcurrency)
-  );
+  const workerCount = exportWorkerCount(taskCount, hostCapabilitySnapshot);
   const workers: Worker[] = [];
   const segments = new Array<string>(taskCount);
   let nextTask = 0;
@@ -315,13 +329,11 @@ async function encodeCtkKeySourceWithoutWorkers(
 
 async function encodeCtkKeySourceWithWorkerPool(
   source: SolutionExportKeySource,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  hostCapabilitySnapshot?: HostCapabilitySnapshot
 ): Promise<string> {
   const taskCount = Math.ceil(source.keyCount / LAZY_SOURCE_CHUNK_SIZE);
-  const workerCount = Math.min(
-    taskCount,
-    defaultWorkerCount(globalThis.navigator?.hardwareConcurrency)
-  );
+  const workerCount = exportWorkerCount(taskCount, hostCapabilitySnapshot);
   const workers: Worker[] = [];
   const segments = new Array<string>(taskCount);
   let nextTask = 0;
@@ -646,6 +658,19 @@ function exportWorkerError(event: ErrorEvent): Error {
       ? ` (${event.filename}:${event.lineno}:${event.colno})`
       : '';
   return new Error(`${event.message || 'solution-export-worker-failed'}${location}`);
+}
+
+export function exportWorkerCount(
+  taskCount: number,
+  snapshot: HostCapabilitySnapshot = sharedBrowserHostCapabilitySnapshot()
+): number {
+  const availableTasks = Number.isFinite(taskCount)
+    ? Math.max(1, Math.floor(taskCount))
+    : 1;
+  return Math.min(
+    availableTasks,
+    automaticWorkerAuthority(snapshot).workersEffective
+  );
 }
 
 function validateKeySource(source: SolutionExportKeySource): void {

@@ -401,10 +401,60 @@ clr_buildup_status clearra_buildup_queue_hold_consume(
 
 #include "hold_queue_verifier_internal.h"
 
-clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask(
+static clr_buildup_status append_terminal_projection_branch(
     const clr_buildup_problem *problem,
     const ClearraBuildUpQueueHold *state,
     uint8_t desired_piece_mask,
+    bool terminal_step,
+    ClearraBuildUpHoldBranchTable *out_table) {
+    if (problem == 0 || state == 0 || out_table == 0) {
+        return CLR_BUILDUP_INVALID_ARGUMENT;
+    }
+    if (!terminal_step ||
+        problem->terminal_projection_policy !=
+            CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD ||
+        problem->source_execution_mode !=
+            CLR_BUILDUP_SOURCE_CONCRETE_PATTERN ||
+        !clearra_buildup_hold_is_enabled(problem) ||
+        state->terminal_projection_consumed != 0u ||
+        state->hold_empty != 0u) {
+        return CLR_BUILDUP_OK;
+    }
+    if (state->hold_piece < CLR_PIECE_I || state->hold_piece > CLR_PIECE_L) {
+        return CLR_BUILDUP_INVALID_PROBLEM;
+    }
+    clr_piece_source_pattern_reader reader =
+        clearra_buildup_piece_source_reader_for_problem(problem);
+    if (reader.complete == 0u) {
+        return CLR_BUILDUP_CAPACITY_EXCEEDED;
+    }
+    if (state->cursor != reader.len ||
+        (desired_piece_mask &
+         (uint8_t)(UINT8_C(1) << state->hold_piece)) == 0u) {
+        return CLR_BUILDUP_OK;
+    }
+
+    ClearraBuildUpQueueHold next = *state;
+    next.hold_piece = CLR_PIECE_NONE;
+    next.hold_empty = 1u;
+    next.terminal_projection_consumed = 1u;
+    next.terminal_projection_provenance =
+        CLEARRA_BUILDUP_TERMINAL_PROVENANCE_FINITE_SOURCE_END;
+    return append_standard_bag_branch(
+        &next,
+        state->hold_piece,
+        CLEARRA_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL,
+        1u,
+        CLR_PIECE_NONE,
+        state,
+        out_table);
+}
+
+clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+    const clr_buildup_problem *problem,
+    const ClearraBuildUpQueueHold *state,
+    uint8_t desired_piece_mask,
+    bool terminal_step,
     ClearraBuildUpHoldBranchTable *out_table) {
     if (problem == 0 || state == 0 || out_table == 0) {
         return CLR_BUILDUP_INVALID_ARGUMENT;
@@ -456,7 +506,14 @@ clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask(
                 return status;
             }
         }
-        return CLR_BUILDUP_OK;
+        return has_current
+                   ? CLR_BUILDUP_OK
+                   : append_terminal_projection_branch(
+                         problem,
+                         state,
+                         desired_piece_mask,
+                         terminal_step,
+                         out_table);
     }
 
     if (has_current) {
@@ -483,6 +540,15 @@ clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask(
         }
     }
     return CLR_BUILDUP_OK;
+}
+
+clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask(
+    const clr_buildup_problem *problem,
+    const ClearraBuildUpQueueHold *state,
+    uint8_t desired_piece_mask,
+    ClearraBuildUpHoldBranchTable *out_table) {
+    return clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+        problem, state, desired_piece_mask, false, out_table);
 }
 
 clr_buildup_status clearra_buildup_queue_hold_enumerate_branches(

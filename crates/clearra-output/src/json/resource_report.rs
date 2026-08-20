@@ -18,6 +18,7 @@ const RESOURCE_KEYS: &[&str] = &[
     "resource_probability_complete",
     "count_complete",
     "count_truncated_reason",
+    "probability_calculated",
     "probability_complete",
     "supply_expansion_truncated",
     "supply_probability_complete",
@@ -88,7 +89,7 @@ pub(crate) fn resource_report_object(fields: &[JsonField]) -> Option<JsonValue> 
 fn resource_truncated(fields: &[JsonField]) -> bool {
     bool_field(fields, "resource_truncated").unwrap_or(false)
         || !count_complete(fields)
-        || bool_field(fields, "probability_complete") == Some(false)
+        || probability_incomplete(fields)
         || observed_universe_truncated(fields)
 }
 
@@ -118,7 +119,7 @@ fn resource_truncation_reason(fields: &[JsonField]) -> Option<JsonValue> {
     if observed_universe_truncated(fields) {
         return Some(JsonValue::string("observed_universe_truncated"));
     }
-    if bool_field(fields, "probability_complete") == Some(false) {
+    if probability_incomplete(fields) {
         return Some(JsonValue::string("probability_incomplete"));
     }
     if bool_field(fields, "resource_truncated") == Some(true) {
@@ -129,11 +130,20 @@ fn resource_truncation_reason(fields: &[JsonField]) -> Option<JsonValue> {
 
 fn observed_universe_truncated(fields: &[JsonField]) -> bool {
     bool_field(fields, "supply_expansion_truncated") == Some(true)
-        || bool_field(fields, "supply_probability_complete") == Some(false)
+        || probability_was_calculated(fields)
+            && bool_field(fields, "supply_probability_complete") == Some(false)
             && match field_value(fields, "queue_mode") {
                 Some(queue_mode) => string_value_is(&queue_mode, "observed"),
                 None => true,
             }
+}
+
+fn probability_incomplete(fields: &[JsonField]) -> bool {
+    probability_was_calculated(fields) && bool_field(fields, "probability_complete") == Some(false)
+}
+
+fn probability_was_calculated(fields: &[JsonField]) -> bool {
+    bool_field(fields, "probability_calculated") != Some(false)
 }
 
 fn materialized_probability_mass(fields: &[JsonField]) -> JsonValue {

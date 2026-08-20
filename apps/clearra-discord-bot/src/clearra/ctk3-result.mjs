@@ -859,7 +859,11 @@ function checkBundlePageLimit(pageCount) {
 function collectSummaryCompleteness(summary, state) {
   if (!summary) return;
   for (const [key, value] of Object.entries(summary)) {
-    if (RESULT_COMPLETENESS_FIELDS.has(key) && value === false) {
+    if (
+      RESULT_COMPLETENESS_FIELDS.has(key) &&
+      value === false &&
+      !summaryCompletenessFieldIsInactive(summary, key)
+    ) {
       state.complete = false;
       addWarning(state.warnings, `Search summary reports ${key}=false.`);
     }
@@ -868,6 +872,24 @@ function collectSummaryCompleteness(summary, state) {
       addWarning(state.warnings, `Search summary reports ${key}=true.`);
     }
   }
+}
+
+function summaryCompletenessFieldIsInactive(summary, key) {
+  if (
+    (key === "probability_complete" || key === "resource_probability_complete") &&
+    summary.solution_probabilities_requested === false
+  ) {
+    return true;
+  }
+  if (key === "objective_search_complete") {
+    return summary.objective_search_incomplete_reason ===
+      "coverage_not_requested_for_unique_solution_set";
+  }
+  if (key === "objective_complete") {
+    return summary.objective_incomplete_reason ===
+      "coverage_not_requested_for_unique_solution_set";
+  }
+  return false;
 }
 
 function collectSetupCompleteness(condition, path, state) {

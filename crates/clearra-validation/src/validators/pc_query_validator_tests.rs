@@ -2,7 +2,7 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcExecutionPolicy, PcHoldPolicy, PcQueueInput, PcScenarioBoard,
-    PieceWindow, RequestedSearchBackend,
+    PieceWindow, RequestedSearchBackend, VISIBLE_SEVEN_MINIMUM_COVER_ERROR_CODE,
 };
 use clearra_rules::{
     kicks::{KickTableProfile, KickTableProfileId, SrsKicks, VerifiedKickTableProfile},
@@ -10,6 +10,7 @@ use clearra_rules::{
 };
 use clearra_supply::queue::{
     bag_aligned_pattern::BagAlignedPattern, fixed_sequence::FixedSequence,
+    queue_observation_policy::QueueObservationPolicy,
 };
 
 use crate::diagnostic::diagnostic_code::DiagnosticCode;
@@ -74,6 +75,33 @@ fn opening_pc_query_validation_rejects_bag_aligned_pattern_contract_errors() {
 
     assert!(report.has_errors());
     assert!(report.contains_code(DiagnosticCode::ESupplyInvalidDuplicate));
+}
+
+#[test]
+fn opening_and_scenario_validation_reject_visible_seven_minimum_cover() {
+    let opening = OpeningPcSearchQuery::new(PcTarget::four_lines())
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .with_objective(ObjectivePolicy::minimum_cover());
+    let scenario = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0),
+        PcQueueInput::default(),
+        PieceWindow::new(10),
+    )
+    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+    .with_objective(ObjectivePolicy::minimum_cover());
+
+    for report in [
+        validate_opening_pc_search_query(&opening),
+        validate_pc_scenario_query(&scenario),
+    ] {
+        assert!(report.has_errors());
+        assert!(report.contains_code(DiagnosticCode::EPcQueryInvalid));
+        assert!(report.diagnostics().iter().any(|diagnostic| diagnostic
+            .evidence()
+            .iter()
+            .any(|evidence| evidence.key() == "reason"
+                && evidence.value() == VISIBLE_SEVEN_MINIMUM_COVER_ERROR_CODE)));
+    }
 }
 
 #[test]

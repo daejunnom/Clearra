@@ -2,6 +2,8 @@ import {
   encodeCtk3,
   encodeCtk3Bundle,
   encodeCtk3Compact,
+  FumenCommentCodecError,
+  FUMEN_MAX_PAGES,
   type Ctk3Color,
   type Ctk3Operation,
   type Ctk3Page
@@ -51,6 +53,9 @@ export type SolutionExportErrorCode =
   | 'invalid-solution-key'
   | 'clipboard-output-too-large'
   | 'fumen-height-unsupported'
+  | 'fumen-comment-too-long'
+  | 'invalid-fumen-comment'
+  | 'fumen-page-limit'
   | 'fumen-roundtrip-mismatch'
   | 'invalid-finesse-witness'
   | 'finesse-witness-solution-mismatch';
@@ -231,6 +236,9 @@ export function encodeColoredFumenSolutionKeys(
   keys: readonly string[]
 ): string {
   if (!keys.length) throw new SolutionExportError('invalid-page');
+  if (keys.length > FUMEN_MAX_PAGES) {
+    throw new SolutionExportError('fumen-page-limit');
+  }
   return encodeFastColoredFumenPages(parsedFumenPages(keys));
 }
 
@@ -354,6 +362,9 @@ export function finesseWitnessCtkPages(
 
 export function encodeColoredFumenPages(pages: SolutionExportPage[]): string {
   if (!pages.length) throw new SolutionExportError('invalid-page');
+  if (pages.length > FUMEN_MAX_PAGES) {
+    throw new SolutionExportError('fumen-page-limit');
+  }
   for (const page of pages) {
     validatePage(page);
     const height = Math.max(1, highestOccupiedRow(occupiedMask(page)) + 1);
@@ -361,7 +372,14 @@ export function encodeColoredFumenPages(pages: SolutionExportPage[]): string {
       throw new SolutionExportError('fumen-height-unsupported');
     }
   }
-  return encodeFastColoredFumenPages(pages);
+  try {
+    return encodeFastColoredFumenPages(pages);
+  } catch (error) {
+    if (error instanceof FumenCommentCodecError) {
+      throw new SolutionExportError(error.code);
+    }
+    throw error;
+  }
 }
 
 export function solutionPageToCtk3Page(page: SolutionExportPage): Ctk3Page {

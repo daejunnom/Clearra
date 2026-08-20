@@ -8,12 +8,17 @@
     Square,
     TriangleAlert
   } from '@lucide/svelte';
-  import { onDestroy, onMount } from 'svelte';
+  import { getContext, onDestroy, onMount } from 'svelte';
 
   import {
+    DEFAULT_RUNTIME_WARMUP_POLICY,
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
+    sharedBrowserHostCapabilitySnapshot,
     updateWasmCommandText,
     wasmWorkerState,
-    WasmTerminalWorkerController
+    WasmTerminalWorkerController,
+    type HostCapabilitySnapshot
   } from '../wasm';
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import BoardEditor from './BoardEditor.svelte';
@@ -26,12 +31,12 @@
   } from './pcSolverLinkState';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import PcSolverResult from './PcSolverResult.svelte';
+  import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import {
     automaticPcTargetLines,
     buildWorkspaceCommand,
     clearCompletedRows,
     createDefaultWorkspaceRequest,
-    defaultBrowserWorkerCount,
     trimBoardMask,
     workspaceValidationCodes,
     type RuleProfile,
@@ -55,7 +60,13 @@
   export let homeHref = '/';
 
   const decodedLinkState = initialPathState ? decodePcSolverPath(initialPathState) : null;
-  const workerController = new WasmTerminalWorkerController(workerFactory);
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const workerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
   const ruleOptions: Array<{ value: RuleProfile; label: string }> = [
     { value: 'srs-plus', label: 'SRS+' },
     { value: 'srs', label: 'SRS' },
@@ -80,6 +91,10 @@
   let invalidSharedLink = Boolean(initialPathState && !decodedLinkState);
 
   $: workerController.setWorkerFactory(workerFactory);
+  $: workerAuthority = automaticWorkerAuthority(
+    hostCapabilitySnapshot,
+    request.useAllLogicalProcessors
+  );
   $: workerView = workspaceViewFromWasm($wasmWorkerState);
   $: runtimeView = hasRun ? workerView : idleRuntimeView(workerView);
   $: validationCodes = standaloneValidationCodes(request);
@@ -99,9 +114,17 @@
     );
     request = withAutomaticTarget({
       ...request,
-      workers: defaultBrowserWorkerCount(navigator.hardwareConcurrency)
+      workers: automaticWorkerAuthority(hostCapabilitySnapshot).workersEffective
     });
-    workerController.prewarm(request.workers, false);
+    workerController.prewarm(
+      request.workers,
+      false,
+      DEFAULT_RUNTIME_WARMUP_POLICY,
+      automaticWorkerAuthority(
+        hostCapabilitySnapshot,
+        request.useAllLogicalProcessors
+      )
+    );
     replacePath(encodePcSolverPath(linkStateFromRequest(request)));
     const handlePageHide = () => dispose();
     window.addEventListener('pagehide', handlePageHide);
@@ -142,10 +165,10 @@
     request = withAutomaticTarget({
       ...next,
       workers: useAllChanged
-        ? defaultBrowserWorkerCount(
-            navigator.hardwareConcurrency,
+        ? automaticWorkerAuthority(
+            hostCapabilitySnapshot,
             next.useAllLogicalProcessors
-          )
+          ).workersEffective
         : next.workers,
       backend: 'auto',
       gpuDevice: 'auto',
@@ -153,7 +176,17 @@
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
     });
-    if (useAllChanged) workerController.prewarm(request.workers, false);
+    if (useAllChanged) {
+      workerController.prewarm(
+        request.workers,
+        false,
+        DEFAULT_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
+    }
   }
 
   function withAutomaticTarget(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
@@ -386,6 +419,7 @@
             on:click={() => updateRequest({ ...request, holdEnabled: !request.holdEnabled })}
           ><i></i></button>
         </div>
+        <WorkerAuthorityStatus authority={workerAuthority} {language} />
 
         <div class="option-row">
           <span>{label('useAllThreads')}</span>
@@ -440,7 +474,8 @@
     {language}
     {elapsedMs}
     targetLines={resultTargetLines}
-    loadSolutionPage={(offset, limit) => workerController.loadSolutionPage(offset, limit)}
+    loadSolutionPage={(offset, limit, signal) =>
+      workerController.loadSolutionPage(offset, limit, signal)}
   />
 </main>
 

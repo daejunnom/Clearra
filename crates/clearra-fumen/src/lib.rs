@@ -13,6 +13,7 @@ pub use codec::{
     FumenLikeReadError, FumenLikeReader, FumenLikeTrace, FumenLikeWriter, SourceFumenBoard,
     SourceFumenColoredFieldSet, SourceFumenDiagramError, SourceFumenDiagramSet, SourceFumenSetup,
     COLORED_FIELD_SOLUTION_KEY_ALGORITHM, COLORED_FIELD_SOLUTION_SET_HASH_ALGORITHM,
+    FUMEN_MAX_INPUT_BYTES, FUMEN_MAX_PAGES,
 };
 pub use normalize::{
     FumenNormalizeError, FumenNormalizer, NormalizedFumenDocument, NormalizedFumenPage,

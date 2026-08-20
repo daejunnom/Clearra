@@ -1,4 +1,6 @@
 mod comment_encoder {
+    use std::fmt::Write as _;
+
     use super::{error::FumenLikeWriteError, value_buffer::FumenValueBuffer};
 
     const MAX_COMMENT_LENGTH: usize = 4095;
@@ -11,13 +13,14 @@ mod comment_encoder {
         index: usize,
         page: &str,
     ) -> Result<(), FumenLikeWriteError> {
-        let escaped = escape_comment(page);
-        if escaped.len() > MAX_COMMENT_LENGTH {
+        let escaped_length = escaped_comment_length(page);
+        if escaped_length > MAX_COMMENT_LENGTH {
             return Err(FumenLikeWriteError::CommentTooLong {
                 index,
-                length: escaped.len(),
+                length: escaped_length,
             });
         }
+        let escaped = escape_comment(page);
 
         buffer.push(escaped.len(), 2);
         for chunk in escaped.as_bytes().chunks(4) {
@@ -36,24 +39,49 @@ mod comment_encoder {
         Ok(())
     }
 
+    fn escaped_comment_length(page: &str) -> usize {
+        page.encode_utf16()
+            .map(|code_unit| {
+                if is_unescaped_ascii(code_unit) {
+                    1
+                } else if code_unit <= 0xff {
+                    3
+                } else {
+                    6
+                }
+            })
+            .sum()
+    }
+
     fn escape_comment(page: &str) -> String {
         let mut escaped = String::new();
-        for byte in page.bytes() {
-            match byte {
-                b'A'..=b'Z'
-                | b'a'..=b'z'
-                | b'0'..=b'9'
-                | b'@'
-                | b'*'
-                | b'_'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'/' => escaped.push(byte as char),
-                _ => escaped.push_str(&format!("%{byte:02X}")),
+        for code_unit in page.encode_utf16() {
+            if is_unescaped_ascii(code_unit) {
+                escaped.push(char::from_u32(u32::from(code_unit)).expect("ASCII code unit"));
+            } else if code_unit <= 0xff {
+                write!(escaped, "%{code_unit:02X}").expect("writing to a String cannot fail");
+            } else {
+                write!(escaped, "%u{code_unit:04X}").expect("writing to a String cannot fail");
             }
         }
         escaped
+    }
+
+    fn is_unescaped_ascii(code_unit: u16) -> bool {
+        code_unit <= 0x7f
+            && matches!(
+                code_unit as u8,
+                b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'@'
+                    | b'*'
+                    | b'_'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'/'
+            )
     }
 
     fn comment_table_index(byte: u8) -> Option<usize> {
@@ -99,11 +127,35 @@ mod empty_field_encoder {
     }
 }
 mod error {
+    use std::fmt;
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum FumenLikeWriteError {
         CommentTooLong { index: usize, length: usize },
         UnsupportedCommentCharacter { index: usize, byte: u8 },
+        TooManyPages { length: usize, maximum: usize },
     }
+
+    impl fmt::Display for FumenLikeWriteError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::CommentTooLong { index, length } => write!(
+                    formatter,
+                    "fumen page {index} comment length {length} exceeds the 4095-byte escaped limit"
+                ),
+                Self::UnsupportedCommentCharacter { index, byte } => write!(
+                    formatter,
+                    "fumen page {index} contains unsupported escaped byte 0x{byte:02x}"
+                ),
+                Self::TooManyPages { length, maximum } => write!(
+                    formatter,
+                    "fumen page count {length} exceeds the {maximum}-page limit"
+                ),
+            }
+        }
+    }
+
+    impl std::error::Error for FumenLikeWriteError {}
 }
 mod event_names {
     use clearra_replay::{ReplayBoardSnapshotPhase, RotationRequest, TraceCompleteness};
@@ -293,6 +345,7 @@ mod wrap_data {
 }
 mod writer {
     use crate::codec::fumen_like_trace::FumenLikeTrace;
+    use crate::codec::FUMEN_MAX_PAGES;
 
     use super::{
         comment_encoder::write_comment, empty_action_encoder::encode_empty_action,
@@ -305,17 +358,25 @@ mod writer {
     pub struct FumenLikeWriter;
 
     impl FumenLikeWriter {
-        pub fn write(trace: &FumenLikeTrace) -> String {
-            Self::try_write(trace).expect("validated fumen-like traces must be writable")
+        pub fn write(trace: &FumenLikeTrace) -> Result<String, FumenLikeWriteError> {
+            Self::try_write(trace)
         }
     }
     impl FumenLikeWriter {
-        pub fn write_replay_trace(trace: &clearra_replay::ReplayTrace) -> String {
+        pub fn write_replay_trace(
+            trace: &clearra_replay::ReplayTrace,
+        ) -> Result<String, FumenLikeWriteError> {
             Self::write(&FumenLikeTrace::new(replay_trace_pages(trace)))
         }
     }
     impl FumenLikeWriter {
         pub fn try_write(trace: &FumenLikeTrace) -> Result<String, FumenLikeWriteError> {
+            if trace.pages().len() > FUMEN_MAX_PAGES {
+                return Err(FumenLikeWriteError::TooManyPages {
+                    length: trace.pages().len(),
+                    maximum: FUMEN_MAX_PAGES,
+                });
+            }
             let mut buffer = FumenValueBuffer::default();
             for (index, page) in trace.pages().iter().enumerate() {
                 write_empty_field_diff(&mut buffer);

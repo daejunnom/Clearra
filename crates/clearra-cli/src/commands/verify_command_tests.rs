@@ -5,22 +5,24 @@ use super::*;
 
 #[test]
 fn verify_command_runs_validation_before_native_execution() {
-    let output = VerifyCommand::run(&VerifyArgs::default(), RenderFormat::Text);
+    let output = VerifyCommand::run(&VerifyArgs::new(Some("pc".to_owned())), RenderFormat::Text);
 
-    assert_eq!(output.exit_code(), ExitCode::Unsupported);
-    assert!(output
-        .stderr()
-        .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
+    assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
+    assert!(output.stdout().contains("kind: pc"));
+    assert!(output.stdout().contains("queue_len: 5"));
+    assert!(output.stdout().contains("hold_enabled: false"));
 }
 
 #[test]
-fn verify_command_default_reaches_native_execution_after_capability_validation() {
-    let output = VerifyCommand::run(&VerifyArgs::default(), RenderFormat::Json);
+fn verify_command_bounded_cover_reaches_native_execution_after_capability_validation() {
+    let output = VerifyCommand::run(
+        &VerifyArgs::new(Some("cover".to_owned())),
+        RenderFormat::Json,
+    );
 
-    assert_eq!(output.exit_code(), ExitCode::Unsupported);
-    assert!(output
-        .stderr()
-        .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
+    assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
+    assert!(output.stdout().contains("\"kind\":\"build_coverage\""));
+    assert!(output.stdout().contains("\"template\":\"cli-default\""));
 }
 
 #[test]

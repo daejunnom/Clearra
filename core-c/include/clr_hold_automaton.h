@@ -22,7 +22,9 @@ typedef struct clr_hold_automaton_state {
     uint64_t provenance_id;
     uint8_t hold_piece;
     uint8_t hold_empty;
-    uint8_t reserved[6];
+    uint8_t terminal_projection_consumed;
+    uint8_t terminal_projection_provenance;
+    uint8_t reserved[4];
 } clr_hold_automaton_state;typedef struct clr_hold_automaton_step {
     uint8_t used_piece;
     clr_hold_automaton_state next_state;
@@ -34,7 +36,9 @@ typedef struct clr_hold_automaton_state {
     uint64_t provenance_id;
     uint8_t hold_piece;
     uint8_t hold_empty;
-    uint8_t reserved[6];
+    uint8_t terminal_projection_consumed;
+    uint8_t terminal_projection_provenance;
+    uint8_t reserved[4];
 } clr_buildup_hold_automaton_memo_key;uint32_t clearra_hold_automaton_apply(
     const clr_hold_automaton_state *state,
     uint32_t transition,

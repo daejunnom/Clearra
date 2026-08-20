@@ -9,6 +9,37 @@ import { loadDiscordBotConfig } from "../src/config.mjs";
 import { loadClearraJobServiceConfig } from "../src/job-service/config.mjs";
 import { ClearraCommandRunner } from "../src/job-service/runner.mjs";
 import { ClearraJobService } from "../src/job-service/server.mjs";
+import {
+  ARTIFACT_SCHEMA_VERSION,
+  LEGACY_ARTIFACT_SCHEMA_VERSION,
+  LEGACY_SEARCH_CONTRACT_REVISION,
+  LEGACY_SUPPLY_SEMANTICS_ID,
+  normalizeRuntimeIdentity,
+  productBuildIdentityFromRuntime,
+  RUNTIME_IDENTITY_SCHEMA,
+  runtimeIdentityMatches,
+  SEARCH_CONTRACT_REVISION,
+  SUPPLY_SEMANTICS_ID,
+} from "../src/job-service/runtime-identity.mjs";
+
+const TEST_RUNTIME_IDENTITY = Object.freeze({
+  schema: RUNTIME_IDENTITY_SCHEMA,
+  sourceCommit: "a".repeat(40),
+  engineBuildId: "a".repeat(40),
+  contractSchemaVersion: SEARCH_CONTRACT_REVISION,
+  supplySemanticsId: SUPPLY_SEMANTICS_ID,
+  artifactSchemaVersion: ARTIFACT_SCHEMA_VERSION,
+});
+
+test("runtime identity preserves distinct source and engine commits", () => {
+  const identity = normalizeRuntimeIdentity({
+    ...TEST_RUNTIME_IDENTITY,
+    engineBuildId: "b".repeat(40),
+  });
+
+  assert.equal(identity.sourceCommit, "a".repeat(40));
+  assert.equal(identity.engineBuildId, "b".repeat(40));
+});
 
 test("job runner requires working finesse search and score capabilities", async () => {
   const invocations = [];
@@ -16,11 +47,13 @@ test("job runner requires working finesse search and score capabilities", async 
     {
       executable: "clearra",
       searchTimeoutMs: 5_000,
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
     },
     {
       execFile: (_executable, arguments_, options, callback) => {
         invocations.push({ arguments_, options });
         callback(null, JSON.stringify({
+          runtime_identity: productBuildIdentityFromRuntime(TEST_RUNTIME_IDENTITY),
           finesse_report: {
             mode: arguments_[1],
             metric: "inputs",
@@ -42,6 +75,32 @@ test("job runner requires working finesse search and score capabilities", async 
     assert.equal(invocation.arguments_.includes("--workers"), true);
     assert.equal(invocation.arguments_.includes("--format"), true);
   }
+});
+
+test("job runner rejects a stale CLI build identity before listening", async () => {
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra",
+      searchTimeoutMs: 5_000,
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+    },
+    {
+      execFile: (_executable, arguments_, _options, callback) => {
+        callback(null, JSON.stringify({
+          runtime_identity: {
+            ...productBuildIdentityFromRuntime(TEST_RUNTIME_IDENTITY),
+            supply_semantics_id: "clearra.supply.stale",
+          },
+          finesse_report: { mode: arguments_[1], metric: "inputs" },
+        }), "");
+      },
+    },
+  );
+
+  await assert.rejects(
+    runner.verifyCapabilities(),
+    /^Error: Clearra executable identity does not match the configured job runtime identity\.$/,
+  );
 });
 
 test("job runner fails closed when a legacy CLI lacks finesse", async () => {
@@ -67,10 +126,18 @@ test("job runner fails closed when a legacy CLI lacks finesse", async () => {
 
 test("both job-service Docker paths smoke-test finesse before runtime", () => {
   const imagePaths = [
-    ["Dockerfile.current-job-service", "cloudbuild-current-job-service.yaml"],
-    ["Dockerfile.job-service", "cloudbuild-job-service.yaml"],
+    [
+      "Dockerfile.current-job-service",
+      "cloudbuild-current-job-service.yaml",
+      SEARCH_CONTRACT_REVISION,
+    ],
+    [
+      "Dockerfile.job-service",
+      "cloudbuild-job-service.yaml",
+      LEGACY_SEARCH_CONTRACT_REVISION,
+    ],
   ];
-  for (const [dockerName, cloudBuildName] of imagePaths) {
+  for (const [dockerName, cloudBuildName, contractRevision] of imagePaths) {
     const dockerfile = readFileSync(
       new URL(`../${dockerName}`, import.meta.url),
       "utf8",
@@ -87,7 +154,50 @@ test("both job-service Docker paths smoke-test finesse before runtime", () => {
       cloudBuild,
       new RegExp(`- apps/clearra-discord-bot/${dockerName.replaceAll(".", "\\.")}`),
     );
+    assert.match(dockerfile, /CLEARRA_SOURCE_COMMIT/);
+    assert.match(dockerfile, /CLEARRA_ENGINE_BUILD_ID/);
+    assert.match(dockerfile, /CLEARRA_SUPPLY_SEMANTICS_ID/);
+    assert.match(dockerfile, /CLEARRA_ARTIFACT_SCHEMA_VERSION/);
+    assert.match(dockerfile, new RegExp(contractRevision.replaceAll(".", "\\.")));
+    assert.match(cloudBuild, /CLEARRA_SOURCE_COMMIT=\$\{_SOURCE_COMMIT\}/);
+    assert.match(
+      cloudBuild,
+      /CLEARRA_ENGINE_BUILD_ID=\$\{_(?:ENGINE_BUILD_ID|SOURCE_COMMIT)\}/,
+    );
   }
+  const currentCloudBuild = readFileSync(
+    new URL("../cloudbuild-current-job-service.yaml", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(currentCloudBuild, /_TAG:\s*latest/);
+  const currentDocker = readFileSync(
+    new URL("../Dockerfile.current-job-service", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    currentDocker,
+    /CLEARRA_SEARCH_CONTRACT_REVISION!==?'clearra\.search\.contract\.v2'/,
+  );
+  assert.match(
+    currentDocker,
+    /source_commit.*CLEARRA_SOURCE_COMMIT/,
+  );
+  assert.match(
+    currentDocker,
+    /"supply_semantics_id":"clearra\.supply\.projected-terminal-lookahead\.v1"/,
+  );
+  const legacyDocker = readFileSync(
+    new URL("../Dockerfile.job-service", import.meta.url),
+    "utf8",
+  );
+  const legacyCloudBuild = readFileSync(
+    new URL("../cloudbuild-job-service.yaml", import.meta.url),
+    "utf8",
+  );
+  assert.match(legacyDocker, /sha256sum --check --strict/);
+  assert.doesNotMatch(legacyDocker, /ARG CLEARRA_CLI_SHA256=""/);
+  assert.match(legacyCloudBuild, /_CLEARRA_CLI_SHA256:\s*required/);
+  assert.doesNotMatch(legacyCloudBuild, /clearra\.search\.contract\.v2/);
 
   const main = readFileSync(
     new URL("../src/job-service/main.mjs", import.meta.url),
@@ -109,6 +219,11 @@ test("remote job execution is not capped by the Oracle gateway CPU count", () =>
       DISCORD_TOKEN: "test-token",
       CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
       CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "a".repeat(40),
+      CLEARRA_EXPECTED_ENGINE_BUILD_ID: "a".repeat(40),
+      CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+      CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID: SUPPLY_SEMANTICS_ID,
+      CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION: ARTIFACT_SCHEMA_VERSION,
       CLEARRA_MAX_CONCURRENT_REMOTE_JOBS: "4",
     },
     { availableParallelism: () => 2 },
@@ -141,6 +256,11 @@ test("gateway worker authority preserves host-local CPU allocation", () => {
       CLEARRA_JOB_URL: "https://jobs.example.test/jobs",
       CLEARRA_JOB_TOKEN: "job-token",
       CLEARRA_WORKER_AUTHORITY: "gateway",
+      CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "a".repeat(40),
+      CLEARRA_EXPECTED_ENGINE_BUILD_ID: "a".repeat(40),
+      CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+      CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID: SUPPLY_SEMANTICS_ID,
+      CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION: ARTIFACT_SCHEMA_VERSION,
       CLEARRA_MAX_CONCURRENT_SEARCHES: "2",
     },
     { availableParallelism: () => 8 },
@@ -494,6 +614,109 @@ test("job service executes an authenticated synchronous idempotent job", async (
   const conflicting = await request({ arguments: ["pc", "--lines", "2"] });
   assert.equal(conflicting.status, 409);
   assert.equal(executions, 1);
+});
+
+test("job service exposes and enforces the exact runtime identity before execution", async (t) => {
+  let executions = 0;
+  const config = {
+    host: "127.0.0.1",
+    port: 0,
+    authorizationToken: "job-token",
+    allowUnauthenticated: false,
+    maxRequestBodyBytes: 64 * 1024,
+    maxOutputBytes: 1024 * 1024,
+    searchTimeoutMs: 5_000,
+    terminationGraceMs: 10,
+    maxConcurrentJobs: 1,
+    completedJobTtlMs: 60_000,
+    maxRetainedJobs: 16,
+    processLogicalProcessors: 6,
+    searchWorkersPerSession: 5,
+    useAllLogicalProcessors: false,
+    runtimeIdentity: TEST_RUNTIME_IDENTITY,
+  };
+  const service = new ClearraJobService(config, {
+    async execute() {
+      executions += 1;
+      return { exitCode: 0, signal: null, stdout: "ok", stderr: "" };
+    },
+  });
+  const address = await service.listen();
+  t.after(() => service.close());
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const health = await (await fetch(`${base}/health`)).json();
+  assert.deepEqual(health.runtime, TEST_RUNTIME_IDENTITY);
+
+  const body = {
+    protocol: "clearra.job.v1",
+    id: "identity-job",
+    kind: "clearra.command",
+    arguments: ["pc", "--lines", "4"],
+    deadlineUnixMs: Date.now() + 5_000,
+    maxOutputBytes: 1024 * 1024,
+  };
+  const submit = (expectedRuntime) => fetch(`${base}/jobs`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer job-token",
+      "content-type": "application/json",
+      "idempotency-key": body.id,
+    },
+    body: JSON.stringify({ ...body, expectedRuntime }),
+  });
+
+  assert.equal((await submit(null)).status, 409);
+  assert.equal(executions, 0);
+  const accepted = await submit(TEST_RUNTIME_IDENTITY);
+  assert.equal(accepted.status, 200);
+  const terminal = await accepted.json();
+  assert.deepEqual(terminal.runtime, TEST_RUNTIME_IDENTITY);
+  assert.equal(executions, 1);
+});
+
+test("production job-service configuration fails closed without immutable identity", () => {
+  assert.throws(
+    () => loadClearraJobServiceConfig({
+      NODE_ENV: "production",
+      CLEARRA_JOB_SERVICE_ALLOW_UNAUTHENTICATED: "1",
+      CLEARRA_LISTEN_HOST: "127.0.0.1",
+      CLEARRA_SOURCE_COMMIT: "a".repeat(40),
+      CLEARRA_ENGINE_BUILD_ID: "a".repeat(40),
+    }),
+    /must declare its contract schema version/,
+  );
+  assert.throws(
+    () => loadClearraJobServiceConfig({
+      NODE_ENV: "production",
+      CLEARRA_JOB_SERVICE_ALLOW_UNAUTHENTICATED: "1",
+      CLEARRA_LISTEN_HOST: "127.0.0.1",
+      CLEARRA_SEARCH_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+      CLEARRA_SUPPLY_SEMANTICS_ID: SUPPLY_SEMANTICS_ID,
+      CLEARRA_ARTIFACT_SCHEMA_VERSION: ARTIFACT_SCHEMA_VERSION,
+    }),
+    /full Git commit SHA/,
+  );
+  const config = loadClearraJobServiceConfig({
+    NODE_ENV: "production",
+    CLEARRA_JOB_SERVICE_ALLOW_UNAUTHENTICATED: "1",
+    CLEARRA_LISTEN_HOST: "127.0.0.1",
+    CLEARRA_SOURCE_COMMIT: "a".repeat(40),
+    CLEARRA_ENGINE_BUILD_ID: "a".repeat(40),
+    CLEARRA_SEARCH_CONTRACT_REVISION: SEARCH_CONTRACT_REVISION,
+    CLEARRA_SUPPLY_SEMANTICS_ID: SUPPLY_SEMANTICS_ID,
+    CLEARRA_ARTIFACT_SCHEMA_VERSION: ARTIFACT_SCHEMA_VERSION,
+  });
+  assert.deepEqual(config.runtimeIdentity, TEST_RUNTIME_IDENTITY);
+
+  const legacy = normalizeRuntimeIdentity({
+    ...TEST_RUNTIME_IDENTITY,
+    contractSchemaVersion: LEGACY_SEARCH_CONTRACT_REVISION,
+    supplySemanticsId: LEGACY_SUPPLY_SEMANTICS_ID,
+    artifactSchemaVersion: LEGACY_ARTIFACT_SCHEMA_VERSION,
+  });
+  assert.notDeepEqual(legacy, TEST_RUNTIME_IDENTITY);
+  assert.equal(runtimeIdentityMatches(legacy, TEST_RUNTIME_IDENTITY), false);
 });
 
 test("job service rejects unauthenticated work", async (t) => {

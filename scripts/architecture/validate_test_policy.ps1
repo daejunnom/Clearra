@@ -182,8 +182,11 @@ function Invoke-TestPolicyArchitectureValidation() {
     if (Test-Path -LiteralPath (Join-Path $Root "build.rs")) {
         Add-ArchitectureError "workspace root build.rs is forbidden"
     }
-    foreach ($buildScript in Get-ChildItem -LiteralPath (Join-Path $Root "crates") -Recurse -File -Filter build.rs) {
-        Add-ArchitectureError "crate-local Cargo build script is forbidden: $($buildScript.FullName)"
+    foreach ($cargoToml in Get-ChildItem -LiteralPath (Join-Path $Root "crates") -Recurse -File -Filter Cargo.toml) {
+        $buildScript = Join-Path $cargoToml.Directory.FullName "build.rs"
+        if (Test-Path -LiteralPath $buildScript -PathType Leaf) {
+            Add-ArchitectureError "crate-local Cargo build script is forbidden: $buildScript"
+        }
     }
 
     if (Test-Path -LiteralPath (Join-Path $Root "package.json")) {

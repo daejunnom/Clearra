@@ -1,7 +1,7 @@
 import {
-  decodeCtk3,
+  decodeCtk3Exact,
   encodeCtk3,
-  inspectCtk3,
+  inspectCtk3Exact,
   type Ctk3Document,
 } from "./codec.js";
 
@@ -32,12 +32,12 @@ export function decodeCtk3File(data: Ctk3FileData): Ctk3Document {
 
 export function parseCtk3File(data: Ctk3FileData): ParsedCtk3File {
   const source = decodeFileSource(data);
-  return { source, document: decodeCtk3(source) };
+  return { source, document: decodeCtk3Exact(source) };
 }
 
 export function ctk3FileSource(data: Ctk3FileData): string {
   const source = decodeFileSource(data);
-  inspectCtk3(source);
+  inspectCtk3Exact(source);
   return source;
 }
 

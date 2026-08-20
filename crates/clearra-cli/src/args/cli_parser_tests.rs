@@ -568,6 +568,72 @@ fn parses_spin_structure_help_without_executing_the_search() {
 }
 
 #[test]
+fn every_generic_product_command_routes_help_without_executing_the_product() {
+    let commands = [
+        "build-probability",
+        "finesse",
+        "damage",
+        "spin-finder",
+        "spin-structure",
+        "chance",
+        "minimals",
+        "score",
+        "special-minimals",
+        "special_minimals",
+        "special-cover",
+        "special_cover",
+        "score-minimals",
+        "score_minimals",
+        "saves",
+        "best-save",
+        "best_save",
+        "score-finder",
+        "score_finder",
+        "spin-cover",
+        "spincover",
+        "setup-cover",
+        "setupcover",
+        "congruent",
+        "congruent-cover",
+        "congruent_cover",
+        "cover-percent",
+        "cover_percent",
+        "pc-setup",
+        "pcsetup",
+        "best-setup",
+        "bestsetup",
+        "dpc-finder",
+        "dpcfinder",
+        "parity",
+        "to-gray",
+        "togray",
+        "to-fumen",
+        "tofumen",
+        "render",
+    ];
+
+    for command in commands {
+        for flag in ["--help", "-h"] {
+            let parsed = CliParser::parse(["clearra", command, flag])
+                .unwrap_or_else(|error| panic!("{command} {flag}: {error:?}"));
+            let ParsedCliCommand::Help(topic) = parsed.into_command() else {
+                panic!("{command} {flag} executed instead of returning help");
+            };
+            let output = topic.into_output(LanguageId::En);
+            assert!(output.stderr().is_empty(), "{command} {flag}");
+            assert!(!output.stdout().is_empty(), "{command} {flag}");
+            assert!(!output.stdout().contains("unsupported"), "{command} {flag}");
+        }
+    }
+}
+
+#[test]
+fn pc_help_covers_the_public_b2b_preservation_option() {
+    let output = CliHelpTopic::Pc.into_output(LanguageId::En);
+    assert!(output.stdout().contains("--preserve-b2b"));
+}
+
+#[test]
 fn canonical_clearra_commands_match_legacy_aliases() {
     let canonical_path = CliParser::parse(["clearra", "pc-replay", "--lines", "2"])
         .expect("canonical replay command")

@@ -1,5 +1,7 @@
 import { availableParallelism as nodeAvailableParallelism } from "node:os";
 
+import { runtimeIdentityFromEnvironment } from "./runtime-identity.mjs";
+
 export function loadClearraJobServiceConfig(
   environment = process.env,
   runtime = {},
@@ -98,6 +100,7 @@ export function loadClearraJobServiceConfig(
     useAllLogicalProcessors:
       useAllLogicalProcessors &&
       searchWorkersPerSession > Math.max(1, processLogicalProcessors - 1),
+    runtimeIdentity: runtimeIdentityFromEnvironment(environment),
   };
 }
 

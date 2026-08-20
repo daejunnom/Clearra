@@ -1,5 +1,4 @@
 use crate::{error::CliErrorCode, exit::ExitCode};
-use clearra_validation::diagnostic::diagnostic_code::DiagnosticCode;
 
 use super::*;
 
@@ -62,7 +61,7 @@ fn pc_command_validates_supported_query() {
     assert!(output.stdout().contains("objective_complete: true"));
     assert!(output.stdout().contains("count_complete: true"));
     assert!(output.stdout().contains("count_truncated_reason: none"));
-    assert!(output.stdout().contains("objective_solution_traces: 64"));
+    assert!(output.stdout().contains("objective_solution_traces: 3"));
     assert!(output.stdout().contains("trace_steps: 5"));
     assert!(output.stdout().contains("trace_available: true"));
     assert!(output.stdout().contains("partitions: 1"));
@@ -113,7 +112,7 @@ fn pc_command_renders_json_when_selected() {
         .stdout()
         .contains("\"objective_search_mode\":\"all-traces\""));
     assert!(output.stdout().contains("\"applied\":true"));
-    assert!(output.stdout().contains("\"solution_traces\":64"));
+    assert!(output.stdout().contains("\"solution_traces\":3"));
     assert!(output.stdout().contains("\"trace_steps\":5"));
     assert!(output.stdout().contains("\"trace_available\":true"));
     assert!(output
@@ -124,7 +123,7 @@ fn pc_command_renders_json_when_selected() {
 #[test]
 fn pc_command_routes_non_two_line_targets_to_generic_search() {
     let output = PcCommand::run(
-        PcArgs::new(4).with_queue("I,O,T", true),
+        PcArgs::new(4).with_queue("IIOOOIIOOO", true),
         RenderFormat::TextVerbose,
     );
 
@@ -164,7 +163,7 @@ fn pc_command_reports_unsupported_target() {
 fn pc_command_routes_disabled_hold_to_generic_search() {
     let output = PcCommand::run(
         PcArgs::new(2)
-            .with_queue("IOT", true)
+            .with_queue("IIOOO", true)
             .with_hold_enabled(false)
             .with_objective("unique"),
         RenderFormat::TextVerbose,
@@ -194,19 +193,24 @@ fn pc_command_routes_disabled_hold_to_generic_search() {
 }
 
 #[test]
-fn pc_command_routes_extension_rule_to_validation_error_before_search() {
+fn pc_command_routes_builtin_srs_x_through_verified_native_descriptor() {
     let output = PcCommand::run(
-        PcArgs::new(2).with_rule(Some("srs-x".to_owned())),
-        RenderFormat::Text,
+        PcArgs::new(2)
+            .with_queue("IIOOO", true)
+            .with_hold_enabled(false)
+            .with_rule(Some("srs-x".to_owned())),
+        RenderFormat::TextVerbose,
     );
 
-    assert_eq!(output.exit_code(), ExitCode::ValidationFailed);
+    assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
+    assert!(output.stdout().contains("rule_profile: srs-x"));
+    assert!(output.stdout().contains("effective_kick_model: srs-x"));
     assert!(output
-        .stderr()
-        .contains(DiagnosticCode::ERuleUnsupportedMvp.as_str()));
+        .stdout()
+        .contains("compact_has_verified_kick_profile: 1"));
     assert!(output
-        .stderr()
-        .contains("srs_x_profile_requires_imported_kick_table"));
+        .stdout()
+        .contains("compact_verified_kick_transition_count: 80"));
 }
 
 #[test]

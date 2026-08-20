@@ -51,9 +51,9 @@ function Assert-CliCommandSurfaceIsSynchronized() {
     $commandsMod = Read-Text "crates/clearra-cli/src/commands/mod.rs"
 
     $commandVariants = @(Get-RustEnumVariants $cliParser "ParsedCliCommand" |
-        Where-Object { $_ -ne "Unsupported" -and $_ -ne "Help" })
+        Where-Object { $_ -ne "Unsupported" -and $_ -ne "Help" -and $_ -ne "Product" })
     $helpVariants = @(Get-RustEnumVariants $cliParser "CliHelpTopic" |
-        Where-Object { $_ -ne "TopLevel" })
+        Where-Object { $_ -ne "TopLevel" -and $_ -ne "Product" })
 
     foreach ($variant in $commandVariants) {
         $kebab = Convert-PascalToKebab $variant
@@ -100,6 +100,23 @@ function Assert-CliCommandSurfaceIsSynchronized() {
         if (-not ($commandVariants -contains $variant)) {
             Add-ArchitectureError "CliHelpTopic::$variant must correspond to a concrete ParsedCliCommand variant"
         }
+    }
+
+    foreach ($required in @(
+        'has_help(command_args)',
+        'CliHelpTopic::Product',
+        'product_help_topic(command)',
+        'ProductHelpTopic::BuildProbability',
+        'ProductHelpTopic::Finesse',
+        'ProductHelpTopic::Damage',
+        'ProductHelpTopic::SpinFinder'
+    )) {
+        if (($cliCommandParser + "`n" + $cliParser) -notlike "*$required*") {
+            Add-ArchitectureError "Generic product help routing is missing '$required'"
+        }
+    }
+    if ($cliParser -notlike '*--preserve-b2b*') {
+        Add-ArchitectureError 'PC help must expose the public --preserve-b2b option'
     }
 }
 function Invoke-WorkspaceSurfaceArchitectureValidation() {

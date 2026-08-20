@@ -4,11 +4,17 @@
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
-  import type { SolutionExportKeySource } from './solutionExportAsync';
   import {
     workspaceSolutionCount,
+    workspaceSolutionKeysComplete,
     workspaceSolutionPageAvailable
   } from './solutionSetAvailability';
+  import {
+    bindSolutionPageLoader,
+    createPagedSolutionExportKeySource,
+    solutionPageResultIdentity,
+    type SolutionPageLoader
+  } from './solutionPageSource';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -20,24 +26,48 @@
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
   export let targetLines = 4;
-  export let loadSolutionPage:
-    | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
-    | null = null;
+  export let loadSolutionPage: SolutionPageLoader | null = null;
 
-  const EXPORT_PAGE_SIZE = 1_000;
   let copyFormat: SolutionCopyFormat = 'ctk';
 
   $: report = view.searchReport;
   $: solutionKeys = report?.normalized_solution_keys ?? [];
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
   $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
+  $: solutionKeysComplete = workspaceSolutionKeysComplete(report);
   $: solutionCount = workspaceSolutionCount(report);
   $: resultIncomplete = view.status === 'completed' && (
     report?.count_complete === false || view.resourceReport?.truncated === true
   );
-  $: exportKeySource = solutionCount !== null && solutionPageAvailable && loadSolutionPage
-    ? createExportKeySource(solutionCount, loadSolutionPage)
+  $: solutionResultIdentity = solutionPageResultIdentity(
+    report?.normalized_solution_set_hash,
+    solutionCount,
+    solutionKeys
+  );
+  $: boundSolutionPageLoader =
+    solutionCount !== null &&
+    solutionCount > 0 &&
+    solutionPageAvailable &&
+    loadSolutionPage
+      ? bindSolutionPageLoader({
+          keyCount: solutionCount,
+          loadPage: loadSolutionPage,
+          resultIdentity: solutionResultIdentity,
+          currentResultIdentity: () => solutionPageResultIdentity(
+            report?.normalized_solution_set_hash,
+            workspaceSolutionCount(report),
+            report?.normalized_solution_keys ?? []
+          )
+        })
+      : null;
+  $: exportKeySource = solutionCount !== null && boundSolutionPageLoader
+    ? createPagedSolutionExportKeySource({
+        keyCount: solutionCount,
+        loadPage: boundSolutionPageLoader
+      })
     : null;
+  $: exportableSolutionKeys =
+    solutionKeysComplete && solutionCount === solutionKeys.length ? solutionKeys : [];
   $: progressPercent = view.progressTotal > 0
     ? Math.max(0, Math.min(100, (view.progressDone / view.progressTotal) * 100))
     : 0;
@@ -54,48 +84,6 @@
     return new Intl.NumberFormat(language).format(value);
   }
 
-  function createExportKeySource(
-    keyCount: number,
-    loader: NonNullable<typeof loadSolutionPage>
-  ): SolutionExportKeySource | null {
-    if (keyCount < 1) return null;
-    return {
-      keyCount,
-      async readKeys(start, count, signal) {
-        if (
-          !Number.isSafeInteger(start) ||
-          !Number.isSafeInteger(count) ||
-          start < 0 ||
-          count < 0 ||
-          start + count > keyCount
-        ) {
-          throw new RangeError('PC solver export range is invalid');
-        }
-        const keys: string[] = [];
-        while (keys.length < count) {
-          throwIfAborted(signal);
-          const response = await loader(
-            start + keys.length,
-            Math.min(EXPORT_PAGE_SIZE, count - keys.length)
-          );
-          if (!response.keys.length) {
-            throw new Error('PC solver solution store ended before the reported total');
-          }
-          keys.push(...response.keys.slice(0, count - keys.length));
-        }
-        throwIfAborted(signal);
-        return keys;
-      }
-    };
-  }
-
-  function throwIfAborted(signal: AbortSignal | undefined) {
-    if (!signal?.aborted) return;
-    if (signal.reason instanceof Error) throw signal.reason;
-    const error = new Error('Solution copy was aborted.');
-    error.name = 'AbortError';
-    throw error;
-  }
 </script>
 
 {#if view.status !== 'idle'}
@@ -143,7 +131,7 @@
             bind:value={copyFormat}
             {language}
             compact
-            {solutionKeys}
+            solutionKeys={exportableSolutionKeys}
             keySource={exportKeySource}
           />
         {/if}
@@ -155,7 +143,7 @@
         <SolutionGallery
           {solutionKeys}
           {solutionCount}
-          loadSolutionPage={solutionPageAvailable ? loadSolutionPage : null}
+          loadSolutionPage={boundSolutionPageLoader}
           solutionSetHash={report?.normalized_solution_set_hash ?? ''}
           {targetLines}
           {language}

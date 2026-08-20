@@ -1,23 +1,23 @@
 export async function writeClipboardText(
   value: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  environment: ClipboardTextEnvironment = globalThis as ClipboardTextEnvironment
 ): Promise<void> {
   throwIfAborted(signal);
-  const clipboard = globalThis.navigator?.clipboard;
+  const clipboard = environment.navigator?.clipboard;
   if (!clipboard) throw new Error('clipboard-unavailable');
 
-  const ClipboardItemConstructor = (
-    globalThis as unknown as {
-      ClipboardItem?: new (
-        items: Record<string, Blob>
-      ) => ClipboardItem;
-    }
-  ).ClipboardItem;
-  if (ClipboardItemConstructor && typeof clipboard.write === 'function') {
+  const ClipboardItemConstructor = environment.ClipboardItem;
+  const BlobConstructor = environment.Blob;
+  if (
+    ClipboardItemConstructor &&
+    BlobConstructor &&
+    typeof clipboard.write === 'function'
+  ) {
     try {
       throwIfAborted(signal);
       const item = new ClipboardItemConstructor({
-        'text/plain': new Blob([value], {
+        'text/plain': new BlobConstructor([value], {
           type: 'text/plain;charset=utf-8'
         })
       });
@@ -37,6 +37,17 @@ export async function writeClipboardText(
   await clipboard.writeText(value);
   throwIfAborted(signal);
 }
+
+export type ClipboardTextEnvironment = {
+  navigator?: {
+    clipboard?: {
+      write?(items: unknown[]): Promise<void>;
+      writeText?(value: string): Promise<void>;
+    };
+  };
+  ClipboardItem?: new (items: Record<string, Blob>) => unknown;
+  Blob?: typeof Blob;
+};
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw abortError(signal);

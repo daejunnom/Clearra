@@ -1,6 +1,8 @@
 # Release-blocking static validation is intentionally limited to boundaries,
 # forbidden APIs, public ABI shape, unsafe isolation, and unsupported capability
 # disclosure. Runtime correctness belongs to executed adversarial tests.
+# SRP rationale: this validator has one change reason: the accepted release and
+# deployment authority contract changes at a publication or cutover boundary.
 
 function Assert-ReleasePublicContractContains {
     param(
@@ -268,4 +270,877 @@ function Invoke-ArchitectureValidationAuthorityPolicy {
         'runtime correctness is not inferred from marker presence',
         'AdversarialCorrectness', 'NoProductDebt'
     ) 'Architecture validation authority'
+}
+
+function Invoke-ReleaseIdentityGateValidation {
+    $release = Read-Text '.github/workflows/release-cli.yml'
+    $pages = Read-Text '.github/workflows/pages.yml'
+    $cloudBuild = Read-Text 'apps/clearra-discord-bot/cloudbuild-current-job-service.yaml'
+    $currentDocker = Read-Text 'apps/clearra-discord-bot/Dockerfile.current-job-service'
+    $legacyCloudBuild = Read-Text 'apps/clearra-discord-bot/cloudbuild-job-service.yaml'
+    $legacyDocker = Read-Text 'apps/clearra-discord-bot/Dockerfile.job-service'
+    $runtimeIdentity = Read-Text 'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
+    $cloudDeploy = Read-Text 'apps/clearra-discord-bot/CLOUD_RUN_JOB_SERVICE.md'
+    $cloudReadme = Read-Text 'apps/clearra-discord-bot/README.md'
+    $acceptedSourcePreflight = Read-Text 'apps/clearra-discord-bot/scripts/verify-accepted-source.mjs'
+    $acceptedSourcePreflightTest = Read-Text 'apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs'
+    $candidateSmoke = Read-Text 'apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs'
+    $candidateSmokeTest = Read-Text 'apps/clearra-discord-bot/test/cloud-run-candidate-smoke.test.mjs'
+    $oracleProofProducer = Read-Text 'apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs'
+    $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
+    $oracleRollbackProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs'
+    $oracleRestore = Read-Text 'apps/clearra-discord-bot/scripts/restore-oracle-release'
+    $oracleRollbackCapture = Read-Text 'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
+    $oracleReleaseDigest = Read-Text 'apps/clearra-discord-bot/scripts/release-tree-digest.mjs'
+    $oracleProofProducerTest = Read-Text 'apps/clearra-discord-bot/test/oracle-deployment-proof-producer.test.mjs'
+    $oracleCandidateProofTest = Read-Text 'apps/clearra-discord-bot/test/oracle-candidate-proof.test.mjs'
+    $oracleRollbackProofTest = Read-Text 'apps/clearra-discord-bot/test/oracle-rollback-proof.test.mjs'
+    $oracleRestoreTest = Read-Text 'apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs'
+    $oracleRollbackCaptureTest = Read-Text 'apps/clearra-discord-bot/test/oracle-rollback-capture.test.mjs'
+    $oracleReleaseDigestTest = Read-Text 'apps/clearra-discord-bot/test/release-tree-digest.test.mjs'
+    $productionJobExecutor = Read-Text 'apps/clearra-discord-bot/src/clearra/command.mjs'
+    $gatewayConfig = Read-Text 'apps/clearra-discord-bot/src/config.mjs'
+    $gatewayCommandTests = Read-Text 'apps/clearra-discord-bot/test/command.test.mjs'
+    $jobRunner = Read-Text 'apps/clearra-discord-bot/src/job-service/runner.mjs'
+    $wasmReleaseGate = Read-Text 'scripts/lib/wasm-release-gate.ps1'
+    $wasmBuildContract = Read-Text 'scripts/tools/clearra-wasm-build-contract.mjs'
+    $wasmBuild = Read-Text 'scripts/tools/build-clearra-wasm.mjs'
+    $wasmProductProbe = Read-Text 'scripts/tools/wasm-pc-environment-probe.mjs'
+    $wasmProductTerminalContract = Read-Text 'scripts/tools/wasm-product-terminal-contract.mjs'
+    $wasmProductTerminalContractTest = Read-Text 'scripts/tools/wasm-product-terminal-contract.test.mjs'
+    $webWasmRuntime = Read-Text 'apps/clearra-web/src/workers/clearraWasmRuntime.ts'
+    $releasePackage = Read-Text 'scripts/tools/package-release-cli.sh'
+    $uiPackage = Read-Text 'packages/clearra-ui/package.json'
+    $webPackage = Read-Text 'apps/clearra-web/package.json'
+    $uiContractTypecheck = Read-Text 'packages/clearra-ui/tsconfig.contract.json'
+    $webContractTypecheck = Read-Text 'apps/clearra-web/tsconfig.contract.json'
+    $productProcessSurface = Read-Text 'scripts/lib/product-process-surface.ps1'
+    $remoteTagVerifier = Read-Text 'scripts/release/verify-remote-annotated-tag.mjs'
+    $remoteTagVerifierTest = Read-Text 'scripts/release/verify-remote-annotated-tag.test.mjs'
+
+    foreach ($required in @(
+        'validate-release-metadata.mjs',
+        'node --test scripts/release/validate-release-metadata.test.mjs',
+        'node --test scripts/release/verify-remote-annotated-tag.test.mjs',
+        'validate-release-cli-smokes.mjs',
+        'release tag must point at the exact current main commit',
+        'release tag is no longer the exact current main commit',
+        '-f event=workflow_dispatch',
+        'published versions are immutable',
+        'node scripts/release/verify-remote-annotated-tag.mjs',
+        '--tag "$GITHUB_REF_NAME"',
+        '--expected-commit "$GITHUB_SHA"',
+        'CLEARRA_IMMUTABLE_RELEASES_ENABLED',
+        '--draft',
+        'gh release edit "$GITHUB_REF_NAME" --draft=false',
+        'X-GitHub-Api-Version: 2026-03-10',
+        "--jq '.immutable'",
+        'published release is not immutable',
+        'github.ref_type == ''tag'''
+    )) {
+        if ($release -notlike "*$required*") {
+            Add-ArchitectureError "Product release workflow is missing exact release identity gate '$required'"
+        }
+    }
+    foreach ($workflow in @(
+        @{
+            Name = 'Product release'
+            Text = $release
+            HeadShaMarkers = @(
+                '-f head_sha="$GITHUB_SHA"',
+                '-f head_sha="$GITHUB_SHA"'
+            )
+        },
+        @{
+            Name = 'Pages'
+            Text = $pages
+            HeadShaMarkers = @(
+                '-f head_sha="$checked_sha"',
+                '-f head_sha="$EXPECTED_SHA"'
+            )
+        }
+    )) {
+        $acceptedAtLeastOne = [regex]::Matches(
+            $workflow.Text,
+            '(?m)^\s*if \[\[ "\$accepted" -lt 1 \]\]; then\s*$'
+        ).Count
+        if ($acceptedAtLeastOne -lt 2) {
+            Add-ArchitectureError "$($workflow.Name) must accept one or more successful exact-SHA acceptance runs at both identity gates"
+        }
+        if ($workflow.Text -match '(?m)^\s*if \[\[ "\$accepted" -(?:ne|eq) 1 \]\]; then\s*$') {
+            Add-ArchitectureError "$($workflow.Name) must not deadlock re-acceptance by requiring exactly one successful acceptance run"
+        }
+        if ([regex]::Matches($workflow.Text, '(?m)^\s*accepted="\$\(gh api --method GET \\$').Count -lt 2) {
+            Add-ArchitectureError "$($workflow.Name) acceptance lookup must remain a fail-closed GET query at both identity gates"
+        }
+        if ([regex]::Matches($workflow.Text, '(?m)^\s*-f per_page=1 \\$').Count -lt 2) {
+            Add-ArchitectureError "$($workflow.Name) acceptance lookup must request only one server-filtered run at both identity gates"
+        }
+        if ([regex]::Matches($workflow.Text, '(?m)^\s*-f event=workflow_dispatch \\$').Count -lt 2 -or
+            [regex]::Matches($workflow.Text, '(?m)^\s*-f status=success \\$').Count -lt 2 -or
+            [regex]::Matches($workflow.Text, '(?m)^\s*--jq ''\.workflow_runs \| length''\)"\s*$').Count -lt 2) {
+            Add-ArchitectureError "$($workflow.Name) acceptance lookup must server-filter successful canonical dispatch runs at both identity gates"
+        }
+        $missingHeadSha = $false
+        foreach ($headShaMarker in @($workflow.HeadShaMarkers)) {
+            $requiredCount = @($workflow.HeadShaMarkers | Where-Object { $_ -eq $headShaMarker }).Count
+            $actualCount = [regex]::Matches($workflow.Text, [regex]::Escape($headShaMarker)).Count
+            if ($actualCount -lt $requiredCount) {
+                $missingHeadSha = $true
+                break
+            }
+        }
+        if ($missingHeadSha -or [regex]::Matches($workflow.Text, '(?m)^\s*-f head_sha=').Count -lt 2) {
+            Add-ArchitectureError "$($workflow.Name) acceptance lookup must filter the accepted head SHA on the server at both identity gates"
+        }
+        if ($workflow.Text -match 'per_page=100|select\(\.head_sha') {
+            Add-ArchitectureError "$($workflow.Name) must not recover exact-SHA acceptance by client-filtering a bounded run history"
+        }
+    }
+    foreach ($required in @(
+        'CLEARRA_CLI_SHA256=${_CLEARRA_CLI_SHA256}',
+        '_CLEARRA_CLI_SHA256: required',
+        'clearra.search.contract.legacy-v1'
+    )) {
+        if ($legacyCloudBuild -notlike "*$required*") {
+            Add-ArchitectureError "Legacy job build is missing fail-closed engine identity '$required'"
+        }
+    }
+    foreach ($required in @(
+        'sha256sum --check --strict',
+        'clearra.search.contract.legacy-v1'
+    )) {
+        if ($legacyDocker -notlike "*$required*") {
+            Add-ArchitectureError "Legacy job image is missing fail-closed engine identity '$required'"
+        }
+    }
+    if ($legacyCloudBuild -like '*CLEARRA_SEARCH_CONTRACT_REVISION=clearra.search.contract.v2*') {
+        Add-ArchitectureError 'A downloaded legacy CLI must not claim the current search contract revision'
+    }
+    if ($release -match '(?m)\bgh\s+release\s+upload\b.*--clobber') {
+        Add-ArchitectureError 'Published GitHub Release assets must not be overwritten'
+    }
+    if ($release -match '(?m)^\s*git ls-remote\b') {
+        Add-ArchitectureError 'Remote annotated-tag validation must stay encapsulated in its tested release helper'
+    }
+    foreach ($required in @(
+        '["ls-remote", "origin", tagRef, `${tagRef}^{}`]',
+        'remote release tag ${tag} is lightweight, not annotated',
+        'remote tag response is ambiguous: duplicate ref',
+        'remote annotated release tag ${tag} moved or resolves to a different commit'
+    )) {
+        if ($remoteTagVerifier.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Remote annotated-tag verifier is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'exact annotated remote tag succeeds',
+        'moved annotated remote tag fails closed',
+        'lightweight remote tag fails closed',
+        'missing remote tag fails closed',
+        'malformed remote tag response fails closed',
+        'ambiguous remote tag response fails closed'
+    )) {
+        if ($remoteTagVerifierTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Remote annotated-tag regression coverage is missing '$required'"
+        }
+    }
+    $lateMainIndex = $release.LastIndexOf(
+        'release tag is no longer the exact current main commit',
+        [System.StringComparison]::Ordinal
+    )
+    $lateAcceptanceIndex = $release.LastIndexOf(
+        'release tag no longer has a successful exact-SHA canonical acceptance run',
+        [System.StringComparison]::Ordinal
+    )
+    $remoteTagIndex = $release.LastIndexOf(
+        'node scripts/release/verify-remote-annotated-tag.mjs',
+        [System.StringComparison]::Ordinal
+    )
+    $immutabilityPreconditionIndex = $release.LastIndexOf(
+        'repository release immutability has not been confirmed by the approved administrator',
+        [System.StringComparison]::Ordinal
+    )
+    $draftCreateIndex = $release.LastIndexOf(
+        'gh release create "$GITHUB_REF_NAME"',
+        [System.StringComparison]::Ordinal
+    )
+    $publishDraftIndex = $release.LastIndexOf(
+        'gh release edit "$GITHUB_REF_NAME" --draft=false',
+        [System.StringComparison]::Ordinal
+    )
+    $immutableCheckIndex = $release.LastIndexOf(
+        "--jq '.immutable'",
+        [System.StringComparison]::Ordinal
+    )
+    if ($lateMainIndex -lt 0 -or
+        $lateAcceptanceIndex -le $lateMainIndex -or
+        $immutabilityPreconditionIndex -le $lateAcceptanceIndex -or
+        $remoteTagIndex -le $immutabilityPreconditionIndex -or
+        $draftCreateIndex -le $remoteTagIndex -or
+        $publishDraftIndex -le $draftCreateIndex -or
+        $immutableCheckIndex -le $publishDraftIndex) {
+        Add-ArchitectureError 'Release publication must rebind the remote annotated tag, build an asset-complete draft, publish it, and verify immutable state in order'
+    }
+    if ($release -notmatch '(?m)^\s*fi\r?\n\s*node scripts/release/verify-remote-annotated-tag\.mjs \\\s*$') {
+        Add-ArchitectureError 'Release publication must run the remote annotated-tag verifier immediately after its late preconditions'
+    }
+    foreach ($required in @(
+        'accepted_sha',
+        'clearra-build-identity.json',
+        'clearra.pages.identity.v2',
+        'Pages source has no successful canonical workflow_dispatch acceptance run',
+        'Pages source is no longer the exact current main commit'
+    )) {
+        if ($pages -notlike "*$required*") {
+            Add-ArchitectureError "Pages workflow is missing accepted-source identity gate '$required'"
+        }
+    }
+    if ($pages -match '(?ms)^\s*push:\s*\r?\n\s*branches:\s*\[main\]') {
+        Add-ArchitectureError 'Pages must not deploy an unaccepted main push'
+    }
+    if ($pages -match '(?m)^\s*(?!ref:|[A-Z_]+:)\S.*\$\{\{\s*inputs\.') {
+        Add-ArchitectureError 'Pages shell steps must receive workflow inputs through environment variables, never direct expression interpolation'
+    }
+    foreach ($required in @(
+        'EXPECTED_SHA: ${{ inputs.accepted_sha }}',
+        '[[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]',
+        'if [[ "$checked_sha" != "$EXPECTED_SHA" ]]'
+    )) {
+        if ($pages.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages accepted-source validation is missing untrusted-input guard '$required'"
+        }
+    }
+    foreach ($required in @(
+        'CLEARRA_SOURCE_COMMIT: ${{ github.sha }}',
+        'CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}'
+    )) {
+        if ($release.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Product release workflow is missing compile-time build identity '$required'"
+        }
+    }
+    foreach ($required in @(
+        'CLEARRA_SOURCE_COMMIT: ${{ inputs.accepted_sha }}',
+        'CLEARRA_ENGINE_BUILD_ID: ${{ inputs.accepted_sha }}',
+        'apps/clearra-web/build/wasm/clearra_wasm.manifest.json',
+        '${PAGE_URL%/}/wasm/clearra_wasm.manifest.json?source=${EXPECTED_SHA}',
+        '.build.runtime_identity.source_commit == $sha',
+        '.build.runtime_identity.engine_build_id == $sha',
+        'clearra.supply.projected-terminal-lookahead.v1',
+        'clearra.solution-data.v1'
+    )) {
+        if ($pages.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages workflow is missing exact product build identity '$required'"
+        }
+    }
+    foreach ($package in @(
+        @{ Name = 'UI'; Text = $uiPackage; Config = $uiContractTypecheck },
+        @{ Name = 'Web'; Text = $webPackage; Config = $webContractTypecheck }
+    )) {
+        foreach ($required in @(
+            'npm exec tsc -- --noEmit -p tsconfig.contract.json',
+            'run-typescript-contracts.mjs'
+        )) {
+            if ($package.Text -notlike "*$required*") {
+                Add-ArchitectureError "$($package.Name) test script is missing TypeScript contract gate '$required'"
+            }
+        }
+        if ($package.Config.IndexOf('"noEmit": true', [System.StringComparison]::Ordinal) -lt 0 -or
+            $package.Config.IndexOf('"include": ["test/*.contract.ts"]', [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "$($package.Name) TypeScript contract typecheck must compile every tracked .contract.ts without emitting artifacts"
+        }
+    }
+    if ($webPackage.IndexOf('"pretest": "npm run sync"', [System.StringComparison]::Ordinal) -lt 0) {
+        Add-ArchitectureError 'Web TypeScript contracts must generate the SvelteKit tsconfig before typechecking on a clean checkout'
+    }
+    foreach ($required in @(
+        'apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs',
+        'packages/clearra-ui/scripts/verify-terminal-supply-product.mjs',
+        '$probePath "--clearra" $builtExePath',
+        '$uiProbePath "--clearra" $builtExePath'
+    )) {
+        if ($productProcessSurface.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Built product acceptance is missing exact terminal-supply artifact probe '$required'"
+        }
+    }
+    foreach ($required in @(
+        "'test', '--workspace', '@clearra/ui'",
+        "'test', '--workspace', '@clearra/web'",
+        "'--test', 'terminal_supply_public_contract'",
+        'wasm-product-terminal-contract.test.mjs',
+        "'--manifest'",
+        "'--expected-source-commit'"
+    )) {
+        if ($wasmReleaseGate -notlike "*$required*") {
+            Add-ArchitectureError "WASM release acceptance is missing product contract gate '$required'"
+        }
+    }
+    foreach ($required in @(
+        'validateWasmProbeTerminal',
+        'expectedWasmProbeIdentity',
+        'runtime_identity',
+        'WASM probe final response identity does not match its manifest'
+    )) {
+        if ($wasmProductProbe.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0 -and
+            $wasmProductTerminalContract.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Actual WASM product probe is missing terminal identity assertion '$required'"
+        }
+    }
+    foreach ($required in @(
+        'rejects non-success terminal states and events',
+        'rejects missing, duplicate, or unsuccessful final responses',
+        'rejects manifest, source, and final identity drift'
+    )) {
+        if ($wasmProductTerminalContractTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Actual WASM product probe regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'CLEARRA_SOURCE_COMMIT=${_SOURCE_COMMIT}',
+        'CLEARRA_ENGINE_BUILD_ID=${_SOURCE_COMMIT}',
+        'clearra.search.contract.v2',
+        'clearra.supply.projected-terminal-lookahead.v1',
+        'clearra.solution-data.v1'
+    )) {
+        if ($cloudBuild -notlike "*$required*") {
+            Add-ArchitectureError "Cloud Run build is missing immutable runtime identity '$required'"
+        }
+    }
+    if ($cloudBuild -match '(?m)^\s*_TAG:\s*latest\s*$') {
+        Add-ArchitectureError 'Cloud Run build must not default to a mutable latest image tag'
+    }
+    foreach ($required in @(
+        'ARG CLEARRA_SOURCE_COMMIT',
+        'ARG CLEARRA_ENGINE_BUILD_ID',
+        'source_commit',
+        '${CLEARRA_SOURCE_COMMIT}',
+        'engine_build_id',
+        '${CLEARRA_ENGINE_BUILD_ID}',
+        'contract_schema_version',
+        'supply_semantics_id',
+        'artifact_schema_version',
+        "CLEARRA_SEARCH_CONTRACT_REVISION!=='clearra.search.contract.v2'",
+        "CLEARRA_SUPPLY_SEMANTICS_ID!=='clearra.supply.projected-terminal-lookahead.v1'",
+        "CLEARRA_ARTIFACT_SCHEMA_VERSION!=='clearra.solution-data.v1'"
+    )) {
+        if ($currentDocker.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Current-source job image is missing compile/runtime identity guard '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.runtime.identity.v2',
+        'clearra.search.contract.v2',
+        'sourceCommit',
+        'engineBuildId',
+        'contractSchemaVersion',
+        'supplySemanticsId',
+        'artifactSchemaVersion',
+        'runtimeIdentityMatches'
+    )) {
+        if ($runtimeIdentity -notlike "*$required*") {
+            Add-ArchitectureError "Runtime identity contract is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'productBuildIdentityMatchesRuntime',
+        'payload?.runtime_identity',
+        'Clearra executable identity does not match the configured job runtime identity'
+    )) {
+        if ($jobRunner.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud job startup probe is missing child executable identity marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'CLEARRA_WASM_BUILD_CONTRACT_VERSION = 2',
+        'CLEARRA_WASM_MANIFEST_BYTES = 1280',
+        'product-build-identity/v1',
+        'runtime_identity: productBuildIdentityFromEnvironment(environment)'
+    )) {
+        if ($wasmBuildContract.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "WASM artifact contract is missing product identity marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'serializeClearraWasmManifest',
+        'CLEARRA_SOURCE_COMMIT=',
+        'CLEARRA_ENGINE_BUILD_ID='
+    )) {
+        if ($wasmBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "WASM build is missing compile identity propagation '$required'"
+        }
+    }
+    foreach ($required in @(
+        'contract_version === 2',
+        '30a6cc08ce00320997ccf86982a1b6770d67ff7e1f7aeabb8bb22dea77dbaa0d',
+        'assertClearraWasmTerminalResponseIdentities',
+        'expectedRuntimeIdentity'
+    )) {
+        if ($webWasmRuntime.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Browser WASM runtime is missing manifest/response identity marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'release CLI requires identical full lowercase source and engine commit IDs',
+        'identity?.source_commit !== expectedCommit',
+        'identity?.engine_build_id !== expectedCommit',
+        'clearra.supply.projected-terminal-lookahead.v1',
+        'clearra.solution-data.v1'
+    )) {
+        if ($releasePackage.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Linux release package is missing product identity assertion '$required'"
+        }
+    }
+    foreach ($required in @(
+        'Never submit the working tree (`gcloud builds submit ... .`)',
+        'git archive --format=tar --output=$archivePath $sourceCommit',
+        'cloudbuild-current-job-service.yaml',
+        'cloudbuild-command-sync.yaml',
+        'cloudbuild-job-service.yaml',
+        'same-full-40-character-accepted-commit',
+        '$archiveContext'
+    )) {
+        if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud deployment contract is missing exact-archive marker '$required'"
+        }
+    }
+    $cloudBuildSubmissionCount = [regex]::Matches(
+        $cloudDeploy,
+        '(?m)^\s*gcloud builds submit\s+`\s*$'
+    ).Count
+    $archiveContextArgumentCount = [regex]::Matches(
+        $cloudDeploy,
+        '(?m)^\s+\$archiveContext\s*$'
+    ).Count
+    $gitArchiveCount = [regex]::Matches(
+        $cloudDeploy,
+        '(?m)^\s*git archive --format=tar --output=\$archivePath \$sourceCommit\s*$'
+    ).Count
+    if ($cloudBuildSubmissionCount -lt 3 -or
+        $archiveContextArgumentCount -ne $cloudBuildSubmissionCount -or
+        $gitArchiveCount -ne $cloudBuildSubmissionCount) {
+        Add-ArchitectureError 'Every documented Cloud Build submission, including command sync, must use a fresh exact git-archive context'
+    }
+    if ($cloudDeploy -match '(?m)^\s*\.\s*$' -or
+        $cloudDeploy -match '(?m)^\s*gcloud\s+builds\s+submit\b[^\r\n]*\s\.\s*$') {
+        Add-ArchitectureError 'Cloud deployment documentation must never submit the mutable current directory as a build context'
+    }
+    foreach ($required in @(
+        'command-sync build must come from a fresh temporary `git archive` context',
+        'git archive --format=tar --output=$archivePath $sourceCommit',
+        'Join-Path $archiveContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"',
+        '$archiveContext'
+    )) {
+        if ($cloudReadme.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord deployment README is missing exact-archive marker '$required'"
+        }
+    }
+    $readmeBuildSubmissionCount = [regex]::Matches(
+        $cloudReadme,
+        '(?m)^\s*gcloud builds submit\s+`\s*$'
+    ).Count
+    $readmeArchiveContextArgumentCount = [regex]::Matches(
+        $cloudReadme,
+        '(?m)^\s+\$archiveContext\s*$'
+    ).Count
+    $readmeGitArchiveCount = [regex]::Matches(
+        $cloudReadme,
+        '(?m)^\s*git archive --format=tar --output=\$archivePath \$sourceCommit\s*$'
+    ).Count
+    if ($readmeBuildSubmissionCount -lt 1 -or
+        $readmeArchiveContextArgumentCount -ne $readmeBuildSubmissionCount -or
+        $readmeGitArchiveCount -ne $readmeBuildSubmissionCount) {
+        Add-ArchitectureError 'Every Discord deployment README Cloud Build submission must use a fresh exact git-archive context'
+    }
+    if ($cloudReadme -match '(?m)^\s*\.\s*$' -or
+        $cloudReadme -match '(?m)^\s*gcloud\s+builds\s+submit\b[^\r\n]*\s\.\s*$') {
+        Add-ArchitectureError 'Discord deployment README must never submit the mutable current directory as a build context'
+    }
+    foreach ($deploymentDoc in @(
+        @{ Name = 'Cloud Run deployment contract'; Text = $cloudDeploy },
+        @{ Name = 'Discord deployment README'; Text = $cloudReadme }
+    )) {
+        foreach ($required in @(
+            '--revision-suffix=$revisionSuffix',
+            '--tag=$candidateTag',
+            '--no-traffic',
+            '$candidateUrl/health',
+            'node apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs',
+            'CLEARRA_CANDIDATE_JOB_TOKEN',
+            '--to-revisions="$candidateRevision=100"',
+            '--to-revisions="$priorRevision=100"',
+            'candidate identity or zero-traffic isolation check failed',
+            'contractSchemaVersion',
+            'supplySemanticsId',
+            'artifactSchemaVersion',
+            'CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1',
+            'CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1',
+            '$oracleRemoteWrapper',
+            '--operation capture-rollback-authority',
+            'capture-oracle-rollback-authority.mjs',
+            'independently computes the exact',
+            '--script-release-sha256 $oracleCandidateReleaseSha256',
+            '--operation verify-candidate',
+            'produce-oracle-deployment-proof.mjs candidate',
+            'verify-oracle-candidate-proof.mjs',
+            '--oracle-release-sha256 $oracleCandidateReleaseSha256',
+            '/run/clearra-deploy/clearra-oracle-candidate-$deploymentNonce.json',
+            '$priorCapture.priorOracleReleaseId -cnotmatch',
+            '$priorCapture.priorOracleRelease -cne "/opt/clearra/releases/$($priorCapture.priorOracleReleaseId)"',
+            'if ($candidateOracleExit -ne 0)',
+            '--operation restore-prior-and-verify',
+            'candidate Oracle verification failed; exact prior Oracle authority was restored and Cloud traffic was not changed',
+            'restore-oracle-release',
+            'produce-oracle-deployment-proof.mjs rollback',
+            'verify-oracle-rollback-proof.mjs',
+            '--prior-runtime-identity-sha256 $priorRuntimeIdentitySha256',
+            '$serviceRolledBack = gcloud run services describe $serviceName',
+            'prior Cloud revision did not become the sole 100-percent revision',
+            '$candidateTaggedAfter = @($serviceAfter.status.traffic',
+            'candidate did not become the sole 100-percent revision with its exact tagged URL preserved',
+            'stable-URL rebinding is forbidden',
+            'After global command synchronization'
+        )) {
+            if ($deploymentDoc.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "$($deploymentDoc.Name) is missing staged cutover marker '$required'"
+            }
+        }
+        $deployIndex = $deploymentDoc.Text.IndexOf(
+            'gcloud run deploy $serviceName',
+            [System.StringComparison]::Ordinal
+        )
+        $noTrafficIndex = $deploymentDoc.Text.IndexOf(
+            '--no-traffic',
+            [System.StringComparison]::Ordinal
+        )
+        $healthIndex = $deploymentDoc.Text.IndexOf(
+            '$candidateUrl/health',
+            [System.StringComparison]::Ordinal
+        )
+        $smokeIndex = $deploymentDoc.Text.IndexOf(
+            'node apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs',
+            [System.StringComparison]::Ordinal
+        )
+        $cutoverIndex = $deploymentDoc.Text.IndexOf(
+            '--to-revisions="$candidateRevision=100"',
+            [System.StringComparison]::Ordinal
+        )
+        $captureIndex = $deploymentDoc.Text.IndexOf(
+            '--operation capture-rollback-authority',
+            [System.StringComparison]::Ordinal
+        )
+        $scriptReleaseDigestMarker = '--script-release-sha256 $oracleCandidateReleaseSha256'
+        $scriptReleaseDigestBindingCount = [regex]::Matches(
+            $deploymentDoc.Text,
+            [regex]::Escape($scriptReleaseDigestMarker)
+        ).Count
+        $priorRevisionCaptureIndex = $deploymentDoc.Text.IndexOf(
+            '$priorRevision = [string]$priorTraffic[0].revisionName',
+            [System.StringComparison]::Ordinal
+        )
+        $oracleCandidateProofIndex = $deploymentDoc.Text.IndexOf(
+            '--operation verify-candidate',
+            [System.StringComparison]::Ordinal
+        )
+        $candidateFailureIndex = $deploymentDoc.Text.IndexOf(
+            'if ($candidateOracleExit -ne 0)',
+            [System.StringComparison]::Ordinal
+        )
+        $preCutoverRestoreIndex = $deploymentDoc.Text.IndexOf(
+            '--operation restore-prior-and-verify',
+            [System.StringComparison]::Ordinal
+        )
+        $preCutoverAbortIndex = $deploymentDoc.Text.IndexOf(
+            'candidate Oracle verification failed; exact prior Oracle authority was restored and Cloud traffic was not changed',
+            [System.StringComparison]::Ordinal
+        )
+        $rollbackIndex = $deploymentDoc.Text.IndexOf(
+            '--to-revisions="$priorRevision=100"',
+            [System.StringComparison]::Ordinal
+        )
+        $candidateTagReobserveIndex = $deploymentDoc.Text.IndexOf(
+            '$candidateTaggedAfter = @($serviceAfter.status.traffic',
+            [System.StringComparison]::Ordinal
+        )
+        $postSyncPolicyIndex = $deploymentDoc.Text.IndexOf(
+            'After global command synchronization',
+            [System.StringComparison]::Ordinal
+        )
+        $rollbackTrafficAuthorityIndex = $deploymentDoc.Text.IndexOf(
+            '$serviceRolledBack = gcloud run services describe $serviceName',
+            [System.StringComparison]::Ordinal
+        )
+        $oracleRestoreIndex = $deploymentDoc.Text.LastIndexOf(
+            '--operation restore-prior-and-verify',
+            [System.StringComparison]::Ordinal
+        )
+        $captureScriptDigestIndex = $deploymentDoc.Text.IndexOf(
+            $scriptReleaseDigestMarker,
+            $captureIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $candidateScriptDigestIndex = $deploymentDoc.Text.IndexOf(
+            $scriptReleaseDigestMarker,
+            $oracleCandidateProofIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $preCutoverRestoreScriptDigestIndex = $deploymentDoc.Text.IndexOf(
+            $scriptReleaseDigestMarker,
+            $preCutoverRestoreIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $postCutoverRestoreScriptDigestIndex = $deploymentDoc.Text.LastIndexOf(
+            $scriptReleaseDigestMarker,
+            [System.StringComparison]::Ordinal
+        )
+        if ($deployIndex -lt 0 -or
+            $priorRevisionCaptureIndex -lt 0 -or
+            $captureIndex -le $priorRevisionCaptureIndex -or
+            $captureIndex -lt 0 -or
+            $scriptReleaseDigestBindingCount -ne 4 -or
+            $captureScriptDigestIndex -le $captureIndex -or
+            $captureScriptDigestIndex -ge $deployIndex -or
+            $captureIndex -ge $deployIndex -or
+            $noTrafficIndex -le $deployIndex -or
+            $healthIndex -le $noTrafficIndex -or
+            $smokeIndex -le $healthIndex -or
+            $oracleCandidateProofIndex -le $smokeIndex -or
+            $candidateScriptDigestIndex -le $oracleCandidateProofIndex -or
+            $candidateScriptDigestIndex -ge $candidateFailureIndex -or
+            $candidateFailureIndex -le $oracleCandidateProofIndex -or
+            $preCutoverRestoreIndex -le $candidateFailureIndex -or
+            $preCutoverRestoreScriptDigestIndex -le $preCutoverRestoreIndex -or
+            $preCutoverRestoreScriptDigestIndex -ge $preCutoverAbortIndex -or
+            $preCutoverAbortIndex -le $preCutoverRestoreIndex -or
+            $cutoverIndex -le $oracleCandidateProofIndex -or
+            $cutoverIndex -le $preCutoverRestoreIndex -or
+            $cutoverIndex -le $preCutoverAbortIndex -or
+            $candidateTagReobserveIndex -le $cutoverIndex -or
+            $rollbackIndex -le $cutoverIndex -or
+            $rollbackIndex -le $candidateTagReobserveIndex -or
+            $rollbackTrafficAuthorityIndex -le $rollbackIndex -or
+            $oracleRestoreIndex -le $rollbackTrafficAuthorityIndex -or
+            $postCutoverRestoreScriptDigestIndex -le $oracleRestoreIndex -or
+            $postSyncPolicyIndex -le $candidateTagReobserveIndex) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must capture prior authority before mutation, verify or restore Oracle before cutover, then re-observe and restore both authorities in order"
+        }
+
+        if ($deploymentDoc.Text -match '(?m)^\s*sudo\s+(?:node\s+)?"?/opt/clearra/releases/.*(?:produce-oracle-deployment-proof|verify-oracle-|restore-oracle-release)') {
+            Add-ArchitectureError "$($deploymentDoc.Name) must cross the authenticated Oracle remote wrapper instead of running Oracle sudo locally"
+        }
+    }
+
+    $cloudCandidateTagReobserveIndex = $cloudDeploy.IndexOf(
+        '$candidateTaggedAfter = @($serviceAfter.status.traffic',
+        [System.StringComparison]::Ordinal
+    )
+    $cloudPostRollbackRestoreIndex = $cloudDeploy.LastIndexOf(
+        '--operation restore-prior-and-verify',
+        [System.StringComparison]::Ordinal
+    )
+    $cloudSyncHeadingIndex = $cloudDeploy.IndexOf(
+        '## Exact-SHA command synchronization',
+        [System.StringComparison]::Ordinal
+    )
+    if ($cloudSyncHeadingIndex -le $cloudCandidateTagReobserveIndex -or
+        $cloudSyncHeadingIndex -le $cloudPostRollbackRestoreIndex) {
+        Add-ArchitectureError 'Cloud Run command synchronization must remain after exact tagged-candidate observation and the pre-sync rollback contract'
+    }
+
+    if ($cloudDeploy -like '*CLEARRA_ORACLE_CANDIDATE_VERIFIED*' -or
+        $cloudReadme -like '*CLEARRA_ORACLE_CANDIDATE_VERIFIED*') {
+        Add-ArchitectureError 'Cloud cutover must not trust an unbound reusable Oracle verification boolean'
+    }
+    foreach ($required in @(
+        'active Oracle release is outside the immutable release root',
+        'active Oracle settings must be a root-owned regular file',
+        'active Oracle job URL must be a credential-free HTTPS /jobs URL',
+        'prior Cloud runtime health identity is unavailable',
+        '/etc/clearra-gateway/settings.pre-v0.7.5-',
+        'openSync(temporaryPath, "wx", 0o600)',
+        'linkSync(temporaryPath, backupPath)'
+    )) {
+        if ($oracleRollbackCapture.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle rollback capture is missing pre-mutation authority marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'active Oracle release tree digest does not match the expected artifact',
+        'active Oracle settings digest does not match the expected snapshot',
+        'current Oracle Gateway process has no READY record',
+        'Oracle Gateway has no fresh successful bounded end-to-end operation',
+        'restored prior runtime identity digest does not match the captured authority',
+        '/run/clearra-deploy',
+        'directoryMetadata.uid !== 0',
+        '(directoryMetadata.mode & 0o777) !== 0o700',
+        'linkSync(temporaryPath, proofPath)'
+    )) {
+        if ($oracleProofProducer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Trusted Oracle proof producer is missing observation/security marker '$required'"
+        }
+    }
+    foreach ($proofConsumer in @(
+        @{ Name = 'candidate'; Text = $oracleCandidateProof },
+        @{ Name = 'rollback'; Text = $oracleRollbackProof }
+    )) {
+        foreach ($required in @(
+            'root-only namespace',
+            'metadata.uid !== 0',
+            '(metadata.mode & 0o777) !== 0o600',
+            'remove(proofPath)'
+        )) {
+            if ($proofConsumer.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Oracle $($proofConsumer.Name) proof consumer is missing one-shot root-only marker '$required'"
+            }
+        }
+    }
+    foreach ($required in @(
+        'Prior Oracle release does not match its captured tree digest.',
+        'Prior Oracle settings backup does not match its captured digest.',
+        'service_transition_started=1',
+        'restore_verified=1',
+        '[ "$service_transition_started" -eq 1 ] && [ "$restore_verified" -ne 1 ]',
+        '"$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true',
+        'Restored Oracle process does not run from the prior immutable release.'
+    )) {
+        if ($oracleRestore.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle rollback helper is missing fail-closed restoration marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'release tree symlink escapes the immutable root',
+        'release tree symlink is dangling',
+        'clearra-release-tree-v1'
+    )) {
+        if ($oracleReleaseDigest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle release digest is missing immutable-tree marker '$required'"
+        }
+    }
+    foreach ($testContract in @(
+        @{ Name = 'capture'; Text = $oracleRollbackCaptureTest; Marker = 'freezes exact prior release, settings, job, and runtime' },
+        @{ Name = 'producer'; Text = $oracleProofProducerTest; Marker = 'rejects stale settings, process, and operation evidence' },
+        @{ Name = 'candidate'; Text = $oracleCandidateProofTest; Marker = 'rejects every stale deployment authority' },
+        @{ Name = 'rollback'; Text = $oracleRollbackProofTest; Marker = 'rejects stale authority and missing live checks' },
+        @{ Name = 'restore'; Text = $oracleRestoreTest; Marker = 'keeps the service stopped after every partial or unverified restore' },
+        @{ Name = 'tree'; Text = $oracleReleaseDigestTest; Marker = 'rejects an external or mutable symlink target' }
+    )) {
+        if ($testContract.Text.IndexOf($testContract.Marker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle $($testContract.Name) recurrence contract is missing '$($testContract.Marker)'"
+        }
+    }
+
+    foreach ($required in @(
+        'ClearraJobExecutor',
+        'expectedRuntimeIdentity',
+        'deadlineUnixMs',
+        'CLEARRA_CANDIDATE_JOB_TOKEN',
+        'normalized_solution_set_hash',
+        'candidate_smoke=failed'
+    )) {
+        if ($candidateSmoke.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud Run candidate smoke is missing production contract marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'candidate smoke submits one bounded exact-runtime job',
+        'expectedRuntimeIdentity',
+        'invalid PC result contract'
+    )) {
+        if ($candidateSmokeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud Run candidate smoke regression is missing '$required'"
+        }
+    }
+    foreach ($required in @('"idempotency-key"', 'Bearer ${this.authorizationToken}')) {
+        if ($productionJobExecutor.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production job executor is missing authenticated smoke transport marker '$required'"
+        }
+    }
+
+    foreach ($required in @(
+        '"fetch", "--no-tags"',
+        'origin/main',
+        'event=workflow_dispatch',
+        'status=success',
+        'head_sha=',
+        'per_page=1',
+        'active runtime identity does not match the accepted source'
+    )) {
+        if ($acceptedSourcePreflight.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted-source preflight is missing authority marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'exact main, canonical acceptance, and active runtime',
+        'missing acceptance',
+        'runtime drift'
+    )) {
+        if ($acceptedSourcePreflightTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted-source preflight regression is missing '$required'"
+        }
+    }
+    foreach ($deploymentDoc in @(
+        @{ Name = 'Cloud Run deployment contract'; Text = $cloudDeploy },
+        @{ Name = 'Discord deployment README'; Text = $cloudReadme }
+    )) {
+        $preflightIndex = $deploymentDoc.Text.IndexOf(
+            'node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs',
+            [System.StringComparison]::Ordinal
+        )
+        $buildIndex = $deploymentDoc.Text.IndexOf(
+            '$buildConfig = Join-Path $archiveContext',
+            [System.StringComparison]::Ordinal
+        )
+        if ($preflightIndex -lt 0 -or $buildIndex -le $preflightIndex) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must verify exact accepted source before its current-job Cloud Build mutation"
+        }
+    }
+    $syncHeadingIndex = $cloudDeploy.IndexOf('## Exact-SHA command synchronization', [System.StringComparison]::Ordinal)
+    $syncPreflightIndex = $cloudDeploy.IndexOf(
+        'node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs',
+        [Math]::Max(0, $syncHeadingIndex),
+        [System.StringComparison]::Ordinal
+    )
+    $syncActiveHealthIndex = $cloudDeploy.IndexOf(
+        '--active-health-url',
+        [Math]::Max(0, $syncHeadingIndex),
+        [System.StringComparison]::Ordinal
+    )
+    $syncBuildIndex = $cloudDeploy.IndexOf(
+        'gcloud builds submit',
+        [Math]::Max(0, $syncHeadingIndex),
+        [System.StringComparison]::Ordinal
+    )
+    if ($syncHeadingIndex -lt 0 -or
+        $syncPreflightIndex -le $syncHeadingIndex -or
+        $syncActiveHealthIndex -le $syncPreflightIndex -or
+        $syncBuildIndex -le $syncActiveHealthIndex) {
+        Add-ArchitectureError 'Command sync must verify current main, canonical acceptance, and active runtime identity before its mutation'
+    }
+
+    foreach ($required in @(
+        'remoteIdentityRequired',
+        'externalJobEndpoint',
+        '!isLoopbackHostname',
+        'Remote Clearra execution requires an explicit CLEARRA_JOB_URL.',
+        'External or production remote Clearra execution requires'
+    )) {
+        if ($gatewayConfig.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle Gateway config is missing remote runtime authority marker '$required'"
+        }
+    }
+    if ($gatewayCommandTests.IndexOf(
+            'external remote execution requires explicit endpoint and exact current identity without NODE_ENV',
+            [System.StringComparison]::Ordinal
+        ) -lt 0) {
+        Add-ArchitectureError 'Oracle Gateway tests must fail closed for external remote execution even when NODE_ENV is absent'
+    }
+    foreach ($deploymentDoc in @(
+        @{ Name = 'Cloud Run deployment contract'; Text = $cloudDeploy },
+        @{ Name = 'Discord deployment README'; Text = $cloudReadme }
+    )) {
+        $productionIndex = $deploymentDoc.Text.LastIndexOf('NODE_ENV=production', [System.StringComparison]::Ordinal)
+        $remoteAuthorityIndex = $deploymentDoc.Text.LastIndexOf('CLEARRA_WORKER_AUTHORITY=remote', [System.StringComparison]::Ordinal)
+        if ($productionIndex -lt 0 -or $remoteAuthorityIndex -le $productionIndex) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must pin production mode before enabling remote Oracle execution"
+        }
+    }
 }

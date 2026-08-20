@@ -16,7 +16,7 @@ use clearra_core_ffi::{
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SearchProblem;
-use clearra_supply::{PackingPatternMembershipKind, PieceMultisetKey};
+use clearra_supply::{PackingHoldProjection, PackingPatternMembershipKind, PieceMultisetKey};
 
 use crate::{
     backend::{
@@ -345,10 +345,17 @@ impl PackingRunner {
             ));
         }
         let family = universe
-            .packing_multiset_family_with_workers(
+            .packing_multiset_family_for_execution_with_workers(
                 placed_piece_count,
                 problem.initial_hold(),
-                problem.supply().hold_enabled() && !problem.supply().projects_unplaced_lookahead(),
+                problem.supply().hold_enabled(),
+                if problem.supply().projects_unplaced_lookahead()
+                    && !problem.supply().projects_standard_bag_lookahead()
+                {
+                    PackingHoldProjection::ReleaseHeldAtTerminal
+                } else {
+                    PackingHoldProjection::PreserveFinalHoldLanguage
+                },
                 preprocessing_worker_count(problem),
             )
             .map_err(|_| PackingRunnerError::ParallelWorkerPanicked)?;

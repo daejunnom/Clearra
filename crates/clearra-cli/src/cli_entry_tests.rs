@@ -200,9 +200,32 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
                 value["summary"]["coverage_probability"], "not-calculated",
                 "{objective}"
             );
+            assert_eq!(
+                value["summary"]["probability_calculated"], false,
+                "{objective}"
+            );
+            assert_eq!(
+                value["summary"]["probability_complete"], false,
+                "{objective}"
+            );
+            assert_eq!(
+                value["summary"]["supply_probability_complete"], false,
+                "{objective}"
+            );
+            assert_eq!(
+                value["summary"]["resource_probability_complete"], false,
+                "{objective}"
+            );
+            assert_eq!(value["resource_report"]["truncated"], false, "{objective}");
+            assert_eq!(
+                value["resource_report"]["truncation_reason"],
+                serde_json::Value::Null,
+                "{objective}"
+            );
         }
     }
 
+    #[cfg(feature = "wasm-cpu-runtime")]
     #[test]
     fn build_probability_tiling_json_quotes_not_calculated_probability() {
         let value = run_json(&[
@@ -228,6 +251,69 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
         ]);
 
         assert_eq!(value["summary"]["coverage_probability"], "not-calculated");
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn wasm_pc_json_preserves_builtin_srs_x_rule_and_kick_identity() {
+        let value = run_json(&[
+            "clearra",
+            "--format",
+            "json",
+            "pc",
+            "--lines",
+            "2",
+            "--queue",
+            "IIOOO",
+            "--fixed",
+            "--no-hold",
+            "--rule",
+            "srs-x",
+            "--backend",
+            "cpu",
+            "--workers",
+            "1",
+        ]);
+
+        assert_eq!(value["summary"]["rule_profile"], "srs-x");
+        assert_eq!(value["summary"]["kick_profile"], "srs-x");
+        assert_eq!(value["summary"]["effective_kick_model"], "srs-x");
+        assert_eq!(value["summary"]["verified_kick_profile"], true);
+        assert_eq!(value["summary"]["kick_profile_transition_count"], 80);
+    }
+
+    #[cfg(not(feature = "wasm-cpu-runtime"))]
+    #[test]
+    fn build_probability_native_only_harness_fails_closed_without_a_connected_backend() {
+        let output = run_with_args([
+            "clearra",
+            "--format",
+            "json",
+            "build-probability",
+            "--base-mask",
+            "0x0",
+            "--target-mask",
+            "0xf",
+            "--height",
+            "4",
+            "--queue",
+            "I",
+            "--no-hold",
+            "--no-mirror",
+            "--tiling-only",
+            "--backend",
+            "cpu",
+            "--workers",
+            "1",
+        ]);
+
+        assert_eq!(output.exit_code(), ExitCode::Unsupported);
+        assert!(output
+            .stderr()
+            .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
+        assert!(output
+            .stderr()
+            .contains("native_build_probability_backend_not_connected"));
     }
 }
 
@@ -291,7 +377,7 @@ mod case_run_with_args_routes_pc_queue_hold_and_objective {
             "--lines",
             "2",
             "--queue",
-            "I,O,T",
+            "I,I,O,O,O",
             "--fixed",
             "--no-hold",
             "--objective",
@@ -300,7 +386,7 @@ mod case_run_with_args_routes_pc_queue_hold_and_objective {
 
         assert_eq!(output.exit_code(), ExitCode::Success);
         assert!(output.stdout().contains("queue_mode: fixed"));
-        assert!(output.stdout().contains("queue_len: 3"));
+        assert!(output.stdout().contains("queue_len: 5"));
         assert!(output.stdout().contains("hold_enabled: false"));
         assert!(output.stdout().contains("objective: unique"));
         assert!(output
@@ -339,13 +425,7 @@ mod case_run_with_args_routes_pc_scenario_fixture {
         assert!(output.stdout().contains("\"count_policy\":\"count-all\""));
         assert!(output.stdout().contains("\"retained_trace_limit\":1"));
         assert!(output.stdout().contains("\"solution_found\":true"));
-        assert!(output
-            .stdout()
-            .contains(if cfg!(feature = "native-c-core") {
-                "\"total_solution_count\":2"
-            } else {
-                "\"total_solution_count\":1"
-            }));
+        assert!(output.stdout().contains("\"total_solution_count\":1"));
         assert!(output
             .stdout()
             .contains(if cfg!(feature = "native-c-core") {
@@ -550,7 +630,8 @@ mod case_run_with_args_routes_convert_command {
     #[test]
     fn run_with_args_routes_convert_command() {
         let input =
-            FumenLikeWriter::write(&FumenLikeTrace::new(vec!["kind=pc\nlines=2".to_owned()]));
+            FumenLikeWriter::write(&FumenLikeTrace::new(vec!["kind=pc\nlines=2".to_owned()]))
+                .expect("test fumen");
         let output = run_with_args(vec![
             "clearra".to_owned(),
             "convert".to_owned(),
@@ -642,10 +723,10 @@ mod case_run_with_args_routes_verify_command {
     fn run_with_args_routes_verify_command() {
         let output = run_with_args(["clearra", "verify", "pc"]);
 
-        assert_eq!(output.exit_code(), ExitCode::Unsupported);
-        assert!(output
-            .stderr()
-            .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
+        assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
+        assert!(output.stdout().contains("kind: pc"));
+        assert!(output.stdout().contains("queue_len: 5"));
+        assert!(output.stdout().contains("hold_enabled: false"));
     }
 }
 
@@ -695,7 +776,7 @@ mod case_run_with_args_reports_unsupported_mvp_command {
             assert!(output.stderr().contains(command));
             assert!(output
                 .stderr()
-                .contains("reserved for a future inspection command"));
+                .contains("use rules inspect or scoring inspect for profile inspection"));
         }
     }
 }

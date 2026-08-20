@@ -209,6 +209,16 @@ impl CBuildUpProblemBuilder {
                 0
             },
             source_execution_mode: crate::problem::C_BUILDUP_SOURCE_CONCRETE_PATTERN,
+            terminal_projection_policy_version:
+                crate::problem::C_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION,
+            terminal_projection_policy: if problem.supply().projects_unplaced_lookahead()
+                && !problem.supply().projects_standard_bag_lookahead()
+            {
+                crate::problem::C_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD
+            } else {
+                crate::problem::C_BUILDUP_TERMINAL_PROJECTION_DISABLED
+            },
+            terminal_projection_reserved: 0,
             ..Default::default()
         })
     }
@@ -339,6 +349,7 @@ fn configure_standard_bag_automaton(scratch: &mut CBuildUpProblem) -> Result<(),
     scratch.piece_source_pattern_id = 0;
     scratch.packing.piece_source_pattern_id = 0;
     scratch.source_execution_mode = crate::problem::C_BUILDUP_SOURCE_STANDARD_BAG_AUTOMATON;
+    scratch.terminal_projection_policy = crate::problem::C_BUILDUP_TERMINAL_PROJECTION_DISABLED;
     Ok(())
 }
 

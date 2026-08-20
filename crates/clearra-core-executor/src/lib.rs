@@ -27,6 +27,8 @@ pub mod service;
 pub mod setup_finder_report;
 pub mod solution_probability;
 pub mod spin;
+#[cfg(test)]
+pub(crate) mod terminal_supply_conformance;
 pub mod tiling_solution_store;
 
 #[cfg(feature = "webgpu-search")]

@@ -7,11 +7,13 @@ use crate::{
         text_output_profile::TextOutputProfile, text_writer::TextWriter,
     },
 };
+use clearra_host_contract::ProductBuildIdentity;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderMessage {
     kind: String,
     fields: Vec<RenderField>,
+    runtime_identity: Option<ProductBuildIdentity>,
 }
 
 impl RenderMessage {
@@ -19,7 +21,14 @@ impl RenderMessage {
         Self {
             kind: kind.into(),
             fields: Vec::new(),
+            runtime_identity: None,
         }
+    }
+}
+impl RenderMessage {
+    pub fn with_runtime_identity(mut self, runtime_identity: ProductBuildIdentity) -> Self {
+        self.runtime_identity = Some(runtime_identity);
+        self
     }
 }
 impl RenderMessage {
@@ -87,7 +96,11 @@ fn text_field_value(field: &RenderField) -> String {
 }
 impl RenderMessage {
     pub fn json_contract(&self) -> JsonContract {
-        JsonContract::from_render_message(&self.kind, &self.fields)
+        JsonContract::from_render_message_with_runtime_identity(
+            &self.kind,
+            &self.fields,
+            self.runtime_identity.as_ref(),
+        )
     }
 }
 impl RenderMessage {

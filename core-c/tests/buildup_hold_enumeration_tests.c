@@ -160,6 +160,104 @@ static clr_buildup_problem buildup_hold_problem_from_sequence(
 }void long_hold_carryover_uses_bag_epoch_and_remainder(void) {
     hold_enabled_long_carryover_uses_piece_source_pattern();
     hold_transition_updates_bag_epoch_and_remainder_from_piece_source_pattern();
+}void terminal_projection_branch_is_exactly_once_and_terminal_only(void) {
+    const uint8_t pieces[1] = {CLR_PIECE_I};
+    clr_buildup_problem problem = buildup_hold_problem_from_sequence(
+        pieces,
+        1,
+        1,
+        CLR_PIECE_SOURCE_FIXED_QUEUE,
+        CLR_SUPPLY_PROVENANCE_FIXED_SEQUENCE);
+    problem.terminal_projection_policy =
+        CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD;
+    ClearraBuildUpQueueHold state;
+    EXPECT_BUILDUP_STATUS(clearra_buildup_queue_hold_init(&problem, &state),
+                          CLR_BUILDUP_OK);
+    state.cursor = 1u;
+    state.hold_piece = CLR_PIECE_O;
+    state.hold_empty = 0u;
+
+    ClearraBuildUpHoldBranchTable branches;
+    const uint8_t desired_o =
+        (uint8_t)(UINT8_C(1) << CLR_PIECE_O);
+    EXPECT_BUILDUP_STATUS(
+        clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+            &problem, &state, desired_o, false, &branches),
+        CLR_BUILDUP_OK);
+    EXPECT_U64(branches.counts[CLR_PIECE_O], 0u);
+
+    EXPECT_BUILDUP_STATUS(
+        clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+            &problem, &state, desired_o, true, &branches),
+        CLR_BUILDUP_OK);
+    EXPECT_U64(branches.counts[CLR_PIECE_O], 1u);
+    ClearraBuildUpHoldBranch terminal =
+        branches.branches[CLR_PIECE_O][0];
+    EXPECT_U64(terminal.branch_kind,
+               CLEARRA_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL);
+    EXPECT_U64(terminal.used_hold, 1u);
+    EXPECT_U64(terminal.incoming_piece, CLR_PIECE_NONE);
+    EXPECT_U64(terminal.held_piece_before, CLR_PIECE_O);
+    EXPECT_U64(terminal.state.cursor, 1u);
+    EXPECT_U64(terminal.state.hold_piece, CLR_PIECE_NONE);
+    EXPECT_U64(terminal.state.hold_empty, 1u);
+    EXPECT_U64(terminal.state.terminal_projection_consumed, 1u);
+    EXPECT_U64(
+        terminal.state.terminal_projection_provenance,
+        CLEARRA_BUILDUP_TERMINAL_PROVENANCE_FINITE_SOURCE_END);
+
+    EXPECT_BUILDUP_STATUS(
+        clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+            &problem, &terminal.state, desired_o, true, &branches),
+        CLR_BUILDUP_OK);
+    EXPECT_U64(branches.counts[CLR_PIECE_O], 0u);
+
+    problem.terminal_projection_policy =
+        CLR_BUILDUP_TERMINAL_PROJECTION_DISABLED;
+    EXPECT_BUILDUP_STATUS(
+        clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+            &problem, &state, desired_o, true, &branches),
+        CLR_BUILDUP_OK);
+    EXPECT_U64(branches.counts[CLR_PIECE_O], 0u);
+}void terminal_projection_builds_with_occupied_initial_hold(void) {
+    ClearraBoard64Layout layout = buildup_test_standard_10x2_layout();
+    uint8_t columns[2] = {0, 2};
+    clr_packing_problem packing = buildup_test_buildup_packing_problem(2, 2, 1);
+    uint64_t target_mask = buildup_test_low_mask_for_cells(20);
+    uint64_t missing = buildup_test_o_mask_at(layout, 0, 0) |
+                       buildup_test_o_mask_at(layout, 2, 0);
+    packing.board.initial_mask = target_mask & ~missing;
+    packing.required_fill_mask = missing;
+    const uint8_t pieces[1] = {CLR_PIECE_O};
+    buildup_test_set_packing_pieces(
+        &packing,
+        pieces,
+        1,
+        CLR_PIECE_SOURCE_FIXED_QUEUE,
+        CLR_SUPPLY_PROVENANCE_FIXED_SEQUENCE);
+
+    clr_buildup_problem problem = buildup_test_build_problem_from_candidate(
+        packing, buildup_test_o_candidate_for_columns(layout, columns, 2));
+    buildup_test_configure_initial_hold(&problem, 1, 0, CLR_PIECE_O);
+    problem.terminal_projection_policy =
+        CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD;
+    clr_build_variant_buffer *first =
+        (clr_build_variant_buffer *)malloc(sizeof(clr_build_variant_buffer));
+    EXPECT_TRUE(first != 0);
+
+    EXPECT_BUILDUP_STATUS(clr_buildup_verify_first(&problem, first),
+                          CLR_BUILDUP_OK);
+    EXPECT_U64(first->count, 1u);
+    EXPECT_U64(first->variants[0].trace_step_count, 2u);
+    EXPECT_U64(
+        first->trace_step_storage[0][1].hold_branch_kind,
+        CLEARRA_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL);
+
+    problem.terminal_projection_policy =
+        CLR_BUILDUP_TERMINAL_PROJECTION_DISABLED;
+    EXPECT_BUILDUP_STATUS(clr_buildup_verify_first(&problem, first),
+                          CLR_BUILDUP_QUEUE_ORDER_IMPOSSIBLE);
+    free(first);
 }void piece_source_reader_rejects_provenance_mismatch(void) {
     const uint8_t pieces[2] = {CLR_PIECE_T, CLR_PIECE_I};
     clr_buildup_problem problem = buildup_hold_problem_from_sequence(

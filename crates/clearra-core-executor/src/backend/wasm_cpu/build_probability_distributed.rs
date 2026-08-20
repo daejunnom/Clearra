@@ -775,7 +775,14 @@ fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionControl,
+        piece::piece_kind::PieceKind,
+        solution::normalized_tiling_solution::{
+            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
+            PiecePlacementMask, StandardBoard64TilingIdentity,
+        },
+    };
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
     };
@@ -899,6 +906,57 @@ mod tests {
                 .covered_patterns()
                 .count_ones(),
             1
+        );
+    }
+
+    #[test]
+    fn distributed_terminal_hold_matches_serial_micro_oracle_set_and_hash() {
+        let first_o = 0x0c03u64;
+        let second_o = 0x300cu64;
+        let queue = QueuePatternExpression::parse("[O]!", 1).expect("single O pattern");
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::pattern_expression(queue),
+            PieceWindow::new(2),
+        )
+        .with_hold_piece(Some(PieceKind::O))
+        .with_exact_pieces(Some(2));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+        assert!(problem.supply().projects_unplaced_lookahead());
+        let field = BuildProbabilityField::from_words_preserving_height(
+            4,
+            [0; 4],
+            [first_o | second_o, 0, 0, 0],
+        )
+        .expect("two-O build field");
+        let oracle = StandardBoard64TilingIdentity::from_placements(
+            0,
+            [
+                PiecePlacementMask::new(PieceKind::O, first_o),
+                PiecePlacementMask::new(PieceKind::O, second_o),
+            ],
+        )
+        .expect("independent two-O build oracle");
+        let oracle_hash =
+            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(&[oracle]);
+
+        let serial = run_serial(&problem, field);
+        let distributed = run_distributed(&problem, field);
+
+        for result in [&serial, &distributed] {
+            assert_eq!(result.normalized_solution_identities(), &[oracle]);
+            assert_eq!(
+                result.field("normalized_solution_set_hash"),
+                Some(oracle_hash.as_str())
+            );
+        }
+        assert_eq!(
+            distributed.normalized_solution_keys(),
+            serial.normalized_solution_keys()
+        );
+        assert_eq!(
+            distributed.field("normalized_solution_set_hash"),
+            serial.field("normalized_solution_set_hash")
         );
     }
 }

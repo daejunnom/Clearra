@@ -97,6 +97,37 @@ function Invoke-ProductE2EBuiltTask([string]$Root) {
         $productE2EArgs["ReportPath"] = $ReportPath
     }
     & (Join-Path $Root "scripts/product-e2e.ps1") @productE2EArgs
+
+    $npmName = if ($env:OS -eq "Windows_NT") { "npm.cmd" } else { "npm" }
+    $npmCommand = Get-Command $npmName -ErrorAction SilentlyContinue
+    if ($null -eq $npmCommand) {
+        throw "Discord terminal-supply product acceptance requires npm on PATH."
+    }
+    $ctk3BuildOutput = & $npmCommand.Source "run" "build" "--workspace" "ctk3" 2>&1
+    $ctk3BuildExitCode = $LASTEXITCODE
+    if ($ctk3BuildExitCode -ne 0) {
+        throw "Discord terminal-supply product acceptance could not build ctk3 with exit $ctk3BuildExitCode`n$($ctk3BuildOutput -join "`n")"
+    }
+
+    $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        throw "Discord terminal-supply product acceptance requires node on PATH."
+    }
+    $probePath = Join-Path $Root "apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs"
+    $probeOutput = & $nodeCommand.Source $probePath "--clearra" $builtExePath 2>&1
+    $probeExitCode = $LASTEXITCODE
+    if ($probeExitCode -ne 0) {
+        throw "Discord terminal-supply product acceptance failed with exit $probeExitCode`n$($probeOutput -join "`n")"
+    }
+    Write-Output ($probeOutput -join "`n")
+
+    $uiProbePath = Join-Path $Root "packages/clearra-ui/scripts/verify-terminal-supply-product.mjs"
+    $uiProbeOutput = & $nodeCommand.Source $uiProbePath "--clearra" $builtExePath 2>&1
+    $uiProbeExitCode = $LASTEXITCODE
+    if ($uiProbeExitCode -ne 0) {
+        throw "UI terminal-supply product acceptance failed with exit $uiProbeExitCode`n$($uiProbeOutput -join "`n")"
+    }
+    Write-Output ($uiProbeOutput -join "`n")
 }
 
 function Set-ClearraReleaseUxSmokeBinaryArgs([hashtable]$Arguments, [string]$Root) {

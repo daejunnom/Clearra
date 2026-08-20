@@ -195,7 +195,7 @@ try {
         $script:VerifyCoreResult = Invoke-CoreCTest `
             -BuildDir $coreBuildDir `
             -Configuration "Debug" `
-            -BuildOnly:(-not $nativeTestExecutionAllowed) `
+            -BuildOnly:(-not $trustedExecution) `
             -Workers $Workers
         if ($script:VerifyCoreResult.Status -eq "Failed") {
             throw "C core verification failed"

@@ -22,5 +22,6 @@ pub use pattern_universe_materializer::{
     PatternUniverseMaterializationError, PatternUniverseMaterializer,
 };
 pub use piece_multiset_group::{
-    PackingMultisetFamily, PackingMultisetGroup, PackingPatternMembershipKind, PieceMultisetKey,
+    PackingHoldProjection, PackingMultisetFamily, PackingMultisetGroup,
+    PackingPatternMembershipKind, PieceMultisetKey,
 };

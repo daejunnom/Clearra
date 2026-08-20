@@ -9,8 +9,10 @@ use clearra_build_coverage::{
 use clearra_core_domain::{
     board::cell::CellCoord, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
 };
-use clearra_problem::SetupSearchQuery;
+use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput};
+use clearra_problem::{SetupLimits, SetupSearchQuery};
 use clearra_rules::kicks::KickContractReport;
+use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use crate::{
     app_command::RunnableAppCommand,
@@ -54,7 +56,7 @@ impl RunnableAppCommand for VerifyAppCommand {
     fn run(self, context: &AppExecutionContext<'_>) -> AppResponse {
         match self.scope.as_deref() {
             Some("pc") => PcAppCommand::new(default_pc_query()).run(context),
-            Some("setup") => SetupAppCommand::new(SetupSearchQuery::default()).run(context),
+            Some("setup") => SetupAppCommand::new(default_setup_query()).run(context),
             Some("cover") | Some("build") => {
                 CoverAppCommand::new(default_cover_query()).run(context)
             }
@@ -78,7 +80,7 @@ fn run_default_verify(context: &AppExecutionContext<'_>) -> AppResponse {
     }
     let outputs = [
         PcAppCommand::new(default_pc_query()).run(context),
-        SetupAppCommand::new(SetupSearchQuery::default()).run(context),
+        SetupAppCommand::new(default_setup_query()).run(context),
         CoverAppCommand::new(default_cover_query()).run(context),
     ];
     if let Some(failed) = outputs
@@ -129,8 +131,24 @@ fn verify_success(kind: AppResultKind, fields: Vec<(String, String)>) -> AppResp
     )))
 }
 
-fn default_pc_query() -> clearra_pc_graph::request::OpeningPcSearchQuery {
-    clearra_pc_graph::request::OpeningPcSearchQuery::new(PcTarget::two_lines())
+fn default_pc_query() -> OpeningPcSearchQuery {
+    OpeningPcSearchQuery::new(PcTarget::two_lines())
+        .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+        ])))
+        .with_hold_policy(PcHoldPolicy::Disabled)
+}
+
+fn default_setup_query() -> SetupSearchQuery {
+    SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::I, PieceKind::O])
+        .with_queue_based_pieces(vec![PieceKind::T, PieceKind::S, PieceKind::Z, PieceKind::J])
+        .with_max_setup_pieces(1)
+        .with_limits(SetupLimits::new(1, 1, 1, 1, 288, 1).expect("non-zero verify limits"))
 }
 
 fn default_cover_query() -> BuildCoverageQuery {

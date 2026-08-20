@@ -4,15 +4,16 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  CLEARRA_UNVERIFIED_BUILD_ID,
   clearraWasmBuildContractsEqual,
   createClearraWasmBuildContract,
+  serializeClearraWasmManifest,
 } from './clearra-wasm-build-contract.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { finesseSourceSnapshot } from '../benchmark/finesse-source-snapshot.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const scriptRoot = resolve(scriptDir, '..', '..');
-const MANIFEST_BYTES = 768;
 const GENERATION_HEX_LENGTH = 24;
 const BENCHMARK_PROVENANCE_FILE = 'clearra-finesse-wasm-build-provenance.json';
 const PERFORMANCE_RUST_ENV_KEYS = [
@@ -104,15 +105,21 @@ try {
 async function buildWithWsl() {
   const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
   const cargoFeatures = options.stageProfiling ? ' --features stage-profiling' : '';
+  const identityEnvironment =
+    wasmBuildContract.runtime_identity.source_commit === CLEARRA_UNVERIFIED_BUILD_ID
+      ? ''
+      :
+        `CLEARRA_SOURCE_COMMIT=${shellQuote(wasmBuildContract.runtime_identity.source_commit)} ` +
+        `CLEARRA_ENGINE_BUILD_ID=${shellQuote(wasmBuildContract.runtime_identity.engine_build_id)} `;
   const script = `set -euo pipefail
 ROOT=$(wslpath -a ${shellQuote(root)})
 DESTINATION=$(wslpath -a ${shellQuote(stagingDir)})
 TARGET_ROOT="\${CLEARRA_WSL_CARGO_TARGET_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build/cargo-target-wasm}"
 mkdir -p "$TARGET_ROOT" "$DESTINATION"
-${options.verify ? `CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-web-command --lib --tests
-CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
-CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
-CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
+${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-web-command --lib --tests
+${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
+${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
+${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
 wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" --target web --out-dir "$DESTINATION" --out-name clearra_wasm --no-typescript
 `;
   const encoded = Buffer.from(script, 'utf8').toString('base64');
@@ -250,7 +257,7 @@ async function writeManifest(outputDir, buildContract) {
   ]);
   const manifestPath = resolve(outputDir, 'clearra_wasm.manifest.json');
   await mkdir(dirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath, serializeManifest(manifest), 'utf8');
+  await writeFile(manifestPath, serializeClearraWasmManifest(manifest), 'utf8');
   return manifest;
 }
 
@@ -414,17 +421,6 @@ function versionedArtifact(prefix, suffix, bytes) {
     bytes: bytes.byteLength,
     sha256
   };
-}
-
-function serializeManifest(manifest) {
-  const json = JSON.stringify(manifest);
-  const byteLength = Buffer.byteLength(json, 'utf8') + 1;
-  if (byteLength > MANIFEST_BYTES) {
-    throw new Error(
-      `Clearra WASM manifest exceeds the fixed ${MANIFEST_BYTES}-byte deployment contract`
-    );
-  }
-  return `${json}${' '.repeat(MANIFEST_BYTES - byteLength)}\n`;
 }
 
 function shellQuote(value) {

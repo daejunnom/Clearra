@@ -10,6 +10,8 @@ const ENCODE_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 const COMMENT_TABLE: &[u8] =
     b" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
 const COMMENT_BASE: usize = COMMENT_TABLE.len() + 1;
+pub const FUMEN_MAX_INPUT_BYTES: usize = 16 << 20;
+pub const FUMEN_MAX_PAGES: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FumenLikeReader;
@@ -24,6 +26,11 @@ impl FumenLikeReader {
         let mut last_comment = String::new();
 
         while !buffer.is_empty() {
+            if pages.len() == FUMEN_MAX_PAGES {
+                return Err(FumenLikeReadError::TooManyPages {
+                    maximum: FUMEN_MAX_PAGES,
+                });
+            }
             if repeat_count > 0 {
                 repeat_count -= 1;
             } else {
@@ -78,6 +85,8 @@ pub enum FumenLikeReadError {
     InvalidFieldDiff { diff: usize },
     InvalidCommentCharacter { index: usize },
     InvalidEscape,
+    InputTooLong { length: usize, maximum: usize },
+    TooManyPages { maximum: usize },
     InvalidTrace(FumenLikeTraceError),
     MissingInitialBoardMask,
     InvalidInitialBoardMask { value: String },
@@ -135,6 +144,12 @@ impl FumenValueReader {
 }
 
 fn extract_v115_data(input: &str) -> Result<String, FumenLikeReadError> {
+    if input.len() > FUMEN_MAX_INPUT_BYTES {
+        return Err(FumenLikeReadError::InputTooLong {
+            length: input.len(),
+            maximum: FUMEN_MAX_INPUT_BYTES,
+        });
+    }
     let without_params = input.split('&').next().unwrap_or(input);
     let Some(marker_index) = find_v115_marker(without_params) else {
         return Err(FumenLikeReadError::UnsupportedVersion);
@@ -219,12 +234,12 @@ fn decode_comment_chunk(mut value: usize) -> Result<String, FumenLikeReadError> 
 
 fn unescape_comment(escaped: &str) -> Result<String, FumenLikeReadError> {
     let bytes = escaped.as_bytes();
-    let mut output = String::new();
+    let mut code_units = Vec::with_capacity(bytes.len());
     let mut index = 0;
 
     while index < bytes.len() {
         if bytes[index] != b'%' {
-            output.push(bytes[index] as char);
+            code_units.push(u16::from(bytes[index]));
             index += 1;
             continue;
         }
@@ -233,22 +248,18 @@ fn unescape_comment(escaped: &str) -> Result<String, FumenLikeReadError> {
             let hex = bytes
                 .get(index + 2..index + 6)
                 .ok_or(FumenLikeReadError::InvalidEscape)?;
-            let value = parse_hex(hex)?;
-            let Some(ch) = char::from_u32(value as u32) else {
-                return Err(FumenLikeReadError::InvalidEscape);
-            };
-            output.push(ch);
+            code_units.push(parse_hex(hex)?);
             index += 6;
         } else {
             let hex = bytes
                 .get(index + 1..index + 3)
                 .ok_or(FumenLikeReadError::InvalidEscape)?;
-            output.push(parse_hex(hex)? as u8 as char);
+            code_units.push(parse_hex(hex)? & 0xff);
             index += 3;
         }
     }
 
-    Ok(output)
+    String::from_utf16(&code_units).map_err(|_| FumenLikeReadError::InvalidEscape)
 }
 
 fn parse_hex(hex: &[u8]) -> Result<u16, FumenLikeReadError> {

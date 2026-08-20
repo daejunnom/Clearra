@@ -141,10 +141,11 @@ clr_buildup_status clearra_buildup_search_order(
     ClearraBuildUpHoldBranchTable hold_branches;
     clr_search_profile_span hold_span =
         clr_search_profile_begin(CLR_PROFILE_BUILDUP_HOLD_BRANCH_ENUMERATION);
-    status = clearra_buildup_queue_hold_enumerate_branch_mask(
+    status = clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
         context->problem,
         &queue_hold,
         eligible_piece_mask,
+        (remaining_operations & (uint16_t)(remaining_operations - 1u)) == 0u,
         &hold_branches);
     uint64_t available_branch_count = 0u;
     for (uint8_t piece = CLR_PIECE_I; piece <= CLR_PIECE_L; ++piece) {

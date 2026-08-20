@@ -3,6 +3,10 @@ import { createServer } from "node:http";
 
 import { canonicalClearraOperationalCommand } from "../clearra/command.mjs";
 import { writeOperationalLog } from "../operational-log.mjs";
+import {
+  normalizeRuntimeIdentity,
+  runtimeIdentityMatches,
+} from "./runtime-identity.mjs";
 
 const JOB_PROTOCOL = "clearra.job.v1";
 const JOB_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -14,6 +18,9 @@ export class ClearraJobService {
     this.now = options.now ?? Date.now;
     this.logger = options.logger ?? console;
     this.operationalScope = options.operationalScope ?? null;
+    this.runtimeIdentity = config.runtimeIdentity
+      ? normalizeRuntimeIdentity(config.runtimeIdentity)
+      : null;
     this.jobs = new Map();
     this.activeJobs = 0;
     this.server = createServer((request, response) => {
@@ -63,6 +70,7 @@ export class ClearraJobService {
         status: "ok",
         activeJobs: this.activeJobs,
         workerLimit: this.config.searchWorkersPerSession,
+        runtime: this.runtimeIdentity,
       });
       return;
     }
@@ -99,7 +107,7 @@ export class ClearraJobService {
     const job = validateJobRequest(body, this.config, this.now());
     const idempotencyKey = request.headers["idempotency-key"];
     if (idempotencyKey !== job.id) {
-      sendJson(response, 400, jobEnvelope(job.id, "failed", {
+      sendJson(response, 400, this.jobEnvelope(job.id, "failed", {
         error: "idempotency-key must match the job ID",
       }));
       return;
@@ -108,7 +116,7 @@ export class ClearraJobService {
     const existing = this.jobs.get(job.id);
     if (existing) {
       if (existing.digest !== digest) {
-        sendJson(response, 409, jobEnvelope(job.id, "failed", {
+        sendJson(response, 409, this.jobEnvelope(job.id, "failed", {
           error: "job ID already refers to a different request",
         }));
         return;
@@ -118,7 +126,7 @@ export class ClearraJobService {
       return;
     }
     if (this.activeJobs >= this.config.maxConcurrentJobs) {
-      sendJson(response, 429, jobEnvelope(job.id, "failed", {
+      sendJson(response, 429, this.jobEnvelope(job.id, "failed", {
         error: "job service is at its configured concurrency limit",
       }));
       return;
@@ -159,14 +167,14 @@ export class ClearraJobService {
         signal: entry.controller.signal,
       });
       entry.state = "completed";
-      entry.terminal = jobEnvelope(job.id, "completed", { result });
+      entry.terminal = this.jobEnvelope(job.id, "completed", { result });
     } catch (error) {
       if (error?.name === "AbortError") {
         entry.state = "cancelled";
-        entry.terminal = jobEnvelope(job.id, "cancelled");
+        entry.terminal = this.jobEnvelope(job.id, "cancelled");
       } else {
         entry.state = "failed";
-        entry.terminal = jobEnvelope(job.id, "failed", {
+        entry.terminal = this.jobEnvelope(job.id, "failed", {
           error: safeErrorMessage(error),
         });
       }
@@ -194,7 +202,7 @@ export class ClearraJobService {
   handleRead(jobId, response) {
     const entry = this.jobs.get(jobId);
     if (!entry) {
-      sendJson(response, 404, jobEnvelope(jobId, "failed", {
+      sendJson(response, 404, this.jobEnvelope(jobId, "failed", {
         error: "job not found on this service instance",
       }));
       return;
@@ -203,7 +211,7 @@ export class ClearraJobService {
       sendJson(response, 200, entry.terminal);
       return;
     }
-    sendJson(response, 200, jobEnvelope(jobId, entry.state));
+    sendJson(response, 200, this.jobEnvelope(jobId, entry.state));
   }
 
   handleCancel(jobId, response) {
@@ -245,6 +253,16 @@ export class ClearraJobService {
       this.jobs.delete(jobId);
     }
   }
+
+  jobEnvelope(id, state, additional = {}) {
+    return {
+      protocol: JOB_PROTOCOL,
+      id,
+      state,
+      runtime: this.runtimeIdentity,
+      ...additional,
+    };
+  }
 }
 
 function validateJobRequest(value, config, now) {
@@ -256,6 +274,12 @@ function validateJobRequest(value, config, now) {
   }
   if (value.kind !== "clearra.command") {
     throw new RequestError(400, "unsupported job kind");
+  }
+  if (
+    config.runtimeIdentity &&
+    !runtimeIdentityMatches(value.expectedRuntime, config.runtimeIdentity)
+  ) {
+    throw new RequestError(409, "job runtime identity does not match");
   }
   if (typeof value.id !== "string" || !JOB_ID_PATTERN.test(value.id)) {
     throw new RequestError(400, "invalid job ID");
@@ -328,15 +352,6 @@ function jobDigest(job) {
   return createHash("sha256")
     .update(JSON.stringify(identity))
     .digest("hex");
-}
-
-function jobEnvelope(id, state, additional = {}) {
-  return {
-    protocol: JOB_PROTOCOL,
-    id,
-    state,
-    ...additional,
-  };
 }
 
 function sendJson(response, status, value) {

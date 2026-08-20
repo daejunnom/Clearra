@@ -1,6 +1,6 @@
 <script lang="ts">
   import { TriangleAlert } from '@lucide/svelte';
-  import { onDestroy, onMount } from 'svelte';
+  import { getContext, onDestroy, onMount } from 'svelte';
 
   import {
     cancelDesktopJob,
@@ -13,9 +13,14 @@
   } from '../stores';
   import {
     clearWasmTerminalResult,
+    DEFAULT_RUNTIME_WARMUP_POLICY,
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
+    sharedBrowserHostCapabilitySnapshot,
     updateWasmCommandText,
     wasmWorkerState,
-    WasmTerminalWorkerController
+    WasmTerminalWorkerController,
+    type HostCapabilitySnapshot
   } from '../wasm';
   import BoardEditor from './BoardEditor.svelte';
   import ResultWorkspace from './ResultWorkspace.svelte';
@@ -25,8 +30,6 @@
     buildWorkspaceCommand,
     clearCompletedRows,
     createDefaultWorkspaceRequest,
-    defaultBrowserWorkerCount,
-    defaultWorkerCount,
     normalizeWorkspaceRequest,
     trimBoardMask,
     workspaceRequestForDesktop,
@@ -47,7 +50,13 @@
   export let runtime: 'web' | 'desktop' = 'web';
   export let workerFactory: (() => Worker) | null = null;
 
-  const workerController = new WasmTerminalWorkerController(workerFactory);
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const workerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
   let request = createDefaultWorkspaceRequest();
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
@@ -58,6 +67,10 @@
   let resultScoreMode = request.scoreMode;
 
   $: workerController.setWorkerFactory(workerFactory);
+  $: workerAuthority = automaticWorkerAuthority(
+    hostCapabilitySnapshot,
+    request.useAllLogicalProcessors
+  );
   $: runtimeView = runtime === 'web'
     ? workspaceViewFromWasm($wasmWorkerState)
     : workspaceViewFromDesktop($desktopJobState);
@@ -78,7 +91,17 @@
       ...request,
       workers
     };
-    if (runtime === 'web') workerController.prewarm(workers, request.tablebaseEnabled);
+    if (runtime === 'web') {
+      workerController.prewarm(
+        workers,
+        request.tablebaseEnabled,
+        DEFAULT_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
+    }
     if (runtime === 'desktop') resumeDesktopJobPolling();
     const handlePageHide = () => disposeWorkspace();
     window.addEventListener('pagehide', handlePageHide);
@@ -105,21 +128,30 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
-    const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(useAllChanged
+    const draftRequest = useAllChanged
       ? { ...next, workers: automaticWorkerCount(next.useAllLogicalProcessors) }
-      : next));
-    const workersChanged = automaticRequest.workers !== request.workers;
-    const tablebaseChanged = automaticRequest.tablebaseEnabled !== request.tablebaseEnabled;
-    request = automaticRequest;
+      : next;
+    const workersChanged = draftRequest.workers !== request.workers;
+    const tablebaseChanged = draftRequest.tablebaseEnabled !== request.tablebaseEnabled;
+    request = draftRequest;
     if (runtime === 'web' && (workersChanged || tablebaseChanged)) {
-      workerController.prewarm(automaticRequest.workers, automaticRequest.tablebaseEnabled);
+      workerController.prewarm(
+        draftRequest.workers,
+        draftRequest.tablebaseEnabled,
+        DEFAULT_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          draftRequest.useAllLogicalProcessors
+        )
+      );
     }
   }
 
   function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
-    return runtime === 'web'
-      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
-      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+    return automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      useAllLogicalProcessors
+    ).workersEffective;
   }
 
   function withAutomaticBackend(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
@@ -151,7 +183,7 @@
 
   async function run() {
     if (active || validationCodes.length) return;
-    const automaticRequest = withAutomaticBackend(request);
+    const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(request));
     const normalized = clearCompletedRows(automaticRequest.boardMask, automaticRequest.lines);
     const executionRequest = normalized.clearedRows > 0
       ? {
@@ -160,7 +192,13 @@
           boardMask: normalized.boardMask
         }
       : automaticRequest;
-    if (executionRequest !== request) request = executionRequest;
+    if (normalized.clearedRows > 0) {
+      request = {
+        ...request,
+        lines: normalized.remainingLines,
+        boardMask: normalized.boardMask
+      };
+    }
     clearedRowsWarning = normalized.clearedRows;
     resultTargetLines = executionRequest.lines;
     resultScoreMode = executionRequest.scoreMode;
@@ -266,6 +304,7 @@
     dependencyDagControlAvailable
     tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
+    {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />
   <ResultWorkspace
@@ -275,9 +314,11 @@
     {elapsedMs}
     targetLines={resultTargetLines}
     scoreMode={resultScoreMode}
-    tilingOnlyRequested={request.scoreMode === 'tiling'}
-    failedQueueRequested={request.scoreMode === 'failed-queue'}
-    loadSolutionPage={(offset, limit) => workerController.loadSolutionPage(offset, limit)}
+    tilingOnlyRequested={resultScoreMode === 'tiling'}
+    failedQueueRequested={resultScoreMode === 'failed-queue'}
+    loadSolutionPage={runtime === 'web'
+      ? (offset, limit, signal) => workerController.loadSolutionPage(offset, limit, signal)
+      : null}
   />
 </WorkspaceShell>
 

@@ -1,4 +1,9 @@
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
+import type {
+  HostCapabilitySnapshot,
+  RuntimeWarmupPolicy,
+  WorkerAuthorityReport
+} from './hostCapabilitySnapshot';
 import type { ClearraWasmForcedTerminationReason } from './wasmWorkerLifecycle';
 
 export type ClearraVirtualFileHandle = {
@@ -24,7 +29,16 @@ export type ClearraDiagnosticReport = {
   diagnostics: ClearraDiagnostic[];
 };
 
+export type ClearraProductBuildIdentity = {
+  engine_build_id: string;
+  source_commit: string;
+  contract_schema_version: 'clearra.search.contract.v2';
+  supply_semantics_id: 'clearra.supply.projected-terminal-lookahead.v1';
+  artifact_schema_version: 'clearra.solution-data.v1';
+};
+
 export type ClearraHostAppResponse = {
+  runtime_identity: ClearraProductBuildIdentity;
   command: string | null;
   status: 'success' | 'validation-failed' | 'unsupported' | 'execution-failed';
   result: { kind: string } | null;
@@ -165,6 +179,12 @@ export type ClearraSolutionProbability = {
   probability_complete: boolean;
 };
 
+export type ClearraWasmRuntimeAuthority = {
+  hostCapabilitySnapshot: HostCapabilitySnapshot;
+  workerAuthority: WorkerAuthorityReport;
+  warmupPolicy: RuntimeWarmupPolicy;
+};
+
 export type ClearraSolutionAverageScore = {
   solution_key: string;
   average_score: string;
@@ -278,6 +298,11 @@ export type ClearraWasmSearchReport = {
   workers_used: number;
   cpu_parallel_execution: boolean;
   cpu_parallel_decision_reason: string;
+  supply_window_resolution: string;
+  projects_unplaced_lookahead: boolean;
+  projects_standard_bag_lookahead: boolean;
+  source_sequence_length: number;
+  total_possible_pattern_count: string;
   solution_found: boolean;
   packing_candidate_count: number;
   packing_candidate_set_digest: string;
@@ -350,7 +375,34 @@ export type ClearraSearchProgressTelemetry = {
   layer_count: number;
   layer_done: number;
   layer_total: number;
+  availability: ClearraSearchProgressTelemetryFlags;
+  exactness: ClearraSearchProgressTelemetryFlags;
 };
+
+export type ClearraSearchProgressCountKey =
+  | 'geometry_nodes'
+  | 'candidates_emitted'
+  | 'geometry_family_count'
+  | 'candidates_verified'
+  | 'producer_build_nodes'
+  | 'producer_coverage_checks'
+  | 'build_nodes'
+  | 'coverage_checks'
+  | 'ready_workers'
+  | 'active_workers'
+  | 'worker_count'
+  | 'oldest_batch_ms'
+  | 'pass_index'
+  | 'pass_count'
+  | 'layer_index'
+  | 'layer_count'
+  | 'layer_done'
+  | 'layer_total';
+
+export type ClearraSearchProgressTelemetryFlags = Record<
+  ClearraSearchProgressCountKey,
+  boolean
+>;
 
 export type ClearraWasmWorkerEvent = ClearraWasmWorkerEventBase &
   (
@@ -423,7 +475,8 @@ export function postRunCommand(
   request: ClearraWasmCommandRequest,
   prewarmWorkerCount = 1,
   tablebaseRequested = false,
-  lifecycleOwnerId?: string
+  lifecycleOwnerId?: string,
+  runtimeAuthority?: ClearraWasmRuntimeAuthority
 ) {
   worker.postMessage({
     type: 'run_command_text',
@@ -431,6 +484,7 @@ export function postRunCommand(
     prewarmWorkerCount,
     tablebaseRequested,
     lifecycleOwnerId,
+    ...runtimeAuthority,
     virtualFiles: request.virtualFiles ?? []
   });
 }
@@ -439,13 +493,15 @@ export function postPrewarmRuntime(
   worker: Worker,
   workerCount: number,
   tablebaseRequested = false,
-  lifecycleOwnerId?: string
+  lifecycleOwnerId?: string,
+  runtimeAuthority?: ClearraWasmRuntimeAuthority
 ) {
   worker.postMessage({
     type: 'prewarm_runtime',
     workerCount,
     tablebaseRequested,
-    lifecycleOwnerId
+    lifecycleOwnerId,
+    ...runtimeAuthority
   });
 }
 

@@ -221,10 +221,11 @@ impl WasmTilingRootProducer {
             .materialized_universe()
             .ok_or("wasm_piece_source_not_materialized")?;
         let family_count = universe
-            .packing_multiset_family(
+            .packing_multiset_family_for_execution(
                 field.target_piece_count(),
                 problem.initial_hold(),
-                super::packing_projection_hold_enabled(problem),
+                problem.supply().hold_enabled(),
+                super::packing_hold_projection(problem),
             )
             .len();
         let pass_count = if field.includes_applicable_horizontal_mirror()
@@ -607,10 +608,11 @@ impl WasmTilingRootWorker {
             let canonical_rank_by_source =
                 canonical_tiling_rank_by_source(&catalog).map_err(super::distributed::map_error)?;
             let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
-            let family = universe.packing_multiset_family(
+            let family = universe.packing_multiset_family_for_execution(
                 target_piece_count,
                 problem.initial_hold(),
-                super::packing_projection_hold_enabled(problem),
+                problem.supply().hold_enabled(),
+                super::packing_hold_projection(problem),
             );
             if family.is_empty() {
                 return Err("wasm_supply_has_no_reachable_piece_multiset");

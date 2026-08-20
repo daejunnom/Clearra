@@ -7,6 +7,11 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+env:
+  CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+  CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
 
 jobs:
   metadata:
@@ -29,12 +34,53 @@ jobs:
             exit 2
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate every product version and changelog surface
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        shell: bash
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then
+            node scripts/release/validate-release-metadata.mjs --tag "$RELEASE_TAG"
+          else
+            node scripts/release/validate-release-metadata.mjs
+          fi
+      - name: Validate release metadata regression coverage
+        run: node --test scripts/release/validate-release-metadata.test.mjs
+      - name: Validate remote annotated tag regression coverage
+        run: node --test scripts/release/verify-remote-annotated-tag.test.mjs
+      - name: Validate release CLI smoke wiring
+        run: node scripts/tools/validate-release-cli-smokes.mjs
+      - name: Require the exact accepted main commit before tag publication
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo 'release tag must point at the exact current main commit' >&2
+            exit 2
+          fi
+          accepted="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/release-cli.yml/runs" \
+            -f event=workflow_dispatch \
+            -f status=success \
+            -f head_sha="$GITHUB_SHA" \
+            -f per_page=1 \
+            --jq '.workflow_runs | length')"
+          if [[ "$accepted" -lt 1 ]]; then
+            echo 'release tag commit has no successful canonical workflow_dispatch acceptance run' >&2
+            exit 2
+          fi
 
   linux-cli:
     needs: metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/cache@v4
         with:
           path: |
@@ -131,28 +177,101 @@ jobs:
         shell: pwsh
         run: |
           cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
-          $cli = Join-Path $env:CARGO_TARGET_DIR 'release\clearra.exe'
-          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
-            throw "Clearra CLI executable was not produced: $cli"
+          $builtCli = Join-Path $env:CARGO_TARGET_DIR 'release\clearra.exe'
+          if (-not (Test-Path -LiteralPath $builtCli -PathType Leaf)) {
+            throw "Clearra CLI executable was not produced: $builtCli"
           }
+          $version = '${{ needs.metadata.outputs.version }}'
+          $artifactDir = Join-Path $PWD.Path 'dist'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $cli = Join-Path $artifactDir "Clearra-CLI-v$version-windows-x86_64.exe"
+          Copy-Item -LiteralPath $builtCli -Destination $cli -Force
           function Invoke-ClearraJsonSmoke {
             param(
               [Parameter(Mandatory)] [string] $Name,
-              [Parameter(Mandatory)] [string[]] $CommandArguments
+              [Parameter(Mandatory)] [string[]] $CommandArguments,
+              [hashtable] $ExpectedSummary = @{},
+              [hashtable] $ExpectedResourceReport = @{}
             )
             $jsonLines = & $cli @CommandArguments
             $exitCode = $LASTEXITCODE
             if ($exitCode -ne 0) { throw "Clearra CLI $Name smoke failed: $exitCode" }
             $json = $jsonLines -join "`n"
             try {
-              $json | ConvertFrom-Json -ErrorAction Stop | Out-Null
+              $parsed = $json | ConvertFrom-Json -ErrorAction Stop
             } catch {
               throw "Clearra CLI $Name smoke returned invalid JSON"
             }
+            if ($null -eq $parsed) { throw "Clearra CLI $Name smoke returned empty JSON" }
+            $identity = $parsed.runtime_identity
+            if ($null -eq $identity -or
+                $identity.source_commit -ne $env:GITHUB_SHA -or
+                $identity.engine_build_id -ne $env:GITHUB_SHA -or
+                $identity.contract_schema_version -ne 'clearra.search.contract.v2' -or
+                $identity.supply_semantics_id -ne 'clearra.supply.projected-terminal-lookahead.v1' -or
+                $identity.artifact_schema_version -ne 'clearra.solution-data.v1') {
+              throw "Clearra CLI $Name smoke returned a mismatched product build identity"
+            }
+            foreach ($entry in $ExpectedSummary.GetEnumerator()) {
+              $property = $parsed.summary.PSObject.Properties[$entry.Key]
+              if ($null -eq $property -or $property.Value -ne $entry.Value) {
+                $actual = if ($null -eq $property) { '<missing>' } else { $property.Value }
+                throw "Clearra CLI $Name smoke expected summary.$($entry.Key)=$($entry.Value), received $actual"
+              }
+            }
+            foreach ($entry in $ExpectedResourceReport.GetEnumerator()) {
+              $property = $parsed.resource_report.PSObject.Properties[$entry.Key]
+              if ($null -eq $property -or $property.Value -ne $entry.Value) {
+                $actual = if ($null -eq $property) { '<missing>' } else { $property.Value }
+                throw "Clearra CLI $Name smoke expected resource_report.$($entry.Key)=$($entry.Value), received $actual"
+              }
+            }
+            if ($Name -eq 'rules-export-srs-x') {
+              try {
+                $embedded = $parsed.summary.json | ConvertFrom-Json -ErrorAction Stop
+              } catch {
+                throw 'Clearra CLI SRS-X export returned invalid embedded JSON'
+              }
+              $halfTurnCount = @(
+                $embedded.entries | Where-Object {
+                  "$($_.from):$($_.to)" -in @('0:2', '2:0', 'R:L', 'L:R')
+                }
+              ).Count
+              if ($embedded.id -ne 'srs-x' -or
+                  $embedded.source_rule -ne 'srs-x' -or
+                  $embedded.entries.Count -ne 80 -or
+                  $halfTurnCount -ne 24) {
+                throw 'Clearra CLI SRS-X export did not preserve its canonical 80-transition profile'
+              }
+            }
+            if ($Name -eq 'terminal-supply-p0') {
+              $json | node scripts/tools/validate-release-cli-smokes.mjs `
+                --validate-terminal-supply-json `
+                --expected-source-commit $env:GITHUB_SHA
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Clearra CLI terminal-supply smoke violated the product contract'
+              }
+            }
           }
           Invoke-ClearraJsonSmoke -Name 'rules' -CommandArguments @('--format', 'json', 'rules', 'list')
+          Invoke-ClearraJsonSmoke -Name 'rules-export-srs-x' `
+            -CommandArguments @('--format', 'json', 'rules', 'export', '--profile', 'srs-x') `
+            -ExpectedSummary @{ action = 'export'; profile = 'srs-x' }
           Invoke-ClearraJsonSmoke -Name 'solver' -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IJLOO', '--fixed', '--no-hold')
+          Invoke-ClearraJsonSmoke -Name 'pc-tiling' `
+            -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IJLOO', '--fixed', '--no-hold', '--objective', 'tiling', '--backend', 'cpu', '--workers', '1') `
+            -ExpectedSummary @{ coverage_probability = 'not-calculated'; probability_calculated = $false; probability_complete = $false; supply_probability_complete = $false; resource_probability_complete = $false } `
+            -ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }
           Invoke-ClearraJsonSmoke -Name 'failed-queue' -CommandArguments @('--format', 'json', 'failed-queue', '--lines', '2', '--patterns', 'P5', '--backend', 'cpu', '--failed-count', '7')
+          Invoke-ClearraJsonSmoke -Name 'build-probability' `
+            -CommandArguments @('--format', 'json', 'build-probability', '--base-mask', '0x0', '--target-mask', '0xf', '--height', '4', '--queue', 'I', '--no-hold', '--no-mirror', '--backend', 'cpu', '--workers', '1') `
+            -ExpectedSummary @{ actual_backend = 'wasm-cpu-build-probability'; probability_calculated = $true; solution_found = $true }
+          Invoke-ClearraJsonSmoke -Name 'pc-srs-x' `
+            -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IIOOO', '--fixed', '--no-hold', '--rule', 'srs-x', '--backend', 'cpu', '--workers', '1') `
+            -ExpectedSummary @{ rule_profile = 'srs-x'; effective_kick_model = 'srs-x'; solution_found = $true }
+          Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0' `
+            -CommandArguments @('--format', 'json', '--include-solution-data', 'pc-scenario', '--field', '0x1c0701c07', '--visible-height', '4', '--queue', 'STOILJZ', '--max-pieces', '7', '--exact-pieces', '7', '--count-policy', 'count-unique', '--backend', 'cpu', '--workers', '1') `
+            -ExpectedSummary @{ actual_backend = 'wasm-cpu'; unique_solution_count = 18; normalized_unique_solution_count = 18; solution_count_calculated = $true; solution_set_materialized = $true; solution_keys_materialized_count = 18; solution_keys_complete = $true; count_complete = $true; supply_window_resolution = 'projected-terminal-lookahead'; projects_unplaced_lookahead = $true; projects_standard_bag_lookahead = $false; source_sequence_length = 7; total_possible_pattern_count = '1'; normalized_solution_set_hash = 'cts1:8a7fc484d9b49994'; actual_normalized_solution_set_hash = 'cts1:8a7fc484d9b49994' }
       - name: Build standalone SvelteKit and Tauri GUI
         run: npm run tauri -w @clearra/desktop -- build --no-bundle
       - name: Stage Windows executables
@@ -160,13 +279,15 @@ jobs:
         run: |
           $version = '${{ needs.metadata.outputs.version }}'
           $releaseDir = Join-Path $env:CARGO_TARGET_DIR 'release'
-          $cli = Join-Path $releaseDir 'clearra.exe'
+          $cli = Join-Path $PWD.Path "dist\Clearra-CLI-v$version-windows-x86_64.exe"
           $gui = Join-Path $releaseDir 'clearra-desktop.exe'
+          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+            throw "Exercised Clearra CLI release asset is missing: $cli"
+          }
           if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) {
             throw "Clearra GUI executable was not produced: $gui"
           }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item -LiteralPath $cli -Destination "dist\Clearra-CLI-v$version-windows-x86_64.exe"
           Copy-Item -LiteralPath $gui -Destination "dist\Clearra-GUI-v$version-windows-x86_64.exe"
       - name: Upload Windows product artifacts
         uses: actions/upload-artifact@v4
@@ -189,8 +310,32 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_IMMUTABILITY_CONFIRMED: ${{ vars.CLEARRA_IMMUTABLE_RELEASES_ENABLED }}
         shell: bash
         run: |
+          git fetch --no-tags --depth=1 origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo 'release tag is no longer the exact current main commit' >&2
+            exit 2
+          fi
+          accepted="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/release-cli.yml/runs" \
+            -f event=workflow_dispatch \
+            -f status=success \
+            -f head_sha="$GITHUB_SHA" \
+            -f per_page=1 \
+            --jq '.workflow_runs | length')"
+          if [[ "$accepted" -lt 1 ]]; then
+            echo 'release tag no longer has a successful exact-SHA canonical acceptance run' >&2
+            exit 2
+          fi
+          if [[ "$RELEASE_IMMUTABILITY_CONFIRMED" != 'true' ]]; then
+            echo 'repository release immutability has not been confirmed by the approved administrator' >&2
+            exit 2
+          fi
+          node scripts/release/verify-remote-annotated-tag.mjs \
+            --tag "$GITHUB_REF_NAME" \
+            --expected-commit "$GITHUB_SHA"
           mapfile -t assets < <(find dist -maxdepth 1 -type f -print | sort)
           if [[ "${#assets[@]}" -ne 3 ]]; then
             printf 'expected three standalone release assets, found %s\n' "${#assets[@]}" >&2
@@ -198,10 +343,20 @@ jobs:
             exit 2
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-              --verify-tag \
-              --generate-notes \
-              --title "Clearra $GITHUB_REF_NAME"
+            echo "release $GITHUB_REF_NAME already exists; published versions are immutable" >&2
+            exit 2
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --generate-notes \
+            --title "Clearra $GITHUB_REF_NAME" \
+            --draft
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+          immutable="$(gh api --method GET \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            --jq '.immutable')"
+          if [[ "$immutable" != 'true' ]]; then
+            echo 'published release is not immutable' >&2
+            exit 2
           fi

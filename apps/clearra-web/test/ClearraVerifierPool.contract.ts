@@ -77,8 +77,10 @@ class FakeVerifierWorker {
         type: 'consumed',
         requestId: message.requestId,
         candidateCount: 1,
+        candidateCountAvailable: true,
+        candidateCountExact: true,
         partial: null,
-        progress: { candidateCount: this.consumed.length, buildNodes: 0, coverageChecks: 0 }
+        progress: exactVerifierProgress(this.consumed.length)
       });
       return;
     }
@@ -169,8 +171,10 @@ class StreamingVerifierWorker {
         type: 'consumed',
         requestId: message.requestId,
         candidateCount: 1,
+        candidateCountAvailable: true,
+        candidateCountExact: true,
         partial: null,
-        progress: { candidateCount: 1, buildNodes: 0, coverageChecks: 0 }
+        progress: exactVerifierProgress(1)
       });
       return;
     }
@@ -182,6 +186,24 @@ class StreamingVerifierWorker {
     for (const listener of this.listeners.get('message') ?? []) listener(event);
     this.onmessage?.(event);
   }
+}
+
+function exactVerifierProgress(candidateCount: number) {
+  return {
+    candidateCount,
+    buildNodes: 0,
+    coverageChecks: 0,
+    availability: {
+      candidateCount: true,
+      buildNodes: true,
+      coverageChecks: true
+    },
+    exactness: {
+      candidateCount: true,
+      buildNodes: true,
+      coverageChecks: true
+    }
+  };
 }
 
 const streamingWorkers: StreamingVerifierWorker[] = [];
@@ -300,7 +322,11 @@ class HeartbeatVerifierWorker extends FakeVerifierWorker {
       this.emit({
         type: 'heartbeat',
         requestId: message.requestId,
-        progress: { candidateCount: 0, buildNodes: 1, coverageChecks: 2 }
+        progress: {
+          ...exactVerifierProgress(0),
+          buildNodes: 1,
+          coverageChecks: 2
+        }
       });
     }, 10);
     setTimeout(() => {
@@ -338,6 +364,16 @@ assert.deepEqual(heartbeatPool.progressSnapshot(), {
   candidatesVerified: 1,
   buildNodes: 0,
   coverageChecks: 0,
+  availability: {
+    candidatesVerified: true,
+    buildNodes: true,
+    coverageChecks: true
+  },
+  exactness: {
+    candidatesVerified: true,
+    buildNodes: true,
+    coverageChecks: true
+  },
   readyWorkers: 1,
   activeWorkers: 0,
   workerCount: 1,
@@ -484,3 +520,89 @@ await bounded(
 assert.equal(stalledFinishWorkers.length, 2);
 assert.equal(stalledFinishWorkers[0].terminated, true);
 assert.deepEqual(stalledFinishPartials, [6]);
+
+class SaturatedTelemetryVerifierWorker extends FakeVerifierWorker {
+  constructor(private readonly saturated: boolean) {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type !== 'consume' || !this.saturated) {
+      super.postMessage(message);
+      return;
+    }
+    queueMicrotask(() => {
+      this.emit({
+        type: 'consumed',
+        requestId: message.requestId,
+        candidateCount: 0xffff_ffff,
+        candidateCountAvailable: false,
+        candidateCountExact: false,
+        partial: null,
+        progress: {
+          candidateCount: 0xffff_ffff,
+          buildNodes: 0xffff_ffff,
+          coverageChecks: 0xffff_ffff,
+          availability: {
+            candidateCount: false,
+            buildNodes: false,
+            coverageChecks: false
+          },
+          exactness: {
+            candidateCount: false,
+            buildNodes: false,
+            coverageChecks: false
+          }
+        }
+      });
+    });
+  }
+}
+
+const saturatedTelemetryWorkers: SaturatedTelemetryVerifierWorker[] = [];
+const saturatedTelemetryPool = new ClearraVerifierPool(() => {
+  const worker = new SaturatedTelemetryVerifierWorker(
+    saturatedTelemetryWorkers.length === 0
+  );
+  saturatedTelemetryWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+await bounded(
+  'saturated telemetry initialize',
+  saturatedTelemetryPool.initialize(
+    new ArrayBuffer(0),
+    2,
+    undefined,
+    'saturated-telemetry-owner',
+    'atomic-task'
+  )
+);
+await Promise.all([
+  bounded(
+    'saturated telemetry first enqueue',
+    saturatedTelemetryPool.enqueue(Uint8Array.of(1).buffer, () => undefined)
+  ),
+  bounded(
+    'saturated telemetry second enqueue',
+    saturatedTelemetryPool.enqueue(Uint8Array.of(2).buffer, () => undefined)
+  )
+]);
+await bounded('saturated telemetry idle', saturatedTelemetryPool.waitForIdle());
+const saturatedTelemetrySnapshot = saturatedTelemetryPool.progressSnapshot();
+assert.equal(saturatedTelemetrySnapshot.candidatesVerified, 0x1_0000_0000);
+assert.equal(saturatedTelemetrySnapshot.buildNodes, 0xffff_ffff);
+assert.equal(saturatedTelemetrySnapshot.coverageChecks, 0xffff_ffff);
+assert.deepEqual(saturatedTelemetrySnapshot.availability, {
+  candidatesVerified: false,
+  buildNodes: false,
+  coverageChecks: false
+});
+assert.deepEqual(saturatedTelemetrySnapshot.exactness, {
+  candidatesVerified: false,
+  buildNodes: false,
+  coverageChecks: false
+});
+await bounded(
+  'saturated telemetry finish',
+  saturatedTelemetryPool.finish(() => undefined)
+);

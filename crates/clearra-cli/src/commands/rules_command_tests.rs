@@ -88,6 +88,33 @@ fn rules_command_imports_and_exports_json_profiles() {
 }
 
 #[test]
+fn rules_command_exports_and_round_trips_the_canonical_srs_x_profile() {
+    let exported = RulesCommand::run(
+        &RulesArgs::new(RulesAction::Export).with_profile(Some("srs-x".to_owned())),
+        RenderFormat::Json,
+    );
+
+    assert_eq!(
+        exported.exit_code(),
+        ExitCode::Success,
+        "{}",
+        exported.stderr()
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(exported.stdout()).expect("rules export envelope");
+    let profile_json = envelope["summary"]["json"]
+        .as_str()
+        .expect("embedded SRS-X profile");
+    let profile = KickImport::from_json(profile_json).expect("round-tripped SRS-X profile");
+
+    assert_eq!(profile.id(), KickTableProfileId::SrsX);
+    assert_eq!(profile.source_rule(), RuleProfileId::SrsX);
+    assert!(profile.supports_180());
+    assert_eq!(profile.transition_count(), 80);
+    assert_eq!(profile, SrsKicks::srs_x_profile());
+}
+
+#[test]
 fn rules_import_marks_verified_exact_180_profile_as_c_descriptor_ready() {
     let import_json = KickImport::to_json(&KickTableProfile::new(
         KickTableProfileId::Imported,

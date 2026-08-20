@@ -26,6 +26,12 @@ test("an explicit job URL preserves the remote execution seam", () => {
     DISCORD_TOKEN: "test-token",
     CLEARRA_JOB_URL: "https://oracle.example.test/jobs",
     CLEARRA_JOB_TOKEN: "job-token",
+    CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: "1".repeat(40),
+    CLEARRA_EXPECTED_ENGINE_BUILD_ID: "1".repeat(40),
+    CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: "clearra.search.contract.v2",
+    CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID:
+      "clearra.supply.projected-terminal-lookahead.v1",
+    CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION: "clearra.solution-data.v1",
   });
 
   assert.equal(config.jobEndpoint, "https://oracle.example.test/jobs");

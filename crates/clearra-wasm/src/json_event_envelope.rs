@@ -1,8 +1,10 @@
+// SRP rationale: this module has one behavior-level change reason: serializing typed WASM
+// worker events into the stable host JSON envelope.
 use std::fmt::Write;
 
 use clearra_host_contract::{
     AppResponse, AppStatus, BackendReport, CapabilityReport, ContinuationReport, Diagnostic,
-    DiagnosticReport, ResourceReport,
+    DiagnosticReport, ProductBuildIdentity, ResourceReport,
 };
 
 use crate::{
@@ -142,6 +144,9 @@ fn write_memory_status(object: &mut JsonObject<'_>, status: &MemoryStatus) {
 }
 
 fn write_app_response(object: &mut JsonObject<'_>, response: &AppResponse) {
+    object.object("runtime_identity", |nested| {
+        write_runtime_identity(nested, response.runtime_identity())
+    });
     object.optional_string(
         "command",
         response.command().map(|command| command.as_str()),
@@ -174,6 +179,20 @@ fn write_app_response(object: &mut JsonObject<'_>, response: &AppResponse) {
         "continuation",
         response.continuation(),
         write_continuation_report,
+    );
+}
+
+fn write_runtime_identity(object: &mut JsonObject<'_>, identity: &ProductBuildIdentity) {
+    object.string("engine_build_id", identity.engine_build_id());
+    object.string("source_commit", identity.source_commit());
+    object.string(
+        "contract_schema_version",
+        identity.contract_schema_version(),
+    );
+    object.string("supply_semantics_id", identity.supply_semantics_id());
+    object.string(
+        "artifact_schema_version",
+        identity.artifact_schema_version(),
     );
 }
 
@@ -357,6 +376,10 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
     object.boolean(
         "projects_unplaced_lookahead",
         report.projects_unplaced_lookahead,
+    );
+    object.boolean(
+        "projects_standard_bag_lookahead",
+        report.projects_standard_bag_lookahead,
     );
     object.number("source_sequence_length", report.source_sequence_length);
     object.string(

@@ -22,6 +22,10 @@ typedef struct ClearraBuildUpOrder {
 #define CLEARRA_BUILDUP_HOLD_BRANCH_CURRENT CLR_BUILDUP_HOLD_BRANCH_CURRENT
 #define CLEARRA_BUILDUP_HOLD_BRANCH_SWAP_HELD CLR_BUILDUP_HOLD_BRANCH_SWAP_HELD
 #define CLEARRA_BUILDUP_HOLD_BRANCH_STORE_CURRENT CLR_BUILDUP_HOLD_BRANCH_STORE_CURRENT
+#define CLEARRA_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL \
+    CLR_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL
+#define CLEARRA_BUILDUP_TERMINAL_PROVENANCE_NONE 0u
+#define CLEARRA_BUILDUP_TERMINAL_PROVENANCE_FINITE_SOURCE_END 1u
 typedef struct ClearraBuildUpHoldBranch {
     ClearraBuildUpQueueHold state;
     uint8_t branch_kind;
@@ -109,6 +113,12 @@ clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask(
     const clr_buildup_problem *problem,
     const ClearraBuildUpQueueHold *state,
     uint8_t desired_piece_mask,
+    ClearraBuildUpHoldBranchTable *out_table);
+clr_buildup_status clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
+    const clr_buildup_problem *problem,
+    const ClearraBuildUpQueueHold *state,
+    uint8_t desired_piece_mask,
+    bool terminal_step,
     ClearraBuildUpHoldBranchTable *out_table);
 clr_buildup_status clearra_buildup_verify_bag_pattern(
     const clr_buildup_problem *problem);

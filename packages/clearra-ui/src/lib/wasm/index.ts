@@ -1,4 +1,5 @@
 export * from './wasmCommandClient';
+export * from './hostCapabilitySnapshot';
 export * from './wasmWorkerLifecycle';
 export * from './wasmWorkerStore';
 export * from './WasmTerminalWorkerController';

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
 
   import {
@@ -13,10 +13,15 @@
   } from '../stores';
 
   import {
+    CPU_ONLY_RUNTIME_WARMUP_POLICY,
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
     clearWasmTerminalResult,
+    sharedBrowserHostCapabilitySnapshot,
     updateWasmCommandText,
     wasmWorkerState,
-    WasmTerminalWorkerController
+    WasmTerminalWorkerController,
+    type HostCapabilitySnapshot
   } from '../wasm';
   import ForwardSearchControls from './ForwardSearchControls.svelte';
   import ForwardSearchResult from './ForwardSearchResult.svelte';
@@ -33,7 +38,6 @@
     type ForwardSearchRequest,
     type ForwardTool
   } from './forwardSearchModel';
-  import { defaultBrowserWorkerCount, defaultWorkerCount } from './solverWorkspaceModel';
   import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
@@ -41,7 +45,13 @@
   export let workerFactory: (() => Worker) | null = null;
   export let runtime: 'web' | 'desktop' = 'web';
 
-  const workerController = new WasmTerminalWorkerController(workerFactory);
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const workerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
   let request = createDefaultForwardSearchRequest(tool);
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
@@ -55,6 +65,10 @@
   let disposed = false;
 
   $: workerController.setWorkerFactory(workerFactory);
+  $: workerAuthority = automaticWorkerAuthority(
+    hostCapabilitySnapshot,
+    request.useAllLogicalProcessors
+  );
   $: if (request.tool !== tool) request = createDefaultForwardSearchRequest(tool);
   $: runtimeView = runtime === 'web'
     ? workspaceViewFromWasm($wasmWorkerState)
@@ -69,7 +83,15 @@
     workerCount = automaticWorkerCount(request.useAllLogicalProcessors);
     if (runtime === 'web') {
       clearWasmTerminalResult();
-      workerController.prewarm(workerCount);
+      workerController.prewarm(
+        workerCount,
+        false,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
     } else {
       clearDesktopTerminalResult();
       resumeDesktopJobPolling();
@@ -136,15 +158,26 @@
     const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
     if (useAllChanged) {
       workerCount = automaticWorkerCount(next.useAllLogicalProcessors);
-      if (runtime === 'web') workerController.prewarm(workerCount);
+      if (runtime === 'web') {
+        workerController.prewarm(
+          workerCount,
+          false,
+          CPU_ONLY_RUNTIME_WARMUP_POLICY,
+          automaticWorkerAuthority(
+            hostCapabilitySnapshot,
+            next.useAllLogicalProcessors
+          )
+        );
+      }
     }
     request = { ...next, tool };
   }
 
   function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
-    return runtime === 'web'
-      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
-      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+    return automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      useAllLogicalProcessors
+    ).workersEffective;
   }
 
   async function run() {
@@ -231,7 +264,7 @@
     on:change={(event) => setBoardMask(event.detail.existingMask)}
     on:import={(event) => importBoard(event.detail.existingMask, event.detail.height)}
   />
-  <ForwardSearchControls slot="controls" {request} {language} {validationCodes} on:change={(event) => updateRequest(event.detail)} />
+  <ForwardSearchControls slot="controls" {request} {language} {validationCodes} {workerAuthority} on:change={(event) => updateRequest(event.detail)} />
   <ForwardSearchResult
     slot="result"
     report={runtimeView.searchReport}

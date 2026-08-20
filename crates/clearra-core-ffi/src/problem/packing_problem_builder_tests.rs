@@ -10,8 +10,9 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 use crate::board::C_BOARD_BACKEND_BOARD64;
 use crate::problem::{
     C_BACKEND_AUTO, C_BACKEND_CPU, C_BAG_STANDARD_7_BAG, C_GOAL_CLEAR_TO_EMPTY,
-    C_KICK_SRS_PLUS_180, C_PIECE_I, C_PIECE_O, C_PIECE_S, C_PIECE_SET_STANDARD_TETROMINOES,
-    C_PIECE_T, C_PIECE_Z, C_RULE_SRS_PLUS, C_RULE_SRS_X, C_SPAWN_STANDARD_10,
+    C_KICK_SRS_PLUS_180, C_KICK_SRS_X, C_PIECE_I, C_PIECE_O, C_PIECE_S,
+    C_PIECE_SET_STANDARD_TETROMINOES, C_PIECE_T, C_PIECE_Z, C_RULE_SRS_PLUS, C_RULE_SRS_X,
+    C_SPAWN_STANDARD_10,
 };
 
 use super::*;
@@ -231,16 +232,17 @@ fn packing_problem_builder_rejects_unsupported_board() {
 }
 
 #[test]
-fn packing_problem_builder_rejects_unverified_kick_profile() {
+fn packing_problem_builder_projects_builtin_srs_x_as_verified_kick_profile() {
     let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_rule(srs_x());
     let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
 
-    assert_eq!(
-        CPackingProblemBuilder::from_search_problem(&problem),
-        Err(FfiProblemError::UnverifiedRuleProfileRejected {
-            rule_profile_id: C_RULE_SRS_X,
-        })
-    );
+    let compact = CPackingProblemBuilder::from_search_problem(&problem).expect("SRS-X compact");
+
+    assert_eq!(compact.rule.rule_profile_id, C_RULE_SRS_X);
+    assert_eq!(compact.rule.kick_profile_id, C_KICK_SRS_X);
+    assert_eq!(compact.rule.has_verified_kick_profile, 1);
+    assert_eq!(compact.rule.verified_supports_180, 1);
+    assert_eq!(compact.rule.verified_transition_count, 80);
 }
 
 #[test]

@@ -6,6 +6,10 @@ use crate::{
 
 pub(crate) fn pc_assembly_error(error: PcQueryAssemblyError) -> CliOutput {
     match error {
+        PcQueryAssemblyError::SearchContract(error) => CliOutput::error(
+            CliErrorCode::PcQueryInvalid,
+            format!("{}: {}", error.code(), error.message()),
+        ),
         PcQueryAssemblyError::InvalidTarget(error) => {
             CliOutput::error(CliErrorCode::PcTargetInvalid, format!("{error:?}"))
         }

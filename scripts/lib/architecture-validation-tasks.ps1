@@ -15,6 +15,7 @@ function New-AdvisoryMarkerAuditTasks() {
         New-ArchitectureValidationTask "Dependency Architecture" "Invoke-DependencyArchitectureValidation" -RequiresWorkspaceDependencyGraph
         New-ArchitectureValidationTask "Adversarial Release Wiring" "Invoke-AdversarialReleaseGateWiringValidation"
         New-ArchitectureValidationTask "Architecture Authority Policy" "Invoke-ArchitectureValidationAuthorityPolicy"
+        New-ArchitectureValidationTask "Release Identity Gate" "Invoke-ReleaseIdentityGateValidation"
         New-ArchitectureValidationTask "A Product Boundary" "Invoke-ProductBoundaryValidation"
         New-ArchitectureValidationTask "B Forbidden Algorithms" "Invoke-ForbiddenAlgorithmsValidation"
         New-ArchitectureValidationTask "M Proof-carrying Pruning" "Invoke-ProofCarryingPruningContractValidation"
@@ -122,6 +123,7 @@ function New-CurrentArchitectureValidationTasks() {
         New-ArchitectureValidationTask "Public ABI Architecture" "Invoke-PublicAbiContractValidation"
         New-ArchitectureValidationTask "Unsafe Boundary Architecture" "Invoke-UnsafeBoundaryArchitectureValidation"
         New-ArchitectureValidationTask "Unsupported Capability Architecture" "Invoke-UnsupportedCapabilityStaticValidation"
+        New-ArchitectureValidationTask "Release Identity Gate" "Invoke-ReleaseIdentityGateValidation"
         New-ArchitectureValidationTask "SRP Policy Architecture" "Invoke-SrpPolicyArchitectureValidation"
     )
 }

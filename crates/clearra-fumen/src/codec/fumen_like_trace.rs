@@ -16,9 +16,6 @@ impl FumenLikeTrace {
             if page.contains('\r') {
                 return Err(FumenLikeTraceError::CarriageReturn { index });
             }
-            if !page.is_ascii() {
-                return Err(FumenLikeTraceError::NonAsciiPage { index });
-            }
         }
 
         Ok(Self { pages })
@@ -40,7 +37,6 @@ pub enum FumenLikeTraceError {
     EmptyTrace,
     EmptyPage { index: usize },
     CarriageReturn { index: usize },
-    NonAsciiPage { index: usize },
 }
 
 #[cfg(test)]

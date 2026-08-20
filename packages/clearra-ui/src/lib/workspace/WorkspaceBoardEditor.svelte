@@ -17,6 +17,7 @@
     installGlobalDocumentPaste,
     sourceFromCtk3File
   } from './ctk3File';
+  import { fieldImportFailureMessageKey } from './fieldImportFailure';
   import { decodeInterchangeField } from './fumenFieldImport';
   import {
     boardCellMask,
@@ -60,6 +61,7 @@
   let boardElement: HTMLDivElement | null = null;
   let importInput = '';
   let importError = false;
+  let importFailureKey: WorkspaceMessageKey = 'fieldImportInvalid';
   let fileInput: HTMLInputElement | null = null;
   let lastExisting = existingMask;
   let lastTarget = targetMask;
@@ -86,7 +88,10 @@
 
   onMount(() => installGlobalDocumentPaste({
     importSource: (source) => importField(source),
-    importFailed: () => (importError = true)
+    importFailed: () => {
+      importFailureKey = 'fieldImportInvalid';
+      importError = true;
+    }
   }));
 
   function beginPaint(event: PointerEvent, x: number, y: number) {
@@ -242,11 +247,13 @@
     try {
       const imported = decodeInterchangeField(source, mode === 'pc' ? 6 : 24);
       importError = false;
+      importFailureKey = 'fieldImportInvalid';
       dispatch('import', {
         existingMask: imported.boardMask,
         height: Math.max(height, imported.occupiedHeight || 1)
       });
-    } catch {
+    } catch (error) {
+      importFailureKey = fieldImportFailureMessageKey(error);
       importError = true;
     }
   }
@@ -258,7 +265,8 @@
     if (!file) return;
     try {
       importField(await sourceFromCtk3File(file));
-    } catch {
+    } catch (error) {
+      importFailureKey = fieldImportFailureMessageKey(error);
       importError = true;
     }
   }
@@ -336,6 +344,7 @@
           aria-invalid={importError}
           on:input={(event) => {
             importInput = (event.currentTarget as HTMLInputElement).value;
+            importFailureKey = 'fieldImportInvalid';
             importError = false;
           }}
           on:keydown={(event) => event.key === 'Enter' && importField()}
@@ -356,7 +365,7 @@
         <Upload size={15} strokeWidth={1.8} />{label('loadField')}
       </button>
     </div>
-    {#if importError}<p class="fumen-error" role="alert">{label('fieldImportInvalid')}</p>{/if}
+    {#if importError}<p class="fumen-error" role="alert">{label(importFailureKey)}</p>{/if}
   {/if}
 
   {#if mode === 'build-probability'}

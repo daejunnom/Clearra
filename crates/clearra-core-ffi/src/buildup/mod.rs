@@ -12,7 +12,8 @@ pub use coverage_row_view::{
 pub use kick_evidence_view::CKickEvidenceView;
 pub use trace_step_view::{
     CBuildUpTraceStep, CReachabilityEvidenceView, C_BUILDUP_HOLD_BRANCH_CURRENT,
-    C_BUILDUP_HOLD_BRANCH_STORE_CURRENT, C_BUILDUP_HOLD_BRANCH_SWAP_HELD,
+    C_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL, C_BUILDUP_HOLD_BRANCH_STORE_CURRENT,
+    C_BUILDUP_HOLD_BRANCH_SWAP_HELD,
 };
 
 #[repr(C)]

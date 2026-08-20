@@ -5,6 +5,7 @@ fn option_usize(value: Option<usize>) -> String {
 }
 
 mod opening_coverage_fields {
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
     use clearra_problem::SearchProblem;
     use clearra_supply::bag::bag_boundary::BagBoundaryReport;
 
@@ -38,6 +39,7 @@ mod opening_coverage_fields {
         )
         .unwrap_or(0);
         let covered_pattern_count = buildup.covered_pattern_count();
+        let probability_calculated = problem.objective().kind() != ObjectiveKind::Tiling;
         vec![
             field("piece_source_id", problem.piece_source().id().get()),
             field("pattern_universe_id", universe.pattern_universe_id().get()),
@@ -74,16 +76,19 @@ mod opening_coverage_fields {
             ),
             field(
                 "supply_probability_complete",
-                !observed_supply_incomplete
+                probability_calculated
+                    && !observed_supply_incomplete
                     && packing.count_complete()
                     && buildup.coverage_complete(),
             ),
             field(
                 "probability_complete",
-                !observed_supply_incomplete
+                probability_calculated
+                    && !observed_supply_incomplete
                     && packing.count_complete()
                     && buildup.coverage_complete(),
             ),
+            field("probability_calculated", probability_calculated),
             field("supply_expansion_truncated", observed_supply_incomplete),
             field(
                 "supply_boundary_candidates",
@@ -306,6 +311,7 @@ mod opening_renderer {
             observed_supply_incomplete,
         ));
         fields.extend(result_count_fields(
+            problem,
             packing,
             buildup,
             !observed_supply_incomplete,
@@ -314,6 +320,8 @@ mod opening_renderer {
             packing,
             buildup,
             observed_supply_incomplete,
+            problem.objective().kind()
+                != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling,
         ));
         fields.extend(opening_continuation_fields(
             pc_query,
@@ -378,6 +386,7 @@ mod resource_summary_fields {
         packing: &PackingRunResult,
         buildup: &BuildUpRunResult,
         observed_supply_incomplete: bool,
+        probability_calculated: bool,
     ) -> Vec<(String, String)> {
         let report = packing.resource_report();
         let resource_truncated =
@@ -391,8 +400,10 @@ mod resource_summary_fields {
         } else {
             "none"
         };
-        let probability_complete =
-            report.probability_complete && !resource_truncated && buildup.coverage_complete();
+        let probability_complete = probability_calculated
+            && report.probability_complete
+            && !resource_truncated
+            && buildup.coverage_complete();
         let peak_cpu_bytes = report
             .peak_cpu_bytes
             .saturating_add(buildup.peak_workspace_bytes());
@@ -498,6 +509,7 @@ mod scenario_continuation_fields {
     }
 }
 mod scenario_execution_fields {
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
     use clearra_problem::SearchProblem;
 
     use crate::{
@@ -526,6 +538,7 @@ mod scenario_execution_fields {
             packing.count_complete() && buildup.coverage_complete(),
         )
         .unwrap_or(0);
+        let probability_calculated = problem.objective().kind() != ObjectiveKind::Tiling;
         vec![
             field("cleared_lines", buildup.cleared_lines()),
             field("route", "search-problem-core-executor"),
@@ -544,10 +557,12 @@ mod scenario_execution_fields {
             ),
             field(
                 "probability_complete",
-                !observed_supply_incomplete
+                probability_calculated
+                    && !observed_supply_incomplete
                     && packing.count_complete()
                     && buildup.coverage_complete(),
             ),
+            field("probability_calculated", probability_calculated),
             field(
                 "state_count_available",
                 packing.backend_report().state_count_available(),
@@ -596,6 +611,10 @@ mod scenario_profile_fields {
     pub(super) fn scenario_profile_fields(problem: &SearchProblem) -> Vec<(String, String)> {
         let query = problem.core_query();
         let capability = RuleCapability::from_rule(query.rule());
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("compiled scenario PC problem has a materialized supply universe");
         vec![
             field("completion_goal", query.completion_goal().as_str()),
             field("board_width", query.initial_board().width()),
@@ -610,6 +629,26 @@ mod scenario_profile_fields {
             field("effective_kick_model", capability.kick_model().as_str()),
             field("queue_mode", query.remaining_queue().mode()),
             field("queue_len", query.remaining_queue().len()),
+            field(
+                "supply_window_resolution",
+                problem.supply().supply_window_resolution(),
+            ),
+            field(
+                "projects_unplaced_lookahead",
+                problem.supply().projects_unplaced_lookahead(),
+            ),
+            field(
+                "projects_standard_bag_lookahead",
+                problem.supply().projects_standard_bag_lookahead(),
+            ),
+            field(
+                "source_sequence_length",
+                problem.supply().source_sequence_length(),
+            ),
+            field(
+                "total_possible_pattern_count",
+                universe.total_possible_pattern_count(),
+            ),
             field("hold", hold_slot_name(query.hold_state())),
             field("piece_window", query.piece_window().max_pieces()),
             field("exact_pieces", option_usize(query.exact_pieces())),
@@ -683,8 +722,11 @@ mod scenario_renderer {
             packing,
             buildup,
             observed_supply_incomplete,
+            problem.objective().kind()
+                != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling,
         ));
         fields.extend(result_count_fields(
+            problem,
             packing,
             buildup,
             !observed_supply_incomplete,

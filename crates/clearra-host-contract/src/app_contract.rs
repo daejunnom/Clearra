@@ -1,6 +1,7 @@
 use crate::{
     AppCommandKind, AppResult, BackendPolicy, BackendReport, CapabilityReport, ContinuationReport,
-    DiagnosticsPolicy, LocalePolicy, OutputPolicy, QueryEnvelope, ResourceBudget, ResourceReport,
+    DiagnosticsPolicy, LocalePolicy, OutputPolicy, ProductBuildIdentity, QueryEnvelope,
+    ResourceBudget, ResourceReport,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +167,7 @@ impl AppRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppResponse {
+    runtime_identity: ProductBuildIdentity,
     command: Option<AppCommandKind>,
     status: AppStatus,
     result: Option<AppResult>,
@@ -179,6 +181,7 @@ pub struct AppResponse {
 impl AppResponse {
     pub fn new(command: Option<AppCommandKind>, status: AppStatus) -> Self {
         Self {
+            runtime_identity: ProductBuildIdentity::current(),
             command,
             status,
             result: None,
@@ -229,6 +232,11 @@ impl AppResponse {
     pub fn with_continuation(mut self, continuation: Option<ContinuationReport>) -> Self {
         self.continuation = continuation;
         self
+    }
+}
+impl AppResponse {
+    pub fn runtime_identity(&self) -> &ProductBuildIdentity {
+        &self.runtime_identity
     }
 }
 impl AppResponse {

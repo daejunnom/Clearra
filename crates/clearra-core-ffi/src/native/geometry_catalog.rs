@@ -7,7 +7,9 @@ use clearra_core_domain::resource::ResourceReport;
 
 #[cfg(all(feature = "native-c-core", any(test, feature = "test-support")))]
 use crate::packing_problem::CPackingCandidate;
-use crate::problem::{CBuildUpProblem, CPackingProblem};
+#[cfg(feature = "native-c-core")]
+use crate::problem::CBuildUpProblem;
+use crate::problem::CPackingProblem;
 
 use super::NativeCoreError;
 #[cfg(feature = "native-c-core")]

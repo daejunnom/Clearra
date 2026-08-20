@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "node --test ./test/*.test.mjs"
+    "test": "node --test ./test/*.test.mjs && npm exec tsc -- --noEmit -p tsconfig.contract.json && node ../../scripts/tools/run-typescript-contracts.mjs ./test"
   },
   "exports": {
     ".": "./src/lib/index.ts",

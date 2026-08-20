@@ -1,4 +1,4 @@
-pub const CLEARRA_CORE_ABI_VERSION: i32 = 21;
+pub const CLEARRA_CORE_ABI_VERSION: i32 = 22;
 pub const CLEARRA_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

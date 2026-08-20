@@ -6,8 +6,19 @@
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
-  import { workspaceSolutionCount } from './solutionSetAvailability';
+  import {
+    workspaceSolutionCount,
+    workspaceSolutionKeysComplete,
+    workspaceSolutionPageAvailable
+  } from './solutionSetAvailability';
+  import {
+    bindSolutionPageLoader,
+    createPagedSolutionExportKeySource,
+    solutionPageResultIdentity,
+    type SolutionPageLoader
+  } from './solutionPageSource';
   import { boardCellOccupied } from './solverWorkspaceModel';
+  import { BUILD_PROBABILITY_PRIMARY_METRIC } from './buildProbabilityModel';
   import {
     buildProbabilityFinesseView,
     formatFinesseInputCount
@@ -29,6 +40,7 @@
   export let existingMask = 0n;
   export let targetMask = 0n;
   export let aggregation: 'buildability' | 'tiling' | 'spin' = 'buildability';
+  export let loadSolutionPage: SolutionPageLoader | null = null;
 
   const dispatch = createEventDispatcher<{ continue: { existingMask: bigint; height: number } }>();
   const columns = Array.from({ length: 10 }, (_, index) => index);
@@ -43,7 +55,39 @@
   );
   $: finesseView = buildProbabilityFinesseView(report?.finesse_report);
   $: solutionKeys = report?.normalized_solution_keys ?? [];
+  $: solutionKeysComplete = workspaceSolutionKeysComplete(report);
+  $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
+  $: solutionResultIdentity = solutionPageResultIdentity(
+    report?.normalized_solution_set_hash,
+    solutionCount,
+    solutionKeys
+  );
+  $: boundSolutionPageLoader =
+    solutionCount !== null &&
+    solutionCount > 0 &&
+    solutionPageAvailable &&
+    loadSolutionPage
+      ? bindSolutionPageLoader({
+          keyCount: solutionCount,
+          loadPage: loadSolutionPage,
+          resultIdentity: solutionResultIdentity,
+          currentResultIdentity: () => solutionPageResultIdentity(
+            report?.normalized_solution_set_hash,
+            workspaceSolutionCount(report),
+            report?.normalized_solution_keys ?? []
+          )
+        })
+      : null;
   $: solutionCommentByKey = buildSolutionComments();
+  $: solutionExportKeySource = boundSolutionPageLoader && solutionCount !== null
+    ? createPagedSolutionExportKeySource({
+        keyCount: solutionCount,
+        loadPage: boundSolutionPageLoader,
+        commentForKey: (key) => solutionCommentByKey[key]
+      })
+    : null;
+  $: exportableSolutionKeys =
+    solutionKeysComplete && solutionCount === solutionKeys.length ? solutionKeys : [];
   $: showFinesseDetails = Boolean(
     finesseView && (
       finesseView.exactTotalInputs !== null ||
@@ -173,8 +217,14 @@
               <small>{number(summaryNumber(summary.spin_search_candidate_count))} {label('spinSearchBuilds')} · {label('spinAccuracy')}: {summary.spin_search_accuracy ?? '—'}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
             {:else}
               <div class:with-averages={Boolean(finesseView?.policyResults.length)} class="probability-with-inputs">
-                <div class="primary-probability">
-                  <span>{label('buildProbability')}</span>
+                <div
+                  class="primary-probability"
+                  data-metric-id={BUILD_PROBABILITY_PRIMARY_METRIC.id}
+                  data-future-visibility={BUILD_PROBABILITY_PRIMARY_METRIC.futureVisibility}
+                  data-queue-knowledge={BUILD_PROBABILITY_PRIMARY_METRIC.queueKnowledge}
+                  data-distinct-from={BUILD_PROBABILITY_PRIMARY_METRIC.distinctFrom}
+                >
+                  <span>{label('oracleBuildProbability')}</span>
                   <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
                 </div>
                 {#if finesseView?.policyResults.length}
@@ -198,8 +248,14 @@
           {#if aggregation === 'spin'}
             <div class="spin-metric">
               <div class:with-averages={Boolean(finesseView?.policyResults.length)} class="probability-with-inputs">
-                <div class="primary-probability">
-                  <span>{label('buildProbability')}</span>
+                <div
+                  class="primary-probability"
+                  data-metric-id={BUILD_PROBABILITY_PRIMARY_METRIC.id}
+                  data-future-visibility={BUILD_PROBABILITY_PRIMARY_METRIC.futureVisibility}
+                  data-queue-knowledge={BUILD_PROBABILITY_PRIMARY_METRIC.queueKnowledge}
+                  data-distinct-from={BUILD_PROBABILITY_PRIMARY_METRIC.distinctFrom}
+                >
+                  <span>{label('oracleBuildProbability')}</span>
                   <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
                 </div>
                 {#if finesseView?.policyResults.length}
@@ -272,19 +328,22 @@
       <section class="solutions-section" aria-label={label('solutions')}>
         <div class="solutions-heading">
           <h3>{label('solutions')}</h3>
-          {#if solutionCount !== null && solutionKeys.length}
+          {#if solutionCount !== null && solutionCount > 0}
             <SolutionCopyFormatControl
               bind:value={copyFormat}
               {language}
-              {solutionKeys}
+              solutionKeys={exportableSolutionKeys}
+              keySource={solutionExportKeySource}
             />
           {/if}
         </div>
         {#if solutionCount === null}
           <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
-        {:else if solutionKeys.length}
+        {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}
           <SolutionGallery
             {solutionKeys}
+            {solutionCount}
+            loadSolutionPage={boundSolutionPageLoader}
             solutionProbabilities={solutionProbabilityByKey}
             solutionFinesse={finesseView?.solutionByKey ?? {}}
             solutionComments={solutionCommentByKey}
@@ -294,6 +353,8 @@
             {language}
             {copyFormat}
           />
+        {:else if solutionCount > 0}
+          <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('solutionPageLoadFailed')}</p></div>
         {:else}
           <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
         {/if}

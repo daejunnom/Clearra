@@ -39,10 +39,19 @@ function Invoke-WasmBuildTestGate {
                 Copy-Item -LiteralPath $_.FullName -Destination $webPublicDir -Recurse -Force
             }
         }
+        Invoke-WasmReleaseCommand $CargoPath @(
+            'test', '--locked', '-p', 'clearra-wasm',
+            '--test', 'terminal_supply_public_contract',
+            '--', '--test-threads=1'
+        ) 'clearra-wasm terminal-supply public contract'
         $stagedWasm = Join-Path $webPublicDir 'wasm'
         New-Item -ItemType Directory -Force -Path $stagedWasm | Out-Null
         Get-ChildItem -LiteralPath $stagedWasm -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            '--test',
+            (Join-Path $Root 'scripts/tools/wasm-product-terminal-contract.test.mjs')
+        ) 'clearra-wasm product terminal contract'
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'scripts/tools/build-clearra-wasm.mjs'),
             '--verify',
@@ -50,18 +59,28 @@ function Invoke-WasmBuildTestGate {
         ) 'clearra-wasm verified product build'
         $wasmBindings = Join-Path $stagedWasm 'clearra_wasm.js'
         $boundWasm = Join-Path $stagedWasm 'clearra_wasm_bg.wasm'
-        foreach ($artifact in @($wasmBindings, $boundWasm)) {
+        $wasmManifest = Join-Path $stagedWasm 'clearra_wasm.manifest.json'
+        foreach ($artifact in @($wasmBindings, $boundWasm, $wasmManifest)) {
             if (-not (Test-Path -LiteralPath $artifact -PathType Leaf) -or
                 (Get-Item -LiteralPath $artifact).Length -le 0) {
                 throw "Bound WASM release artifact is missing or empty: $artifact"
             }
+        }
+        $expectedSourceCommit = if ([string]::IsNullOrWhiteSpace($env:CLEARRA_SOURCE_COMMIT)) {
+            'unverified-local-build'
+        } else {
+            $env:CLEARRA_SOURCE_COMMIT
         }
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'scripts/tools/wasm-pc-environment-probe.mjs'),
             $wasmBindings,
             'clearra pc --board-mask 0x000000e0f87e3f87 --height 4 --pieces 4 --hold I --count all --max-patterns 840 --max-candidates 250000 --backend cpu',
             '8192',
-            'summary'
+            'summary',
+            '--manifest',
+            $wasmManifest,
+            '--expected-source-commit',
+            $expectedSourceCommit
         ) 'clearra-wasm exact worker probe'
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
@@ -70,6 +89,12 @@ function Invoke-WasmBuildTestGate {
         if ($null -eq $npmCommand) {
             throw 'WASM release requires npm on PATH'
         }
+        Invoke-WasmReleaseCommand $npmCommand.Source @(
+            'test', '--workspace', '@clearra/ui'
+        ) 'clearra-ui runtime contracts'
+        Invoke-WasmReleaseCommand $npmCommand.Source @(
+            'test', '--workspace', '@clearra/web'
+        ) 'clearra-web worker contracts'
         Invoke-WasmReleaseCommand $npmCommand.Source @(
             'exec', '--workspace', '@clearra/web', '--', 'vite', 'build'
         ) 'clearra-web frontend build'

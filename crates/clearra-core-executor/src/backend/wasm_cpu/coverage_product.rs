@@ -7,6 +7,7 @@ use clearra_supply::{
 
 use super::{
     buildup::{BuildOrderGraph, PreparedFinesseNode},
+    terminal_hold_projection::terminal_release_pattern_word,
     WasmExactSearchError,
 };
 
@@ -247,7 +248,6 @@ impl CoverageProductEvaluator {
                         if projects_unplaced_lookahead
                             && hold_enabled
                             && hold_code == desired_piece
-                            && queue_position == pattern_index.sequence_len()
                             && graph.nodes[edge.to as usize].accepting()
                         {
                             // Releasing the held piece is terminal only when
@@ -256,17 +256,18 @@ impl CoverageProductEvaluator {
                             // piece at this position, so it must take the
                             // normal Hold swap path (and its spawn guard)
                             // instead of bypassing that current piece.
-                            let projected_current = projected_current_word(
+                            let terminal_patterns = terminal_release_pattern_word(
                                 pattern_index,
                                 queue_position,
                                 word_index,
+                                active,
                                 projects_standard_bag_lookahead,
                             );
                             self.activate_transition(
                                 edge.to as usize,
                                 extra_draw,
                                 hold_code,
-                                active & !projected_current,
+                                terminal_patterns,
                                 state_index,
                                 graph,
                                 count_paths,
@@ -593,78 +594,5 @@ const fn piece_from_code(code: u8) -> Option<PieceKind> {
         6 => Some(PieceKind::J),
         7 => Some(PieceKind::L),
         _ => None,
-    }
-}
-
-fn projected_current_word(
-    pattern_index: &PatternPiecePositionIndex,
-    queue_position: usize,
-    word_index: usize,
-    projects_standard_bag_lookahead: bool,
-) -> u64 {
-    (1..=7).fold(0_u64, |word, piece_code| {
-        word | pattern_index.piece_word_with_projected_standard_bag_lookahead(
-            queue_position,
-            piece_code,
-            word_index,
-            projects_standard_bag_lookahead,
-        )
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use clearra_core_domain::{
-        piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
-    };
-    use clearra_coverage::universe::{
-        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
-    };
-    use clearra_supply::pattern_universe::{
-        MaterializedPatternUniverse, PatternPiecePositionIndex,
-    };
-
-    use super::projected_current_word;
-
-    fn pattern_index(sequence: Vec<PieceKind>) -> PatternPiecePositionIndex {
-        let universe = MaterializedPatternUniverse::from_sequences(
-            PatternUniverseId::new(1),
-            PatternWeightModelId::new(1),
-            vec![sequence],
-            vec![ProbabilityValue::ONE],
-            1,
-            true,
-            None,
-        )
-        .expect("test pattern universe");
-        PatternPiecePositionIndex::compile(&universe).expect("test pattern index")
-    }
-
-    #[test]
-    fn terminal_hold_release_excludes_an_inferred_standard_bag_current_piece() {
-        use PieceKind::{I, J, O, S, T, Z};
-
-        let index = pattern_index(vec![I, O, T, S, Z, J]);
-        let active = index.active_word(0);
-
-        assert_ne!(
-            projected_current_word(&index, index.sequence_len(), 0, true) & active,
-            0
-        );
-        assert_eq!(
-            projected_current_word(&index, index.sequence_len(), 0, false) & active,
-            0
-        );
-    }
-
-    #[test]
-    fn terminal_hold_release_remains_available_without_an_inferred_current_piece() {
-        use PieceKind::{I, J, L, O, S, T, Z};
-
-        let index = pattern_index(vec![I, O, T, S, Z, J, L]);
-        assert_eq!(
-            projected_current_word(&index, index.sequence_len(), 0, true) & index.active_word(0),
-            0
-        );
     }
 }

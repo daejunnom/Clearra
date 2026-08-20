@@ -1,0 +1,16 @@
+# input	valid	canonical	kind	sequence_len	error
+i-o_t|s	true	IOTS	fixed	4	-
+i, o t s	true	IOTS	fixed	4	-
+*	true	*	pattern	1	-
+*!	true	*!	pattern	7	-
+p4	true	P4	pattern	4	-
+[oisz]	true	[OISZ]	pattern	1	-
+[OISZ]2	true	[OISZ]2	pattern	2	-
+[^tsz]!p4	true	[^TSZ]!P4	pattern	8	-
+I;O	true	I;O	pattern	1	-
+[IO]P2	false	-	pattern	-	invalid
+*p4	false	-	pattern	-	invalid
+[IO]3	false	-	pattern	-	invalid
+P0	false	-	pattern	-	invalid
+I;OT	false	-	pattern	-	invalid
+P4-P3	false	-	pattern	-	invalid

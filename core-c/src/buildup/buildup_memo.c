@@ -99,6 +99,10 @@ bool clearra_buildup_memo_key_equals_exact(
                right->hold_automaton_state.hold_piece &&
            left->hold_automaton_state.hold_empty ==
                right->hold_automaton_state.hold_empty &&
+           left->hold_automaton_state.terminal_projection_consumed ==
+               right->hold_automaton_state.terminal_projection_consumed &&
+           left->hold_automaton_state.terminal_projection_provenance ==
+               right->hold_automaton_state.terminal_projection_provenance &&
            left->piece_source_cursor == right->piece_source_cursor &&
            left->reachability_relevant_state ==
                right->reachability_relevant_state &&

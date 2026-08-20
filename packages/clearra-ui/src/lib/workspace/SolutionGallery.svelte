@@ -1,6 +1,6 @@
 <script lang="ts">
   import { AlertTriangle } from '@lucide/svelte';
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
 
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import {
@@ -16,13 +16,15 @@
     type SolutionExportPage
   } from './solutionExport';
   import type { ClearraFinesseRepresentativeWitness } from '../wasm/wasmCommandClient';
+  import {
+    solutionPageResultIdentity,
+    type SolutionPageLoader
+  } from './solutionPageSource';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let solutionKeys: string[] = [];
   export let solutionCount = solutionKeys.length;
-  export let loadSolutionPage:
-    | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
-    | null = null;
+  export let loadSolutionPage: SolutionPageLoader | null = null;
   export let solutionProbabilities: Record<
     string,
     {
@@ -66,20 +68,33 @@
   let loadingMore = false;
   let pageTotal = solutionCount;
   let pageLoadFailed = false;
+  let pageLoadController: AbortController | null = null;
+
+  onDestroy(() => abortPageLoads('Solution gallery was disposed.'));
 
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
-  $: setIdentity = `${solutionSetHash || 'unhashed'}:${fallbackSetIdentity(solutionKeys)}:${solutionCount}:${targetLines}`;
+  $: setIdentity = `${solutionPageResultIdentity(
+    solutionSetHash,
+    solutionCount,
+    solutionKeys
+  )}:lines:${targetLines}`;
   $: if (setIdentity !== lastSetIdentity) {
+    abortPageLoads('Solution gallery result was replaced.');
+    pageLoadController = new AbortController();
     lastSetIdentity = setIdentity;
     visibleCount = PAGE_SIZE;
-    loadedSolutionKeys = solutionKeys.slice();
+    loadedSolutionKeys = solutionKeys.slice(0, solutionCount);
     pageTotal = solutionCount;
     pageLoadFailed = false;
+    loadingMore = false;
     preparedCount = Math.min(loadedSolutionKeys.length, PAGE_SIZE * 2);
     solutionViewCache = new Map<string, SolutionView>();
+    if (loadedSolutionKeys.length === 0 && solutionCount > 0 && loadSolutionPage) {
+      void primeInitialPage(setIdentity, pageLoadController);
+    }
   }
   $: totalSolutionCount = Math.max(solutionCount, pageTotal, loadedSolutionKeys.length);
   $: minimumPreparedCount = Math.min(
@@ -103,23 +118,26 @@
   $: remainingCount = Math.max(0, totalSolutionCount - visibleSolutions.length);
   $: nextPageCount = Math.min(PAGE_SIZE, remainingCount);
 
-  function fallbackSetIdentity(keys: string[]): string {
-    return `${keys.length}:${keys[0] ?? ''}:${keys[keys.length - 1] ?? ''}`;
-  }
-
   async function showMore() {
     if (loadingMore) return;
     const identity = setIdentity;
+    const controller = pageLoadController ?? new AbortController();
+    pageLoadController = controller;
     const nextVisibleCount = Math.min(totalSolutionCount, visibleCount + PAGE_SIZE);
     loadingMore = true;
     try {
-      await ensureLoaded(Math.min(totalSolutionCount, nextVisibleCount + PAGE_SIZE));
-      pageLoadFailed = false;
-    } catch {
-      pageLoadFailed = true;
+      await ensureLoaded(
+        Math.min(totalSolutionCount, nextVisibleCount + PAGE_SIZE),
+        identity,
+        controller.signal
+      );
+      if (identity === setIdentity) pageLoadFailed = false;
+    } catch (error) {
+      if (isAbortError(error)) return;
+      if (identity === setIdentity) pageLoadFailed = true;
       return;
     } finally {
-      loadingMore = false;
+      if (identity === setIdentity) loadingMore = false;
     }
     if (identity !== setIdentity) return;
     visibleCount = Math.min(loadedSolutionKeys.length, nextVisibleCount);
@@ -128,15 +146,73 @@
     preparedCount = Math.min(loadedSolutionKeys.length, visibleCount + PAGE_SIZE);
   }
 
-  async function ensureLoaded(target: number) {
+  async function primeInitialPage(identity: string, controller: AbortController) {
+    if (loadingMore) return;
+    loadingMore = true;
+    try {
+      await ensureLoaded(
+        Math.min(solutionCount, PAGE_SIZE * 2),
+        identity,
+        controller.signal
+      );
+      if (identity !== setIdentity) return;
+      visibleCount = Math.min(PAGE_SIZE, loadedSolutionKeys.length);
+      pageLoadFailed = false;
+    } catch (error) {
+      if (identity === setIdentity && !isAbortError(error)) pageLoadFailed = true;
+    } finally {
+      if (identity === setIdentity) loadingMore = false;
+    }
+  }
+
+  async function ensureLoaded(target: number, identity: string, signal: AbortSignal) {
     if (!loadSolutionPage) return;
     while (loadedSolutionKeys.length < target) {
+      throwIfAborted(signal);
+      if (identity !== setIdentity) throw stalePageError();
       const offset = loadedSolutionKeys.length;
-      const response = await loadSolutionPage(offset, Math.min(PAGE_SIZE, target - offset));
-      if (!response.keys.length) break;
+      const limit = Math.min(PAGE_SIZE, target - offset);
+      const response = await loadSolutionPage(offset, limit, signal);
+      throwIfAborted(signal);
+      if (identity !== setIdentity) throw stalePageError();
+      if (
+        !Number.isSafeInteger(response.total) ||
+        response.total !== solutionCount ||
+        !Array.isArray(response.keys) ||
+        response.keys.length === 0 ||
+        response.keys.length > limit ||
+        response.keys.some((key) => typeof key !== 'string')
+      ) {
+        throw new Error('Solution gallery page does not match the completed result.');
+      }
       loadedSolutionKeys = [...loadedSolutionKeys, ...response.keys];
-      pageTotal = Math.max(pageTotal, response.total);
+      pageTotal = response.total;
     }
+  }
+
+  function abortPageLoads(message: string) {
+    if (!pageLoadController || pageLoadController.signal.aborted) return;
+    const error = new Error(message);
+    error.name = 'AbortError';
+    pageLoadController.abort(error);
+  }
+
+  function throwIfAborted(signal: AbortSignal) {
+    if (!signal.aborted) return;
+    if (signal.reason instanceof Error) throw signal.reason;
+    const error = new Error('Solution gallery page load was aborted.');
+    error.name = 'AbortError';
+    throw error;
+  }
+
+  function stalePageError() {
+    const error = new Error('Solution gallery result was replaced.');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  function isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
   }
 
   function probabilityLabel(value: string): string {

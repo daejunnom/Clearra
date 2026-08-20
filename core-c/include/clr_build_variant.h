@@ -4,6 +4,7 @@
 #define CLR_BUILDUP_HOLD_BRANCH_CURRENT 1u
 #define CLR_BUILDUP_HOLD_BRANCH_SWAP_HELD 2u
 #define CLR_BUILDUP_HOLD_BRANCH_STORE_CURRENT 3u
+#define CLR_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL 4u
 
 #include "clr_buildup_problem.h"
 #include <stddef.h>

@@ -6,11 +6,11 @@ pub(crate) fn render_scoring(
     fields: Vec<(impl Into<String>, String)>,
     format: RenderFormat,
 ) -> CliOutput {
-    CliOutput::success(CommandRenderer::render(
+    CommandRenderer::render_output(
         "scoring",
         SummaryRenderContract::render_fields(fields),
         format,
-    ))
+    )
 }
 
 pub(crate) fn profile_fields(

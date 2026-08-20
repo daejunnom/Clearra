@@ -48,6 +48,7 @@ export type SolverWorkspaceRequest = {
 
 export type WorkspaceValidationCode =
   | 'queue_invalid'
+  | 'visible-seven-minimum-cover-unsupported'
   | 'target_lines_invalid'
   | 'scenario_not_tileable'
   | 'scenario_supply_mismatch'
@@ -77,6 +78,14 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     tablebaseEnabled: false,
     precomputeBuildDependencies: false
   };
+}
+
+/** Preserve inactive user choices; normalization belongs only at execution boundaries. */
+export function updateWorkspaceDraft(
+  request: SolverWorkspaceRequest,
+  change: Partial<SolverWorkspaceRequest>
+): SolverWorkspaceRequest {
+  return { ...request, ...change };
 }
 
 export function normalizeWorkspaceRequest(
@@ -130,12 +139,17 @@ export function defaultBrowserWorkerCount(
 }
 
 export function logicalProcessorCount(hardwareConcurrency?: number): number {
-  const reported = hardwareConcurrency ?? globalThis.navigator?.hardwareConcurrency ?? 1;
+  // Host inspection belongs to HostCapabilitySnapshot. Callers that do not
+  // own that snapshot receive the conservative single-processor default.
+  const reported = hardwareConcurrency ?? 1;
   return Number.isFinite(reported) ? Math.max(1, Math.floor(reported)) : 1;
 }
 
 export function normalizeQueueInput(value: string): string {
-  return value.toUpperCase().replace(/[\s,]+/g, '');
+  const normalized = value.toUpperCase().replace(/[\s,]+/g, '');
+  return /[P\[\]*!;]/.test(normalized)
+    ? normalized
+    : normalized.replace(/[-_|]+/g, '');
 }
 
 export type BrowserQueueInput = {
@@ -213,8 +227,28 @@ export function parseBrowserQueueInput(value: string): BrowserQueueInput | null 
         if (!Number.isInteger(drawCount) || drawCount < 1 || drawCount > choiceCount) return null;
       }
 
+      if (!hasExplicitSuffix && input[cursor] === 'P') return null;
       canonical += input.slice(start, cursor);
-      if (!hasExplicitSuffix && input[cursor] === 'P') canonical += '1';
+      pattern = true;
+      alternativeHasAtom = true;
+      alternativeLength += drawCount;
+      continue;
+    }
+
+    if (character === '*') {
+      const start = cursor;
+      cursor += 1;
+      let drawCount = 1;
+      if (input[cursor] === '!') {
+        cursor += 1;
+        drawCount = STANDARD_PIECE_LETTERS.length;
+      } else if (
+        (cursor < input.length && /[0-9]/.test(input[cursor])) ||
+        input[cursor] === 'P'
+      ) {
+        return null;
+      }
+      canonical += input.slice(start, cursor);
       pattern = true;
       alternativeHasAtom = true;
       alternativeLength += drawCount;
@@ -364,6 +398,12 @@ export function workspaceValidationCodes(
   }
   if (request.queue.trim() !== '' && !parseBrowserQueueInput(request.queue)) {
     errors.push('queue_invalid');
+  }
+  if (
+    request.queueKnowledge === 'visible-7' &&
+    request.scoreMode === 'minimum-cover'
+  ) {
+    errors.push('visible-seven-minimum-cover-unsupported');
   }
   const normalized = clearCompletedRows(request.boardMask, request.lines);
   const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);

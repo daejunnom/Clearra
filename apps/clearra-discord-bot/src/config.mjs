@@ -1,6 +1,12 @@
 import { availableParallelism as nodeAvailableParallelism } from "node:os";
 
 import { normalizeDiscordLocale } from "./discord/i18n.mjs";
+import {
+  ARTIFACT_SCHEMA_VERSION,
+  CONTRACT_SCHEMA_VERSION,
+  runtimeIdentityFromEnvironment,
+  SUPPLY_SEMANTICS_ID,
+} from "./job-service/runtime-identity.mjs";
 
 export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
   assertOracleGatewayHost(environment.K_SERVICE);
@@ -10,13 +16,44 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     false,
   );
   const token = required(environment, "DISCORD_TOKEN");
+  const workerAuthority = workerAuthoritySetting(
+    environment.CLEARRA_WORKER_AUTHORITY,
+    environment.CLEARRA_JOB_URL ? "remote" : "gateway",
+  );
   const jobEndpoint = environment.CLEARRA_JOB_URL
     ? httpEndpoint(environment.CLEARRA_JOB_URL)
     : httpEndpoint("http://127.0.0.1:8787/jobs");
+  assertProductionRemoteJobEndpoint(environment, workerAuthority, jobEndpoint);
+  const externalJobEndpoint =
+    Boolean(environment.CLEARRA_JOB_URL) &&
+    !isLoopbackHostname(new URL(jobEndpoint).hostname);
+  const remoteIdentityRequired =
+    externalJobEndpoint ||
+    (environment.NODE_ENV === "production" && workerAuthority === "remote");
   const jobToken = environment.CLEARRA_JOB_TOKEN || null;
   if (environment.CLEARRA_JOB_URL && !jobToken) {
     throw new Error("CLEARRA_JOB_TOKEN is required with CLEARRA_JOB_URL.");
   }
+  const expectedJobRuntimeIdentity = environment.CLEARRA_JOB_URL
+    ? runtimeIdentityFromEnvironment(
+        {
+          NODE_ENV: environment.NODE_ENV,
+          CLEARRA_SOURCE_COMMIT: environment.CLEARRA_EXPECTED_JOB_SOURCE_COMMIT,
+          CLEARRA_ENGINE_BUILD_ID: environment.CLEARRA_EXPECTED_ENGINE_BUILD_ID,
+          CLEARRA_SEARCH_CONTRACT_REVISION:
+            environment.CLEARRA_EXPECTED_JOB_CONTRACT_REVISION,
+          CLEARRA_SUPPLY_SEMANTICS_ID:
+            environment.CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID,
+          CLEARRA_ARTIFACT_SCHEMA_VERSION:
+            environment.CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION,
+        },
+        { required: remoteIdentityRequired },
+      )
+    : null;
+  assertProductionRemoteJobIdentity(
+    remoteIdentityRequired,
+    expectedJobRuntimeIdentity,
+  );
   const oracleRenderEnabled = booleanSetting(
     environment.CLEARRA_ORACLE_RENDER_ENABLED,
     false,
@@ -69,10 +106,6 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
       "Oracle text ingress requires CLEARRA_ORACLE_ALLOWED_CHANNEL_IDS or explicit CLEARRA_ORACLE_ALLOW_ALL_TEXT_CHANNELS=1.",
     );
   }
-  const workerAuthority = workerAuthoritySetting(
-    environment.CLEARRA_WORKER_AUTHORITY,
-    environment.CLEARRA_JOB_URL ? "remote" : "gateway",
-  );
   const processLogicalProcessors = runtimeLogicalProcessorCount(runtime);
   const useAllLogicalProcessors = booleanSetting(
     environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS,
@@ -150,6 +183,7 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     ingressMode: "gateway",
     jobEndpoint,
     jobToken,
+    expectedJobRuntimeIdentity,
     jobPollIntervalMs: positiveInteger(
       environment.CLEARRA_JOB_POLL_INTERVAL_MS,
       250,
@@ -163,10 +197,8 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     defaultLocale: discordLocaleSetting(
       environment.CLEARRA_DISCORD_DEFAULT_LOCALE,
     ),
-    localeStorePath:
-      environment.CLEARRA_DISCORD_LOCALE_STORE?.trim() || null,
-    accessStorePath:
-      environment.CLEARRA_DISCORD_ACCESS_STORE?.trim() || null,
+    localeStorePath: environment.CLEARRA_DISCORD_LOCALE_STORE?.trim() || null,
+    accessStorePath: environment.CLEARRA_DISCORD_ACCESS_STORE?.trim() || null,
     discordAdminUserIds,
     registerCommands,
     searchTimeoutMs,
@@ -337,6 +369,43 @@ function workerAuthoritySetting(value, fallback) {
     throw new Error("CLEARRA_WORKER_AUTHORITY must be gateway or remote.");
   }
   return authority;
+}
+
+function assertProductionRemoteJobEndpoint(
+  environment,
+  workerAuthority,
+  jobEndpoint,
+) {
+  if (workerAuthority === "remote" && !environment.CLEARRA_JOB_URL) {
+    throw new Error(
+      "Remote Clearra execution requires an explicit CLEARRA_JOB_URL.",
+    );
+  }
+  if (
+    environment.NODE_ENV === "production" &&
+    workerAuthority === "remote" &&
+    (!environment.CLEARRA_JOB_URL || new URL(jobEndpoint).protocol !== "https:")
+  ) {
+    throw new Error(
+      "Production remote Clearra execution requires an explicit HTTPS CLEARRA_JOB_URL.",
+    );
+  }
+}
+
+function assertProductionRemoteJobIdentity(
+  remoteIdentityRequired,
+  identity,
+) {
+  if (
+    remoteIdentityRequired &&
+    (identity?.contractSchemaVersion !== CONTRACT_SCHEMA_VERSION ||
+      identity?.supplySemanticsId !== SUPPLY_SEMANTICS_ID ||
+      identity?.artifactSchemaVersion !== ARTIFACT_SCHEMA_VERSION)
+  ) {
+    throw new Error(
+      `External or production remote Clearra execution requires ${CONTRACT_SCHEMA_VERSION}, ${SUPPLY_SEMANTICS_ID}, and ${ARTIFACT_SCHEMA_VERSION}.`,
+    );
+  }
 }
 
 function assertGatewayIngress(value) {

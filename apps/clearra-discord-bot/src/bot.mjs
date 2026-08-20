@@ -105,6 +105,7 @@ export class Clearrabot {
         ? new ClearraJobExecutor({
             endpoint: config.jobEndpoint,
             authorizationToken: config.jobToken,
+            expectedRuntimeIdentity: config.expectedJobRuntimeIdentity,
             timeoutMs: config.searchTimeoutMs,
             reverseSearchTimeoutMs: config.reverseSearchTimeoutMs,
             forwardSearchTimeoutMs: config.forwardSearchTimeoutMs,

@@ -3,6 +3,7 @@ use super::kick_evidence_view::CKickEvidenceView;
 pub const C_BUILDUP_HOLD_BRANCH_CURRENT: u8 = 1;
 pub const C_BUILDUP_HOLD_BRANCH_SWAP_HELD: u8 = 2;
 pub const C_BUILDUP_HOLD_BRANCH_STORE_CURRENT: u8 = 3;
+pub const C_BUILDUP_HOLD_BRANCH_RELEASE_HELD_AT_TERMINAL: u8 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

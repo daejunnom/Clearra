@@ -3,11 +3,14 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createClearraWasmBuildContract,
+  serializeClearraWasmManifest,
+} from './clearra-wasm-build-contract.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const root = resolve(scriptDir, '..', '..');
-const MANIFEST_BYTES = 335;
 const GENERATION_HEX_LENGTH = 24;
 const cacheBase = process.platform === 'win32'
   ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
@@ -64,6 +67,7 @@ try {
   const wasmSha256 = sha256(wasmBytes);
   const artifactManifest = {
     schema_version: 1,
+    build: await createClearraWasmBuildContract(root),
     bindings: {
       path: `clearra_wasm.${bindingsSha256.slice(0, GENERATION_HEX_LENGTH)}.js`,
       bytes: bindingsBytes.byteLength,
@@ -79,7 +83,7 @@ try {
     writeFile(resolve(stagingDir, artifactManifest.bindings.path), bindingsBytes),
     writeFile(resolve(stagingDir, artifactManifest.wasm.path), wasmBytes)
   ]);
-  await writeFile(manifest, serializeManifest(artifactManifest), 'utf8');
+  await writeFile(manifest, serializeClearraWasmManifest(artifactManifest), 'utf8');
   for (const name of [
     artifactManifest.bindings.path,
     artifactManifest.wasm.path,
@@ -102,17 +106,6 @@ try {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
-}
-
-function serializeManifest(artifactManifest) {
-  const json = JSON.stringify(artifactManifest);
-  const byteLength = Buffer.byteLength(json, 'utf8') + 1;
-  if (byteLength > MANIFEST_BYTES) {
-    throw new Error(
-      `Clearra WASM manifest exceeds the fixed ${MANIFEST_BYTES}-byte deployment contract`
-    );
-  }
-  return `${json}${' '.repeat(MANIFEST_BYTES - byteLength)}\n`;
 }
 
 async function removeStaleVersionedArtifacts(artifactManifest) {

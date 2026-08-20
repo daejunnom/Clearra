@@ -27,11 +27,12 @@ fn expected_count_complete_json() -> &'static str {
 }
 
 fn expected_actual_solution_count() -> usize {
-    if cfg!(feature = "native-c-core") {
-        2
-    } else {
-        1
-    }
+    // With an empty hold and a one-piece queue there is no legal
+    // store-current branch: that transition requires a next current piece.
+    // The finite terminal projection can release only a piece that was
+    // already held when the concrete source ended, so direct use of I is the
+    // fixture's sole accepting execution on every backend.
+    1
 }
 
 fn write_mismatched_fixture() -> PathBuf {
@@ -231,7 +232,7 @@ mod case_pc_scenario_command_runs_fixture_through_validation_and_search {
             .stdout()
             .contains("\"continuation_token_version\":\"none\""));
         assert!(output.stdout().contains(
-        "\"scenario_replay_token\":\"sr2:w10:v2:m0x00000000000003f0:psstandard-tetrominoes:bgstandard-7-bag:rsrs:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1:knone\""
+        "\"scenario_replay_token\":\"sr2:w10:v2:m0x00000000000003f0:psstandard-tetrominoes:bgstandard-7-bag:rsrs:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1:knone:u0:ooracle\""
     ));
         assert!(output.stdout().contains("\"continue_hint\":\"none\""));
         assert!(output
@@ -349,7 +350,7 @@ mod case_pc_scenario_command_accepts_inline_board_and_queue {
             .stdout()
             .contains("\"continuation_token_version\":\"none\""));
         assert!(output.stdout().contains(
-        "\"scenario_replay_token\":\"sr2:w10:v2:m0x00000000000003f0:psstandard-tetrominoes:bgstandard-7-bag:rsrs:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1:knone\""
+        "\"scenario_replay_token\":\"sr2:w10:v2:m0x00000000000003f0:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1:knone:u0:ooracle\""
     ));
         assert!(output.stdout().contains("\"continue_hint\":\"none\""));
     }

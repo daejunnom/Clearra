@@ -1,8 +1,14 @@
-import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
+import type {
+  ClearraSearchProgressTelemetryFlags,
+  ClearraWasmWorkerEvent
+} from '@clearra/ui/wasm';
 
 import { DistributedWasmJobRunner } from './DistributedWasmJobRunner';
 import { WasmJobRunner } from './WasmJobRunner';
-import type { ClearraWasmModule } from './clearraWasmRuntime';
+import type {
+  ClearraWasmHostCapabilities,
+  ClearraWasmModule
+} from './clearraWasmRuntime';
 
 export class ClearraProductJobRunner {
   private activeRunner: WasmJobRunner | DistributedWasmJobRunner | null = null;
@@ -10,7 +16,8 @@ export class ClearraProductJobRunner {
   constructor(
     private readonly wasm: ClearraWasmModule,
     private readonly jobId: number,
-    private readonly lifecycleOwnerId: string
+    private readonly lifecycleOwnerId: string,
+    private readonly hostCapabilities: ClearraWasmHostCapabilities
   ) {}
 
   async run(
@@ -20,7 +27,8 @@ export class ClearraProductJobRunner {
     const distributed = new DistributedWasmJobRunner(
       this.wasm,
       this.jobId,
-      this.lifecycleOwnerId
+      this.lifecycleOwnerId,
+      this.hostCapabilities
     );
     try {
       onEvent(preparationProgressEvent(this.jobId));
@@ -98,8 +106,33 @@ function preparationProgressEvent(jobId: number): ClearraWasmWorkerEvent {
         layer_index: 0,
         layer_count: 0,
         layer_done: 0,
-        layer_total: 0
+        layer_total: 0,
+        availability: preparationTelemetryFlags(),
+        exactness: preparationTelemetryFlags()
       }
     }
+  };
+}
+
+function preparationTelemetryFlags(): ClearraSearchProgressTelemetryFlags {
+  return {
+    geometry_nodes: false,
+    candidates_emitted: false,
+    geometry_family_count: false,
+    candidates_verified: false,
+    producer_build_nodes: false,
+    producer_coverage_checks: false,
+    build_nodes: false,
+    coverage_checks: false,
+    ready_workers: true,
+    active_workers: true,
+    worker_count: true,
+    oldest_batch_ms: true,
+    pass_index: false,
+    pass_count: false,
+    layer_index: false,
+    layer_count: false,
+    layer_done: false,
+    layer_total: false
   };
 }

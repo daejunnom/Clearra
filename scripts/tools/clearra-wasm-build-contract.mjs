@@ -2,13 +2,21 @@ import { createHash } from 'node:crypto';
 import { lstat, readdir, readFile } from 'node:fs/promises';
 import { basename, extname, relative, resolve } from 'node:path';
 
-export const CLEARRA_WASM_BUILD_CONTRACT_VERSION = 1;
+export const CLEARRA_WASM_BUILD_CONTRACT_VERSION = 2;
+export const CLEARRA_CONTRACT_SCHEMA_VERSION = 'clearra.search.contract.v2';
+export const CLEARRA_SUPPLY_SEMANTICS_ID =
+  'clearra.supply.projected-terminal-lookahead.v1';
+export const CLEARRA_ARTIFACT_SCHEMA_VERSION = 'clearra.solution-data.v1';
+export const CLEARRA_UNVERIFIED_BUILD_ID = 'unverified-local-build';
+export const CLEARRA_WASM_MANIFEST_BYTES = 1280;
 
 export const CLEARRA_WASM_REQUIRED_CAPABILITIES = Object.freeze([
   'command-envelope/v1',
   'build-probability/finesse-inputs/v1',
   'finesse/search/v1',
   'finesse/score/v1',
+  'wasm-abi/availability-exactness/v1',
+  'product-build-identity/v1',
 ]);
 
 const REQUIRED_ROOT_FILES = Object.freeze(['Cargo.toml', 'Cargo.lock']);
@@ -37,7 +45,10 @@ const IGNORED_DIRECTORIES = new Set([
  * particular, package-lock files, environment files, credentials, and JSON
  * documents are never part of this snapshot.
  */
-export async function createClearraWasmBuildContract(repositoryRoot) {
+export async function createClearraWasmBuildContract(
+  repositoryRoot,
+  environment = process.env
+) {
   const root = resolve(repositoryRoot);
   const files = await collectClearraWasmBuildSourceFiles(root);
   const sourceHash = createHash('sha256');
@@ -55,6 +66,7 @@ export async function createClearraWasmBuildContract(repositoryRoot) {
     source_sha256: sourceHash.digest('hex'),
     source_file_count: files.length,
     capabilities_sha256: clearraWasmCapabilitiesSha256(),
+    runtime_identity: productBuildIdentityFromEnvironment(environment),
   });
 }
 
@@ -76,7 +88,8 @@ export function isClearraWasmBuildContract(value) {
       isSha256(value.source_sha256) &&
       Number.isSafeInteger(value.source_file_count) &&
       value.source_file_count > 0 &&
-      value.capabilities_sha256 === clearraWasmCapabilitiesSha256()
+      value.capabilities_sha256 === clearraWasmCapabilitiesSha256() &&
+      isProductBuildIdentity(value.runtime_identity)
   );
 }
 
@@ -87,7 +100,67 @@ export function clearraWasmBuildContractsEqual(left, right) {
       left.contract_version === right.contract_version &&
       left.source_sha256 === right.source_sha256 &&
       left.source_file_count === right.source_file_count &&
-      left.capabilities_sha256 === right.capabilities_sha256
+      left.capabilities_sha256 === right.capabilities_sha256 &&
+      productBuildIdentitiesEqual(left.runtime_identity, right.runtime_identity)
+  );
+}
+
+export function serializeClearraWasmManifest(manifest) {
+  const json = JSON.stringify(manifest);
+  const byteLength = Buffer.byteLength(json, 'utf8') + 1;
+  if (byteLength > CLEARRA_WASM_MANIFEST_BYTES) {
+    throw new Error(
+      `Clearra WASM manifest exceeds the fixed ${CLEARRA_WASM_MANIFEST_BYTES}-byte deployment contract`
+    );
+  }
+  return `${json}${' '.repeat(CLEARRA_WASM_MANIFEST_BYTES - byteLength)}\n`;
+}
+
+export function productBuildIdentityFromEnvironment(environment = process.env) {
+  const sourceCommit = String(environment.CLEARRA_SOURCE_COMMIT ?? '')
+    .trim()
+    .toLowerCase();
+  const engineBuildId = String(environment.CLEARRA_ENGINE_BUILD_ID ?? '')
+    .trim()
+    .toLowerCase();
+  const anyPinned = sourceCommit.length > 0 || engineBuildId.length > 0;
+  if (anyPinned && (!isCommit(sourceCommit) || !isCommit(engineBuildId))) {
+    throw new Error(
+      'Clearra product build identity requires both full lowercase source and engine commit IDs'
+    );
+  }
+  return Object.freeze({
+    source_commit: anyPinned ? sourceCommit : CLEARRA_UNVERIFIED_BUILD_ID,
+    engine_build_id: anyPinned ? engineBuildId : CLEARRA_UNVERIFIED_BUILD_ID,
+    contract_schema_version: CLEARRA_CONTRACT_SCHEMA_VERSION,
+    supply_semantics_id: CLEARRA_SUPPLY_SEMANTICS_ID,
+    artifact_schema_version: CLEARRA_ARTIFACT_SCHEMA_VERSION,
+  });
+}
+
+export function isProductBuildIdentity(value) {
+  if (!value || typeof value !== 'object') return false;
+  const pinned = isCommit(value.source_commit) && isCommit(value.engine_build_id);
+  const local =
+    value.source_commit === CLEARRA_UNVERIFIED_BUILD_ID &&
+    value.engine_build_id === CLEARRA_UNVERIFIED_BUILD_ID;
+  return (
+    (pinned || local) &&
+    value.contract_schema_version === CLEARRA_CONTRACT_SCHEMA_VERSION &&
+    value.supply_semantics_id === CLEARRA_SUPPLY_SEMANTICS_ID &&
+    value.artifact_schema_version === CLEARRA_ARTIFACT_SCHEMA_VERSION
+  );
+}
+
+export function productBuildIdentitiesEqual(left, right) {
+  return Boolean(
+    isProductBuildIdentity(left) &&
+      isProductBuildIdentity(right) &&
+      left.source_commit === right.source_commit &&
+      left.engine_build_id === right.engine_build_id &&
+      left.contract_schema_version === right.contract_schema_version &&
+      left.supply_semantics_id === right.supply_semantics_id &&
+      left.artifact_schema_version === right.artifact_schema_version
   );
 }
 
@@ -170,6 +243,10 @@ async function isRegularFile(path) {
 
 function isSha256(value) {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isCommit(value) {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
 }
 
 function normalizePath(path) {

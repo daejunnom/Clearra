@@ -1,0 +1,119 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+if [ "$#" -ne 4 ]; then
+  fail "usage: restore-oracle-release PRIOR_RELEASE PRIOR_RELEASE_SHA256 PRIOR_SETTINGS_BACKUP PRIOR_SETTINGS_SHA256" 64
+fi
+if [ "$(id -u)" -ne 0 ]; then
+  fail "Oracle rollback must run as root." 77
+fi
+
+release_root=/opt/clearra/releases
+current_link=/opt/clearra/current
+settings_path=/etc/clearra-gateway/settings
+service_name=clearra-gateway.service
+systemctl_path=/usr/bin/systemctl
+
+[ -x "$systemctl_path" ] || fail "systemctl is unavailable." 69
+[ ! -L "$3" ] || fail "Oracle settings backup must not be a symlink." 65
+
+prior_release=$(readlink -f -- "$1") || fail "Prior Oracle release does not resolve." 66
+expected_release_sha256=$2
+prior_settings=$(readlink -f -- "$3") || fail "Prior Oracle settings backup does not resolve." 66
+expected_settings_sha256=$4
+case "$expected_release_sha256$expected_settings_sha256" in
+  *[!0-9a-f]*) fail "Captured Oracle release/settings digests are invalid." 65 ;;
+esac
+[ "${#expected_release_sha256}" -eq 64 ] && [ "${#expected_settings_sha256}" -eq 64 ] ||
+  fail "Captured Oracle release/settings digests are invalid." 65
+case "$prior_release" in
+  "$release_root"/*) ;;
+  *) fail "Prior Oracle release is outside the immutable release root." 65 ;;
+esac
+case "$prior_settings" in
+  /etc/clearra-gateway/settings.pre-*) ;;
+  *) fail "Prior Oracle settings backup is outside the approved backup namespace." 65 ;;
+esac
+[ -d "$prior_release/apps/clearra-discord-bot" ] ||
+  fail "Prior Oracle release is incomplete." 66
+[ -f "$prior_release/apps/clearra-discord-bot/src/admin/main.mjs" ] ||
+  fail "Prior Oracle entrypoint is missing." 66
+[ -f "$prior_settings" ] || fail "Prior Oracle settings backup is missing." 66
+[ "$(stat -c %u -- "$prior_settings")" -eq 0 ] ||
+  fail "Prior Oracle settings backup must be root-owned." 77
+
+prior_settings_sha256=$(sha256sum -- "$prior_settings" | awk '{print $1}')
+case "$prior_settings_sha256" in
+  [0-9a-f][0-9a-f]*) ;;
+  *) fail "Prior Oracle settings digest is invalid." 65 ;;
+esac
+[ "${#prior_settings_sha256}" -eq 64 ] ||
+  fail "Prior Oracle settings digest is invalid." 65
+[ "$prior_settings_sha256" = "$expected_settings_sha256" ] ||
+  fail "Prior Oracle settings backup does not match its captured digest." 65
+
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+node_path=$(command -v node 2>/dev/null) || fail "Node.js is required for release digest verification." 69
+prior_release_sha256=$(
+  "$node_path" "$script_directory/release-tree-digest.mjs" "$prior_release"
+) || fail "Prior Oracle release digest could not be computed." 65
+[ "$prior_release_sha256" = "$expected_release_sha256" ] ||
+  fail "Prior Oracle release does not match its captured tree digest." 65
+
+temporary_directory=$(mktemp -d /opt/clearra/.oracle-rollback.XXXXXX)
+temporary_link="$temporary_directory/current"
+temporary_settings=$(mktemp /etc/clearra-gateway/.settings.rollback.XXXXXX)
+service_transition_started=0
+restore_verified=0
+
+cleanup() {
+  exit_status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$service_transition_started" -eq 1 ] && [ "$restore_verified" -ne 1 ]; then
+    "$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$temporary_settings" || true
+  rm -rf -- "$temporary_directory" || true
+  exit "$exit_status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+ln -s -- "$prior_release" "$temporary_link"
+install -o root -g root -m 0644 -- "$prior_settings" "$temporary_settings"
+
+service_transition_started=1
+"$systemctl_path" stop "$service_name"
+mv -Tf -- "$temporary_link" "$current_link"
+mv -f -- "$temporary_settings" "$settings_path"
+active_release=$(readlink -f -- "$current_link") ||
+  fail "Restored Oracle current link does not resolve."
+[ "$active_release" = "$prior_release" ] ||
+  fail "Restored Oracle release identity mismatch."
+active_settings_sha256=$(sha256sum -- "$settings_path" | awk '{print $1}')
+[ "$active_settings_sha256" = "$prior_settings_sha256" ] ||
+  fail "Restored Oracle settings digest mismatch."
+"$systemctl_path" start "$service_name"
+"$systemctl_path" is-active --quiet "$service_name" ||
+  fail "Restored Oracle service is not active."
+
+main_pid=$("$systemctl_path" show --property MainPID --value "$service_name")
+case "$main_pid" in
+  ''|*[!0-9]*|0|1) fail "Restored Oracle MainPID is invalid." ;;
+esac
+process_cwd=$(readlink -f -- "/proc/$main_pid/cwd") ||
+  fail "Restored Oracle process working directory is unavailable."
+[ "$process_cwd" = "$prior_release/apps/clearra-discord-bot" ] ||
+  fail "Restored Oracle process does not run from the prior immutable release."
+
+restore_verified=1
+printf '%s\n' "oracle_restore=passed"

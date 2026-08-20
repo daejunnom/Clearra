@@ -21,6 +21,7 @@ use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::SearchProblem;
 use clearra_replay::ExactScoringExecutionBatch;
+use clearra_rules::profile::rule_capability::RuleCapability;
 use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 
 use crate::{
@@ -519,10 +520,11 @@ impl WasmExactSearchSession {
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let multiset_family = universe.packing_multiset_family(
+        let multiset_family = universe.packing_multiset_family_for_execution(
             target_piece_count,
             problem.initial_hold(),
-            super::packing_projection_hold_enabled(problem),
+            problem.supply().hold_enabled(),
+            super::packing_hold_projection(problem),
         );
         if multiset_family.is_empty() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -2316,6 +2318,9 @@ impl WasmExactSearchSession {
         } else {
             gpu_disabled_reason
         };
+        let rule = self.problem.rule_profile_value();
+        let kick_profile = self.problem.kick_profile();
+        let rule_capability = RuleCapability::from_rule(rule);
         let fields = vec![
             field(
                 "backend_requested",
@@ -2323,6 +2328,17 @@ impl WasmExactSearchSession {
             ),
             field("backend_selected", self.backend_selected),
             field("actual_backend", self.backend_selected),
+            field("rule_profile", rule.id().as_str()),
+            field("kick_profile", kick_profile.profile_id().as_str()),
+            field(
+                "effective_kick_model",
+                rule_capability.kick_model().as_str(),
+            ),
+            field("verified_kick_profile", kick_profile.verified()),
+            field(
+                "kick_profile_transition_count",
+                kick_profile.transition_count(),
+            ),
             field(
                 "backend_fallback_allowed",
                 self.problem.backend_policy().allow_backend_fallback(),
@@ -2622,6 +2638,8 @@ impl WasmExactSearchSession {
             ),
             field("renormalized", false),
             field("probability_complete", probability_complete),
+            field("supply_probability_complete", probability_complete),
+            field("resource_probability_complete", probability_complete),
             field("count_complete", count_complete),
             field(
                 "solution_probabilities_requested",
@@ -2898,12 +2916,25 @@ mod tests {
     use crate::backend::wasm_cpu::tiling_parallel::{
         WasmPackedTilingIdentity, WasmTilingRootChunk,
     };
+    use crate::terminal_supply_conformance::{
+        terminal_supply_p0_expected_identities, terminal_supply_p0_fixed_problem,
+        terminal_supply_p0_generic_problem, TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH,
+        TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT,
+    };
     use crate::tiling_solution_store::{
         pack_tiling_row_ids, read_packed_tiling_row, PackedTilingRows, PACKED_TILING_MAX_ROW_ID,
     };
-    use crate::WasmCpuSearchBackend;
+    use crate::{
+        CoreExecutionResult, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
+        WasmCpuSearchBackend, WasmDistributedVerifier,
+    };
     use clearra_core_domain::{
-        execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
+        execution_cancellation::ExecutionControl,
+        piece::piece_kind::PieceKind,
+        solution::normalized_tiling_solution::{
+            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
+            PiecePlacementMask, StandardBoard64TilingIdentity,
+        },
     };
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
@@ -2912,7 +2943,9 @@ mod tests {
         PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
     };
     use clearra_problem::ProblemCompiler;
-    use clearra_supply::queue::fixed_sequence::FixedSequence;
+    use clearra_supply::queue::{
+        fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
+    };
 
     #[test]
     fn compact_tiling_rows_round_trip_across_word_boundaries() {
@@ -2981,6 +3014,217 @@ mod tests {
         );
         assert!(result.normalized_solution_identities().is_empty());
         assert!(result.path_steps().is_empty());
+    }
+
+    #[test]
+    fn tiling_result_exposes_a_complete_public_not_calculated_probability_invariant() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_objective(ObjectivePolicy::tiling());
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("tiling problem");
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("tiling result");
+
+        assert_eq!(result.field("coverage_probability"), Some("not-calculated"));
+        assert_eq!(result.bool_field("probability_calculated"), Some(false));
+        assert_eq!(result.bool_field("probability_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("supply_probability_complete"),
+            Some(false)
+        );
+        assert_eq!(
+            result.bool_field("resource_probability_complete"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn wasm_result_preserves_builtin_rule_and_kick_identity() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_rule(clearra_rules::profile::builtin_rules::srs_x());
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("SRS-X problem");
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("SRS-X result");
+
+        assert_eq!(result.field("rule_profile"), Some("srs-x"));
+        assert_eq!(result.field("kick_profile"), Some("srs-x"));
+        assert_eq!(result.field("effective_kick_model"), Some("srs-x"));
+        assert_eq!(result.bool_field("verified_kick_profile"), Some(true));
+        assert_eq!(
+            result.usize_field("kick_profile_transition_count"),
+            Some(80)
+        );
+    }
+
+    #[test]
+    fn finite_terminal_hold_fixed_and_generic_witnesses_match_the_micro_oracle_set_and_hash() {
+        fn execute(queue: PcQueueInput) -> crate::CoreExecutionResult {
+            let first_o = 0x0c03u64;
+            let second_o = 0x300cu64;
+            let initial_mask = 0x0f_ffffu64 & !(first_o | second_o);
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(2, initial_mask),
+                queue,
+                PieceWindow::new(2),
+            )
+            .with_hold_piece(Some(PieceKind::O))
+            .with_exact_pieces(Some(2));
+            let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+            assert!(problem.supply().projects_unplaced_lookahead());
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("terminal projection search")
+        }
+
+        let first_o = 0x0c03u64;
+        let second_o = 0x300cu64;
+        let initial_mask = 0x0f_ffffu64 & !(first_o | second_o);
+        let oracle = StandardBoard64TilingIdentity::from_placements(
+            initial_mask,
+            [
+                PiecePlacementMask::new(PieceKind::O, first_o),
+                PiecePlacementMask::new(PieceKind::O, second_o),
+            ],
+        )
+        .expect("independent two-O micro oracle");
+        let oracle_hash =
+            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(&[oracle]);
+
+        let fixed = execute(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::O,
+        ])));
+        let generic = execute(PcQueueInput::pattern_expression(
+            QueuePatternExpression::parse("[O]!", 1).expect("single O pattern"),
+        ));
+
+        for result in [&fixed, &generic] {
+            assert_eq!(result.normalized_solution_identities(), &[oracle]);
+            assert_eq!(
+                result.field("normalized_solution_set_hash"),
+                Some(oracle_hash.as_str())
+            );
+            assert_eq!(result.path_steps().len(), 2);
+            assert_eq!(
+                result
+                    .path_steps()
+                    .iter()
+                    .filter(|step| step.hold() == "release-held-at-terminal")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                result.path_steps().last().map(crate::CorePathStep::hold),
+                Some("release-held-at-terminal")
+            );
+        }
+        assert_eq!(
+            fixed.normalized_solution_identities(),
+            generic.normalized_solution_identities()
+        );
+        assert_eq!(
+            fixed.field("normalized_solution_set_hash"),
+            generic.field("normalized_solution_set_hash")
+        );
+    }
+
+    fn execute_terminal_supply_p0_distributed(
+        problem: &clearra_problem::SearchProblem,
+    ) -> CoreExecutionResult {
+        let control = ExecutionControl::default();
+        let mut producer = WasmCpuCandidateProducer::new(problem).expect("P0 producer");
+        assert!(producer.verification_required());
+        let mut verifiers = [
+            WasmDistributedVerifier::new(problem).expect("P0 verifier zero"),
+            WasmDistributedVerifier::new(problem).expect("P0 verifier one"),
+        ];
+        let mut packet_count = 0usize;
+        let summary = loop {
+            match producer.advance(&control).expect("P0 producer advance") {
+                WasmCandidateProducerAdvance::Pending => {}
+                WasmCandidateProducerAdvance::Candidate(packet) => {
+                    let verifier_index = packet_count % verifiers.len();
+                    verifiers[verifier_index]
+                        .consume(&packet, &control)
+                        .expect("P0 distributed verify");
+                    packet_count = packet_count.saturating_add(1);
+                }
+                WasmCandidateProducerAdvance::Completed(summary) => break summary,
+                WasmCandidateProducerAdvance::Cancelled => panic!("P0 producer cancelled"),
+            }
+        };
+        assert_eq!(packet_count, summary.candidate_count);
+
+        let mut merger = producer.into_merger().expect("P0 merger");
+        for verifier in &mut verifiers {
+            let result = verifier.finish().expect("P0 verifier finish");
+            merger.absorb(&result).expect("P0 merge worker result");
+        }
+        merger
+            .finish(&summary, verifiers.len())
+            .expect("P0 distributed finish")
+    }
+
+    #[test]
+    fn terminal_supply_p0_fixed_generic_serial_and_distributed_share_exact_18_set_and_hash() {
+        let fixed_problem = terminal_supply_p0_fixed_problem();
+        let generic_problem = terminal_supply_p0_generic_problem();
+        let fixed = WasmCpuSearchBackend::execute_with_control(
+            &fixed_problem,
+            &ExecutionControl::default(),
+        )
+        .expect("P0 fixed serial");
+        let generic = WasmCpuSearchBackend::execute_with_control(
+            &generic_problem,
+            &ExecutionControl::default(),
+        )
+        .expect("P0 generic serial");
+        let distributed = execute_terminal_supply_p0_distributed(&generic_problem);
+        let expected_identities = terminal_supply_p0_expected_identities();
+
+        for result in [&fixed, &generic, &distributed] {
+            let identities = result.normalized_solution_identities();
+            assert_eq!(identities, expected_identities);
+            assert_eq!(identities.len(), TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT);
+            assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+            let calculated_hash =
+                normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+                    identities,
+                );
+            assert_eq!(
+                result.field("normalized_solution_set_hash"),
+                Some(calculated_hash.as_str())
+            );
+            assert_eq!(
+                calculated_hash.as_str(),
+                TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH
+            );
+            assert_eq!(
+                result.usize_field("unique_solution_count"),
+                Some(TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT)
+            );
+        }
+        assert_eq!(
+            fixed.normalized_solution_identities(),
+            generic.normalized_solution_identities()
+        );
+        assert_eq!(
+            fixed.normalized_solution_identities(),
+            distributed.normalized_solution_identities()
+        );
     }
 
     #[test]

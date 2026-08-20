@@ -1,5 +1,8 @@
-use clearra_core_domain::pc::pc_target::PcTarget;
-use clearra_pc_graph::request::{OpeningPcSearchQuery, PcQueueInput, PcScenarioQuery};
+use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
+use clearra_pc_graph::request::{
+    validate_pc_observation_objective, OpeningPcSearchQuery, PcQueueInput, PcScenarioQuery,
+};
+use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
 
 use crate::{
     diagnostic::{
@@ -35,6 +38,10 @@ impl PcQueryValidator {
             query.verified_kick_profile(),
         ));
         report.append(validate_objective_kind(query.objective().kind()));
+        report.append(validate_observation_objective_contract(
+            query.queue_observation_policy(),
+            query.objective().kind(),
+        ));
         report.append(match query.queue() {
             PcQueueInput::FixedSequence(sequence) => validate_fixed_sequence(sequence),
             PcQueueInput::BagAlignedPattern(pattern) => validate_bag_aligned_pattern(pattern),
@@ -95,6 +102,21 @@ pub fn validate_opening_pc_search_query(query: &OpeningPcSearchQuery) -> Diagnos
 
 pub fn validate_pc_scenario_query(query: &PcScenarioQuery) -> DiagnosticReport {
     pc_scenario_query_validator::validate_pc_scenario_query(query)
+}
+
+pub(crate) fn validate_observation_objective_contract(
+    observation: QueueObservationPolicy,
+    objective: ObjectiveKind,
+) -> DiagnosticReport {
+    let mut report = DiagnosticReport::new();
+    if let Err(error) = validate_pc_observation_objective(observation, objective) {
+        report.push(invalid_pc_query(
+            "pc.queue_observation_policy",
+            error.message(),
+            error.code(),
+        ));
+    }
+    report
 }
 
 fn validate_bag_contract(query: &OpeningPcSearchQuery, report: &mut DiagnosticReport) {

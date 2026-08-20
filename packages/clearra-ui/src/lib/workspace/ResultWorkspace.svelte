@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Check, ChevronDown, Copy, Search } from '@lucide/svelte';
 
+  import { writeClipboardText } from './clipboardText';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
@@ -9,8 +10,15 @@
   import type { SolutionExportKeySource } from './solutionExportAsync';
   import {
     workspaceSolutionCount,
+    workspaceSolutionKeysComplete,
     workspaceSolutionPageAvailable
   } from './solutionSetAvailability';
+  import {
+    bindSolutionPageLoader,
+    createPagedSolutionExportKeySource,
+    solutionPageResultIdentity,
+    type SolutionPageLoader
+  } from './solutionPageSource';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import {
     workspaceMessage,
@@ -27,15 +35,12 @@
   export let tilingOnlyRequested = false;
   export let failedQueueRequested = false;
   export let scoreMode: ScoreMode = 'off';
-  export let loadSolutionPage:
-    | ((offset: number, limit: number) => Promise<{ keys: string[]; total: number }>)
-    | null = null;
+  export let loadSolutionPage: SolutionPageLoader | null = null;
 
   let copyFormat: SolutionCopyFormat = 'ctk';
   let failedQueueCopyComplete = false;
   let visibleFailedQueueCount = 100;
   let failedQueueResultIdentity = '';
-  const SOLUTION_EXPORT_PAGE_SIZE = 1_000;
 
   $: report = view.searchReport;
   $: solutionCount = workspaceSolutionCount(report);
@@ -81,6 +86,28 @@
   }
   $: tilingOnly = summaryFields.objective === 'tiling';
   $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
+  $: solutionKeysComplete = workspaceSolutionKeysComplete(report);
+  $: solutionResultIdentity = solutionPageResultIdentity(
+    report?.normalized_solution_set_hash,
+    solutionCount,
+    canonicalSolutionKeys
+  );
+  $: boundSolutionPageLoader =
+    solutionCount !== null &&
+    solutionCount > 0 &&
+    solutionPageAvailable &&
+    loadSolutionPage
+      ? bindSolutionPageLoader({
+          keyCount: solutionCount,
+          loadPage: loadSolutionPage,
+          resultIdentity: solutionResultIdentity,
+          currentResultIdentity: () => solutionPageResultIdentity(
+            report?.normalized_solution_set_hash,
+            workspaceSolutionCount(report),
+            report?.normalized_solution_keys ?? []
+          )
+        })
+      : null;
   $: tilingProgress = tilingOnly || (!report && tilingOnlyRequested);
   $: scoringRequested = summaryFields.score_requested === 'true';
   $: progressMode = failedQueueResult
@@ -90,10 +117,9 @@
       : scoringRequested || scoreMode === 'summary'
         ? 'pc-score' as const
         : 'pc-all' as const;
-  $: solutionExportKeySource =
-    (solutionPageAvailable && loadSolutionPage) || solutionCommentsAvailable
-      ? createSolutionExportKeySource()
-      : null;
+  $: solutionExportKeySource = createSolutionExportKeySource();
+  $: exportableSolutionKeys =
+    solutionKeysComplete && solutionCount === solutionKeys.length ? solutionKeys : [];
   $: hasResult = Boolean(view.response || report);
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
@@ -146,10 +172,23 @@
 
   function createSolutionExportKeySource(): SolutionExportKeySource | null {
     if (solutionCount === null) return null;
-    const loader = loadSolutionPage;
-    const lazy = solutionPageAvailable && Boolean(loader);
+    const loader = boundSolutionPageLoader;
+    if (loader) {
+      return createPagedSolutionExportKeySource({
+        keyCount: solutionCount,
+        loadPage: loader,
+        ...(solutionCommentsAvailable
+          ? { commentForKey: (key: string) => solutionCommentByKey[key] }
+          : {})
+      });
+    }
+    if (
+      !solutionKeysComplete ||
+      solutionCount !== solutionKeys.length ||
+      !solutionCommentsAvailable
+    ) return null;
     const localKeys = solutionKeys;
-    const keyCount = lazy ? solutionCount : localKeys.length;
+    const keyCount = localKeys.length;
     if (keyCount < 1) return null;
     return {
       keyCount,
@@ -162,31 +201,13 @@
           !Number.isSafeInteger(count) ||
           start < 0 ||
           count < 0 ||
-          start + count > keyCount
+          count > keyCount ||
+          start > keyCount - count
         ) {
           throw new RangeError('tiling solution export range is invalid');
         }
-        if (!lazy || !loader) {
-          throwIfAborted(signal);
-          return localKeys.slice(start, start + count);
-        }
-        const keys: string[] = [];
-        while (keys.length < count) {
-          throwIfAborted(signal);
-          const offset = start + keys.length;
-          const response = await loader(
-            offset,
-            Math.min(SOLUTION_EXPORT_PAGE_SIZE, count - keys.length)
-          );
-          if (!response.keys.length) {
-            throw new Error(
-              'tiling solution page store ended before the reported total'
-            );
-          }
-          keys.push(...response.keys.slice(0, count - keys.length));
-        }
         throwIfAborted(signal);
-        return keys;
+        return localKeys.slice(start, start + count);
       }
     };
   }
@@ -233,7 +254,7 @@
   async function copyFailedQueues() {
     if (!failedQueueEntries.length) return;
     try {
-      await navigator.clipboard.writeText(failedQueueEntries.join('\n'));
+      await writeClipboardText(failedQueueEntries.join('\n'));
       failedQueueCopyComplete = true;
       setTimeout(() => {
         failedQueueCopyComplete = false;
@@ -324,18 +345,18 @@
             <SolutionCopyFormatControl
               bind:value={copyFormat}
               {language}
-              {solutionKeys}
+              solutionKeys={exportableSolutionKeys}
               keySource={solutionExportKeySource}
             />
           {/if}
         </div>
         {#if solutionCount === null}
           <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
-        {:else if solutionKeys.length}
+        {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}
           <SolutionGallery
             {solutionKeys}
             {solutionCount}
-            loadSolutionPage={solutionPageAvailable ? loadSolutionPage : null}
+            loadSolutionPage={boundSolutionPageLoader}
             solutionProbabilities={solutionProbabilityByKey}
             solutionAverageScores={solutionAverageScoreByKey}
             solutionComments={solutionCommentByKey}
@@ -344,6 +365,8 @@
             {language}
             {copyFormat}
           />
+        {:else if solutionCount > 0}
+          <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionPageLoadFailed')}</p></div>
         {:else}
           <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
         {/if}
@@ -496,6 +519,13 @@
   @media (max-width: 520px) {
     .metric-grid {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .queue-copy-button,
+    .show-more-queues {
+      min-height: 44px;
     }
   }
 </style>

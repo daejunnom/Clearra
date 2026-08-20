@@ -54,7 +54,8 @@ pub use clearra_core_executor::{
 };
 pub use clearra_host_contract::{
     AppCommandKind, AppResult, BackendPolicy, BackendReport, CapabilityReport, ContinuationReport,
-    DiagnosticsPolicy, LocalePolicy, OutputPolicy, QueryEnvelope, ResourceBudget, ResourceReport,
+    DiagnosticsPolicy, LocalePolicy, OutputPolicy, ProductBuildIdentity, QueryEnvelope,
+    ResourceBudget, ResourceReport,
 };
 pub use commands::{
     BuildProbabilityAppCommand, ContinueAppCommand, ConvertAppCommand, CoverAppCommand,

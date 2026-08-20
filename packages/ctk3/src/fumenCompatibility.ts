@@ -9,9 +9,11 @@ import {
 } from "tetris-fumen";
 
 import {
+  Ctk3PageLimitError,
   decodeCtk3,
   defaultCtk3Flags,
   encodeCtk3,
+  inspectCtk3WithinPageLimit,
   type Ctk3Color,
   type Ctk3Document,
   type Ctk3Operation,
@@ -19,6 +21,8 @@ import {
   type Ctk3PageFlags,
   type Ctk3Piece,
 } from "./codec.js";
+import { escapeFumenComment } from "./fumenComment.js";
+import { FUMEN_MAX_PAGES } from "./fumenLimits.js";
 
 const FUMEN_WIDTH = 10;
 const FUMEN_HEIGHT = 23;
@@ -31,9 +35,15 @@ export type PageRefs = {
 };
 
 export class Ctk3FumenCompatibilityError extends Error {
-  constructor(message: string) {
+  readonly code: "fumen-incompatible" | "fumen-page-limit";
+
+  constructor(
+    message: string,
+    code: "fumen-incompatible" | "fumen-page-limit" = "fumen-incompatible",
+  ) {
     super(message);
     this.name = "Ctk3FumenCompatibilityError";
+    this.code = code;
   }
 }
 
@@ -78,6 +88,17 @@ export type Page = TetrisFumenPage;
 export type Pages = TetrisFumenPages;
 
 export function decodeFumenCompatible(input: string): Pages {
+  try {
+    inspectCtk3WithinPageLimit(input, FUMEN_MAX_PAGES);
+  } catch (error) {
+    if (error instanceof Ctk3PageLimitError) {
+      throw new Ctk3FumenCompatibilityError(
+        `Fumen page count exceeds the ${FUMEN_MAX_PAGES}-page limit.`,
+        "fumen-page-limit",
+      );
+    }
+    throw error;
+  }
   const document = decodeCtk3(input);
   assertFumenDocument(document);
 
@@ -132,6 +153,15 @@ export function encodeFumenCompatible(pages: EncodePages): string {
       "CTK3 requires at least one Fumen-compatible page.",
     );
   }
+  if (pages.length > FUMEN_MAX_PAGES) {
+    throw new Ctk3FumenCompatibilityError(
+      `Fumen page count exceeds the ${FUMEN_MAX_PAGES}-page limit.`,
+      "fumen-page-limit",
+    );
+  }
+  for (const page of pages) {
+    if (page.comment !== undefined) escapeFumenComment(page.comment);
+  }
   const normalized = fumenDecoder.decode(fumenEncoder.encode(pages));
   return encodeCtk3({
     width: FUMEN_WIDTH,
@@ -148,6 +178,12 @@ export const encoder = {
 };
 
 function assertFumenDocument(document: Ctk3Document) {
+  if (document.pages.length > FUMEN_MAX_PAGES) {
+    throw new Ctk3FumenCompatibilityError(
+      `Fumen page count exceeds the ${FUMEN_MAX_PAGES}-page limit.`,
+      "fumen-page-limit",
+    );
+  }
   if (document.width !== FUMEN_WIDTH) {
     throw new Ctk3FumenCompatibilityError(
       "The Fumen-compatible decoder requires a 10-column CTK3 document.",

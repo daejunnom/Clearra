@@ -164,7 +164,7 @@ fn coverage_summary_solution_data_request_is_explicitly_unavailable_without_arti
         ("solution_count_calculated".to_owned(), "false".to_owned()),
     ]);
     append_solution_data_contract(&mut fields, status, RenderFormat::Json);
-    let rendered = CommandRenderer::render("percent", fields, RenderFormat::Json);
+    let rendered = CommandRenderer::render("percent", fields, RenderFormat::Json).expect("JSON");
     let value: serde_json::Value = serde_json::from_str(&rendered).expect("percent CLI JSON");
 
     assert_eq!(value["summary"]["unique_solution_count"], "not-calculated");
@@ -189,7 +189,8 @@ fn coverage_summary_text_preserves_not_calculated_without_json_contract_metadata
         SolutionDataStatus::for_request(true, false, false),
         RenderFormat::TextVerbose,
     );
-    let rendered = CommandRenderer::render("percent", fields, RenderFormat::TextVerbose);
+    let rendered =
+        CommandRenderer::render("percent", fields, RenderFormat::TextVerbose).expect("text");
 
     assert!(rendered.contains("unique_solution_count: not-calculated"));
     assert!(!rendered.contains("unique_solution_count: 0"));

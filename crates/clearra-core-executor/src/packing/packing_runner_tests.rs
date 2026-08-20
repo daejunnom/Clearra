@@ -1,18 +1,25 @@
 #![cfg_attr(not(feature = "native-c-core"), allow(dead_code, unused_imports))]
 
-use std::cell::Cell;
+// SRP rationale: this test module has one behavior-level change reason: verifying the
+// canonical packing projection contract across serial, worker, and terminal-hold supplies.
+
+use std::{cell::Cell, collections::BTreeSet};
 
 use clearra_core_domain::resource::ResourceReport;
-use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+    solution::normalized_tiling_solution::normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
+};
 #[cfg(not(feature = "native-c-core"))]
 use clearra_core_ffi::NativeCoreError;
 use clearra_core_ffi::{
-    problem::CPackingProblem, supply::C_PIECE_SOURCE_FIXED_QUEUE, CBuildUpProblemBuilder,
-    CNativeBuildUpEnumerationLimits, CoreCNative, FfiProblemError,
+    problem::{CPackingProblem, C_KICK_SRS_X, C_RULE_SRS_X},
+    supply::C_PIECE_SOURCE_FIXED_QUEUE,
+    CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits, CoreCNative,
 };
 use clearra_pc_graph::request::{
-    GpuDeviceSelection, OpeningPcSearchQuery, PcExecutionPolicy, PcQueueInput,
-    RequestedSearchBackend,
+    GpuDeviceSelection, OpeningPcSearchQuery, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
+    PcScenarioQuery, PieceWindow, RequestedSearchBackend,
 };
 use clearra_problem::ProblemCompiler;
 use clearra_rules::{
@@ -33,6 +40,12 @@ use crate::{
     },
     buildup::BuildUpRunner,
     packing::{packing_metrics::PackingExecutionSource, PackingRunner, PackingRunnerError},
+    terminal_supply_conformance::{
+        terminal_supply_p0_expected_identities, terminal_supply_p0_fixed_problem,
+        TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH, TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT,
+        TERMINAL_SUPPLY_P0_INITIAL_MASK,
+    },
+    WasmCpuSearchBackend,
 };
 
 #[cfg(feature = "native-c-core")]
@@ -99,6 +112,108 @@ fn packing_runner_builds_c_packing_problem_and_candidate_buffer() {
     assert_eq!(
         result.memory_report().leak_check_state(),
         crate::packing::PackingMemoryLeakCheckState::OwnershipReleaseConfirmed
+    );
+}
+
+#[cfg(feature = "native-c-core")]
+#[test]
+fn occupied_initial_hold_terminal_inventory_matches_serial_parallel_and_native_buildup() {
+    fn problem(workers: usize) -> clearra_problem::SearchProblem {
+        let first_o = 0x0c03u64;
+        let second_o = 0x300cu64;
+        let initial_mask = 0x0f_ffffu64 & !(first_o | second_o);
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, initial_mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(2),
+        )
+        .with_hold_piece(Some(PieceKind::O))
+        .with_exact_pieces(Some(2))
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(workers)
+                .with_worker_hardware_limit(workers),
+        );
+        ProblemCompiler::compile_scenario_pc(&query).expect("problem")
+    }
+
+    let serial_problem = problem(1);
+    let parallel_problem = problem(4);
+    assert!(serial_problem.supply().projects_unplaced_lookahead());
+    let serial = PackingRunner::run(&serial_problem).expect("serial packing");
+    let parallel = PackingRunner::run(&parallel_problem).expect("parallel packing");
+    let serial_candidates = serial.candidates().collect::<Vec<_>>();
+    let parallel_candidates = parallel.candidates().collect::<Vec<_>>();
+
+    assert!(!serial_candidates.is_empty());
+    assert_eq!(parallel_candidates, serial_candidates);
+    assert!(serial_candidates.iter().all(|candidate| {
+        candidate.operations[..usize::from(candidate.operation_count)]
+            .iter()
+            .all(|operation| operation.piece == clearra_core_ffi::problem::C_PIECE_O)
+    }));
+
+    assert!(serial_candidates.iter().any(|candidate| {
+        let buildup =
+            CBuildUpProblemBuilder::from_packing_candidate(&serial_problem, candidate, 0, 0)
+                .expect("terminal buildup");
+        CoreCNative::enumerate_buildup_variants(
+            &buildup,
+            &CNativeBuildUpEnumerationLimits::default(),
+        )
+        .expect("native terminal buildup")
+        .accepted()
+    }));
+}
+
+#[cfg(feature = "native-c-core")]
+#[test]
+fn terminal_supply_p0_native_packing_and_c_buildup_match_the_canonical_wasm_set_and_hash() {
+    let problem = terminal_supply_p0_fixed_problem();
+    let packing = PackingRunner::run(&problem).expect("P0 native packing");
+    assert!(packing.count_complete());
+    let mut native_identities = BTreeSet::new();
+
+    for candidate in packing.candidates() {
+        let buildup = CBuildUpProblemBuilder::from_packing_candidate(&problem, &candidate, 0, 0)
+            .expect("P0 native buildup problem");
+        let outcome = CoreCNative::enumerate_buildup_variants(
+            &buildup,
+            &CNativeBuildUpEnumerationLimits::default(),
+        )
+        .expect("P0 native buildup");
+        if outcome.accepted() {
+            native_identities.insert(
+                candidate
+                    .standard_board64_tiling_identity(TERMINAL_SUPPLY_P0_INITIAL_MASK)
+                    .expect("P0 native normalized identity"),
+            );
+        }
+    }
+
+    let native_identities = native_identities.into_iter().collect::<Vec<_>>();
+    assert_eq!(native_identities, terminal_supply_p0_expected_identities());
+    assert_eq!(
+        native_identities.len(),
+        TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT
+    );
+    let native_hash = normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+        &native_identities,
+    );
+    assert_eq!(
+        native_hash.as_str(),
+        TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH
+    );
+
+    let wasm = WasmCpuSearchBackend::execute_with_control(
+        &problem,
+        &clearra_core_domain::execution_cancellation::ExecutionControl::default(),
+    )
+    .expect("P0 canonical WASM result");
+    assert_eq!(wasm.normalized_solution_identities(), native_identities);
+    assert_eq!(
+        wasm.field("normalized_solution_set_hash"),
+        Some(native_hash.as_str())
     );
 }
 
@@ -396,21 +511,21 @@ fn verified_imported_kick_profile_reaches_c_packing_descriptor() {
     assert_eq!(result.compact_problem().rule.verified_transition_count, 80);
 }
 
+#[cfg(feature = "native-c-core")]
 #[test]
-fn unverified_extension_rule_is_rejected_before_candidate_generation() {
+fn builtin_srs_x_uses_the_canonical_verified_table_during_native_packing() {
     let query = opening_query_with_rule(srs_x(), None);
     let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
 
-    let result = PackingRunner::run(&problem);
+    let result = PackingRunner::run(&problem).expect("SRS-X native packing");
+    let rule = &result.compact_problem().rule;
 
-    assert_eq!(
-        result,
-        Err(PackingRunnerError::Ffi(
-            FfiProblemError::UnverifiedRuleProfileRejected {
-                rule_profile_id: clearra_core_ffi::problem::C_RULE_SRS_X
-            }
-        ))
-    );
+    assert_eq!(rule.rule_profile_id, C_RULE_SRS_X);
+    assert_eq!(rule.kick_profile_id, C_KICK_SRS_X);
+    assert_eq!(rule.has_verified_kick_profile, 1);
+    assert_eq!(rule.verified_supports_180, 1);
+    assert_eq!(rule.verified_transition_count, 80);
+    assert!(result.candidate_count() > 0);
 }
 
 #[cfg(feature = "native-c-core")]

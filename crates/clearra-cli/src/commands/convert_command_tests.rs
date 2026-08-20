@@ -6,7 +6,8 @@ use super::*;
 
 #[test]
 fn converts_fumen_like_trace_to_json_contract() {
-    let input = FumenLikeWriter::write(&FumenLikeTrace::new(vec!["kind=pc\nlines=2".to_owned()]));
+    let input = FumenLikeWriter::write(&FumenLikeTrace::new(vec!["kind=pc\nlines=2".to_owned()]))
+        .expect("test fumen");
     let output = ConvertCommand::run(
         &ConvertArgs::new(
             Some(input),

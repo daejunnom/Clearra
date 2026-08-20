@@ -1,6 +1,7 @@
 use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    SupplyWindowSize,
 };
 use clearra_problem::ProblemCompiler;
 use clearra_supply::queue::fixed_sequence::FixedSequence;
@@ -37,6 +38,14 @@ fn buildup_problem_wraps_compact_packing_problem() {
     assert_eq!(
         buildup.buildup_flags,
         crate::problem::C_BUILDUP_FLAG_HOLD_ENABLED
+    );
+    assert_eq!(
+        buildup.terminal_projection_policy_version,
+        crate::problem::C_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION
+    );
+    assert_eq!(
+        buildup.terminal_projection_policy,
+        crate::problem::C_BUILDUP_TERMINAL_PROJECTION_DISABLED
     );
 }
 
@@ -116,7 +125,8 @@ fn buildup_problem_preserves_actual_piece_source_sequence() {
             PieceKind::O,
         ])),
         PieceWindow::new(3),
-    );
+    )
+    .with_exact_pieces(Some(3));
     let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
     let buildup = CBuildUpProblemBuilder::from_search_problem(&problem).expect("buildup");
 
@@ -125,5 +135,112 @@ fn buildup_problem_preserves_actual_piece_source_sequence() {
     assert_eq!(
         &buildup.piece_source_pattern_pieces[..3],
         &[super::super::C_PIECE_T, C_PIECE_I, C_PIECE_O]
+    );
+    assert!(problem.supply().projects_unplaced_lookahead());
+    assert!(!problem.supply().projects_standard_bag_lookahead());
+    assert_eq!(
+        buildup.terminal_projection_policy_version,
+        crate::problem::C_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION
+    );
+    assert_eq!(
+        buildup.terminal_projection_policy,
+        crate::problem::C_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD
+    );
+}
+
+#[test]
+fn occupied_initial_hold_selects_the_finite_terminal_projection_policy() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::Z,
+        ])),
+        PieceWindow::new(5),
+    )
+    .with_hold_piece(Some(PieceKind::S))
+    .with_exact_pieces(Some(5));
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+    let buildup = CBuildUpProblemBuilder::from_search_problem(&problem).expect("buildup");
+
+    assert!(problem.supply().projects_unplaced_lookahead());
+    assert!(!problem.supply().projects_standard_bag_lookahead());
+    assert_eq!(
+        buildup.initial_hold_automaton.hold_piece,
+        super::super::C_PIECE_S
+    );
+    assert_eq!(buildup.initial_hold_automaton.hold_empty, 0);
+    assert_eq!(
+        buildup.terminal_projection_policy,
+        crate::problem::C_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD
+    );
+}
+
+#[test]
+fn inferred_standard_bag_current_does_not_select_finite_terminal_projection() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0x80787),
+        PcQueueInput::standard_7_bag(),
+        PieceWindow::new(8),
+    )
+    .with_hold_piece(Some(PieceKind::S))
+    .with_supply_window_size(SupplyWindowSize::new(7))
+    .with_exact_pieces(Some(8));
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+    let buildup = CBuildUpProblemBuilder::from_search_problem(&problem).expect("buildup");
+
+    assert!(problem.supply().projects_unplaced_lookahead());
+    assert!(problem.supply().projects_standard_bag_lookahead());
+    assert_eq!(
+        buildup.terminal_projection_policy,
+        crate::problem::C_BUILDUP_TERMINAL_PROJECTION_DISABLED
+    );
+}
+
+#[test]
+fn terminal_projection_fields_are_the_immutable_tail_of_the_c_problem_abi() {
+    assert_eq!(
+        core::mem::offset_of!(CBuildUpProblem, terminal_projection_policy_version),
+        core::mem::size_of::<CBuildUpProblem>() - 4
+    );
+    assert_eq!(
+        core::mem::offset_of!(CBuildUpProblem, terminal_projection_policy),
+        core::mem::size_of::<CBuildUpProblem>() - 2
+    );
+    assert_eq!(
+        core::mem::offset_of!(CBuildUpProblem, terminal_projection_reserved),
+        core::mem::size_of::<CBuildUpProblem>() - 1
+    );
+    assert_eq!(
+        core::mem::size_of::<crate::supply::CHoldAutomatonStateDescriptor>(),
+        40
+    );
+    assert_eq!(
+        core::mem::offset_of!(crate::supply::CHoldAutomatonStateDescriptor, hold_piece),
+        32
+    );
+    assert_eq!(
+        core::mem::offset_of!(crate::supply::CHoldAutomatonStateDescriptor, hold_empty),
+        33
+    );
+    assert_eq!(
+        core::mem::offset_of!(
+            crate::supply::CHoldAutomatonStateDescriptor,
+            terminal_projection_consumed
+        ),
+        34
+    );
+    assert_eq!(
+        core::mem::offset_of!(
+            crate::supply::CHoldAutomatonStateDescriptor,
+            terminal_projection_provenance
+        ),
+        35
+    );
+    assert_eq!(
+        core::mem::offset_of!(crate::supply::CHoldAutomatonStateDescriptor, reserved),
+        36
     );
 }

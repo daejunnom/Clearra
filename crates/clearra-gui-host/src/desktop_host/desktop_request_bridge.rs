@@ -114,7 +114,8 @@ mod error {
 mod form_parser {
     use clearra_app::AppRequest;
     use clearra_core_domain::{
-        board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind,
+        board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
+        piece::piece_kind::PieceKind,
     };
     use clearra_forward_search::{
         ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery,
@@ -124,7 +125,9 @@ mod form_parser {
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
     };
-    use clearra_pc_graph::request::{GpuDeviceSelection, RequestedSearchBackend, WorkerPolicy};
+    use clearra_pc_graph::request::{
+        validate_pc_observation_objective, GpuDeviceSelection, RequestedSearchBackend, WorkerPolicy,
+    };
     use clearra_problem::{
         BuildProbabilityAggregation, FinesseMetric, FinessePatternKnowledge,
         SetupCandidatePriority, SetupLengthPreference, SetupPathDetail, SetupSearchMode,
@@ -135,7 +138,10 @@ mod form_parser {
     use serde_json::Value;
 
     use crate::{
-        request::{parse_piece_sequence, parse_queue_pattern, parse_rule_profile},
+        request::{
+            parse_piece_sequence, parse_queue_pattern, parse_rule_profile,
+            score_mode_objective_kind,
+        },
         GuiAppState, GuiBackendForm, GuiOpeningPcForm, GuiProblemForm, GuiToAppRequest,
     };
 
@@ -265,6 +271,22 @@ mod form_parser {
             }
         };
         let score_mode = text_or_default(&value, &["score_mode"], "off")?;
+        let base_objective_kind = match command {
+            "pc" if score_mode == "failed-queue" => ObjectiveKind::All,
+            "pc-scenario" if matches!(count_policy, "all" | "count-all") => ObjectiveKind::All,
+            _ => ObjectiveKind::Unique,
+        };
+        let objective_kind = score_mode_objective_kind(score_mode, base_objective_kind)
+            .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
+        validate_pc_observation_objective(queue_observation_policy, objective_kind).map_err(
+            |error| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "{}: {}",
+                    error.code(),
+                    error.message()
+                ))
+            },
+        )?;
         let initial_b2b = optional_u16(&value, "initial_b2b")?
             .map(u32::from)
             .unwrap_or(0);
@@ -2403,6 +2425,46 @@ mod tests {
             form.queue_observation_policy(),
             QueueObservationPolicy::VisibleSeven
         );
+    }
+
+    #[test]
+    fn desktop_request_rejects_visible_seven_minimum_cover_aliases_consistently() {
+        for command in ["pc", "pc-scenario"] {
+            for score_mode in ["minimum-cover", "minimum"] {
+                let scenario_fields = if command == "pc-scenario" {
+                    r#", "piece_window": 10, "board_mask": 0"#
+                } else {
+                    ""
+                };
+                let request = format!(
+                    r#"{{
+                        "app_request_model": "clearra-app/AppRequest",
+                        "command": "{command}",
+                        "lines": 4,
+                        "score_mode": "{score_mode}",
+                        "queue_knowledge": "visible-7",
+                        "backend": "cpu"
+                        {scenario_fields}
+                    }}"#
+                );
+                let error = desktop_request_builds_app_request(&request).expect_err(
+                    "visible-7 minimum-cover aliases must fail before AppRequest construction",
+                );
+
+                assert_eq!(
+                    error.code(),
+                    "desktop-invalid-request",
+                    "{command} {score_mode}"
+                );
+                assert!(
+                    error
+                        .message()
+                        .contains("visible-seven-minimum-cover-unsupported"),
+                    "{command} {score_mode}: {}",
+                    error.message()
+                );
+            }
+        }
     }
 
     #[test]

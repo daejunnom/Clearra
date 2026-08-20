@@ -1057,10 +1057,12 @@ static clr_buildup_status search_geometry_node(
 
     ClearraBuildUpHoldBranchTable hold_branches;
     clr_buildup_status status =
-        clearra_buildup_queue_hold_enumerate_branch_mask(
+        clearra_buildup_queue_hold_enumerate_branch_mask_for_step(
             context->problem,
             &queue_hold,
             eligible_piece_mask,
+            (node->remaining_operations &
+             (uint16_t)(node->remaining_operations - 1u)) == 0u,
             &hold_branches);
     if (status != CLR_BUILDUP_OK) {
         clearra_buildup_search_record_failure(context, status, depth);

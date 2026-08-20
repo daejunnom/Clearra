@@ -4,12 +4,15 @@ import test from "node:test";
 
 import {
   Ctk3FumenCompatibilityError,
+  Ctk3PageLimitError,
+  FumenCommentCodecError,
   CTK3_FILE_EXTENSION,
   CTK3_FILE_MIME_TYPE,
   Field,
   Mino,
   decodeCtk3,
   decodeCtk3Async,
+  decodeCtk3Exact,
   decodeCtk3File,
   decoder,
   documentDecoder,
@@ -21,6 +24,7 @@ import {
   encodeCtk3PageSourceAsync,
   encoder,
   inspectCtk3,
+  inspectCtk3WithinPageLimit,
   isCtk3File,
   isCtk3,
   openCtk3Document,
@@ -133,6 +137,65 @@ test("native document API preserves CTK3-only row 23", () => {
   assert.throws(() => decoder.decode(value), Ctk3FumenCompatibilityError);
 });
 
+test("Fumen compatibility rejects lossy comments before third-party encoding", () => {
+  const unicode = "주석 100% 😀";
+  const encoded = encoder.encode([
+    { field: Field.create(), comment: unicode },
+  ]);
+  assert.equal(decodeCtk3(encoded).pages[0].comment, unicode);
+
+  for (const comment of ["A".repeat(4095), `${"A".repeat(4092)}%`]) {
+    const boundary = encoder.encode([{ field: Field.create(), comment }]);
+    assert.equal(decodeCtk3(boundary).pages[0].comment, comment);
+  }
+
+  assert.throws(
+    () =>
+      encoder.encode([
+        { field: Field.create(), comment: "A".repeat(4096) },
+      ]),
+    (error) =>
+      error instanceof FumenCommentCodecError &&
+      error.code === "fumen-comment-too-long",
+  );
+});
+
+test("Fumen compatibility rejects oversized page sets before normalization", () => {
+  assert.throws(
+    () =>
+      encoder.encode(
+        Array.from({ length: 4097 }, () => ({ field: Field.create() })),
+      ),
+    (error) =>
+      error instanceof Ctk3FumenCompatibilityError &&
+      error.code === "fumen-page-limit" &&
+      /4096-page limit/.test(error.message),
+  );
+
+  const emptyPage = () => ({
+    height: 1,
+    cells: Array(10).fill(null),
+  });
+  const onePageSegment = documentEncoder.encode({
+    width: 10,
+    pages: [emptyPage()],
+  });
+  const oversizedCtk3 = encodeCtk3Bundle(
+    Array(4097).fill(onePageSegment),
+  );
+  assert.throws(
+    () => inspectCtk3WithinPageLimit(oversizedCtk3, 4096),
+    (error) =>
+      error instanceof Ctk3PageLimitError && error.maximumPages === 4096,
+  );
+  assert.throws(
+    () => decoder.decode(oversizedCtk3),
+    (error) =>
+      error instanceof Ctk3FumenCompatibilityError &&
+      error.code === "fumen-page-limit",
+  );
+});
+
 test(".ctk3 files use the exact UTF-8 document contract", () => {
   const document = {
     width: 10,
@@ -164,6 +227,75 @@ test("legacy CTK85 remains readable and CommonJS exposes the same API", () => {
   assert.equal(document.width, 10);
   assert.equal(commonJs.documentDecoder.decode(legacy).width, 10);
   assert.equal(typeof commonJs.decoder.decode, "function");
+});
+
+test("exact decoding rejects envelopes while compatibility decoding still extracts them", () => {
+  const source = encodeCtk3Compact({
+    width: 10,
+    pages: [{ height: 0, cells: [] }],
+  });
+  const envelope = `https://example.invalid/view?document=${source}&theme=dark`;
+
+  assert.deepEqual(decodeCtk3(envelope), decodeCtk3Exact(source));
+  assert.throws(
+    () => decodeCtk3Exact(envelope),
+    /No CTK3 header was found/,
+  );
+  assert.throws(
+    () => decodeCtk3File(`${source} trailing-text`),
+    /trailing data/,
+  );
+});
+
+test("every CTK3 revision enforces the shared operation-coordinate boundary", () => {
+  const maximum = 0x3fffffff;
+  for (const revision of [0, 1, 2, 3]) {
+    for (const axis of ["x", "y"]) {
+      for (const coordinate of [maximum, -maximum]) {
+        const document = decodeCtk3Exact(
+          operationFixture({ revision, [axis]: coordinate }),
+        );
+        assert.equal(
+          document.pages[0].operation?.[axis],
+          coordinate,
+          `revision ${revision}, ${axis}`,
+        );
+      }
+      for (const coordinate of [maximum + 1, -maximum - 1]) {
+        assert.throws(
+          () =>
+            decodeCtk3Exact(
+              operationFixture({ revision, [axis]: coordinate }),
+            ),
+          /CTK3 operation is invalid/,
+          `revision ${revision}, ${axis} coordinate ${coordinate}`,
+        );
+      }
+    }
+  }
+});
+
+test("temporal operation deltas cannot cross the operation-coordinate boundary", () => {
+  const maximum = 0x3fffffff;
+  for (const revision of [2, 3]) {
+    for (const axis of ["X", "Y"]) {
+      for (const sign of [1, -1]) {
+        const coordinate = sign * maximum;
+        assert.throws(
+          () =>
+            decodeCtk3Exact(
+              operationFixture({
+                revision,
+                [axis.toLowerCase()]: coordinate,
+                [`delta${axis}`]: sign,
+              }),
+            ),
+          /CTK3 operation is invalid/,
+          `${axis} cumulative overflow in revision ${revision}`,
+        );
+      }
+    }
+  }
 });
 
 test("compact segments combine into one exact large-document bundle", () => {
@@ -345,4 +477,132 @@ function hangingWorker() {
       this.terminated = true;
     },
   };
+}
+
+function operationFixture({ revision, x = 0, y = 0, deltaX, deltaY }) {
+  const writer = new FixtureBitWriter();
+  writer.writeBits(0xc3, 8);
+  writer.writeBits(revision, 3);
+  writer.writeBits(9, 5);
+  writer.writeVarUint(deltaX === undefined && deltaY === undefined ? 1 : 2);
+  writer.writeBit(0);
+
+  if (revision === 3) {
+    writer.writeVarUint(1);
+    writer.writeBits(7, 4);
+  }
+
+  if (revision === 0) {
+    writer.writeBits(1 << 6, 8);
+    writer.writeVarUint(0);
+    writer.writeBits(0, 2);
+    writer.writeBits(1, 9);
+    writeFixtureOperationBody(writer, x, y);
+  } else if (revision === 1) {
+    writer.writeBits(0, 2);
+    writer.writeBit(0);
+    writer.writeBit(1);
+    writer.writeBit(0);
+    writer.writeVarUint(0);
+    writer.writeBits(7, 3);
+    writeFixtureOperationBody(writer, x, y);
+  } else {
+    writeFixtureTemporalPage(writer, x, y);
+    if (deltaX !== undefined || deltaY !== undefined) {
+      writer.writeBits(0, 2);
+      writer.writeBit(0);
+      writer.writeBit(0);
+      writer.writeBits(0, 4);
+      writer.writeBits(7, 4);
+      writer.writeBit(0);
+      writer.writeBit(0);
+      writer.writeBits(3, 3);
+      writer.writeSignedVarInt(deltaX ?? 0);
+      writer.writeSignedVarInt(deltaY ?? 0);
+    }
+  }
+
+  const body = writer.toBytes();
+  const checksum = fixtureCrc16(body);
+  const payload = Buffer.concat([
+    Buffer.from(body),
+    Buffer.from([checksum >>> 8, checksum & 0xff]),
+  ]);
+  return `ctk3_${payload.toString("base64url")}`;
+}
+
+function writeFixtureTemporalPage(writer, x, y) {
+  writer.writeBits(0, 2);
+  writer.writeBit(0);
+  writer.writeVarUint(0);
+  writer.writeBits(0, 4);
+  writer.writeBits(7, 4);
+  writer.writeBit(0);
+  writer.writeBit(0);
+  writer.writeBits(7, 3);
+  writeFixtureOperationBody(writer, x, y);
+}
+
+function writeFixtureOperationBody(writer, x, y) {
+  writer.writeBits(2, 3);
+  writer.writeBits(0, 2);
+  writer.writeSignedVarInt(x);
+  writer.writeSignedVarInt(y);
+}
+
+function fixtureCrc16(bytes) {
+  let crc = 0xffff;
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc =
+        crc & 0x8000
+          ? ((crc << 1) ^ 0x1021) & 0xffff
+          : (crc << 1) & 0xffff;
+    }
+  }
+  return crc;
+}
+
+class FixtureBitWriter {
+  bytes = [];
+  bitLength = 0;
+
+  writeBit(value) {
+    const byteIndex = Math.floor(this.bitLength / 8);
+    const bitIndex = this.bitLength % 8;
+    if (byteIndex === this.bytes.length) this.bytes.push(0);
+    if (value & 1) this.bytes[byteIndex] |= 1 << bitIndex;
+    this.bitLength += 1;
+  }
+
+  writeBits(value, width) {
+    for (let bit = 0; bit < width; bit += 1) {
+      this.writeBit(Math.floor(value / 2 ** bit) & 1);
+    }
+  }
+
+  writeVarUint(value) {
+    if (value < 16) {
+      this.writeBit(0);
+      this.writeBits(value, 4);
+    } else if (value < 256) {
+      this.writeBits(1, 2);
+      this.writeBits(value, 8);
+    } else if (value < 65536) {
+      this.writeBits(3, 3);
+      this.writeBits(value, 16);
+    } else {
+      this.writeBits(7, 3);
+      this.writeBits(value, 32);
+    }
+  }
+
+  writeSignedVarInt(value) {
+    this.writeVarUint(value >= 0 ? value * 2 : -value * 2 - 1);
+  }
+
+  toBytes() {
+    return Uint8Array.from(this.bytes);
+  }
 }

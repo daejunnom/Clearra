@@ -15,6 +15,8 @@
   } from './setupFinderModel';
   import type { RuleProfile } from './solverWorkspaceModel';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
+  import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
+  import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let request: SetupFinderRequest;
@@ -22,6 +24,7 @@
   export let validationCodes: SetupFinderValidationCode[] = [];
   export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
   export let tablebaseByteLength = 0;
+  export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SetupFinderRequest }>();
   $: label = (
@@ -179,6 +182,7 @@
           <span class="workspace-switch" aria-hidden="true"></span>
           <span>{label('useAllThreads')}</span>
         </label>
+        <WorkerAuthorityStatus authority={workerAuthority} {language} />
       </div>
       <label class="workspace-field wide priority-field">
         <span>{label('rule')}</span>

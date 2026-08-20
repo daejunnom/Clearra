@@ -1,3 +1,4 @@
+use clearra_host_contract::ProductBuildIdentity;
 use clearra_replay::ReplayTrace;
 
 pub use crate::json::{
@@ -27,6 +28,14 @@ impl JsonContract {
 }
 impl JsonContract {
     pub fn from_render_message(kind: &str, fields: &[RenderField]) -> Self {
+        Self::from_render_message_with_runtime_identity(kind, fields, None)
+    }
+
+    pub fn from_render_message_with_runtime_identity(
+        kind: &str,
+        fields: &[RenderField],
+        runtime_identity: Option<&ProductBuildIdentity>,
+    ) -> Self {
         let fields = fields
             .iter()
             .map(|field| JsonField::typed(field.key(), field.value().to_json_value()))
@@ -67,6 +76,12 @@ impl JsonContract {
             ("summary".to_owned(), fields_object(&summary)),
             ("contract".to_owned(), contract_object(kind, &fields)),
         ];
+        if let Some(identity) = runtime_identity {
+            root_members.push((
+                "runtime_identity".to_owned(),
+                product_build_identity_object(identity),
+            ));
+        }
         if let Some(report) = resource_report_object(&fields) {
             root_members.push(("resource_report".to_owned(), report));
         }
@@ -84,6 +99,28 @@ impl JsonContract {
             root: Some(root),
         }
     }
+}
+
+fn product_build_identity_object(identity: &ProductBuildIdentity) -> JsonValue {
+    JsonValue::object([
+        (
+            "engine_build_id",
+            JsonValue::string(identity.engine_build_id()),
+        ),
+        ("source_commit", JsonValue::string(identity.source_commit())),
+        (
+            "contract_schema_version",
+            JsonValue::string(identity.contract_schema_version()),
+        ),
+        (
+            "supply_semantics_id",
+            JsonValue::string(identity.supply_semantics_id()),
+        ),
+        (
+            "artifact_schema_version",
+            JsonValue::string(identity.artifact_schema_version()),
+        ),
+    ])
 }
 impl JsonContract {
     pub fn from_replay_trace(trace: &ReplayTrace) -> Self {

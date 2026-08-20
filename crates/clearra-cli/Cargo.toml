@@ -25,6 +25,11 @@ name = "process_e2e"
 path = "tests/process_e2e.rs"
 required-features = ["native-c-core"]
 
+[[test]]
+name = "terminal_supply_public_contract"
+path = "tests/terminal_supply_public_contract.rs"
+required-features = ["native-c-core"]
+
 [dependencies]
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }

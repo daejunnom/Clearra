@@ -74,8 +74,15 @@ test("inactive optional postprocessing does not mark a complete solution set inc
       packing_count_complete: true,
       solution_keys_complete: true,
       count_complete: true,
-      probability_complete: true,
-      objective_complete: true,
+      solution_probabilities_requested: false,
+      probability_complete: false,
+      resource_probability_complete: false,
+      objective_search_complete: false,
+      objective_search_incomplete_reason:
+        "coverage_not_requested_for_unique_solution_set",
+      objective_complete: false,
+      objective_incomplete_reason:
+        "coverage_not_requested_for_unique_solution_set",
       minimum_cover_requested: false,
       minimum_cover_complete: false,
       postprocess_scoring_requested: false,
@@ -92,6 +99,36 @@ test("inactive optional postprocessing does not mark a complete solution set inc
   assert.ok(result);
   assert.equal(result.complete, true);
   assert.deepEqual(result.warnings, []);
+});
+
+test("requested or unexplained incomplete postprocessing remains partial", () => {
+  const artifacts = {
+    schema_version: ARTIFACT_SCHEMA,
+    solution_keys: [SIMPLE_KEY],
+  };
+  for (const summary of [
+    {
+      solution_probabilities_requested: true,
+      probability_complete: false,
+    },
+    {
+      objective_search_complete: false,
+      objective_search_incomplete_reason: "budget-exceeded",
+    },
+    {
+      objective_complete: false,
+      objective_incomplete_reason: "not-calculated",
+    },
+  ]) {
+    const result = buildCtk3Result({
+      schema_version: 2,
+      summary,
+      contract: { artifacts },
+    });
+    assert.ok(result);
+    assert.equal(result.complete, false);
+    assert.equal(result.warnings.length, 1);
+  }
 });
 
 test("malformed or overlapping solution keys fail closed", () => {

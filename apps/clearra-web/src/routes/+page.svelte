@@ -3,6 +3,10 @@
   import { base } from '$app/paths';
   import { page } from '$app/stores';
   import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
+  import {
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    sharedBrowserHostCapabilitySnapshot
+  } from '@clearra/ui/wasm';
   import { onMount, setContext } from 'svelte';
   import { resolveCtkViewerQuery } from '../lib/ctkViewerQuery';
 
@@ -13,6 +17,10 @@
   }
 
   setContext(PC_SOLVER_HREF_CONTEXT, `${base}/pc-solver`);
+  setContext(
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    sharedBrowserHostCapabilitySnapshot()
+  );
 
   $: ctkViewer = resolveCtkViewerQuery($page.url);
   $: selectedTool =

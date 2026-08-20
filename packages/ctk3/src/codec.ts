@@ -69,6 +69,7 @@ const MAX_BUNDLE_PAGES = CTK3_MAX_BUNDLE_PAGES;
 const MAX_BUNDLE_SEGMENTS = MAX_BUNDLE_PAGES;
 const MAX_COMMENT_BYTES = 1 << 20;
 const MAX_PAYLOAD_BYTES = 16 << 20;
+const MAX_OPERATION_COORDINATE = 0x3fffffff;
 const TEMPORAL_REFERENCE_WINDOW = 16;
 const MAX_CTK64_CHARACTERS = Math.ceil((MAX_PAYLOAD_BYTES * 8) / 6);
 const MAX_CTK85_CHARACTERS = Math.ceil(MAX_PAYLOAD_BYTES / 4) * 5;
@@ -255,6 +256,41 @@ export function decodeCtk3(input: string): Ctk3Document {
   return decodeSingleCtk3(input);
 }
 
+export class Ctk3PageLimitError extends Ctk3CodecError {
+  constructor(readonly maximumPages: number) {
+    super(`CTK3 page count exceeds the ${maximumPages}-page limit.`);
+    this.name = "Ctk3PageLimitError";
+  }
+}
+
+/**
+ * Decodes one exact CTK3 document value. Unlike {@link decodeCtk3}, this
+ * entrypoint does not search a surrounding URL, message, or HTML fragment for
+ * an embedded value.
+ */
+export function decodeCtk3Exact(input: string): Ctk3Document {
+  const source = input.trim();
+  const bundle = extractExactCtk3BundlePayloads(source);
+  if (bundle) {
+    const pages: Ctk3Page[] = [];
+    let width: number | null = null;
+    for (const payload of bundle) {
+      const document = decodeSingleCtk3Exact(`${CTK64_PREFIX}${payload}`);
+      if (width === null) {
+        width = document.width;
+      } else if (document.width !== width) {
+        throw new Ctk3CodecError("CTK3 bundle widths do not match.");
+      }
+      if (pages.length + document.pages.length > MAX_BUNDLE_PAGES) {
+        throw new Ctk3CodecError("CTK3 bundle page count is invalid.");
+      }
+      pages.push(...document.pages);
+    }
+    return { width: width!, pages };
+  }
+  return decodeSingleCtk3Exact(source);
+}
+
 export function decodeCtk3Segment(input: string): Ctk3Document {
   if (extractCtk3BundlePayloads(input)) {
     throw new Ctk3CodecError("A CTK3 segment cannot contain a bundle.");
@@ -268,6 +304,68 @@ export function splitCtk3Segments(input: string): string[] {
 
 export function inspectCtk3(input: string): Ctk3DocumentInfo {
   return indexCtk3Segments(input).info;
+}
+
+/**
+ * Inspects only compact headers and stops as soon as the caller's aggregate
+ * page budget is exceeded. Unlike decodeCtk3, it never expands temporal page
+ * runs or materializes bundle documents.
+ */
+export function inspectCtk3WithinPageLimit(
+  input: string,
+  maximumPages: number,
+): Ctk3DocumentInfo {
+  if (
+    !Number.isSafeInteger(maximumPages) ||
+    maximumPages < 1 ||
+    maximumPages > MAX_BUNDLE_PAGES
+  ) {
+    throw new RangeError("CTK3 page limit is out of range.");
+  }
+  const bundle = inspectBundleWithinPageLimit(input, maximumPages);
+  if (bundle) return bundle;
+  const header = inspectSingleCtk3(input);
+  if (header.pageCount > maximumPages) {
+    throw new Ctk3PageLimitError(maximumPages);
+  }
+  return {
+    width: header.width,
+    pageCount: header.pageCount,
+    segmentCount: 1,
+    segmentPageCounts: [header.pageCount],
+    bundled: false,
+  };
+}
+
+export function inspectCtk3Exact(input: string): Ctk3DocumentInfo {
+  const source = input.trim();
+  const bundle = extractExactCtk3BundlePayloads(source);
+  const segments = bundle
+    ? bundle.map((payload) => `${CTK64_PREFIX}${payload}`)
+    : [source];
+  const segmentPageCounts = new Array<number>(segments.length);
+  let width: number | null = null;
+  let pageCount = 0;
+  for (let index = 0; index < segments.length; index += 1) {
+    const header = inspectSingleCtk3Exact(segments[index]);
+    if (width === null) {
+      width = header.width;
+    } else if (header.width !== width) {
+      throw new Ctk3CodecError("CTK3 bundle widths do not match.");
+    }
+    pageCount += header.pageCount;
+    if (pageCount > MAX_BUNDLE_PAGES) {
+      throw new Ctk3CodecError("CTK3 bundle page count is invalid.");
+    }
+    segmentPageCounts[index] = header.pageCount;
+  }
+  return {
+    width: width!,
+    pageCount,
+    segmentCount: segments.length,
+    segmentPageCounts,
+    bundled: bundle !== null,
+  };
 }
 
 export function indexCtk3Segments(input: string): Ctk3SegmentIndex {
@@ -305,6 +403,18 @@ export function indexCtk3Segments(input: string): Ctk3SegmentIndex {
 
 function decodeSingleCtk3(input: string): Ctk3Document {
   const encoded = extractCtk3Payload(input);
+  return decodeCtk3Payload(encoded);
+}
+
+function decodeSingleCtk3Exact(input: string): Ctk3Document {
+  const encoded = extractExactCtk3Payload(input);
+  return decodeCtk3Payload(encoded);
+}
+
+function decodeCtk3Payload(encoded: {
+  transport: "ctk64" | "ctk85";
+  payload: string;
+}): Ctk3Document {
   const maximumLength =
     encoded.transport === "ctk64" ? MAX_CTK64_CHARACTERS : MAX_CTK85_CHARACTERS;
   if (encoded.payload.length > maximumLength) {
@@ -478,12 +588,21 @@ function normalizeOperation(operation: Ctk3Operation): Ctk3Operation {
     !ROTATIONS.includes(operation.rotation) ||
     !Number.isSafeInteger(operation.x) ||
     !Number.isSafeInteger(operation.y) ||
-    Math.abs(operation.x) > 0x3fffffff ||
-    Math.abs(operation.y) > 0x3fffffff
+    Math.abs(operation.x) > MAX_OPERATION_COORDINATE ||
+    Math.abs(operation.y) > MAX_OPERATION_COORDINATE
   ) {
     throw new Ctk3CodecError("CTK3 operation is invalid.");
   }
-  return canonicalizeCtkOperation(operation);
+  const canonical = canonicalizeCtkOperation(operation);
+  if (
+    !Number.isSafeInteger(canonical.x) ||
+    !Number.isSafeInteger(canonical.y) ||
+    Math.abs(canonical.x) > MAX_OPERATION_COORDINATE ||
+    Math.abs(canonical.y) > MAX_OPERATION_COORDINATE
+  ) {
+    throw new Ctk3CodecError("CTK3 operation is invalid.");
+  }
+  return canonical;
 }
 
 function normalizeGarbage(
@@ -863,11 +982,11 @@ function readTemporalOperation(
     if (!previous) {
       throw new Ctk3CodecError("CTK3 operation delta is invalid.");
     }
-    return {
+    return normalizeOperation({
       ...previous,
       x: previous.x + reader.readSignedVarInt(),
       y: previous.y + reader.readSignedVarInt(),
-    };
+    });
   }
   return readOperationBody(reader);
 }
@@ -893,12 +1012,12 @@ function readOperationBody(reader: BitReader): Ctk3Operation {
   if (!rotation) {
     throw new Ctk3CodecError("CTK3 operation is invalid.");
   }
-  return {
+  return normalizeOperation({
     piece,
     rotation,
     x: reader.readSignedVarInt(),
     y: reader.readSignedVarInt(),
-  };
+  });
 }
 
 function writeTemporalField(
@@ -1326,12 +1445,12 @@ function readPage(
     if (!rotation) {
       throw new Ctk3CodecError("CTK3 operation is invalid.");
     }
-    operation = {
+    operation = normalizeOperation({
       piece,
       rotation,
       x: reader.readSignedVarInt(),
       y: reader.readSignedVarInt(),
-    };
+    });
   }
   return {
     codes,
@@ -1388,12 +1507,12 @@ function readLegacyPage(
     if (!piece || !rotation) {
       throw new Ctk3CodecError("CTK3 operation is invalid.");
     }
-    operation = {
+    operation = normalizeOperation({
       piece,
       rotation,
       x: reader.readSignedVarInt(),
       y: reader.readSignedVarInt(),
-    };
+    });
   }
   return {
     codes,
@@ -2187,6 +2306,21 @@ function inspectSingleCtk3(input: string): {
   pageCount: number;
 } {
   const encoded = extractCtk3Payload(input);
+  return inspectCtk3PayloadHeader(encoded);
+}
+
+function inspectSingleCtk3Exact(input: string): {
+  width: number;
+  pageCount: number;
+} {
+  const encoded = extractExactCtk3Payload(input);
+  return inspectCtk3PayloadHeader(encoded);
+}
+
+function inspectCtk3PayloadHeader(encoded: {
+  transport: "ctk64" | "ctk85";
+  payload: string;
+}): { width: number; pageCount: number } {
   if (encoded.transport === "ctk64") {
     if (
       encoded.payload.length > MAX_CTK64_CHARACTERS ||
@@ -2243,6 +2377,74 @@ function readDocumentHeader(payload: Uint8Array): {
   return { width, pageCount };
 }
 
+function inspectBundleWithinPageLimit(
+  input: string,
+  maximumPages: number,
+): Ctk3DocumentInfo | null {
+  let source = input.trim();
+  let prefixIndex = source.toLowerCase().indexOf(CTK3_BUNDLE_PREFIX);
+  if (prefixIndex < 0 && /%[0-9a-f]{2}/iu.test(source)) {
+    try {
+      source = decodeURIComponent(source);
+      prefixIndex = source.toLowerCase().indexOf(CTK3_BUNDLE_PREFIX);
+    } catch {
+      return null;
+    }
+  }
+  if (prefixIndex < 0) return null;
+
+  const segmentPageCounts: number[] = [];
+  let width: number | null = null;
+  let pageCount = 0;
+  let cursor = prefixIndex + CTK3_BUNDLE_PREFIX.length;
+  for (;;) {
+    const start = cursor;
+    while (cursor < source.length && CTK64_INDEX.has(source[cursor])) {
+      cursor += 1;
+      if (cursor - start > MAX_CTK64_CHARACTERS) {
+        throw new Ctk3CodecError("CTK3 bundle segment is invalid.");
+      }
+    }
+    const payload = source.slice(start, cursor);
+    if (
+      payload.length < 1 ||
+      payload.length % 4 === 1 ||
+      !isCtk64Payload(payload)
+    ) {
+      throw new Ctk3CodecError("CTK3 bundle payload is invalid.");
+    }
+    if (segmentPageCounts.length === maximumPages) {
+      // Every valid segment contains at least one page, so no later header can
+      // bring this aggregate back within the caller's budget.
+      throw new Ctk3PageLimitError(maximumPages);
+    }
+    const header = inspectCtk64PayloadHeader(payload);
+    if (width === null) {
+      width = header.width;
+    } else if (header.width !== width) {
+      throw new Ctk3CodecError("CTK3 bundle widths do not match.");
+    }
+    pageCount += header.pageCount;
+    if (pageCount > maximumPages) {
+      throw new Ctk3PageLimitError(maximumPages);
+    }
+    segmentPageCounts.push(header.pageCount);
+
+    if (source[cursor] !== ".") break;
+    cursor += 1;
+  }
+  if (segmentPageCounts.length < 2) {
+    throw new Ctk3CodecError("CTK3 bundle payload is invalid.");
+  }
+  return {
+    width: width!,
+    pageCount,
+    segmentCount: segmentPageCounts.length,
+    segmentPageCounts,
+    bundled: true,
+  };
+}
+
 function extractCtk3BundlePayloads(input: string): string[] | null {
   let source = input.trim();
   let prefixIndex = source.toLowerCase().indexOf(CTK3_BUNDLE_PREFIX);
@@ -2273,6 +2475,30 @@ function extractCtk3BundlePayloads(input: string): string[] | null {
       (payload) =>
         payload.length < 1 ||
         payload.length > MAX_CTK64_CHARACTERS ||
+        !isCtk64Payload(payload),
+    )
+  ) {
+    throw new Ctk3CodecError("CTK3 bundle payload is invalid.");
+  }
+  return payloads;
+}
+
+function extractExactCtk3BundlePayloads(input: string): string[] | null {
+  if (
+    input.slice(0, CTK3_BUNDLE_PREFIX.length).toLowerCase() !==
+    CTK3_BUNDLE_PREFIX
+  ) {
+    return null;
+  }
+  const payloads = input.slice(CTK3_BUNDLE_PREFIX.length).split(".");
+  if (
+    payloads.length < 2 ||
+    payloads.length > MAX_BUNDLE_SEGMENTS ||
+    payloads.some(
+      (payload) =>
+        payload.length < 1 ||
+        payload.length > MAX_CTK64_CHARACTERS ||
+        payload.length % 4 === 1 ||
         !isCtk64Payload(payload),
     )
   ) {
@@ -2319,6 +2545,30 @@ function extractCtk3Payload(input: string): {
     transport: useCtk64 ? "ctk64" : "ctk85",
     payload,
   };
+}
+
+function extractExactCtk3Payload(input: string): {
+  transport: "ctk64" | "ctk85";
+  payload: string;
+} {
+  const source = input.trim();
+  const lower = source.toLowerCase();
+  const transport = lower.startsWith(CTK64_PREFIX) ? "ctk64" : "ctk85";
+  const prefix = transport === "ctk64" ? CTK64_PREFIX : CTK3_PREFIX;
+  if (!lower.startsWith(prefix)) {
+    throw new Ctk3CodecError("No CTK3 header was found.");
+  }
+  const payload = source.slice(prefix.length);
+  if (!payload.length) {
+    throw new Ctk3CodecError("CTK3 payload is empty.");
+  }
+  const alphabet = transport === "ctk64" ? CTK64_INDEX : CTK85_INDEX;
+  for (const character of payload) {
+    if (!alphabet.has(character)) {
+      throw new Ctk3CodecError("CTK3 payload contains trailing data.");
+    }
+  }
+  return { transport, payload };
 }
 
 function encodeCtk64(bytes: Uint8Array): string {

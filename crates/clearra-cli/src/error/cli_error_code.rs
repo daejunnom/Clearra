@@ -5,6 +5,7 @@ pub enum CliErrorCode {
     CliMissingValue,
     CliInvalidValue,
     CliOutputFormatUnsupported,
+    CliOutputLimitExceeded,
     CliCommandUnknown,
     CliUnknownOption,
     CliCommandUnsupported,
@@ -49,6 +50,7 @@ impl CliErrorCode {
             Self::CliMissingValue => "E_CLI_MISSING_VALUE",
             Self::CliInvalidValue => "E_CLI_INVALID_VALUE",
             Self::CliOutputFormatUnsupported => "E_CLI_OUTPUT_FORMAT_UNSUPPORTED",
+            Self::CliOutputLimitExceeded => "E_CLI_OUTPUT_LIMIT_EXCEEDED",
             Self::CliCommandUnknown => "E_CLI_COMMAND_UNKNOWN",
             Self::CliUnknownOption => "E_CLI_UNKNOWN_OPTION",
             Self::CliCommandUnsupported => "E_CLI_COMMAND_UNSUPPORTED",
@@ -105,6 +107,7 @@ impl CliErrorCode {
             Self::CliMissingValue
             | Self::CliInvalidValue
             | Self::CliOutputFormatUnsupported
+            | Self::CliOutputLimitExceeded
             | Self::CliCommandUnknown
             | Self::CliUnknownOption
             | Self::PcTargetInvalid

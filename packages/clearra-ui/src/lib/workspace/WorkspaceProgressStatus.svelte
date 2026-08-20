@@ -61,7 +61,7 @@
   };
 
   function count(value: string | null): string {
-    if (value === null) return '';
+    if (value === null) return '—';
     try {
       return new Intl.NumberFormat(language).format(BigInt(value));
     } catch {

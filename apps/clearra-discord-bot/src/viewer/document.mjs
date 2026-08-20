@@ -1,7 +1,10 @@
 import {
   ctk3FileSource,
+  decodeFumenWithinPageLimit,
   decodeCtk3,
+  FUMEN_MAX_PAGES,
   inspectCtk3,
+  inspectCtk3WithinPageLimit,
   isCtk3,
 } from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
@@ -54,8 +57,7 @@ export function decodeViewerDocument(source, options = {}) {
   const normalized = source.trim();
   if (isCtk3(normalized)) {
     enforceSourceLimit(normalized, limits.maxSourceChars);
-    const info = inspectCtk3(normalized);
-    enforcePageLimit(info.pageCount, limits.maxPages);
+    inspectViewerCtk3(normalized, limits.maxPages);
     return decodeCtk3(normalized);
   }
 
@@ -67,7 +69,11 @@ export function decodeViewerDocument(source, options = {}) {
     ? `v${matchedFumen.slice(1)}`
     : matchedFumen;
   if (!fumen) throw new Error("No Fumen or CTK3 document was found.");
-  const pages = fumenDecoder.decode(fumen);
+  const pages = decodeFumenWithinPageLimit(
+    fumen,
+    (bounded) => fumenDecoder.decode(bounded),
+    limits.maxPages ?? FUMEN_MAX_PAGES,
+  );
   if (pages.length === 0) throw new Error("The Fumen document has no pages.");
   enforcePageLimit(pages.length, limits.maxPages);
 
@@ -114,13 +120,20 @@ export function decodeViewerFile(data, options = {}) {
   enforceFileSizeLimit(data, limits.maxFileBytes);
   const source = ctk3FileSource(data);
   enforceSourceLimit(source, limits.maxSourceChars);
-  const info = inspectCtk3(source);
-  enforcePageLimit(info.pageCount, limits.maxPages);
+  inspectViewerCtk3(source, limits.maxPages);
   return {
     format: "ctk3",
     source,
     document: decodeCtk3(source),
   };
+}
+
+function inspectViewerCtk3(source, maximumPages) {
+  const info = maximumPages === null
+    ? inspectCtk3(source)
+    : inspectCtk3WithinPageLimit(source, maximumPages);
+  enforcePageLimit(info.pageCount, maximumPages);
+  return info;
 }
 
 function viewerLimits(options) {

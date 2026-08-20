@@ -3,24 +3,27 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
-    normalizeBuildProbabilityRequest,
+    updateBuildProbabilityDraft,
     type BuildProbabilityRequest,
     type BuildProbabilityValidationCode
   } from './buildProbabilityModel';
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
+  import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
+  import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let request: BuildProbabilityRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: BuildProbabilityValidationCode[] = [];
+  export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: BuildProbabilityRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 
   function patch(change: Partial<BuildProbabilityRequest>) {
-    dispatch('change', normalizeBuildProbabilityRequest({ ...request, ...change }));
+    dispatch('change', updateBuildProbabilityDraft(request, change));
   }
 
   function setAggregation(aggregation: BuildProbabilityRequest['aggregation']) {
@@ -143,6 +146,7 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('useAllThreads')}</span>
       </label>
+      <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
     <div class="dependency-analysis-control">
       <label class="workspace-switch-label">

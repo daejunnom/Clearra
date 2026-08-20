@@ -23,8 +23,10 @@ typedef struct ClearraBuildUpCompletionMemoEntry {
     uint8_t deleted_count;
     uint8_t hold_piece;
     uint8_t hold_empty;
+    uint8_t terminal_projection_consumed;
+    uint8_t terminal_projection_provenance;
     uint8_t cleared_lines;
-    uint8_t reserved[10];
+    uint8_t reserved[8];
 } ClearraBuildUpCompletionMemoEntry;
 
 _Static_assert(

@@ -5,7 +5,8 @@ use clearra_objectives::policy::score_objective_policy::{
 };
 use clearra_pc_graph::request::{
     opening_pc_search_query::OpeningPcSearchQuery, pc_hold_policy::PcHoldPolicy,
-    pc_queue_input::PcQueueInput, PcSolutionProbabilityPolicy,
+    pc_queue_input::PcQueueInput, validate_pc_observation_objective, PcSearchContractError,
+    PcSolutionProbabilityPolicy,
 };
 use clearra_supply::queue::queue_parser::{parse_observed_queue, QueueParseError};
 
@@ -20,6 +21,7 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcQueryAssemblyError {
+    SearchContract(PcSearchContractError),
     InvalidTarget(PcTargetError),
     UnsupportedMvpTarget {
         lines: u8,
@@ -69,6 +71,8 @@ impl PcQueryAssembler {
             });
         }
         let mut objective = parse_objective(args.objective())?;
+        validate_pc_observation_objective(args.queue_observation_policy(), objective.kind())
+            .map_err(PcQueryAssemblyError::SearchContract)?;
         let tiling_only = objective.kind()
             == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         if tiling_only {

@@ -14,6 +14,12 @@ impl PcCommand {
     pub fn run(args: PcArgs, format: RenderFormat) -> CliOutput {
         let query = match PcQueryAssembler::assemble(&args) {
             Ok(query) => query,
+            Err(PcQueryAssemblyError::SearchContract(error)) => {
+                return CliOutput::error(
+                    CliErrorCode::PcQueryInvalid,
+                    format!("{}: {}", error.code(), error.message()),
+                );
+            }
             Err(PcQueryAssemblyError::InvalidTarget(error)) => {
                 return CliOutput::error(CliErrorCode::PcTargetInvalid, format!("{error:?}"));
             }

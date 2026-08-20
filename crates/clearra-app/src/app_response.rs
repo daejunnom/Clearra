@@ -425,3 +425,23 @@ fn host_error_code(code: AppErrorCode) -> &'static str {
         AppErrorCode::VerifyKicksFailed => "E_VERIFY_KICKS_FAILED",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clearra_host_contract::ProductBuildIdentity;
+
+    use super::*;
+
+    #[test]
+    fn host_response_automatically_carries_the_compiled_product_identity() {
+        let response = AppResponse::failed(
+            AppStatus::Unsupported,
+            AppError::new(AppErrorCode::Unsupported, "unsupported in focused test"),
+        );
+
+        assert_eq!(
+            response.to_host_response().runtime_identity(),
+            &ProductBuildIdentity::current()
+        );
+    }
+}

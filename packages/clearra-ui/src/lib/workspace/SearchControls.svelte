@@ -3,12 +3,15 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
+    updateWorkspaceDraft,
     type SolverWorkspaceRequest,
     type WorkspaceValidationCode
   } from './solverWorkspaceModel';
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
+  import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
+  import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let request: SolverWorkspaceRequest;
@@ -18,6 +21,7 @@
   export let dependencyDagControlAvailable = false;
   export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
   export let tablebaseByteLength = 0;
+  export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -25,7 +29,7 @@
   $: failedQueueOnly = request.scoreMode === 'failed-queue';
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
-    dispatch('change', { ...request, ...change });
+    dispatch('change', updateWorkspaceDraft(request, change));
   }
 
   $: tablebaseStatusLabel = tablebaseMessage(
@@ -198,6 +202,7 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('useAllThreads')}</span>
       </label>
+      <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
     {#if tablebaseControlAvailable}
       <div class="tablebase-control">

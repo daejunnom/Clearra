@@ -1,4 +1,13 @@
-import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
+import {
+  createHostCapabilitySnapshot,
+  isHostCapabilitySnapshot,
+  normalizeRuntimeWarmupPolicy,
+  resolveWorkerAuthority,
+  type ClearraWasmWorkerEvent,
+  type HostCapabilitySnapshot,
+  type RuntimeWarmupPolicy,
+  type WorkerAuthorityReport
+} from '@clearra/ui/wasm';
 
 import { ClearraProductJobRunner } from './ClearraProductJobRunner';
 import {
@@ -9,6 +18,7 @@ import {
   ClearraWasmRuntimeError,
   loadClearraWasmModule,
   type ClearraWasmFailureDiagnostics,
+  type ClearraWasmHostCapabilities,
   type ClearraWasmModule
 } from './clearraWasmRuntime';
 import {
@@ -27,6 +37,9 @@ type ClearraWorkerMessage =
       workerCount: number;
       tablebaseRequested?: boolean;
       lifecycleOwnerId?: string;
+      hostCapabilitySnapshot?: HostCapabilitySnapshot;
+      workerAuthority?: WorkerAuthorityReport;
+      warmupPolicy?: RuntimeWarmupPolicy;
     }
   | {
       type: 'run_command_text';
@@ -34,6 +47,9 @@ type ClearraWorkerMessage =
       prewarmWorkerCount?: number;
       tablebaseRequested?: boolean;
       lifecycleOwnerId?: string;
+      hostCapabilitySnapshot?: HostCapabilitySnapshot;
+      workerAuthority?: WorkerAuthorityReport;
+      warmupPolicy?: RuntimeWarmupPolicy;
     }
   | {
       type: 'load_solution_page';
@@ -68,6 +84,15 @@ let tablebaseWarmupGeneration = 0;
 let tablebaseWarmupAttempted = false;
 let failClosed = false;
 let lifecycleOwnerId = '';
+let hostCapabilitySnapshot = createHostCapabilitySnapshot({
+  snapshotId: 'root-worker-conservative-fallback',
+  source: 'conservative-fallback',
+  reportedLogicalProcessors: 1,
+  webGpuAvailable: false,
+  crossOriginIsolated: false
+});
+let workerAuthority = resolveWorkerAuthority(hostCapabilitySnapshot, 1);
+let warmupPolicy = normalizeRuntimeWarmupPolicy();
 
 self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
   if (message.data.type === 'load_solution_page') {
@@ -80,9 +105,11 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
   }
   if (message.data.type === 'prewarm_runtime') {
     updateLifecycleOwner(message.data.lifecycleOwnerId);
+    updateRuntimeAuthority(message.data, message.data.workerCount);
     startRuntimePrewarm(
-      message.data.workerCount,
-      message.data.tablebaseRequested ?? false
+      workerAuthority.workersEffective,
+      message.data.tablebaseRequested ?? false,
+      warmupPolicy
     );
     return;
   }
@@ -91,10 +118,15 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
     return;
   }
   updateLifecycleOwner(message.data.lifecycleOwnerId);
+  updateRuntimeAuthority(
+    message.data,
+    message.data.prewarmWorkerCount ?? workerAuthority.workersRequested
+  );
   void runCommandText(
     message.data.commandText ?? '',
-    message.data.prewarmWorkerCount ?? requestedPrewarmWorkerCount,
-    message.data.tablebaseRequested ?? false
+    workerAuthority.workersEffective,
+    message.data.tablebaseRequested ?? false,
+    warmupPolicy
   );
 };
 
@@ -131,13 +163,14 @@ self.addEventListener('unhandledrejection', (event) => {
 async function runCommandText(
   commandText: string,
   prewarmWorkerCount: number,
-  requestedTablebase: boolean
+  requestedTablebase: boolean,
+  requestedWarmupPolicy: RuntimeWarmupPolicy
 ) {
   if (active) {
     postRuntimeFailure(active.id, 'E_WASM_JOB_ALREADY_RUNNING', 'a WASM job is already active');
     return;
   }
-  requestedPrewarmWorkerCount = clampWorkerCountToBrowserHardware(prewarmWorkerCount);
+  requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
   deferredTablebaseRequested = requestedTablebase;
   setTablebaseRequested(requestedTablebase);
   const jobId = nextJobId++;
@@ -155,7 +188,11 @@ async function runCommandText(
     // Entry warmup is opportunistic. A slow optional worker or GPU adapter
     // must never become a correctness barrier for a foreground command.
     interruptIncompleteRuntimePrewarm();
-    wasm = loadedWasm ?? (await loadClearraWasmModule());
+    wasm = loadedWasm ?? (await loadClearraWasmModule(
+      undefined,
+      wasmHostCapabilities(hostCapabilitySnapshot)
+    ));
+    wasm.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
     loadedWasm = wasm;
     await startTablebaseWarmupAfterWasm(wasm);
     if (job.cancelled) {
@@ -165,7 +202,12 @@ async function runCommandText(
       return;
     }
     failureCode = 'E_WASM_EXECUTION_FAILED';
-    job.runner = new ClearraProductJobRunner(wasm, jobId, lifecycleOwnerId);
+    job.runner = new ClearraProductJobRunner(
+      wasm,
+      jobId,
+      lifecycleOwnerId,
+      wasmHostCapabilities(hostCapabilitySnapshot)
+    );
     const terminal = await job.runner.run(commandText, (event) => {
       if (event.event === 'started') return;
       const emitted = withJobId(event, job.id);
@@ -189,13 +231,25 @@ async function runCommandText(
   } finally {
     if (active === job) active = null;
     if (!failClosed) {
-      startRuntimePrewarm(requestedPrewarmWorkerCount, deferredTablebaseRequested);
+      startRuntimePrewarm(
+        requestedPrewarmWorkerCount,
+        deferredTablebaseRequested,
+        requestedWarmupPolicy
+      );
     }
   }
 }
 
-function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebaseRequested) {
-  const boundedWorkerCount = clampWorkerCountToBrowserHardware(workerCount);
+function startRuntimePrewarm(
+  workerCount: number,
+  requestedTablebase = tablebaseRequested,
+  requestedWarmupPolicy: RuntimeWarmupPolicy = warmupPolicy
+) {
+  const normalizedWarmupPolicy = normalizeRuntimeWarmupPolicy(requestedWarmupPolicy);
+  const boundedWorkerCount = resolveWorkerAuthority(
+    hostCapabilitySnapshot,
+    workerCount
+  ).workersEffective;
   const eagerWorkerCount = Math.min(
     boundedWorkerCount,
     MAX_EAGER_PREWARM_TOTAL_WORKERS
@@ -204,30 +258,44 @@ function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebase
   deferredTablebaseRequested = requestedTablebase;
   if (active) return;
   setTablebaseRequested(requestedTablebase);
+  if (
+    !normalizedWarmupPolicy.cpuWarmup &&
+    !normalizedWarmupPolicy.gpuWarmup &&
+    !requestedTablebase
+  ) {
+    postRuntimePrewarmPhase('finished', 0);
+    return;
+  }
   if (runtimePrewarm || completedPrewarmWorkerCount >= eagerWorkerCount) {
     if (loadedWasm) {
-      void startGpuWarmupAfterWasm(loadedWasm);
+      if (normalizedWarmupPolicy.gpuWarmup) void startGpuWarmupAfterWasm(loadedWasm);
       void startTablebaseWarmupAfterWasm(loadedWasm);
     }
     return;
   }
   const generation = ++runtimePrewarmGeneration;
   postRuntimePrewarmPhase('started', eagerWorkerCount);
-  runtimePrewarm = loadClearraWasmModule()
+  runtimePrewarm = loadClearraWasmModule(
+    undefined,
+    wasmHostCapabilities(hostCapabilitySnapshot)
+  )
     .then(async (wasm) => {
       loadedWasm = wasm;
       if (generation !== runtimePrewarmGeneration) return;
-      void startGpuWarmupAfterWasm(wasm);
+      if (normalizedWarmupPolicy.gpuWarmup) void startGpuWarmupAfterWasm(wasm);
       void startTablebaseWarmupAfterWasm(wasm);
-      await withTimeout(
-        prewarmDistributedWorkers(
-          eagerWorkerCount,
-          wasm.compiled_module(),
-          lifecycleOwnerId
-        ),
-        RUNTIME_PREWARM_TIMEOUT_MS,
-        'distributed runtime warmup'
-      );
+      if (normalizedWarmupPolicy.cpuWarmup) {
+        await withTimeout(
+          prewarmDistributedWorkers(
+            eagerWorkerCount,
+            wasm.compiled_module(),
+            lifecycleOwnerId,
+            wasmHostCapabilities(hostCapabilitySnapshot)
+          ),
+          RUNTIME_PREWARM_TIMEOUT_MS,
+          'distributed runtime warmup'
+        );
+      }
       if (generation === runtimePrewarmGeneration) {
         completedPrewarmWorkerCount = eagerWorkerCount;
       }
@@ -244,15 +312,6 @@ function startRuntimePrewarm(workerCount: number, requestedTablebase = tablebase
         postRuntimePrewarmPhase('finished', eagerWorkerCount);
       }
     });
-}
-
-function clampWorkerCountToBrowserHardware(workerCount: number): number {
-  const reportedLogicalProcessors = self.navigator.hardwareConcurrency;
-  const logicalProcessors = Number.isFinite(reportedLogicalProcessors)
-    ? Math.max(1, Math.floor(reportedLogicalProcessors))
-    : 1;
-  const requested = Number.isFinite(workerCount) ? Math.max(1, Math.floor(workerCount)) : 1;
-  return Math.min(requested, logicalProcessors);
 }
 
 function startGpuWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
@@ -310,6 +369,53 @@ function setTablebaseRequested(requested: boolean) {
 
 function updateLifecycleOwner(ownerId: string | undefined) {
   if (ownerId) lifecycleOwnerId = ownerId;
+}
+
+function updateRuntimeAuthority(
+  message: {
+    hostCapabilitySnapshot?: HostCapabilitySnapshot;
+    workerAuthority?: WorkerAuthorityReport;
+    warmupPolicy?: RuntimeWarmupPolicy;
+  },
+  fallbackRequestedWorkers: number
+) {
+  if (isHostCapabilitySnapshot(message.hostCapabilitySnapshot)) {
+    hostCapabilitySnapshot = createHostCapabilitySnapshot({
+      snapshotId: message.hostCapabilitySnapshot.snapshotId,
+      source: message.hostCapabilitySnapshot.source,
+      reportedLogicalProcessors:
+        message.hostCapabilitySnapshot.reportedLogicalProcessors,
+      reportedDeviceMemoryGiB:
+        message.hostCapabilitySnapshot.reportedDeviceMemoryGiB,
+      webGpuAvailable: message.hostCapabilitySnapshot.webGpuAvailable,
+      crossOriginIsolated: message.hostCapabilitySnapshot.crossOriginIsolated
+    });
+  }
+  const requestedReason =
+    message.workerAuthority?.reason === 'reserved-main-thread' ||
+    message.workerAuthority?.reason === 'all-logical-processors'
+      ? message.workerAuthority.reason
+      : 'explicit-request';
+  workerAuthority = resolveWorkerAuthority(
+    hostCapabilitySnapshot,
+    message.workerAuthority?.workersRequested ?? fallbackRequestedWorkers,
+    requestedReason
+  );
+  warmupPolicy = normalizeRuntimeWarmupPolicy(
+    message.warmupPolicy ?? warmupPolicy
+  );
+  loadedWasm?.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
+}
+
+function wasmHostCapabilities(
+  snapshot: HostCapabilitySnapshot
+): ClearraWasmHostCapabilities {
+  return {
+    logicalProcessorCount: snapshot.reportedLogicalProcessors,
+    transferByteCap: snapshot.wasmTransferByteCap,
+    webGpuAvailable: snapshot.webGpuAvailable,
+    crossOriginIsolated: snapshot.crossOriginIsolated
+  };
 }
 
 function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {

@@ -1,6 +1,9 @@
+use clearra_problem::SearchProblem;
+
 use crate::{buildup::BuildUpRunResult, packing::PackingRunResult, service::field};
 
 pub(crate) fn result_count_fields(
+    problem: &SearchProblem,
     packing: &PackingRunResult,
     buildup: &BuildUpRunResult,
     supply_complete: bool,
@@ -13,7 +16,9 @@ pub(crate) fn result_count_fields(
     } else {
         buildup.count_truncated_reason()
     };
+    let normalized_solution_count = buildup.normalized_unique_solution_count();
     vec![
+        field("search_output_policy", problem.output_policy().as_str()),
         field("count_mode", "count-all"),
         field("count_requested", "true"),
         field("count_complete", count_complete),
@@ -38,11 +43,11 @@ pub(crate) fn result_count_fields(
         ),
         field(
             "normalized_unique_solution_count",
-            buildup.normalized_unique_solution_count(),
+            normalized_solution_count,
         ),
         field(
             "actual_normalized_unique_solution_count",
-            buildup.normalized_unique_solution_count(),
+            normalized_solution_count,
         ),
         field(
             "normalized_solution_set_hash",
@@ -52,6 +57,14 @@ pub(crate) fn result_count_fields(
             "actual_normalized_solution_set_hash",
             buildup.normalized_solution_set_hash(),
         ),
+        field("solution_count_calculated", true),
+        field("solution_set_materialized", true),
+        field(
+            "solution_keys_materialized_count",
+            normalized_solution_count,
+        ),
+        field("solution_keys_complete", count_complete),
+        field("solution_page_available", false),
         field("objective_solution_traces", buildup.retained_trace_count()),
         field(
             "objective_unique_solution_traces",

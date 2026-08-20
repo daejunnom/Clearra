@@ -1,7 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
-import type { ClearraWasmSearchReport } from '../wasm/wasmCommandClient';
+import type {
+  ClearraProductBuildIdentity,
+  ClearraWasmSearchReport
+} from '../wasm/wasmCommandClient';
 
 type ClearraDesktopRequestBase = {
   app_request_model: 'clearra-app/AppRequest';
@@ -103,7 +106,18 @@ export type ClearraDesktopRequest =
   | ClearraDesktopSpinFinderRequest
   | ClearraDesktopNonForwardRequest;
 
+export type ClearraDesktopRequestInput = Partial<ClearraDesktopRequestBase> & {
+  command?: ClearraDesktopRequest['command'];
+  initial_combo?: number;
+  initial_b2b?: number;
+  damage_aggregation?: ClearraDesktopDamageRequest['damage_aggregation'];
+  minimum_damage?: number;
+  spin_lines?: ClearraDesktopSpinFinderRequest['spin_lines'];
+  spin_category?: ClearraDesktopSpinFinderRequest['spin_category'];
+};
+
 export type ClearraDesktopAppResponse = {
+  runtime_identity: ClearraProductBuildIdentity;
   status: 'success' | 'validation-failed' | 'unsupported' | 'execution-failed';
   diagnostics: Array<{ code: string; severity: string; message: string }>;
   capability_report: {
@@ -156,7 +170,7 @@ export type ClearraDesktopJobEvent = {
 };
 
 export function buildDesktopAppRequest(
-  input: Partial<ClearraDesktopRequest>
+  input: ClearraDesktopRequestInput
 ): ClearraDesktopRequest {
   const command = input.command ?? 'pc';
   const base: ClearraDesktopRequestBase = {

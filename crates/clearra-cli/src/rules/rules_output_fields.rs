@@ -8,11 +8,11 @@ pub(crate) fn render_rules(
     fields: Vec<(impl Into<String>, String)>,
     format: RenderFormat,
 ) -> CliOutput {
-    CliOutput::success(CommandRenderer::render(
+    CommandRenderer::render_output(
         "rules",
         SummaryRenderContract::render_fields(fields),
         format,
-    ))
+    )
 }
 
 pub(crate) fn capability_fields(
@@ -51,10 +51,10 @@ pub(crate) fn builtin_kick_profile(profile_id: &str) -> Option<KickTableProfile>
     match KickTableProfileId::parse(profile_id)? {
         KickTableProfileId::Srs90 => Some(SrsKicks::profile()),
         KickTableProfileId::SrsPlus => Some(SrsKicks::srs_plus_profile()),
+        KickTableProfileId::SrsX => Some(SrsKicks::srs_x_profile()),
         KickTableProfileId::Jstris180 => Some(SrsKicks::jstris_180_profile()),
         KickTableProfileId::NoKick => Some(NoKick::profile()),
-        KickTableProfileId::SrsX
-        | KickTableProfileId::Asc
+        KickTableProfileId::Asc
         | KickTableProfileId::Ars
         | KickTableProfileId::Imported
         | KickTableProfileId::Custom => None,

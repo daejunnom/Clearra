@@ -102,10 +102,13 @@ fn geometry_for(problem: &SearchProblem, catalog: &GeometryCatalog) -> GeometryS
         .materialized_universe()
         .expect("materialized standard-bag universe");
     let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
-    let hold_enabled =
-        problem.supply().hold_enabled() && !problem.supply().projects_unplaced_lookahead();
-    let family =
-        universe.packing_multiset_family(target_piece_count, problem.initial_hold(), hold_enabled);
+    let hold_enabled = problem.supply().hold_enabled();
+    let family = universe.packing_multiset_family_for_execution(
+        target_piece_count,
+        problem.initial_hold(),
+        hold_enabled,
+        super::packing_hold_projection(problem),
+    );
     if target_piece_count == 10 {
         assert_eq!(family.groups().len(), if hold_enabled { 140 } else { 35 });
         assert!(family.groups().iter().all(|group| {

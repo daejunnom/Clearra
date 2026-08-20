@@ -13,6 +13,7 @@ bitmap-render = ["dep:clearra-render"]
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-coverage = { path = "../clearra-coverage" }
 clearra-fumen = { path = "../clearra-fumen" }
+clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
 clearra-render = { path = "../clearra-render", optional = true }
 clearra-replay = { path = "../clearra-replay" }
 

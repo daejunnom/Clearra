@@ -38,6 +38,7 @@ struct WasmAbiState {
     distributed_verifier: Option<WasmDistributedVerifierRuntime>,
     distributed_verifier_partial_available: bool,
     distributed_verifier_pending_work: bool,
+    distributed_verifier_last_candidate_count: Option<AbiI32Count>,
     tiling_solution_page_store: Option<Arc<TilingSolutionPageStore>>,
     gpu_warmup: Option<GpuWarmupState>,
     gpu_warmup_generation: u64,
@@ -48,6 +49,62 @@ struct WasmAbiState {
 enum GpuWarmupState {
     Pending,
     Ready(GpuSearchWarmupReport),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AbiU32Count {
+    legacy_value: u32,
+    exact: bool,
+}
+
+impl AbiU32Count {
+    fn project(value: usize) -> Self {
+        match u32::try_from(value) {
+            Ok(value) => Self {
+                legacy_value: value,
+                exact: true,
+            },
+            Err(_) => Self {
+                legacy_value: u32::MAX,
+                exact: false,
+            },
+        }
+    }
+
+    const fn legacy_or(projected: Option<Self>, unavailable_value: u32) -> u32 {
+        match projected {
+            Some(projected) => projected.legacy_value,
+            None => unavailable_value,
+        }
+    }
+
+    const fn exact_or_false(projected: Option<Self>) -> u32 {
+        match projected {
+            Some(projected) => projected.exact as u32,
+            None => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AbiI32Count {
+    legacy_value: i32,
+    exact: bool,
+}
+
+impl AbiI32Count {
+    fn project(value: usize) -> Self {
+        match i32::try_from(value) {
+            Ok(value) => Self {
+                legacy_value: value,
+                exact: true,
+            },
+            Err(_) => Self {
+                legacy_value: i32::MAX,
+                exact: false,
+            },
+        }
+    }
 }
 
 impl WasmAbiState {
@@ -81,11 +138,70 @@ impl WasmAbiState {
     fn set_output_bytes(&mut self, output: Vec<u8>) {
         self.output = output;
     }
+
+    fn reset_distributed_state(&mut self) {
+        self.distributed_coordinator = None;
+        self.distributed_verifier = None;
+        self.distributed_verifier_partial_available = false;
+        self.distributed_verifier_pending_work = false;
+        self.distributed_verifier_last_candidate_count = None;
+
+        // `clear()` keeps the allocation alive. A completed distributed lifecycle must release
+        // the transfer allocation back to the WASM allocator so one large shard does not become
+        // the permanent retained baseline for later jobs.
+        self.transfer_input = Vec::new();
+    }
+
+    fn begin_distributed_verifier(&mut self) {
+        self.distributed_verifier_partial_available = false;
+        self.distributed_verifier_pending_work = false;
+        self.distributed_verifier_last_candidate_count = None;
+    }
+
+    fn record_distributed_verifier_candidate_count(&mut self, value: usize) -> i32 {
+        let projected = AbiI32Count::project(value);
+        self.distributed_verifier_last_candidate_count = Some(projected);
+        projected.legacy_value
+    }
 }
 
 thread_local! {
     static ABI_STATE: RefCell<WasmAbiState> = RefCell::new(WasmAbiState::default());
     static LAST_PANIC: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+fn distributed_count(
+    read: impl FnOnce(&WasmDistributedCoordinator) -> usize,
+) -> Option<AbiU32Count> {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .map(|coordinator| AbiU32Count::project(read(coordinator)))
+    })
+}
+
+fn verifier_progress_count(
+    read: impl FnOnce(&WasmDistributedVerifierRuntime) -> usize,
+) -> Option<AbiU32Count> {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_verifier
+            .as_ref()
+            .map(|verifier| AbiU32Count::project(read(verifier)))
+    })
+}
+
+fn tiling_solution_count() -> Option<AbiU32Count> {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .tiling_solution_page_store
+            .as_ref()
+            .map(|store| AbiU32Count::project(store.len()))
+    })
 }
 
 static INSTALL_PANIC_HOOK: Once = Once::new();
@@ -364,6 +480,25 @@ pub extern "C" fn clearra_wasm_distributed_worker_count() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_worker_count_available() -> u32 {
+    // The legacy contract defines a serial/default worker count of one even when there is no
+    // coordinator, so this count is always available.
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_worker_count_exact() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_none_or(|coordinator| u32::try_from(coordinator.worker_count()).is_ok())
+            .into()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verification_required() -> u32 {
     ABI_STATE.with(|state| {
         state
@@ -439,54 +574,53 @@ pub extern "C" fn clearra_wasm_distributed_worker_initialization_deferred() -> u
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_geometry_nodes() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().geometry_nodes)
-            })
-    })
+    AbiU32Count::legacy_or(
+        distributed_count(|value| value.progress().geometry_nodes),
+        0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_available() -> u32 {
+    ABI_STATE.with(|state| state.borrow().distributed_coordinator.is_some().into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_geometry_nodes_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().geometry_nodes))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_candidate_count() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().candidates)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().candidates), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_candidate_count_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().candidates))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_build_nodes() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().build_nodes)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().build_nodes), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_build_nodes_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().build_nodes))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_coverage_checks() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().coverage_checks)
-            })
-    })
+    AbiU32Count::legacy_or(
+        distributed_count(|value| value.progress().coverage_checks),
+        0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_coverage_checks_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().coverage_checks))
 }
 
 #[no_mangle]
@@ -499,6 +633,12 @@ pub extern "C" fn clearra_wasm_distributed_progress_candidate_family_count_avail
             .is_some_and(|coordinator| coordinator.progress().candidate_family_count.is_some())
             .into()
     })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_candidate_family_count_exact() -> u32 {
+    // All four u32 words are exported, so every available u128 value is represented exactly.
+    clearra_wasm_distributed_progress_candidate_family_count_available()
 }
 
 #[no_mangle]
@@ -517,80 +657,67 @@ pub extern "C" fn clearra_wasm_distributed_progress_candidate_family_count_word(
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_pass_index() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().pass_index)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().pass_index), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_pass_index_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().pass_index))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_pass_count() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(1, |coordinator| {
-                progress_u32(coordinator.progress().pass_count.max(1))
-            })
-    })
+    AbiU32Count::legacy_or(
+        distributed_count(|value| value.progress().pass_count.max(1)),
+        1,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_pass_count_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| {
+        value.progress().pass_count.max(1)
+    }))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_layer_index() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().layer_index)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().layer_index), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_index_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().layer_index))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_layer_count() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().layer_count)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().layer_count), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_count_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().layer_count))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_layer_done() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().layer_done)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().layer_done), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_done_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().layer_done))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_progress_layer_total() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_coordinator
-            .as_ref()
-            .map_or(0, |coordinator| {
-                progress_u32(coordinator.progress().layer_total)
-            })
-    })
+    AbiU32Count::legacy_or(distributed_count(|value| value.progress().layer_total), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_progress_layer_total_exact() -> u32 {
+    AbiU32Count::exact_or_false(distributed_count(|value| value.progress().layer_total))
 }
 
 #[no_mangle]
@@ -685,14 +812,17 @@ pub extern "C" fn clearra_wasm_distributed_finish(job_id: u32, workers_used: u32
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_tiling_solution_count() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .tiling_solution_page_store
-            .as_ref()
-            .and_then(|store| u32::try_from(store.len()).ok())
-            .unwrap_or(u32::MAX)
-    })
+    AbiU32Count::legacy_or(tiling_solution_count(), u32::MAX)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tiling_solution_count_available() -> u32 {
+    ABI_STATE.with(|state| state.borrow().tiling_solution_page_store.is_some().into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_tiling_solution_count_exact() -> u32 {
+    AbiU32Count::exact_or_false(tiling_solution_count())
 }
 
 #[no_mangle]
@@ -751,12 +881,7 @@ pub extern "C" fn clearra_wasm_distributed_cancel() -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_reset() -> i32 {
     ABI_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        state.distributed_coordinator = None;
-        state.distributed_verifier = None;
-        state.distributed_verifier_partial_available = false;
-        state.distributed_verifier_pending_work = false;
-        state.transfer_input.clear();
+        state.borrow_mut().reset_distributed_state();
         ABI_OK
     })
 }
@@ -766,6 +891,7 @@ pub extern "C" fn clearra_wasm_distributed_verifier_start() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.output.clear();
+        state.begin_distributed_verifier();
         let command_text = match std::str::from_utf8(&state.input) {
             Ok(command_text) => command_text.to_owned(),
             Err(error) => {
@@ -779,8 +905,6 @@ pub extern "C" fn clearra_wasm_distributed_verifier_start() -> i32 {
         ) {
             Ok(verifier) => {
                 state.distributed_verifier = Some(verifier);
-                state.distributed_verifier_partial_available = false;
-                state.distributed_verifier_pending_work = false;
                 ABI_OK
             }
             Err(error) => {
@@ -796,6 +920,7 @@ pub extern "C" fn clearra_wasm_distributed_forward_verifier_start() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.output.clear();
+        state.begin_distributed_verifier();
         let input = std::mem::take(&mut state.transfer_input);
         let outcome = WasmDistributedVerifierRuntime::prepare_forward(
             state.runtime.command_runtime(),
@@ -805,8 +930,6 @@ pub extern "C" fn clearra_wasm_distributed_forward_verifier_start() -> i32 {
         match outcome {
             Ok(verifier) => {
                 state.distributed_verifier = Some(verifier);
-                state.distributed_verifier_partial_available = false;
-                state.distributed_verifier_pending_work = false;
                 ABI_OK
             }
             Err(error) => {
@@ -821,6 +944,7 @@ pub extern "C" fn clearra_wasm_distributed_forward_verifier_start() -> i32 {
 pub extern "C" fn clearra_wasm_distributed_verifier_consume() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        state.distributed_verifier_last_candidate_count = None;
         let input = std::mem::take(&mut state.transfer_input);
         let outcome = state
             .distributed_verifier
@@ -842,7 +966,7 @@ pub extern "C" fn clearra_wasm_distributed_verifier_consume() -> i32 {
                 if let Some(partial) = consumed.partial {
                     state.set_output_bytes(partial);
                 }
-                i32::try_from(consumed.candidate_count).unwrap_or(i32::MAX)
+                state.record_distributed_verifier_candidate_count(consumed.candidate_count)
             }
             Err((code, message)) => {
                 state.set_error(code, message);
@@ -863,9 +987,32 @@ pub extern "C" fn clearra_wasm_distributed_verifier_pending_work() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_last_candidate_count_available() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_verifier_last_candidate_count
+            .is_some()
+            .into()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_last_candidate_count_exact() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_verifier_last_candidate_count
+            .is_some_and(|count| count.exact)
+            .into()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_continue() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        state.distributed_verifier_last_candidate_count = None;
         let outcome = state
             .distributed_verifier
             .as_mut()
@@ -885,7 +1032,7 @@ pub extern "C" fn clearra_wasm_distributed_verifier_continue() -> i32 {
                 if let Some(partial) = consumed.partial {
                     state.set_output_bytes(partial);
                 }
-                i32::try_from(consumed.candidate_count).unwrap_or(i32::MAX)
+                state.record_distributed_verifier_candidate_count(consumed.candidate_count)
             }
             Err((code, message)) => {
                 state.set_error(code, message);
@@ -897,37 +1044,50 @@ pub extern "C" fn clearra_wasm_distributed_verifier_continue() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_progress_candidate_count() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_verifier
-            .as_ref()
-            .map_or(0, |verifier| progress_u32(verifier.progress().candidates))
-    })
+    AbiU32Count::legacy_or(
+        verifier_progress_count(|value| value.progress().candidates),
+        0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_available() -> u32 {
+    ABI_STATE.with(|state| state.borrow().distributed_verifier.is_some().into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_candidate_count_exact() -> u32 {
+    AbiU32Count::exact_or_false(verifier_progress_count(|value| value.progress().candidates))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_progress_build_nodes() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_verifier
-            .as_ref()
-            .map_or(0, |verifier| progress_u32(verifier.progress().build_nodes))
-    })
+    AbiU32Count::legacy_or(
+        verifier_progress_count(|value| value.progress().build_nodes),
+        0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_build_nodes_exact() -> u32 {
+    AbiU32Count::exact_or_false(verifier_progress_count(|value| {
+        value.progress().build_nodes
+    }))
 }
 
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_progress_coverage_checks() -> u32 {
-    ABI_STATE.with(|state| {
-        state
-            .borrow()
-            .distributed_verifier
-            .as_ref()
-            .map_or(0, |verifier| {
-                progress_u32(verifier.progress().coverage_checks)
-            })
-    })
+    AbiU32Count::legacy_or(
+        verifier_progress_count(|value| value.progress().coverage_checks),
+        0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_coverage_checks_exact() -> u32 {
+    AbiU32Count::exact_or_false(verifier_progress_count(|value| {
+        value.progress().coverage_checks
+    }))
 }
 
 #[no_mangle]
@@ -947,6 +1107,7 @@ pub extern "C" fn clearra_wasm_distributed_verifier_finish() -> i32 {
                 state.distributed_verifier = None;
                 state.distributed_verifier_partial_available = false;
                 state.distributed_verifier_pending_work = false;
+                state.distributed_verifier_last_candidate_count = None;
                 ABI_OK
             }
             Err(error) => {
@@ -955,10 +1116,6 @@ pub extern "C" fn clearra_wasm_distributed_verifier_finish() -> i32 {
             }
         }
     })
-}
-
-fn progress_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn u128_word(value: u128, word_index: u32) -> u32 {
@@ -1072,6 +1229,11 @@ pub extern "C" fn clearra_wasm_output_len() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_output_len_exact() -> u32 {
+    ABI_STATE.with(|state| u32::try_from(state.borrow().output.len()).is_ok().into())
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_last_panic_ptr() -> u32 {
     LAST_PANIC.with(|last| last.borrow().as_ptr() as usize as u32)
 }
@@ -1079,6 +1241,11 @@ pub extern "C" fn clearra_wasm_last_panic_ptr() -> u32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_last_panic_len() -> u32 {
     LAST_PANIC.with(|last| last.borrow().len().min(u32::MAX as usize) as u32)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_last_panic_len_exact() -> u32 {
+    LAST_PANIC.with(|last| u32::try_from(last.borrow().len()).is_ok().into())
 }
 
 #[cfg(feature = "stage-profiling")]
@@ -1162,5 +1329,127 @@ mod tests {
         assert_ne!(cancelled_generation, active_generation);
         assert!(!state.accepts_gpu_warmup_completion(cancelled_generation));
         assert!(state.accepts_gpu_warmup_completion(active_generation));
+    }
+
+    #[test]
+    fn optional_u32_count_distinguishes_absence_exact_maximum_and_overflow() {
+        let unavailable = None;
+        assert_eq!(AbiU32Count::legacy_or(unavailable, u32::MAX), u32::MAX);
+        assert_eq!(AbiU32Count::exact_or_false(unavailable), 0);
+
+        for value in [0, u32::MAX - 1, u32::MAX] {
+            let exact = Some(AbiU32Count::project(value as usize));
+            assert_eq!(AbiU32Count::legacy_or(exact, u32::MAX), value);
+            assert_eq!(AbiU32Count::exact_or_false(exact), 1);
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let overflow = Some(AbiU32Count::project(u32::MAX as usize + 1));
+            assert_eq!(AbiU32Count::legacy_or(overflow, 0), u32::MAX);
+            assert_eq!(AbiU32Count::exact_or_false(overflow), 0);
+        }
+    }
+
+    #[test]
+    fn verifier_i32_count_distinguishes_exact_maximum_and_saturation() {
+        for value in [0, i32::MAX - 1, i32::MAX] {
+            let exact = AbiI32Count::project(value as usize);
+            assert_eq!(exact.legacy_value, value);
+            assert!(exact.exact);
+        }
+
+        let overflow = AbiI32Count::project(i32::MAX as usize + 1);
+        assert_eq!(overflow.legacy_value, i32::MAX);
+        assert!(!overflow.exact);
+    }
+
+    #[test]
+    fn distributed_reset_releases_transfer_capacity_on_every_lifecycle() {
+        for byte_len in [2 * 1024 * 1024, 257, 4 * 1024 * 1024] {
+            ABI_STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                state.transfer_input = Vec::with_capacity(byte_len);
+                state.transfer_input.resize(byte_len, 0x5a);
+                state.distributed_verifier_partial_available = true;
+                state.distributed_verifier_pending_work = true;
+                state.record_distributed_verifier_candidate_count(7);
+                assert!(state.transfer_input.capacity() >= byte_len);
+            });
+
+            assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+            ABI_STATE.with(|state| {
+                let state = state.borrow();
+                assert!(state.transfer_input.is_empty());
+                assert_eq!(state.transfer_input.capacity(), 0);
+                assert!(!state.distributed_verifier_partial_available);
+                assert!(!state.distributed_verifier_pending_work);
+                assert!(state.distributed_verifier_last_candidate_count.is_none());
+            });
+
+            assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+            ABI_STATE.with(|state| assert_eq!(state.borrow().transfer_input.capacity(), 0));
+        }
+    }
+
+    #[test]
+    fn verifier_candidate_count_metadata_is_cleared_by_reset() {
+        let mut state = WasmAbiState::default();
+
+        assert_eq!(
+            state.record_distributed_verifier_candidate_count(i32::MAX as usize),
+            i32::MAX
+        );
+        assert!(state
+            .distributed_verifier_last_candidate_count
+            .is_some_and(|count| count.exact));
+
+        assert_eq!(
+            state.record_distributed_verifier_candidate_count(i32::MAX as usize + 1),
+            i32::MAX
+        );
+        assert!(state
+            .distributed_verifier_last_candidate_count
+            .is_some_and(|count| !count.exact));
+
+        state.reset_distributed_state();
+        assert!(state.distributed_verifier_last_candidate_count.is_none());
+    }
+
+    #[test]
+    fn exported_count_metadata_distinguishes_unavailable_legacy_defaults() {
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+
+        assert_eq!(clearra_wasm_distributed_worker_count(), 1);
+        assert_eq!(clearra_wasm_distributed_worker_count_available(), 1);
+        assert_eq!(clearra_wasm_distributed_worker_count_exact(), 1);
+
+        assert_eq!(clearra_wasm_distributed_progress_available(), 0);
+        assert_eq!(clearra_wasm_distributed_progress_candidate_count(), 0);
+        assert_eq!(clearra_wasm_distributed_progress_candidate_count_exact(), 0);
+        assert_eq!(clearra_wasm_distributed_progress_pass_count(), 1);
+        assert_eq!(clearra_wasm_distributed_progress_pass_count_exact(), 0);
+
+        assert_eq!(clearra_wasm_tiling_solution_count(), u32::MAX);
+        assert_eq!(clearra_wasm_tiling_solution_count_available(), 0);
+        assert_eq!(clearra_wasm_tiling_solution_count_exact(), 0);
+
+        assert_eq!(
+            clearra_wasm_distributed_verifier_last_candidate_count_available(),
+            0
+        );
+        assert_eq!(
+            clearra_wasm_distributed_verifier_last_candidate_count_exact(),
+            0
+        );
+        assert_eq!(clearra_wasm_distributed_verifier_progress_available(), 0);
+        assert_eq!(
+            clearra_wasm_distributed_verifier_progress_candidate_count(),
+            0
+        );
+        assert_eq!(
+            clearra_wasm_distributed_verifier_progress_candidate_count_exact(),
+            0
+        );
     }
 }

@@ -7,7 +7,9 @@
     "profile_0_id=srs",
     "profile_0_kick_profile=srs",
     "profile_3_id=srs-x",
-    "profile_3_unsupported_backend_reason=srs_x_profile_requires_imported_kick_table",
+    "profile_3_search_backend_supported=true",
+    "profile_3_c_compact_descriptor_ready=true",
+    "profile_3_unsupported_backend_reason=none",
     "profile_4_id=jstris-180",
     "profile_4_unsupported_backend_reason=none"
   ]

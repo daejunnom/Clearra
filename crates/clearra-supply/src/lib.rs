@@ -14,9 +14,10 @@ pub mod queue;
 
 pub use pattern_universe::{
     reachable_bag_multisets, BagHoldBranchKind, BagMultisetProjectionError, BagPlacementAutomaton,
-    BagPlacementState, BagSupplyBranch, MaterializedPatternUniverse, PackingMultisetFamily,
-    PackingMultisetGroup, PackingPatternMembershipKind, PatternPiecePositionIndex,
-    PatternPiecePositionIndexError, PatternSequenceReader, PatternUniverseMaterializationError,
-    PatternUniverseMaterializer, PieceMultisetKey, ProbabilityWeight,
+    BagPlacementState, BagSupplyBranch, MaterializedPatternUniverse, PackingHoldProjection,
+    PackingMultisetFamily, PackingMultisetGroup, PackingPatternMembershipKind,
+    PatternPiecePositionIndex, PatternPiecePositionIndexError, PatternSequenceReader,
+    PatternUniverseMaterializationError, PatternUniverseMaterializer, PieceMultisetKey,
+    ProbabilityWeight,
 };
 pub use queue::queue_observation_policy::QueueObservationPolicy;

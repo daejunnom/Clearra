@@ -41,6 +41,7 @@
   export let capturingAction: PlayerBindingAction | null = null;
   export let initialFieldText = '';
   export let fieldInvalid = false;
+  export let fieldFailureKey: WorkspaceMessageKey = 'playerImportInvalid';
   export let disabled = false;
   let garbageLinesValid = true;
   let initialQueueText = formatPlayerInitialQueue(settings.initialQueue);
@@ -734,7 +735,7 @@
       ></textarea>
       {#if fieldInvalid}
         <p id="player-field-error" class="field-error" role="alert">
-          {label('playerImportInvalid')}
+          {label(fieldFailureKey)}
         </p>
       {/if}
       <div class="field-actions">

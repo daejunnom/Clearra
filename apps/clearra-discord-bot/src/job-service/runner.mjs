@@ -7,6 +7,7 @@ import {
   prepareClearraArguments,
   searchTimeoutMsForArguments,
 } from "../clearra/command.mjs";
+import { productBuildIdentityMatchesRuntime } from "./runtime-identity.mjs";
 
 export class ClearraCommandRunner {
   constructor(config, options = {}) {
@@ -36,6 +37,15 @@ export class ClearraCommandRunner {
         payload?.finesse_report?.metric !== "inputs"
       ) {
         throw capabilityError();
+      }
+      if (
+        this.config.runtimeIdentity &&
+        !productBuildIdentityMatchesRuntime(
+          payload?.runtime_identity,
+          this.config.runtimeIdentity,
+        )
+      ) {
+        throw executableIdentityError();
       }
     }
   }
@@ -223,6 +233,12 @@ function executeCapabilityProbe(execFile, config, arguments_) {
 
 function capabilityError() {
   return new Error("Clearra engine capability check failed.");
+}
+
+function executableIdentityError() {
+  return new Error(
+    "Clearra executable identity does not match the configured job runtime identity.",
+  );
 }
 
 function expectedVcpuEnvironment(value) {

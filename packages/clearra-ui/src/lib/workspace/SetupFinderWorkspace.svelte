@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { getContext, onDestroy, onMount } from 'svelte';
 
   import {
     cancelJob as cancelDesktopDetailJob,
@@ -19,15 +19,21 @@
   } from '../stores';
 
   import {
+    CPU_ONLY_RUNTIME_WARMUP_POLICY,
+    HOST_CAPABILITY_SNAPSHOT_CONTEXT,
+    automaticWorkerAuthority,
     buildWasmCommandRequest,
     clearWasmTerminalResult,
     ensureWasmWorkerOwnerId,
     postRunCommand,
+    resolveWorkerAuthority,
+    sharedBrowserHostCapabilitySnapshot,
     terminateOwnedWasmWorker,
     updateWasmCommandText,
     wasmWorkerState,
     WasmTerminalWorkerController,
-    type ClearraWasmWorkerEvent
+    type ClearraWasmWorkerEvent,
+    type HostCapabilitySnapshot
   } from '../wasm';
   import SetupFinderControls from './SetupFinderControls.svelte';
   import SetupFinderResult from './SetupFinderResult.svelte';
@@ -51,15 +57,17 @@
     type WorkspaceLanguage
   } from './workspaceI18n';
   import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
-  import {
-    defaultBrowserWorkerCount,
-    defaultWorkerCount
-  } from './solverWorkspaceModel';
 
   export let workerFactory: (() => Worker) | null = null;
   export let runtime: 'web' | 'desktop' = 'web';
 
-  const workerController = new WasmTerminalWorkerController(workerFactory);
+  const hostCapabilitySnapshot =
+    getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
+    sharedBrowserHostCapabilitySnapshot();
+  const workerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
   let request = createDefaultSetupFinderRequest();
   let resultRequest: SetupFinderRequest | null = null;
   let pathDetails: Record<string, SetupPathDetailState> = {};
@@ -77,6 +85,10 @@
   let prewarmWorkerCount = 1;
 
   $: workerController.setWorkerFactory(workerFactory);
+  $: workerAuthority = automaticWorkerAuthority(
+    hostCapabilitySnapshot,
+    request.useAllLogicalProcessors
+  );
   $: runtimeView = runtime === 'web'
     ? workspaceViewFromWasm($wasmWorkerState)
     : workspaceViewFromDesktop($desktopJobState);
@@ -91,7 +103,17 @@
       localStorage.getItem('clearra-language') ?? navigator.language
     );
     prewarmWorkerCount = automaticWorkerCount(request.useAllLogicalProcessors);
-    if (runtime === 'web') workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
+    if (runtime === 'web') {
+      workerController.prewarm(
+        prewarmWorkerCount,
+        request.tablebaseEnabled,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
+    }
     else resumeDesktopJobPolling();
     const handlePageHide = () => disposeWorkspace();
     window.addEventListener('pagehide', handlePageHide);
@@ -128,14 +150,23 @@
       ? next
       : { ...next, allowPostCycleBorrow: false };
     if (runtime === 'web' && (tablebaseChanged || useAllChanged)) {
-      workerController.prewarm(prewarmWorkerCount, request.tablebaseEnabled);
+      workerController.prewarm(
+        prewarmWorkerCount,
+        request.tablebaseEnabled,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(
+          hostCapabilitySnapshot,
+          request.useAllLogicalProcessors
+        )
+      );
     }
   }
 
   function automaticWorkerCount(useAllLogicalProcessors: boolean): number {
-    return runtime === 'web'
-      ? defaultBrowserWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors)
-      : defaultWorkerCount(navigator.hardwareConcurrency, useAllLogicalProcessors);
+    return automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      useAllLogicalProcessors
+    ).workersEffective;
   }
 
   async function run() {
@@ -332,7 +363,12 @@
         }),
         1,
         resultRequest.tablebaseEnabled,
-        ensureWasmWorkerOwnerId(worker)
+        ensureWasmWorkerOwnerId(worker),
+        {
+          hostCapabilitySnapshot,
+          workerAuthority: resolveWorkerAuthority(hostCapabilitySnapshot, 1),
+          warmupPolicy: CPU_ONLY_RUNTIME_WARMUP_POLICY
+        }
       );
     } catch (error) {
       updatePathDetail(key, {
@@ -596,6 +632,7 @@
     {validationCodes}
     tablebaseStatus={runtime === 'web' ? $wasmWorkerState.tablebaseWarmup.status : 'disabled'}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
+    {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />
   <SetupFinderResult

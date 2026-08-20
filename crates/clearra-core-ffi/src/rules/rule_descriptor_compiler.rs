@@ -1,4 +1,8 @@
 use clearra_problem::SearchProblem;
+use clearra_rules::{
+    kicks::{SrsKicks, VerifiedKickTableProfile},
+    profile::rule_profile::RuleProfileId,
+};
 
 use crate::problem::{CRuleProfileDescriptor, FfiProblemError};
 
@@ -30,6 +34,16 @@ impl RuleDescriptorCompiler {
 
         if let Some(profile) = problem.rule_profile().verified_kick_profile() {
             return compile_verified_profile(base, rule, profile);
+        }
+
+        // Core C intentionally has no second, hand-maintained SRS-X table.
+        // Project the canonical Rust table through the same verified-profile
+        // ABI used by imported profiles so the public built-in catalog and the
+        // native executor share one source of truth.
+        if rule.id() == RuleProfileId::SrsX {
+            let profile = VerifiedKickTableProfile::try_new(SrsKicks::srs_x_profile())
+                .map_err(|_| FfiProblemError::UnverifiedRuleProfileRejected { rule_profile_id })?;
+            return compile_verified_profile(base, rule, &profile);
         }
 
         compile_builtin_profile(base, rule)

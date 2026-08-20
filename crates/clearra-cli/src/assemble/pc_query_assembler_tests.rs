@@ -56,6 +56,24 @@ fn preserves_visible_seven_policy_in_pc_query() {
 }
 
 #[test]
+fn rejects_visible_seven_minimum_cover_before_query_execution() {
+    let args = PcArgs::new(4)
+        .with_queue_observation_policy(
+            clearra_supply::queue::queue_observation_policy::QueueObservationPolicy::VisibleSeven,
+        )
+        .with_objective("minimum-cover");
+
+    let error = PcQueryAssembler::assemble(&args)
+        .expect_err("visible-7 minimum-cover must fail closed at native CLI assembly");
+    assert_eq!(
+        error,
+        PcQueryAssemblyError::SearchContract(
+            clearra_pc_graph::request::PcSearchContractError::VisibleSevenMinimumCoverUnsupported
+        )
+    );
+}
+
+#[test]
 fn rejects_unsupported_even_target() {
     assert_eq!(
         PcQueryAssembler::assemble(&PcArgs::new(8)),

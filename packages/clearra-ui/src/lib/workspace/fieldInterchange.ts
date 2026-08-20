@@ -5,6 +5,11 @@ import {
   type Ctk3AsyncEncoderOptions,
   type Ctk3DecodeWorkerFactory,
   decodeCtk3,
+  decodeFumenWithinPageLimit,
+  escapeFumenComment,
+  FUMEN_MAX_PAGES,
+  FUMEN_MAX_SOURCE_CHARACTERS,
+  inspectFumenPageCount,
   encodeCtk3Async,
   encodeCtk3,
   isCtk3,
@@ -49,12 +54,19 @@ const CLEARA_HEIGHT = 24;
 const FUMEN_WORKER_THRESHOLD = 256;
 const FUMEN_PATTERN = /v11(?:0|5)@[A-Za-z0-9+/?]+/;
 
+export {
+  decodeFumenWithinPageLimit,
+  FUMEN_MAX_PAGES,
+  FUMEN_MAX_SOURCE_CHARACTERS,
+  inspectFumenPageCount
+};
+
 export function decodeFieldDocument(input: string): Ctk3Document {
   const raw = input.trim();
   if (isCtk3(raw)) {
     return decodeCtk3(raw);
   }
-  const source = decodeInputUrl(raw);
+  const source = decodeBoundedFumenInputUrl(raw);
   if (isCtk3(source)) return decodeCtk3(source);
 
   const legacy = extractLegacyCtk(source);
@@ -69,8 +81,14 @@ export function decodeFieldDocument(input: string): Ctk3Document {
 
   const fumen = source.match(FUMEN_PATTERN)?.[0];
   if (!fumen) throw new Error('No Fumen or CTK value was found.');
-  const pages = decoder.decode(fumen);
+  if (fumen.length > FUMEN_MAX_SOURCE_CHARACTERS) {
+    throw new Error('fumen-input-too-large');
+  }
+  const pages = decodeFumenWithinPageLimit(fumen, (bounded) => decoder.decode(bounded));
   if (!pages.length) throw new Error('Fumen has no pages.');
+  if (pages.length > FUMEN_MAX_PAGES) {
+    throw new Error('fumen-page-limit');
+  }
   return {
     width: WIDTH,
     pages: pages.map((page) => {
@@ -118,7 +136,7 @@ export function openFieldDocument(
   options: OpenFieldDocumentOptions = {}
 ): FieldDocumentReader {
   const raw = input.trim();
-  const source = isCtk3(raw) ? raw : decodeInputUrl(raw);
+  const source = isCtk3(raw) ? raw : decodeBoundedFumenInputUrl(raw);
   if (isCtk3(source)) {
     const reader = openCtk3DocumentAsync(source, options);
     return ctkReader(source, reader);
@@ -134,8 +152,18 @@ export function encodeFieldDocument(
   if (document.width !== WIDTH || document.pages.length === 0) {
     throw new Error('Fumen requires a non-empty 10-column document.');
   }
-  const pages = document.pages.map((page, index) => {
-    const normalized = normalizeFumenPage(page, document.width);
+  if (document.pages.length > FUMEN_MAX_PAGES) {
+    throw new Error('fumen-page-limit');
+  }
+  const normalizedPages = document.pages.map((page) =>
+    normalizeFumenPage(page, document.width)
+  );
+  for (const normalized of normalizedPages) {
+    if (normalized.comment !== undefined) {
+      escapeFumenComment(normalized.comment);
+    }
+  }
+  const pages = normalizedPages.map((normalized, index) => {
     const field = Field.create(
       fumenFieldText(normalized.cells, normalized.height),
       normalized.garbage ? fumenRowText(normalized.garbage) : undefined
@@ -194,7 +222,7 @@ export function decodeFieldInput(
     throw new Error('Field height limit must be between one and 24 rows.');
   }
   const raw = input.trim();
-  const source = isCtk3(raw) ? raw : decodeInputUrl(raw);
+  const source = isCtk3(raw) ? raw : decodeBoundedFumenInputUrl(raw);
   let width: number;
   let page: Ctk3Page | undefined;
   if (isCtk3(source)) {
@@ -242,6 +270,17 @@ function decodeInputUrl(input: string): string {
   } catch {
     return source;
   }
+}
+
+function decodeBoundedFumenInputUrl(input: string): string {
+  if (input.length > FUMEN_MAX_SOURCE_CHARACTERS) {
+    throw new Error('fumen-input-too-large');
+  }
+  const source = decodeInputUrl(input);
+  if (source.length > FUMEN_MAX_SOURCE_CHARACTERS) {
+    throw new Error('fumen-input-too-large');
+  }
+  return source;
 }
 
 function extractLegacyCtk(source: string): string | null {

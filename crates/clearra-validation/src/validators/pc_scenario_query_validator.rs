@@ -12,6 +12,7 @@ use crate::{
         objective_validator::validate_objective_kind,
         pc_execution_policy_validator::validate_pc_execution_policy,
         pc_execution_policy_validator::PcBackendCompatibilityContext,
+        pc_query_validator::validate_observation_objective_contract,
         piece_set_validator::validate_piece_set_profile,
         rule_validator::validate_rule_profile_with_verified_kick_profile,
         supply_validator::{
@@ -33,6 +34,10 @@ pub fn validate_pc_scenario_query(query: &PcScenarioQuery) -> DiagnosticReport {
         query.verified_kick_profile(),
     ));
     report.append(validate_objective_kind(query.objective().kind()));
+    report.append(validate_observation_objective_contract(
+        query.queue_observation_policy(),
+        query.objective().kind(),
+    ));
     report.append(validate_pc_execution_policy(
         query.execution_policy(),
         PcBackendCompatibilityContext::scenario(query.count_policy()),

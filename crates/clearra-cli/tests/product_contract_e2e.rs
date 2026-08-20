@@ -407,8 +407,6 @@ mod case_pc_command_uses_search_problem_core_executor {
 mod case_setup_command_assembles_exact_residue_request {
     use clearra_setup_search::query::SetupCycleResetBorrowPolicy;
 
-    use super::*;
-
     #[test]
     fn setup_command_assembles_exact_residue_request() {
         let query = crate::assemble::SetupQueryAssembler::assemble(&crate::args::SetupArgs::new(

@@ -4,6 +4,16 @@ steps:
       - build
       - -f
       - apps/clearra-discord-bot/Dockerfile.current-job-service
+      - --build-arg
+      - CLEARRA_SOURCE_COMMIT=${_SOURCE_COMMIT}
+      - --build-arg
+      - CLEARRA_ENGINE_BUILD_ID=${_SOURCE_COMMIT}
+      - --build-arg
+      - CLEARRA_SEARCH_CONTRACT_REVISION=clearra.search.contract.v2
+      - --build-arg
+      - CLEARRA_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1
+      - --build-arg
+      - CLEARRA_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1
       - -t
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
       - .
@@ -13,7 +23,8 @@ substitutions:
   _REGION: asia-northeast1
   _REPOSITORY: clearra
   _IMAGE_NAME: clearra-current-job
-  _TAG: latest
+  _TAG: source-required
+  _SOURCE_COMMIT: required
 options:
   logging: CLOUD_LOGGING_ONLY
 timeout: 3600s

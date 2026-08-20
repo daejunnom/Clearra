@@ -2,6 +2,10 @@ import type {
   SolutionExportPage,
   SolutionPiece
 } from './solutionExport';
+import {
+  escapeFumenComment,
+  FumenCommentCodecError
+} from './ctk3Codec';
 
 const BOARD_WIDTH = 10;
 const FUMEN_VISIBLE_HEIGHT = 23;
@@ -12,7 +16,6 @@ const FUMEN_ALPHABET =
 const EMPTY_ACTION = 30_720;
 const COMMENT_ACTION_FLAG = 61_440;
 const COMMENT_BASE = 96;
-const COMMENT_MAX_LENGTH = 4_095;
 const COMMENT_TABLE =
   ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';
 const VALUE_CHUNK_SIZE = 65_536;
@@ -62,7 +65,6 @@ export class FastColoredFumenEncoder {
       throw new Error('fumen-height-unsupported');
     }
 
-    this.writeFieldDiff();
     const currentComment =
       page.comment !== undefined && (this.pageCount !== 0 || page.comment !== '')
         ? page.comment
@@ -71,11 +73,16 @@ export class FastColoredFumenEncoder {
       currentComment !== undefined && currentComment !== this.previousComment
         ? currentComment
         : undefined;
+    const escapedComment =
+      changedComment === undefined
+        ? undefined
+        : escapeFumenComment(changedComment);
+    this.writeFieldDiff();
     this.values.push(
       EMPTY_ACTION + (changedComment === undefined ? 0 : COMMENT_ACTION_FLAG),
       3
     );
-    if (changedComment !== undefined) this.writeComment(changedComment);
+    if (escapedComment !== undefined) this.writeComment(escapedComment);
     this.previousComment = currentComment;
     this.pageCount += 1;
     clearFullLines(this.current);
@@ -135,8 +142,7 @@ export class FastColoredFumenEncoder {
     return this.current[index] - this.previous[index] + 8;
   }
 
-  private writeComment(comment: string) {
-    const escaped = escapeFumenComment(comment).slice(0, COMMENT_MAX_LENGTH);
+  private writeComment(escaped: string) {
     this.values.push(escaped.length, 2);
     for (let offset = 0; offset < escaped.length; offset += 4) {
       let value = 0;
@@ -145,7 +151,9 @@ export class FastColoredFumenEncoder {
         const character = escaped[offset + index];
         if (character === undefined) break;
         const code = COMMENT_TABLE.indexOf(character);
-        if (code < 0) throw new Error('invalid-fumen-comment');
+        if (code < 0) {
+          throw new FumenCommentCodecError('invalid-fumen-comment');
+        }
         value += code * multiplier;
         multiplier *= COMMENT_BASE;
       }
@@ -263,26 +271,4 @@ function trailingZeroes(value: bigint): number {
     count += 1;
   }
   return count;
-}
-
-function escapeFumenComment(value: string): string {
-  let escaped = '';
-  for (const character of value) {
-    const code = character.codePointAt(0)!;
-    if (/^[A-Za-z0-9@*_+\-./]$/.test(character)) {
-      escaped += character;
-    } else if (code <= 0xff) {
-      escaped += `%${code.toString(16).toUpperCase().padStart(2, '0')}`;
-    } else if (code <= 0xffff) {
-      escaped += `%u${code.toString(16).toUpperCase().padStart(4, '0')}`;
-    } else {
-      const scalar = code - 0x10000;
-      const high = 0xd800 + (scalar >> 10);
-      const low = 0xdc00 + (scalar & 0x3ff);
-      escaped += `%u${high.toString(16).toUpperCase()}%u${low
-        .toString(16)
-        .toUpperCase()}`;
-    }
-  }
-  return escaped;
 }

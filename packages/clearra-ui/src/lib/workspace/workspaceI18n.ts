@@ -1,5 +1,8 @@
 // SRP rationale: this module has one behavior-level change reason: the complete workspace localization catalog and its typed lookup contract.
-import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
+import type {
+  ClearraSearchProgressCountKey,
+  ClearraSearchProgressTelemetry
+} from '../wasm/wasmCommandClient';
 
 export type WorkspaceLanguage = 'en' | 'ko';
 
@@ -15,6 +18,7 @@ const en = {
   solverLinkInvalid: 'This solver link is invalid. Default settings were loaded.',
   setupFinder: 'Setup finder',
   buildProbability: 'Build probability',
+  oracleBuildProbability: 'Full-future/oracle build probability',
   maximumDamage: 'Maximum damage',
   ctkDrawer: 'CTK',
   player: 'Player',
@@ -208,6 +212,8 @@ const en = {
   loadCtk3File: 'Open CTK3 file',
   fumenInvalid: 'Enter a valid v110/v115 Fumen whose occupied field fits within the current height.',
   fieldImportInvalid: 'Enter a valid Fumen, CTK1/2 solution, or CTK3 document that fits within the current height.',
+  fumenInputTooLarge: 'This Fumen is too large to import safely. Reduce the input size and try again.',
+  fumenPageLimit: 'This Fumen has too many pages to import safely. Reduce it to 4,096 pages or fewer.',
   completedRowsCleared: '{count} completed starting row(s) were cleared before search.',
   source: 'Piece source',
   setupResidue: 'Piece input',
@@ -499,6 +505,9 @@ const en = {
   solutionDownloadFailed: 'Solution file could not be downloaded.',
   solutionCopyTooLarge: 'There are too many solutions to copy at once.',
   fumenCopyHeightUnsupported: 'Fumen supports occupied cells through row 23. Select CTK for taller results.',
+  fumenExportPageLimit: 'Fumen can export at most 4,096 pages. Select CTK or copy fewer solutions.',
+  fumenCommentTooLong: 'A Fumen comment is too long to encode. Select CTK or shorten the comment.',
+  invalidFumenComment: 'A solution comment contains text that Fumen cannot encode. Select CTK or edit the comment.',
   openFumen: 'Open Fumen',
   status: 'Status',
   runtime: 'Runtime',
@@ -532,6 +541,7 @@ const en = {
   setup_next_cycle_duplicate_invalid: 'Only one next-cycle piece kind may repeat, and it may occur at most twice through hold carryover.',
   setup_max_pieces_invalid: 'Maximum setup pieces must be an integer from 1 through 10.',
   queue_invalid: 'Enter a piece queue or a valid pattern such as P4 or [OISZ].',
+  'visible-seven-minimum-cover-unsupported': 'Minimum-cover selection is not supported with only seven visible pieces. Choose all supplied pieces or another result aggregation.',
   target_lines_invalid: 'Target lines must be an integer from 1 through 6.',
   scenario_not_tileable: 'The empty field area must be divisible by four.',
   scenario_supply_mismatch: 'The field and queue cannot complete a perfect clear within four lines.',
@@ -620,6 +630,7 @@ const ko: Record<keyof typeof en, string> = {
   solverLinkInvalid: '올바르지 않은 탐색 링크입니다. 기본 설정을 불러왔습니다.',
   setupFinder: '셋업 탐색',
   buildProbability: '구축 확률',
+  oracleBuildProbability: '전체 미래/오라클 구축 확률',
   maximumDamage: '최고 데미지',
   ctkDrawer: 'CTK',
   player: '플레이어',
@@ -813,6 +824,8 @@ const ko: Record<keyof typeof en, string> = {
   loadCtk3File: 'CTK3 파일 열기',
   fumenInvalid: '현재 필드 높이에 들어오는 올바른 v110/v115 Fumen을 입력해 주세요.',
   fieldImportInvalid: '현재 높이에 맞는 Fumen, CTK1/2 해법 또는 CTK3 문서를 입력해 주세요.',
+  fumenInputTooLarge: '이 Fumen은 안전하게 불러오기에는 너무 큽니다. 입력 크기를 줄인 뒤 다시 시도해 주세요.',
+  fumenPageLimit: '이 Fumen은 안전하게 불러오기에는 페이지가 너무 많습니다. 4,096페이지 이하로 줄여 주세요.',
   completedRowsCleared: '시작 필드의 완성된 줄 {count}개를 정리한 뒤 탐색을 시작했습니다.',
   source: '미노 공급',
   setupResidue: '미노 입력',
@@ -1104,6 +1117,9 @@ const ko: Record<keyof typeof en, string> = {
   solutionDownloadFailed: '해법 파일을 다운로드하지 못했습니다.',
   solutionCopyTooLarge: '해법이 너무 많습니다.',
   fumenCopyHeightUnsupported: 'Fumen은 23번째 줄까지 지원합니다. 더 높은 결과는 CTK를 선택해 주세요.',
+  fumenExportPageLimit: 'Fumen은 최대 4,096페이지까지 내보낼 수 있습니다. CTK를 선택하거나 해법 수를 줄여 주세요.',
+  fumenCommentTooLong: 'Fumen으로 인코딩하기에 주석이 너무 깁니다. CTK를 선택하거나 주석을 줄여 주세요.',
+  invalidFumenComment: '해법 주석에 Fumen으로 인코딩할 수 없는 텍스트가 있습니다. CTK를 선택하거나 주석을 수정해 주세요.',
   openFumen: 'Fumen 열기',
   status: '상태',
   runtime: '런타임',
@@ -1137,6 +1153,7 @@ const ko: Record<keyof typeof en, string> = {
   setup_next_cycle_duplicate_invalid: 'hold carryover로 다음 회차 잔여의 한 종류만 중복할 수 있으며 같은 미노는 최대 2개까지 허용됩니다.',
   setup_max_pieces_invalid: '최대 구축 미노 수는 1~10 사이의 정수여야 합니다.',
   queue_invalid: '미노 큐 또는 P4, [OISZ] 같은 올바른 패턴을 입력해 주세요.',
+  'visible-seven-minimum-cover-unsupported': '앞 7개만 공개하는 모드에서는 최소 커버 선택을 지원하지 않습니다. 입력 전체 또는 다른 결과 집계를 선택해 주세요.',
   target_lines_invalid: '목표 줄은 1~6 사이의 정수여야 합니다.',
   scenario_not_tileable: '필드의 빈칸 수는 4의 배수여야 합니다.',
   scenario_supply_mismatch: '현재 필드와 큐로는 4줄 이내의 퍼펙트 클리어 높이를 만들 수 없습니다.',
@@ -1215,6 +1232,25 @@ const ko: Record<keyof typeof en, string> = {
 
 export type WorkspaceMessageKey = keyof typeof en;
 
+export type WorkspaceSolutionCopyFailureKey =
+  | 'solutionCopyFailed'
+  | 'solutionCopyTooLarge'
+  | 'fumenCopyHeightUnsupported'
+  | 'fumenExportPageLimit'
+  | 'fumenCommentTooLong'
+  | 'invalidFumenComment';
+
+export function workspaceSolutionCopyFailureKey(
+  code: string
+): WorkspaceSolutionCopyFailureKey {
+  if (code === 'fumen-height-unsupported') return 'fumenCopyHeightUnsupported';
+  if (code === 'clipboard-output-too-large') return 'solutionCopyTooLarge';
+  if (code === 'fumen-page-limit') return 'fumenExportPageLimit';
+  if (code === 'fumen-comment-too-long') return 'fumenCommentTooLong';
+  if (code === 'invalid-fumen-comment') return 'invalidFumenComment';
+  return 'solutionCopyFailed';
+}
+
 export function workspaceMessage(
   language: WorkspaceLanguage,
   key: WorkspaceMessageKey,
@@ -1276,39 +1312,110 @@ export function workspaceProgressDetail(
     }
   };
   const compact = (value: number) => formatters.compact.format(value);
-  const candidateFamilies = telemetry.geometry_family_count
+  const candidateFamilies =
+    telemetry.availability.geometry_family_count &&
+    telemetry.geometry_family_count !== null
     ? workspaceMessage(language, 'progressCandidateFamilies', {
-        emitted: exact(telemetry.candidates_emitted),
-        total: exactDecimal(telemetry.geometry_family_count)
+        emitted: progressTelemetryValue(
+          telemetry,
+          'candidates_emitted',
+          telemetry.candidates_emitted,
+          exact
+        ),
+        total: progressTelemetryValue(
+          telemetry,
+          'geometry_family_count',
+          telemetry.geometry_family_count,
+          exactDecimal
+        )
       })
     : null;
-  const requiredSearches =
-    telemetry.geometry_family_count ??
-    (telemetry.producer_complete ? String(telemetry.candidates_emitted) : null);
+  const requiredSearches = telemetry.availability.geometry_family_count &&
+    telemetry.geometry_family_count !== null
+    ? {
+        total: progressTelemetryValue(
+          telemetry,
+          'geometry_family_count',
+          telemetry.geometry_family_count,
+          exactDecimal
+        )
+      }
+    : telemetry.producer_complete && telemetry.availability.candidates_emitted
+      ? {
+          total: progressTelemetryValue(
+            telemetry,
+            'candidates_emitted',
+            telemetry.candidates_emitted,
+            exact
+          )
+        }
+      : null;
   const verification = requiredSearches
     ? workspaceMessage(language, 'progressCandidates', {
-        verified: exact(telemetry.candidates_verified),
-        total: exactDecimal(requiredSearches)
+        verified: progressTelemetryValue(
+          telemetry,
+          'candidates_verified',
+          telemetry.candidates_verified,
+          exact
+        ),
+        total: requiredSearches.total
       })
     : workspaceMessage(language, 'progressCandidatesStreaming', {
-        verified: exact(telemetry.candidates_verified),
-        discovered: exact(telemetry.candidates_emitted)
+        verified: progressTelemetryValue(
+          telemetry,
+          'candidates_verified',
+          telemetry.candidates_verified,
+          exact
+        ),
+        discovered: progressTelemetryValue(
+          telemetry,
+          'candidates_emitted',
+          telemetry.candidates_emitted,
+          exact
+        )
       });
   const pass =
+    telemetry.availability.pass_index &&
+    telemetry.availability.pass_count &&
     telemetry.pass_count > 1
       ? workspaceMessage(language, 'progressFieldPass', {
-          current: Math.min(telemetry.pass_index + 1, telemetry.pass_count),
-          total: telemetry.pass_count
+          current: progressCompositeTelemetryValue(
+            telemetry,
+            ['pass_index', 'pass_count'],
+            Math.min(telemetry.pass_index + 1, telemetry.pass_count),
+            exact
+          ),
+          total: progressTelemetryValue(
+            telemetry,
+            'pass_count',
+            telemetry.pass_count,
+            exact
+          )
         })
       : null;
   const geometry = workspaceMessage(language, 'progressGeometry', {
-    count: compact(telemetry.geometry_nodes)
+    count: progressTelemetryValue(
+      telemetry,
+      'geometry_nodes',
+      telemetry.geometry_nodes,
+      compact
+    )
   });
   const build = workspaceMessage(language, 'progressBuild', {
-    count: compact(telemetry.build_nodes)
+    count: progressTelemetryValue(
+      telemetry,
+      'build_nodes',
+      telemetry.build_nodes,
+      compact
+    )
   });
   const coverage = workspaceMessage(language, 'progressCoverage', {
-    count: compact(telemetry.coverage_checks)
+    count: progressTelemetryValue(
+      telemetry,
+      'coverage_checks',
+      telemetry.coverage_checks,
+      compact
+    )
   });
 
   if (telemetry.phase === 'initializing') return '';
@@ -1322,6 +1429,28 @@ export function workspaceProgressDetail(
     return [verification, build, coverage].filter(Boolean).join(' · ');
   }
   return [candidateFamilies ?? geometry, build, coverage].join(' · ');
+}
+
+function progressTelemetryValue<T extends number | string>(
+  telemetry: ClearraSearchProgressTelemetry,
+  key: ClearraSearchProgressCountKey,
+  value: T,
+  formatter: (value: T) => string
+): string {
+  if (!telemetry.availability[key]) return '—';
+  const formatted = formatter(value);
+  return telemetry.exactness[key] ? formatted : `≈${formatted}`;
+}
+
+function progressCompositeTelemetryValue(
+  telemetry: ClearraSearchProgressTelemetry,
+  keys: ClearraSearchProgressCountKey[],
+  value: number,
+  formatter: (value: number) => string
+): string {
+  if (!keys.every((key) => telemetry.availability[key])) return '—';
+  const formatted = formatter(value);
+  return keys.every((key) => telemetry.exactness[key]) ? formatted : `≈${formatted}`;
 }
 
 const workspaceProgressNumberFormatters: Record<

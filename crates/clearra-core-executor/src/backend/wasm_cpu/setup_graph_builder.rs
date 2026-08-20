@@ -233,10 +233,11 @@ impl SetupGraphBuildSession {
             let universe = problem.piece_source().materialized_universe().ok_or(
                 WasmExactSearchError::InvalidProblem("setup_pattern_universe_not_materialized"),
             )?;
-            let family = universe.packing_multiset_family(
+            let family = universe.packing_multiset_family_for_execution(
                 10,
                 problem.initial_hold(),
-                super::packing_projection_hold_enabled(problem),
+                problem.supply().hold_enabled(),
+                super::packing_hold_projection(problem),
             );
             target_keys.extend(family.groups().iter().map(|group| group.key()));
         }

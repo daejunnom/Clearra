@@ -6,6 +6,9 @@
 #include "clr_packing_problem.h"
 #define CLR_BUILDUP_SOURCE_CONCRETE_PATTERN 1u
 #define CLR_BUILDUP_SOURCE_STANDARD_BAG_AUTOMATON 2u
+#define CLR_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION 1u
+#define CLR_BUILDUP_TERMINAL_PROJECTION_DISABLED 0u
+#define CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD 1u
 typedef struct ClearraGeometryCatalog ClearraGeometryCatalog;
 typedef struct clr_buildup_problem {
     clr_packing_problem packing;
@@ -30,6 +33,9 @@ typedef struct clr_buildup_problem {
     uint32_t coverage_pattern_id;
     uint32_t buildup_flags;
     uint32_t source_execution_mode;
+    uint16_t terminal_projection_policy_version;
+    uint8_t terminal_projection_policy;
+    uint8_t terminal_projection_reserved;
 } clr_buildup_problem;clr_buildup_problem clr_buildup_problem_from_packing(clr_packing_problem problem);
 bool clr_buildup_problem_is_valid(const clr_buildup_problem *problem);
 clr_buildup_status clr_piece_source_pattern_piece_at(

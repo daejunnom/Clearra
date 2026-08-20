@@ -11,6 +11,9 @@ foreach ($requiredFile in @(
             "crates/clearra-validation/src/validators/rule_verified_kick_profile_validator.rs",
             "crates/clearra-core-ffi/src/rules/imported_kick_descriptor_compiler.rs",
             "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler.rs",
+            "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler_tests.rs",
+            "crates/clearra-core-ffi/src/rules/custom_rule_descriptor_compiler_tests.rs",
+            "crates/clearra-core-executor/src/packing/packing_runner_tests.rs",
             "core-c/include/clr_rules.h",
             "core-c/src/rules/kick_table.c",
             "core-c/src/candidate/candidate_search_dispatch.c",
@@ -32,6 +35,9 @@ $surface = @(
         Read-Text "crates/clearra-validation/src/validators/rule_validator_tests.rs"
         Read-Text "crates/clearra-core-ffi/src/rules/imported_kick_descriptor_compiler.rs"
         Read-Text "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler.rs"
+        Read-Text "crates/clearra-core-ffi/src/rules/rule_descriptor_compiler_tests.rs"
+        Read-Text "crates/clearra-core-ffi/src/rules/custom_rule_descriptor_compiler_tests.rs"
+        Read-Text "crates/clearra-core-executor/src/packing/packing_runner_tests.rs"
         Read-Text "core-c/src/rules/kick_table.c"
         Read-Text "crates/clearra-ui-schema/src/rule_editor/kick_table_preview_schema.rs"
         Read-Text "docs/rules-and-kicks.md"
@@ -48,7 +54,7 @@ foreach ($requiredMarker in @(
             "first_success_order_preserved",
             "provenance",
             "verified",
-            "deny_unknown_fields",
+            "exact_object",
             "duplicate_transition_count",
             "missing_transition_count",
             "UnknownRotation",
@@ -59,7 +65,9 @@ foreach ($requiredMarker in @(
             "asc_profile_validates_as_guarded_descriptor",
             "ars_profile_validates_as_guarded_descriptor",
             "imported_verified_kick_profile_compiles_to_c_descriptor",
-            "unverified_extension_profile_is_rejected_before_c_execution",
+            "builtin_srs_x_projects_the_canonical_verified_table_to_c",
+            "builtin_srs_x_uses_the_canonical_verified_table_during_native_packing",
+            "unverified_custom_rule_rejected_before_execution",
             "clearra_rule_transition_is_180",
             "!table->supports_180",
             "compile-and-architecture-only",

@@ -94,6 +94,12 @@ pub enum PackingPatternMembershipKind {
     ExactSymbolicStandardBag,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackingHoldProjection {
+    PreserveFinalHoldLanguage,
+    ReleaseHeldAtTerminal,
+}
+
 impl PackingPatternMembershipKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -162,6 +168,50 @@ impl PackingMultisetGroup {
 }
 
 impl MaterializedPatternUniverse {
+    pub fn packing_multiset_family_for_execution(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+    ) -> PackingMultisetFamily {
+        match hold_projection {
+            PackingHoldProjection::PreserveFinalHoldLanguage => {
+                self.packing_multiset_family(placed_piece_count, initial_hold, hold_enabled)
+            }
+            PackingHoldProjection::ReleaseHeldAtTerminal if hold_enabled => {
+                self.terminally_released_multiset_family(placed_piece_count, initial_hold)
+            }
+            PackingHoldProjection::ReleaseHeldAtTerminal => empty_multiset_family(),
+        }
+    }
+
+    pub fn packing_multiset_family_for_execution_with_workers(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+        requested_workers: usize,
+    ) -> Result<PackingMultisetFamily, PackingMultisetBuildError> {
+        match hold_projection {
+            PackingHoldProjection::PreserveFinalHoldLanguage => self
+                .packing_multiset_family_with_workers(
+                    placed_piece_count,
+                    initial_hold,
+                    hold_enabled,
+                    requested_workers,
+                ),
+            PackingHoldProjection::ReleaseHeldAtTerminal if hold_enabled => self
+                .terminally_released_multiset_family_with_workers(
+                    placed_piece_count,
+                    initial_hold,
+                    requested_workers,
+                ),
+            PackingHoldProjection::ReleaseHeldAtTerminal => Ok(empty_multiset_family()),
+        }
+    }
+
     pub fn packing_multiset_family(
         &self,
         placed_piece_count: usize,
@@ -214,6 +264,60 @@ impl MaterializedPatternUniverse {
             groups,
             membership_kind: PackingPatternMembershipKind::ExactMaterialized,
         })
+    }
+
+    fn terminally_released_multiset_family(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+    ) -> PackingMultisetFamily {
+        let Some(source_piece_count) =
+            placed_piece_count.checked_sub(usize::from(initial_hold.hold_piece().is_some()))
+        else {
+            return empty_multiset_family();
+        };
+        let initial_piece = initial_hold.hold_piece();
+        let source_only = HoldAutomatonState::new(
+            initial_hold.piece_source_id(),
+            initial_hold.cursor(),
+            None,
+            initial_hold.bag_epoch(),
+            initial_hold.bag_remainder_key(),
+            initial_hold.provenance(),
+        );
+        append_initial_hold_piece(
+            self.packing_multiset_family(source_piece_count, source_only, false),
+            initial_piece,
+        )
+    }
+
+    fn terminally_released_multiset_family_with_workers(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        requested_workers: usize,
+    ) -> Result<PackingMultisetFamily, PackingMultisetBuildError> {
+        let Some(source_piece_count) =
+            placed_piece_count.checked_sub(usize::from(initial_hold.hold_piece().is_some()))
+        else {
+            return Ok(empty_multiset_family());
+        };
+        let initial_piece = initial_hold.hold_piece();
+        let source_only = HoldAutomatonState::new(
+            initial_hold.piece_source_id(),
+            initial_hold.cursor(),
+            None,
+            initial_hold.bag_epoch(),
+            initial_hold.bag_remainder_key(),
+            initial_hold.provenance(),
+        );
+        self.packing_multiset_family_with_workers(
+            source_piece_count,
+            source_only,
+            false,
+            requested_workers,
+        )
+        .map(|family| append_initial_hold_piece(family, initial_piece))
     }
 
     fn symbolic_standard_bag_family(
@@ -371,6 +475,36 @@ impl MaterializedPatternUniverse {
     }
 }
 
+fn empty_multiset_family() -> PackingMultisetFamily {
+    PackingMultisetFamily {
+        envelope: PieceMultisetKey::default(),
+        groups: Vec::new(),
+        membership_kind: PackingPatternMembershipKind::ExactMaterialized,
+    }
+}
+
+fn append_initial_hold_piece(
+    mut family: PackingMultisetFamily,
+    initial_piece: Option<PieceKind>,
+) -> PackingMultisetFamily {
+    let Some(initial_piece) = initial_piece else {
+        return family;
+    };
+    for group in &mut family.groups {
+        group.key.push(initial_piece);
+    }
+    family
+        .groups
+        .sort_unstable_by_key(PackingMultisetGroup::key);
+    family.envelope = family
+        .groups
+        .iter()
+        .fold(PieceMultisetKey::default(), |envelope, group| {
+            envelope.componentwise_max(group.key())
+        });
+    family
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackingMultisetBuildError {
     WorkerPanicked,
@@ -499,6 +633,11 @@ const fn piece_index(piece: PieceKind) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use clearra_core_domain::probability::probability_value::ProbabilityValue;
+    use clearra_coverage::universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    };
+
     use crate::{
         hold_automaton::SupplyProvenanceId, pattern_universe::PatternUniverseMaterializer,
         piece_source::PieceSourceId,
@@ -554,5 +693,114 @@ mod tests {
                 && counts.iter().all(|count| (1..=2).contains(count))
                 && counts.iter().filter(|count| **count == 2).count() == 3
         }));
+    }
+
+    #[test]
+    fn terminal_projection_places_every_finite_source_piece_with_an_empty_initial_hold() {
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(1),
+            PatternWeightModelId::new(1),
+            vec![vec![PieceKind::I, PieceKind::O, PieceKind::T]],
+            vec![ProbabilityValue::ONE],
+            1,
+            true,
+            None,
+        )
+        .expect("finite universe");
+        let initial_hold =
+            HoldAutomatonState::new(PieceSourceId::new(1), 0, None, 0, 0, SupplyProvenanceId(1));
+
+        let family = universe.packing_multiset_family_for_execution(
+            3,
+            initial_hold,
+            true,
+            PackingHoldProjection::ReleaseHeldAtTerminal,
+        );
+
+        assert_eq!(family.groups().len(), 1);
+        let key = family.groups()[0].key();
+        assert_eq!(key.total_count(), 3);
+        assert_eq!(key.count(PieceKind::I), 1);
+        assert_eq!(key.count(PieceKind::O), 1);
+        assert_eq!(key.count(PieceKind::T), 1);
+    }
+
+    #[test]
+    fn terminal_projection_preserves_an_occupied_initial_hold_as_placed_inventory() {
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(2),
+            PatternWeightModelId::new(2),
+            vec![vec![PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::Z]],
+            vec![ProbabilityValue::ONE],
+            2,
+            true,
+            None,
+        )
+        .expect("finite universe");
+        let initial_hold = HoldAutomatonState::new(
+            PieceSourceId::new(2),
+            0,
+            Some(PieceKind::S),
+            0,
+            0,
+            SupplyProvenanceId(2),
+        );
+
+        let serial = universe.packing_multiset_family_for_execution(
+            5,
+            initial_hold,
+            true,
+            PackingHoldProjection::ReleaseHeldAtTerminal,
+        );
+        let parallel = universe
+            .packing_multiset_family_for_execution_with_workers(
+                5,
+                initial_hold,
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+                4,
+            )
+            .expect("parallel terminal projection");
+
+        assert_eq!(parallel, serial);
+        assert_eq!(serial.groups().len(), 1);
+        let key = serial.groups()[0].key();
+        assert_eq!(key.total_count(), 5);
+        assert_eq!(key.count(PieceKind::S), 1);
+        assert_eq!(key.count(PieceKind::I), 1);
+        assert_eq!(key.count(PieceKind::O), 1);
+        assert_eq!(key.count(PieceKind::T), 1);
+        assert_eq!(key.count(PieceKind::Z), 1);
+    }
+
+    #[test]
+    fn terminal_projection_is_fail_closed_when_hold_is_disabled() {
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(3),
+            PatternWeightModelId::new(3),
+            vec![vec![PieceKind::I]],
+            vec![ProbabilityValue::ONE],
+            3,
+            true,
+            None,
+        )
+        .expect("finite universe");
+        let initial_hold = HoldAutomatonState::new(
+            PieceSourceId::new(3),
+            0,
+            Some(PieceKind::O),
+            0,
+            0,
+            SupplyProvenanceId(3),
+        );
+
+        let family = universe.packing_multiset_family_for_execution(
+            2,
+            initial_hold,
+            false,
+            PackingHoldProjection::ReleaseHeldAtTerminal,
+        );
+
+        assert!(family.groups().is_empty());
     }
 }

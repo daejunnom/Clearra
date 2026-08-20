@@ -2,16 +2,35 @@ import fs from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
+import {
+  expectedWasmProbeIdentity,
+  validateWasmProbeTerminal,
+} from './wasm-product-terminal-contract.mjs';
 
-const [bindingsPath, commandText, workBudgetText = '8192', outputMode = 'summary'] =
-  process.argv.slice(2);
+const [
+  bindingsPath,
+  commandText,
+  workBudgetText = '8192',
+  outputMode = 'summary',
+  ...contractArguments
+] = process.argv.slice(2);
 if (!bindingsPath || !commandText) {
   throw new Error(
-    'usage: node wasm-pc-environment-probe.mjs CLEARRA_WASM_BINDINGS "clearra pc ..." [WORK_BUDGET] [summary|full]',
+    'usage: node wasm-pc-environment-probe.mjs CLEARRA_WASM_BINDINGS "clearra pc ..." [WORK_BUDGET] [summary|full] [--manifest PATH --expected-source-commit SHA|unverified-local-build]',
   );
+}
+if (!['summary', 'full'].includes(outputMode)) {
+  throw new Error('WASM probe output mode must be summary or full');
 }
 
 const workBudget = positiveInteger(workBudgetText, 'WORK_BUDGET');
+const contractOptions = parseContractArguments(contractArguments);
+const expectedRuntimeIdentity = contractOptions === null
+  ? null
+  : expectedWasmProbeIdentity(
+      JSON.parse(fs.readFileSync(contractOptions.manifestPath, 'utf8')),
+      contractOptions.expectedSourceCommit,
+    );
 const debugLifecycle = process.env.CLEARRA_WASM_PROBE_DEBUG === '1';
 const progressInterval = optionalPositiveInteger(
   process.env.CLEARRA_WASM_PROBE_PROGRESS_INTERVAL,
@@ -113,9 +132,11 @@ if (api.drainJobEvents(jobId) !== 0) {
   throw new Error(readOutput(api));
 }
 const events = JSON.parse(readOutput(api));
-const finalEvent = events.find((event) => event.event === 'final_response') ?? null;
-const failedEvent = events.find((event) => event.event === 'failed') ?? null;
-const cancelledEvent = events.find((event) => event.event === 'cancelled') ?? null;
+const finalEvent = validateWasmProbeTerminal({
+  events,
+  terminalStatus,
+  expectedRuntimeIdentity,
+});
 const searchReport = finalEvent?.search_report ?? null;
 let searchProfile = null;
 if (profilingEnabled) {
@@ -140,14 +161,13 @@ console.log(JSON.stringify({
   search_profile: searchProfile,
   command: commandText,
   final: outputMode === 'full' ? finalEvent : summarizeFinal(finalEvent, searchReport),
-  failed: failedEvent,
-  cancelled: cancelledEvent,
 }, null, 2));
 
 function summarizeFinal(finalEvent, searchReport) {
   if (!finalEvent) return null;
   return {
     status: finalEvent.response?.status ?? null,
+    runtime_identity: finalEvent.response?.runtime_identity ?? null,
     diagnostics: finalEvent.response?.diagnostics ?? [],
     backend_selected: searchReport?.backend_selected ?? null,
     workers_used: searchReport?.workers_used ?? null,
@@ -286,4 +306,23 @@ function positiveInteger(value, label) {
 function optionalPositiveInteger(value, label) {
   if (value === undefined || value === '') return null;
   return positiveInteger(value, label);
+}
+
+function parseContractArguments(argumentsList) {
+  if (argumentsList.length === 0) return null;
+  if (
+    argumentsList.length !== 4 ||
+    argumentsList[0] !== '--manifest' ||
+    argumentsList[2] !== '--expected-source-commit' ||
+    !argumentsList[1] ||
+    !argumentsList[3]
+  ) {
+    throw new Error(
+      'WASM probe identity options require --manifest PATH --expected-source-commit SHA|unverified-local-build',
+    );
+  }
+  return {
+    manifestPath: resolve(argumentsList[1]),
+    expectedSourceCommit: argumentsList[3],
+  };
 }

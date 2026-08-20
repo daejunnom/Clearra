@@ -1,6 +1,9 @@
+// SRP rationale: this module has one behavior-level change reason: coordinating verifier
+// workers and aggregating their bounded availability and exactness telemetry.
 import {
   ClearraWasmRuntimeError,
-  type ClearraDistributedVerifierProgress
+  type ClearraDistributedVerifierProgress,
+  type ClearraWasmHostCapabilities
 } from './clearraWasmRuntime';
 
 type VerifierResponse =
@@ -15,6 +18,8 @@ type VerifierResponse =
       type: 'consumed';
       requestId: number;
       candidateCount: number;
+      candidateCountAvailable: boolean;
+      candidateCountExact: boolean;
       partial: ArrayBuffer | null;
       progress: ClearraDistributedVerifierProgress;
     }
@@ -32,6 +37,8 @@ type PendingRequest = {
 
 type VerifierConsumeResult = {
   candidateCount: number;
+  candidateCountAvailable: boolean;
+  candidateCountExact: boolean;
   partial: ArrayBuffer | null;
 };
 
@@ -77,10 +84,18 @@ export type ClearraVerifierPoolProgress = {
   candidatesVerified: number;
   buildNodes: number;
   coverageChecks: number;
+  availability: ClearraVerifierPoolProgressFlags;
+  exactness: ClearraVerifierPoolProgressFlags;
   readyWorkers: number;
   activeWorkers: number;
   workerCount: number;
   oldestBatchMs: number;
+};
+
+export type ClearraVerifierPoolProgressFlags = {
+  candidatesVerified: boolean;
+  buildNodes: boolean;
+  coverageChecks: boolean;
 };
 
 class VerifierClient {
@@ -92,6 +107,8 @@ class VerifierClient {
   private readyReject: ((error: Error) => void) | null = null;
   private prewarmReject: ((error: Error) => void) | null = null;
   private candidatesVerified = 0;
+  private candidatesVerifiedAvailable = true;
+  private candidatesVerifiedExact = true;
   private progress: ClearraDistributedVerifierProgress = emptyVerifierProgress();
   private batchStartedAt: number | null = null;
   private initialized = false;
@@ -112,7 +129,11 @@ class VerifierClient {
     this.worker = this.createWorker();
   }
 
-  prewarm(compiledModule?: WebAssembly.Module, lifecycleOwnerId = ''): Promise<void> {
+  prewarm(
+    compiledModule?: WebAssembly.Module,
+    lifecycleOwnerId = '',
+    hostCapabilities?: ClearraWasmHostCapabilities
+  ): Promise<void> {
     if (
       lifecycleOwnerId &&
       this.lifecycleOwnerId &&
@@ -153,14 +174,16 @@ class VerifierClient {
         worker.postMessage({
           type: 'prewarm',
           compiledModule,
-          lifecycleOwnerId: this.lifecycleOwnerId
+          lifecycleOwnerId: this.lifecycleOwnerId,
+          hostCapabilities
         });
       } catch (error) {
         if (compiledModule) {
           try {
             worker.postMessage({
               type: 'prewarm',
-              lifecycleOwnerId: this.lifecycleOwnerId
+              lifecycleOwnerId: this.lifecycleOwnerId,
+              hostCapabilities
             });
             return;
           } catch {
@@ -179,13 +202,16 @@ class VerifierClient {
   async initialize(
     initialization: string | ArrayBuffer,
     compiledModule?: WebAssembly.Module,
-    lifecycleOwnerId = ''
+    lifecycleOwnerId = '',
+    hostCapabilities?: ClearraWasmHostCapabilities
   ): Promise<void> {
     this.initialized = false;
-    await this.prewarm(compiledModule, lifecycleOwnerId);
+    await this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities);
     this.worker ??= this.createWorker();
     const worker = this.worker;
     this.candidatesVerified = 0;
+    this.candidatesVerifiedAvailable = true;
+    this.candidatesVerifiedExact = true;
     this.progress = emptyVerifierProgress();
     this.batchStartedAt = null;
     this.ready = new Promise<void>((resolve, reject) => {
@@ -220,7 +246,8 @@ class VerifierClient {
           {
             type: 'initialize',
             initialization: workerInitialization,
-            lifecycleOwnerId: this.lifecycleOwnerId
+            lifecycleOwnerId: this.lifecycleOwnerId,
+            hostCapabilities
           },
           workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
         );
@@ -246,9 +273,25 @@ class VerifierClient {
         onPartial
       );
       if (response.type !== 'consumed') throw new Error('invalid verifier consume response');
-      this.candidatesVerified += response.candidateCount;
+      const accumulated = addProgressCounts(
+        this.candidatesVerified,
+        response.candidateCount
+      );
+      this.candidatesVerified = accumulated.value;
+      this.candidatesVerifiedAvailable =
+        this.candidatesVerifiedAvailable && response.candidateCountAvailable === true;
+      this.candidatesVerifiedExact =
+        this.candidatesVerifiedExact &&
+        response.candidateCountAvailable === true &&
+        response.candidateCountExact === true &&
+        accumulated.exact;
       this.progress = response.progress;
-      return { candidateCount: response.candidateCount, partial: response.partial };
+      return {
+        candidateCount: response.candidateCount,
+        candidateCountAvailable: response.candidateCountAvailable,
+        candidateCountExact: response.candidateCountExact,
+        partial: response.partial
+      };
     } finally {
       this.busy = false;
       this.batchStartedAt = null;
@@ -260,6 +303,19 @@ class VerifierClient {
       candidatesVerified: this.candidatesVerified,
       buildNodes: this.progress.buildNodes,
       coverageChecks: this.progress.coverageChecks,
+      availability: {
+        candidatesVerified: this.initialized && this.candidatesVerifiedAvailable,
+        buildNodes: this.progress.availability.buildNodes,
+        coverageChecks: this.progress.availability.coverageChecks
+      },
+      exactness: {
+        candidatesVerified:
+          this.initialized &&
+          this.candidatesVerifiedAvailable &&
+          this.candidatesVerifiedExact,
+        buildNodes: this.progress.exactness.buildNodes,
+        coverageChecks: this.progress.exactness.coverageChecks
+      },
       ready: this.initialized,
       active: this.busy,
       batchAgeMs: this.batchStartedAt === null ? 0 : Math.max(0, now - this.batchStartedAt)
@@ -430,6 +486,8 @@ class VerifierClient {
     this.ready = null;
     this.prewarmed = null;
     this.candidatesVerified = 0;
+    this.candidatesVerifiedAvailable = true;
+    this.candidatesVerifiedExact = true;
     this.progress = emptyVerifierProgress();
     this.batchStartedAt = null;
     this.initialized = false;
@@ -446,6 +504,7 @@ export class ClearraVerifierPool {
   private histories = new Map<VerifierClient, ArrayBuffer[]>();
   private initialization: string | ArrayBuffer | null = null;
   private compiledModule: WebAssembly.Module | undefined;
+  private hostCapabilities: ClearraWasmHostCapabilities | undefined;
   private lifecycleOwnerId = '';
   private recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task';
   private targetWorkerCount = 0;
@@ -478,7 +537,8 @@ export class ClearraVerifierPool {
   async prewarm(
     size: number,
     compiledModule?: WebAssembly.Module,
-    lifecycleOwnerId = ''
+    lifecycleOwnerId = '',
+    hostCapabilities?: ClearraWasmHostCapabilities
   ) {
     const generation = ++this.generation;
     try {
@@ -493,7 +553,9 @@ export class ClearraVerifierPool {
       }
       while (this.clients.length > size) this.clients.pop()?.dispose();
       await Promise.all(
-        this.clients.map((client) => client.prewarm(compiledModule, lifecycleOwnerId))
+        this.clients.map((client) =>
+          client.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities)
+        )
       );
       if (generation !== this.generation) return;
     } catch (error) {
@@ -508,13 +570,15 @@ export class ClearraVerifierPool {
     size: number,
     compiledModule?: WebAssembly.Module,
     lifecycleOwnerId = '',
-    recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task'
+    recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task',
+    hostCapabilities?: ClearraWasmHostCapabilities
   ) {
     const generation = ++this.generation;
     this.active = true;
     this.failure = null;
     this.initialization = cloneInitialization(initialization);
     this.compiledModule = compiledModule;
+    this.hostCapabilities = hostCapabilities;
     this.lifecycleOwnerId = lifecycleOwnerId;
     this.recoveryMode = recoveryMode;
     this.targetWorkerCount = size;
@@ -535,7 +599,12 @@ export class ClearraVerifierPool {
       await Promise.all(
         this.clients.map((client) =>
           withTimeout(
-            client.initialize(initialization, compiledModule, lifecycleOwnerId),
+            client.initialize(
+              initialization,
+              compiledModule,
+              lifecycleOwnerId,
+              hostCapabilities
+            ),
             this.initializationTimeoutMs,
             'distributed verifier initialization'
           )
@@ -602,16 +671,41 @@ export class ClearraVerifierPool {
     if (!this.active) return emptyPoolProgress();
     const snapshots = this.clients.map((client) => client.progressSnapshot(now));
     const readySnapshots = snapshots.filter((snapshot) => snapshot.ready);
+    const candidatesVerified = aggregateProgressCounts(
+      snapshots.map((snapshot) => ({
+        value: snapshot.candidatesVerified,
+        available: snapshot.availability.candidatesVerified,
+        exact: snapshot.exactness.candidatesVerified
+      }))
+    );
+    const buildNodes = aggregateProgressCounts(
+      snapshots.map((snapshot) => ({
+        value: snapshot.buildNodes,
+        available: snapshot.availability.buildNodes,
+        exact: snapshot.exactness.buildNodes
+      }))
+    );
+    const coverageChecks = aggregateProgressCounts(
+      snapshots.map((snapshot) => ({
+        value: snapshot.coverageChecks,
+        available: snapshot.availability.coverageChecks,
+        exact: snapshot.exactness.coverageChecks
+      }))
+    );
     return {
-      candidatesVerified: snapshots.reduce(
-        (total, snapshot) => total + snapshot.candidatesVerified,
-        0
-      ),
-      buildNodes: snapshots.reduce((total, snapshot) => total + snapshot.buildNodes, 0),
-      coverageChecks: snapshots.reduce(
-        (total, snapshot) => total + snapshot.coverageChecks,
-        0
-      ),
+      candidatesVerified: candidatesVerified.value,
+      buildNodes: buildNodes.value,
+      coverageChecks: coverageChecks.value,
+      availability: {
+        candidatesVerified: candidatesVerified.available,
+        buildNodes: buildNodes.available,
+        coverageChecks: coverageChecks.available
+      },
+      exactness: {
+        candidatesVerified: candidatesVerified.exact,
+        buildNodes: buildNodes.exact,
+        coverageChecks: coverageChecks.exact
+      },
       readyWorkers: readySnapshots.length,
       activeWorkers: readySnapshots.filter((snapshot) => snapshot.active).length,
       workerCount: this.targetWorkerCount,
@@ -736,7 +830,8 @@ export class ClearraVerifierPool {
         replacement.initialize(
           this.initialization,
           this.compiledModule,
-          this.lifecycleOwnerId
+          this.lifecycleOwnerId,
+          this.hostCapabilities
         ),
         this.initializationTimeoutMs,
         'distributed verifier replacement initialization'
@@ -793,7 +888,13 @@ export class ClearraVerifierPool {
 }
 
 function emptyVerifierProgress(): ClearraDistributedVerifierProgress {
-  return { candidateCount: 0, buildNodes: 0, coverageChecks: 0 };
+  return {
+    candidateCount: 0,
+    buildNodes: 0,
+    coverageChecks: 0,
+    availability: { candidateCount: false, buildNodes: false, coverageChecks: false },
+    exactness: { candidateCount: false, buildNodes: false, coverageChecks: false }
+  };
 }
 
 function emptyPoolProgress(): ClearraVerifierPoolProgress {
@@ -801,10 +902,55 @@ function emptyPoolProgress(): ClearraVerifierPoolProgress {
     candidatesVerified: 0,
     buildNodes: 0,
     coverageChecks: 0,
+    availability: {
+      candidatesVerified: false,
+      buildNodes: false,
+      coverageChecks: false
+    },
+    exactness: {
+      candidatesVerified: false,
+      buildNodes: false,
+      coverageChecks: false
+    },
     readyWorkers: 0,
     activeWorkers: 0,
     workerCount: 0,
     oldestBatchMs: 0
+  };
+}
+
+function addProgressCounts(
+  left: number,
+  right: number
+): { value: number; exact: boolean } {
+  if (!Number.isSafeInteger(left) || left < 0) {
+    return { value: Number.MAX_SAFE_INTEGER, exact: false };
+  }
+  if (!Number.isSafeInteger(right) || right < 0 || left > Number.MAX_SAFE_INTEGER - right) {
+    return { value: Number.MAX_SAFE_INTEGER, exact: false };
+  }
+  return { value: left + right, exact: true };
+}
+
+function aggregateProgressCounts(
+  values: Array<{ value: number; available: boolean; exact: boolean }>
+): { value: number; available: boolean; exact: boolean } {
+  if (values.length === 0) return { value: 0, available: false, exact: false };
+  let value = 0;
+  let arithmeticExact = true;
+  for (const current of values) {
+    const sum = addProgressCounts(value, current.value);
+    value = sum.value;
+    arithmeticExact &&= sum.exact;
+  }
+  const available = values.every((current) => current.available);
+  return {
+    value,
+    available,
+    exact:
+      available &&
+      arithmeticExact &&
+      values.every((current) => current.exact)
   };
 }
 

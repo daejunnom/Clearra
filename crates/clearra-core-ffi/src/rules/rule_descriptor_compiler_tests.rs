@@ -13,7 +13,7 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use crate::problem::{
     C_KICK_IMPORTED, C_KICK_JSTRIS_180, C_KICK_NO_KICK, C_KICK_SRS_90, C_KICK_SRS_PLUS_180,
-    C_RULE_JSTRIS_180, C_RULE_NO_KICK, C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X,
+    C_KICK_SRS_X, C_RULE_JSTRIS_180, C_RULE_NO_KICK, C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X,
 };
 
 use super::*;
@@ -96,33 +96,30 @@ fn verified_180_capable_rule_rejects_profile_without_180_transitions() {
 }
 
 #[test]
-fn unverified_extension_profile_is_rejected_before_c_execution() {
+fn builtin_srs_x_projects_the_canonical_verified_table_to_c() {
     let problem = opening_problem_with_rule(srs_x(), None);
 
-    let result = RuleDescriptorCompiler::compile(&problem);
+    let descriptor = RuleDescriptorCompiler::compile(&problem).expect("built-in SRS-X descriptor");
 
-    assert_eq!(
-        result,
-        Err(FfiProblemError::UnverifiedRuleProfileRejected {
-            rule_profile_id: C_RULE_SRS_X
-        })
-    );
+    assert_eq!(descriptor.rule_profile_id, C_RULE_SRS_X);
+    assert_eq!(descriptor.kick_profile_id, C_KICK_SRS_X);
+    assert_eq!(descriptor.has_verified_kick_profile, 1);
+    assert_eq!(descriptor.verified_supports_180, 1);
+    assert_eq!(descriptor.verified_transition_count, 80);
 }
 
 #[test]
-fn srs_x_capability_and_unverified_c_boundary_are_distinct() {
+fn srs_x_capability_and_verified_c_boundary_agree() {
     let rule = srs_x();
     let capability = RuleCapability::from_rule(rule);
     let problem = opening_problem_with_rule(rule, None);
 
     assert!(capability.search_backend_supported());
     assert_eq!(capability.unsupported_reason(), None);
-    assert_eq!(
-        RuleDescriptorCompiler::compile(&problem),
-        Err(FfiProblemError::UnverifiedRuleProfileRejected {
-            rule_profile_id: C_RULE_SRS_X
-        })
-    );
+    let descriptor = RuleDescriptorCompiler::compile(&problem).expect("SRS-X C descriptor");
+    assert_eq!(descriptor.rule_profile_id, C_RULE_SRS_X);
+    assert_eq!(descriptor.kick_profile_id, C_KICK_SRS_X);
+    assert_eq!(descriptor.has_verified_kick_profile, 1);
 }
 
 #[test]

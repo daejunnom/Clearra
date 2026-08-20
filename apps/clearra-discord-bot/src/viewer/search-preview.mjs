@@ -19,20 +19,17 @@ export function buildSearchPreviewDocument(command, rawOptions = []) {
       .filter((option) => typeof option?.name === "string")
       .map((option) => [option.name, option.value]),
   );
-  if (fields.some(({ name }) => !values.has(name))) return null;
+  if (fields.some((name) => !values.has(name))) return null;
 
-  const decoded = fields.map(({ name, label }) => ({
-    label,
-    page: decodeStaticField(values.get(name), name),
-  }));
+  const decoded = fields.map((name) => decodeStaticField(values.get(name), name));
   let pages;
   if (decoded.length === 1) {
-    pages = [commentedPage(decoded[0].page, decoded[0].label)];
+    pages = [decoded[0]];
   } else {
     const [base, target] = decoded;
     pages = [
-      commentedPage(base.page, base.label),
-      commentedPage(mergePages(base.page, target.page), "Base + target delta"),
+      base,
+      mergePages(base, target),
     ];
   }
   const document = { width: 10, pages };
@@ -45,10 +42,7 @@ export function buildSearchPreviewDocument(command, rawOptions = []) {
 
 function previewFields(input) {
   if (input === "cover" || input === "finesse-search") {
-    return [
-      { name: "base", label: "Base field" },
-      { name: "target", label: "Target delta" },
-    ];
+    return ["base", "target"];
   }
   if (
     [
@@ -60,7 +54,7 @@ function previewFields(input) {
       "spin-structure",
     ].includes(input)
   ) {
-    return [{ name: "field", label: "Input field" }];
+    return ["field"];
   }
   return [];
 }
@@ -140,6 +134,9 @@ function staticPage(page) {
     height,
     cells: [...page.cells],
     ...(page.flags ? { flags: { ...page.flags } } : {}),
+    ...(typeof page.comment === "string" && page.comment.length > 0
+      ? { comment: page.comment }
+      : {}),
   };
 }
 
@@ -156,9 +153,11 @@ function mergePages(base, target) {
     }
     cells[index] = target.cells[index];
   }
-  return { height, cells };
-}
-
-function commentedPage(page, comment) {
-  return { ...page, comment };
+  return {
+    height,
+    cells,
+    ...(typeof target.comment === "string" && target.comment.length > 0
+      ? { comment: target.comment }
+      : {}),
+  };
 }

@@ -86,6 +86,7 @@ mod budget_policy {
 }
 mod constructor {
     use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
+    use clearra_pc_graph::request::validate_pc_observation_objective;
     use clearra_rules::spawn::SpawnProfile;
 
     use crate::{compile::ProblemCompileError, query::ScenarioQuery};
@@ -110,6 +111,11 @@ mod constructor {
             scenario: ScenarioQuery,
         ) -> Result<Self, ProblemCompileError> {
             let core_query = scenario.core_query();
+            validate_pc_observation_objective(
+                core_query.queue_observation_policy(),
+                core_query.objective().kind(),
+            )
+            .map_err(ProblemCompileError::PcSearchContract)?;
             let max_pieces = core_query.piece_window().max_pieces();
             if u16::try_from(max_pieces).is_err() {
                 return Err(ProblemCompileError::PackingPieceWindowTooLarge { max_pieces });

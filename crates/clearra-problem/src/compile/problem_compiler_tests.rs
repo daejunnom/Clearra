@@ -6,13 +6,18 @@ use clearra_core_domain::{
         PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
     },
 };
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCompletionGoal, PcContinuationToken, PcContinuationTokenCodec,
-    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow, SupplyWindowSize,
+    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSearchContractError, PieceWindow,
+    SupplyWindowSize,
 };
 use clearra_supply::{
     piece_source::PieceSourceKind,
-    queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
+    queue::{
+        fixed_sequence::FixedSequence, queue_observation_policy::QueueObservationPolicy,
+        queue_pattern_expression::QueuePatternExpression,
+    },
 };
 
 use super::*;
@@ -50,6 +55,36 @@ mod case_opening_2l_compiles_to_search_problem {
             }
         );
         assert!(!problem.exact_target_policy().is_core_success_condition());
+    }
+}
+
+mod case_visible_seven_minimum_cover_is_rejected_by_the_problem_boundary {
+    use super::*;
+
+    #[test]
+    fn opening_and_scenario_queries_fail_closed_before_search() {
+        let opening = OpeningPcSearchQuery::new(PcTarget::four_lines())
+            .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+            .with_objective(ObjectivePolicy::minimum_cover());
+        let scenario = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::default(),
+            PieceWindow::new(10),
+        )
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .with_objective(ObjectivePolicy::minimum_cover());
+
+        for result in [
+            ProblemCompiler::compile_opening_pc(&opening),
+            ProblemCompiler::compile_scenario_pc(&scenario),
+        ] {
+            assert_eq!(
+                result,
+                Err(ProblemCompileError::PcSearchContract(
+                    PcSearchContractError::VisibleSevenMinimumCoverUnsupported
+                ))
+            );
+        }
     }
 }
 

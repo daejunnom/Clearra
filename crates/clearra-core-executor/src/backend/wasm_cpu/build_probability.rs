@@ -908,10 +908,11 @@ impl CompactBuildProbabilitySession {
                 ));
             }
             None => {
-                let family = universe.packing_multiset_family(
+                let family = universe.packing_multiset_family_for_execution(
                     target_piece_count,
                     problem.initial_hold(),
-                    super::packing_projection_hold_enabled(problem),
+                    problem.supply().hold_enabled(),
+                    super::packing_hold_projection(problem),
                 );
                 if family.is_empty() {
                     return Err(WasmExactSearchError::InvalidProblem(

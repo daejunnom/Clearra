@@ -8,6 +8,15 @@ import {
   postPrewarmRuntime
 } from './wasmCommandClient';
 import {
+  DEFAULT_RUNTIME_WARMUP_POLICY,
+  normalizeRuntimeWarmupPolicy,
+  resolveWorkerAuthority,
+  sharedBrowserHostCapabilitySnapshot,
+  type HostCapabilitySnapshot,
+  type RuntimeWarmupPolicy,
+  type WorkerAuthorityReport
+} from './hostCapabilitySnapshot';
+import {
   ensureWasmWorkerOwnerId,
   terminateOwnedWasmWorker,
   type ClearraWasmForcedTerminationReason
@@ -33,6 +42,9 @@ export class WasmTerminalWorkerController {
   private cancellingWorker: Worker | null = null;
   private prewarmingWorker: Worker | null = null;
   private prewarmWorkerCount = 1;
+  private hostCapabilitySnapshot: HostCapabilitySnapshot;
+  private workerAuthority: WorkerAuthorityReport;
+  private warmupPolicy: RuntimeWarmupPolicy = DEFAULT_RUNTIME_WARMUP_POLICY;
   private tablebaseRequested = false;
   private runInFlight = false;
   private prewarmDeferred = false;
@@ -44,15 +56,38 @@ export class WasmTerminalWorkerController {
     {
       resolve: (value: { keys: string[]; total: number }) => void;
       reject: (reason: Error) => void;
+      offset: number;
+      limit: number;
     }
   >();
 
-  constructor(private workerFactory: (() => Worker) | null) {}
+  constructor(
+    private workerFactory: (() => Worker) | null,
+    hostCapabilitySnapshot: HostCapabilitySnapshot = sharedBrowserHostCapabilitySnapshot()
+  ) {
+    this.hostCapabilitySnapshot = hostCapabilitySnapshot;
+    this.workerAuthority = resolveWorkerAuthority(hostCapabilitySnapshot, 1);
+  }
 
   setWorkerFactory(workerFactory: (() => Worker) | null) {
     if (this.workerFactory === workerFactory) return;
     this.dispose();
     this.workerFactory = workerFactory;
+  }
+
+  setHostCapabilitySnapshot(hostCapabilitySnapshot: HostCapabilitySnapshot) {
+    if (this.hostCapabilitySnapshot.snapshotId === hostCapabilitySnapshot.snapshotId) return;
+    this.dispose();
+    this.hostCapabilitySnapshot = hostCapabilitySnapshot;
+    this.workerAuthority = resolveWorkerAuthority(
+      hostCapabilitySnapshot,
+      this.workerAuthority.workersRequested
+    );
+    this.prewarmWorkerCount = this.workerAuthority.workersEffective;
+  }
+
+  currentWorkerAuthority(): WorkerAuthorityReport {
+    return this.workerAuthority;
   }
 
   run(): boolean {
@@ -98,7 +133,8 @@ export class WasmTerminalWorkerController {
         worker,
         this.prewarmWorkerCount,
         this.tablebaseRequested,
-        ensureWasmWorkerOwnerId(worker)
+        ensureWasmWorkerOwnerId(worker),
+        this.runtimeAuthority()
       );
       return true;
     } catch (error) {
@@ -108,8 +144,19 @@ export class WasmTerminalWorkerController {
     }
   }
 
-  prewarm(workerCount: number, tablebaseRequested = false) {
-    this.prewarmWorkerCount = Math.max(1, Math.floor(workerCount));
+  prewarm(
+    workerCount: number,
+    tablebaseRequested = false,
+    warmupPolicy: RuntimeWarmupPolicy = DEFAULT_RUNTIME_WARMUP_POLICY,
+    authority?: WorkerAuthorityReport
+  ) {
+    this.workerAuthority = authorityForPrewarm(
+      this.hostCapabilitySnapshot,
+      workerCount,
+      authority
+    );
+    this.prewarmWorkerCount = this.workerAuthority.workersEffective;
+    this.warmupPolicy = normalizeRuntimeWarmupPolicy(warmupPolicy);
     const tablebaseChanged = this.tablebaseRequested !== tablebaseRequested;
     if (tablebaseChanged) {
       applyTablebaseWarmupEvent({
@@ -150,19 +197,43 @@ export class WasmTerminalWorkerController {
     }, COOPERATIVE_CANCEL_GRACE_MS);
   }
 
-  loadSolutionPage(offset: number, limit: number): Promise<{ keys: string[]; total: number }> {
+  loadSolutionPage(
+    offset: number,
+    limit: number,
+    signal?: AbortSignal
+  ): Promise<{ keys: string[]; total: number }> {
     const worker = this.worker;
     if (!worker || this.runInFlight || this.cancellingWorker !== null) {
       return Promise.reject(new Error('solution page runtime is not available'));
     }
+    if (signal?.aborted) return Promise.reject(solutionPageAbortError(signal));
     const requestId = this.nextSolutionPageRequestId++;
     return new Promise((resolve, reject) => {
-      this.solutionPageRequests.set(requestId, { resolve, reject });
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      const settleResolve = (value: { keys: string[]; total: number }) => {
+        cleanup();
+        resolve(value);
+      };
+      const settleReject = (reason: Error) => {
+        cleanup();
+        reject(reason);
+      };
+      const onAbort = () => {
+        if (!this.solutionPageRequests.delete(requestId)) return;
+        settleReject(solutionPageAbortError(signal));
+      };
+      this.solutionPageRequests.set(requestId, {
+        resolve: settleResolve,
+        reject: settleReject,
+        offset,
+        limit
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
       try {
         postLoadSolutionPage(worker, requestId, offset, limit);
       } catch (error) {
         this.solutionPageRequests.delete(requestId);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        settleReject(error instanceof Error ? error : new Error(String(error)));
       }
     });
   }
@@ -173,7 +244,8 @@ export class WasmTerminalWorkerController {
       this.cancellingWorker !== null ||
       this.prewarmingWorker !== null ||
       this.runInFlight ||
-      this.cancelFallback !== null
+      this.cancelFallback !== null ||
+      this.solutionPageRequests.size > 0
     ) {
       return null;
     }
@@ -359,7 +431,8 @@ export class WasmTerminalWorkerController {
         worker,
         workerCount,
         this.tablebaseRequested,
-        ensureWasmWorkerOwnerId(worker)
+        ensureWasmWorkerOwnerId(worker),
+        this.runtimeAuthority()
       );
     } catch (error) {
       this.failClosedWorker(worker, 'E_WASM_WORKER_PREWARM_FAILED', errorMessage(error));
@@ -400,12 +473,26 @@ export class WasmTerminalWorkerController {
     terminateOwnedWasmWorker(worker, 'owner-disposed');
   }
 
+  private runtimeAuthority() {
+    return {
+      hostCapabilitySnapshot: this.hostCapabilitySnapshot,
+      workerAuthority: this.workerAuthority,
+      warmupPolicy: this.warmupPolicy
+    };
+  }
+
   private resolveSolutionPage(event: ClearraSolutionPageWorkerEvent) {
     const pending = this.solutionPageRequests.get(event.request_id);
     if (!pending) return;
     this.solutionPageRequests.delete(event.request_id);
     if (event.type === 'solution_page_failed') {
       pending.reject(new Error(event.message));
+    } else if (
+      event.offset !== pending.offset ||
+      !Array.isArray(event.keys) ||
+      event.keys.length > pending.limit
+    ) {
+      pending.reject(new Error('solution page response does not match its request'));
     } else {
       pending.resolve({ keys: event.keys, total: event.total });
     }
@@ -422,6 +509,28 @@ export class WasmTerminalWorkerController {
     this.cancellingWorker = null;
     this.cancellingJobId = null;
   }
+}
+
+function solutionPageAbortError(signal: AbortSignal | undefined): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error('Solution page load was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function authorityForPrewarm(
+  snapshot: HostCapabilitySnapshot,
+  workerCount: number,
+  authority: WorkerAuthorityReport | undefined
+): WorkerAuthorityReport {
+  if (
+    authority?.snapshotId === snapshot.snapshotId &&
+    authority.workersEffective === workerCount &&
+    authority.reportedLogicalProcessors === snapshot.reportedLogicalProcessors
+  ) {
+    return authority;
+  }
+  return resolveWorkerAuthority(snapshot, workerCount);
 }
 
 function isTerminalWorkerEvent(event: ClearraWasmWorkerEvent): boolean {

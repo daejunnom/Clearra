@@ -9,6 +9,7 @@ import {
   type ClearraSearchProgressTelemetry,
   type ClearraWebGpuBackendReport,
   type ClearraWasmCommandRequest,
+  type ClearraWasmRuntimeAuthority,
   type ClearraWasmSearchReport,
   type ClearraWasmWorkerEvent
 } from './wasmCommandClient';
@@ -118,7 +119,8 @@ export function runWasmCommand(
   worker: Worker,
   prewarmWorkerCount = 1,
   tablebaseRequested = false,
-  lifecycleOwnerId?: string
+  lifecycleOwnerId?: string,
+  runtimeAuthority?: ClearraWasmRuntimeAuthority
 ) {
   const request = get(wasmWorkerState).request;
   wasmWorkerState.update((state) => ({
@@ -144,7 +146,8 @@ export function runWasmCommand(
     request,
     prewarmWorkerCount,
     tablebaseRequested,
-    lifecycleOwnerId
+    lifecycleOwnerId,
+    runtimeAuthority
   );
 }
 

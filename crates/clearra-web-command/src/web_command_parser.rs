@@ -10,8 +10,9 @@ use clearra_objectives::policy::score_objective_policy::{
     ScoreProfileSelection, SpinProfileSelection,
 };
 use clearra_pc_graph::request::{
-    GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
-    PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
+    validate_pc_observation_objective, GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy,
+    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend,
+    SupplyWindowSize, WorkerPolicy,
 };
 use clearra_problem::{
     BuildProbabilityAggregation, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
@@ -2031,6 +2032,14 @@ fn parse_pc_command(
         objective = objective
             .with_back_to_back_preservation(spin_profile.unwrap_or(SpinProfileSelection::TSpins));
     }
+    validate_pc_observation_objective(queue_observation_policy, objective.kind()).map_err(
+        |error| {
+            WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("{}: {}", error.code(), error.message()),
+            )
+        },
+    )?;
     if objective.score().requested() {
         count_policy = PcCountPolicy::CountAll;
     }

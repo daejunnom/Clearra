@@ -21,6 +21,7 @@ impl DiagnosticPrinter {
 impl DiagnosticPrinter {
     pub fn render_json(report: &DiagnosticReport) -> String {
         CommandRenderer::render("diagnostic", diagnostic_fields(report), RenderFormat::Json)
+            .expect("diagnostic JSON is not Fumen output")
     }
 }
 

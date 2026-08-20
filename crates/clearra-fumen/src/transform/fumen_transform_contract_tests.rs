@@ -20,7 +20,7 @@ fn fumen_mirror_roundtrip() {
         "kind=normalized-solution\ninitial_board_mask=0x1\nfinal_board_mask=0x0\npiece_sequence=TI\noperation_sequence=T:0:4:0|I:1:2:1\nmirror_policy=none".to_owned(),
     ]);
     let mirrored = FumenTransformContract::field_mirror(&trace);
-    let encoded = FumenLikeWriter::write(&mirrored);
+    let encoded = FumenLikeWriter::write(&mirrored).expect("mirrored fumen");
     let decoded = FumenLikeReader::read(&encoded).expect("decoded mirrored fumen");
     let normalized = FumenNormalizer::normalize_trace(&decoded);
     let key = normalized
@@ -62,7 +62,7 @@ fn fumen_to_build_template_adapter_validates_input() {
         "kind=build-template\ntemplate_id=t-spin-setup\nslot_count=4\nmirror_policy=none"
             .to_owned(),
     ]);
-    let encoded = FumenLikeWriter::write(&trace);
+    let encoded = FumenLikeWriter::write(&trace).expect("build template fumen");
     let draft = FumenToBuildTemplateAdapter::build_template_from_fumen(&encoded).expect("draft");
 
     assert_eq!(draft.template_id(), "t-spin-setup");

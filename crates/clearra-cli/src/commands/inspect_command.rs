@@ -12,10 +12,10 @@ impl InspectCommand {
             .subject()
             .map(|subject| vec![("subject", subject.to_owned())])
             .unwrap_or_default();
-        CliOutput::success(CommandRenderer::render(
+        CommandRenderer::render_output(
             "inspect",
             crate::output::SummaryRenderContract::render_fields(fields),
             format,
-        ))
+        )
     }
 }

@@ -48,22 +48,23 @@ pub(crate) fn score_objective_policy(
     initial_b2b: u32,
     base: clearra_objectives::policy::objective_policy::ObjectivePolicy,
 ) -> Result<clearra_objectives::policy::objective_policy::ObjectivePolicy, RequestBuildError> {
-    let objective = match mode {
-        "off" | "disabled" | "failed-queue" | "" => return Ok(base),
-        "tiling" | "tiling-only" => {
+    let objective_kind = score_mode_objective_kind(mode, base.kind())?;
+    let objective = match objective_kind {
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling => {
             return Ok(clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling())
         }
-        "minimum-cover" | "minimum" => {
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover => {
             return Ok(
                 clearra_objectives::policy::objective_policy::ObjectivePolicy::minimum_cover(),
             )
         }
-        "summary" => base.with_score_summary(),
-        value => {
-            return Err(RequestBuildError::new(
-                RequestBuildErrorCode::ValidationFailed,
-                format!("invalid GUI score mode '{value}'"),
-            ))
+        clearra_core_domain::objective::objective_kind::ObjectiveKind::All
+        | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique => {
+            if mode == "summary" {
+                base.with_score_summary()
+            } else {
+                return Ok(base);
+            }
         }
     };
     let score_profile =
@@ -90,6 +91,23 @@ pub(crate) fn score_objective_policy(
         .with_score_profile(score_profile)
         .with_spin_profile(spin_profile)
         .with_initial_b2b(initial_b2b))
+}
+
+pub(crate) fn score_mode_objective_kind(
+    mode: &str,
+    base_kind: clearra_core_domain::objective::objective_kind::ObjectiveKind,
+) -> Result<clearra_core_domain::objective::objective_kind::ObjectiveKind, RequestBuildError> {
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+
+    match mode {
+        "off" | "disabled" | "failed-queue" | "" | "summary" => Ok(base_kind),
+        "tiling" | "tiling-only" => Ok(ObjectiveKind::Tiling),
+        "minimum-cover" | "minimum" => Ok(ObjectiveKind::MinimumCover),
+        value => Err(RequestBuildError::new(
+            RequestBuildErrorCode::ValidationFailed,
+            format!("invalid GUI score mode '{value}'"),
+        )),
+    }
 }
 
 pub(crate) fn execution_constraint_objective_policy(

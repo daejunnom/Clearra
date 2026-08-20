@@ -65,11 +65,11 @@ fn render_success(
     let mut fields = assembly.input_fields();
     fields.extend(expected_fields);
     fields.extend(result_fields);
-    CliOutput::success(CommandRenderer::render(
+    CommandRenderer::render_output(
         "pc-scenario",
         crate::output::SummaryRenderContract::render_fields(fields),
         format,
-    ))
+    )
 }
 
 fn expected_unsupported_output(
@@ -87,11 +87,11 @@ fn expected_unsupported_output(
             let mut fields = assembly.input_fields();
             fields.extend(expected_fields);
             fields.extend(PcScenarioUnsupportedVerifier::validation_fields(report));
-            Some(CliOutput::success(CommandRenderer::render(
+            Some(CommandRenderer::render_output(
                 "pc-scenario",
                 crate::output::SummaryRenderContract::render_fields(fields),
                 format,
-            )))
+            ))
         }
         Err(error) => Some(expected_mismatch_output(assembly, error)),
     }

@@ -25,12 +25,22 @@ pub(crate) fn parse_command(
         "convert" => parse_convert(command_args),
         "continue" => parse_continue(command_args),
         "verify" => parse_verify(command_args),
-        "spin-structure"
-            if command_args
-                .first()
-                .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h")) =>
-        {
+        "spin-structure" if has_help(command_args) => {
             Ok(ParsedCliCommand::Help(CliHelpTopic::SpinStructure))
+        }
+        "build-probability" | "finesse" | "damage" | "spin-finder" | "spin-structure"
+        | "chance" | "minimals" | "score" | "special-minimals" | "special_minimals"
+        | "special-cover" | "special_cover" | "score-minimals" | "score_minimals" | "saves"
+        | "best-save" | "best_save" | "score-finder" | "score_finder" | "spin-cover"
+        | "spincover" | "setup-cover" | "setupcover" | "congruent" | "congruent-cover"
+        | "congruent_cover" | "cover-percent" | "cover_percent" | "pc-setup" | "pcsetup"
+        | "best-setup" | "bestsetup" | "dpc-finder" | "dpcfinder" | "parity" | "to-gray"
+        | "togray" | "to-fumen" | "tofumen" | "render"
+            if has_help(command_args) =>
+        {
+            Ok(ParsedCliCommand::Help(CliHelpTopic::Product(
+                product_help_topic(command),
+            )))
         }
         "build-probability" | "finesse" | "damage" | "spin-finder" | "spin-structure"
         | "chance" | "minimals" | "score" | "special-minimals" | "special_minimals"
@@ -58,6 +68,24 @@ pub(crate) fn parse_command(
         _ => Err(CliParseError::UnknownCommand {
             command: command.to_owned(),
         }),
+    }
+}
+
+fn has_help(command_args: &[String]) -> bool {
+    command_args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+}
+
+fn product_help_topic(command: &str) -> super::ProductHelpTopic {
+    use super::ProductHelpTopic;
+
+    match command {
+        "build-probability" => ProductHelpTopic::BuildProbability,
+        "finesse" => ProductHelpTopic::Finesse,
+        "damage" => ProductHelpTopic::Damage,
+        "spin-finder" => ProductHelpTopic::SpinFinder,
+        _ => ProductHelpTopic::MappedCompatibility,
     }
 }
 

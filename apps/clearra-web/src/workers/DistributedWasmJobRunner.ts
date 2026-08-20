@@ -1,5 +1,6 @@
 import type {
   ClearraSearchProgressTelemetry,
+  ClearraSearchProgressTelemetryFlags,
   ClearraWasmWorkerEvent
 } from '@clearra/ui/wasm';
 
@@ -8,7 +9,12 @@ import {
   type ClearraVerifierPoolProgress,
   type ClearraVerifierRecoveryMode
 } from './ClearraVerifierPool';
-import type { ClearraDistributedPlan, ClearraWasmModule } from './clearraWasmRuntime';
+import type {
+  ClearraDistributedCoreProgress,
+  ClearraDistributedPlan,
+  ClearraWasmHostCapabilities,
+  ClearraWasmModule
+} from './clearraWasmRuntime';
 
 const PRODUCER_WORK_BUDGET = 32768;
 const CANDIDATE_BATCH_SIZE = 256;
@@ -20,12 +26,14 @@ const sharedVerifierPool = new ClearraVerifierPool();
 export function prewarmDistributedWorkers(
   totalWorkerCount: number,
   compiledModule: WebAssembly.Module,
-  lifecycleOwnerId = ''
+  lifecycleOwnerId = '',
+  hostCapabilities?: ClearraWasmHostCapabilities
 ): Promise<void> {
   return sharedVerifierPool.prewarm(
     Math.max(0, Math.floor(totalWorkerCount) - 1),
     compiledModule,
-    lifecycleOwnerId
+    lifecycleOwnerId,
+    hostCapabilities
   );
 }
 
@@ -42,6 +50,7 @@ export class DistributedWasmJobRunner {
     private readonly wasm: ClearraWasmModule,
     private readonly jobId: number,
     private readonly lifecycleOwnerId: string,
+    private readonly hostCapabilities: ClearraWasmHostCapabilities,
     pool: ClearraVerifierPool = sharedVerifierPool
   ) {
     this.pool = pool;
@@ -76,6 +85,8 @@ export class DistributedWasmJobRunner {
       candidatesVerified: 0,
       buildNodes: 0,
       coverageChecks: 0,
+      availability: emptyVerifierProgressFlags(),
+      exactness: emptyVerifierProgressFlags(),
       readyWorkers: 0,
       activeWorkers: 0,
       workerCount: verifierCount,
@@ -121,7 +132,9 @@ export class DistributedWasmJobRunner {
             layer_index: producer.layerIndex,
             layer_count: producer.layerCount,
             layer_done: producer.layerDone,
-            layer_total: producer.layerTotal
+            layer_total: producer.layerTotal,
+            availability: telemetryFlags(producer, verifier, 'availability'),
+            exactness: telemetryFlags(producer, verifier, 'exactness')
           }
         )
       );
@@ -142,7 +155,8 @@ export class DistributedWasmJobRunner {
           verifierCount,
           this.wasm.compiled_module(),
           this.lifecycleOwnerId,
-          verifierRecoveryMode(plan)
+          verifierRecoveryMode(plan),
+          this.hostCapabilities
         );
         void verifierInitialization.catch(() => undefined);
       }
@@ -175,7 +189,8 @@ export class DistributedWasmJobRunner {
             effectiveVerifierCount,
             this.wasm.compiled_module(),
             this.lifecycleOwnerId,
-            verifierRecoveryMode(plan)
+            verifierRecoveryMode(plan),
+            this.hostCapabilities
           );
           void verifierInitialization.catch(() => undefined);
           await yieldToWorkerHost();
@@ -306,6 +321,43 @@ export class DistributedWasmJobRunner {
       // The main worker is terminated after failure or cancellation.
     }
   }
+}
+
+function emptyVerifierProgressFlags() {
+  return {
+    candidatesVerified: false,
+    buildNodes: false,
+    coverageChecks: false
+  };
+}
+
+function telemetryFlags(
+  producer: ClearraDistributedCoreProgress,
+  verifier: ClearraVerifierPoolProgress,
+  kind: 'availability' | 'exactness'
+): ClearraSearchProgressTelemetryFlags {
+  const producerFlags = producer[kind];
+  const verifierFlags = verifier[kind];
+  return {
+    geometry_nodes: producerFlags.geometryNodes,
+    candidates_emitted: producerFlags.candidateCount,
+    geometry_family_count: producerFlags.candidateFamilyCount,
+    candidates_verified: verifierFlags.candidatesVerified,
+    producer_build_nodes: producerFlags.buildNodes,
+    producer_coverage_checks: producerFlags.coverageChecks,
+    build_nodes: verifierFlags.buildNodes,
+    coverage_checks: verifierFlags.coverageChecks,
+    ready_workers: true,
+    active_workers: true,
+    worker_count: true,
+    oldest_batch_ms: true,
+    pass_index: producerFlags.passIndex,
+    pass_count: producerFlags.passCount,
+    layer_index: producerFlags.layerIndex,
+    layer_count: producerFlags.layerCount,
+    layer_done: producerFlags.layerDone,
+    layer_total: producerFlags.layerTotal
+  };
 }
 
 function withSearchProfile(

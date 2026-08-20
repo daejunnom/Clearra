@@ -8,13 +8,25 @@ steps:
       - CLEARRA_VERSION=${_CLEARRA_VERSION}
       - --build-arg
       - CLEARRA_CLI_SHA256=${_CLEARRA_CLI_SHA256}
+      - --build-arg
+      - CLEARRA_SOURCE_COMMIT=${_SOURCE_COMMIT}
+      - --build-arg
+      - CLEARRA_ENGINE_BUILD_ID=${_ENGINE_BUILD_ID}
+      - --build-arg
+      - CLEARRA_SEARCH_CONTRACT_REVISION=clearra.search.contract.legacy-v1
+      - --build-arg
+      - CLEARRA_SUPPLY_SEMANTICS_ID=clearra.supply.legacy-v1
+      - --build-arg
+      - CLEARRA_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.legacy-v1
       - -t
       - ${_IMAGE}
       - .
 images:
   - ${_IMAGE}
 substitutions:
-  _CLEARRA_VERSION: 0.5.1
-  _CLEARRA_CLI_SHA256: ""
+  _CLEARRA_VERSION: required
+  _CLEARRA_CLI_SHA256: required
+  _SOURCE_COMMIT: required
+  _ENGINE_BUILD_ID: required
 options:
   logging: CLOUD_LOGGING_ONLY

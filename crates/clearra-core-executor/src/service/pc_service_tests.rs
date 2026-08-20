@@ -11,6 +11,51 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 use crate::service::pc_service::PcService;
 
 #[cfg(feature = "native-c-core")]
+#[test]
+fn scenario_result_exposes_terminal_supply_and_explicit_solution_availability() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0x1c0701c07),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::S,
+            PieceKind::T,
+            PieceKind::O,
+            PieceKind::I,
+            PieceKind::L,
+            PieceKind::J,
+            PieceKind::Z,
+        ])),
+        PieceWindow::new(7),
+    )
+    .with_exact_pieces(Some(7));
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+    let result = PcService::execute(&problem).expect("execution");
+    let availability = result.execution_report().solution_set_availability();
+
+    assert_eq!(result.field("search_output_policy"), Some("trace"));
+    assert_eq!(
+        result.field("supply_window_resolution"),
+        Some("projected-terminal-lookahead")
+    );
+    assert_eq!(result.bool_field("projects_unplaced_lookahead"), Some(true));
+    assert_eq!(
+        result.bool_field("projects_standard_bag_lookahead"),
+        Some(false)
+    );
+    assert_eq!(result.usize_field("source_sequence_length"), Some(7));
+    assert_eq!(result.field("total_possible_pattern_count"), Some("1"));
+    assert!(availability.uses_explicit_contract());
+    assert!(availability.contract_valid());
+    assert!(availability.solution_count_calculated());
+    assert!(availability.solution_set_materialized());
+    assert_eq!(
+        availability.solution_keys_materialized_count(),
+        result.normalized_solution_keys().len()
+    );
+    assert!(availability.solution_keys_complete());
+    assert!(!availability.solution_page_available());
+}
+
+#[cfg(feature = "native-c-core")]
 mod case_pc_service_runs_search_problem_through_packing_buildup_coverage_and_output_model {
     use super::*;
 
@@ -296,6 +341,9 @@ mod case_product_acceptance_continuation_fixture_exports_next_pc_token_after_2l 
 #[cfg(feature = "native-c-core")]
 mod case_product_acceptance_scenario_simple_4l_fixture_solves_visible_tall_board {
     use super::*;
+    use clearra_core_domain::solution::normalized_tiling_solution::{
+        NormalizedTilingSolutionKey, NormalizedTilingSolutionSet, PiecePlacementMask,
+    };
 
     #[test]
     fn product_acceptance_scenario_simple_4l_fixture_solves_visible_tall_board() {
@@ -333,7 +381,36 @@ mod case_product_acceptance_scenario_simple_4l_fixture_solves_visible_tall_board
             Some("normalized-tiling-set")
         );
         assert_eq!(result.field("normalized_unique_solution_count"), Some("1"));
-        assert_eq!(result.normalized_solution_keys().len(), 1);
+        let independent_key = NormalizedTilingSolutionKey::from_placements(
+            0x3f0,
+            [PiecePlacementMask::new(PieceKind::I, 0x0f)],
+        )
+        .expect("one horizontal I fills the only four empty cells");
+        assert_eq!(
+            independent_key.as_str(),
+            "ctk1|initial=00000000000003f0|placements=I:000000000000000f"
+        );
+        let independent_set = NormalizedTilingSolutionSet::new([independent_key.clone()]);
+        let independent_hash = independent_set.hash();
+        assert_eq!(
+            result
+                .execution_report()
+                .objective_result()
+                .total_solution_count(),
+            1,
+            "an empty hold cannot store the final current without a next piece"
+        );
+        assert_eq!(
+            result.normalized_solution_keys(),
+            &[independent_key.as_str().to_owned()]
+        );
+        assert_eq!(
+            result.field("normalized_solution_set_hash"),
+            Some(independent_hash)
+        );
+        assert_eq!(result.path_steps().len(), 1);
+        assert_eq!(result.path_steps()[0].piece(), PieceKind::I);
+        assert_eq!(result.path_steps()[0].hold(), "none");
         assert_eq!(
             result.field("coverage_probability"),
             Some(expected_coverage_probability())

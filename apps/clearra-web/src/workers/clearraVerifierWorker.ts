@@ -3,6 +3,7 @@ import {
   loadClearraWasmModule,
   type ClearraDistributedVerifierConsume,
   type ClearraDistributedVerifierProgress,
+  type ClearraWasmHostCapabilities,
   type ClearraWasmModule
 } from './clearraWasmRuntime';
 import { listenForWasmOwnerTermination } from '@clearra/ui/wasm-lifecycle';
@@ -12,11 +13,13 @@ type VerifierRequest =
       type: 'prewarm';
       compiledModule?: WebAssembly.Module;
       lifecycleOwnerId?: string;
+      hostCapabilities?: ClearraWasmHostCapabilities;
     }
   | {
       type: 'initialize';
       initialization: string | ArrayBuffer;
       lifecycleOwnerId?: string;
+      hostCapabilities?: ClearraWasmHostCapabilities;
     }
   | { type: 'consume'; requestId: number; batch: ArrayBuffer }
   | { type: 'finish'; requestId: number }
@@ -34,6 +37,8 @@ type VerifierResponse =
       type: 'consumed';
       requestId: number;
       candidateCount: number;
+      candidateCountAvailable: boolean;
+      candidateCountExact: boolean;
       partial: ArrayBuffer | null;
       progress: ClearraDistributedVerifierProgress;
     }
@@ -61,12 +66,15 @@ async function handleRequest(request: VerifierRequest) {
       return;
     }
     if (request.type === 'prewarm') {
-      wasm ??= await loadClearraWasmModule(request.compiledModule);
+      wasm ??= await loadClearraWasmModule(
+        request.compiledModule,
+        request.hostCapabilities
+      );
       post({ type: 'prewarmed' });
       return;
     }
     if (request.type === 'initialize') {
-      wasm ??= await loadClearraWasmModule();
+      wasm ??= await loadClearraWasmModule(undefined, request.hostCapabilities);
       wasm.distributed_verifier_start(request.initialization);
       initialized = true;
       post({ type: 'ready' });
@@ -77,7 +85,10 @@ async function handleRequest(request: VerifierRequest) {
       let lastHeartbeatAt = performance.now();
       let consumed: ClearraDistributedVerifierConsume =
         wasm.distributed_verifier_consume(request.batch);
-      const candidateCount = consumed.candidateCount;
+      let candidateCount = consumed.candidateCount;
+      let candidateCountAvailable = consumed.candidateCountAvailable;
+      let candidateCountExact =
+        consumed.candidateCountAvailable && consumed.candidateCountExact;
       while (consumed.hasPendingWork) {
         if (consumed.partial) {
           post(
@@ -91,11 +102,20 @@ async function handleRequest(request: VerifierRequest) {
         }
         await yieldToHost();
         consumed = wasm.distributed_verifier_continue();
+        const accumulated = addVerifierCounts(candidateCount, consumed.candidateCount);
+        candidateCount = accumulated.value;
+        candidateCountAvailable &&= consumed.candidateCountAvailable;
+        candidateCountExact &&=
+          consumed.candidateCountAvailable &&
+          consumed.candidateCountExact &&
+          accumulated.exact;
       }
       const response: VerifierResponse = {
         type: 'consumed',
         requestId: request.requestId,
         candidateCount,
+        candidateCountAvailable,
+        candidateCountExact,
         partial: consumed.partial,
         progress: wasm.distributed_verifier_progress()
       };
@@ -121,6 +141,22 @@ async function handleRequest(request: VerifierRequest) {
       message: failure.message
     });
   }
+}
+
+function addVerifierCounts(
+  left: number,
+  right: number
+): { value: number; exact: boolean } {
+  if (
+    !Number.isSafeInteger(left) ||
+    left < 0 ||
+    !Number.isSafeInteger(right) ||
+    right < 0 ||
+    left > Number.MAX_SAFE_INTEGER - right
+  ) {
+    return { value: Number.MAX_SAFE_INTEGER, exact: false };
+  }
+  return { value: left + right, exact: true };
 }
 
 function postHeartbeat(

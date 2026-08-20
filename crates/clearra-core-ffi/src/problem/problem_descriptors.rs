@@ -101,6 +101,9 @@ pub struct CBuildUpProblem {
     pub coverage_pattern_id: u32,
     pub buildup_flags: u32,
     pub source_execution_mode: u32,
+    pub terminal_projection_policy_version: u16,
+    pub terminal_projection_policy: u8,
+    pub terminal_projection_reserved: u8,
 }
 
 impl Default for CBuildUpProblem {
@@ -127,6 +130,9 @@ impl Default for CBuildUpProblem {
             coverage_pattern_id: 0,
             buildup_flags: 0,
             source_execution_mode: super::C_BUILDUP_SOURCE_CONCRETE_PATTERN,
+            terminal_projection_policy_version: super::C_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION,
+            terminal_projection_policy: super::C_BUILDUP_TERMINAL_PROJECTION_DISABLED,
+            terminal_projection_reserved: 0,
         }
     }
 }

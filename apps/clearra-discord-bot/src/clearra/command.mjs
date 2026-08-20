@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  normalizeRuntimeIdentity,
+  runtimeIdentityMatches,
+} from "../job-service/runtime-identity.mjs";
+
 const JOB_PROTOCOL = "clearra.job.v1";
 const DEFAULT_JOB_ENDPOINT = "http://127.0.0.1:8787/jobs";
 const TERMINAL_JOB_STATES = new Set(["completed", "failed", "cancelled"]);
@@ -413,6 +418,9 @@ export class ClearraJobExecutor {
       options.endpoint ?? DEFAULT_JOB_ENDPOINT,
     );
     this.authorizationToken = options.authorizationToken ?? null;
+    this.expectedRuntimeIdentity = options.expectedRuntimeIdentity
+      ? normalizeRuntimeIdentity(options.expectedRuntimeIdentity)
+      : null;
     if (!this.authorizationToken && !isLoopbackHostname(this.endpoint.hostname)) {
       throw new Error("A remote Clearra job endpoint requires an authorization token.");
     }
@@ -494,9 +502,11 @@ export class ClearraJobExecutor {
           arguments: [...arguments_],
           deadlineUnixMs,
           maxOutputBytes: this.maxOutputBytes,
+          expectedRuntime: this.expectedRuntimeIdentity,
         }),
       });
       let job = await readJobResponse(response, this.maxOutputBytes);
+      validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
       validateJobIdentity(job, jobId);
 
       while (!TERMINAL_JOB_STATES.has(job.state)) {
@@ -510,6 +520,7 @@ export class ClearraJobExecutor {
           signal: controller.signal,
         });
         job = await readJobResponse(response, this.maxOutputBytes);
+        validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
         validateJobIdentity(job, jobId);
       }
 
@@ -708,6 +719,13 @@ async function readBoundedText(response, maxBytes) {
 function validateJobIdentity(job, expectedId) {
   if (job.id !== expectedId) {
     throw new Error("Clearra job service returned a mismatched job ID.");
+  }
+}
+
+function validateRuntimeIdentity(job, expected) {
+  if (!expected) return;
+  if (!runtimeIdentityMatches(job.runtime, expected)) {
+    throw new Error("Clearra job service runtime identity does not match Clearrabot.");
   }
 }
 

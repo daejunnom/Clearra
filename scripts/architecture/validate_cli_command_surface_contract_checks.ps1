@@ -611,7 +611,7 @@ foreach ($requiredMarker in @("CommandRenderer::render", "SummaryRenderContract:
         Add-ArchitectureError "rules_output_fields.rs must own rules render/profile field helpers marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("rules_verify_input_reports_issues_without_failing", "rules_import_rejects_unverified_imported_profiles", "rules_command_discloses_generic_srs_plus_and_unsupported_extension_backends", "rules_import_marks_verified_exact_180_profile_as_c_descriptor_ready")) {
+foreach ($requiredMarker in @("rules_verify_input_reports_issues_without_failing", "rules_import_rejects_unverified_imported_profiles", "rules_command_discloses_exact_connected_srs_plus_and_srs_x_backends", "rules_import_marks_verified_exact_180_profile_as_c_descriptor_ready")) {
     if ($rulesCommandTests -notlike "*$requiredMarker*") {
         Add-ArchitectureError "RulesCommand tests must preserve rules command behavior marker '$requiredMarker'"
     }

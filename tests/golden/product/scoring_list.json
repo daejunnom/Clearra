@@ -3,10 +3,12 @@
   "required_markers": [
     "kind=scoring",
     "action=list",
-    "profile_count=8",
-    "profile_0_id=jstris-ultra",
-    "profile_2_id=tetrio",
-    "profile_2_attack_model=tetrio",
-    "profile_2_accuracy_level=basic-approximation"
+    "profile_count=9",
+    "profile_0_id=guideline",
+    "profile_1_id=jstris-ultra",
+    "profile_3_id=tetrio",
+    "profile_3_attack_model=tetrio",
+    "profile_3_accuracy_level=basic-approximation",
+    "profile_8_id=tetrio-all-mini-plus"
   ]
 }

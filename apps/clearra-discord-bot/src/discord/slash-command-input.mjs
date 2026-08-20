@@ -1,4 +1,9 @@
-import { documentDecoder, isCtk3, operationCells } from "ctk3";
+import {
+  decodeFumenWithinPageLimit,
+  documentDecoder,
+  isCtk3,
+  operationCells,
+} from "ctk3";
 import { decoder as fumenDecoder } from "tetris-fumen";
 
 import { decodeViewerDocument } from "../viewer/document.mjs";
@@ -616,7 +621,11 @@ function readFumenSearchField(source, options) {
   const normalized = /^[Ddm]115@/.test(source) ? `v${source.slice(1)}` : source;
   let pages;
   try {
-    pages = fumenDecoder.decode(normalized);
+    pages = decodeFumenWithinPageLimit(
+      normalized,
+      (bounded) => fumenDecoder.decode(bounded),
+      1,
+    );
   } catch {
     throw new Error(`${options.name} Fumen could not be decoded.`);
   }

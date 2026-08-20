@@ -107,6 +107,56 @@ fn contract_preserves_not_calculated_solution_metadata_as_strings() {
     );
 }
 
+#[test]
+fn terminal_supply_projection_fields_keep_their_public_json_types() {
+    let fields = SummaryRenderContract::render_fields(vec![
+        ("projects_unplaced_lookahead".to_owned(), "true".to_owned()),
+        (
+            "projects_standard_bag_lookahead".to_owned(),
+            "false".to_owned(),
+        ),
+        ("source_sequence_length".to_owned(), "7".to_owned()),
+        (
+            "normalized_unique_solution_count".to_owned(),
+            "18".to_owned(),
+        ),
+        (
+            "actual_normalized_unique_solution_count".to_owned(),
+            "18".to_owned(),
+        ),
+    ]);
+    let message = fields
+        .into_iter()
+        .fold(RenderMessage::new("pc-scenario"), |message, field| {
+            message.with_value(field.key().to_owned(), field.value().clone())
+        });
+    let JsonValue::Object(root) = message.json_contract().root() else {
+        panic!("root object");
+    };
+    let summary = object_member(&root, "summary");
+
+    assert_eq!(
+        member_value(summary, "projects_unplaced_lookahead"),
+        &JsonValue::Bool(true)
+    );
+    assert_eq!(
+        member_value(summary, "projects_standard_bag_lookahead"),
+        &JsonValue::Bool(false)
+    );
+    assert_eq!(
+        member_value(summary, "source_sequence_length"),
+        &JsonValue::number("7")
+    );
+    assert_eq!(
+        member_value(summary, "normalized_unique_solution_count"),
+        &JsonValue::number("18")
+    );
+    assert_eq!(
+        member_value(summary, "actual_normalized_unique_solution_count"),
+        &JsonValue::number("18")
+    );
+}
+
 fn member_value<'a>(
     members: &'a [clearra_output::json::json_contract::JsonMember],
     key: &str,

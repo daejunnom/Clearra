@@ -14,7 +14,10 @@ import {
   updateWasmCommandText,
   wasmWorkerState
 } from '../src/lib/wasm/wasmWorkerStore';
-import type { ClearraWasmWorkerEvent } from '../src/lib/wasm/wasmCommandClient';
+import type {
+  ClearraSolutionPageWorkerEvent,
+  ClearraWasmWorkerEvent
+} from '../src/lib/wasm/wasmCommandClient';
 
 const originalState = get(wasmWorkerState);
 
@@ -180,6 +183,97 @@ async function clearingTerminalResultReleasesLogPayloads() {
   assert.deepEqual(state.terminalLines, ['clearra web runtime ready']);
 }
 
+async function abortingSolutionPageRequestReleasesControllerOwnership() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  controller.prewarm(1);
+  const abort = new AbortController();
+  const request = controller.loadSolutionPage(0, 1, abort.signal);
+  const reason = new Error('solution page aborted by test');
+  reason.name = 'AbortError';
+  abort.abort(reason);
+
+  await assert.rejects(request, reason);
+  const message = worker.messages.find(
+    (candidate) => (candidate as { type?: string }).type === 'load_solution_page'
+  ) as { requestId: number };
+  worker.emit({
+    type: 'solution_page',
+    request_id: message.requestId,
+    offset: 0,
+    total: 1,
+    keys: ['late-key']
+  });
+  controller.dispose();
+}
+
+async function newRunRejectsOutstandingSolutionPageRequest() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  controller.prewarm(1);
+  worker.emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1
+  } as unknown as ClearraWasmWorkerEvent);
+  const request = controller.loadSolutionPage(0, 1);
+
+  assert.equal(controller.run(), true);
+  await assert.rejects(request, /new search replaced/);
+  controller.dispose();
+}
+
+async function outstandingSolutionPageRequestPreventsWorkerTransfer() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  controller.prewarm(1);
+  worker.emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1
+  } as unknown as ClearraWasmWorkerEvent);
+  const request = controller.loadSolutionPage(0, 1);
+
+  assert.equal(controller.takeIdleWorker(), null);
+  const message = worker.messages.find(
+    (candidate) => (candidate as { type?: string }).type === 'load_solution_page'
+  ) as { requestId: number };
+  worker.emit({
+    type: 'solution_page',
+    request_id: message.requestId,
+    offset: 0,
+    total: 1,
+    keys: ['only-key']
+  });
+  assert.deepEqual(await request, { keys: ['only-key'], total: 1 });
+  assert.equal(controller.takeIdleWorker(), worker as unknown as Worker);
+  worker.terminate();
+}
+
+async function mismatchedSolutionPageResponseIsRejected() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  controller.prewarm(1);
+  const request = controller.loadSolutionPage(5, 2);
+  const message = worker.messages.find(
+    (candidate) => (candidate as { type?: string }).type === 'load_solution_page'
+  ) as { requestId: number };
+  worker.emit({
+    type: 'solution_page',
+    request_id: message.requestId,
+    offset: 4,
+    total: 10,
+    keys: ['wrong-key']
+  });
+
+  await assert.rejects(request, /does not match its request/);
+  controller.dispose();
+}
+
 function controllerFor(worker: FakeWorker) {
   return new WasmTerminalWorkerController(() => worker as unknown as Worker);
 }
@@ -229,7 +323,7 @@ function delay(milliseconds: number) {
 }
 
 class FakeWorker {
-  onmessage: ((event: MessageEvent<ClearraWasmWorkerEvent>) => void) | null = null;
+  onmessage: ((event: MessageEvent<ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: (() => void) | null = null;
   messages: unknown[] = [];
@@ -243,8 +337,8 @@ class FakeWorker {
     this.terminateCount += 1;
   }
 
-  emit(event: ClearraWasmWorkerEvent) {
-    this.onmessage?.({ data: event } as MessageEvent<ClearraWasmWorkerEvent>);
+  emit(event: ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent) {
+    this.onmessage?.({ data: event } as MessageEvent<ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent>);
   }
 }
 
@@ -258,6 +352,10 @@ try {
   await workerCreationFailureBecomesTerminalFailure();
   await nonSuccessFinalResponseRemainsFailure();
   await clearingTerminalResultReleasesLogPayloads();
+  await abortingSolutionPageRequestReleasesControllerOwnership();
+  await newRunRejectsOutstandingSolutionPageRequest();
+  await outstandingSolutionPageRequestPreventsWorkerTransfer();
+  await mismatchedSolutionPageResponseIsRejected();
 } finally {
   wasmWorkerState.set(originalState);
 }
@@ -271,6 +369,10 @@ console.log(
     duplicate_run: 'rejected',
     worker_creation_failure: 'reported',
     non_success_response: 'failed',
-    terminal_log_release: 'cleared'
+    terminal_log_release: 'cleared',
+    solution_page_abort: 'released',
+    solution_page_new_run: 'rejected',
+    solution_page_worker_transfer: 'guarded',
+    solution_page_response_identity: 'validated'
   })
 );

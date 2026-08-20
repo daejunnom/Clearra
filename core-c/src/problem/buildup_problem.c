@@ -51,6 +51,11 @@ static void copy_packing_fields(
     buildup->goal = packing->goal;
     buildup->buildup_flags = packing->flags & CLR_BUILDUP_FLAG_HOLD_ENABLED;
     buildup->source_execution_mode = CLR_BUILDUP_SOURCE_CONCRETE_PATTERN;
+    buildup->terminal_projection_policy_version =
+        CLR_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION;
+    buildup->terminal_projection_policy =
+        CLR_BUILDUP_TERMINAL_PROJECTION_DISABLED;
+    buildup->terminal_projection_reserved = 0u;
 }clr_buildup_problem clr_buildup_problem_from_packing(clr_packing_problem problem) {
     clr_buildup_problem buildup = {0};
     copy_packing_fields(&problem, &buildup);
@@ -85,6 +90,10 @@ static void copy_packing_fields(
         problem->piece_source.piece_source_id) {
         return false;
     }
+    if (problem->initial_hold_automaton.terminal_projection_consumed != 0u ||
+        problem->initial_hold_automaton.terminal_projection_provenance != 0u) {
+        return false;
+    }
     if (problem->rule.rule_profile_id == 0 || problem->rule.kick_profile_id == 0) {
         return false;
     }
@@ -93,6 +102,20 @@ static void copy_packing_fields(
     }
     if (problem->source_execution_mode != CLR_BUILDUP_SOURCE_CONCRETE_PATTERN &&
         problem->source_execution_mode != CLR_BUILDUP_SOURCE_STANDARD_BAG_AUTOMATON) {
+        return false;
+    }
+    if (problem->terminal_projection_policy_version !=
+            CLR_BUILDUP_TERMINAL_PROJECTION_POLICY_VERSION ||
+        problem->terminal_projection_policy >
+            CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD ||
+        problem->terminal_projection_reserved != 0u) {
+        return false;
+    }
+    if (problem->terminal_projection_policy ==
+            CLR_BUILDUP_TERMINAL_PROJECTION_RELEASE_FINITE_HELD &&
+        ((problem->buildup_flags & CLR_BUILDUP_FLAG_HOLD_ENABLED) == 0u ||
+         problem->source_execution_mode !=
+             CLR_BUILDUP_SOURCE_CONCRETE_PATTERN)) {
         return false;
     }
     return problem->goal == CLR_GOAL_CLEAR_TO_EMPTY;

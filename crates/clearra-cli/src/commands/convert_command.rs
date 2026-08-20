@@ -45,11 +45,11 @@ impl ConvertCommand {
             fields.push((format!("page_{index}"), page.clone()));
         }
 
-        CliOutput::success(CommandRenderer::render(
+        CommandRenderer::render_output(
             "convert",
             crate::output::SummaryRenderContract::render_fields(fields),
             target,
-        ))
+        )
     }
 }
 

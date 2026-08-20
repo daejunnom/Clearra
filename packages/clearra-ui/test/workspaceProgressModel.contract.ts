@@ -45,7 +45,32 @@ function telemetry(
     layer_count: 0,
     layer_done: 0,
     layer_total: 0,
+    availability: telemetryFlags(true),
+    exactness: telemetryFlags(true),
     ...overrides
+  };
+}
+
+function telemetryFlags(value: boolean) {
+  return {
+    geometry_nodes: value,
+    candidates_emitted: value,
+    geometry_family_count: value,
+    candidates_verified: value,
+    producer_build_nodes: value,
+    producer_coverage_checks: value,
+    build_nodes: value,
+    coverage_checks: value,
+    ready_workers: value,
+    active_workers: value,
+    worker_count: value,
+    oldest_batch_ms: value,
+    pass_index: value,
+    pass_count: value,
+    layer_index: value,
+    layer_count: value,
+    layer_done: value,
+    layer_total: value
   };
 }
 

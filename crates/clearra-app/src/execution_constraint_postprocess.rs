@@ -37,6 +37,8 @@ pub(crate) fn apply_execution_constraints(
     if control.is_cancelled() {
         return Err(CoreExecutionError::Cancelled);
     }
+    let (minimum_cover_requested, minimum_cover_blocking_reason) =
+        minimum_cover_input_status(&result);
     // Distributed finalizers initialize this marker from the requested constraint and AND it
     // with every absorbed worker result. Once true, every partition is already materialized;
     // a coordinator-generated empty evidence wrapper must not trigger a second filtering pass.
@@ -60,8 +62,22 @@ pub(crate) fn apply_execution_constraints(
             .unwrap_or(false)
             && result.bool_field("count_complete").unwrap_or(false)
             && result.bool_field("probability_complete").unwrap_or(false)
-            && !score_requested;
-        return Ok(result.with_replaced_fields(vec![
+            && !score_requested
+            && (!minimum_cover_requested || minimum_cover_blocking_reason.is_none());
+        let objective_incomplete_reason = if objective_complete {
+            "none"
+        } else if score_requested {
+            "score_matrix_not_materialized"
+        } else if !result.bool_field("probability_complete").unwrap_or(false) {
+            "pattern_universe_incomplete"
+        } else if minimum_cover_requested {
+            minimum_cover_blocking_reason
+                .as_deref()
+                .unwrap_or("search_incomplete")
+        } else {
+            "search_incomplete"
+        };
+        let mut replacements = vec![
             field("execution_constraint_materialized", true),
             field("b2b_preserving_solution_count", solution_count),
             field("b2b_preserving_candidate_pattern_count", 0),
@@ -71,17 +87,20 @@ pub(crate) fn apply_execution_constraints(
             ),
             field("b2b_preservation_path_multiplicity_counted", false),
             field("objective_complete", objective_complete),
-            field(
-                "objective_incomplete_reason",
-                if objective_complete {
-                    "none"
-                } else if score_requested {
-                    "score_matrix_not_materialized"
-                } else {
-                    "search_incomplete"
-                },
-            ),
-        ]));
+            field("objective_incomplete_reason", objective_incomplete_reason),
+        ];
+        if minimum_cover_requested {
+            let minimum_cover_complete = minimum_cover_blocking_reason.is_none();
+            replacements.extend([
+                field("minimum_cover_complete", minimum_cover_complete),
+                field("minimum_cover_proven_minimum", minimum_cover_complete),
+                field(
+                    "minimum_cover_incomplete_reason",
+                    minimum_cover_blocking_reason.as_deref().unwrap_or("none"),
+                ),
+            ]);
+        }
+        return Ok(result.with_replaced_fields(replacements));
     }
     if result.exact_scoring_execution_batches().is_empty()
         && result.spin_coverage_execution_batches().is_empty()
@@ -160,20 +179,20 @@ pub(crate) fn apply_execution_constraints(
     let weights = materialized_weights(&result, pattern_count)?;
     let probability_complete = result.bool_field("probability_complete").unwrap_or(false);
     let count_complete = result.bool_field("count_complete").unwrap_or(false);
-    let minimum_cover_requested = result.field("objective") == Some("minimum-cover");
-    let minimum_cover_deferred =
-        result.field("minimum_cover_incomplete_reason") == Some("deferred-to-coordinator");
     let minimum_cover_source_solution_count = accepted.len();
     let mut minimum_cover_complete = false;
     let mut minimum_cover_proven = false;
-    let mut minimum_cover_reason = if minimum_cover_deferred {
-        "deferred-to-coordinator"
+    let mut minimum_cover_reason = if let Some(reason) = &minimum_cover_blocking_reason {
+        reason.clone()
     } else if minimum_cover_requested {
-        "search_incomplete"
+        "search_incomplete".to_owned()
     } else {
-        "not_requested"
+        "not_requested".to_owned()
     };
-    if minimum_cover_requested && !minimum_cover_deferred && count_complete && probability_complete
+    if minimum_cover_requested
+        && minimum_cover_blocking_reason.is_none()
+        && count_complete
+        && probability_complete
     {
         let required = coverage_union(accepted.values(), pattern_count)?;
         let candidate_keys = accepted.keys().cloned().collect::<Vec<_>>();
@@ -199,9 +218,12 @@ pub(crate) fn apply_execution_constraints(
         accepted.retain(|key, _| selected.contains(key));
         minimum_cover_complete = true;
         minimum_cover_proven = true;
-        minimum_cover_reason = "none";
-    } else if minimum_cover_requested && !minimum_cover_deferred && !probability_complete {
-        minimum_cover_reason = "pattern_universe_incomplete";
+        minimum_cover_reason = "none".to_owned();
+    } else if minimum_cover_requested
+        && minimum_cover_blocking_reason.is_none()
+        && !probability_complete
+    {
+        minimum_cover_reason = "pattern_universe_incomplete".to_owned();
     }
     filtered_scoring_batches = retain_accepted_scoring_batches(filtered_scoring_batches, &accepted);
     filtered_spin_batches = retain_accepted_spin_batches(filtered_spin_batches, &accepted);
@@ -275,18 +297,19 @@ pub(crate) fn apply_execution_constraints(
         && !score_requested
         && (!minimum_cover_requested || minimum_cover_complete);
     let objective_incomplete_reason = if score_requested {
-        "score_matrix_not_materialized"
+        "score_matrix_not_materialized".to_owned()
     } else if !count_complete {
         result
             .field("resource_truncation_reason")
             .filter(|reason| *reason != "none")
             .unwrap_or("search_incomplete")
+            .to_owned()
     } else if !probability_complete {
-        "pattern_universe_incomplete"
+        "pattern_universe_incomplete".to_owned()
     } else if minimum_cover_requested && !minimum_cover_complete {
-        minimum_cover_reason
+        minimum_cover_reason.clone()
     } else {
-        "none"
+        "none".to_owned()
     };
     let mut replacements = vec![
         field("solution_found", solution_count != 0),
@@ -362,7 +385,7 @@ pub(crate) fn apply_execution_constraints(
             field("minimum_cover_required_pattern_count", union.count_ones()),
             field("minimum_cover_complete", minimum_cover_complete),
             field("minimum_cover_proven_minimum", minimum_cover_proven),
-            field("minimum_cover_incomplete_reason", minimum_cover_reason),
+            field("minimum_cover_incomplete_reason", &minimum_cover_reason),
         ]);
     }
     append_build_symmetry_fields(&mut replacements, &pass_results, &weights);
@@ -387,6 +410,25 @@ pub(crate) fn apply_execution_constraints(
         .with_spin_coverage_execution_batches(filtered_spin_batches)
         .without_finesse_search_report()
         .without_tiling_solution_page_store())
+}
+
+fn minimum_cover_input_status(result: &CoreExecutionResult) -> (bool, Option<String>) {
+    let requested = result.field("objective") == Some("minimum-cover");
+    if !requested {
+        return (false, None);
+    }
+
+    let blocking_reason = match result.field("minimum_cover_incomplete_reason") {
+        Some("none")
+            if result.bool_field("minimum_cover_complete") == Some(true)
+                && result.bool_field("minimum_cover_proven_minimum") == Some(true) =>
+        {
+            None
+        }
+        Some("none") | None => Some("minimum-cover-status-missing".to_owned()),
+        Some(reason) => Some(reason.to_owned()),
+    };
+    (true, blocking_reason)
 }
 
 fn coverage_union<'a>(
@@ -1063,6 +1105,54 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn visible_seven_minimum_cover_incompleteness_is_never_promoted_by_b2b_filtering() {
+        let reason = "visible-seven-policy-minimum-cover-not-materialized";
+        let input = empty_partition_result(1, 0, Vec::new()).with_replaced_fields(vec![
+            ("objective".to_owned(), "minimum-cover".to_owned()),
+            ("minimum_cover_complete".to_owned(), "false".to_owned()),
+            (
+                "minimum_cover_proven_minimum".to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                "minimum_cover_incomplete_reason".to_owned(),
+                reason.to_owned(),
+            ),
+        ]);
+
+        let result = apply_execution_constraints(input, &ExecutionControl::default())
+            .expect("unsupported visible-seven objective must remain a typed incomplete result");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(false)
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some(reason)
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+        assert_eq!(result.field("objective_incomplete_reason"), Some(reason));
+    }
+
+    #[test]
+    fn missing_minimum_cover_status_remains_fail_closed_after_b2b_filtering() {
+        let input = empty_partition_result(1, 0, Vec::new())
+            .with_replaced_fields(vec![("objective".to_owned(), "minimum-cover".to_owned())]);
+
+        let result = apply_execution_constraints(input, &ExecutionControl::default())
+            .expect("missing minimum-cover status must remain incomplete");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("minimum-cover-status-missing")
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+    }
+
     fn b2b_graph(candidate_key: &str, cleared_lines: u8) -> SpinCoverageExecutionGraph {
         SpinCoverageExecutionGraph::new(
             1,
@@ -1134,6 +1224,90 @@ mod tests {
                 component: "b2b_preservation_vacuous_evidence_incomplete"
             }
         ));
+    }
+
+    #[test]
+    fn vacuous_target_preserves_minimum_cover_blocking_reason() {
+        let reason = "visible-seven-policy-minimum-cover-not-materialized";
+        let input = empty_partition_result(0, 1, Vec::new()).with_replaced_fields(vec![
+            ("objective".to_owned(), "minimum-cover".to_owned()),
+            ("minimum_cover_complete".to_owned(), "false".to_owned()),
+            (
+                "minimum_cover_proven_minimum".to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                "minimum_cover_incomplete_reason".to_owned(),
+                reason.to_owned(),
+            ),
+        ]);
+
+        let result = apply_execution_constraints(input, &ExecutionControl::default())
+            .expect("vacuous B2B filtering must preserve the blocking status");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(false)
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some(reason)
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+        assert_eq!(result.field("objective_incomplete_reason"), Some(reason));
+    }
+
+    #[test]
+    fn vacuous_target_fails_closed_when_minimum_cover_status_is_missing() {
+        let input = empty_partition_result(0, 1, Vec::new())
+            .with_replaced_fields(vec![("objective".to_owned(), "minimum-cover".to_owned())]);
+
+        let result = apply_execution_constraints(input, &ExecutionControl::default())
+            .expect("missing minimum-cover status remains a typed incomplete result");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(false)
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("minimum-cover-status-missing")
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+        assert_eq!(
+            result.field("objective_incomplete_reason"),
+            Some("minimum-cover-status-missing")
+        );
+    }
+
+    #[test]
+    fn vacuous_target_accepts_a_complete_proven_minimum_cover_status() {
+        let input = empty_partition_result(0, 1, Vec::new()).with_replaced_fields(vec![
+            ("objective".to_owned(), "minimum-cover".to_owned()),
+            ("minimum_cover_complete".to_owned(), "true".to_owned()),
+            ("minimum_cover_proven_minimum".to_owned(), "true".to_owned()),
+            (
+                "minimum_cover_incomplete_reason".to_owned(),
+                "none".to_owned(),
+            ),
+        ]);
+
+        let result = apply_execution_constraints(input, &ExecutionControl::default())
+            .expect("complete proven trivial minimum cover");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(true));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(true)
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("none")
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(true));
+        assert_eq!(result.field("objective_incomplete_reason"), Some("none"));
     }
 
     fn empty_partition_result(

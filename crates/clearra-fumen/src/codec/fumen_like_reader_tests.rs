@@ -30,6 +30,57 @@ fn rejects_truncated_v115_data() {
 }
 
 #[test]
+fn unescapes_javascript_utf16_pairs_and_rejects_unpaired_surrogates() {
+    assert_eq!(
+        unescape_comment("%uD55C%uAE00%20%uD83D%uDE00"),
+        Ok("한글 😀".to_owned())
+    );
+    assert_eq!(
+        unescape_comment("100%25%20ready"),
+        Ok("100% ready".to_owned())
+    );
+    assert_eq!(
+        unescape_comment("%uD83D"),
+        Err(FumenLikeReadError::InvalidEscape)
+    );
+    assert_eq!(
+        unescape_comment("%uDE00"),
+        Err(FumenLikeReadError::InvalidEscape)
+    );
+}
+
+#[test]
+fn rejects_oversized_input_before_base64_materialization() {
+    let input = format!("v115@{}", "A".repeat(FUMEN_MAX_INPUT_BYTES));
+
+    assert_eq!(
+        FumenLikeReader::read(&input),
+        Err(FumenLikeReadError::InputTooLong {
+            length: input.len(),
+            maximum: FUMEN_MAX_INPUT_BYTES,
+        })
+    );
+}
+
+#[test]
+fn rejects_documents_beyond_the_page_budget() {
+    let single = FumenLikeWriter::write(&FumenLikeTrace::new(vec!["x".to_owned()]))
+        .expect("single-page fumen");
+    let page_data = single
+        .strip_prefix("v115@")
+        .expect("writer version")
+        .replace('?', "");
+    let encoded = format!("v115@{}", page_data.repeat(FUMEN_MAX_PAGES + 1));
+
+    assert_eq!(
+        FumenLikeReader::read(&encoded),
+        Err(FumenLikeReadError::TooManyPages {
+            maximum: FUMEN_MAX_PAGES,
+        })
+    );
+}
+
+#[test]
 fn rejects_external_fumen_without_clearra_payload_pages() {
     assert_eq!(
         FumenLikeReader::read("v115@vhAAgH"),
@@ -42,7 +93,7 @@ fn rejects_external_fumen_without_clearra_payload_pages() {
 #[test]
 fn reads_v115_from_url_and_ignores_query_parameters() {
     let trace = FumenLikeTrace::new(vec!["source=url".to_owned()]);
-    let encoded = FumenLikeWriter::write(&trace);
+    let encoded = FumenLikeWriter::write(&trace).expect("URL fumen");
     let decoded = FumenLikeReader::read(&format!("https://harddrop.com/fumen/?{encoded}&foo=bar"))
         .expect("decoded");
 
@@ -75,7 +126,7 @@ fn fumen_like_reader_outputs_occupancy_field() {
     let trace = FumenLikeTrace::new(vec![
         "kind=scenario\ninitial_board_mask=0x00000000000003f0".to_owned()
     ]);
-    let encoded = FumenLikeWriter::write(&trace);
+    let encoded = FumenLikeWriter::write(&trace).expect("occupancy fumen");
 
     let field = FumenLikeReader::read_occupancy_field(&encoded, 10, 4).expect("field");
 

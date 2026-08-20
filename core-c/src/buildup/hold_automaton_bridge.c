@@ -12,7 +12,9 @@ static void clearra_hash_u8(uint64_t *hash, uint8_t value) {
 }clr_buildup_hold_automaton_memo_key clearra_buildup_hold_automaton_memo_key(
     const clr_hold_automaton_state *state) {
     clr_buildup_hold_automaton_memo_key key = {
-        0u, 0u, 0u, 0u, 0u, CLR_PIECE_NONE, 1u, {0u, 0u, 0u, 0u, 0u, 0u}};
+        .hold_piece = CLR_PIECE_NONE,
+        .hold_empty = 1u,
+    };
     if (state == 0) {
         return key;
     }
@@ -23,6 +25,10 @@ static void clearra_hash_u8(uint64_t *hash, uint8_t value) {
     key.provenance_id = state->provenance_id;
     key.hold_piece = state->hold_piece;
     key.hold_empty = state->hold_empty;
+    key.terminal_projection_consumed =
+        state->terminal_projection_consumed;
+    key.terminal_projection_provenance =
+        state->terminal_projection_provenance;
     return key;
 }uint64_t clearra_buildup_hold_automaton_memo_key_hash(
     const clr_buildup_hold_automaton_memo_key *key) {
@@ -37,5 +43,7 @@ static void clearra_hash_u8(uint64_t *hash, uint8_t value) {
     clearra_hash_u64(&hash, key->provenance_id);
     clearra_hash_u8(&hash, key->hold_piece);
     clearra_hash_u8(&hash, key->hold_empty);
+    clearra_hash_u8(&hash, key->terminal_projection_consumed);
+    clearra_hash_u8(&hash, key->terminal_projection_provenance);
     return hash == 0u ? 1u : hash;
 }

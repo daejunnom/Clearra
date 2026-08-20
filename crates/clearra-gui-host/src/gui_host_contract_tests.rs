@@ -5,6 +5,27 @@ use crate::{
 };
 use serde_json::Value;
 
+fn assert_product_runtime_identity(value: &Value) {
+    let expected = clearra_host_contract::ProductBuildIdentity::current();
+    let identity = value.as_object().expect("desktop runtime_identity object");
+
+    assert_eq!(identity.len(), 5);
+    assert_eq!(identity["engine_build_id"], expected.engine_build_id());
+    assert_eq!(identity["source_commit"], expected.source_commit());
+    assert_eq!(
+        identity["contract_schema_version"],
+        expected.contract_schema_version()
+    );
+    assert_eq!(
+        identity["supply_semantics_id"],
+        expected.supply_semantics_id()
+    );
+    assert_eq!(
+        identity["artifact_schema_version"],
+        expected.artifact_schema_version()
+    );
+}
+
 mod case_gui_pc_request_preserves_back_to_back_constraint {
     use clearra_app::AppCommand;
 
@@ -434,6 +455,7 @@ mod case_tauri_command_calls_clearra_gui_host_only {
             )
             .expect("desktop run request");
         let value: Value = serde_json::from_str(&response).expect("desktop response JSON");
+        assert_product_runtime_identity(&value["runtime_identity"]);
         let render_capability = &value["capability_report"]["render_capability"];
         assert_eq!(render_capability["png_supported"], true);
         assert_eq!(render_capability["gif_supported"], true);
@@ -653,6 +675,11 @@ mod case_desktop_job_queue_reports_progress_cancel_result {
             Some("completed" | "failed")
         ));
         assert!(events.iter().all(|event| event["job_id"] == job_id));
+        let completed = events
+            .iter()
+            .find(|event| event["event"] == "completed")
+            .expect("desktop async job must emit a completed response");
+        assert_product_runtime_identity(&completed["response"]["runtime_identity"]);
     }
 }
 

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.7.5 - 2026-08-20
+
+- Corrected finite-source hold projection across WASM, distributed, native
+  Rust, and C search paths, including occupied initial hold and terminal-held
+  piece release, with an exact 18-solution cross-product contract.
+- Rejected visible-seven minimum-cover requests consistently across CLI, Web,
+  Desktop, Discord, and direct engine boundaries, while preserving incomplete
+  minimum-cover evidence through B2B and zero-piece post-processing.
+- Hardened CTK3 and Fumen decoding and export with common operation validation,
+  bounded raw input and page counts, Unicode-compatible comments, and typed
+  failures instead of silent truncation or output panics.
+- Preserved workspace drafts across mode changes, established a single browser
+  worker-capability authority, surfaced approximate or unavailable progress,
+  aligned CPU-only warmup behavior, and improved mobile copy controls and
+  clipboard fallback handling.
+- Added exact queue-parser corpus parity, complete generic product help,
+  canonical verified SRS-X descriptor/export parity, typed terminal-supply
+  result metadata, and explicit full-future/oracle labeling for Build
+  Probability results.
+- Strengthened Discord and release provenance with a shared five-field product
+  identity across CLI, WASM, Desktop, Cloud jobs, and Gateway; production
+  remote-execution fail-closed checks; immutable exact-commit build contexts;
+  zero-traffic tagged Cloud Run cutovers; and re-runnable accepted-SHA Pages
+  and Release gates.
+
 ## 0.7.4 - 2026-08-12
 
 - Unified PC, setup, build, damage, and spin search option normalization across

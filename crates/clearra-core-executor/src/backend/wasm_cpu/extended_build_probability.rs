@@ -123,10 +123,11 @@ impl ExtendedBuildProbabilitySession {
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let family = universe.packing_multiset_family(
+        let family = universe.packing_multiset_family_for_execution(
             target_piece_count,
             problem.initial_hold(),
-            super::packing_projection_hold_enabled(problem),
+            problem.supply().hold_enabled(),
+            super::packing_hold_projection(problem),
         );
         if target_piece_count != 0 && family.is_empty() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -818,10 +819,11 @@ impl ExtendedBuildProbabilitySession {
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let family = universe.packing_multiset_family(
+        let family = universe.packing_multiset_family_for_execution(
             self.field.target_piece_count(),
             self.problem.initial_hold(),
-            super::packing_projection_hold_enabled(&self.problem),
+            self.problem.supply().hold_enabled(),
+            super::packing_hold_projection(&self.problem),
         );
         let mut reconstruction = ExtendedGeometrySearch::new(universe, &family, &self.catalog)?;
         if !reconstruction.prepare_external() {

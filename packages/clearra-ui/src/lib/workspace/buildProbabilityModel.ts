@@ -48,6 +48,13 @@ export type BuildProbabilityValidationCode =
   | 'build_target_overlap'
   | 'worker_count_invalid';
 
+export const BUILD_PROBABILITY_PRIMARY_METRIC = Object.freeze({
+  id: 'full-future-oracle-build-probability',
+  futureVisibility: 'full-future',
+  queueKnowledge: 'oracle',
+  distinctFrom: 'finesse-pattern-knowledge'
+} as const);
+
 export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest {
   return {
     height: 8,
@@ -65,6 +72,14 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     workers: defaultWorkerCount(),
     useAllLogicalProcessors: false
   };
+}
+
+/** Preserve inactive user choices; normalization belongs only at execution boundaries. */
+export function updateBuildProbabilityDraft(
+  request: BuildProbabilityRequest,
+  change: Partial<BuildProbabilityRequest>
+): BuildProbabilityRequest {
+  return { ...request, ...change };
 }
 
 export function normalizeBuildProbabilityRequest(
