@@ -500,6 +500,87 @@ The managed job bearer is bound separately as `CLEARRA_JOB_TOKEN`. Oracle loads
 the matching bearer from OCI Vault; no plaintext value belongs in either
 deployment command or settings file.
 
+Run the tracked `prepare-cloud-runtime-service-account.mjs` helper before the
+exact-source build and again immediately before Cloud Run deployment. It reads
+only IAM and Secret metadata, never a Secret version payload. It creates the
+dedicated `clearra-current-job` service account only when absent and requires
+zero project-level roles. It permits exactly one unconditional Secret binding:
+`roles/secretmanager.secretAccessor` on `clearra-job-token`. Authority over
+`discord-bot-token` or any other Secret fails closed, so the job tier cannot
+inherit the Gateway's Discord credential access.
+
+The universal boundary is the global catalog plus every supported regional Secret
+catalog. The helper discovers a nonempty, unique location set with
+`gcloud secrets locations list`, validates exact project ID-or-number and
+location resource names, and enumerates every location. It pins global calls to
+`https://secretmanager.googleapis.com/` and each regional list/IAM read to
+`https://secretmanager.LOCATION.rep.googleapis.com/` with the subprocess-only
+`CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER` override; it never changes the
+parent environment or persistent gcloud configuration. Only the global
+`clearra-job-token` is job authority. A regional Secret with that same leaf ID
+remains a non-job Secret and must be inaccessible. Any empty, malformed,
+duplicate, wrong-project/location, unreadable, or partial catalog fails closed.
+
+The active caller must be able to submit Cloud Build as `clearra-build`,
+administer the public Cloud Run service, read the `clearra` Artifact Registry
+repository, and act as both exact service accounts. The least-privilege roles
+are Cloud Build Editor and Cloud Run Admin on the project, Artifact Registry
+Reader on the repository, and Service Account User on the build and runtime
+accounts. Metadata reads additionally need project Secret Manager Viewer and
+Service Account Viewer; project Security Reviewer is an accepted consolidated
+read grant and supplies the repository-policy read that Artifact Registry
+Reader does not. Effective evaluation needs project Security Reviewer,
+Deny Reviewer, and Service Usage Consumer. Group/domain policies also require the
+corresponding Google Workspace `groups.read` or domain-admin visibility, and
+principal-set policies need Browser; missing visibility becomes `UNKNOWN` and
+fails closed.
+
+Enable `policytroubleshooter.googleapis.com` as a separately approved
+prerequisite; the helper never enables APIs. It requires
+`gcloud projects get-ancestors` to remain exactly one `clearra-cloud` project row
+and requires an empty
+`PRINCIPAL_ACCESS_BOUNDARY` binding search for its exact numeric project before
+and after preparation. The PAB search needs a custom read role containing
+`resourcemanager.projects.searchPolicyBindings`; Project IAM Admin or Owner is a
+broader alternative. The installed GA
+`gcloud policy-intelligence troubleshoot-policy iam` result must say
+`CAN_ACCESS` for `clearra-job-token` and `CANNOT_ACCESS` for every other Secret,
+with exact principal/resource/permission identity and complete allow/deny
+explanations.
+Inherited or group access, any `UNKNOWN`, and every API/evaluation error abort.
+
+Immediately after observing or creating the runtime account, the helper freshly
+re-enumerates the complete inventory and rejects drift from its initial snapshot.
+It then performs the direct and effective global/regional checks. This occurs
+before any Secret binding write. When the direct global job binding is absent,
+even that Secret must initially be `CANNOT_ACCESS`; inherited job access is rejected. An
+existing exact direct job binding must already be `CAN_ACCESS`, while every
+non-job Secret remains `CANNOT_ACCESS`. After the one permitted write, the
+helper freshly re-enumerates all locations and catalogs, requires them to equal
+the pre-binding snapshot, checks every direct/effective permission, and seals
+the result with one more fresh enumeration so catalog drift fails closed.
+
+First creation additionally needs Service Account Creator plus project-level
+Service Account User. For the single job-Secret policy write, prefer a custom
+role containing only `secretmanager.secrets.getIamPolicy` and
+`secretmanager.secrets.setIamPolicy` on `clearra-job-token`; exact-Secret Secret
+Manager Admin or Owner is broader. The helper verifies the caller's effective
+`setIamPolicy` permission before writing, never grants caller authority, and
+re-observes ambiguous IAM mutations before it reports success. The operator who
+runs the separately approved one-time API command needs
+`serviceusage.services.enable`, normally Service Usage Admin
+(`roles/serviceusage.serviceUsageAdmin`). The deployment
+caller itself keeps Service Usage Consumer; the bootstrap helper never enables
+the API or requires the broader role.
+
+Run that prerequisite command before the accepted-source deployment window:
+
+```powershell
+$projectId = "clearra-cloud"
+gcloud services enable policytroubleshooter.googleapis.com --project=$projectId
+if ($LASTEXITCODE -ne 0) { throw "Policy Troubleshooter API prerequisite failed" }
+```
+
 Automatic job execution uses every logical processor visible to the Node host.
 On Cloud Run, native Clearra may accept that eight-worker ceiling only after
 validating the Linux affinity mask; a failed validation falls back to the
@@ -549,6 +630,10 @@ node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs `
   --source-commit $sourceCommit `
   --repository $repository
 if ($LASTEXITCODE -ne 0) { throw "accepted-source preflight failed" }
+
+node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs `
+  --project $projectId
+if ($LASTEXITCODE -ne 0) { throw "Cloud runtime IAM bootstrap/preflight failed" }
 
 try {
   New-Item -ItemType Directory -Path $archiveContext -Force | Out-Null
@@ -613,7 +698,7 @@ $serviceName = "clearra-current-job"
 $revisionSuffix = "v075-" + $sourceCommit.Substring(0, 7)
 $candidateTag = "candidate-" + $sourceCommit.Substring(0, 7)
 $runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
-$jobBearerSecret = "<Google Secret Manager job-bearer Secret name>"
+$jobBearerSecret = "clearra-job-token"
 $oracleCandidateReleaseId = "<immutable-candidate-Oracle-release-ID>"
 $oracleCandidateReleaseSha256 = "<candidate-Oracle-release-tree-SHA-256>"
 $oracleCandidateSettingsSha256 = "<candidate-non-secret-settings-SHA-256>"
@@ -637,6 +722,10 @@ $oracleRollbackProofPath = "/run/clearra-deploy/clearra-oracle-rollback-$deploym
 # `produce-oracle-deployment-proof.mjs rollback` and
 # `verify-oracle-rollback-proof.mjs`. It passes only non-secret exact arguments
 # plus the nonce and never prints credentials, settings contents, or job data.
+# Before accepting any operation, the remote launcher and every mapped helper
+# must be root:root mode 0755 regular non-symlink files. An ubuntu-owned,
+# group/other-writable, or mode-0666 launcher is stale authority and must fail
+# before capture, candidate activation, or service mutation.
 # Before every operation, the trusted wrapper independently computes the exact
 # script-release tree digest (without executing candidate-supplied code), rejects
 # dangling or out-of-tree links, and compares it with `--script-release-sha256`.
@@ -644,6 +733,9 @@ $oracleRollbackProofPath = "/run/clearra-deploy/clearra-oracle-rollback-$deploym
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   throw "sourceCommit must be the full lowercase accepted commit SHA"
 }
+node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs `
+  --project $projectId
+if ($LASTEXITCODE -ne 0) { throw "Cloud runtime IAM preflight drifted before deploy" }
 $serviceBefore = gcloud run services describe $serviceName `
   --project=$projectId --region=asia-northeast1 --format=json | ConvertFrom-Json
 $priorTraffic = @($serviceBefore.status.traffic | Where-Object { [int]$_.percent -eq 100 })

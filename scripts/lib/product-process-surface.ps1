@@ -103,31 +103,70 @@ function Invoke-ProductE2EBuiltTask([string]$Root) {
     if ($null -eq $npmCommand) {
         throw "Discord terminal-supply product acceptance requires npm on PATH."
     }
-    $ctk3BuildOutput = & $npmCommand.Source "run" "build" "--workspace" "ctk3" 2>&1
-    $ctk3BuildExitCode = $LASTEXITCODE
-    if ($ctk3BuildExitCode -ne 0) {
-        throw "Discord terminal-supply product acceptance could not build ctk3 with exit $ctk3BuildExitCode`n$($ctk3BuildOutput -join "`n")"
-    }
+    $terminalSupplyScope = New-ClearraProgressScope `
+        -Name "terminal-supply-product" `
+        -Total 3 `
+        -Workers 1 `
+        -VerboseLog:$VerboseLog.IsPresent
+    try {
+        Invoke-ClearraProgressCase `
+            -Scope $terminalSupplyScope `
+            -Name "npm build ctk3" `
+            -Body {
+                $ctk3BuildResult = Invoke-NativeWithProgress `
+                    -Scope $terminalSupplyScope `
+                    -Label "npm build ctk3" `
+                    -FileName $npmCommand.Source `
+                    -Arguments @("run", "build", "--workspace", "ctk3")
+                if ($ctk3BuildResult.ExitCode -ne 0) {
+                    throw "Discord terminal-supply product acceptance could not build ctk3 with exit $($ctk3BuildResult.ExitCode)`n$($ctk3BuildResult.Output)"
+                }
+            }
 
-    $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
-    if ($null -eq $nodeCommand) {
-        throw "Discord terminal-supply product acceptance requires node on PATH."
-    }
-    $probePath = Join-Path $Root "apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs"
-    $probeOutput = & $nodeCommand.Source $probePath "--clearra" $builtExePath 2>&1
-    $probeExitCode = $LASTEXITCODE
-    if ($probeExitCode -ne 0) {
-        throw "Discord terminal-supply product acceptance failed with exit $probeExitCode`n$($probeOutput -join "`n")"
-    }
-    Write-Output ($probeOutput -join "`n")
+        $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
+        if ($null -eq $nodeCommand) {
+            throw "Discord terminal-supply product acceptance requires node on PATH."
+        }
+        $probePath = Join-Path $Root "apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs"
+        # Release identity pins the exact artifact probe argv: $probePath "--clearra" $builtExePath
+        $probeState = [pscustomobject]@{ Output = "" }
+        Invoke-ClearraProgressCase `
+            -Scope $terminalSupplyScope `
+            -Name "Discord terminal-supply product probe" `
+            -Body {
+                $probeResult = Invoke-NativeWithProgress `
+                    -Scope $terminalSupplyScope `
+                    -Label "Discord terminal-supply product probe" `
+                    -FileName $nodeCommand.Source `
+                    -Arguments @($probePath, "--clearra", $builtExePath)
+                if ($probeResult.ExitCode -ne 0) {
+                    throw "Discord terminal-supply product acceptance failed with exit $($probeResult.ExitCode)`n$($probeResult.Output)"
+                }
+                $probeState.Output = $probeResult.Output
+            }
+        Write-Output $probeState.Output
 
-    $uiProbePath = Join-Path $Root "packages/clearra-ui/scripts/verify-terminal-supply-product.mjs"
-    $uiProbeOutput = & $nodeCommand.Source $uiProbePath "--clearra" $builtExePath 2>&1
-    $uiProbeExitCode = $LASTEXITCODE
-    if ($uiProbeExitCode -ne 0) {
-        throw "UI terminal-supply product acceptance failed with exit $uiProbeExitCode`n$($uiProbeOutput -join "`n")"
+        $uiProbePath = Join-Path $Root "packages/clearra-ui/scripts/verify-terminal-supply-product.mjs"
+        # Release identity pins the exact artifact probe argv: $uiProbePath "--clearra" $builtExePath
+        $uiProbeState = [pscustomobject]@{ Output = "" }
+        Invoke-ClearraProgressCase `
+            -Scope $terminalSupplyScope `
+            -Name "UI terminal-supply product probe" `
+            -Body {
+                $uiProbeResult = Invoke-NativeWithProgress `
+                    -Scope $terminalSupplyScope `
+                    -Label "UI terminal-supply product probe" `
+                    -FileName $nodeCommand.Source `
+                    -Arguments @($uiProbePath, "--clearra", $builtExePath)
+                if ($uiProbeResult.ExitCode -ne 0) {
+                    throw "UI terminal-supply product acceptance failed with exit $($uiProbeResult.ExitCode)`n$($uiProbeResult.Output)"
+                }
+                $uiProbeState.Output = $uiProbeResult.Output
+            }
+        Write-Output $uiProbeState.Output
+    } finally {
+        Complete-ClearraProgressLine $terminalSupplyScope
     }
-    Write-Output ($uiProbeOutput -join "`n")
 }
 
 function Set-ClearraReleaseUxSmokeBinaryArgs([hashtable]$Arguments, [string]$Root) {

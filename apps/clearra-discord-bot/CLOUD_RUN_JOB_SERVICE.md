@@ -35,6 +35,24 @@ Two job-service artifacts intentionally remain separate:
 The retired Discord interaction image is not a job-service artifact and must not
 receive active traffic. Discord interactions are owned by Oracle Gateway.
 
+## One-time Policy Troubleshooter prerequisite
+
+Policy Troubleshooter is a separately approved prerequisite; the helper never enables
+an API. Enable it before the accepted-source deployment window, then
+leave the helper to prove that it is enabled:
+
+The operator performing this one-time enable must have
+`serviceusage.services.enable`, normally through Service Usage Admin
+(`roles/serviceusage.serviceUsageAdmin`). That
+broader role is not a bootstrap-helper requirement: the deployment caller keeps
+Service Usage Consumer, and the helper fails closed rather than enabling the API.
+
+```powershell
+$projectId = "clearra-cloud"
+gcloud services enable policytroubleshooter.googleapis.com --project=$projectId
+if ($LASTEXITCODE -ne 0) { throw "Policy Troubleshooter API prerequisite failed" }
+```
+
 ## Build the current-source image
 
 Build in Tokyo and use an immutable source-revision tag. The build context must
@@ -63,6 +81,10 @@ node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs `
   --source-commit $sourceCommit `
   --repository $repository
 if ($LASTEXITCODE -ne 0) { throw "accepted-source preflight failed" }
+
+node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs `
+  --project $projectId
+if ($LASTEXITCODE -ne 0) { throw "Cloud runtime IAM bootstrap/preflight failed" }
 
 try {
   New-Item -ItemType Directory -Path $archiveContext -Force | Out-Null
@@ -166,6 +188,82 @@ or log. The Cloud Run runtime service account needs Secret Accessor on only the
 one Google Secret; Oracle's instance principal needs `read secret-bundles` on
 the dedicated OCI Vault job-bearer Secret.
 
+The tracked `prepare-cloud-runtime-service-account.mjs` helper is the only
+approved bootstrap for the Cloud runtime identity. It reads IAM and Secret
+metadata, never a Secret version payload. It creates `clearra-current-job` only
+when the account is absent, then re-observes ambiguous create/binding results.
+The runtime account must retain zero project-level roles and exactly one
+unconditional Secret binding: `roles/secretmanager.secretAccessor` on
+`clearra-job-token`. Any access to `discord-bot-token` or another Secret fails
+closed. The helper also requires the active caller to be able to submit the
+Cloud Build as `clearra-build`, administer the public Cloud Run service, read
+the `clearra` Artifact Registry repository, and act as both build and runtime
+service accounts. It never grants caller authority automatically.
+
+The universal Secret boundary includes the global catalog plus every supported regional
+Secret catalog. The helper obtains the authoritative, nonempty, unique
+location set with `gcloud secrets locations list`, accepts only exact
+`projects/<project-ID-or-number>/locations/<same-location>` resources, and lists
+every location. Global Secret Manager calls are pinned per subprocess to
+`https://secretmanager.googleapis.com/`; each regional list and IAM-policy read
+is pinned to its exact `https://secretmanager.LOCATION.rep.googleapis.com/`
+endpoint with `CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER`. It never changes
+the parent process or persistent gcloud configuration. A regional Secret named
+`clearra-job-token` is still non-job authority; only the global managed Secret
+is eligible for the runtime binding. An empty, malformed, duplicate, unreadable,
+wrong-project, wrong-location, or partially enumerated catalog fails closed.
+
+This repository's Cloud project is intentionally parentless. The helper reads
+`gcloud projects get-ancestors` before and after IAM preparation and accepts
+exactly one `project` row for `clearra-cloud`. It also requires an empty
+`PRINCIPAL_ACCESS_BOUNDARY` target-binding search for the exact numeric project.
+A new folder/organization parent, a PAB binding, an unreadable search, or drift
+during the operation fails closed. Under that mechanically pinned boundary, the
+installed GA `gcloud policy-intelligence troubleshoot-policy iam` command is the
+effective allow/deny authority. The job Secret must be `CAN_ACCESS`; every
+non-job Secret must be `CANNOT_ACCESS`. Identity mismatch, `UNKNOWN`, an
+evaluation error, or a missing allow/deny explanation aborts deployment. The
+same checks detect inherited and Google-group access that is invisible in a
+Secret's direct policy.
+
+Immediately after the runtime account is observed or created, the helper
+freshly re-enumerates the complete inventory and rejects drift from its initial
+snapshot. The effective authority check then runs before any Secret binding write.
+If the direct global job binding is absent, its pre-binding result must be
+`CANNOT_ACCESS` too; an inherited or group grant is rejected instead of being
+combined with a new direct binding. If the exact direct job binding already
+exists, it must already be `CAN_ACCESS`. Every global and regional non-job
+Secret must be `CANNOT_ACCESS` in both cases. Only then may the helper add the
+one exact job binding. Afterward it freshly re-enumerates all locations and all
+global/regional catalogs, requires exact equality with the pre-binding snapshot,
+checks every direct and effective permission, and re-enumerates once more to
+seal against catalog drift during validation.
+
+For least-privilege bootstrap, grant the caller Cloud Build Editor and Cloud Run
+Admin on the project, Artifact Registry Reader on the `clearra` repository, and
+Service Account User on the exact build and runtime service accounts. Metadata
+preflight also needs project Secret Manager Viewer and Service Account Viewer;
+project Security Reviewer is an accepted consolidated read grant and supplies
+the Artifact Registry repository-policy read. Effective access evaluation needs
+project Security Reviewer, Deny Reviewer, and Service Usage Consumer. If a
+policy contains a group or domain, the operator additionally needs the relevant
+Google Workspace `groups.read` or domain-admin visibility; otherwise the
+result is `UNKNOWN` and fails. Principal-set policies additionally need Browser.
+The exact empty-PAB search needs a custom read role containing only
+`resourcemanager.projects.searchPolicyBindings`; Project IAM Admin or Owner also
+works but carries mutation authority and is not the least-privilege choice.
+
+If the runtime account does not exist, the caller additionally needs Service
+Account Creator and project-level Service Account User for the one-time
+creation. If the job binding is absent, prefer a custom role containing only
+`secretmanager.secrets.getIamPolicy` and
+`secretmanager.secrets.setIamPolicy`, bound on `clearra-job-token` alone.
+Secret Manager Admin on that exact Secret or Owner also works but is broader.
+The helper evaluates the caller's effective `setIamPolicy` permission before
+the write and never grants caller authority. Run the helper before the
+exact-source build and again immediately before deployment so intervening IAM,
+ancestry, PAB, or effective Secret-access drift fails before Cloud Run mutation.
+
 `CLEARRA_JOB_SERVICE_ALLOW_UNAUTHENTICATED=1` is restricted to a loopback
 listener for local smoke tests. It is not a Cloud Run setting.
 
@@ -184,7 +282,7 @@ $serviceName = "clearra-current-job"
 $revisionSuffix = "v075-" + $sourceCommit.Substring(0, 7)
 $candidateTag = "candidate-" + $sourceCommit.Substring(0, 7)
 $runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
-$jobBearerSecret = "<Google Secret Manager job-bearer Secret name>"
+$jobBearerSecret = "clearra-job-token"
 $oracleCandidateReleaseId = "<immutable-candidate-Oracle-release-ID>"
 $oracleCandidateReleaseSha256 = "<candidate-Oracle-release-tree-SHA-256>"
 $oracleCandidateSettingsSha256 = "<candidate-non-secret-settings-SHA-256>"
@@ -208,6 +306,10 @@ $oracleRollbackProofPath = "/run/clearra-deploy/clearra-oracle-rollback-$deploym
 # `produce-oracle-deployment-proof.mjs rollback` and
 # `verify-oracle-rollback-proof.mjs`. It passes only non-secret exact arguments
 # plus the nonce and never prints credentials, settings contents, or job data.
+# Before accepting any operation, the remote launcher and every mapped helper
+# must be root:root mode 0755 regular non-symlink files. An ubuntu-owned,
+# group/other-writable, or mode-0666 launcher is stale authority and must fail
+# before capture, candidate activation, or service mutation.
 # Before every operation, the trusted wrapper independently computes the exact
 # script-release tree digest (without executing candidate-supplied code), rejects
 # dangling or out-of-tree links, and compares it with `--script-release-sha256`.
@@ -215,6 +317,9 @@ $oracleRollbackProofPath = "/run/clearra-deploy/clearra-oracle-rollback-$deploym
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   throw "sourceCommit must be the full lowercase accepted commit SHA"
 }
+node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs `
+  --project $projectId
+if ($LASTEXITCODE -ne 0) { throw "Cloud runtime IAM preflight drifted before deploy" }
 $serviceBefore = gcloud run services describe $serviceName `
   --project=$projectId --region=asia-northeast1 --format=json | ConvertFrom-Json
 $priorTraffic = @($serviceBefore.status.traffic | Where-Object { [int]$_.percent -eq 100 })

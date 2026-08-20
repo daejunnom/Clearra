@@ -284,6 +284,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $cloudReadme = Read-Text 'apps/clearra-discord-bot/README.md'
     $acceptedSourcePreflight = Read-Text 'apps/clearra-discord-bot/scripts/verify-accepted-source.mjs'
     $acceptedSourcePreflightTest = Read-Text 'apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs'
+    $runtimeServiceAccountBootstrap = Read-Text 'apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs'
+    $runtimeServiceAccountBootstrapTest = Read-Text 'apps/clearra-discord-bot/test/cloud-runtime-service-account.test.mjs'
     $candidateSmoke = Read-Text 'apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs'
     $candidateSmokeTest = Read-Text 'apps/clearra-discord-bot/test/cloud-run-candidate-smoke.test.mjs'
     $oracleProofProducer = Read-Text 'apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs'
@@ -691,6 +693,168 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
+        'const RUNTIME_SERVICE_ACCOUNT_ID = "clearra-current-job"',
+        'const BUILD_SERVICE_ACCOUNT_ID = "clearra-build"',
+        'const JOB_SECRET = "clearra-job-token"',
+        'const DISCORD_SECRET = "discord-bot-token"',
+        'const POLICY_TROUBLESHOOTER_SERVICE = "policytroubleshooter.googleapis.com"',
+        'const PROJECT_PAB_SEARCH_PERMISSION = "resourcemanager.projects.searchPolicyBindings"',
+        'const SECRET_ACCESS_PERMISSION = "secretmanager.versions.access"',
+        'const SECRET_SET_IAM_POLICY_PERMISSION = "secretmanager.secrets.setIamPolicy"',
+        'const SECRET_MANAGER_ENDPOINT_ENV = "CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER"',
+        'const GLOBAL_SECRET_MANAGER_ENDPOINT = "https://secretmanager.googleapis.com/"',
+        'roles/cloudbuild.builds.editor',
+        'roles/run.admin',
+        'roles/artifactregistry.reader',
+        'roles/iam.serviceAccountUser',
+        'roles/iam.serviceAccountViewer',
+        'roles/iam.securityReviewer',
+        'roles/iam.denyReviewer',
+        'roles/secretmanager.viewer',
+        'roles/serviceusage.serviceUsageConsumer',
+        'roles/secretmanager.secretAccessor',
+        'runtime service account must have zero project-level roles',
+        'runtime service account must not access the Discord token Secret',
+        'runtime service account must not access any non-job Secret',
+        'observeServiceAccountEventually',
+        'projects", "describe", projectId, "--format=json(projectId,projectNumber)',
+        '`projects/${projectNumber}/secrets/`',
+        'projects", "get-ancestors", projectId, "--format=json(id,type)',
+        'search-target-policy-bindings',
+        '--filter=policyKind=PRINCIPAL_ACCESS_BOUNDARY',
+        '--filter=config.name=${POLICY_TROUBLESHOOTER_SERVICE}',
+        'policy-intelligence',
+        'troubleshoot-policy',
+        'overallAccessState === "CAN_ACCESS"',
+        'overallAccessState === "CANNOT_ACCESS"',
+        'Policy Troubleshooter response contains unknown policy state',
+        'Policy Troubleshooter response contains evaluation errors',
+        'runtime service account has effective non-job Secret access',
+        'runtime service account has inherited effective job Secret access before binding',
+        'verifyPreBindingSecretAuthority',
+        'isGlobalJobSecret',
+        'isGlobalDiscordSecret',
+        '"secrets", "locations", "list"',
+        '`projects/${projectNumber}/locations/`',
+        '`https://secretmanager.${location}.rep.googleapis.com/`',
+        'CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER',
+        'assertSecretInventoryUnchanged',
+        'Secret location or metadata catalog drifted during bootstrap',
+        'env: gcloudProcessEnvironment(execution)',
+        'key.toUpperCase() === SECRET_MANAGER_ENDPOINT_ENV',
+        '--condition=None',
+        'environment.ComSpec',
+        'gcloud.cmd',
+        'shell: false',
+        'cloud_runtime_service_account=failed'
+    )) {
+        if ($runtimeServiceAccountBootstrap.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud runtime service-account bootstrap is missing '$required'"
+        }
+    }
+    if ($runtimeServiceAccountBootstrap -match '(?s)"secrets"\s*,\s*"versions"\s*,\s*"access"' -or
+        $runtimeServiceAccountBootstrap -like '*print-access-token*') {
+        Add-ArchitectureError 'Cloud runtime service-account bootstrap must never read a Secret payload or access token'
+    }
+    if ($runtimeServiceAccountBootstrap -match '(?s)"services"\s*,\s*"enable"' -or
+        $runtimeServiceAccountBootstrap -match '(?s)"beta"\s*,\s*"policy-intelligence"') {
+        Add-ArchitectureError 'Cloud runtime service-account bootstrap must not enable APIs or use the unavailable beta policy command'
+    }
+    if ($runtimeServiceAccountBootstrap -notmatch '(?s)"services"\s*,\s*"list"\s*,\s*"--enabled"') {
+        Add-ArchitectureError 'Cloud runtime service-account bootstrap must prove the Policy Troubleshooter API is already enabled'
+    }
+    if ([regex]::Matches(
+            $runtimeServiceAccountBootstrap,
+            '(?m)^\s{2}assertParentlessProject\(run, projectId\);\s*$'
+        ).Count -ne 2 -or
+        [regex]::Matches(
+            $runtimeServiceAccountBootstrap,
+            '(?m)^\s{2}assertNoProjectPabBindings\(run, projectId, projectNumber\);\s*$'
+        ).Count -ne 2) {
+        Add-ArchitectureError 'Cloud runtime service-account bootstrap must re-observe exact parentless ancestry and empty PAB bindings after preparation'
+    }
+    $initialSecretInventoryIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        'const initialSecretInventory = requiredSecretInventory',
+        [System.StringComparison]::Ordinal
+    )
+    $preBindingSecretAuthorityIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        'const preBindingAuthority = verifyPreBindingSecretAuthority',
+        [System.StringComparison]::Ordinal
+    )
+    $preBindingInventoryIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        'const preBindingSecretInventory = requiredSecretInventory',
+        [System.StringComparison]::Ordinal
+    )
+    $secretBindingWriteIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        '"add-iam-policy-binding"',
+        [System.StringComparison]::Ordinal
+    )
+    $postBindingInventoryIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        'const postBindingSecretInventory = requiredSecretInventory',
+        [System.StringComparison]::Ordinal
+    )
+    $postBindingAuthorityIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        'verifyExclusiveSecretAuthority(',
+        [System.StringComparison]::Ordinal
+    )
+    $sealedInventoryIndex = $runtimeServiceAccountBootstrap.IndexOf(
+        'const sealedSecretInventory = requiredSecretInventory',
+        [System.StringComparison]::Ordinal
+    )
+    if ($initialSecretInventoryIndex -lt 0 -or
+        $preBindingInventoryIndex -le $initialSecretInventoryIndex -or
+        $preBindingSecretAuthorityIndex -le $preBindingInventoryIndex -or
+        $secretBindingWriteIndex -le $preBindingSecretAuthorityIndex -or
+        $postBindingInventoryIndex -le $secretBindingWriteIndex -or
+        $postBindingAuthorityIndex -le $postBindingInventoryIndex -or
+        $sealedInventoryIndex -le $postBindingAuthorityIndex) {
+        Add-ArchitectureError 'Cloud runtime bootstrap must prove pre-binding exclusivity before the write, then refresh, verify, and seal the full Secret inventory'
+    }
+    if ([regex]::Matches(
+            $runtimeServiceAccountBootstrap,
+            '(?m)^\s{2}const (?:initial|preBinding|postBinding|sealed)SecretInventory = requiredSecretInventory\(run, projectId, projectNumber\);\s*$'
+        ).Count -ne 4) {
+        Add-ArchitectureError 'Cloud runtime bootstrap must enumerate the complete global/regional Secret inventory before, after, and after final authority validation'
+    }
+    foreach ($required in @(
+        'bootstrap is idempotent and reads no Secret values',
+        'rejects project roles and non-job Secret access',
+        'rejects inherited access and unknown group evaluation',
+        'proves effective exclusivity before a job binding write',
+        'checks every regional Secret with its exact endpoint',
+        'rejects incomplete regional catalogs before mutation',
+        'rejects Secret catalog drift around post-binding proof',
+        'accepts the exact numeric Secret parent only',
+        'pins parentless ancestry and zero PAB bindings',
+        'enforces fake metadata and getIamPolicy permissions',
+        'requires build and deploy caller authority',
+        're-observes ambiguous IAM mutations',
+        'invokes the Windows gcloud shim without a Node shell',
+        'must not access the Discord token Secret',
+        'cannot act as the build service account',
+        'policyTroubleshooterEnabled: false',
+        'unknownEffectiveSecrets',
+        'troubleshooterFault: "evaluation-error"',
+        'troubleshooterFault: "missing-explanation"',
+        'secretResourceParent: "999999999999"',
+        'denyPabSearch: true',
+        'ancestryDriftsAfterFirstCheck: true',
+        'pabDriftsAfterFirstCheck: true',
+        'newlyCreatedOverprivileged.mutations("secrets add-iam-policy-binding")',
+        'regionalJobLeaf',
+        'regionalCatalogFailure: "asia-northeast1"',
+        'locationCatalogFault: "empty"',
+        'locationCatalogDriftsAfterFirstRead: true',
+        'locationCatalogDriftsAfterPreBinding: true',
+        'secretCatalogDriftsAfterFirstRead: true',
+        'secretCatalogDriftsAfterPreBinding: true',
+        'gcloudProcessEnvironment(undefined, ambientEnvironment)'
+    )) {
+        if ($runtimeServiceAccountBootstrapTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud runtime service-account regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
         'Never submit the working tree (`gcloud builds submit ... .`)',
         'git archive --format=tar --output=$archivePath $sourceCommit',
         'cloudbuild-current-job-service.yaml',
@@ -760,6 +924,39 @@ function Invoke-ReleaseIdentityGateValidation {
         @{ Name = 'Discord deployment README'; Text = $cloudReadme }
     )) {
         foreach ($required in @(
+            'node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs',
+            '$jobBearerSecret = "clearra-job-token"',
+            'zero project-level roles',
+            'never a Secret version payload',
+            'Service Account User',
+            'policytroubleshooter.googleapis.com',
+            'the helper never enables',
+            'serviceusage.services.enable',
+            'Service Usage Admin',
+            'roles/serviceusage.serviceUsageAdmin',
+            'projects get-ancestors',
+            'PRINCIPAL_ACCESS_BOUNDARY',
+            'resourcemanager.projects.searchPolicyBindings',
+            'policy-intelligence troubleshoot-policy iam',
+            'Secret Manager Viewer',
+            'Service Account Viewer',
+            'Security Reviewer',
+            'Deny Reviewer',
+            'Service Usage Consumer',
+            'Browser',
+            'groups.read',
+            'secretmanager.secrets.setIamPolicy',
+            'CAN_ACCESS',
+            'CANNOT_ACCESS',
+            'UNKNOWN',
+            'global catalog plus every supported regional',
+            'gcloud secrets locations list',
+            'https://secretmanager.googleapis.com/',
+            'https://secretmanager.LOCATION.rep.googleapis.com/',
+            'CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER',
+            'before any Secret binding write',
+            'freshly re-enumerates',
+            'catalog drift',
             '--revision-suffix=$revisionSuffix',
             '--tag=$candidateTag',
             '--no-traffic',
@@ -778,6 +975,8 @@ function Invoke-ReleaseIdentityGateValidation {
             '--operation capture-rollback-authority',
             'capture-oracle-rollback-authority.mjs',
             'independently computes the exact',
+            'root:root mode 0755 regular non-symlink files',
+            'mode-0666 launcher is stale authority',
             '--script-release-sha256 $oracleCandidateReleaseSha256',
             '--operation verify-candidate',
             'produce-oracle-deployment-proof.mjs candidate',
@@ -1081,16 +1280,63 @@ function Invoke-ReleaseIdentityGateValidation {
         @{ Name = 'Cloud Run deployment contract'; Text = $cloudDeploy },
         @{ Name = 'Discord deployment README'; Text = $cloudReadme }
     )) {
+        $runtimeBootstrapMarker = 'node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs'
+        $policyTroubleshooterPrerequisiteIndex = $deploymentDoc.Text.IndexOf(
+            'gcloud services enable policytroubleshooter.googleapis.com',
+            [System.StringComparison]::Ordinal
+        )
         $preflightIndex = $deploymentDoc.Text.IndexOf(
             'node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs',
+            [System.StringComparison]::Ordinal
+        )
+        $buildBootstrapIndex = $deploymentDoc.Text.IndexOf(
+            $runtimeBootstrapMarker,
+            [Math]::Max(0, $preflightIndex),
             [System.StringComparison]::Ordinal
         )
         $buildIndex = $deploymentDoc.Text.IndexOf(
             '$buildConfig = Join-Path $archiveContext',
             [System.StringComparison]::Ordinal
         )
-        if ($preflightIndex -lt 0 -or $buildIndex -le $preflightIndex) {
-            Add-ArchitectureError "$($deploymentDoc.Name) must verify exact accepted source before its current-job Cloud Build mutation"
+        $deployIndex = $deploymentDoc.Text.IndexOf(
+            'gcloud run deploy $serviceName',
+            [System.StringComparison]::Ordinal
+        )
+        $deploymentBootstrapIndex = if ($deployIndex -ge 0) {
+            $deploymentDoc.Text.LastIndexOf(
+                $runtimeBootstrapMarker,
+                $deployIndex,
+                [System.StringComparison]::Ordinal
+            )
+        } else {
+            -1
+        }
+        $jobSecretIndex = if ($deployIndex -ge 0) {
+            $deploymentDoc.Text.LastIndexOf(
+                '$jobBearerSecret = "clearra-job-token"',
+                $deployIndex,
+                [System.StringComparison]::Ordinal
+            )
+        } else {
+            -1
+        }
+        $runtimeBootstrapCommandCount = [regex]::Matches(
+            $deploymentDoc.Text,
+            '(?m)^node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account\.mjs\s+`\s*$'
+        ).Count
+        if ($policyTroubleshooterPrerequisiteIndex -lt 0 -or
+            $preflightIndex -le $policyTroubleshooterPrerequisiteIndex -or
+            $buildBootstrapIndex -le $preflightIndex -or
+            $buildIndex -le $buildBootstrapIndex) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must place the explicit Policy Troubleshooter prerequisite before accepted-source and Cloud IAM/build mutation"
+        }
+        if ($runtimeBootstrapCommandCount -lt 2 -or
+            $deployIndex -lt 0 -or
+            $jobSecretIndex -le $buildIndex -or
+            $deploymentBootstrapIndex -le $jobSecretIndex -or
+            $deploymentBootstrapIndex -le $buildIndex -or
+            $deploymentBootstrapIndex -ge $deployIndex) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must repeat the exact runtime-SA/Secret/caller preflight immediately before Cloud Run deployment"
         }
     }
     $syncHeadingIndex = $cloudDeploy.IndexOf('## Exact-SHA command synchronization', [System.StringComparison]::Ordinal)
