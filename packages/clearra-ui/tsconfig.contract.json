@@ -9,7 +9,9 @@
     "noEmit": true,
     "skipLibCheck": true,
     "strict": true,
-    "target": "ES2022"
+    "target": "ES2022",
+    "types": []
   },
-  "include": ["test/*.contract.ts"]
+  "include": ["test/*.contract.ts"],
+  "files": ["../../scripts/types/node-contract-builtins.d.ts"]
 }
