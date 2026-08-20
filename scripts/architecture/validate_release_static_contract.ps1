@@ -649,6 +649,11 @@ function Invoke-ReleaseIdentityGateValidation {
         '["--no-replace-objects", ...args]',
         'get-tar-commit-id',
         '["hash-object", "--no-filters", "--", helperPath]',
+        'realpathSync.native(resolve(output))',
+        'const helperPath = realpathSync.native(',
+        'const invokedPath =',
+        'realpathSync.native(resolve(process.argv[1]))',
+        'if (invokedPath === modulePath)',
         'exact-source-tar-contract.mjs',
         '["ls-tree", "-r", "-t", "-z", "--full-tree", sourceCommit]',
         'gzipSync(rawTar, { level: 9 })',
@@ -680,6 +685,9 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'exports every exact commit byte, 0644/0755 mode, safe symlink, and embedded identity with autocrlf enabled',
+        'accepts the canonical helper through an equivalent Windows short-path alias',
+        'enters the CLI through a Windows repository junction alias',
+        'rejects a canonical helper directory junction that escapes the repository',
         'rejects committed eol=crlf archive conversion and deletes output',
         'rejects committed export-ignore archive omission and deletes output',
         'rejects committed export-subst archive mutation and deletes output',

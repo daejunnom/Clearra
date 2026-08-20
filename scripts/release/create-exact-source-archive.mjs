@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   rmdirSync,
   unlinkSync,
   writeSync,
@@ -56,7 +57,7 @@ function resolveRepositoryRoot(cwd) {
     "exact source archive must run inside a Git worktree",
   ).trim();
   if (!output) throw new Error("exact source archive Git root is missing");
-  return resolve(output);
+  return realpathSync.native(resolve(output));
 }
 
 function verifyCommit(repositoryRoot, sourceCommit) {
@@ -78,7 +79,9 @@ function verifyCommit(repositoryRoot, sourceCommit) {
 function verifyHelperAuthority(repositoryRoot, sourceCommit, helperUrls) {
   for (let index = 0; index < CANONICAL_HELPER_PATHS.length; index += 1) {
     const expectedPath = CANONICAL_HELPER_PATHS[index];
-    const helperPath = resolve(fileURLToPath(helperUrls[index]));
+    const helperPath = realpathSync.native(
+      resolve(fileURLToPath(helperUrls[index])),
+    );
     const relativePath = relative(repositoryRoot, helperPath)
       .split(sep)
       .join("/");
@@ -319,7 +322,13 @@ function parseArguments(argv) {
   };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const invokedPath =
+  typeof process.argv[1] === "string"
+    ? realpathSync.native(resolve(process.argv[1]))
+    : null;
+const modulePath = realpathSync.native(resolve(fileURLToPath(import.meta.url)));
+
+if (invokedPath === modulePath) {
   try {
     const result = createExactSourceArchive(
       parseArguments(process.argv.slice(2)),

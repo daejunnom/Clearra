@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,6 +36,7 @@ function run(command, args, options = {}) {
     encoding: options.encoding,
     input: options.input,
     maxBuffer: 64 * 1024 * 1024,
+    windowsVerbatimArguments: options.windowsVerbatimArguments,
     windowsHide: true,
   });
   if (options.allowFailure !== true) {
@@ -136,6 +138,22 @@ function runFixtureHelper(fixture, outputPath, sourceCommit = fixture.commit) {
     ],
     { cwd: fixture.repository, allowFailure: true, encoding: "utf8" },
   );
+}
+
+function windowsShortPath(path) {
+  const command = `for %I in ("${path.replaceAll("%", "%%")}") do @echo %~sI`;
+  const result = run(
+    process.env.ComSpec ?? "cmd.exe",
+    ["/d", "/s", "/c", command],
+    {
+      allowFailure: true,
+      encoding: "utf8",
+      windowsVerbatimArguments: true,
+    },
+  );
+  if (result.status !== 0) return null;
+  const output = result.stdout.trim();
+  return output.length > 0 ? output : null;
 }
 
 function tarFieldString(header, start, length) {
@@ -247,6 +265,141 @@ test("exports every exact commit byte, 0644/0755 mode, safe symlink, and embedde
     rmSync(fixture.repository, { recursive: true, force: true });
   }
 });
+
+test(
+  "accepts the canonical helper through an equivalent Windows short-path alias",
+  { skip: process.platform !== "win32" },
+  (context) => {
+    const fixture = prepareRepository();
+    try {
+      const shortRepository = windowsShortPath(fixture.repository);
+      if (
+        shortRepository === null ||
+        shortRepository.toLowerCase() === fixture.repository.toLowerCase()
+      ) {
+        context.skip("an 8.3 path alias is unavailable on this Windows volume");
+        return;
+      }
+      const shortHelperPath = join(
+        shortRepository,
+        "scripts",
+        "release",
+        helperSources[0],
+      );
+      const outputPath = join(shortRepository, "short-path-source.tar.gz");
+      const result = run(
+        process.execPath,
+        [
+          shortHelperPath,
+          "--source-commit",
+          fixture.commit,
+          "--output",
+          outputPath,
+        ],
+        { cwd: shortRepository, allowFailure: true, encoding: "utf8" },
+      );
+      assert.equal(
+        result.status,
+        0,
+        JSON.stringify({
+          error: result.error?.message ?? null,
+          fixtureRepository: fixture.repository,
+          shortHelperExists: existsSync(shortHelperPath),
+          shortRepository,
+          shortRepositoryExists: existsSync(shortRepository),
+          signal: result.signal,
+          stderr: result.stderr,
+          stdout: result.stdout,
+        }),
+      );
+      assert.match(result.stdout, /exact_source_archive=ready/);
+      assert.equal(existsSync(outputPath), true);
+    } finally {
+      rmSync(fixture.repository, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "enters the CLI through a Windows repository junction alias",
+  { skip: process.platform !== "win32" },
+  () => {
+    const fixture = prepareRepository();
+    const aliasRoot = mkdtempSync(
+      join(tmpdir(), "clearra-exact-archive-junction-alias-"),
+    );
+    try {
+      const aliasRepository = join(aliasRoot, "repository");
+      symlinkSync(fixture.repository, aliasRepository, "junction");
+      const aliasHelperPath = join(
+        aliasRepository,
+        "scripts",
+        "release",
+        helperSources[0],
+      );
+      const outputPath = join(aliasRepository, "junction-source.tar.gz");
+      const result = run(
+        process.execPath,
+        [
+          aliasHelperPath,
+          "--source-commit",
+          fixture.commit,
+          "--output",
+          outputPath,
+        ],
+        { cwd: aliasRepository, allowFailure: true, encoding: "utf8" },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /exact_source_archive=ready/);
+      assert.equal(existsSync(outputPath), true);
+    } finally {
+      rmSync(aliasRoot, { recursive: true, force: true });
+      rmSync(fixture.repository, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "rejects a canonical helper directory junction that escapes the repository",
+  { skip: process.platform !== "win32" },
+  () => {
+    const fixture = prepareRepository();
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "clearra-exact-archive-junction-escape-"),
+    );
+    try {
+      const externalReleaseDirectory = join(externalRoot, "release");
+      mkdirSync(externalReleaseDirectory, { recursive: true });
+      for (const name of helperSources) {
+        copyFileSync(
+          fileURLToPath(new URL(`./${name}`, import.meta.url)),
+          join(externalReleaseDirectory, name),
+        );
+      }
+      const canonicalReleaseDirectory = join(
+        fixture.repository,
+        "scripts",
+        "release",
+      );
+      rmSync(canonicalReleaseDirectory, { recursive: true, force: true });
+      symlinkSync(
+        externalReleaseDirectory,
+        canonicalReleaseDirectory,
+        "junction",
+      );
+
+      const outputPath = join(fixture.repository, "junction-escape.tar.gz");
+      const result = runFixtureHelper(fixture, outputPath);
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /outside its canonical path/);
+      assert.equal(result.stdout, "");
+      assert.equal(existsSync(outputPath), false);
+    } finally {
+      rmSync(fixture.repository, { recursive: true, force: true });
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 for (const regression of [
   {

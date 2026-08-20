@@ -6,7 +6,8 @@
 
 - Hardened accepted-source export so Cloud Build and Oracle consume one
   verified commit-byte `.tar.gz`, rejecting line-ending or attribute rewrites,
-  replacement refs, hidden helper drift, mode changes, and unsafe symlinks.
+  replacement refs, hidden helper drift, mode changes, unsafe symlinks, and
+  Windows short-path and junction-alias mismatches.
 - Corrected finite-source hold projection across WASM, distributed, native
   Rust, and C search paths, including occupied initial hold and terminal-held
   piece release, with an exact 18-solution cross-product contract.
