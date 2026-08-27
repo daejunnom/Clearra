@@ -1,9 +1,10 @@
 use clearra_core_domain::board::standard_pc_board::StandardPcBoard;
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_coverage::pattern::pattern_id::PatternId;
 use clearra_finesse::{
     aggregate_unique_queue_costs, CostedGeometryEdge, CostedGeometryLanguage, FinesseBoard,
     FinesseTarget, FrozenFinesseQuery, GeometryActionKey, GeometryLanguageNode, GeometryNodeId,
-    QueueClassProductEvaluator, QueueClassSet, QueueCostAggregation, QueueCostTable,
+    QueueClass, QueueClassProductEvaluator, QueueClassSet, QueueCostAggregation, QueueCostTable,
 };
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_problem::{
@@ -13,6 +14,7 @@ use clearra_problem::{
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
+    resource::ExecutionMemoryBound,
     CoreExecutionResult, CorePathStep, FinessePolicyResult, FinesseReport, FinesseSolutionAverage,
 };
 
@@ -33,14 +35,32 @@ pub(super) fn execute_finesse_score(
     score: &FinesseScoreRequest,
     knowledge: FinessePatternKnowledge,
     control: &ExecutionControl,
+    memory_bound: ExecutionMemoryBound,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
     ensure_not_cancelled(control)?;
+    memory_bound
+        .ensure(0, finesse_score_requested_bytes(problem, score)?)
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
     let (language, path, initial_board_words) =
         fixed_operation_language(problem, field, score, control)?;
 
     ensure_not_cancelled(control)?;
     let grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
     let classes = queue_classes(problem)?;
+    let mut observed_bytes = queue_class_retained_bytes(&classes)?
+        .checked_add(finesse_language_retained_bytes(&language)?)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (path.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+            )
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))?;
+    memory_bound
+        .ensure(observed_bytes, 0)
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
     grouping_span.finish(classes.classes().len() as u64);
 
     ensure_not_cancelled(control)?;
@@ -64,6 +84,14 @@ pub(super) fn execute_finesse_score(
         control,
         "wasm_finesse_oracle_failed",
     )?;
+    observed_bytes = observed_bytes
+        .checked_add(queue_cost_table_upper_bound(&oracle)?)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))?;
+    memory_bound
+        .ensure(observed_bytes, 0)
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
     ensure_not_cancelled(control)?;
     let visible = if matches!(
         knowledge,
@@ -81,6 +109,16 @@ pub(super) fn execute_finesse_score(
     } else {
         None
     };
+    if let Some(visible) = visible.as_ref() {
+        observed_bytes = observed_bytes
+            .checked_add(queue_cost_table_upper_bound(visible)?)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_score_memory_projection_overflow",
+            ))?;
+        memory_bound
+            .ensure(observed_bytes, 0)
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+    }
     ensure_not_cancelled(control)?;
     product_span.finish(classes.classes().len() as u64);
 
@@ -230,9 +268,32 @@ pub(super) fn execute_finesse_score(
             .successful_unique_queue_count()
             .is_some_and(|count| count != 0)
     });
+    let authority_future_bytes =
+        FinesseReport::checked_score_request_authority_clone_bytes(score, &path).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_finesse_score_memory_projection_overflow"),
+        )?;
+    memory_bound
+        .ensure(observed_bytes, authority_future_bytes)
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
+    let report =
+        report.with_score_request_authority(field, score, classes.metadata().pattern_count, &path);
+    observed_bytes = observed_bytes
+        .checked_add(
+            report
+                .checked_score_request_authority_retained_bytes()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_score_memory_projection_overflow",
+                ))?,
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))?;
+    memory_bound
+        .ensure(observed_bytes, 0)
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
     aggregation_span.finish(classes.classes().len() as u64);
 
-    Ok(CoreExecutionResult::new(
+    let result = CoreExecutionResult::new(
         vec![
             ("search_kind".to_owned(), "finesse-score".to_owned()),
             ("objective".to_owned(), "finesse".to_owned()),
@@ -262,7 +323,101 @@ pub(super) fn execute_finesse_score(
             Vec::new()
         },
     )
-    .with_finesse_report(report))
+    .with_finesse_report(report);
+    memory_bound
+        .ensure(observed_bytes, 0)
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
+    Ok(result)
+}
+
+fn finesse_score_requested_bytes(
+    problem: &SearchProblem,
+    score: &FinesseScoreRequest,
+) -> Result<u128, WasmExactSearchError> {
+    let universe = problem.piece_source().materialized_universe().ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+    )?;
+    let pattern_count = universe.pattern_count() as u128;
+    let queue_len = problem.exact_pieces().unwrap_or(0) as u128;
+    let per_pattern = (core::mem::size_of::<QueueClass>() + core::mem::size_of::<PatternId>())
+        as u128
+        + queue_len
+            .checked_mul(
+                core::mem::size_of::<clearra_core_domain::piece::piece_kind::PieceKind>() as u128,
+            )
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_score_memory_projection_overflow",
+            ))?;
+    let placement_count = score.placements().len() as u128;
+    pattern_count
+        .checked_mul(per_pattern)
+        .and_then(|bytes| {
+            placement_count
+                .checked_mul(
+                    (core::mem::size_of::<FinesseBoard>()
+                        + core::mem::size_of::<CorePathStep>()
+                        + core::mem::size_of::<Option<u32>>()
+                        + core::mem::size_of::<GeometryLanguageNode>()) as u128,
+                )
+                .and_then(|placement_bytes| bytes.checked_add(placement_bytes))
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))
+}
+
+fn queue_class_retained_bytes(classes: &QueueClassSet) -> Result<u128, WasmExactSearchError> {
+    let mut bytes = (classes.classes().len() as u128)
+        .checked_mul(core::mem::size_of::<QueueClass>() as u128)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))?;
+    for class in classes.classes() {
+        bytes = bytes
+            .checked_add(
+                (class.queue().len() as u128)
+                    .checked_mul(core::mem::size_of::<
+                        clearra_core_domain::piece::piece_kind::PieceKind,
+                    >() as u128)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_score_memory_projection_overflow",
+                    ))?,
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (class.pattern_ids().len() as u128)
+                        .checked_mul(core::mem::size_of::<PatternId>() as u128)?,
+                )
+            })
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_score_memory_projection_overflow",
+            ))?;
+    }
+    Ok(bytes)
+}
+
+fn queue_cost_table_upper_bound(table: &QueueCostTable) -> Result<u128, WasmExactSearchError> {
+    (table.len() as u128)
+        .checked_mul(core::mem::size_of::<Option<u32>>() as u128)
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<QueueCostTable>() as u128))
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))
+}
+
+fn finesse_language_retained_bytes(
+    language: &CostedGeometryLanguage,
+) -> Result<u128, WasmExactSearchError> {
+    // The public language API exposes node count but not backing capacities;
+    // every node owns at most one outgoing edge in score mode.
+    (language.nodes().len() as u128)
+        .checked_mul(
+            (core::mem::size_of::<GeometryLanguageNode>()
+                + core::mem::size_of::<CostedGeometryEdge>()) as u128,
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_score_memory_projection_overflow",
+        ))
 }
 
 fn fixed_operation_language(

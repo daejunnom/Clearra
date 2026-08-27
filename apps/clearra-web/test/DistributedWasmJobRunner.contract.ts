@@ -6,6 +6,12 @@ import { buildWorkspaceProgressModel } from '../../../packages/clearra-ui/src/li
 
 import type { ClearraVerifierPoolProgress } from '../src/workers/ClearraVerifierPool.ts';
 import { DistributedWasmJobRunner } from '../src/workers/DistributedWasmJobRunner.ts';
+import { ClearraProductJobRunner } from '../src/workers/ClearraProductJobRunner.ts';
+import {
+  SharedExecutionAvailabilityError,
+  SharedExecutionResourceAuthority,
+  type SharedExecutionResourceLease
+} from '../src/workers/SharedExecutionResourceAuthority.ts';
 import {
   normalizeWasmU32,
   type ClearraDistributedPlan,
@@ -243,6 +249,251 @@ assert.match(
   approximateModel.stages.find((stage) => stage.id === 'geometry')?.done ?? '',
   /^≈/u
 );
+
+const sharedCapacity = { computeUnits: 2, memoryBytes: 64n * 1024n * 1024n };
+const sharedAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
+const existingOwner = sharedAuthority.tryAcquire('existing-pool-owner', sharedCapacity);
+let deferredInitializeCount = 0;
+let deferredPoolCancelCount = 0;
+let deferredCoordinatorCancelCount = 0;
+let deferredCoordinatorResetCount = 0;
+const deferredPool = {
+  async initialize() {
+    deferredInitializeCount += 1;
+  },
+  async enqueue() {},
+  async waitForIdle() {},
+  async finish() { return 0; },
+  progressSnapshot() { return emptyProgress; },
+  cancel() {
+    deferredPoolCancelCount += 1;
+  }
+};
+const deferredWasm = {
+  ...wasm,
+  distributed_cancel() {
+    deferredCoordinatorCancelCount += 1;
+  },
+  distributed_reset() {
+    deferredCoordinatorResetCount += 1;
+  }
+} as unknown as ClearraWasmModule;
+const deferredRunner = new DistributedWasmJobRunner(
+  deferredWasm,
+  43,
+  'deferred-runner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  deferredPool as never,
+  sharedAuthority,
+  100
+);
+const deferredRun = deferredRunner.run(
+  'clearra pc --lines 1',
+  plan,
+  () => undefined
+);
+deferredRunner.cancel();
+await assert.rejects(
+  deferredRun,
+  (error: unknown) => error instanceof SharedExecutionAvailabilityError &&
+    error.availability.state === 'cancelled' &&
+    error.availability.reason === 'cancelled-by-caller'
+);
+assert.equal(deferredInitializeCount, 0);
+assert.equal(deferredPoolCancelCount, 0);
+assert.equal(deferredCoordinatorCancelCount, 0);
+assert.equal(deferredCoordinatorResetCount, 0);
+assert.deepEqual(sharedAuthority.snapshot().used, sharedCapacity);
+
+const timedOutRunner = new DistributedWasmJobRunner(
+  deferredWasm,
+  44,
+  'timed-out-runner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  deferredPool as never,
+  sharedAuthority,
+  1
+);
+await assert.rejects(
+  timedOutRunner.run('clearra pc --lines 1', plan, () => undefined),
+  (error: unknown) => error instanceof SharedExecutionAvailabilityError &&
+    error.availability.state === 'deferred' &&
+    error.availability.reason === 'shared-resource-contention'
+);
+assert.equal(deferredInitializeCount, 0);
+assert.equal(deferredPoolCancelCount, 0);
+assert.equal(deferredCoordinatorCancelCount, 0);
+assert.equal(deferredCoordinatorResetCount, 0);
+assert.deepEqual(sharedAuthority.snapshot().used, sharedCapacity);
+existingOwner.release();
+assert.deepEqual(sharedAuthority.snapshot().available, sharedCapacity);
+
+const productAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
+const incumbentProductOwner = productAuthority.tryAcquire('incumbent-product-owner', sharedCapacity);
+let productPrepareCount = 0;
+let productResetCount = 0;
+const productWasm = {
+  ...wasm,
+  distributed_prepare() {
+    productPrepareCount += 1;
+    return plan;
+  },
+  distributed_reset() {
+    productResetCount += 1;
+  }
+} as unknown as ClearraWasmModule;
+await assert.rejects(
+  new ClearraProductJobRunner(
+    productWasm,
+    45,
+    'deferred-product-runner',
+    {
+      logicalProcessorCount: 2,
+      webGpuAvailable: false,
+      crossOriginIsolated: false,
+      transferByteCap: 32 * 1024 * 1024
+    },
+    productAuthority,
+    1
+  ).run('clearra pc --lines 1', () => undefined),
+  (error: unknown) => error instanceof SharedExecutionAvailabilityError &&
+    error.availability.state === 'deferred'
+);
+assert.equal(productPrepareCount, 0);
+assert.equal(productResetCount, 0);
+assert.deepEqual(productAuthority.snapshot().used, sharedCapacity);
+incumbentProductOwner.release();
+
+const serialAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
+let serialResetCount = 0;
+let serialDrainCount = 0;
+const serialPlan: ClearraDistributedPlan = {
+  ...plan,
+  mode: 'serial',
+  workerCount: 1,
+  workerInitialization: null,
+  verificationRequired: false
+};
+const serialWasm = {
+  ...wasm,
+  distributed_prepare() {
+    return serialPlan;
+  },
+  distributed_reset() {
+    serialResetCount += 1;
+  },
+  start_job() {
+    assert.deepEqual(
+      serialAuthority.snapshot().used,
+      sharedCapacity,
+      'serial start must remain covered by the preparation lease'
+    );
+    return 46;
+  },
+  advance_job() {
+    assert.deepEqual(
+      serialAuthority.snapshot().used,
+      sharedCapacity,
+      'serial advance must remain covered by the preparation lease'
+    );
+    return 'failed' as const;
+  },
+  drain_job_events_json() {
+    serialDrainCount += 1;
+    if (serialDrainCount === 1) return '[]';
+    return JSON.stringify([{
+      schema_version: 1,
+      runtime: 'clearra-wasm',
+      event: 'failed',
+      job_id: 46,
+      diagnostics: { diagnostics: [] }
+    }]);
+  },
+  cancel_job() {}
+} as unknown as ClearraWasmModule;
+const serialTerminal = await new ClearraProductJobRunner(
+  serialWasm,
+  46,
+  'serial-product-runner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  serialAuthority,
+  100
+).run('clearra pc --lines 1', () => undefined);
+assert.equal(serialTerminal.event, 'failed');
+assert.equal(serialResetCount, 1, 'preparation coordinator resets exactly once');
+assert.deepEqual(serialAuthority.snapshot().available, sharedCapacity);
+
+const lateGrantAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
+let settleLateGrant: () => void = () => undefined;
+const lateGrant = new Promise<SharedExecutionResourceLease>((resolve) => {
+  settleLateGrant = () => resolve(
+    lateGrantAuthority.tryAcquire('late-grant-owner', sharedCapacity)
+  );
+});
+lateGrantAuthority.acquireBounded = async () => lateGrant;
+let lateGrantPoolCancelCount = 0;
+let lateGrantCoordinatorCancelCount = 0;
+let lateGrantCoordinatorResetCount = 0;
+const lateGrantRunner = new DistributedWasmJobRunner(
+  {
+    ...wasm,
+    distributed_cancel() {
+      lateGrantCoordinatorCancelCount += 1;
+    },
+    distributed_reset() {
+      lateGrantCoordinatorResetCount += 1;
+    }
+  } as unknown as ClearraWasmModule,
+  47,
+  'late-grant-runner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  {
+    ...deferredPool,
+    cancel() {
+      lateGrantPoolCancelCount += 1;
+    }
+  } as never,
+  lateGrantAuthority,
+  100
+);
+const pendingLateGrant = lateGrantRunner.acquire();
+lateGrantRunner.cancel();
+settleLateGrant();
+await assert.rejects(
+  pendingLateGrant,
+  (error: unknown) => error instanceof SharedExecutionAvailabilityError &&
+    error.availability.state === 'cancelled' &&
+    error.availability.reason === 'cancelled-by-caller'
+);
+lateGrantRunner.dispose();
+assert.deepEqual(lateGrantAuthority.snapshot().used, {
+  computeUnits: 0,
+  memoryBytes: 0n
+});
+assert.equal(lateGrantAuthority.snapshot().activeLeaseCount, 0);
+assert.equal(lateGrantPoolCancelCount, 0);
+assert.equal(lateGrantCoordinatorCancelCount, 0);
+assert.equal(lateGrantCoordinatorResetCount, 0);
 
 function verifierFlags(value: boolean) {
   return {

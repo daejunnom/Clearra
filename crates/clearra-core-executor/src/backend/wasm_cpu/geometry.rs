@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::solution::normalized_tiling_solution::{
@@ -50,6 +50,9 @@ impl GeometryCandidate {
         let mut row_ids = [0_u32; MAX_BOARD64_PIECES];
         row_ids[..rows.len()].copy_from_slice(rows);
         row_ids[..rows.len()].sort_unstable();
+        for row_id in &row_ids[..rows.len()] {
+            catalog.try_skeleton(*row_id)?;
+        }
         let placements = row_ids[..rows.len()].iter().copied().map(|row_id| {
             let row = catalog.skeleton(row_id);
             PiecePlacementMask::new(row.piece, row.cells)
@@ -116,6 +119,15 @@ struct ResidualMemo {
 }
 
 impl ResidualMemo {
+    fn disabled() -> Self {
+        Self {
+            bucket_heads: Vec::new(),
+            chunks: Vec::new(),
+            entry_count: 0,
+            insertion_disabled: true,
+        }
+    }
+
     fn new(piece_count: u8) -> Self {
         let bucket_count = match piece_count {
             0..=5 => 1 << 12,
@@ -849,6 +861,7 @@ struct FamilyCompiler {
     column_pruned_states: usize,
     component_compositions: usize,
     tablebase_pruned_states: usize,
+    resource_authoritative: bool,
 }
 
 impl FamilyCompiler {
@@ -859,6 +872,46 @@ impl FamilyCompiler {
     ) -> Self {
         let admissible_prefixes = compile_admissible_prefixes(&targets);
         Self::new_with_admissible_prefixes(required_cells, targets, admissible_prefixes, tablebase)
+    }
+
+    fn try_new(
+        required_cells: u64,
+        targets: Arc<[TargetGroup]>,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
+    ) -> Result<Self, WasmExactSearchError> {
+        let admissible_prefixes = compile_admissible_prefixes_checked(&targets)?;
+        let target_depth = targets.first().map_or(0, |target| target.key.total_count());
+        let mut stack = Vec::new();
+        stack
+            .try_reserve_exact(usize::from(target_depth).saturating_add(1))
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_compile_stack_storage_unavailable",
+                )
+            })?;
+        stack.push(CompileFrame::root(required_cells));
+        Ok(Self {
+            targets,
+            tablebase,
+            admissible_prefixes,
+            compile_domain: FamilyCompileDomain::PermutationClosedGeometry,
+            used_counts: [0; 7],
+            stack,
+            residual_memo: ResidualMemo::disabled(),
+            projection_cache: ProjectionReachabilityCache::default(),
+            family: GeometrySolutionFamily::new(),
+            component_entries: Vec::new(),
+            target_depth,
+            root_family: FAMILY_INVALID,
+            expanded_nodes: 0,
+            peak_frontier: 1,
+            domain_pruned_states: 0,
+            hall_pruned_states: 0,
+            column_pruned_states: 0,
+            component_compositions: 0,
+            tablebase_pruned_states: 0,
+            resource_authoritative: true,
+        })
     }
 
     fn new_with_admissible_prefixes(
@@ -888,6 +941,7 @@ impl FamilyCompiler {
             column_pruned_states: 0,
             component_compositions: 0,
             tablebase_pruned_states: 0,
+            resource_authoritative: false,
         }
     }
 
@@ -919,6 +973,7 @@ impl FamilyCompiler {
             column_pruned_states: 0,
             component_compositions: 0,
             tablebase_pruned_states: 0,
+            resource_authoritative: false,
         }
     }
 
@@ -998,7 +1053,7 @@ impl FamilyCompiler {
                 self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
-            let advanced_analysis_enabled = self.target_depth >= 7;
+            let advanced_analysis_enabled = !self.resource_authoritative && self.target_depth >= 7;
             let component_composition_enabled =
                 advanced_analysis_enabled && self.compile_domain.allows_component_composition();
             let advanced_domain = advanced_analysis_enabled && catalog.initial_board() != 0;
@@ -1299,12 +1354,35 @@ impl FamilyCompiler {
             + self.component_entries.capacity() * core::mem::size_of::<ComponentFamilyEntry>()
     }
 
+    fn set_retained_limit_bytes(&mut self, limit: u128) -> bool {
+        let family_retained = self.family.retained_bytes() as u128;
+        let Some(fixed_retained) = (self.retained_bytes() as u128).checked_sub(family_retained)
+        else {
+            return false;
+        };
+        let Some(family_limit) = limit.checked_sub(fixed_retained) else {
+            return false;
+        };
+        self.family.set_retained_limit_bytes(Some(family_limit));
+        self.retained_bytes() as u128 <= limit
+    }
+
     fn into_enumerator(self) -> FamilyEnumerator {
         FamilyEnumerator::new(
             self.targets,
             self.family,
             self.root_family,
             self.target_depth,
+        )
+    }
+
+    fn try_into_bounded_enumerator(self, limit: u128) -> Option<FamilyEnumerator> {
+        FamilyEnumerator::try_new_bounded(
+            self.targets,
+            self.family,
+            self.root_family,
+            self.target_depth,
+            limit,
         )
     }
 
@@ -1434,6 +1512,15 @@ impl GeometryFamilyCompileSession {
                         Err(WasmExactSearchError::InvalidProblem(reason)) => {
                             return GeometryFamilyCompileAdvance::ResourceIncomplete(reason);
                         }
+                        // Admission is owned by the enclosing session and cannot
+                        // originate in this pure completion-oracle constructor.
+                        // Keep the compatibility result fail-closed if that
+                        // invariant is ever violated.
+                        Err(error @ WasmExactSearchError::ResourceAdmission(_)) => {
+                            return GeometryFamilyCompileAdvance::ResourceIncomplete(
+                                error.reason(),
+                            );
+                        }
                         Err(WasmExactSearchError::Cancelled) => {
                             return GeometryFamilyCompileAdvance::Cancelled;
                         }
@@ -1483,6 +1570,7 @@ struct FamilyEnumerator {
     tasks: Vec<TraversalTask>,
     rows: [u32; MAX_BOARD64_PIECES],
     target_depth: u8,
+    retained_limit_bytes: Option<u128>,
     #[cfg(feature = "parallel")]
     candidate_count: Option<u128>,
 }
@@ -1511,9 +1599,50 @@ impl FamilyEnumerator {
             tasks,
             rows: [0; MAX_BOARD64_PIECES],
             target_depth,
+            retained_limit_bytes: None,
             #[cfg(feature = "parallel")]
             candidate_count,
         }
+    }
+
+    fn try_new_bounded(
+        targets: Arc<[TargetGroup]>,
+        family: GeometrySolutionFamily,
+        root_family: u32,
+        target_depth: u8,
+        retained_limit_bytes: u128,
+    ) -> Option<Self> {
+        let fixed = (target_bytes(&targets) as u128)
+            .checked_add(core::mem::size_of::<GeometrySolutionFamily>() as u128)?
+            .checked_add(family.retained_bytes() as u128)?;
+        if fixed > retained_limit_bytes {
+            return None;
+        }
+        let mut tasks = Vec::new();
+        if root_family != FAMILY_INVALID {
+            let task_bytes = core::mem::size_of::<TraversalTask>() as u128;
+            if fixed.checked_add(task_bytes)? > retained_limit_bytes {
+                return None;
+            }
+            tasks.try_reserve_exact(1).ok()?;
+            tasks.push(TraversalTask {
+                family: root_family,
+                continuations: [FAMILY_INVALID; MAX_BOARD64_PIECES],
+                depth: 0,
+                continuation_count: 0,
+            });
+        }
+        let enumerator = Self {
+            targets,
+            family: Arc::new(family),
+            tasks,
+            rows: [0; MAX_BOARD64_PIECES],
+            target_depth,
+            retained_limit_bytes: Some(retained_limit_bytes),
+            #[cfg(feature = "parallel")]
+            candidate_count: None,
+        };
+        (enumerator.retained_bytes() as u128 <= retained_limit_bytes).then_some(enumerator)
     }
 
     #[cfg(feature = "parallel")]
@@ -1567,6 +1696,7 @@ impl FamilyEnumerator {
                 tasks: vec![seed.task],
                 rows: seed.rows,
                 target_depth: self.target_depth,
+                retained_limit_bytes: None,
                 #[cfg(feature = "parallel")]
                 candidate_count: Some(seed.weight),
             });
@@ -1610,7 +1740,33 @@ impl FamilyEnumerator {
                     FamilyNodeKind::Union => {
                         let mut right = task;
                         right.family = node.right;
-                        if self.tasks.try_reserve(1).is_err() {
+                        let requested_capacity = self
+                            .tasks
+                            .capacity()
+                            .saturating_mul(2)
+                            .max(self.tasks.len().saturating_add(1));
+                        let projected_task_bytes = (requested_capacity as u128)
+                            .checked_mul(core::mem::size_of::<TraversalTask>() as u128)
+                            .ok_or(())?;
+                        let fixed = (self.retained_bytes() as u128)
+                            .checked_sub(
+                                (self.tasks.capacity() as u128)
+                                    .checked_mul(core::mem::size_of::<TraversalTask>() as u128)
+                                    .ok_or(())?,
+                            )
+                            .ok_or(())?;
+                        if self.retained_limit_bytes.is_some_and(|limit| {
+                            fixed
+                                .checked_add(projected_task_bytes)
+                                .is_none_or(|projected| projected > limit)
+                        }) || self.tasks.try_reserve_exact(1).is_err()
+                        {
+                            return Err(());
+                        }
+                        if self
+                            .retained_limit_bytes
+                            .is_some_and(|limit| self.retained_bytes() as u128 > limit)
+                        {
                             return Err(());
                         }
                         self.tasks.push(right);
@@ -1647,7 +1803,8 @@ impl FamilyEnumerator {
 
     fn retained_bytes(&self) -> usize {
         usize::from(Arc::strong_count(&self.targets) == 1) * target_bytes(&self.targets)
-            + usize::from(Arc::strong_count(&self.family) == 1) * self.family.retained_bytes()
+            + usize::from(Arc::strong_count(&self.family) == 1)
+                * (core::mem::size_of::<GeometrySolutionFamily>() + self.family.retained_bytes())
             + self.tasks.capacity() * core::mem::size_of::<TraversalTask>()
     }
 }
@@ -1728,6 +1885,37 @@ pub(super) fn compile_admissible_prefixes(targets: &[TargetGroup]) -> Vec<u32> {
     prefixes.sort_unstable();
     prefixes.dedup();
     prefixes
+}
+
+fn compile_admissible_prefixes_checked(
+    targets: &[TargetGroup],
+) -> Result<Vec<u32>, WasmExactSearchError> {
+    let capacity = targets
+        .iter()
+        .try_fold(0_usize, |total, target| {
+            target
+                .key
+                .counts()
+                .into_iter()
+                .try_fold(1_usize, |count, piece_count| {
+                    count.checked_mul(usize::from(piece_count).checked_add(1)?)
+                })
+                .and_then(|count| total.checked_add(count))
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_geometry_prefix_projection_overflow",
+        ))?;
+    let mut prefixes = Vec::new();
+    prefixes.try_reserve_exact(capacity).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_geometry_prefix_storage_unavailable")
+    })?;
+    let mut counts = [0_u8; 7];
+    for target in targets {
+        enumerate_count_prefixes(target.key.counts(), 0, &mut counts, &mut prefixes);
+    }
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    Ok(prefixes)
 }
 
 fn feasible_piece_mask_for(admissible_prefixes: &[u32], used_counts: [u8; 7]) -> u8 {
@@ -1820,6 +2008,7 @@ pub(super) struct GeometrySearch {
     component_compositions: usize,
     tablebase_pruned_states: usize,
     external_targets: Option<Arc<[TargetGroup]>>,
+    resource_authoritative: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1860,17 +2049,19 @@ pub(super) fn compile_target_groups(
     family: &PackingMultisetFamily,
     compile_pattern_indexes: bool,
 ) -> Result<(Vec<TargetGroup>, usize), WasmExactSearchError> {
-    let mut targets = Vec::new();
+    let mut targets = Vec::<TargetGroup>::new();
     targets.try_reserve_exact(family.len()).map_err(|_| {
         WasmExactSearchError::InvalidProblem("wasm_pattern_index_storage_unavailable")
     })?;
-    let mut compiled_by_membership = HashMap::<usize, Arc<PatternPiecePositionIndex>>::new();
     for group in family.groups() {
         let membership = group.shared_pattern_bits();
-        let membership_identity = Arc::as_ptr(&membership) as usize;
         let pattern_index = if compile_pattern_indexes {
-            if let Some(index) = compiled_by_membership.get(&membership_identity) {
-                Some(Arc::clone(index))
+            if let Some(index) = targets.iter().find_map(|target| {
+                Arc::ptr_eq(&target.possible_patterns, &membership)
+                    .then(|| target.pattern_index.as_ref().map(Arc::clone))
+                    .flatten()
+            }) {
+                Some(index)
             } else {
                 let index = Arc::new(
                     PatternPiecePositionIndex::compile_subset_before(
@@ -1882,7 +2073,6 @@ pub(super) fn compile_target_groups(
                         WasmExactSearchError::InvalidProblem("wasm_pattern_index_compile_failed")
                     })?,
                 );
-                compiled_by_membership.insert(membership_identity, Arc::clone(&index));
                 Some(index)
             }
         } else {
@@ -1901,11 +2091,264 @@ pub(super) fn compile_target_groups(
             WasmExactSearchError::InvalidProblem("wasm_pattern_index_identity_overflow")
         })?;
     }
-    let pattern_index_bytes = compiled_by_membership
-        .values()
-        .map(|index| index.retained_bytes())
-        .sum();
-    Ok((targets, pattern_index_bytes))
+    let target_nested_bytes = checked_target_nested_retained_bytes(&targets)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_pattern_index_retained_projection_overflow",
+        ))?;
+    Ok((targets, target_nested_bytes))
+}
+
+/// Builds target groups only after their full constructor peak fits the same
+/// memory surface as the surrounding exact-search session. The family and its
+/// membership bitsets are already included in `already_retained_bytes`; this
+/// projection therefore counts target slots, new position indexes, conversion
+/// scratch, and the Vec-to-Arc target copy without double-counting membership.
+pub(super) fn compile_target_groups_with_memory_limit(
+    universe: &MaterializedPatternUniverse,
+    family: &PackingMultisetFamily,
+    compile_pattern_indexes: bool,
+    already_retained_bytes: u128,
+    max_memory_bytes: u128,
+) -> Result<(Vec<TargetGroup>, usize), WasmExactSearchError> {
+    let peak =
+        checked_target_group_build_peak_additional_bytes(universe, family, compile_pattern_indexes)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_pattern_index_projection_overflow",
+            ))?;
+    let required =
+        already_retained_bytes
+            .checked_add(peak)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_pattern_index_projection_overflow",
+            ))?;
+    if required > max_memory_bytes {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_pattern_index_memory_capacity_exceeded",
+        ));
+    }
+    compile_target_groups(universe, family, compile_pattern_indexes)
+}
+
+pub(super) fn checked_target_group_build_peak_additional_bytes(
+    universe: &MaterializedPatternUniverse,
+    family: &PackingMultisetFamily,
+    compile_pattern_indexes: bool,
+) -> Option<u128> {
+    let target_slot_bytes =
+        (family.len() as u128).checked_mul(core::mem::size_of::<TargetGroup>() as u128)?;
+    // Vec -> Arc<[TargetGroup]> may keep both payloads live during conversion.
+    let mut bytes = target_slot_bytes.checked_mul(2)?;
+    let admissible_prefix_count = checked_admissible_prefix_count_upper_bound(family)?;
+    let target_depth = family.envelope().total_count();
+    bytes = bytes
+        .checked_add(admissible_prefix_count.checked_mul(core::mem::size_of::<u32>() as u128)?)?
+        .checked_add(
+            (u128::from(target_depth).checked_add(1)?)
+                .checked_mul(core::mem::size_of::<CompileFrame>() as u128)?,
+        )?
+        .checked_add(
+            (FAMILY_INTERN_INITIAL_SLOT_COUNT as u128)
+                .checked_mul(core::mem::size_of::<u32>() as u128)?,
+        )?;
+    let residual_bucket_count = match target_depth {
+        0..=5 => 1_u128 << 12,
+        6..=7 => 1_u128 << 14,
+        8..=10 => 1_u128 << 18,
+        _ => 1_u128 << 20,
+    };
+    bytes = bytes
+        .checked_add(residual_bucket_count.checked_mul(core::mem::size_of::<u32>() as u128)?)?;
+    let mut max_sequence_scratch_bytes = 0_u128;
+    for (group_index, group) in family.groups().iter().enumerate() {
+        let membership = group.shared_pattern_bits();
+        let already_compiled = family.groups()[..group_index].iter().any(|prior| {
+            let prior = prior.shared_pattern_bits();
+            Arc::ptr_eq(&prior, &membership)
+        });
+        if already_compiled || !compile_pattern_indexes {
+            continue;
+        }
+        let member_count = usize::try_from(membership.count_ones()).ok()?;
+        let sequence_len = max_covered_sequence_len(universe, membership.as_ref());
+        let word_count = member_count.div_ceil(u64::BITS as usize);
+        let local_id_bytes =
+            (member_count as u128).checked_mul(core::mem::size_of::<u32>() as u128)?;
+        let position_word_bytes = (sequence_len as u128)
+            .checked_mul(7)?
+            .checked_mul(word_count as u128)?
+            .checked_mul(core::mem::size_of::<u64>() as u128)?;
+        bytes = bytes
+            .checked_add(core::mem::size_of::<PatternPiecePositionIndex>() as u128)?
+            .checked_add(local_id_bytes)?
+            .checked_add(position_word_bytes)?;
+        max_sequence_scratch_bytes =
+            max_sequence_scratch_bytes.max((sequence_len as u128).checked_mul(
+                core::mem::size_of::<clearra_core_domain::piece::piece_kind::PieceKind>() as u128,
+            )?);
+    }
+    bytes.checked_add(max_sequence_scratch_bytes)
+}
+
+fn max_covered_sequence_len(
+    universe: &MaterializedPatternUniverse,
+    membership: &PatternBitSet,
+) -> usize {
+    membership
+        .covered_patterns_before(universe.pattern_count())
+        .map(|pattern| universe.sequence_len_at(pattern.index()))
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod target_group_memory_admission_tests {
+    use clearra_core_domain::{
+        piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
+    };
+    use clearra_coverage::{
+        pattern::pattern_bitset::PatternBitSet,
+        universe::{
+            pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+        },
+    };
+    use clearra_supply::{
+        hold_automaton::{HoldAutomatonState, SupplyProvenanceId},
+        pattern_universe::{
+            MaterializedPatternUniverse, PackingHoldProjection, PatternUniverseMaterializer,
+        },
+        piece_source::PieceSourceId,
+    };
+
+    use super::{
+        checked_target_group_build_peak_additional_bytes, compile_target_groups_with_memory_limit,
+        max_covered_sequence_len, WasmExactSearchError,
+    };
+
+    #[test]
+    fn sequence_length_projection_iterates_dense_sparse_and_high_cardinality_membership() {
+        let universe = PatternUniverseMaterializer::standard_7_bag(14, 262_145, 91)
+            .expect("lazy high-cardinality universe");
+        assert_eq!(universe.pattern_count(), 262_145);
+
+        let dense = PatternBitSet::all(universe.pattern_count());
+        assert_eq!(max_covered_sequence_len(&universe, &dense), 14);
+
+        let sparse =
+            PatternBitSet::from_pattern_indices(universe.pattern_count(), vec![0, 65_537, 262_144])
+                .expect("sparse membership");
+        assert_eq!(max_covered_sequence_len(&universe, &sparse), 14);
+    }
+
+    #[test]
+    fn target_group_constructor_accepts_exact_cap_and_rejects_one_byte_short() {
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(92),
+            PatternWeightModelId::new(92),
+            vec![
+                vec![PieceKind::I, PieceKind::O],
+                vec![PieceKind::O, PieceKind::I],
+                vec![PieceKind::T, PieceKind::T],
+            ],
+            vec![
+                ProbabilityValue::new(1.0 / 3.0).expect("probability"),
+                ProbabilityValue::new(1.0 / 3.0).expect("probability"),
+                ProbabilityValue::new(1.0 / 3.0).expect("probability"),
+            ],
+            3,
+            true,
+            None,
+        )
+        .expect("mixed dense and sparse universe");
+        let initial_hold = HoldAutomatonState::new(
+            PieceSourceId::new(92),
+            0,
+            None,
+            0,
+            0,
+            SupplyProvenanceId(92),
+        );
+        let family = universe.packing_multiset_family_for_execution(
+            2,
+            initial_hold,
+            false,
+            PackingHoldProjection::PreserveFinalHoldLanguage,
+        );
+        let peak = checked_target_group_build_peak_additional_bytes(&universe, &family, true)
+            .expect("checked target construction peak");
+        let already_retained = 37_u128;
+
+        let below_cap = compile_target_groups_with_memory_limit(
+            &universe,
+            &family,
+            true,
+            already_retained,
+            already_retained + peak - 1,
+        );
+        assert!(matches!(
+            below_cap,
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_pattern_index_memory_capacity_exceeded"
+            ))
+        ));
+
+        let (targets, retained_bytes) = compile_target_groups_with_memory_limit(
+            &universe,
+            &family,
+            true,
+            already_retained,
+            already_retained + peak,
+        )
+        .expect("exact cap admits target construction");
+        assert_eq!(targets.len(), family.len());
+        assert!(retained_bytes > 0);
+    }
+}
+
+// Mirrors the initial intern table in geometry_family without exposing its
+// implementation-private constant as public API.
+const FAMILY_INTERN_INITIAL_SLOT_COUNT: usize = 4096;
+
+fn checked_admissible_prefix_count_upper_bound(family: &PackingMultisetFamily) -> Option<u128> {
+    family.groups().iter().try_fold(0_u128, |total, group| {
+        group
+            .key()
+            .counts()
+            .into_iter()
+            .try_fold(1_u128, |count, piece_count| {
+                count.checked_mul(u128::from(piece_count).checked_add(1)?)
+            })
+            .and_then(|count| total.checked_add(count))
+    })
+}
+
+fn checked_target_nested_retained_bytes(targets: &[TargetGroup]) -> Option<u128> {
+    let mut bytes = 0_u128;
+    for (index, target) in targets.iter().enumerate() {
+        if !targets[..index]
+            .iter()
+            .any(|prior| Arc::ptr_eq(&prior.possible_patterns, &target.possible_patterns))
+        {
+            bytes = bytes
+                .checked_add(core::mem::size_of::<PatternBitSet>() as u128)?
+                .checked_add(target.possible_patterns.retained_bytes() as u128)?;
+        }
+        let Some(pattern_index) = target.pattern_index.as_ref() else {
+            continue;
+        };
+        if targets[..index].iter().any(|prior| {
+            prior
+                .pattern_index
+                .as_ref()
+                .is_some_and(|prior| Arc::ptr_eq(prior, pattern_index))
+        }) {
+            continue;
+        }
+        bytes = bytes
+            .checked_add(core::mem::size_of::<PatternPiecePositionIndex>() as u128)?
+            .checked_add(pattern_index.retained_bytes() as u128)?;
+    }
+    Some(bytes)
 }
 
 impl GeometrySearch {
@@ -1925,6 +2368,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            resource_authoritative: false,
         }
     }
 
@@ -1936,6 +2380,28 @@ impl GeometrySearch {
     ) -> Result<Self, WasmExactSearchError> {
         let shared = SharedTargetGroups::compile(universe, family, compile_pattern_indexes)?;
         Ok(Self::new_shared(required_cells, &shared))
+    }
+
+    pub fn new_with_memory_limit(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        required_cells: u64,
+        compile_pattern_indexes: bool,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        let (targets, group_pattern_index_bytes) = compile_target_groups_with_memory_limit(
+            universe,
+            family,
+            compile_pattern_indexes,
+            already_retained_bytes,
+            max_memory_bytes,
+        )?;
+        let shared = SharedTargetGroups {
+            targets: targets.into(),
+            group_pattern_index_bytes,
+        };
+        Self::try_new_shared_with_tablebase(required_cells, &shared, None)
     }
 
     pub fn new_with_tablebase(
@@ -1951,6 +2417,30 @@ impl GeometrySearch {
             &shared,
             Some(tablebase),
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_tablebase_and_memory_limit(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        required_cells: u64,
+        compile_pattern_indexes: bool,
+        tablebase: Arc<Pc4CompactTablebase>,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        let (targets, group_pattern_index_bytes) = compile_target_groups_with_memory_limit(
+            universe,
+            family,
+            compile_pattern_indexes,
+            already_retained_bytes,
+            max_memory_bytes,
+        )?;
+        let shared = SharedTargetGroups {
+            targets: targets.into(),
+            group_pattern_index_bytes,
+        };
+        Self::try_new_shared_with_tablebase(required_cells, &shared, Some(tablebase))
     }
 
     pub fn new_shared(required_cells: u64, shared: &SharedTargetGroups) -> Self {
@@ -1980,7 +2470,35 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            resource_authoritative: false,
         }
+    }
+
+    fn try_new_shared_with_tablebase(
+        required_cells: u64,
+        shared: &SharedTargetGroups,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
+    ) -> Result<Self, WasmExactSearchError> {
+        Ok(Self {
+            group_pattern_index_bytes: shared.group_pattern_index_bytes,
+            shared_family_bytes: 0,
+            compiler: Some(FamilyCompiler::try_new(
+                required_cells,
+                Arc::clone(&shared.targets),
+                tablebase,
+            )?),
+            enumerator: None,
+            expanded_nodes: 0,
+            peak_frontier: 0,
+            candidate_family_count: None,
+            domain_pruned_states: 0,
+            hall_pruned_states: 0,
+            column_pruned_states: 0,
+            component_compositions: 0,
+            tablebase_pruned_states: 0,
+            external_targets: None,
+            resource_authoritative: true,
+        })
     }
 
     pub fn external(targets: Vec<TargetGroup>, group_pattern_index_bytes: usize) -> Self {
@@ -2006,12 +2524,74 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: Some(Arc::clone(&shared.targets)),
+            resource_authoritative: false,
         }
     }
 
     pub fn advance(&mut self, catalog: &GeometryCatalog) -> GeometryAdvance {
+        self.advance_internal(catalog, None)
+    }
+
+    pub fn advance_with_retained_limit(
+        &mut self,
+        catalog: &GeometryCatalog,
+        retained_limit_bytes: u128,
+    ) -> GeometryAdvance {
+        if !self.resource_authoritative {
+            return GeometryAdvance::ResourceIncomplete("geometry_memory_authority_not_connected");
+        }
+        self.advance_internal(catalog, Some(retained_limit_bytes))
+    }
+
+    fn advance_internal(
+        &mut self,
+        catalog: &GeometryCatalog,
+        retained_limit_bytes: Option<u128>,
+    ) -> GeometryAdvance {
+        let internal_limit = match retained_limit_bytes {
+            Some(total_limit) => {
+                let live_targets = self
+                    .compiler
+                    .as_ref()
+                    .map(|compiler| compiler.targets.as_ref())
+                    .or_else(|| {
+                        self.enumerator
+                            .as_ref()
+                            .map(|enumerator| enumerator.targets.as_ref())
+                    })
+                    .or_else(|| self.external_targets.as_deref());
+                let fixed = live_targets
+                    .map_or(Some(0_u128), checked_target_nested_retained_bytes)
+                    .and_then(|bytes| bytes.checked_add(self.shared_family_bytes as u128))
+                    .and_then(|bytes| {
+                        bytes.checked_add(
+                            self.external_targets
+                                .as_ref()
+                                .map_or(0_u128, |targets| target_bytes(targets) as u128),
+                        )
+                    });
+                let Some(limit) = fixed.and_then(|fixed| total_limit.checked_sub(fixed)) else {
+                    return GeometryAdvance::ResourceIncomplete(
+                        "geometry_memory_capacity_exceeded",
+                    );
+                };
+                Some(limit)
+            }
+            None => None,
+        };
         if let Some(compiler) = self.compiler.as_mut() {
-            match compiler.advance(catalog) {
+            if internal_limit.is_some_and(|limit| !compiler.set_retained_limit_bytes(limit)) {
+                return GeometryAdvance::ResourceIncomplete(
+                    "geometry_solution_family_memory_capacity_exceeded",
+                );
+            }
+            let compile_advance = compiler.advance(catalog);
+            if internal_limit.is_some_and(|limit| compiler.retained_bytes() as u128 > limit) {
+                return GeometryAdvance::ResourceIncomplete(
+                    "geometry_solution_family_memory_capacity_exceeded",
+                );
+            }
+            match compile_advance {
                 CompileAdvance::Pending => {
                     self.observe_compiler_metrics();
                     return GeometryAdvance::Pending;
@@ -2025,8 +2605,25 @@ impl GeometrySearch {
                 CompileAdvance::Complete => {
                     self.observe_compiler_metrics();
                     let compiler = self.compiler.take().expect("geometry compiler exists");
-                    self.candidate_family_count = compiler.candidate_family_count();
-                    self.enumerator = Some(compiler.into_enumerator());
+                    if let Some(limit) = internal_limit {
+                        self.candidate_family_count = None;
+                        let Some(enumerator) = compiler.try_into_bounded_enumerator(limit) else {
+                            return GeometryAdvance::ResourceIncomplete(
+                                "geometry_solution_family_traversal_memory_capacity_exceeded",
+                            );
+                        };
+                        self.enumerator = Some(enumerator);
+                    } else {
+                        self.candidate_family_count = compiler.candidate_family_count();
+                        self.enumerator = Some(compiler.into_enumerator());
+                    }
+                    if retained_limit_bytes
+                        .is_some_and(|limit| self.retained_bytes() as u128 > limit)
+                    {
+                        return GeometryAdvance::ResourceIncomplete(
+                            "geometry_solution_family_traversal_memory_capacity_exceeded",
+                        );
+                    }
                     return GeometryAdvance::Pending;
                 }
             }
@@ -2035,8 +2632,16 @@ impl GeometrySearch {
         let Some(enumerator) = self.enumerator.as_mut() else {
             return GeometryAdvance::Complete;
         };
-        match enumerator.next_candidate(catalog) {
-            Ok(Some(candidate)) => GeometryAdvance::Candidate(candidate),
+        let advance = match enumerator.next_candidate(catalog) {
+            Ok(Some(candidate)) => {
+                if retained_limit_bytes.is_some_and(|limit| self.retained_bytes() as u128 > limit) {
+                    GeometryAdvance::ResourceIncomplete(
+                        "geometry_solution_family_traversal_memory_capacity_exceeded",
+                    )
+                } else {
+                    GeometryAdvance::Candidate(candidate)
+                }
+            }
             Ok(None) => {
                 self.enumerator = None;
                 GeometryAdvance::Complete
@@ -2044,6 +2649,11 @@ impl GeometrySearch {
             Err(()) => GeometryAdvance::ResourceIncomplete(
                 "geometry_solution_family_traversal_unavailable",
             ),
+        };
+        if retained_limit_bytes.is_some_and(|limit| self.retained_bytes() as u128 > limit) {
+            GeometryAdvance::ResourceIncomplete("geometry_memory_capacity_exceeded")
+        } else {
+            advance
         }
     }
 
@@ -2116,6 +2726,7 @@ impl GeometrySearch {
                 component_compositions: usize::from(index == 0) * self.component_compositions,
                 tablebase_pruned_states: usize::from(index == 0) * self.tablebase_pruned_states,
                 external_targets: None,
+                resource_authoritative: false,
             });
         }
         Ok(ParallelGeometryPlan {
@@ -2261,8 +2872,26 @@ impl GeometrySearch {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.group_pattern_index_bytes
-            + self.shared_family_bytes
+        let current_target_nested_bytes = self
+            .compiler
+            .as_ref()
+            .map(|compiler| compiler.targets.as_ref())
+            .or_else(|| {
+                self.enumerator
+                    .as_ref()
+                    .map(|enumerator| enumerator.targets.as_ref())
+            })
+            .or_else(|| self.external_targets.as_deref())
+            .and_then(checked_target_nested_retained_bytes)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or_else(|| {
+                usize::from(
+                    self.compiler.is_some()
+                        || self.enumerator.is_some()
+                        || self.external_targets.is_some(),
+                ) * usize::MAX
+            });
+        current_target_nested_bytes.saturating_add(self.shared_family_bytes)
             + self
                 .compiler
                 .as_ref()

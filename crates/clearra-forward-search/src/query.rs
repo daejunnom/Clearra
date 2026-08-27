@@ -144,6 +144,11 @@ pub enum ForwardSearchMode {
     MaximumDamage,
     DamageAtLeast(u32),
     SpinFinder(ForwardSpinTarget),
+    /// Finds every distinct witness attaining the longest uninterrupted line-clear chain.
+    ///
+    /// The chain starts after initial completed rows have been normalized away, so the first
+    /// accepted lock has REN 0. A non-clearing lock is never a continuation of this mode.
+    MaximumRen,
 }
 
 impl ForwardSearchMode {
@@ -151,10 +156,21 @@ impl ForwardSearchMode {
         matches!(self, Self::MaximumDamage | Self::DamageAtLeast(_))
     }
 
+    pub const fn is_ren(self) -> bool {
+        matches!(self, Self::MaximumRen)
+    }
+
+    pub(crate) const fn preserves_all_paths(self) -> bool {
+        matches!(
+            self,
+            Self::MaximumDamage | Self::DamageAtLeast(_) | Self::SpinFinder(_) | Self::MaximumRen
+        )
+    }
+
     pub const fn minimum_damage(self) -> Option<u32> {
         match self {
             Self::DamageAtLeast(damage) => Some(damage),
-            Self::MaximumDamage | Self::SpinFinder(_) => None,
+            Self::MaximumDamage | Self::SpinFinder(_) | Self::MaximumRen => None,
         }
     }
 }

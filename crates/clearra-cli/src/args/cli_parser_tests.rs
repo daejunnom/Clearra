@@ -20,6 +20,449 @@ fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
 }
 
 #[test]
+fn build_probability_help_uses_the_canonical_parser_option_names() {
+    let output =
+        CliHelpTopic::Product(ProductHelpTopic::BuildProbability).into_output(LanguageId::En);
+    for marker in [
+        "--base-mask HEX",
+        "--aggregate buildability|tiling|spin",
+        "--solution-probabilities",
+        "--include-mirror|--no-mirror",
+        "--max-patterns N",
+        "--max-candidates N",
+        "--max-memory-mib N",
+    ] {
+        assert!(output.stdout().contains(marker), "missing marker: {marker}");
+    }
+    for stale in [
+        "--initial-mask HEX",
+        "--aggregation",
+        "--gpu-warmup",
+        "--gpu-device",
+    ] {
+        assert!(!output.stdout().contains(stale), "stale marker: {stale}");
+    }
+}
+
+#[test]
+fn build_v2_routes_to_the_product_boundary_and_owns_closed_help() {
+    let parsed = CliParser::parse([
+        "clearra",
+        "build",
+        "setup",
+        "--target-format",
+        "ctk3",
+        "--target-document",
+        "ctk3_test",
+        "--queue",
+        "I",
+    ])
+    .expect("Build v2 product command")
+    .into_command();
+    let ParsedCliCommand::Product(tokens) = parsed else {
+        panic!("Build v2 must route through Product/Web");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "build", "setup"]);
+
+    assert_eq!(
+        CliParser::parse(["clearra", "build", "--help"])
+            .expect("Build v2 help")
+            .into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::BuildV2))
+    );
+    let help = CliHelpTopic::Product(ProductHelpTopic::BuildV2).into_output(LanguageId::En);
+    for marker in [
+        "build evaluate",
+        "--target-format ctk3|fumen",
+        "--solution-format ctk3|fumen",
+        "--objective all|unique|min-cover|max-probability-minimum|max-score-cover",
+        "--score-profile tetrio|guideline|jstris-ultra",
+        "rejects --max-memory-mib",
+    ] {
+        assert!(help.stdout().contains(marker), "missing marker: {marker}");
+    }
+}
+
+#[test]
+fn pc_allspin_help_keeps_exact_queue_and_pattern_contracts_distinct() {
+    let exact =
+        CliHelpTopic::Product(ProductHelpTopic::PcAllSpinSolution).into_output(LanguageId::En);
+    assert!(exact
+        .stdout()
+        .contains("pc allspin-sol --lines 2|4|6 --queue QUEUE"));
+    assert!(exact
+        .stdout()
+        .contains("deterministic B2B-preserving witness"));
+    assert!(exact.stdout().contains("denominator is exactly one"));
+    assert!(exact.stdout().contains("oracle-fixed"));
+    assert!(exact.stdout().contains("command-intent only"));
+    assert!(exact
+        .stdout()
+        .contains("--board-mask HEX --height 1..6 --pieces N"));
+    assert!(exact.stdout().contains("no target-field input exists"));
+    assert!(!exact.stdout().contains("--patterns PATTERN"));
+
+    let chance = CliHelpTopic::Product(ProductHelpTopic::PcAllSpinPreservationChance)
+        .into_output(LanguageId::En);
+    assert!(chance
+        .stdout()
+        .contains("pc allspin-pres-chance --lines 2|4|6 --patterns PATTERN"));
+    assert!(chance.stdout().contains("original-queue denominator"));
+    assert!(chance
+        .stdout()
+        .contains("Each original queue is counted once"));
+    assert!(chance.stdout().contains("command-intent only"));
+    assert!(chance
+        .stdout()
+        .contains("--board-mask HEX --height 1..6 --pieces N"));
+    assert!(!chance.stdout().contains("--queue QUEUE"));
+}
+
+#[test]
+fn pc_allspin_subcommands_route_to_the_shared_product_boundary() {
+    for subcommand in ["allspin-sol", "allspin-pres-chance"] {
+        let parsed = CliParser::parse([
+            "clearra",
+            "pc",
+            subcommand,
+            if subcommand == "allspin-sol" {
+                "--queue"
+            } else {
+                "--patterns"
+            },
+            "IOTS",
+            "--spin-profile",
+            "all-spin-plus",
+        ])
+        .expect("PC All-Spin product command")
+        .into_command();
+        let ParsedCliCommand::Product(tokens) = parsed else {
+            panic!("expected product command");
+        };
+        assert_eq!(tokens[0..3], ["clearra", "pc", subcommand]);
+    }
+
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "allspin-sol", "--help"])
+            .expect("exact help")
+            .into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcAllSpinSolution))
+    );
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "allspin-pres-chance", "-h"])
+            .expect("chance help")
+            .into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Product(
+            ProductHelpTopic::PcAllSpinPreservationChance
+        ))
+    );
+}
+
+#[test]
+fn pc_minimals_routes_only_the_grouped_canonical_spelling_to_product_help_and_tokens() {
+    let help = CliParser::parse(["clearra", "pc", "minimals", "--help"])
+        .expect("canonical pc minimals help")
+        .into_command();
+    assert_eq!(
+        help,
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcMinimals))
+    );
+    let output = CliHelpTopic::Product(ProductHelpTopic::PcMinimals).into_output(LanguageId::En);
+    assert!(output
+        .stdout()
+        .contains("usage: clearra pc minimals --lines 2"));
+    assert!(output.stdout().contains("pc.minimals product contract"));
+    assert!(output.stdout().contains("pc-minimum-cover.v2"));
+    for hidden in ["objective", "diagnostic", "verify"] {
+        assert!(
+            !output.stdout().to_ascii_lowercase().contains(hidden),
+            "{hidden}"
+        );
+    }
+
+    let canonical = CliParser::parse([
+        "clearra",
+        "pc",
+        "minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+    ])
+    .expect("canonical pc minimals")
+    .into_command();
+    let ParsedCliCommand::Product(tokens) = canonical else {
+        panic!("canonical pc minimals must route through Product/Web");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "pc", "minimals"]);
+
+    let legacy = CliParser::parse([
+        "clearra",
+        "sfinder",
+        "minimals",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1",
+    ])
+    .expect("legacy sfinder minimals")
+    .into_command();
+    let ParsedCliCommand::Product(tokens) = legacy else {
+        panic!("legacy sfinder minimals must remain a compatibility product route");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "sfinder", "minimals"]);
+}
+
+#[test]
+fn pc_chance_routes_only_the_grouped_canonical_spelling_to_product_help_and_tokens() {
+    let help = CliParser::parse(["clearra", "pc", "chance", "--help"])
+        .expect("canonical pc chance help")
+        .into_command();
+    assert_eq!(
+        help,
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcChance))
+    );
+    let output = CliHelpTopic::Product(ProductHelpTopic::PcChance).into_output(LanguageId::En);
+    assert!(output
+        .stdout()
+        .contains("usage: clearra pc chance --lines 2"));
+    assert!(output.stdout().contains("pc.chance product contract"));
+    for hidden in ["objective", "diagnostic", "verify"] {
+        assert!(
+            !output.stdout().to_ascii_lowercase().contains(hidden),
+            "{hidden}"
+        );
+    }
+    assert!(!output.stdout().contains("visible-7"));
+
+    let canonical = CliParser::parse([
+        "clearra",
+        "pc",
+        "chance",
+        "--lines",
+        "2",
+        "--patterns",
+        "[TI]!",
+    ])
+    .expect("canonical pc chance")
+    .into_command();
+    let ParsedCliCommand::Product(tokens) = canonical else {
+        panic!("canonical pc chance must route through Product/Web");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "pc", "chance"]);
+
+    assert!(matches!(
+        CliParser::parse(["clearra", "chance", "v115@vhAAgH", "P7P3", "4"])
+            .expect("legacy chance")
+            .into_command(),
+        ParsedCliCommand::Product(_)
+    ));
+    assert!(matches!(
+        CliParser::parse(["clearra", "percent", "--queue", "IOT"])
+            .expect("legacy percent")
+            .into_command(),
+        ParsedCliCommand::Percent(_)
+    ));
+}
+
+#[test]
+fn pc_score_routes_only_the_grouped_canonical_spelling_to_product_help_and_tokens() {
+    let help = CliParser::parse(["clearra", "pc", "score", "--help"])
+        .expect("canonical pc score help")
+        .into_command();
+    assert_eq!(
+        help,
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcScore))
+    );
+    let output = CliHelpTopic::Product(ProductHelpTopic::PcScore).into_output(LanguageId::En);
+    assert!(output
+        .stdout()
+        .contains("usage: clearra pc score --lines 2"));
+    assert!(output.stdout().contains("pc-score-summary.v2"));
+    assert!(output.stdout().contains("basic-approximation"));
+    assert!(output.stdout().contains("profile_specific_exact=false"));
+    assert!(output.stdout().contains("fixed Wasm CPU single-session"));
+    assert!(output.stdout().contains("16 source pieces"));
+    assert!(output
+        .stdout()
+        .contains("one factorized pattern expression"));
+    assert!(output.stdout().contains("P7P7P2"));
+    for hidden in [
+        "objective",
+        "diagnostic",
+        "verify",
+        "--backend",
+        "--workers",
+        "--auto-workers",
+        "--gpu-device",
+        "--max-patterns",
+        "--max-memory-mib",
+    ] {
+        assert!(
+            !output.stdout().to_ascii_lowercase().contains(hidden),
+            "{hidden}"
+        );
+    }
+
+    let canonical = CliParser::parse([
+        "clearra",
+        "pc",
+        "score",
+        "--lines",
+        "2",
+        "--patterns",
+        "[TIOSZ]!",
+    ])
+    .expect("canonical pc score")
+    .into_command();
+    let ParsedCliCommand::Product(tokens) = canonical else {
+        panic!("canonical pc score must route through Product/Web");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "pc", "score"]);
+
+    for source in [
+        &["clearra", "score", "v115@vhAAgH", "P7P3", "4"][..],
+        &["clearra", "sfinder", "score", "v115@vhAAgH", "P7P3", "4"][..],
+    ] {
+        assert!(matches!(
+            CliParser::parse(source.iter().copied())
+                .expect("legacy score")
+                .into_command(),
+            ParsedCliCommand::Product(_)
+        ));
+    }
+}
+
+#[test]
+fn pc_score_finder_help_and_explicit_family_view_are_closed() {
+    let help = CliParser::parse(["clearra", "pc", "score-finder", "--help"])
+        .expect("canonical pc score-finder help")
+        .into_command();
+    assert_eq!(
+        help,
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcScoreFinder))
+    );
+    let output = CliHelpTopic::Product(ProductHelpTopic::PcScoreFinder).into_output(LanguageId::En);
+    assert!(output.stdout().contains("pc-fixed-score-witness.v2"));
+    assert!(output.stdout().contains("score only"));
+    assert!(output.stdout().contains("attack is informational"));
+    assert!(output.stdout().contains("no portfolio tie metadata"));
+
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "score-finder",
+        "--lines",
+        "2",
+        "--queue",
+        "IOTSZ",
+        "--ties",
+    ])
+    .expect("explicit fixed-score winner-family view");
+    assert!(invocation.explicit_ties().requested());
+    assert!(invocation.explicit_ties().snapshot_path().is_none());
+    assert!(CliParser::parse([
+        "clearra",
+        "pc",
+        "score-finder",
+        "--lines",
+        "2",
+        "--queue",
+        "IOTSZ",
+        "--ties",
+        "--tie-snapshot",
+        "score-finder.jsonl",
+    ])
+    .is_err());
+}
+
+#[test]
+fn pc_save_commands_route_to_distinct_product_help_and_tokens() {
+    for (subcommand, topic, contract_marker) in [
+        ("saves", ProductHelpTopic::PcSaves, "pc-save-groups.v2"),
+        ("best-save", ProductHelpTopic::PcBestSave, "pc-best-save.v2"),
+    ] {
+        let help = CliParser::parse(["clearra", "pc", subcommand, "--help"])
+            .expect("canonical pc save help")
+            .into_command();
+        assert_eq!(help, ParsedCliCommand::Help(CliHelpTopic::Product(topic)));
+        let output = CliHelpTopic::Product(topic).into_output(LanguageId::En);
+        assert!(output.stdout().contains(contract_marker), "{subcommand}");
+        assert!(output.stdout().contains("whole-universe"), "{subcommand}");
+        assert!(
+            output.stdout().contains("fixed bag-boundary"),
+            "{subcommand}"
+        );
+
+        let parsed = CliParser::parse([
+            "clearra",
+            "pc",
+            subcommand,
+            "--lines",
+            "2",
+            "--patterns",
+            "P7",
+        ])
+        .expect("canonical pc save command")
+        .into_command();
+        let ParsedCliCommand::Product(tokens) = parsed else {
+            panic!("canonical pc {subcommand} must route through Product/Web");
+        };
+        assert_eq!(tokens[0..3], ["clearra", "pc", subcommand]);
+    }
+
+    let saves = CliHelpTopic::Product(ProductHelpTopic::PcSaves).into_output(LanguageId::En);
+    assert!(saves.stdout().contains("conditional_probability_given_pc"));
+    let best = CliHelpTopic::Product(ProductHelpTopic::PcBestSave).into_output(LanguageId::En);
+    assert!(best.stdout().contains("clearra-save-v1"));
+    assert!(best.stdout().contains("ordinary list entry"));
+    assert!(best.stdout().contains("never uses portfolio tie semantics"));
+}
+
+#[test]
+fn search_help_exposes_only_runnable_rule_and_profile_choices() {
+    let pc = CliHelpTopic::Pc.into_output(LanguageId::En);
+    assert!(pc
+        .stdout()
+        .contains("--rule srs-plus|srs|srs-x|jstris-180|no-kick"));
+    assert!(!pc.stdout().contains("|asc|ars|"));
+    assert!(pc
+        .stdout()
+        .contains("ASC and ARS remain inspectable rule-registry profiles"));
+
+    let damage = CliHelpTopic::Product(ProductHelpTopic::Damage).into_output(LanguageId::En);
+    assert!(damage.stdout().contains(
+        "--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus"
+    ));
+    assert!(damage
+        .stdout()
+        .contains("default spin profile: all-mini-plus"));
+    assert!(damage
+        .stdout()
+        .contains("--minimum-damage selects at-least mode"));
+
+    let spin = CliHelpTopic::Product(ProductHelpTopic::SpinFinder).into_output(LanguageId::En);
+    assert!(spin.stdout().contains(
+        "--spin-profile t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus"
+    ));
+    assert!(!spin.stdout().contains("--spin-profile disabled|"));
+    assert!(spin
+        .stdout()
+        .contains("--spin-category other requires an all-spin or all-mini profile"));
+
+    let finesse = CliHelpTopic::Product(ProductHelpTopic::Finesse).into_output(LanguageId::En);
+    assert!(finesse.stdout().contains("--hold empty|PIECE|--no-hold"));
+}
+
+#[test]
 fn tablebase_use_is_explicit_for_pc_and_setup() {
     let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc", "--lines", "4"])
         .expect("default PC invocation")
@@ -390,6 +833,167 @@ fn solution_data_requires_structured_json_output() {
 }
 
 #[test]
+fn solution_artifact_flags_are_global_and_default_to_compact_without_rewriting_allspin() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "allspin-sol",
+        "--queue",
+        "IOTS",
+        "--spin-profile",
+        "all-spin",
+        "--solution-output",
+        "solutions.csa",
+    ])
+    .expect("AllSpin artifact invocation");
+    let artifact = invocation
+        .solution_artifact_output()
+        .expect("artifact request");
+    assert_eq!(artifact.target(), std::path::Path::new("solutions.csa"));
+    assert_eq!(artifact.format(), SolutionArtifactOutputFormat::Compact);
+    let ParsedCliCommand::Product(tokens) = invocation.into_command() else {
+        panic!("AllSpin must keep the product command boundary");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "pc", "allspin-sol"]);
+    assert!(!tokens.iter().any(|token| token == "--solution-output"));
+}
+
+#[test]
+fn solution_artifact_json_selection_may_appear_before_the_command() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "--solution-artifact-format",
+        "json",
+        "--solution-output",
+        "solutions.json",
+        "pc",
+        "--lines",
+        "2",
+    ])
+    .expect("JSON artifact invocation");
+    let artifact = invocation
+        .solution_artifact_output()
+        .expect("artifact request");
+    assert_eq!(artifact.format(), SolutionArtifactOutputFormat::Json);
+    assert!(matches!(invocation.into_command(), ParsedCliCommand::Pc(_)));
+}
+
+#[test]
+fn artifact_format_without_target_and_legacy_fumen_like_stdout_fail_during_parse() {
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "2",
+            "--solution-artifact-format",
+            "json",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--solution-artifact-format",
+            value: "requires --solution-output".to_owned(),
+        })
+    );
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "2",
+            "--format",
+            "fumen-like",
+            "--solution-output",
+            "solutions.csa",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--solution-output",
+            value: "is incompatible with --format fumen-like".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn native_document_formats_are_available_for_stdout_and_artifacts() {
+    for (format, expected) in [
+        ("ctk3", SolutionArtifactOutputFormat::Ctk3),
+        ("fumen", SolutionArtifactOutputFormat::Fumen),
+    ] {
+        let stdout = CliParser::parse(["clearra", "pc", "--lines", "2", "--format", format])
+            .expect("native document stdout invocation");
+        assert_eq!(stdout.format(), RenderFormat::Text);
+        assert_eq!(stdout.solution_stdout_format(), Some(expected));
+        assert!(stdout.solution_artifact_output().is_none());
+
+        let artifact = CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "2",
+            "--solution-output",
+            "solutions.bin",
+            "--solution-artifact-format",
+            format,
+        ])
+        .expect("native document artifact invocation");
+        assert_eq!(
+            artifact
+                .solution_artifact_output()
+                .expect("artifact request")
+                .format(),
+            expected
+        );
+        assert_eq!(artifact.solution_stdout_format(), None);
+    }
+}
+
+#[test]
+fn native_document_stdout_rejects_conflicting_output_controls() {
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "2",
+            "--format",
+            "ctk3",
+            "--solution-output",
+            "solutions.ctk3",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--solution-output",
+            value: "is incompatible with native document stdout".to_owned(),
+        })
+    );
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "2",
+            "--format",
+            "fumen",
+            "--verbose",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--format",
+            value: "native document stdout does not accept verbose profiles".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn top_level_help_describes_native_solution_document_formats() {
+    let output = CliHelpTopic::TopLevel.into_output(LanguageId::En);
+    assert!(output.stdout().contains("--solution-output PATH"));
+    assert!(output
+        .stdout()
+        .contains("--solution-artifact-format compact|json|ctk3|fumen"));
+    assert!(output
+        .stdout()
+        .contains("Native CTK3/Fumen encoding has no JavaScript, subprocess, network, or browser runtime dependency"));
+}
+
+#[test]
 fn native_pc_backend_fallback_override_is_explicit_and_conflict_checked() {
     for arguments in [
         ["--allow-backend-fallback", "--no-backend-fallback"],
@@ -419,7 +1023,7 @@ fn native_pc_backend_fallback_override_is_explicit_and_conflict_checked() {
 #[test]
 fn native_pc_initial_b2b_uses_the_cross_surface_u16_domain() {
     let ParsedCliCommand::Pc(maximum) =
-        CliParser::parse(["clearra", "pc", "--initial-b2b", "65535"])
+        CliParser::parse(["clearra", "pc", "--score", "--initial-b2b", "65535"])
             .expect("maximum initial B2B")
             .into_command()
     else {
@@ -428,7 +1032,7 @@ fn native_pc_initial_b2b_uses_the_cross_surface_u16_domain() {
     assert_eq!(maximum.initial_b2b(), Some(65_535));
 
     assert_eq!(
-        CliParser::parse(["clearra", "pc", "--initial-b2b", "65536"]),
+        CliParser::parse(["clearra", "pc", "--score", "--initial-b2b", "65536"]),
         Err(CliParseError::InvalidValue {
             option: "--initial-b2b",
             value: "65536".to_owned(),
@@ -634,6 +1238,75 @@ fn pc_help_covers_the_public_b2b_preservation_option() {
 }
 
 #[test]
+fn native_pc_parses_b2b_preservation_without_enabling_scoring() {
+    let parsed = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--preserve-b2b",
+        "--spin-profile",
+        "all-spin-plus",
+    ])
+    .expect("B2B-preserving PC")
+    .into_command();
+    let ParsedCliCommand::Pc(args) = parsed else {
+        panic!("expected PC command");
+    };
+
+    assert!(args.preserves_back_to_back());
+    assert_eq!(args.spin_profile(), Some("all-spin-plus"));
+    assert!(!args.score_requested());
+}
+
+#[test]
+fn native_pc_spin_profile_requires_a_scoring_or_preservation_consumer() {
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "4",
+            "--spin-profile",
+            "all-spin-plus",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--spin-profile",
+            value: "requires --score or --preserve-b2b".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn native_pc_initial_b2b_remains_a_scoring_only_option() {
+    assert_eq!(
+        CliParser::parse(["clearra", "pc", "--lines", "4", "--initial-b2b", "1"]),
+        Err(CliParseError::InvalidValue {
+            option: "--initial-b2b",
+            value: "requires --score".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn native_pc_tiling_rejects_b2b_preservation() {
+    assert_eq!(
+        CliParser::parse([
+            "clearra",
+            "pc",
+            "--lines",
+            "4",
+            "--tiling-only",
+            "--preserve-b2b",
+        ]),
+        Err(CliParseError::InvalidValue {
+            option: "--preserve-b2b",
+            value: "not available with tiling-only search".to_owned(),
+        })
+    );
+}
+
+#[test]
 fn canonical_clearra_commands_match_legacy_aliases() {
     let canonical_path = CliParser::parse(["clearra", "pc-replay", "--lines", "2"])
         .expect("canonical replay command")
@@ -682,6 +1355,17 @@ fn sfinder_namespace_does_not_collide_with_clearra_legacy_aliases() {
             .into_command(),
         ParsedCliCommand::Help(CliHelpTopic::Sfinder)
     );
+    let sfinder_help = CliHelpTopic::Sfinder.into_output(LanguageId::En);
+    assert!(sfinder_help
+        .stdout()
+        .contains("spin/spincover are unordered structural searches"));
+    let mapped_commands = sfinder_help
+        .stdout()
+        .lines()
+        .find(|line| line.starts_with("Clearra-native mappings:"))
+        .expect("mapping inventory");
+    assert!(!mapped_commands.contains("spin-cover"));
+    assert!(!mapped_commands.contains(", spin,"));
 
     let score_finder = CliParser::parse(["clearra", "score-finder"])
         .expect("score-finder product command")
@@ -1177,4 +1861,314 @@ fn parses_failed_queue_with_pc_options_and_exact_output_limit() {
     assert_eq!(args.patterns(), Some("P7P3"));
     assert_eq!(args.pc().workers(), Some(2));
     assert_eq!(args.failed_pattern_limit(), 41);
+}
+
+#[test]
+fn parses_canonical_pc_failed_queue_as_product_but_keeps_top_level_spellings_generic() {
+    let canonical = CliParser::parse([
+        "clearra",
+        "pc",
+        "failed-queue",
+        "--lines",
+        "2",
+        "--patterns",
+        "P5",
+    ])
+    .expect("canonical pc failed-queue")
+    .into_command();
+    let ParsedCliCommand::Product(tokens) = canonical else {
+        panic!("canonical pc failed-queue must route through Product/Web");
+    };
+    assert_eq!(tokens[0..3], ["clearra", "pc", "failed-queue"]);
+
+    for spelling in ["failed-queue", "failed_queue"] {
+        let parsed = CliParser::parse(["clearra", spelling, "--lines", "2"])
+            .unwrap_or_else(|_| panic!("top-level {spelling}"))
+            .into_command();
+        assert!(
+            matches!(parsed, ParsedCliCommand::FailedQueue(_)),
+            "{spelling}"
+        );
+    }
+
+    let grouped_underscore = CliParser::parse(["clearra", "pc", "failed_queue", "--lines", "2"])
+        .expect("grouped underscore is routed to the rejecting Product boundary")
+        .into_command();
+    assert!(matches!(grouped_underscore, ParsedCliCommand::Product(_)));
+}
+
+#[test]
+fn pc_score_minimals_help_describes_score_only_portfolio_paging() {
+    let help = CliParser::parse(["clearra", "pc", "score-minimals", "--help"])
+        .expect("canonical pc score-minimals help")
+        .into_command();
+    assert_eq!(
+        help,
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcScoreMinimals))
+    );
+    let output =
+        CliHelpTopic::Product(ProductHelpTopic::PcScoreMinimals).into_output(LanguageId::En);
+    assert!(output.stdout().contains("pc-score-portfolio.v2"));
+    assert!(output.stdout().contains("never use attack"));
+    assert!(output.stdout().contains("--tie-snapshot PATH"));
+}
+
+#[test]
+fn explicit_pc_minimals_portfolio_options_are_typed_and_not_forwarded() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "--format",
+        "json",
+        "pc",
+        "minimals",
+        "--lines",
+        "2",
+        "--ties",
+        "--tie-snapshot",
+        "minimum-portfolios.jsonl",
+    ])
+    .expect("explicit pc minimals portfolio request");
+    assert!(invocation.explicit_ties().requested());
+    assert_eq!(
+        invocation.explicit_ties().snapshot_path(),
+        Some("minimum-portfolios.jsonl")
+    );
+    assert_eq!(invocation.explicit_ties().cursor(), None);
+    let ParsedCliCommand::Product(tokens) = invocation.into_command() else {
+        panic!("pc minimals must use the product boundary");
+    };
+    assert_eq!(&tokens[0..3], ["clearra", "pc", "minimals"]);
+    assert!(!tokens.iter().any(|token| token.starts_with("--tie")));
+}
+
+#[test]
+fn explicit_pc_score_winner_family_does_not_accept_a_portfolio_snapshot() {
+    let invocation = CliParser::parse(["clearra", "pc", "score", "--lines", "2", "--ties"])
+        .expect("explicit score winner-family view");
+    assert!(invocation.explicit_ties().requested());
+    assert_eq!(invocation.explicit_ties().snapshot_path(), None);
+    assert!(matches!(
+        invocation.into_command(),
+        ParsedCliCommand::Product(_)
+    ));
+
+    assert!(CliParser::parse([
+        "clearra",
+        "pc",
+        "score",
+        "--ties",
+        "--tie-snapshot",
+        "score.jsonl",
+    ])
+    .is_err());
+}
+
+#[test]
+fn explicit_pc_score_minimals_requires_and_preserves_a_restartable_snapshot_path() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "score-minimals",
+        "--lines",
+        "2",
+        "--ties",
+        "--tie-snapshot",
+        "score-portfolios.jsonl",
+    ])
+    .expect("explicit score-minimals portfolio request");
+    assert!(invocation.explicit_ties().requested());
+    assert_eq!(
+        invocation.explicit_ties().snapshot_path(),
+        Some("score-portfolios.jsonl")
+    );
+    let ParsedCliCommand::Product(tokens) = invocation.into_command() else {
+        panic!("expected score-minimals product command");
+    };
+    assert_eq!(&tokens[..3], ["clearra", "pc", "score-minimals"]);
+    assert!(!tokens.iter().any(|token| token.starts_with("--tie")));
+
+    assert!(
+        CliParser::parse(["clearra", "pc", "score-minimals", "--lines", "2", "--ties",]).is_err()
+    );
+}
+
+#[test]
+fn tie_snapshot_continuation_is_fieldwise_distinct_from_positional_continuation() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "continue",
+        "--tie-snapshot",
+        "minimum-portfolios.jsonl",
+        "--tie-cursor",
+        "cpt1.secret.payload.mac",
+    ])
+    .expect("typed portfolio continuation");
+    assert!(!invocation.explicit_ties().requested());
+    assert_eq!(
+        invocation.explicit_ties().snapshot_path(),
+        Some("minimum-portfolios.jsonl")
+    );
+    assert_eq!(
+        invocation.explicit_ties().cursor(),
+        Some("cpt1.secret.payload.mac")
+    );
+    let ParsedCliCommand::Continue(args) = invocation.into_command() else {
+        panic!("continue command");
+    };
+    assert_eq!(args.token(), None);
+
+    assert!(CliParser::parse([
+        "clearra",
+        "continue",
+        "legacy-positional-token",
+        "--tie-snapshot",
+        "minimum-portfolios.jsonl",
+        "--tie-cursor",
+        "cpt1.secret.payload.mac",
+    ])
+    .is_err());
+}
+
+#[test]
+fn tie_options_are_explicit_only_complete_and_nonduplicated() {
+    assert!(CliParser::parse(["clearra", "pc", "chance", "--ties"]).is_err());
+    assert!(CliParser::parse([
+        "clearra",
+        "pc",
+        "minimals",
+        "--tie-snapshot",
+        "minimum-portfolios.jsonl",
+    ])
+    .is_err());
+    assert!(CliParser::parse(["clearra", "pc", "minimals", "--ties"]).is_err());
+    assert!(CliParser::parse([
+        "clearra",
+        "pc",
+        "minimals",
+        "--ties",
+        "--ties",
+        "--tie-snapshot",
+        "minimum-portfolios.jsonl",
+    ])
+    .is_err());
+}
+
+#[test]
+fn exact_build_portfolios_alone_accept_explicit_restartable_tie_paging() {
+    for command in [
+        &["build", "cover"][..],
+        &["build", "congruent-cover"][..],
+        &["build", "setup-cover"][..],
+        &["build", "setup-cover-score"][..],
+        &["build", "evaluate", "minimals"][..],
+        &["build", "evaluate", "score"][..],
+    ] {
+        let mut args = vec!["clearra"];
+        args.extend_from_slice(command);
+        args.extend_from_slice(&["--ties", "--tie-snapshot", "build-portfolios.jsonl"]);
+        let invocation = CliParser::parse(args).expect("exact Build portfolio tie request");
+        assert!(invocation.explicit_ties().requested());
+        assert_eq!(
+            invocation.explicit_ties().snapshot_path(),
+            Some("build-portfolios.jsonl")
+        );
+        let ParsedCliCommand::Product(tokens) = invocation.into_command() else {
+            panic!("Build v2 tie route must retain Product tokens");
+        };
+        assert!(!tokens.iter().any(|token| token.starts_with("--tie")));
+    }
+
+    for command in [
+        &["build", "setup"][..],
+        &["build", "congruent"][..],
+        &["build", "setup-cover-percent"][..],
+        &["build", "evaluate", "cover"][..],
+        &["build", "evaluate", "b2b-cover"][..],
+        &["build", "evaluate", "cover-percent"][..],
+    ] {
+        let mut args = vec!["clearra"];
+        args.extend_from_slice(command);
+        args.extend_from_slice(&["--ties", "--tie-snapshot", "not-a-portfolio.jsonl"]);
+        assert!(CliParser::parse(args).is_err(), "{command:?}");
+    }
+}
+
+#[test]
+fn build_portfolio_ties_require_a_snapshot_and_help_freezes_score_only_equality() {
+    assert!(CliParser::parse(["clearra", "build", "cover", "--ties"]).is_err());
+    assert!(CliParser::parse(["clearra", "build", "evaluate", "score", "--ties",]).is_err());
+
+    let help = CliHelpTopic::Product(ProductHelpTopic::BuildV2).into_output(LanguageId::En);
+    assert!(help
+        .stdout()
+        .contains("only through explicit --ties --tie-snapshot PATH"));
+    assert!(help
+        .stdout()
+        .contains("Score equality and ordering never use attack"));
+    assert!(help.stdout().contains("--base-mask HEX --target-mask HEX"));
+    assert!(help.stdout().contains("nominally distinct"));
+}
+
+#[test]
+fn spin_structure_cover_alone_accepts_restartable_exact_tie_paging() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "spin-structure",
+        "cover",
+        "--pieces",
+        "T",
+        "--ties",
+        "--tie-snapshot",
+        "spin-cover-portfolios.jsonl",
+    ])
+    .expect("explicit spin cover portfolio request");
+    assert!(invocation.explicit_ties().requested());
+    assert_eq!(
+        invocation.explicit_ties().snapshot_path(),
+        Some("spin-cover-portfolios.jsonl")
+    );
+    let ParsedCliCommand::Product(tokens) = invocation.into_command() else {
+        panic!("spin-structure cover must retain Product tokens");
+    };
+    assert_eq!(&tokens[..3], ["clearra", "spin-structure", "cover"]);
+    assert!(!tokens.iter().any(|token| token.starts_with("--tie")));
+
+    assert!(CliParser::parse([
+        "clearra",
+        "spin-structure",
+        "cover",
+        "--pieces",
+        "T",
+        "--ties",
+    ])
+    .is_err());
+
+    for route in ["search", "guaranteed"] {
+        assert!(CliParser::parse([
+            "clearra",
+            "spin-structure",
+            route,
+            "--pieces",
+            "T",
+            "--ties",
+            "--tie-snapshot",
+            "not-a-portfolio.jsonl",
+        ])
+        .is_err());
+    }
+}
+
+#[test]
+fn spin_structure_help_freezes_the_three_closed_route_contracts() {
+    let output = CliHelpTopic::SpinStructure.into_output(LanguageId::En);
+    let help = output.stdout();
+    assert!(help.contains("spin-structure search"));
+    assert!(help.contains("spin-structure cover"));
+    assert!(help.contains("spin-structure guaranteed"));
+    assert!(help.contains("--ties --tie-snapshot PATH"));
+    assert!(help.contains("unordered no-hold inventory"));
+    assert!(help.contains(
+        "Queue/pattern, hold, GPU, tablebase, and explicit memory options are unavailable"
+    ));
+    assert!(help.contains("every equal-cardinality optimum"));
 }

@@ -4,12 +4,15 @@ use std::{
 };
 
 use super::{mix_digest, piece_order_language::PieceOrderLanguageCache, WasmExactSearchError};
-use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_supply::{
     bag::BagState,
+    execution_automaton::{SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState},
+    hold::hold_policy::HoldPolicy,
     hold_automaton::HoldAutomatonState,
     pattern_universe::{MaterializedPatternUniverse, MaterializedPatternUniverseStructure},
+    piece_source::PieceSourceKind,
 };
 
 const REJECT: u32 = 0;
@@ -86,14 +89,6 @@ impl SourceState {
         }
     }
 
-    fn advance(self, piece_index: usize) -> Self {
-        let state = self.normalized();
-        Self {
-            depth: state.depth + 1,
-            bag_remainder: state.bag_remainder & !(1_u8 << piece_index),
-        }
-    }
-
     fn remaining_output_capacity(
         self,
         sequence_len: u8,
@@ -126,6 +121,8 @@ pub(super) struct StandardBagCoverage {
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     initial_hold_code: u8,
+    supply_automaton: SupplyExecutionAutomaton,
+    supply_identity: SupplyExecutionState,
     suffix_counts: Vec<u128>,
     nodes: Vec<DecisionNode>,
     node_summaries: Vec<DecisionSummary>,
@@ -190,12 +187,25 @@ impl StandardBagCoverage {
             }
         };
         let suffix_counts = compile_suffix_counts(sequence_len)?;
+        let supply_automaton = SupplyExecutionAutomaton::for_bag(&PieceKind::STANDARD_TETROMINOES)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_supply_automaton_invalid")
+            })?;
+        let mut supply_identity = initial_hold;
+        supply_identity.source_kind = PieceSourceKind::BagUniverse;
+        supply_identity.hold_policy = if hold_enabled {
+            HoldPolicy::Allowed
+        } else {
+            HoldPolicy::Forbidden
+        };
         Ok(Some(Self {
             sequence_len,
             materialized_pattern_count: universe.pattern_count(),
             hold_enabled,
             projects_unplaced_lookahead,
             initial_hold_code,
+            supply_automaton,
+            supply_identity,
             suffix_counts,
             nodes: Vec::new(),
             node_summaries: Vec::new(),
@@ -376,6 +386,105 @@ impl StandardBagCoverage {
         Ok(())
     }
 
+    fn supply_state(
+        &self,
+        source: SourceState,
+        hold_code: u8,
+    ) -> Result<SupplyExecutionState, WasmExactSearchError> {
+        let hold_piece = match hold_code {
+            0 => None,
+            1..=7 => Some(PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)]),
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_standard_bag_hold_state_invalid",
+                ))
+            }
+        };
+        let source = source.normalized();
+        Ok(SupplyExecutionState {
+            cursor: u16::from(source.depth),
+            hold_piece,
+            hold_empty: hold_piece.is_none(),
+            hold_policy: if self.hold_enabled {
+                HoldPolicy::Allowed
+            } else {
+                HoldPolicy::Forbidden
+            },
+            bag_epoch: if source.depth == 0 {
+                0
+            } else {
+                u16::from((source.depth - 1) / 7)
+            },
+            bag_remainder_key: if source.depth != 0
+                && source.depth % PieceKind::STANDARD_TETROMINOES.len() as u8 == 0
+                && source.bag_remainder == FULL_STANDARD_BAG
+            {
+                0
+            } else {
+                standard_bag_mask_key(source.bag_remainder)
+            },
+            ..self.supply_identity
+        })
+    }
+
+    fn source_state(
+        &self,
+        state: SupplyExecutionState,
+    ) -> Result<SourceState, WasmExactSearchError> {
+        Ok(SourceState {
+            depth: u8::try_from(state.cursor).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_cursor_overflow")
+            })?,
+            bag_remainder: standard_bag_key_mask(state.bag_remainder_key)?,
+        })
+    }
+
+    fn advance_source(
+        &self,
+        source: SourceState,
+        piece_index: usize,
+    ) -> Result<SourceState, WasmExactSearchError> {
+        let state = self.supply_state(source, 0)?;
+        let next = self
+            .supply_automaton
+            .advance_bag_cursor(state, PieceKind::STANDARD_TETROMINOES[piece_index])
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_cursor_transition_invalid")
+            })?
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_piece_missing",
+            ))?;
+        self.source_state(next)
+    }
+
+    fn matching_supply_step(
+        &self,
+        source: SourceState,
+        hold_code: u8,
+        desired_piece: PieceKind,
+        branch_kind: SupplyBranchKind,
+        current_piece: PieceKind,
+    ) -> Result<Option<clearra_supply::SupplyExecutionStep>, WasmExactSearchError> {
+        let state = self.supply_state(source, hold_code)?;
+        let mut matched = None;
+        self.supply_automaton
+            .for_each_matching_bag_step(state, desired_piece, |step| {
+                let drawn_current = match step.evidence.branch_kind {
+                    SupplyBranchKind::Current => step.used_piece,
+                    SupplyBranchKind::SwapHeld | SupplyBranchKind::StoreCurrent => {
+                        step.next_state.hold_piece.unwrap_or(current_piece)
+                    }
+                };
+                if step.evidence.branch_kind == branch_kind && drawn_current == current_piece {
+                    matched = Some(step);
+                }
+            })
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_supply_transition_invalid")
+            })?;
+        Ok(matched)
+    }
+
     fn solve(
         &mut self,
         language: &PieceOrderLanguageCache,
@@ -392,8 +501,9 @@ impl StandardBagCoverage {
                 "wasm_piece_language_node_out_of_range",
             ))?;
         if node.accepting {
+            let projected_terminal_depth = self.sequence_len.checked_add(1);
             let projected_terminal = (source.depth == self.sequence_len && hold_code == 0)
-                || (source.depth == self.sequence_len.saturating_add(1) && hold_code != 0);
+                || (Some(source.depth) == projected_terminal_depth && hold_code != 0);
             return Ok(if !self.projects_unplaced_lookahead || projected_terminal {
                 ACCEPT
             } else {
@@ -413,7 +523,19 @@ impl StandardBagCoverage {
             if source.bag_remainder.count_ones() == 1 {
                 let lookahead_index = source.bag_remainder.trailing_zeros() as usize;
                 let lookahead_code = lookahead_index as u8 + 1;
-                let next_source = source.advance(lookahead_index);
+                let lookahead_piece = PieceKind::STANDARD_TETROMINOES[lookahead_index];
+                let current_step = self
+                    .matching_supply_step(
+                        source,
+                        hold_code,
+                        lookahead_piece,
+                        SupplyBranchKind::Current,
+                        lookahead_piece,
+                    )?
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_standard_bag_current_transition_missing",
+                    ))?;
+                let current_source = self.source_state(current_step.next_state)?;
                 let lookahead_edges = language
                     .edges_for_piece(language_node, lookahead_code)
                     .ok_or(WasmExactSearchError::InvalidProblem(
@@ -421,14 +543,37 @@ impl StandardBagCoverage {
                     ))?;
                 for edge in lookahead_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
-                    let next =
-                        self.solve(language, edge.child(), next_source, hold_code, control)?;
+                    let next = self.solve(
+                        language,
+                        edge.child(),
+                        current_source,
+                        current_step.next_state.hold_piece.map_or(0, piece_code),
+                        control,
+                    )?;
                     result = self.union(result, next)?;
                 }
+                let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
+                let swap_step = self
+                    .matching_supply_step(
+                        source,
+                        hold_code,
+                        held_piece,
+                        SupplyBranchKind::SwapHeld,
+                        lookahead_piece,
+                    )?
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_standard_bag_swap_transition_missing",
+                    ))?;
+                let swap_source = self.source_state(swap_step.next_state)?;
                 for edge in held_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
-                    let next =
-                        self.solve(language, edge.child(), next_source, lookahead_code, control)?;
+                    let next = self.solve(
+                        language,
+                        edge.child(),
+                        swap_source,
+                        swap_step.next_state.hold_piece.map_or(0, piece_code),
+                        control,
+                    )?;
                     result = self.union(result, next)?;
                 }
             } else {
@@ -472,7 +617,19 @@ impl StandardBagCoverage {
                 continue;
             }
             let current_code = current_index as u8 + 1;
-            let next_source = source.advance(current_index);
+            let current_piece = PieceKind::STANDARD_TETROMINOES[current_index];
+            let current_step = self
+                .matching_supply_step(
+                    source,
+                    hold_code,
+                    current_piece,
+                    SupplyBranchKind::Current,
+                    current_piece,
+                )?
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_standard_bag_current_transition_missing",
+                ))?;
+            let next_source = self.source_state(current_step.next_state)?;
             let mut branch = REJECT;
             let current_edges = language
                 .edges_for_piece(language_node, current_code)
@@ -481,17 +638,41 @@ impl StandardBagCoverage {
                 ))?;
             for edge in current_edges.iter().copied() {
                 self.edge_check_count = self.edge_check_count.saturating_add(1);
-                let next = self.solve(language, edge.child(), next_source, hold_code, control)?;
+                let next = self.solve(
+                    language,
+                    edge.child(),
+                    next_source,
+                    current_step.next_state.hold_piece.map_or(0, piece_code),
+                    control,
+                )?;
                 branch = self.union(branch, next)?;
             }
             if self.hold_enabled && hold_code != 0 {
+                let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
+                let swap_step = self
+                    .matching_supply_step(
+                        source,
+                        hold_code,
+                        held_piece,
+                        SupplyBranchKind::SwapHeld,
+                        current_piece,
+                    )?
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_standard_bag_swap_transition_missing",
+                    ))?;
+                let swap_source = self.source_state(swap_step.next_state)?;
                 let held_edges = language.edges_for_piece(language_node, hold_code).ok_or(
                     WasmExactSearchError::InvalidProblem("wasm_piece_language_node_out_of_range"),
                 )?;
                 for edge in held_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
-                    let next =
-                        self.solve(language, edge.child(), next_source, current_code, control)?;
+                    let next = self.solve(
+                        language,
+                        edge.child(),
+                        swap_source,
+                        swap_step.next_state.hold_piece.map_or(0, piece_code),
+                        control,
+                    )?;
                     branch = self.union(branch, next)?;
                 }
             }
@@ -510,9 +691,26 @@ impl StandardBagCoverage {
                         ))?;
                     for edge in desired_edges.iter().copied() {
                         self.edge_check_count = self.edge_check_count.saturating_add(1);
-                        let after_next = next_source.advance(desired_index);
-                        let next =
-                            self.solve(language, edge.child(), after_next, current_code, control)?;
+                        let desired_piece = PieceKind::STANDARD_TETROMINOES[desired_index];
+                        let store_step = self
+                            .matching_supply_step(
+                                source,
+                                hold_code,
+                                desired_piece,
+                                SupplyBranchKind::StoreCurrent,
+                                current_piece,
+                            )?
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_standard_bag_store_transition_missing",
+                            ))?;
+                        let after_next = self.source_state(store_step.next_state)?;
+                        let next = self.solve(
+                            language,
+                            edge.child(),
+                            after_next,
+                            store_step.next_state.hold_piece.map_or(0, piece_code),
+                            control,
+                        )?;
                         stored_children[desired_index] =
                             self.union(stored_children[desired_index], next)?;
                     }
@@ -533,19 +731,31 @@ impl StandardBagCoverage {
             {
                 let lookahead_index = next_source.bag_remainder.trailing_zeros() as usize;
                 let lookahead_code = lookahead_index as u8 + 1;
+                let lookahead_piece = PieceKind::STANDARD_TETROMINOES[lookahead_index];
                 let lookahead_edges = language
                     .edges_for_piece(language_node, lookahead_code)
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_piece_language_node_out_of_range",
                     ))?;
-                let after_lookahead = next_source.advance(lookahead_index);
+                let store_step = self
+                    .matching_supply_step(
+                        source,
+                        hold_code,
+                        lookahead_piece,
+                        SupplyBranchKind::StoreCurrent,
+                        current_piece,
+                    )?
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_standard_bag_store_transition_missing",
+                    ))?;
+                let after_lookahead = self.source_state(store_step.next_state)?;
                 for edge in lookahead_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
                     let next = self.solve(
                         language,
                         edge.child(),
                         after_lookahead,
-                        current_code,
+                        store_step.next_state.hold_piece.map_or(0, piece_code),
                         control,
                     )?;
                     branch = self.union(branch, next)?;
@@ -734,7 +944,7 @@ impl StandardBagCoverage {
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
-            let next = source.advance(piece_index);
+            let next = self.advance_source(source, piece_index)?;
             let child_summary = self.summary(children[piece_index], next)?;
             covered_pattern_count =
                 covered_pattern_count.saturating_add(child_summary.covered_pattern_count);
@@ -787,7 +997,7 @@ impl StandardBagCoverage {
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
-            let next = source.advance(piece_index);
+            let next = self.advance_source(source, piece_index)?;
             newly_covered = newly_covered.saturating_add(self.accumulate_global(
                 children[piece_index],
                 next,
@@ -834,7 +1044,7 @@ impl StandardBagCoverage {
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
-            let next = source.advance(piece_index);
+            let next = self.advance_source(source, piece_index)?;
             self.accumulate_into(children[piece_index], next, child_base, limit, words)?;
             child_base = child_base.saturating_add(self.suffix_count(next));
             if child_base >= limit {
@@ -907,7 +1117,7 @@ impl StandardBagCoverage {
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
-            let next = source.advance(piece_index);
+            let next = self.advance_source(source, piece_index)?;
             count = count.saturating_add(self.count_patterns(
                 children[piece_index],
                 next,
@@ -1096,6 +1306,134 @@ const fn piece_code(piece: clearra_core_domain::piece::piece_kind::PieceKind) ->
         PieceKind::Z => 5,
         PieceKind::J => 6,
         PieceKind::L => 7,
+    }
+}
+
+fn standard_bag_mask_key(mask: u8) -> u64 {
+    (0..7).fold(0_u64, |key, index| {
+        let count = (mask >> index) & 1;
+        key | (u64::from(count) << ((index + 1) * 4))
+    })
+}
+
+fn standard_bag_key_mask(key: u64) -> Result<u8, WasmExactSearchError> {
+    let storage_mask = (1usize..=7).fold(0_u64, |mask, piece| mask | (0xf_u64 << (piece * 4)));
+    if key & !storage_mask != 0 {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_standard_bag_remainder_invalid",
+        ));
+    }
+    let mut mask = 0_u8;
+    for index in 0..7 {
+        let count = ((key >> ((index + 1) * 4)) & 0xf) as u8;
+        if count > 1 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_remainder_invalid",
+            ));
+        }
+        mask |= count << index;
+    }
+    Ok(mask)
+}
+
+#[cfg(test)]
+mod supply_automaton_tests {
+    use clearra_supply::{
+        hold_automaton::SupplyProvenanceId, piece_source::PieceSourceId,
+        PatternUniverseMaterializer,
+    };
+
+    use super::*;
+
+    fn coverage(hold_enabled: bool) -> StandardBagCoverage {
+        let universe =
+            PatternUniverseMaterializer::standard_7_bag(8, 1, 0x77).expect("standard bag universe");
+        let initial = HoldAutomatonState::new(
+            PieceSourceId::new(0x77),
+            0,
+            None,
+            0,
+            BagState::fresh_standard_7_bag().packed_remainder_key(),
+            SupplyProvenanceId(0x77),
+        );
+        StandardBagCoverage::for_universe(&universe, initial, hold_enabled, true)
+            .expect("coverage construction")
+            .expect("standard bag fast path")
+    }
+
+    #[test]
+    fn compact_standard_bag_boundary_round_trips_through_canonical_epoch_transition() {
+        let coverage = coverage(true);
+        let boundary = SourceState {
+            depth: 7,
+            bag_remainder: FULL_STANDARD_BAG,
+        };
+        let before = coverage.supply_state(boundary, 0).expect("boundary state");
+        assert_eq!(before.bag_epoch, 0);
+        assert_eq!(before.bag_remainder_key, 0);
+
+        let next = coverage
+            .advance_source(boundary, 0)
+            .expect("first draw in next bag");
+        assert_eq!(next.depth, 8);
+        assert_eq!(next.bag_remainder, FULL_STANDARD_BAG & !1);
+        let after = coverage.supply_state(next, 0).expect("next epoch state");
+        assert_eq!(after.bag_epoch, 1);
+    }
+
+    #[test]
+    fn compact_standard_bag_hold_branches_match_canonical_fieldwise() {
+        let coverage = coverage(true);
+        let source = SourceState {
+            depth: 0,
+            bag_remainder: FULL_STANDARD_BAG,
+        };
+        let swapped = coverage
+            .matching_supply_step(
+                source,
+                piece_code(PieceKind::T),
+                PieceKind::T,
+                SupplyBranchKind::SwapHeld,
+                PieceKind::I,
+            )
+            .expect("swap evaluation")
+            .expect("swap branch");
+        assert_eq!(swapped.used_piece, PieceKind::T);
+        assert_eq!(swapped.next_state.cursor, 1);
+        assert_eq!(swapped.next_state.hold_piece, Some(PieceKind::I));
+
+        let stored = coverage
+            .matching_supply_step(
+                source,
+                0,
+                PieceKind::O,
+                SupplyBranchKind::StoreCurrent,
+                PieceKind::I,
+            )
+            .expect("store evaluation")
+            .expect("store branch");
+        assert_eq!(stored.used_piece, PieceKind::O);
+        assert_eq!(stored.next_state.cursor, 2);
+        assert_eq!(stored.next_state.hold_piece, Some(PieceKind::I));
+        assert_eq!(stored.evidence.queue_advances, 2);
+    }
+
+    #[test]
+    fn compact_standard_bag_disabled_hold_fails_closed() {
+        let coverage = coverage(false);
+        let source = SourceState {
+            depth: 0,
+            bag_remainder: FULL_STANDARD_BAG,
+        };
+        assert!(coverage
+            .matching_supply_step(
+                source,
+                piece_code(PieceKind::T),
+                PieceKind::T,
+                SupplyBranchKind::SwapHeld,
+                PieceKind::I,
+            )
+            .is_err());
     }
 }
 // SRP rationale: this module has one behavior-level change reason: exact standard-bag language materialization and coverage projection.

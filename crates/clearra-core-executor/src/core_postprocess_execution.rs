@@ -38,4 +38,42 @@ impl CorePostProcessExecution {
     pub fn replay_trace(&self) -> &ReplayTrace {
         &self.replay_trace
     }
+
+    /// Heap storage retained by this execution, excluding its inline value.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        checked_execution_nested_bytes(
+            self.trace_identity.capacity(),
+            self.replay_trace.checked_nested_retained_bytes()?,
+        )
+    }
+
+    /// Heap storage requested by cloning this execution's nested owners.
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        checked_execution_nested_bytes(
+            self.trace_identity.len(),
+            self.replay_trace.checked_clone_nested_bytes()?,
+        )
+    }
+
+    pub fn checked_clone_peak_bytes(&self) -> Option<u128> {
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(self.checked_nested_retained_bytes()?)?
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(self.checked_clone_nested_bytes()?)
+    }
+}
+
+fn checked_execution_nested_bytes(trace_identity_bytes: usize, trace_bytes: u128) -> Option<u128> {
+    (trace_identity_bytes as u128).checked_add(trace_bytes)
+}
+
+#[cfg(test)]
+mod retained_memory_projection_tests {
+    use super::*;
+
+    #[test]
+    fn execution_projection_adds_identity_and_trace_without_saturation() {
+        assert_eq!(checked_execution_nested_bytes(17, 23), Some(40));
+        assert_eq!(checked_execution_nested_bytes(1, u128::MAX), None);
+    }
 }

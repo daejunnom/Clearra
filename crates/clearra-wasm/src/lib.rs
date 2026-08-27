@@ -7,6 +7,10 @@ pub mod wasm_host_capabilities;
 pub mod wasm_worker_job;
 pub mod webgpu;
 
+pub use clearra_app::{
+    CoveragePortfolioPageStore, PortfolioAlternativeAdvance, PortfolioAlternativeError,
+    PortfolioAlternativePage, PortfolioMemberPage, ProductPageSourceOwner, ProductPageStore,
+};
 #[cfg(feature = "stage-profiling")]
 pub use clearra_app::{
     ExecutorSearchProfileError, ExecutorSearchProfileSession, ExecutorSearchProfileStage,
@@ -29,20 +33,26 @@ pub use distributed_wire::{
     DistributedWireError,
 };
 pub use host_contract_bridge::wasm_worker_event_to_host_contract;
-pub use json_event_envelope::serialize_search_report_from_app_response;
+pub use json_event_envelope::{
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page,
+    serialize_governed_worker_events, serialize_parity_report_exhausted,
+    serialize_parity_report_page, serialize_search_report_from_app_response, GovernedWasmJson,
+};
 pub use wasm_command_runtime::{
-    WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult, WasmFinessePlacement,
+    GovernedWasmExecutionResult, WasmCommandRuntime, WasmCommandRuntimeError,
+    WasmExecutionMemoryAuthority, WasmExecutionResult, WasmFinessePlacement,
     WasmFinessePolicyResult, WasmFinesseReport, WasmFinesseRepresentativeWitness,
     WasmFinesseSolutionAverage, WasmForwardPathStep, WasmForwardSearchOutcome, WasmSearchPathStep,
     WasmSearchReport, WasmSetupCandidate, WasmSetupFinderReport, WasmSetupHoldCondition,
-    WasmSolutionAverageScore, WasmSolutionProbability,
+    WasmSolutionAverageScore, WasmSolutionProbability, WasmSpinStructureOutcome,
+    WasmSpinStructureReport, WasmStructureOperation,
 };
 pub use wasm_host_capabilities::WasmHostCapabilities;
 pub use wasm_worker_job::{
-    BackendStatus, BudgetStatus, CancelRequest, JobDiagnosticEvent, JobFinalResponse, JobId,
-    JobPartialResult, JobProgress, JobStatus, MemoryStatus, WasmCancellationToken,
-    WasmWorkerAdvanceStatus, WasmWorkerJobEvent, WasmWorkerJobId, WasmWorkerJobRuntime,
-    WasmWorkerJobStatus,
+    BackendStatus, BudgetStatus, CancelRequest, GovernedWasmWorkerEvents, JobDiagnosticEvent,
+    JobFinalResponse, JobId, JobPartialResult, JobProgress, JobStatus, MemoryStatus,
+    WasmCancellationToken, WasmWorkerAdvanceStatus, WasmWorkerJobEvent, WasmWorkerJobId,
+    WasmWorkerJobRuntime, WasmWorkerJobStatus,
 };
 pub use webgpu::{
     WebGpuBackendOutcomeState, WebGpuBackendReport, WebGpuLimitsReport, WebGpuMemoryReport,

@@ -23,6 +23,16 @@ type WorkerMessage = {
   type: string;
   requestId?: number;
   batch?: ArrayBuffer;
+  offer?: {
+    taskId: string;
+    fencingTokenDecimal: string;
+  };
+  delegation?: {
+    taskId: string;
+    fencingTokenDecimal: string;
+  };
+  taskId?: string;
+  fencingTokenDecimal?: string;
 };
 
 class FakeVerifierWorker {
@@ -32,6 +42,7 @@ class FakeVerifierWorker {
   private listeners = new Map<string, Set<(event: MessageEvent) => void>>();
   private consumed: number[] = [];
   private consumeCount = 0;
+  private staged = new Map<string, WorkerMessage>();
   terminated = false;
 
   constructor(private readonly failOnSecondConsume: boolean) {}
@@ -56,10 +67,40 @@ class FakeVerifierWorker {
 
   private handle(message: WorkerMessage) {
     if (this.terminated) return;
+    if (message.type === 'delegation-offer') {
+      this.emit(delegationAccepted(message));
+      return;
+    }
     if (message.type === 'prewarm') {
       this.emit({ type: 'prewarmed' });
       return;
     }
+    if (message.type === 'delegation-run') {
+      const staged = this.staged.get(message.taskId!);
+      if (!staged || staged.delegation?.fencingTokenDecimal !== message.fencingTokenDecimal) {
+        throw new Error('missing staged verifier executable');
+      }
+      this.staged.delete(message.taskId!);
+      this.handleExecutable(staged);
+      return;
+    }
+    if (
+      message.type === 'initialize' ||
+      message.type === 'consume' ||
+      message.type === 'finish'
+    ) {
+      const delegation = message.delegation!;
+      this.staged.set(delegation.taskId, message);
+      this.emit({
+        type: 'delegation-started',
+        taskId: delegation.taskId,
+        fencingTokenDecimal: delegation.fencingTokenDecimal
+      });
+      return;
+    }
+  }
+
+  protected handleExecutable(message: WorkerMessage) {
     if (message.type === 'initialize') {
       this.consumed = [];
       this.consumeCount = 0;
@@ -113,22 +154,20 @@ await bounded(
 await bounded('replay first enqueue', pool.enqueue(Uint8Array.of(1).buffer, () => undefined));
 await bounded('replay first idle', pool.waitForIdle());
 await bounded('replay retry enqueue', pool.enqueue(Uint8Array.of(2).buffer, () => undefined));
-await bounded('replay retry idle', pool.waitForIdle());
-const partials: number[] = [];
-await bounded(
-  'replay finish',
-  pool.finish((partial) => partials.push(new Uint8Array(partial)[0]))
+await assert.rejects(
+  bounded('replay retry idle', pool.waitForIdle()),
+  /synthetic worker transport failure/
 );
 
-assert.equal(workers.length, 2);
+assert.equal(workers.length, 1);
 assert.equal(workers[0].terminated, true);
-assert.deepEqual(partials, [3]);
 
 class StreamingVerifierWorker {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: (() => void) | null = null;
   private listeners = new Map<string, Set<(event: MessageEvent) => void>>();
+  private staged = new Map<string, WorkerMessage>();
   terminated = false;
 
   constructor(private readonly failAfterPartial: boolean) {}
@@ -153,10 +192,40 @@ class StreamingVerifierWorker {
 
   private handle(message: WorkerMessage) {
     if (this.terminated) return;
+    if (message.type === 'delegation-offer') {
+      this.emit(delegationAccepted(message));
+      return;
+    }
     if (message.type === 'prewarm') {
       this.emit({ type: 'prewarmed' });
       return;
     }
+    if (message.type === 'delegation-run') {
+      const staged = this.staged.get(message.taskId!);
+      if (!staged || staged.delegation?.fencingTokenDecimal !== message.fencingTokenDecimal) {
+        throw new Error('missing staged verifier executable');
+      }
+      this.staged.delete(message.taskId!);
+      this.execute(staged);
+      return;
+    }
+    if (
+      message.type === 'initialize' ||
+      message.type === 'consume' ||
+      message.type === 'finish'
+    ) {
+      const delegation = message.delegation!;
+      this.staged.set(delegation.taskId, message);
+      this.emit({
+        type: 'delegation-started',
+        taskId: delegation.taskId,
+        fencingTokenDecimal: delegation.fencingTokenDecimal
+      });
+      return;
+    }
+  }
+
+  private execute(message: WorkerMessage) {
     if (message.type === 'initialize') {
       this.emit({ type: 'ready' });
       return;
@@ -206,6 +275,19 @@ function exactVerifierProgress(candidateCount: number) {
   };
 }
 
+function delegationAccepted(message: WorkerMessage) {
+  if (!message.offer) throw new Error('delegation offer is absent');
+  return {
+    type: 'delegation-accepted',
+    acceptance: {
+      taskId: message.offer.taskId,
+      fencingTokenDecimal: message.offer.fencingTokenDecimal,
+      workerId: '1',
+      reservationSha256: '33'.repeat(32)
+    }
+  };
+}
+
 const streamingWorkers: StreamingVerifierWorker[] = [];
 const streamingPool = new ClearraVerifierPool(() => {
   const worker = new StreamingVerifierWorker(streamingWorkers.length === 0);
@@ -229,12 +311,14 @@ await bounded(
     streamed.push(new Uint8Array(partial)[0])
   )
 );
-await bounded('streaming idle', streamingPool.waitForIdle());
-await bounded('streaming finish', streamingPool.finish(() => undefined));
+await assert.rejects(
+  bounded('streaming idle', streamingPool.waitForIdle()),
+  /synthetic post-commit transport failure/
+);
 
-assert.equal(streamingWorkers.length, 2);
+assert.equal(streamingWorkers.length, 1);
 assert.equal(streamingWorkers[0].terminated, true);
-assert.deepEqual(streamed, [7, 7]);
+assert.deepEqual(streamed, [], 'streamed partial must not escape before immutable result sealing');
 
 class FullInitializationVerifierWorker extends FakeVerifierWorker {
   constructor(
@@ -463,17 +547,12 @@ await bounded(
   'stalled consume enqueue',
   stalledConsumePool.enqueue(Uint8Array.of(5).buffer, () => undefined)
 );
-await bounded('stalled consume recovery', stalledConsumePool.waitForIdle());
-const stalledConsumePartials: number[] = [];
-await bounded(
-  'stalled consume finish',
-  stalledConsumePool.finish((partial) =>
-    stalledConsumePartials.push(new Uint8Array(partial)[0])
-  )
+await assert.rejects(
+  bounded('stalled consume fail closed', stalledConsumePool.waitForIdle()),
+  /stalled/
 );
-assert.equal(stalledConsumeWorkers.length, 2);
+assert.equal(stalledConsumeWorkers.length, 1);
 assert.equal(stalledConsumeWorkers[0].terminated, true);
-assert.deepEqual(stalledConsumePartials, [5]);
 
 class StalledFinishVerifierWorker extends FakeVerifierWorker {
   constructor(private readonly stallFinish: boolean) {
@@ -511,50 +590,51 @@ await bounded(
 );
 await bounded('stalled finish idle', stalledFinishPool.waitForIdle());
 const stalledFinishPartials: number[] = [];
-await bounded(
-  'stalled finish recovery',
-  stalledFinishPool.finish((partial) =>
-    stalledFinishPartials.push(new Uint8Array(partial)[0])
-  )
+await assert.rejects(
+  bounded(
+    'stalled finish fail closed',
+    stalledFinishPool.finish((partial) =>
+      stalledFinishPartials.push(new Uint8Array(partial)[0])
+    )
+  ),
+  /stalled/
 );
-assert.equal(stalledFinishWorkers.length, 2);
+assert.equal(stalledFinishWorkers.length, 1);
 assert.equal(stalledFinishWorkers[0].terminated, true);
-assert.deepEqual(stalledFinishPartials, [6]);
+assert.deepEqual(stalledFinishPartials, []);
 
 class SaturatedTelemetryVerifierWorker extends FakeVerifierWorker {
   constructor(private readonly saturated: boolean) {
     super(false);
   }
 
-  override postMessage(message: WorkerMessage) {
+  protected override handleExecutable(message: WorkerMessage) {
     if (message.type !== 'consume' || !this.saturated) {
-      super.postMessage(message);
+      super.handleExecutable(message);
       return;
     }
-    queueMicrotask(() => {
-      this.emit({
-        type: 'consumed',
-        requestId: message.requestId,
+    this.emit({
+      type: 'consumed',
+      requestId: message.requestId,
+      candidateCount: 0xffff_ffff,
+      candidateCountAvailable: false,
+      candidateCountExact: false,
+      partial: null,
+      progress: {
         candidateCount: 0xffff_ffff,
-        candidateCountAvailable: false,
-        candidateCountExact: false,
-        partial: null,
-        progress: {
-          candidateCount: 0xffff_ffff,
-          buildNodes: 0xffff_ffff,
-          coverageChecks: 0xffff_ffff,
-          availability: {
-            candidateCount: false,
-            buildNodes: false,
-            coverageChecks: false
-          },
-          exactness: {
-            candidateCount: false,
-            buildNodes: false,
-            coverageChecks: false
-          }
+        buildNodes: 0xffff_ffff,
+        coverageChecks: 0xffff_ffff,
+        availability: {
+          candidateCount: false,
+          buildNodes: false,
+          coverageChecks: false
+        },
+        exactness: {
+          candidateCount: false,
+          buildNodes: false,
+          coverageChecks: false
         }
-      });
+      }
     });
   }
 }

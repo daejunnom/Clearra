@@ -30,11 +30,17 @@ name = "terminal_supply_public_contract"
 path = "tests/terminal_supply_public_contract.rs"
 required-features = ["native-c-core"]
 
+[[test]]
+name = "forward_ren_contract"
+path = "tests/forward_ren_contract.rs"
+
 [dependencies]
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-coverage = { path = "../clearra-coverage" }
 clearra-fumen = { path = "../clearra-fumen" }
+clearra-host-contract = { path = "../clearra-host-contract" }
 clearra-i18n = { path = "../clearra-i18n" }
 clearra-objectives = { path = "../clearra-objectives" }
 clearra-output = { path = "../clearra-output" }
@@ -49,6 +55,8 @@ clearra-validation = { path = "../clearra-validation" }
 clearra-web-command = { path = "../clearra-web-command" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+getrandom = "0.4.3"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 clearra-problem = { path = "../clearra-problem" }

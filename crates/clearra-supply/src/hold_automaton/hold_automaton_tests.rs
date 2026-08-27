@@ -77,3 +77,21 @@ fn hold_automaton_state_in_buildup_memo_key() {
     assert_eq!(memo.bag_remainder_key, 0xfeed);
     assert_eq!(memo.provenance, SupplyProvenanceId(77));
 }
+
+#[test]
+fn legacy_hold_transition_is_a_parity_wrapper_over_supply_execution_automaton() {
+    let before = state(Some(PieceKind::T));
+    let legacy = before
+        .apply(HoldTransition::SwapHeld, PieceKind::I, None)
+        .expect("legacy swap");
+    let canonical = crate::execution_automaton::SupplyExecutionAutomaton::sequence()
+        .transition(
+            before,
+            crate::execution_automaton::SupplyBranchKind::SwapHeld,
+            PieceKind::I,
+            None,
+        )
+        .expect("canonical swap");
+
+    assert_eq!(legacy, canonical);
+}

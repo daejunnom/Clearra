@@ -53,7 +53,7 @@ impl SearchBackendExecutor for NativeCpuPackingExecutor {
             CoreCNative::compile_geometry_catalog_with_cancellation(problem, cancellation)
                 .map_err(PackingRunnerError::Native)?;
         let outcome = generate_complete_family(&catalog, problem, cancellation)?;
-        Ok(PackingBackendOutcome::exact(
+        Ok(PackingBackendOutcome::raw_geometry_exact(
             self.actual_backend,
             outcome.candidates,
             outcome.resource_report,
@@ -199,7 +199,7 @@ impl NativeParallelPackingExecutor {
             resource_report.mark_truncated(ResourceTruncationReason::CandidateBudgetExceeded);
         }
 
-        Ok(PackingBackendOutcome::exact(
+        Ok(PackingBackendOutcome::raw_geometry_exact(
             actual_backend,
             candidates,
             resource_report,
@@ -237,7 +237,7 @@ fn native_exact_outcome(
     let catalog = CoreCNative::compile_geometry_catalog_with_cancellation(problem, cancellation)
         .map_err(PackingRunnerError::Native)?;
     let outcome = generate_complete_family(&catalog, problem, cancellation)?;
-    Ok(PackingBackendOutcome::exact(
+    Ok(PackingBackendOutcome::raw_geometry_exact(
         backend,
         outcome.candidates,
         outcome.resource_report,

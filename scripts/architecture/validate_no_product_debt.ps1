@@ -46,7 +46,11 @@ function Add-NoProductDebtPatternErrors {
 
     foreach ($file in $Files) {
         foreach ($entry in $Patterns.GetEnumerator()) {
-            if ($file.Text -match $entry.Value) {
+            # Patterns are case-sensitive unless they opt in with (?i).  Using
+            # PowerShell's default case-insensitive -match makes the stable-ABI
+            # guard treat ordinary Rust locals such as `requested_future` as
+            # C-style upper-case ABI constants.
+            if ($file.Text -cmatch $entry.Value) {
                 Add-ArchitectureError "NoProductDebt $Policy found '$($entry.Key)' in $($file.RelativePath)"
             }
         }

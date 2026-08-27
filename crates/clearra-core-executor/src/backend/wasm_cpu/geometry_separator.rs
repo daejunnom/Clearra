@@ -19,10 +19,16 @@ pub(super) struct SeparatorCatalog {
 }
 
 impl SeparatorCatalog {
-    pub fn compile(width: u8, height: u8, rows: &[SkeletonRow]) -> Self {
-        let mut column_masks = vec![0_u64; width as usize];
-        let mut left_masks = vec![0_u64; width as usize];
-        let mut right_masks = vec![0_u64; width as usize];
+    pub fn compile(width: u8, height: u8, rows: &[SkeletonRow]) -> Option<Self> {
+        let mut column_masks = Vec::new();
+        let mut left_masks = Vec::new();
+        let mut right_masks = Vec::new();
+        column_masks.try_reserve_exact(width as usize).ok()?;
+        left_masks.try_reserve_exact(width as usize).ok()?;
+        right_masks.try_reserve_exact(width as usize).ok()?;
+        column_masks.resize(width as usize, 0_u64);
+        left_masks.resize(width as usize, 0_u64);
+        right_masks.resize(width as usize, 0_u64);
         let mut safe_column_bits = 0_u64;
         let board_cells = usize::from(width) * usize::from(height);
         let board_mask = if board_cells == 64 {
@@ -64,7 +70,7 @@ impl SeparatorCatalog {
             identity_digest = mix_digest(identity_digest, right_masks[column]);
         }
 
-        Self {
+        Some(Self {
             width,
             height,
             column_masks,
@@ -72,7 +78,7 @@ impl SeparatorCatalog {
             right_masks,
             safe_column_bits,
             identity_digest,
-        }
+        })
     }
 
     pub fn certified_split(&self, remaining: u64) -> Option<CertifiedSeparatorSplit> {

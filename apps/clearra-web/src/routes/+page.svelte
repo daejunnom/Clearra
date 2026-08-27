@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BuildProbabilityWorkspace, CtkDrawerWorkspace, ForwardSearchWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SetupFinderWorkspace, SolverWorkspace } from '@clearra/ui/workspace';
+  import { BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
@@ -27,16 +27,30 @@
     $page.url.searchParams.get('tool') ?? (ctkViewer.document ? 'ctk' : null);
 
   onMount(() => {
-    if (!['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk', 'player'].includes(selectedTool ?? '')) {
+    if (!['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'].includes(selectedTool ?? '')) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
   });
 </script>
 
-{#if selectedTool === 'build-probability'}
+{#if selectedTool === 'build'}
+  <BuildV2Workspace {workerFactory} />
+{:else if selectedTool === 'build-probability'}
   <BuildProbabilityWorkspace {workerFactory} />
+{:else if selectedTool === 'sequence-dependencies'}
+  <SequenceDependenciesWorkspace {workerFactory} />
+{:else if selectedTool === 'sequence'}
+  <OperationSequenceWorkspace {workerFactory} />
+{:else if selectedTool === 'parity' || selectedTool === 'fumen' || selectedTool === 'render' || selectedTool === 'to-gray' || selectedTool === 'mirror'}
+  {#key selectedTool}
+    <DocumentUtilityWorkspace tool={selectedTool} {workerFactory} />
+  {/key}
 {:else if selectedTool === 'setup'}
   <SetupFinderWorkspace {workerFactory} />
+{:else if selectedTool === 'setup-score'}
+  <SetupScoreWorkspace {workerFactory} />
+{:else if selectedTool === 'spin-structure'}
+  <SpinStructureWorkspace {workerFactory} />
 {:else if selectedTool === 'ctk'}
   <CtkDrawerWorkspace
     initialDocument={ctkViewer.document ?? undefined}
@@ -44,7 +58,7 @@
   />
 {:else if selectedTool === 'player'}
   <PlayerWorkspace {workerFactory} />
-{:else if selectedTool === 'damage' || selectedTool === 'spin-finder'}
+{:else if selectedTool === 'damage' || selectedTool === 'spin-finder' || selectedTool === 'ren'}
   {#key selectedTool}
     <ForwardSearchWorkspace tool={selectedTool} {workerFactory} />
   {/key}

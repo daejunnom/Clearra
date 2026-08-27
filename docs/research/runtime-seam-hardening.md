@@ -219,8 +219,8 @@ reapplied in later optimization passes:
   queuing work. The former `clearra:board:v1` submission route remains readable
   during a rolling deployment, but new forms always emit v2.
 - Forms carry the inputs owned by each typed contract: fields, `next`, PC row
-  count, built-in kick table, hold policy, T-spin target, remaining inventory,
-  and verification scope as applicable. Finite values use Discord string
+  count, built-in kick table, hold policy, T-spin target, and remaining
+  inventory as applicable. Finite values use Discord string
   selects and are revalidated against the same allow-list on submit. The Modal
   submit is translated back into ordinary slash options and reaches the same
   parser as a direct command.
@@ -712,8 +712,7 @@ examples above:
   Access-denial and terminal-failure fallbacks re-read a valid Modal selection
   as bounded presentation metadata as well; a malformed selector falls back
   safely without suppressing the response or changing admission.
-- Korean Modal titles use the localized command name, and every `/verify` scope
-  label is localized while stable internal option values remain unchanged.
+- Korean Modal titles use the localized command name.
 - These changes affect only Discord presentation and locale selection. PC/build
   generation, pruning, execution order, worker selection, and port 4194 remain
   unchanged. The integrated Discord suite passes all 228 tests, including the
@@ -748,8 +747,8 @@ overwrite or palette migration:
   were unchanged because this release is confined to Discord presentation and
   gateway-side rendering.
 - Both the local suite and the inactive-release suite passed all 231 tests
-  before cutover. After cutover, Chrome testing verified Korean localized
-  `/path` and `/verify` Modals, selectable PC heights 1–6 including odd heights,
+  before cutover. After cutover, Chrome testing verified the Korean localized
+  `/path` Modal, selectable PC heights 1–6 including odd heights,
   the single-result automatic label with 100% coverage, and a downloadable
   200x80 `/render` GIF containing all eight GUI colors. The English `/path`
   Modal in the bot test channel is intentional: its stored channel-level English

@@ -8,6 +8,7 @@ pub enum AppResultKind {
     BuildProbability,
     Damage,
     SpinFinder,
+    Ren,
     SpinStructure,
     Cover,
     Rules,
@@ -16,6 +17,13 @@ pub enum AppResultKind {
     Continue,
     Verify,
     VerifyKicks,
+    Sequence,
+    SequenceDependencies,
+    Parity,
+    Fumen,
+    Render,
+    ToGray,
+    Mirror,
 }
 
 impl AppResultKind {
@@ -29,6 +37,7 @@ impl AppResultKind {
             Self::BuildProbability => "build-probability",
             Self::Damage => "damage",
             Self::SpinFinder => "spin-finder",
+            Self::Ren => "ren",
             Self::SpinStructure => "spin-structure",
             Self::Cover => "build_coverage",
             Self::Rules => "rules",
@@ -37,6 +46,13 @@ impl AppResultKind {
             Self::Continue => "continue",
             Self::Verify => "verify",
             Self::VerifyKicks => "verify-kicks",
+            Self::Sequence => "sequence",
+            Self::SequenceDependencies => "sequence-dependencies",
+            Self::Parity => "parity",
+            Self::Fumen => "fumen",
+            Self::Render => "render",
+            Self::ToGray => "to-gray",
+            Self::Mirror => "mirror",
         }
     }
 }

@@ -115,13 +115,35 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     environment.CLEARRA_SEARCH_TIMEOUT_MS,
     3 * 60_000,
   );
-  const reverseSearchTimeoutMs = positiveInteger(
-    environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
+  const pcSearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
+      environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
     5 * 60_000,
   );
-  const forwardSearchTimeoutMs = positiveInteger(
-    environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+  const legacyLongSearchTimeout = environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS;
+  const buildSearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_BUILD_SEARCH_TIMEOUT_MS ?? legacyLongSearchTimeout,
     15 * 60_000,
+  );
+  const setupSearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_SETUP_SEARCH_TIMEOUT_MS ?? legacyLongSearchTimeout,
+    15 * 60_000,
+  );
+  const forwardSearchTimeoutMs = positiveInteger(
+    legacyLongSearchTimeout,
+    15 * 60_000,
+  );
+  const structureSearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS ?? legacyLongSearchTimeout,
+    15 * 60_000,
+  );
+  const utilitySearchTimeoutMs = positiveInteger(
+    environment.CLEARRA_UTILITY_SEARCH_TIMEOUT_MS,
+    15 * 60_000,
+  );
+  const diagnosticTimeoutMs = positiveInteger(
+    environment.CLEARRA_DIAGNOSTIC_TIMEOUT_MS,
+    searchTimeoutMs,
   );
   const interactionDeadlineMs = boundedPositiveInteger(
     environment.CLEARRA_INTERACTION_DEADLINE_MS,
@@ -202,8 +224,16 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     discordAdminUserIds,
     registerCommands,
     searchTimeoutMs,
-    reverseSearchTimeoutMs,
+    pcSearchTimeoutMs,
+    // Compatibility projection for existing integrations. New code selects
+    // pcSearchTimeoutMs through the pc_reverse canonical class.
+    reverseSearchTimeoutMs: pcSearchTimeoutMs,
+    buildSearchTimeoutMs,
+    setupSearchTimeoutMs,
     forwardSearchTimeoutMs,
+    structureSearchTimeoutMs,
+    utilitySearchTimeoutMs,
+    diagnosticTimeoutMs,
     setupProgressNoticeMs: positiveInteger(
       environment.CLEARRA_SETUP_PROGRESS_NOTICE_MS,
       5 * 60_000,

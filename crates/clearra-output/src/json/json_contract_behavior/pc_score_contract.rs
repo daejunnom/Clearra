@@ -235,3 +235,78 @@ mod case_pc_contract_exposes_scoring_post_processing_contract {
         );
     }
 }
+
+mod case_typed_pc_score_summary_keeps_the_pc_scoring_contract {
+    use super::*;
+
+    #[test]
+    fn typed_pc_score_summary_keeps_the_pc_scoring_contract() {
+        let contract = JsonContract::from_render_message(
+            "pc-score-summary.v2",
+            &[
+                RenderField::new(
+                    "score_accuracy_level",
+                    RenderFieldValue::string("basic-approximation"),
+                ),
+                RenderField::new(
+                    "score_accuracy_reason",
+                    RenderFieldValue::string(
+                        "profile-specific basic score/attack tables with configurable spin detection",
+                    ),
+                ),
+                RenderField::new(
+                    "score_profile_specific_exact",
+                    RenderFieldValue::Bool(false),
+                ),
+                RenderField::new(
+                    "score_summary_complete",
+                    RenderFieldValue::Bool(true),
+                ),
+                RenderField::new(
+                    "score_failed_pc_pattern_count",
+                    RenderFieldValue::number("3"),
+                ),
+                RenderField::new(
+                    "score_failed_pc_pattern_score",
+                    RenderFieldValue::number("0"),
+                ),
+            ],
+        );
+
+        let JsonValue::Object(root) = contract.root() else {
+            panic!("root object");
+        };
+        assert_eq!(
+            member_value(&root, "kind"),
+            &JsonValue::string("pc-score-summary.v2")
+        );
+        let contract = object_member(&root, "contract");
+        let command = object_member(contract, "command");
+        assert_eq!(
+            member_value(command, "kind"),
+            &JsonValue::string("pc-score-summary.v2")
+        );
+        let pc = object_member(contract, "pc");
+        let scoring = object_member(pc, "scoring");
+        assert_eq!(
+            member_value(scoring, "score_accuracy_level"),
+            &JsonValue::string("basic-approximation")
+        );
+        assert_eq!(
+            member_value(scoring, "score_profile_specific_exact"),
+            &JsonValue::Bool(false)
+        );
+        assert_eq!(
+            member_value(scoring, "score_summary_complete"),
+            &JsonValue::Bool(true)
+        );
+        assert_eq!(
+            member_value(scoring, "score_failed_pc_pattern_count"),
+            &JsonValue::number("3")
+        );
+        assert_eq!(
+            member_value(scoring, "score_failed_pc_pattern_score"),
+            &JsonValue::number("0")
+        );
+    }
+}

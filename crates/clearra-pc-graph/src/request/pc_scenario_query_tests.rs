@@ -81,6 +81,38 @@ fn scenario_query_can_carry_verified_imported_kick_profile_override() {
 }
 
 #[test]
+fn build_probability_retained_capacity_accounts_supplied_identity_owner() {
+    let verified =
+        VerifiedKickTableProfile::try_new(clearra_rules::kicks::SrsKicks::srs_plus_profile())
+            .expect("verified profile");
+    let identity = StandardBoard64ColoredTilingIdentity::from_piece_masks(0, [0; 7])
+        .expect("empty colored identity is structurally valid");
+    let base = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    );
+
+    assert_eq!(
+        base.clone()
+            .with_verified_kick_table_profile(verified)
+            .checked_build_probability_retained_capacity_bytes(),
+        None
+    );
+    let base_bytes = base
+        .checked_build_probability_retained_capacity_bytes()
+        .expect("queue owner is measurable");
+    let selected_bytes = base
+        .with_allowed_colored_solution_identities([identity])
+        .checked_build_probability_retained_capacity_bytes()
+        .expect("inline colored identities are measurable");
+    assert_eq!(
+        selected_bytes - base_bytes,
+        core::mem::size_of::<StandardBoard64ColoredTilingIdentity>() as u128
+    );
+}
+
+#[test]
 fn scenario_query_can_carry_execution_policy() {
     let policy = PcExecutionPolicy::mvp_default()
         .with_requested_backend(RequestedSearchBackend::Cpu)

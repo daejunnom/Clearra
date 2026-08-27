@@ -1,9 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   normalizeRuntimeIdentity,
   runtimeIdentityMatches,
 } from "../job-service/runtime-identity.mjs";
+import { projectDiscordBuildV2Result } from "../discord/build-v2-result.mjs";
+import { projectDiscordTypedProductResult } from "../discord/typed-product-result.mjs";
 
 const JOB_PROTOCOL = "clearra.job.v1";
 const DEFAULT_JOB_ENDPOINT = "http://127.0.0.1:8787/jobs";
@@ -11,6 +13,7 @@ const TERMINAL_JOB_STATES = new Set(["completed", "failed", "cancelled"]);
 
 const NATIVE_COMMANDS = new Set([
   "pc",
+  "build",
   "failed-queue",
   "setup",
   "setup-finder",
@@ -22,8 +25,10 @@ const NATIVE_COMMANDS = new Set([
   "build-probability",
   "damage",
   "spin-finder",
+  "ren",
   "spin-structure",
   "finesse",
+  "utility",
 ]);
 const SFINDER_SEARCH_COMMANDS = new Set([
   "path",
@@ -49,6 +54,7 @@ const SFINDER_COMMANDS = new Set([...SFINDER_SEARCH_COMMANDS, "verify"]);
 const ALLOWED_COMMANDS = new Set([...NATIVE_COMMANDS, "sfinder"]);
 const PARALLEL_SEARCH_COMMANDS = new Set([
   "pc",
+  "build",
   "failed-queue",
   "setup",
   "setup-finder",
@@ -57,6 +63,7 @@ const PARALLEL_SEARCH_COMMANDS = new Set([
   "build-probability",
   "damage",
   "spin-finder",
+  "ren",
   "spin-structure",
   "finesse",
 ]);
@@ -68,14 +75,20 @@ const REVERSE_SEARCH_COMMANDS = new Set([
   "pc-replay",
   "percent",
 ]);
-const FORWARD_SEARCH_COMMANDS = new Set([
+const BUILD_SEARCH_COMMANDS = new Set([
+  "build",
   "cover",
   "build-coverage",
   "build-probability",
+  "finesse",
+]);
+const FORWARD_SEARCH_COMMANDS = new Set([
   "damage",
   "spin-finder",
+  "ren",
+]);
+const STRUCTURE_SEARCH_COMMANDS = new Set([
   "spin-structure",
-  "finesse",
 ]);
 const SETUP_SEARCH_COMMANDS = new Set(["setup", "setup-finder"]);
 const SFINDER_REVERSE_SEARCH_COMMANDS = new Set([
@@ -89,7 +102,7 @@ const SFINDER_REVERSE_SEARCH_COMMANDS = new Set([
   "best-save",
   "score-finder",
 ]);
-const SFINDER_FORWARD_SEARCH_COMMANDS = new Set([
+const SFINDER_BUILD_SEARCH_COMMANDS = new Set([
   "cover",
   "setup",
   "congruent",
@@ -97,62 +110,194 @@ const SFINDER_FORWARD_SEARCH_COMMANDS = new Set([
   "setup-cover",
   "cover-percent",
   "special-cover",
+]);
+const SFINDER_STRUCTURE_SEARCH_COMMANDS = new Set([
   "spin-cover",
   "spin",
 ]);
 const DEFAULT_SEARCH_TIMEOUT_MS = 3 * 60_000;
-const DEFAULT_REVERSE_SEARCH_TIMEOUT_MS = 5 * 60_000;
-const DEFAULT_FORWARD_SEARCH_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_PC_SEARCH_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_LONG_SEARCH_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_UTILITY_SEARCH_TIMEOUT_MS = 15 * 60_000;
+const DISCORD_UTILITY_SUBCOMMANDS = new Set([
+  "sequence",
+  "sequence-dependencies",
+  "parity",
+  "fumen",
+  "render",
+  "to-gray",
+  "mirror",
+]);
+const DISCORD_PC_SUBCOMMANDS = new Set([
+  "path",
+  "chance",
+  "minimals",
+  "score",
+  "saves",
+  "best-save",
+  "score-minimals",
+  "tiling",
+  "failed-queue",
+  "score-finder",
+  "allspin-sol",
+  "allspin-pres-chance",
+]);
+const DISCORD_SETUP_SUBCOMMANDS = new Set(["joint", "build", "pc", "score"]);
+const DISCORD_SPIN_STRUCTURE_SUBCOMMANDS = new Set(["search", "cover", "guaranteed"]);
+const BUILD_V2_TARGET_SUBCOMMANDS = new Set([
+  "setup",
+  "congruent",
+  "congruent-cover",
+  "setup-cover",
+  "setup-cover-percent",
+  "setup-cover-score",
+]);
+const BUILD_V2_EVALUATE_SUBCOMMANDS = new Set([
+  "cover",
+  "minimals",
+  "score",
+  "b2b-cover",
+  "cover-percent",
+]);
+const BUILD_V2_SCORE_CAPABILITIES = new Set([
+  "build.setup-cover-score",
+  "build.evaluate.score",
+]);
+const BUILD_V2_COMMON_OPTIONS = new Set([
+  "--queue",
+  "--patterns",
+  "--hold",
+  "--no-hold",
+  "--queue-knowledge",
+  "--objective",
+  "--rule",
+  "--backend",
+  "--no-backend-fallback",
+]);
+const BUILD_V2_FLAG_OPTIONS = new Set([
+  "--no-hold",
+  "--no-backend-fallback",
+]);
+const BUILD_V2_OBJECTIVES = Object.freeze({
+  "build.cover": Object.freeze(["min-cover", "max-probability-minimum"]),
+  "build.setup": Object.freeze(["unique", "all"]),
+  "build.congruent": Object.freeze(["unique", "all"]),
+  "build.congruent-cover": Object.freeze(["min-cover", "max-probability-minimum"]),
+  "build.setup-cover": Object.freeze(["min-cover", "max-probability-minimum"]),
+  "build.setup-cover-percent": Object.freeze(["unique", "all"]),
+  "build.setup-cover-score": Object.freeze(["max-score-cover"]),
+  "build.evaluate.cover": Object.freeze(["all"]),
+  "build.evaluate.minimals": Object.freeze(["min-cover"]),
+  "build.evaluate.score": Object.freeze(["max-score-cover"]),
+  "build.evaluate.b2b-cover": Object.freeze(["all"]),
+  "build.evaluate.cover-percent": Object.freeze(["unique"]),
+});
+const SEARCH_TIMEOUT_CLASSES = new Set([
+  "pc_reverse",
+  "build_long",
+  "setup_long",
+  "forward_long",
+  "structure_long",
+  "utility_bounded",
+  "diagnostic",
+  "default",
+]);
 
 /**
- * Classifies a curated Clearra argv by its search direction. Setup ranking is
- * kept distinct so the Discord gateway can attach setup-only progress UX while
- * sharing the forward-search execution limit.
+ * Classifies a curated Clearra argv by its canonical product timeout family.
+ * An explicitly routed class must agree with the argv classification; this
+ * preserves registry authority without allowing a caller to select a more
+ * permissive deadline for unrelated work.
  */
-export function searchTimeoutClass(arguments_) {
+export function searchTimeoutClass(arguments_, routedClass = undefined) {
+  const inferred = inferSearchTimeoutClass(arguments_);
+  if (routedClass === undefined || routedClass === null || routedClass === "") {
+    return inferred;
+  }
+  const normalized = normalizedTimeoutClass(routedClass);
+  if (normalized !== inferred) {
+    throw new Error(
+      `Clearrabot timeout class '${normalized}' does not match '${inferred}' for this command.`,
+    );
+  }
+  return normalized;
+}
+
+function inferSearchTimeoutClass(arguments_) {
   if (!Array.isArray(arguments_) || arguments_.length === 0) return "default";
   const command = normalizedSearchCommand(arguments_[0]);
   if (!command) return "default";
-  if (SETUP_SEARCH_COMMANDS.has(command)) return "setup";
-  if (REVERSE_SEARCH_COMMANDS.has(command)) return "reverse";
-  if (FORWARD_SEARCH_COMMANDS.has(command)) return "forward";
+  if (SETUP_SEARCH_COMMANDS.has(command)) return "setup_long";
+  if (REVERSE_SEARCH_COMMANDS.has(command)) return "pc_reverse";
+  if (BUILD_SEARCH_COMMANDS.has(command)) return "build_long";
+  if (FORWARD_SEARCH_COMMANDS.has(command)) return "forward_long";
+  if (STRUCTURE_SEARCH_COMMANDS.has(command)) return "structure_long";
+  if (
+    command === "utility" &&
+    DISCORD_UTILITY_SUBCOMMANDS.has(normalizedSearchCommand(arguments_[1]))
+  ) {
+    return "utility_bounded";
+  }
   if (command !== "sfinder") return "default";
 
   const subcommand = normalizedSearchCommand(arguments_[1]);
   if (!subcommand) return "default";
   const canonical = normalizeSfinderCommand(subcommand);
-  if (SFINDER_REVERSE_SEARCH_COMMANDS.has(canonical)) return "reverse";
-  if (SFINDER_FORWARD_SEARCH_COMMANDS.has(canonical)) return "forward";
+  if (canonical === "verify") return "diagnostic";
+  if (SFINDER_REVERSE_SEARCH_COMMANDS.has(canonical)) return "pc_reverse";
+  if (SFINDER_BUILD_SEARCH_COMMANDS.has(canonical)) return "build_long";
+  if (SFINDER_STRUCTURE_SEARCH_COMMANDS.has(canonical)) return "structure_long";
   return "default";
 }
 
 export function isSetupSearchArguments(arguments_) {
-  return searchTimeoutClass(arguments_) === "setup";
+  return searchTimeoutClass(arguments_) === "setup_long";
 }
 
-export function searchTimeoutMsForArguments(arguments_, policy = {}) {
+export function searchTimeoutMsForArguments(
+  arguments_,
+  policy = {},
+  routedClass = undefined,
+) {
   const genericTimeoutMs = positiveSearchTimeout(
     policy.searchTimeoutMs ?? policy.timeoutMs,
     DEFAULT_SEARCH_TIMEOUT_MS,
   );
-  const class_ = searchTimeoutClass(arguments_);
-  if (class_ === "reverse") {
-    return positiveSearchTimeout(
-      policy.reverseSearchTimeoutMs,
-      policy.searchTimeoutMs === undefined && policy.timeoutMs === undefined
-        ? DEFAULT_REVERSE_SEARCH_TIMEOUT_MS
-        : genericTimeoutMs,
-    );
+  const hasGenericOverride =
+    policy.searchTimeoutMs !== undefined || policy.timeoutMs !== undefined;
+  const class_ = searchTimeoutClass(arguments_, routedClass);
+  const classDefault = hasGenericOverride
+    ? genericTimeoutMs
+    : class_ === "pc_reverse"
+      ? DEFAULT_PC_SEARCH_TIMEOUT_MS
+      : class_.endsWith("_long")
+        ? DEFAULT_LONG_SEARCH_TIMEOUT_MS
+        : class_ === "utility_bounded"
+          ? DEFAULT_UTILITY_SEARCH_TIMEOUT_MS
+        : DEFAULT_SEARCH_TIMEOUT_MS;
+  const configured = ({
+    pc_reverse: policy.pcSearchTimeoutMs ?? policy.reverseSearchTimeoutMs,
+    build_long: policy.buildSearchTimeoutMs ?? policy.forwardSearchTimeoutMs,
+    setup_long: policy.setupSearchTimeoutMs ?? policy.forwardSearchTimeoutMs,
+    forward_long: policy.forwardSearchTimeoutMs,
+    structure_long:
+      policy.structureSearchTimeoutMs ?? policy.forwardSearchTimeoutMs,
+    utility_bounded: policy.utilitySearchTimeoutMs,
+    diagnostic: policy.diagnosticTimeoutMs,
+    default: undefined,
+  })[class_];
+  return positiveSearchTimeout(configured, classDefault);
+}
+
+function normalizedTimeoutClass(value) {
+  if (typeof value !== "string") {
+    throw new Error("Clearrabot received an invalid search timeout class.");
   }
-  if (class_ === "forward" || class_ === "setup") {
-    return positiveSearchTimeout(
-      policy.forwardSearchTimeoutMs,
-      policy.searchTimeoutMs === undefined && policy.timeoutMs === undefined
-        ? DEFAULT_FORWARD_SEARCH_TIMEOUT_MS
-        : genericTimeoutMs,
-    );
+  const normalized = value.trim().toLowerCase().replaceAll("-", "_");
+  if (!SEARCH_TIMEOUT_CLASSES.has(normalized)) {
+    throw new Error("Clearrabot received an invalid search timeout class.");
   }
-  return genericTimeoutMs;
+  return normalized;
 }
 
 function normalizedSearchCommand(value) {
@@ -190,6 +335,48 @@ export function canonicalClearraOperationalCommand(value) {
     return subcommand === "search" || subcommand === "score"
       ? `finesse.${subcommand}`
       : null;
+  }
+  if (command === "utility") {
+    if (pathInput && tokens.length !== 2) return null;
+    const subcommand = normalizedOperationalPart(tokens[1]);
+    return DISCORD_UTILITY_SUBCOMMANDS.has(subcommand)
+      ? `utility.${subcommand}`
+      : null;
+  }
+  if (command === "build") {
+    const subcommand = normalizedOperationalPart(tokens[1]);
+    if (subcommand === "cover" || BUILD_V2_TARGET_SUBCOMMANDS.has(subcommand)) {
+      return !pathInput || tokens.length === 2 ? `build.${subcommand}` : null;
+    }
+    if (subcommand !== "evaluate") return null;
+    const evaluation = normalizedOperationalPart(tokens[2]);
+    return BUILD_V2_EVALUATE_SUBCOMMANDS.has(evaluation) &&
+      (!pathInput || tokens.length === 3)
+      ? `build.evaluate.${evaluation}`
+      : null;
+  }
+  if (command === "pc") {
+    const subcommand = normalizedOperationalPart(tokens[1]);
+    if (DISCORD_PC_SUBCOMMANDS.has(subcommand)) {
+      return !pathInput || tokens.length === 2 ? `pc.${subcommand}` : null;
+    }
+    return !pathInput || tokens.length === 1 ? command : null;
+  }
+  if (command === "setup") {
+    const subcommand = normalizedOperationalPart(tokens[1]);
+    if (DISCORD_SETUP_SUBCOMMANDS.has(subcommand)) {
+      return !pathInput || tokens.length === 2 ? `setup.${subcommand}` : null;
+    }
+    return !pathInput || tokens.length === 1 ? command : null;
+  }
+  if (command === "spin-structure") {
+    const subcommand = normalizedOperationalPart(tokens[1]);
+    if (DISCORD_SPIN_STRUCTURE_SUBCOMMANDS.has(subcommand)) {
+      return !pathInput || tokens.length === 2
+        ? `spin-structure.${subcommand}`
+        : null;
+    }
+    return !pathInput || tokens.length === 1 ? command : null;
   }
   if (NATIVE_COMMANDS.has(command)) {
     return !pathInput || tokens.length === 1 ? command : null;
@@ -232,6 +419,75 @@ const CONTROLLED_OPTIONS = new Map([
   ["--format", 1],
   ["--include-solution-data", 0],
 ]);
+const FORBIDDEN_TIE_OPTIONS = new Set([
+  "--ties",
+  "--tie-snapshot",
+  "--tie-cursor",
+]);
+const FORBIDDEN_ALTERNATIVE_RESULT_KEYS = new Set([
+  "alternative",
+  "alternatives",
+  "alternative_count",
+  "alternative_index",
+  "known_alternative_count",
+  "total_alternative_count",
+  "portfolio_alternative_page",
+  "product_result_payload",
+  "score_informational_attack_basis",
+  "score_pattern_winner_contract",
+  "score_pattern_winner_equality",
+  "score_pattern_winner_ordering",
+  "score_pattern_winners",
+  "tie",
+  "ties",
+  "tie_cursor",
+  "tie_metadata",
+  "tie_snapshot",
+]);
+
+/** Discord deliberately has no alternative-page authority. */
+export function assertDiscordNoTieArguments(arguments_) {
+  for (const argument of arguments_) {
+    if (typeof argument !== "string") continue;
+    const normalized = argument.trim().toLowerCase();
+    const equalsIndex = normalized.indexOf("=");
+    const option = equalsIndex < 0 ? normalized : normalized.slice(0, equalsIndex);
+    if (FORBIDDEN_TIE_OPTIONS.has(option)) {
+      throw new Error("Discord does not expose alternative-result paging options.");
+    }
+  }
+}
+
+/**
+ * Rejects an engine/job response that tries to widen Discord's canonical-only
+ * result surface. Normal product families and lists remain valid; only the
+ * explicit alternative/tie contracts are forbidden.
+ */
+export function assertDiscordCanonicalOnlyResult(result) {
+  const stdout = typeof result?.stdout === "string" ? result.stdout.trim() : "";
+  if (!stdout) return result;
+  let payload;
+  try {
+    payload = JSON.parse(stdout);
+  } catch {
+    return result;
+  }
+  const buildProjection = projectDiscordBuildV2Result(payload);
+  if (buildProjection !== null) payload = buildProjection;
+  const typedProjection = buildProjection === null
+    ? projectDiscordTypedProductResult(payload)
+    : null;
+  if (typedProjection !== null) payload = typedProjection;
+  if (containsForbiddenAlternativeMetadata(payload)) {
+    throw new Error("Clearra returned alternative-result metadata that Discord cannot expose.");
+  }
+  const projection = buildProjection ?? typedProjection;
+  if (projection === null) return result;
+  return Object.freeze({
+    ...result,
+    stdout: JSON.stringify(projection),
+  });
+}
 
 export function parseClearraMessage(content, prefix = "!", execution = {}) {
   // The catalog-aware text ingress owns every executable text alias. Keeping
@@ -248,6 +504,7 @@ export function prepareClearraArguments(tokens, execution = {}) {
     throw new Error("Enter a Clearra command.");
   }
   if (tokens.length > 256) throw new Error("The command has too many arguments.");
+  assertDiscordNoTieArguments(tokens);
   const command = tokens[0].toLowerCase();
   if (!ALLOWED_COMMANDS.has(command)) {
     throw new Error(
@@ -257,8 +514,15 @@ export function prepareClearraArguments(tokens, execution = {}) {
   const sfinderCommand = command === "sfinder"
     ? validateSfinderCommand(tokens[1])
     : null;
+  const buildV2Contract = command === "build" ? validateBuildV2Command(tokens) : null;
   if (command === "finesse" && !["search", "score"].includes(tokens[1]?.toLowerCase())) {
     throw new Error("Discord finesse calculations require a search or score subcommand.");
+  }
+  if (
+    command === "utility" &&
+    !DISCORD_UTILITY_SUBCOMMANDS.has(normalizedSearchCommand(tokens[1]))
+  ) {
+    throw new Error("Discord utility execution requires a registered typed-document subcommand.");
   }
 
   const output = [command];
@@ -269,7 +533,22 @@ export function prepareClearraArguments(tokens, execution = {}) {
     const optionName = equalsIndex < 0
       ? normalizedToken
       : normalizedToken.slice(0, equalsIndex);
-    if (FILE_OPTIONS.has(optionName)) {
+    if (command === "build") {
+      assertBuildV2ExecutionOption(
+        buildV2Contract,
+        tokens,
+        index,
+        optionName,
+        equalsIndex,
+      );
+    }
+    const inlineOperationDocument = optionName === "--document" && (
+      command === "utility" &&
+        DISCORD_UTILITY_SUBCOMMANDS.has(normalizedSearchCommand(tokens[1])) ||
+      command === "setup" &&
+        normalizedSearchCommand(tokens[1]) === "score"
+    );
+    if (FILE_OPTIONS.has(optionName) && !inlineOperationDocument) {
       throw new Error("File and custom-code inputs are not available through Discord.");
     }
     const controlledWidth = CONTROLLED_OPTIONS.get(optionName);
@@ -280,13 +559,22 @@ export function prepareClearraArguments(tokens, execution = {}) {
     output.push(token);
   }
 
-  if (command === "pc" || command === "failed-queue") {
+  const canonicalPcSubcommand = command === "pc" &&
+    DISCORD_PC_SUBCOMMANDS.has(normalizedSearchCommand(tokens[1]));
+  if (command === "failed-queue" || command === "pc" && !canonicalPcSubcommand) {
     output.push("--no-tablebase", "--no-build-dependency-dag");
-  } else if (command === "setup" || command === "setup-finder") {
+  } else if (
+    command === "setup-finder" ||
+    command === "setup" && normalizedSearchCommand(tokens[1]) !== "score"
+  ) {
     output.push("--no-tablebase");
   }
-  const parallelSearch = PARALLEL_SEARCH_COMMANDS.has(command) ||
-    (command === "sfinder" && SFINDER_SEARCH_COMMANDS.has(sfinderCommand));
+  const fixedSingleWorkerPcScore = command === "pc" &&
+    ["score", "score-minimals", "score-finder"].includes(normalizedSearchCommand(tokens[1]));
+  const parallelSearch = !fixedSingleWorkerPcScore && (
+    PARALLEL_SEARCH_COMMANDS.has(command) ||
+    (command === "sfinder" && SFINDER_SEARCH_COMMANDS.has(sfinderCommand))
+  );
   if (parallelSearch) {
     if (execution.workers !== undefined) {
       const workers = Number(execution.workers);
@@ -315,10 +603,160 @@ export function prepareClearraArguments(tokens, execution = {}) {
     throw new Error("Clearrabot received an invalid output format policy.");
   }
   output.push("--format", outputFormat);
-  if (execution.includeSolutionData === true) {
+  if (execution.includeSolutionData === true && command !== "utility") {
     output.push("--include-solution-data");
   }
   return output;
+}
+
+function validateBuildV2Command(tokens) {
+  const subcommand = normalizedSearchCommand(tokens[1]);
+  let capabilityId;
+  let optionStart;
+  let sourceOptions;
+  if (subcommand === "cover") {
+    capabilityId = "build.cover";
+    optionStart = 2;
+    sourceOptions = ["--base-mask", "--target-mask", "--height", "--source-pieces"];
+  } else if (BUILD_V2_TARGET_SUBCOMMANDS.has(subcommand)) {
+    capabilityId = `build.${subcommand}`;
+    optionStart = 2;
+    sourceOptions = ["--target-format", "--target-document"];
+  } else if (
+    subcommand === "evaluate" &&
+    BUILD_V2_EVALUATE_SUBCOMMANDS.has(normalizedSearchCommand(tokens[2]))
+  ) {
+    capabilityId = `build.evaluate.${normalizedSearchCommand(tokens[2])}`;
+    optionStart = 3;
+    sourceOptions = ["--solution-format", "--solution-document"];
+  } else {
+    throw new Error("Discord build execution requires one registered Build v2 capability path.");
+  }
+
+  const allowedOptions = new Set([...BUILD_V2_COMMON_OPTIONS, ...sourceOptions]);
+  if (BUILD_V2_SCORE_CAPABILITIES.has(capabilityId)) {
+    allowedOptions.add("--score-profile");
+    allowedOptions.add("--initial-b2b");
+  }
+  const contract = Object.freeze({
+    capabilityId,
+    optionStart,
+    sourceOptions: Object.freeze([...sourceOptions]),
+    allowedOptions,
+  });
+  assertClosedBuildV2Execution(tokens, contract);
+  return contract;
+}
+
+function assertBuildV2ExecutionOption(contract, tokens, index, optionName, equalsIndex) {
+  if ([
+    "--max-memory-mib",
+    "--max-memory",
+    "--memory-budget-mb",
+    "--memory-budget",
+  ].includes(optionName)) {
+    throw new Error("Discord Build v2 has no max-memory request authority.");
+  }
+  if (optionName === "--allow-backend-fallback") {
+    throw new Error("Discord Build v2 is CPU-only and forbids backend fallback.");
+  }
+  if (index < contract.optionStart || !optionName.startsWith("--")) return;
+  if (!contract.allowedOptions.has(optionName)) {
+    throw new Error(
+      `${contract.capabilityId} does not expose the Build v2 option '${optionName}'.`,
+    );
+  }
+  if (optionName !== "--backend") return;
+  const value = equalsIndex < 0
+    ? String(tokens[index + 1] ?? "").trim().toLowerCase()
+    : String(tokens[index]).slice(equalsIndex + 1).trim().toLowerCase();
+  if (value !== "cpu") {
+    throw new Error("Discord Build v2 is CPU-only.");
+  }
+}
+
+function assertClosedBuildV2Execution(tokens, contract) {
+  const values = new Map();
+  for (let index = contract.optionStart; index < tokens.length; index += 1) {
+    const token = String(tokens[index] ?? "");
+    const equalsIndex = token.indexOf("=");
+    const optionName = (equalsIndex < 0 ? token : token.slice(0, equalsIndex))
+      .trim()
+      .toLowerCase();
+    assertBuildV2ExecutionOption(contract, tokens, index, optionName, equalsIndex);
+    if (!optionName.startsWith("--")) {
+      throw new Error(`${contract.capabilityId} does not accept positional Build v2 inputs.`);
+    }
+    if (values.has(optionName)) {
+      throw new Error(`${contract.capabilityId} received '${optionName}' more than once.`);
+    }
+    if (BUILD_V2_FLAG_OPTIONS.has(optionName)) {
+      if (equalsIndex >= 0) {
+        throw new Error(`${optionName} is a flag and does not accept a value.`);
+      }
+      values.set(optionName, true);
+      continue;
+    }
+    const value = equalsIndex >= 0
+      ? token.slice(equalsIndex + 1)
+      : String(tokens[++index] ?? "");
+    if (!value || value.startsWith("--")) {
+      throw new Error(`${optionName} requires one explicit value.`);
+    }
+    values.set(optionName, value);
+  }
+
+  for (const sourceOption of contract.sourceOptions.filter(
+    (option) => option !== "--source-pieces",
+  )) {
+    if (!values.has(sourceOption)) {
+      throw new Error(`${contract.capabilityId} requires '${sourceOption}'.`);
+    }
+  }
+  if (values.has("--queue") === values.has("--patterns")) {
+    throw new Error(`${contract.capabilityId} requires exactly one of --queue or --patterns.`);
+  }
+  if (values.has("--hold") === values.has("--no-hold")) {
+    throw new Error(`${contract.capabilityId} requires exactly one explicit hold policy.`);
+  }
+  for (const required of [
+    "--queue-knowledge",
+    "--objective",
+    "--rule",
+    "--backend",
+    "--no-backend-fallback",
+  ]) {
+    if (!values.has(required)) {
+      throw new Error(`${contract.capabilityId} requires '${required}'.`);
+    }
+  }
+
+  const queueKnowledge = String(values.get("--queue-knowledge")).toLowerCase();
+  if (!["oracle", "visible-7"].includes(queueKnowledge)) {
+    throw new Error("Discord Build v2 queue knowledge must be oracle or visible-7.");
+  }
+  const objective = String(values.get("--objective")).toLowerCase();
+  if (!BUILD_V2_OBJECTIVES[contract.capabilityId]?.includes(objective)) {
+    throw new Error(`${contract.capabilityId} does not expose objective '${objective}'.`);
+  }
+  const rule = String(values.get("--rule")).toLowerCase();
+  if (!["srs-plus", "srs", "srs-x", "jstris-180", "no-kick"].includes(rule)) {
+    throw new Error("Discord Build v2 requires one registered native rule profile.");
+  }
+  if (BUILD_V2_SCORE_CAPABILITIES.has(contract.capabilityId)) {
+    for (const required of ["--score-profile", "--initial-b2b"]) {
+      if (!values.has(required)) {
+        throw new Error(`${contract.capabilityId} requires '${required}'.`);
+      }
+    }
+    if (![
+      "tetrio",
+      "guideline",
+      "jstris-ultra",
+    ].includes(String(values.get("--score-profile")).toLowerCase())) {
+      throw new Error("Discord Build v2 requires one registered score profile.");
+    }
+  }
 }
 
 function validateSfinderCommand(value) {
@@ -358,6 +796,12 @@ function normalizedOperationalPart(value) {
 
 export function tilingOnlyRequested(arguments_) {
   if (!Array.isArray(arguments_)) return false;
+  if (
+    String(arguments_[0] ?? "").toLowerCase() === "pc" &&
+    String(arguments_[1] ?? "").toLowerCase().replaceAll("_", "-") === "tiling"
+  ) {
+    return true;
+  }
   for (let index = 0; index < arguments_.length; index += 1) {
     const token = String(arguments_[index]).toLowerCase();
     if (token === "--tiling-only") return true;
@@ -431,22 +875,54 @@ export class ClearraJobExecutor {
       options.searchTimeoutMs ?? legacyTimeoutMs,
       DEFAULT_SEARCH_TIMEOUT_MS,
     );
-    this.reverseSearchTimeoutMs = positiveExecutorOption(
-      options.reverseSearchTimeoutMs ?? legacyTimeoutMs,
-      legacyTimeoutMs ?? DEFAULT_REVERSE_SEARCH_TIMEOUT_MS,
+    this.pcSearchTimeoutMs = positiveExecutorOption(
+      options.pcSearchTimeoutMs ?? options.reverseSearchTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_PC_SEARCH_TIMEOUT_MS,
+    );
+    // Retain the old property as a read-only compatibility projection for
+    // callers that have not yet moved to the canonical PC family name.
+    this.reverseSearchTimeoutMs = this.pcSearchTimeoutMs;
+    this.buildSearchTimeoutMs = positiveExecutorOption(
+      options.buildSearchTimeoutMs ?? options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
+    );
+    this.setupSearchTimeoutMs = positiveExecutorOption(
+      options.setupSearchTimeoutMs ?? options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
     );
     this.forwardSearchTimeoutMs = positiveExecutorOption(
       options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
-      legacyTimeoutMs ?? DEFAULT_FORWARD_SEARCH_TIMEOUT_MS,
+      legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
+    );
+    this.structureSearchTimeoutMs = positiveExecutorOption(
+      options.structureSearchTimeoutMs ?? options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
+    );
+    this.utilitySearchTimeoutMs = positiveExecutorOption(
+      options.utilitySearchTimeoutMs,
+      DEFAULT_UTILITY_SEARCH_TIMEOUT_MS,
+    );
+    this.diagnosticTimeoutMs = positiveExecutorOption(
+      options.diagnosticTimeoutMs ?? legacyTimeoutMs,
+      legacyTimeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS,
     );
     this.timeoutMs = Math.max(
       this.searchTimeoutMs,
-      this.reverseSearchTimeoutMs,
+      this.pcSearchTimeoutMs,
+      this.buildSearchTimeoutMs,
+      this.setupSearchTimeoutMs,
       this.forwardSearchTimeoutMs,
+      this.structureSearchTimeoutMs,
+      this.utilitySearchTimeoutMs,
+      this.diagnosticTimeoutMs,
     );
     this.maxOutputBytes = positiveExecutorOption(
       options.maxOutputBytes,
       4 * 1024 * 1024,
+    );
+    this.maxArtifactBytes = positiveExecutorOption(
+      options.maxArtifactBytes,
+      24 * 1024 * 1024,
     );
     this.pollIntervalMs = positiveExecutorOption(options.pollIntervalMs, 250);
     this.cancelTimeoutMs = positiveExecutorOption(options.cancelTimeoutMs, 2_000);
@@ -467,7 +943,12 @@ export class ClearraJobExecutor {
 
     const controller = new AbortController();
     const startedAt = this.now();
-    const commandTimeoutMs = searchTimeoutMsForArguments(arguments_, this);
+    const timeoutClass = searchTimeoutClass(arguments_, options.timeoutClass);
+    const commandTimeoutMs = searchTimeoutMsForArguments(
+      arguments_,
+      this,
+      timeoutClass,
+    );
     const requestedDeadlineUnixMs = options.deadlineUnixMs === undefined
       ? startedAt + commandTimeoutMs
       : validAbsoluteDeadline(options.deadlineUnixMs);
@@ -500,12 +981,18 @@ export class ClearraJobExecutor {
           id: jobId,
           kind: "clearra.command",
           arguments: [...arguments_],
+          timeoutClass,
           deadlineUnixMs,
           maxOutputBytes: this.maxOutputBytes,
+          maxArtifactBytes: this.maxArtifactBytes,
           expectedRuntime: this.expectedRuntimeIdentity,
         }),
       });
-      let job = await readJobResponse(response, this.maxOutputBytes);
+      let job = await readJobResponse(
+        response,
+        this.maxOutputBytes,
+        this.maxArtifactBytes,
+      );
       validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
       validateJobIdentity(job, jobId);
 
@@ -519,12 +1006,20 @@ export class ClearraJobExecutor {
           jobId,
           signal: controller.signal,
         });
-        job = await readJobResponse(response, this.maxOutputBytes);
+        job = await readJobResponse(
+          response,
+          this.maxOutputBytes,
+          this.maxArtifactBytes,
+        );
         validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
         validateJobIdentity(job, jobId);
       }
 
-      return terminalJobResult(job, this.maxOutputBytes);
+      return terminalJobResult(
+        job,
+        this.maxOutputBytes,
+        this.maxArtifactBytes,
+      );
     } catch (error) {
       if (submitted) await this.cancel(jobId);
       if (controller.signal.aborted) {
@@ -662,12 +1157,13 @@ function validateJobArguments(arguments_) {
       throw new Error("Clearrabot received an invalid Clearra job argument.");
     }
   }
+  assertDiscordNoTieArguments(arguments_);
 }
 
-async function readJobResponse(response, maxOutputBytes) {
+async function readJobResponse(response, maxOutputBytes, maxArtifactBytes) {
   const text = await readBoundedText(
     response,
-    maxOutputBytes * 6 + 64 * 1024,
+    checkedJobResponseLimit(maxOutputBytes, maxArtifactBytes),
   );
   let value;
   try {
@@ -729,7 +1225,7 @@ function validateRuntimeIdentity(job, expected) {
   }
 }
 
-function terminalJobResult(job, maxOutputBytes) {
+function terminalJobResult(job, maxOutputBytes, maxArtifactBytes) {
   if (job.state === "cancelled") {
     throw abortError("Clearra job service cancelled the search.");
   }
@@ -752,12 +1248,77 @@ function terminalJobResult(job, maxOutputBytes) {
   if (result.signal !== null && result.signal !== undefined && typeof result.signal !== "string") {
     throw new Error("Clearra job service returned an invalid process signal.");
   }
-  return {
+  const artifact = validateTransportArtifact(result.artifact, maxArtifactBytes);
+  return assertDiscordCanonicalOnlyResult({
     exitCode: result.exitCode,
     signal: result.signal ?? null,
     stdout: stdout.trim(),
     stderr: stderr.trim(),
-  };
+    ...(artifact ? { artifact } : {}),
+  });
+}
+
+function checkedJobResponseLimit(maxOutputBytes, maxArtifactBytes) {
+  const encodedArtifactBytes = Math.ceil(maxArtifactBytes / 3) * 4;
+  const total = maxOutputBytes * 6 + encodedArtifactBytes + 64 * 1024;
+  if (!Number.isSafeInteger(total) || total < 1) {
+    throw new Error("Clearrabot job response limits are invalid.");
+  }
+  return total;
+}
+
+function validateTransportArtifact(value, maximumBytes) {
+  if (value === undefined || value === null) return null;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    value.contract !== "clearra.discord-render-artifact.v1" ||
+    !["png", "gif"].includes(value.artifactFormat) ||
+    value.mediaType !== (value.artifactFormat === "png" ? "image/png" : "image/gif") ||
+    typeof value.filename !== "string" ||
+    value.filename.length > 128 ||
+    !/^[a-z0-9][a-z0-9._-]*$/i.test(value.filename) ||
+    !value.filename.toLowerCase().endsWith(`.${value.artifactFormat}`) ||
+    !Number.isSafeInteger(value.byteLength) ||
+    value.byteLength < 1 ||
+    value.byteLength > maximumBytes ||
+    typeof value.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.sha256) ||
+    typeof value.bytesBase64 !== "string" ||
+    value.renderExact !== true
+  ) {
+    throw new Error("Clearra job service returned an invalid render artifact.");
+  }
+  const bytes = Buffer.from(value.bytesBase64, "base64");
+  const canonicalBase64 = bytes.toString("base64");
+  const validSignature = value.artifactFormat === "png"
+    ? bytes.length >= 8 && bytes.subarray(0, 8).equals(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      )
+    : bytes.length >= 6 &&
+      ["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("ascii"));
+  if (
+    canonicalBase64 !== value.bytesBase64 ||
+    bytes.length !== value.byteLength ||
+    createHash("sha256").update(bytes).digest("hex") !== value.sha256 ||
+    !validSignature
+  ) {
+    throw new Error("Clearra job service returned a mismatched render artifact.");
+  }
+  return Object.freeze({ ...value });
+}
+
+function containsForbiddenAlternativeMetadata(value) {
+  if (Array.isArray(value)) return value.some(containsForbiddenAlternativeMetadata);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, nested]) => {
+    const normalized = key.toLowerCase().replaceAll("-", "_");
+    return FORBIDDEN_ALTERNATIVE_RESULT_KEYS.has(normalized) ||
+      normalized.startsWith("portfolio_alternative_") ||
+      normalized.startsWith("tie_") ||
+      containsForbiddenAlternativeMetadata(nested);
+  });
 }
 
 function abortableDelay(milliseconds, signal) {

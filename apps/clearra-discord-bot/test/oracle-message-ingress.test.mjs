@@ -332,8 +332,8 @@ test("Oracle ingress owns one privacy-bounded terminal log for text outcomes", a
     const record = JSON.parse(line);
     return [record.kind, record.command, record.status, record.durationMs];
   }), [
-    ["text", "path", "delegated", 5],
-    ["text", "path", "failed", 5],
+    ["text", "pc.path", "delegated", 5],
+    ["text", "pc.path", "failed", 5],
   ]);
   assert.doesNotMatch(lines.join("\n"), /PRIVATE|sfinder-man|guild-owner/i);
 

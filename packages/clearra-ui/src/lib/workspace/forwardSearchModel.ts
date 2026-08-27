@@ -9,9 +9,10 @@ import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clea
 import { isValidForwardChain, MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 
 const MAX_DAMAGE = 0xffff_ffff;
+export const MAX_REN_QUEUE_PIECES = 22;
 export { MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 
-export type ForwardTool = 'damage' | 'spin-finder';
+export type ForwardTool = 'damage' | 'spin-finder' | 'ren';
 export type ForwardDamageAggregation = 'maximum' | 'at-least';
 export type ForwardSpinLines =
   | 'any'
@@ -47,6 +48,7 @@ export type ForwardSearchRequest = {
 export type ForwardSearchValidationCode =
   | 'forward_queue_invalid'
   | 'forward_pattern_too_long'
+  | 'ren_queue_too_long'
   | 'forward_height_invalid'
   | 'minimum_damage_invalid'
   | 'initial_combo_invalid'
@@ -81,8 +83,13 @@ export function forwardSearchValidationCodes(
 ): ForwardSearchValidationCode[] {
   const errors: ForwardSearchValidationCode[] = [];
   const queue = parseBrowserQueueInput(request.queue);
-  if (!queue || (request.tool === 'damage' && queue.kind !== 'fixed')) {
+  if (!queue || (request.tool !== 'spin-finder' && queue.kind !== 'fixed')) {
     errors.push('forward_queue_invalid');
+  } else if (
+    request.tool === 'ren' &&
+    queue.sequenceLength > MAX_REN_QUEUE_PIECES
+  ) {
+    errors.push('ren_queue_too_long');
   } else if (
     request.tool === 'spin-finder' &&
     queue.kind === 'pattern' &&
@@ -93,10 +100,10 @@ export function forwardSearchValidationCodes(
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('forward_height_invalid');
   }
-  if (!isValidForwardChain(request.initialCombo)) {
+  if (request.tool !== 'ren' && !isValidForwardChain(request.initialCombo)) {
     errors.push('initial_combo_invalid');
   }
-  if (!isValidForwardChain(request.initialB2B)) {
+  if (request.tool !== 'ren' && !isValidForwardChain(request.initialB2B)) {
     errors.push('initial_b2b_invalid');
   }
   if (
@@ -127,18 +134,17 @@ export function buildForwardSearchCommand(
     queue?.source ?? normalizeForwardQueue(request.queue),
     request.holdEnabled ? '--hold' : '--no-hold',
     '--rule',
-    request.rule,
-    '--spin-profile',
-    request.spinProfile
+    request.rule
   ];
-  if (request.preserveB2B) tokens.push('--preserve-b2b');
+  if (request.tool !== 'ren') tokens.push('--spin-profile', request.spinProfile);
+  if (request.tool !== 'ren' && request.preserveB2B) tokens.push('--preserve-b2b');
   if (request.tool === 'damage') {
     if (request.initialCombo > 0) tokens.push('--initial-combo', String(request.initialCombo));
     tokens.push('--initial-b2b', String(request.initialB2B));
     if (request.damageAggregation === 'at-least') {
       tokens.push('--minimum-damage', String(request.minimumDamage));
     }
-  } else {
+  } else if (request.tool === 'spin-finder') {
     tokens.push('--lines', request.spinLines);
     tokens.push('--spin-category', request.spinCategory);
   }
@@ -164,8 +170,8 @@ export function forwardSearchRequestForDesktop(
     patterns: queue?.kind === 'pattern' ? queue.source : '',
     hold_enabled: request.holdEnabled,
     rule: request.rule,
-    spin_profile: request.spinProfile,
-    preserve_b2b: request.preserveB2B,
+    spin_profile: request.tool === 'ren' ? 'disabled' : request.spinProfile,
+    preserve_b2b: request.tool === 'ren' ? false : request.preserveB2B,
     workers: Math.max(1, Math.trunc(workers)),
     use_all_logical_processors: request.useAllLogicalProcessors,
     backend: 'cpu',
@@ -183,12 +189,13 @@ export function forwardSearchRequestForDesktop(
         : {})
     });
   }
-  return buildDesktopAppRequest({
+  if (request.tool === 'spin-finder') return buildDesktopAppRequest({
     ...common,
     command: request.tool,
     spin_lines: request.spinLines,
     spin_category: request.spinCategory
   });
+  return buildDesktopAppRequest({ ...common, command: 'ren' });
 }
 
 export function forwardSourcePieceCount(request: ForwardSearchRequest): number | null {
@@ -201,7 +208,12 @@ export function trimForwardBoardMask(mask: bigint, height: number): bigint {
 }
 
 export function spinCategoryOptions(spinProfile: SpinProfile): ForwardSpinCategory[] {
-  if (spinProfile === 'all-mini' || spinProfile === 'all-mini-plus') {
+  if (
+    spinProfile === 'all-spin' ||
+    spinProfile === 'all-spin-plus' ||
+    spinProfile === 'all-mini' ||
+    spinProfile === 'all-mini-plus'
+  ) {
     return ['any', 't', 'other'];
   }
   return ['any'];

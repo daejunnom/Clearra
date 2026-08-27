@@ -8,11 +8,17 @@ const CONTRACT: &str = include_str!("../../../tests/fixtures/contracts/search_op
 struct ContractRow<'a> {
     family: &'a str,
     option: &'a str,
+    kind: &'a str,
     valid: &'a str,
     invalid: &'a str,
-    web_default: &'a str,
+    discord_default: &'a str,
     native_default: &'a str,
-    discord_surface: &'a str,
+    disposition: &'a str,
+    discord_path: &'a str,
+    exposure: &'a str,
+    lowering: &'a str,
+    reason: &'a str,
+    dependencies: &'a str,
 }
 
 fn rows() -> Vec<ContractRow<'static>> {
@@ -23,34 +29,87 @@ fn rows() -> Vec<ContractRow<'static>> {
             let columns = line.split('\t').collect::<Vec<_>>();
             assert_eq!(
                 columns.len(),
-                9,
-                "search option contract rows must have nine columns: {line}"
+                13,
+                "search option contract rows must have thirteen columns: {line}"
             );
             assert!(!columns[3].is_empty(), "valid representatives: {line}");
             ContractRow {
                 family: columns[0],
                 option: columns[1],
+                kind: columns[2],
                 valid: columns[3],
                 invalid: columns[4],
-                web_default: columns[5],
+                discord_default: columns[5],
                 native_default: columns[6],
-                discord_surface: columns[7],
+                disposition: columns[7],
+                discord_path: columns[8],
+                exposure: columns[9],
+                lowering: columns[10],
+                reason: columns[11],
+                dependencies: columns[12],
             }
         })
         .collect()
 }
 
 #[test]
-fn shared_contract_covers_the_five_search_families_without_duplicate_options() {
+fn shared_contract_covers_each_semantic_family_without_duplicate_options() {
     let rows = rows();
     let families = rows.iter().map(|row| row.family).collect::<BTreeSet<_>>();
     assert_eq!(
         families,
-        BTreeSet::from(["build", "damage", "pc", "setup", "spin-finder"])
+        BTreeSet::from([
+            "build",
+            "finesse-score",
+            "forward-damage",
+            "forward-spin",
+            "pc",
+            "setup",
+            "spin-structure",
+        ])
     );
 
     let mut options = BTreeSet::new();
     for row in rows {
+        assert!(!row.kind.is_empty(), "{}.{} kind", row.family, row.option);
+        assert!(
+            !row.discord_default.is_empty() && !row.native_default.is_empty(),
+            "{}.{} defaults",
+            row.family,
+            row.option
+        );
+        assert!(
+            !row.reason.is_empty(),
+            "{}.{} reason",
+            row.family,
+            row.option
+        );
+        assert!(
+            !row.dependencies.is_empty(),
+            "{}.{} dependencies",
+            row.family,
+            row.option
+        );
+        match row.disposition {
+            "named" | "preset" => {
+                assert_ne!(row.discord_path, "-", "{}.{} path", row.family, row.option);
+                assert_ne!(row.exposure, "-", "{}.{} exposure", row.family, row.option);
+                assert_ne!(
+                    row.lowering, "none",
+                    "{}.{} lowering",
+                    row.family, row.option
+                );
+            }
+            "excluded" => {
+                assert_eq!(row.discord_path, "-", "{}.{} path", row.family, row.option);
+                assert_eq!(
+                    row.lowering, "none",
+                    "{}.{} lowering",
+                    row.family, row.option
+                );
+            }
+            value => panic!("unknown disposition {value}: {}.{}", row.family, row.option),
+        }
         assert!(
             options.insert((row.family, row.option)),
             "duplicate contract option {}.{}",
@@ -115,27 +174,35 @@ fn shared_contract_preserves_surface_defaults_and_discord_boundaries() {
     };
 
     let pc_lines = find("pc", "lines");
-    assert_eq!(pc_lines.web_default, "4");
+    assert_eq!(pc_lines.discord_default, "auto");
     assert_eq!(pc_lines.native_default, "2");
-    assert_eq!(find("pc", "score-mode").web_default, "off");
-    assert_eq!(find("pc", "score-mode").native_default, "all");
+    assert_eq!(find("pc", "score-mode").discord_default, "off");
+    assert_eq!(find("pc", "score-mode").native_default, "off");
 
-    assert_eq!(
-        find("build", "aggregation").discord_surface,
-        "sfinder-baked"
-    );
-    assert_ne!(
-        find("build", "aggregation").discord_surface,
-        "packed:aggregation",
-        "Discord must not expose a general tiling/aggregation selector"
-    );
+    let aggregation = find("build", "aggregation");
+    assert_eq!(aggregation.disposition, "named");
+    assert_eq!(aggregation.discord_path, "/build cover");
+    assert_eq!(aggregation.exposure, "aggregation");
+    assert_eq!(aggregation.lowering, "--aggregate|--tiling-only");
     for option in ["backend", "fallback", "workers"] {
-        assert_eq!(find("pc", option).discord_surface, "host");
+        let row = find("pc", option);
+        assert_eq!(row.disposition, "excluded");
+        assert_eq!(row.exposure, "host-policy");
+        assert_eq!(row.lowering, "none");
     }
-    assert_eq!(find("setup", "mode").discord_surface, "packed:mode");
+    assert_eq!(find("setup", "mode").exposure, "mode");
+    assert_eq!(find("setup", "mode").lowering, "--mode");
     assert_eq!(
-        find("damage", "preserve-b2b").discord_surface,
-        "packed:preserve-b2b"
+        find("forward-damage", "preserve-b2b").exposure,
+        "preserve-b2b"
+    );
+    assert_eq!(
+        find("forward-damage", "preserve-b2b").lowering,
+        "--preserve-b2b"
+    );
+    assert_eq!(
+        find("spin-structure", "hold").exposure,
+        "semantic-exclusion"
     );
 }
 

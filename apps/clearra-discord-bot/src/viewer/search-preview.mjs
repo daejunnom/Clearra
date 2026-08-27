@@ -9,7 +9,7 @@ const EMPTY = /^[C~□._0]$/i;
 const FILLED = /^[+■#1XGIOTSZJL]$/i;
 
 export function buildSearchPreviewDocument(command, rawOptions = []) {
-  if (command?.input === "finesse-score") {
+  if (["finesse-score", "finesse-score-v2"].includes(command?.input)) {
     return finesseScorePreview(rawOptions);
   }
   const fields = previewFields(command?.input);
@@ -41,17 +41,33 @@ export function buildSearchPreviewDocument(command, rawOptions = []) {
 }
 
 function previewFields(input) {
-  if (input === "cover" || input === "finesse-search") {
+  if (["cover", "build-cover", "finesse-search"].includes(input)) {
     return ["base", "target"];
   }
   if (
     [
       "pc",
+      "pc-v2",
+      "pc-path-v2",
+      "pc-chance-v2",
+      "pc-allspin-exact-v1",
+      "pc-allspin-pattern-v1",
+      "pc-score-v2",
+      "pc-tiling-v2",
+      "pc-failed-v2",
       "colored",
       "spin",
+      "forward-spin-v2",
       "fixed-next",
+      "forward-damage-v2",
+      "forward-ren-v1",
       "score-fixed-next",
+      "score-fixed-next-v2",
+      "pc-score-finder-v2",
       "spin-structure",
+      "spin-structure-v2",
+      "spin-structure-cover-v1",
+      "spin-structure-guaranteed-v1",
     ].includes(input)
   ) {
     return ["field"];

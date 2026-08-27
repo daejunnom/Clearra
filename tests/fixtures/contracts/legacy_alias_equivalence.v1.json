@@ -1,0 +1,2230 @@
+{
+  "schema_id": "clearra.legacy-alias-equivalence.v1",
+  "registry_schema_id": "clearra.product-capability-registry.v1",
+  "target_release": "v0.8.0",
+  "slash_remove_in": "v0.10.0",
+  "routes": [
+    {
+      "id": "pc.path/slash/path",
+      "case_id": "pc.path/path/",
+      "capability_id": "pc.path",
+      "surface": "discord-slash",
+      "path": [
+        "path"
+      ],
+      "classification": "equivalence",
+      "input": "pc",
+      "input_schema_id": "pc-pattern",
+      "modal_schema_id": "pc-pattern",
+      "argv_prefix": [
+        "sfinder",
+        "path"
+      ],
+      "public_result_kind": "path",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "pc.path/text/path",
+      "case_id": "pc.path/path/",
+      "capability_id": "pc.path",
+      "surface": "discord-text",
+      "path": [
+        "path"
+      ],
+      "classification": "equivalence",
+      "input": "pc",
+      "input_schema_id": "pc-pattern",
+      "modal_schema_id": "pc-pattern",
+      "argv_prefix": [
+        "sfinder",
+        "path"
+      ],
+      "public_result_kind": "path",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "pc.minimals/slash/minimals",
+      "case_id": "pc.minimals/minimals/",
+      "capability_id": "pc.minimals",
+      "surface": "discord-slash",
+      "path": [
+        "minimals"
+      ],
+      "classification": "equivalence",
+      "input": "pc-v2",
+      "input_schema_id": "pc-pattern.v2",
+      "modal_schema_id": "pc-pattern.v2",
+      "argv_prefix": [
+        "pc",
+        "minimals"
+      ],
+      "public_result_kind": "minimals",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "pc.minimals/text/minimals",
+      "case_id": "pc.minimals/minimals/",
+      "capability_id": "pc.minimals",
+      "surface": "discord-text",
+      "path": [
+        "minimals"
+      ],
+      "classification": "equivalence",
+      "input": "pc-v2",
+      "input_schema_id": "pc-pattern.v2",
+      "modal_schema_id": "pc-pattern.v2",
+      "argv_prefix": [
+        "pc",
+        "minimals"
+      ],
+      "public_result_kind": "minimals",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "pc.score-minimals/slash/score-minimals",
+      "case_id": "pc.score-minimals/score-minimals/",
+      "capability_id": "pc.score-minimals",
+      "surface": "discord-slash",
+      "path": [
+        "score-minimals"
+      ],
+      "classification": "equivalence",
+      "input": "pc-score-v2",
+      "input_schema_id": "pc-score.v2",
+      "modal_schema_id": "pc-score.v2",
+      "argv_prefix": [
+        "pc",
+        "score-minimals"
+      ],
+      "public_result_kind": "score-minimals",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "pc.score-minimals/text/score-minimals",
+      "case_id": "pc.score-minimals/score-minimals/",
+      "capability_id": "pc.score-minimals",
+      "surface": "discord-text",
+      "path": [
+        "score-minimals"
+      ],
+      "classification": "equivalence",
+      "input": "pc-score-v2",
+      "input_schema_id": "pc-score.v2",
+      "modal_schema_id": "pc-score.v2",
+      "argv_prefix": [
+        "pc",
+        "score-minimals"
+      ],
+      "public_result_kind": "score-minimals",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "pc.score-finder/slash/score-finder",
+      "case_id": "pc.score-finder/score-finder/",
+      "capability_id": "pc.score-finder",
+      "surface": "discord-slash",
+      "path": [
+        "score-finder"
+      ],
+      "classification": "equivalence",
+      "input": "score-fixed-next",
+      "input_schema_id": "pc-fixed-score",
+      "modal_schema_id": "pc-fixed-score",
+      "argv_prefix": [
+        "sfinder",
+        "score-finder"
+      ],
+      "public_result_kind": "score-finder",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "pc.score-finder/text/score-finder",
+      "case_id": "pc.score-finder/score-finder/",
+      "capability_id": "pc.score-finder",
+      "surface": "discord-text",
+      "path": [
+        "score-finder"
+      ],
+      "classification": "equivalence",
+      "input": "score-fixed-next",
+      "input_schema_id": "pc-fixed-score",
+      "modal_schema_id": "pc-fixed-score",
+      "argv_prefix": [
+        "sfinder",
+        "score-finder"
+      ],
+      "public_result_kind": "score-finder",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "pc.allspin-sol/slash/allspin-sol-finder",
+      "case_id": "pc.allspin-sol/allspin-sol-finder/",
+      "capability_id": "pc.allspin-sol",
+      "surface": "discord-slash",
+      "path": [
+        "allspin-sol-finder"
+      ],
+      "classification": "equivalence",
+      "input": "pc-allspin-exact-v1",
+      "input_schema_id": "pc-allspin-exact-queue.v1",
+      "modal_schema_id": "pc-allspin-exact-queue.v1",
+      "argv_prefix": [
+        "pc",
+        "allspin-sol"
+      ],
+      "public_result_kind": "allspin-sol-finder",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "pc.allspin-sol/text/allspin-sol-finder",
+      "case_id": "pc.allspin-sol/allspin-sol-finder/",
+      "capability_id": "pc.allspin-sol",
+      "surface": "discord-text",
+      "path": [
+        "allspin-sol-finder"
+      ],
+      "classification": "equivalence",
+      "input": "pc-allspin-exact-v1",
+      "input_schema_id": "pc-allspin-exact-queue.v1",
+      "modal_schema_id": "pc-allspin-exact-queue.v1",
+      "argv_prefix": [
+        "pc",
+        "allspin-sol"
+      ],
+      "public_result_kind": "allspin-sol-finder",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "pc.allspin-pres-chance/slash/allspin-pres-chance",
+      "case_id": "pc.allspin-pres-chance/allspin-pres-chance/",
+      "capability_id": "pc.allspin-pres-chance",
+      "surface": "discord-slash",
+      "path": [
+        "allspin-pres-chance"
+      ],
+      "classification": "equivalence",
+      "input": "pc-allspin-pattern-v1",
+      "input_schema_id": "pc-allspin-pattern.v1",
+      "modal_schema_id": "pc-allspin-pattern.v1",
+      "argv_prefix": [
+        "pc",
+        "allspin-pres-chance"
+      ],
+      "public_result_kind": "allspin-pres-chance",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "pc.allspin-pres-chance/text/allspin-pres-chance",
+      "case_id": "pc.allspin-pres-chance/allspin-pres-chance/",
+      "capability_id": "pc.allspin-pres-chance",
+      "surface": "discord-text",
+      "path": [
+        "allspin-pres-chance"
+      ],
+      "classification": "equivalence",
+      "input": "pc-allspin-pattern-v1",
+      "input_schema_id": "pc-allspin-pattern.v1",
+      "modal_schema_id": "pc-allspin-pattern.v1",
+      "argv_prefix": [
+        "pc",
+        "allspin-pres-chance"
+      ],
+      "public_result_kind": "allspin-pres-chance",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "build.cover/slash/cover",
+      "case_id": "build.cover/cover/",
+      "capability_id": "build.cover",
+      "surface": "discord-slash",
+      "path": [
+        "cover"
+      ],
+      "classification": "equivalence",
+      "input": "cover",
+      "input_schema_id": "build-base-target",
+      "modal_schema_id": "build-base-target",
+      "argv_prefix": [
+        "build-probability"
+      ],
+      "public_result_kind": "cover",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "build.cover/text/cover",
+      "case_id": "build.cover/cover/",
+      "capability_id": "build.cover",
+      "surface": "discord-text",
+      "path": [
+        "cover"
+      ],
+      "classification": "equivalence",
+      "input": "cover",
+      "input_schema_id": "build-base-target",
+      "modal_schema_id": "build-base-target",
+      "argv_prefix": [
+        "build-probability"
+      ],
+      "public_result_kind": "cover",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "build.cover/slash/finesse/search",
+      "case_id": "build.cover/finesse/search",
+      "capability_id": "build.cover",
+      "surface": "discord-slash",
+      "path": [
+        "finesse",
+        "search"
+      ],
+      "classification": "fixed-preset",
+      "input": "finesse-search",
+      "input_schema_id": "finesse-base-target",
+      "modal_schema_id": "finesse-base-target",
+      "argv_prefix": [
+        "build-probability"
+      ],
+      "public_result_kind": "finesse-search",
+      "preset": {
+        "finesse": "inputs",
+        "mirror": "exclude"
+      },
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "build.cover/text/finesse/search",
+      "case_id": "build.cover/finesse/search",
+      "capability_id": "build.cover",
+      "surface": "discord-text",
+      "path": [
+        "finesse",
+        "search"
+      ],
+      "classification": "fixed-preset",
+      "input": "finesse-search",
+      "input_schema_id": "finesse-base-target",
+      "modal_schema_id": "finesse-base-target",
+      "argv_prefix": [
+        "build-probability"
+      ],
+      "public_result_kind": "finesse-search",
+      "preset": {
+        "finesse": "inputs",
+        "mirror": "exclude"
+      },
+      "lifetime": "long-term"
+    },
+    {
+      "id": "build.finesse-score/slash/finesse/score",
+      "case_id": "build.finesse-score/finesse/score",
+      "capability_id": "build.finesse-score",
+      "surface": "discord-slash",
+      "path": [
+        "finesse",
+        "score"
+      ],
+      "classification": "equivalence",
+      "input": "finesse-score",
+      "input_schema_id": "finesse-score-document.v2",
+      "modal_schema_id": "finesse-score-document.v2",
+      "argv_prefix": [
+        "finesse",
+        "score"
+      ],
+      "public_result_kind": "finesse-score",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "build.finesse-score/text/finesse/score",
+      "case_id": "build.finesse-score/finesse/score",
+      "capability_id": "build.finesse-score",
+      "surface": "discord-text",
+      "path": [
+        "finesse",
+        "score"
+      ],
+      "classification": "equivalence",
+      "input": "finesse-score",
+      "input_schema_id": "finesse-score-document.v2",
+      "modal_schema_id": "finesse-score-document.v2",
+      "argv_prefix": [
+        "finesse",
+        "score"
+      ],
+      "public_result_kind": "finesse-score",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "setup.joint/slash/pc-setup",
+      "case_id": "setup.joint/pc-setup/",
+      "capability_id": "setup.joint",
+      "surface": "discord-slash",
+      "path": [
+        "pc-setup"
+      ],
+      "classification": "fixed-preset",
+      "input": "remaining",
+      "input_schema_id": "setup-ranking",
+      "modal_schema_id": "setup-ranking",
+      "argv_prefix": [
+        "setup-finder"
+      ],
+      "public_result_kind": "pc-setup",
+      "preset": {
+        "setupPriority": "all"
+      },
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "setup.joint/text/pc-setup",
+      "case_id": "setup.joint/pc-setup/",
+      "capability_id": "setup.joint",
+      "surface": "discord-text",
+      "path": [
+        "pc-setup"
+      ],
+      "classification": "fixed-preset",
+      "input": "remaining",
+      "input_schema_id": "setup-ranking",
+      "modal_schema_id": "setup-ranking",
+      "argv_prefix": [
+        "setup-finder"
+      ],
+      "public_result_kind": "pc-setup",
+      "preset": {
+        "setupPriority": "all"
+      },
+      "lifetime": "long-term"
+    },
+    {
+      "id": "setup.build/slash/best-setup",
+      "case_id": "setup.build/best-setup/",
+      "capability_id": "setup.build",
+      "surface": "discord-slash",
+      "path": [
+        "best-setup"
+      ],
+      "classification": "fixed-preset",
+      "input": "remaining",
+      "input_schema_id": "setup-ranking",
+      "modal_schema_id": "setup-ranking",
+      "argv_prefix": [
+        "setup-finder"
+      ],
+      "public_result_kind": "best-setup",
+      "preset": {
+        "setupPriority": "build"
+      },
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "setup.build/text/best-setup",
+      "case_id": "setup.build/best-setup/",
+      "capability_id": "setup.build",
+      "surface": "discord-text",
+      "path": [
+        "best-setup"
+      ],
+      "classification": "fixed-preset",
+      "input": "remaining",
+      "input_schema_id": "setup-ranking",
+      "modal_schema_id": "setup-ranking",
+      "argv_prefix": [
+        "setup-finder"
+      ],
+      "public_result_kind": "best-setup",
+      "preset": {
+        "setupPriority": "build"
+      },
+      "lifetime": "long-term"
+    },
+    {
+      "id": "setup.pc/slash/dpc-finder",
+      "case_id": "setup.pc/dpc-finder/",
+      "capability_id": "setup.pc",
+      "surface": "discord-slash",
+      "path": [
+        "dpc-finder"
+      ],
+      "classification": "fixed-preset",
+      "input": "remaining",
+      "input_schema_id": "setup-ranking",
+      "modal_schema_id": "setup-ranking",
+      "argv_prefix": [
+        "setup-finder"
+      ],
+      "public_result_kind": "dpc-finder",
+      "preset": {
+        "setupPriority": "pc"
+      },
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "setup.pc/text/dpc-finder",
+      "case_id": "setup.pc/dpc-finder/",
+      "capability_id": "setup.pc",
+      "surface": "discord-text",
+      "path": [
+        "dpc-finder"
+      ],
+      "classification": "fixed-preset",
+      "input": "remaining",
+      "input_schema_id": "setup-ranking",
+      "modal_schema_id": "setup-ranking",
+      "argv_prefix": [
+        "setup-finder"
+      ],
+      "public_result_kind": "dpc-finder",
+      "preset": {
+        "setupPriority": "pc"
+      },
+      "lifetime": "long-term"
+    },
+    {
+      "id": "forward.spin/slash/spin",
+      "case_id": "forward.spin/spin/",
+      "capability_id": "forward.spin",
+      "surface": "discord-slash",
+      "path": [
+        "spin"
+      ],
+      "classification": "equivalence",
+      "input": "spin",
+      "input_schema_id": "forward-spin",
+      "modal_schema_id": "forward-spin",
+      "argv_prefix": [
+        "spin-finder"
+      ],
+      "public_result_kind": "spin",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "forward.spin/text/spin",
+      "case_id": "forward.spin/spin/",
+      "capability_id": "forward.spin",
+      "surface": "discord-text",
+      "path": [
+        "spin"
+      ],
+      "classification": "equivalence",
+      "input": "spin",
+      "input_schema_id": "forward-spin",
+      "modal_schema_id": "forward-spin",
+      "argv_prefix": [
+        "spin-finder"
+      ],
+      "public_result_kind": "spin",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "forward.spin/slash/spin-cover",
+      "case_id": "forward.spin/spin-cover/",
+      "capability_id": "forward.spin",
+      "surface": "discord-slash",
+      "path": [
+        "spin-cover"
+      ],
+      "classification": "equivalence",
+      "input": "spin",
+      "input_schema_id": "forward-spin",
+      "modal_schema_id": "forward-spin",
+      "argv_prefix": [
+        "spin-finder"
+      ],
+      "public_result_kind": "spin-cover",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "forward.spin/text/spin-cover",
+      "case_id": "forward.spin/spin-cover/",
+      "capability_id": "forward.spin",
+      "surface": "discord-text",
+      "path": [
+        "spin-cover"
+      ],
+      "classification": "equivalence",
+      "input": "spin",
+      "input_schema_id": "forward-spin",
+      "modal_schema_id": "forward-spin",
+      "argv_prefix": [
+        "spin-finder"
+      ],
+      "public_result_kind": "spin-cover",
+      "lifetime": "long-term"
+    },
+    {
+      "id": "forward.damage/slash/damage",
+      "case_id": "forward.damage/damage/",
+      "capability_id": "forward.damage",
+      "surface": "discord-slash",
+      "path": [
+        "damage"
+      ],
+      "classification": "equivalence",
+      "input": "fixed-next",
+      "input_schema_id": "forward-damage-exact-queue",
+      "modal_schema_id": "forward-damage-exact-queue",
+      "argv_prefix": [
+        "damage"
+      ],
+      "public_result_kind": "damage",
+      "remove_in": "v0.10.0"
+    },
+    {
+      "id": "forward.damage/text/damage",
+      "case_id": "forward.damage/damage/",
+      "capability_id": "forward.damage",
+      "surface": "discord-text",
+      "path": [
+        "damage"
+      ],
+      "classification": "equivalence",
+      "input": "fixed-next",
+      "input_schema_id": "forward-damage-exact-queue",
+      "modal_schema_id": "forward-damage-exact-queue",
+      "argv_prefix": [
+        "damage"
+      ],
+      "public_result_kind": "damage",
+      "lifetime": "long-term"
+    }
+  ],
+  "cases": [
+    {
+      "id": "pc.path/path/",
+      "capability_id": "pc.path",
+      "classification": "equivalence",
+      "problem_contract_id": "pc-clear-to-empty",
+      "result_contract_id": "pc-scenario",
+      "canonical_path": [
+        "pc",
+        "path"
+      ],
+      "alias_path": [
+        "path"
+      ],
+      "canonical_input": "pc-v2",
+      "alias_input": "pc",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        }
+      ],
+      "canonical_text": "$pc path --field XXXXXX____ --next I --lines 1",
+      "alias_text": "$path --field XXXXXX____ --next I --lines 1",
+      "canonical_argv": [
+        "pc",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--objective",
+        "all",
+        "--rule",
+        "srs-plus"
+      ],
+      "alias_argv": [
+        "sfinder",
+        "path",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1"
+      ],
+      "canonical_text_argv": [
+        "pc",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--objective",
+        "all",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "sfinder",
+        "path",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra pc --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --objective all --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "alias_text_web_command": "clearra sfinder path --field-mask-v1 000000000000003f --queue I --lines 1 --format text",
+      "canonical_web_command": "clearra pc --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --objective all --rule srs-plus",
+      "alias_web_command": "clearra sfinder path --field-mask-v1 000000000000003f --queue I --lines 1"
+    },
+    {
+      "id": "pc.minimals/minimals/",
+      "capability_id": "pc.minimals",
+      "classification": "equivalence",
+      "problem_contract_id": "pc-clear-to-empty.v2",
+      "result_contract_id": "pc-minimum-cover.v2",
+      "canonical_path": [
+        "pc",
+        "minimals"
+      ],
+      "alias_path": [
+        "minimals"
+      ],
+      "canonical_input": "pc-v2",
+      "alias_input": "pc-v2",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        }
+      ],
+      "canonical_text": "$pc minimals --field XXXXXX____ --next I --lines 1",
+      "alias_text": "$minimals --field XXXXXX____ --next I --lines 1",
+      "canonical_argv": [
+        "pc",
+        "minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--rule",
+        "srs-plus"
+      ],
+      "alias_argv": [
+        "pc",
+        "minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--rule",
+        "srs-plus"
+      ],
+      "canonical_text_argv": [
+        "pc",
+        "minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "pc",
+        "minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "alias_text_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "canonical_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus",
+      "alias_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus"
+    },
+    {
+      "id": "pc.score-minimals/score-minimals/",
+      "capability_id": "pc.score-minimals",
+      "classification": "equivalence",
+      "problem_contract_id": "pc-clear-to-empty.v2",
+      "result_contract_id": "pc-score-portfolio.v2",
+      "canonical_path": [
+        "pc",
+        "score-minimals"
+      ],
+      "alias_path": [
+        "score-minimals"
+      ],
+      "canonical_input": "pc-score-v2",
+      "alias_input": "pc-score-v2",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        },
+        {
+          "name": "score-profile",
+          "value": "jstris-ultra"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        },
+        {
+          "name": "score-profile",
+          "value": "jstris-ultra"
+        }
+      ],
+      "canonical_text": "$pc score-minimals --field XXXXXX____ --next I --lines 1 --score-profile jstris-ultra",
+      "alias_text": "$score-minimals --field XXXXXX____ --next I --lines 1 --score-profile jstris-ultra",
+      "canonical_argv": [
+        "pc",
+        "score-minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--score-profile",
+        "jstris-ultra",
+        "--rule",
+        "srs-plus"
+      ],
+      "alias_argv": [
+        "pc",
+        "score-minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--score-profile",
+        "jstris-ultra",
+        "--rule",
+        "srs-plus"
+      ],
+      "canonical_text_argv": [
+        "pc",
+        "score-minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--score-profile",
+        "jstris-ultra",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "pc",
+        "score-minimals",
+        "--lines",
+        "1",
+        "--board-mask",
+        "0x3f",
+        "--height",
+        "1",
+        "--pieces",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--score-profile",
+        "jstris-ultra",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "alias_text_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "canonical_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus",
+      "alias_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus"
+    },
+    {
+      "id": "pc.score-finder/score-finder/",
+      "capability_id": "pc.score-finder",
+      "classification": "equivalence",
+      "problem_contract_id": "pc-clear-to-empty",
+      "result_contract_id": "pc-scenario",
+      "canonical_path": [
+        "pc",
+        "score-finder"
+      ],
+      "alias_path": [
+        "score-finder"
+      ],
+      "canonical_input": "score-fixed-next-v2",
+      "alias_input": "score-fixed-next",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "XXXXXX____"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": 1
+        }
+      ],
+      "canonical_text": "$pc score-finder --field XXXXXX____ --next I --lines 1",
+      "alias_text": "$score-finder --field XXXXXX____ --next I --lines 1",
+      "canonical_argv": [
+        "sfinder",
+        "score-finder",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1"
+      ],
+      "alias_argv": [
+        "sfinder",
+        "score-finder",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1"
+      ],
+      "canonical_text_argv": [
+        "sfinder",
+        "score-finder",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "sfinder",
+        "score-finder",
+        "--field-mask-v1",
+        "000000000000003f",
+        "--queue",
+        "I",
+        "--lines",
+        "1",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra sfinder score-finder --field-mask-v1 000000000000003f --queue I --lines 1 --format text",
+      "alias_text_web_command": "clearra sfinder score-finder --field-mask-v1 000000000000003f --queue I --lines 1 --format text",
+      "canonical_web_command": "clearra sfinder score-finder --field-mask-v1 000000000000003f --queue I --lines 1",
+      "alias_web_command": "clearra sfinder score-finder --field-mask-v1 000000000000003f --queue I --lines 1"
+    },
+    {
+      "id": "pc.allspin-sol/allspin-sol-finder/",
+      "capability_id": "pc.allspin-sol",
+      "classification": "equivalence",
+      "problem_contract_id": "pc-b2b-preservation.v1",
+      "result_contract_id": "pc-b2b-preserving-witness.v1",
+      "canonical_path": [
+        "pc",
+        "allspin-sol"
+      ],
+      "alias_path": [
+        "allspin-sol-finder"
+      ],
+      "canonical_input": "pc-allspin-exact-v1",
+      "alias_input": "pc-allspin-exact-v1",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "grid:__________/__________"
+        },
+        {
+          "name": "next",
+          "value": "IIOOO"
+        },
+        {
+          "name": "lines",
+          "value": 2
+        },
+        {
+          "name": "spin-profile",
+          "value": "all-spin-plus"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "grid:__________/__________"
+        },
+        {
+          "name": "next",
+          "value": "IIOOO"
+        },
+        {
+          "name": "lines",
+          "value": 2
+        },
+        {
+          "name": "spin-profile",
+          "value": "all-spin-plus"
+        }
+      ],
+      "canonical_text": "$pc allspin-sol --field grid:__________/__________ --next IIOOO --lines 2 --spin-profile all-spin-plus",
+      "alias_text": "$allspin-sol-finder --field grid:__________/__________ --next IIOOO --lines 2 --spin-profile all-spin-plus",
+      "canonical_argv": [
+        "pc",
+        "allspin-sol",
+        "--lines",
+        "2",
+        "--queue",
+        "IIOOO",
+        "--spin-profile",
+        "all-spin-plus",
+        "--rule",
+        "srs-plus"
+      ],
+      "alias_argv": [
+        "pc",
+        "allspin-sol",
+        "--lines",
+        "2",
+        "--queue",
+        "IIOOO",
+        "--spin-profile",
+        "all-spin-plus",
+        "--rule",
+        "srs-plus"
+      ],
+      "canonical_text_argv": [
+        "pc",
+        "allspin-sol",
+        "--lines",
+        "2",
+        "--queue",
+        "IIOOO",
+        "--spin-profile",
+        "all-spin-plus",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "pc",
+        "allspin-sol",
+        "--lines",
+        "2",
+        "--queue",
+        "IIOOO",
+        "--spin-profile",
+        "all-spin-plus",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra pc allspin-sol --lines 2 --queue IIOOO --spin-profile all-spin-plus --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "alias_text_web_command": "clearra pc allspin-sol --lines 2 --queue IIOOO --spin-profile all-spin-plus --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "canonical_web_command": "clearra pc allspin-sol --lines 2 --queue IIOOO --spin-profile all-spin-plus --rule srs-plus",
+      "alias_web_command": "clearra pc allspin-sol --lines 2 --queue IIOOO --spin-profile all-spin-plus --rule srs-plus"
+    },
+    {
+      "id": "pc.allspin-pres-chance/allspin-pres-chance/",
+      "capability_id": "pc.allspin-pres-chance",
+      "classification": "equivalence",
+      "problem_contract_id": "pc-b2b-preservation.v1",
+      "result_contract_id": "pc-b2b-preservation-probability.v1",
+      "canonical_path": [
+        "pc",
+        "allspin-pres-chance"
+      ],
+      "alias_path": [
+        "allspin-pres-chance"
+      ],
+      "canonical_input": "pc-allspin-pattern-v1",
+      "alias_input": "pc-allspin-pattern-v1",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "grid:__________/__________"
+        },
+        {
+          "name": "next",
+          "value": "[IO]!OOO"
+        },
+        {
+          "name": "lines",
+          "value": 2
+        },
+        {
+          "name": "spin-profile",
+          "value": "all-mini-plus"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "grid:__________/__________"
+        },
+        {
+          "name": "next",
+          "value": "[IO]!OOO"
+        },
+        {
+          "name": "lines",
+          "value": 2
+        },
+        {
+          "name": "spin-profile",
+          "value": "all-mini-plus"
+        }
+      ],
+      "canonical_text": "$pc allspin-pres-chance --field grid:__________/__________ --next [IO]!OOO --lines 2 --spin-profile all-mini-plus",
+      "alias_text": "$allspin-pres-chance --field grid:__________/__________ --next [IO]!OOO --lines 2 --spin-profile all-mini-plus",
+      "canonical_argv": [
+        "pc",
+        "allspin-pres-chance",
+        "--lines",
+        "2",
+        "--patterns",
+        "[IO]!OOO",
+        "--spin-profile",
+        "all-mini-plus",
+        "--rule",
+        "srs-plus"
+      ],
+      "alias_argv": [
+        "pc",
+        "allspin-pres-chance",
+        "--lines",
+        "2",
+        "--patterns",
+        "[IO]!OOO",
+        "--spin-profile",
+        "all-mini-plus",
+        "--rule",
+        "srs-plus"
+      ],
+      "canonical_text_argv": [
+        "pc",
+        "allspin-pres-chance",
+        "--lines",
+        "2",
+        "--patterns",
+        "[IO]!OOO",
+        "--spin-profile",
+        "all-mini-plus",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "pc",
+        "allspin-pres-chance",
+        "--lines",
+        "2",
+        "--patterns",
+        "[IO]!OOO",
+        "--spin-profile",
+        "all-mini-plus",
+        "--rule",
+        "srs-plus",
+        "--no-tablebase",
+        "--no-build-dependency-dag",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra pc allspin-pres-chance --lines 2 --patterns [IO]!OOO --spin-profile all-mini-plus --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "alias_text_web_command": "clearra pc allspin-pres-chance --lines 2 --patterns [IO]!OOO --spin-profile all-mini-plus --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
+      "canonical_web_command": "clearra pc allspin-pres-chance --lines 2 --patterns [IO]!OOO --spin-profile all-mini-plus --rule srs-plus",
+      "alias_web_command": "clearra pc allspin-pres-chance --lines 2 --patterns [IO]!OOO --spin-profile all-mini-plus --rule srs-plus"
+    },
+    {
+      "id": "build.cover/cover/",
+      "capability_id": "build.cover",
+      "classification": "equivalence",
+      "problem_contract_id": "build-base-target",
+      "result_contract_id": "build-probability",
+      "canonical_path": [
+        "build",
+        "cover"
+      ],
+      "alias_path": [
+        "cover"
+      ],
+      "canonical_input": "build-cover",
+      "alias_input": "cover",
+      "canonical_options": [
+        {
+          "name": "base",
+          "value": "__________"
+        },
+        {
+          "name": "target",
+          "value": "XXXX______"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "height",
+          "value": 1
+        },
+        {
+          "name": "hold",
+          "value": "empty"
+        },
+        {
+          "name": "mirror",
+          "value": "exclude"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "base",
+          "value": "__________"
+        },
+        {
+          "name": "target",
+          "value": "XXXX______"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "options",
+          "value": "hold=use"
+        }
+      ],
+      "canonical_text": "$build cover --base __________ --target XXXX______ --next I --height 1 --hold empty --mirror exclude",
+      "alias_text": "$cover --base __________ --target XXXX______ --next I --options hold=use",
+      "canonical_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--no-mirror"
+      ],
+      "alias_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--no-mirror"
+      ],
+      "canonical_text_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--no-mirror",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "1",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--no-mirror",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 1 --queue I --hold empty --no-mirror --format text",
+      "alias_text_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 1 --queue I --hold empty --no-mirror --format text",
+      "canonical_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 1 --queue I --hold empty --no-mirror",
+      "alias_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 1 --queue I --hold empty --no-mirror"
+    },
+    {
+      "id": "build.cover/finesse/search",
+      "capability_id": "build.cover",
+      "classification": "fixed-preset",
+      "problem_contract_id": "build-base-target",
+      "result_contract_id": "build-probability",
+      "canonical_path": [
+        "build",
+        "cover"
+      ],
+      "alias_path": [
+        "finesse",
+        "search"
+      ],
+      "canonical_input": "build-cover",
+      "alias_input": "finesse-search",
+      "canonical_options": [
+        {
+          "name": "base",
+          "value": "__________"
+        },
+        {
+          "name": "target",
+          "value": "XXXX______"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "finesse",
+          "value": "inputs"
+        },
+        {
+          "name": "finesse-knowledge",
+          "value": "both"
+        },
+        {
+          "name": "mirror",
+          "value": "exclude"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "base",
+          "value": "__________"
+        },
+        {
+          "name": "target",
+          "value": "XXXX______"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        }
+      ],
+      "canonical_text": "$build cover --base __________ --target XXXX______ --next I --finesse inputs --finesse-knowledge both --mirror exclude",
+      "alias_text": "$finesse search --base __________ --target XXXX______ --next I",
+      "canonical_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--finesse",
+        "inputs",
+        "--pattern-knowledge",
+        "both",
+        "--no-mirror"
+      ],
+      "alias_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--pattern-knowledge",
+        "both",
+        "--finesse",
+        "inputs",
+        "--no-mirror"
+      ],
+      "canonical_text_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--finesse",
+        "inputs",
+        "--pattern-knowledge",
+        "both",
+        "--no-mirror",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "build-probability",
+        "--base-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--target-mask",
+        "00000000000000000000000000000000000000000000000000000000000f",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "empty",
+        "--pattern-knowledge",
+        "both",
+        "--finesse",
+        "inputs",
+        "--no-mirror",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 8 --queue I --hold empty --finesse inputs --pattern-knowledge both --no-mirror --format text",
+      "alias_text_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 8 --queue I --hold empty --pattern-knowledge both --finesse inputs --no-mirror --format text",
+      "canonical_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 8 --queue I --hold empty --finesse inputs --pattern-knowledge both --no-mirror",
+      "alias_web_command": "clearra build-probability --base-mask 000000000000000000000000000000000000000000000000000000000000 --target-mask 00000000000000000000000000000000000000000000000000000000000f --height 8 --queue I --hold empty --pattern-knowledge both --finesse inputs --no-mirror",
+      "conflict": {
+        "option": "mirror",
+        "value": "include"
+      }
+    },
+    {
+      "id": "build.finesse-score/finesse/score",
+      "capability_id": "build.finesse-score",
+      "classification": "equivalence",
+      "problem_contract_id": "fixed-placement-finesse-score.v2",
+      "result_contract_id": "finesse-input-score.v2",
+      "canonical_path": [
+        "build",
+        "finesse-score"
+      ],
+      "alias_path": [
+        "finesse",
+        "score"
+      ],
+      "canonical_input": "finesse-score-v2",
+      "alias_input": "finesse-score",
+      "canonical_options": [
+        {
+          "name": "document",
+          "value": "ctk3_w0kCAhcQABHA"
+        },
+        {
+          "name": "next",
+          "value": "T"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "document",
+          "value": "ctk3_w0kCAhcQABHA"
+        },
+        {
+          "name": "next",
+          "value": "T"
+        }
+      ],
+      "canonical_text": "$build finesse-score --document ctk3_w0kCAhcQABHA --next T",
+      "alias_text": "$finesse score --document ctk3_w0kCAhcQABHA --next T",
+      "canonical_argv": [
+        "finesse",
+        "score",
+        "--initial-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "2",
+        "--placements",
+        "T:spawn:3:0",
+        "--queue",
+        "T",
+        "--hold",
+        "empty",
+        "--pattern-knowledge",
+        "both"
+      ],
+      "alias_argv": [
+        "finesse",
+        "score",
+        "--initial-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "2",
+        "--placements",
+        "T:spawn:3:0",
+        "--queue",
+        "T",
+        "--hold",
+        "empty",
+        "--pattern-knowledge",
+        "both"
+      ],
+      "canonical_text_argv": [
+        "finesse",
+        "score",
+        "--initial-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "2",
+        "--placements",
+        "T:spawn:3:0",
+        "--queue",
+        "T",
+        "--hold",
+        "empty",
+        "--pattern-knowledge",
+        "both",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "finesse",
+        "score",
+        "--initial-mask",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "2",
+        "--placements",
+        "T:spawn:3:0",
+        "--queue",
+        "T",
+        "--hold",
+        "empty",
+        "--pattern-knowledge",
+        "both",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra finesse score --initial-mask 000000000000000000000000000000000000000000000000000000000000 --height 2 --placements T:spawn:3:0 --queue T --hold empty --pattern-knowledge both --format text",
+      "alias_text_web_command": "clearra finesse score --initial-mask 000000000000000000000000000000000000000000000000000000000000 --height 2 --placements T:spawn:3:0 --queue T --hold empty --pattern-knowledge both --format text",
+      "canonical_web_command": "clearra finesse score --initial-mask 000000000000000000000000000000000000000000000000000000000000 --height 2 --placements T:spawn:3:0 --queue T --hold empty --pattern-knowledge both",
+      "alias_web_command": "clearra finesse score --initial-mask 000000000000000000000000000000000000000000000000000000000000 --height 2 --placements T:spawn:3:0 --queue T --hold empty --pattern-knowledge both"
+    },
+    {
+      "id": "setup.joint/pc-setup/",
+      "capability_id": "setup.joint",
+      "classification": "fixed-preset",
+      "problem_contract_id": "setup-ranking-joint",
+      "result_contract_id": "setup-ranking",
+      "canonical_path": [
+        "setup",
+        "joint"
+      ],
+      "alias_path": [
+        "pc-setup"
+      ],
+      "canonical_input": "setup-v2",
+      "alias_input": "remaining",
+      "canonical_options": [
+        {
+          "name": "remaining",
+          "value": "IOTS"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "remaining",
+          "value": "IOTS"
+        }
+      ],
+      "canonical_text": "$setup joint --remaining IOTS",
+      "alias_text": "$pc-setup --remaining IOTS",
+      "canonical_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "all"
+      ],
+      "alias_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "all"
+      ],
+      "canonical_text_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "all",
+        "--no-tablebase",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "all",
+        "--no-tablebase",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra setup-finder --remaining IOTS --priority all --no-tablebase --format text",
+      "alias_text_web_command": "clearra setup-finder --remaining IOTS --priority all --no-tablebase --format text",
+      "canonical_web_command": "clearra setup-finder --remaining IOTS --priority all",
+      "alias_web_command": "clearra setup-finder --remaining IOTS --priority all",
+      "conflict": {
+        "option": "priority",
+        "value": "build"
+      }
+    },
+    {
+      "id": "setup.build/best-setup/",
+      "capability_id": "setup.build",
+      "classification": "fixed-preset",
+      "problem_contract_id": "setup-ranking-build",
+      "result_contract_id": "setup-ranking",
+      "canonical_path": [
+        "setup",
+        "build"
+      ],
+      "alias_path": [
+        "best-setup"
+      ],
+      "canonical_input": "setup-v2",
+      "alias_input": "remaining",
+      "canonical_options": [
+        {
+          "name": "remaining",
+          "value": "IOTS"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "remaining",
+          "value": "IOTS"
+        }
+      ],
+      "canonical_text": "$setup build --remaining IOTS",
+      "alias_text": "$best-setup --remaining IOTS",
+      "canonical_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "build"
+      ],
+      "alias_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "build"
+      ],
+      "canonical_text_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "build",
+        "--no-tablebase",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "build",
+        "--no-tablebase",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra setup-finder --remaining IOTS --priority build --no-tablebase --format text",
+      "alias_text_web_command": "clearra setup-finder --remaining IOTS --priority build --no-tablebase --format text",
+      "canonical_web_command": "clearra setup-finder --remaining IOTS --priority build",
+      "alias_web_command": "clearra setup-finder --remaining IOTS --priority build",
+      "conflict": {
+        "option": "priority",
+        "value": "pc"
+      }
+    },
+    {
+      "id": "setup.pc/dpc-finder/",
+      "capability_id": "setup.pc",
+      "classification": "fixed-preset",
+      "problem_contract_id": "setup-ranking-pc",
+      "result_contract_id": "setup-ranking",
+      "canonical_path": [
+        "setup",
+        "pc"
+      ],
+      "alias_path": [
+        "dpc-finder"
+      ],
+      "canonical_input": "setup-v2",
+      "alias_input": "remaining",
+      "canonical_options": [
+        {
+          "name": "remaining",
+          "value": "IOTS"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "remaining",
+          "value": "IOTS"
+        }
+      ],
+      "canonical_text": "$setup pc --remaining IOTS",
+      "alias_text": "$dpc-finder --remaining IOTS",
+      "canonical_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "pc"
+      ],
+      "alias_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "pc"
+      ],
+      "canonical_text_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "pc",
+        "--no-tablebase",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "setup-finder",
+        "--remaining",
+        "IOTS",
+        "--priority",
+        "pc",
+        "--no-tablebase",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra setup-finder --remaining IOTS --priority pc --no-tablebase --format text",
+      "alias_text_web_command": "clearra setup-finder --remaining IOTS --priority pc --no-tablebase --format text",
+      "canonical_web_command": "clearra setup-finder --remaining IOTS --priority pc",
+      "alias_web_command": "clearra setup-finder --remaining IOTS --priority pc",
+      "conflict": {
+        "option": "priority",
+        "value": "all"
+      }
+    },
+    {
+      "id": "forward.spin/spin/",
+      "capability_id": "forward.spin",
+      "classification": "equivalence",
+      "problem_contract_id": "ordered-forward-spin-search",
+      "result_contract_id": "forward-spin",
+      "canonical_path": [
+        "forward",
+        "spin"
+      ],
+      "alias_path": [
+        "spin"
+      ],
+      "canonical_input": "forward-spin-v2",
+      "alias_input": "spin",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "__________"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": "1"
+        },
+        {
+          "name": "spin-category",
+          "value": "t"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "__________"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        }
+      ],
+      "canonical_text": "$forward spin --field __________ --next I --lines 1 --spin-category t",
+      "alias_text": "$spin --field __________ --next I",
+      "canonical_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--rule",
+        "srs-plus",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t"
+      ],
+      "alias_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t"
+      ],
+      "canonical_text_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--rule",
+        "srs-plus",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --height 8 --queue I --hold --spin-profile t-spins --rule srs-plus --lines 1 --spin-category t --format text",
+      "alias_text_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --queue I --hold --spin-profile t-spins --lines 1 --spin-category t --format text",
+      "canonical_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --height 8 --queue I --hold --spin-profile t-spins --rule srs-plus --lines 1 --spin-category t",
+      "alias_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --queue I --hold --spin-profile t-spins --lines 1 --spin-category t"
+    },
+    {
+      "id": "forward.spin/spin-cover/",
+      "capability_id": "forward.spin",
+      "classification": "equivalence",
+      "problem_contract_id": "ordered-forward-spin-search",
+      "result_contract_id": "forward-spin",
+      "canonical_path": [
+        "forward",
+        "spin"
+      ],
+      "alias_path": [
+        "spin-cover"
+      ],
+      "canonical_input": "forward-spin-v2",
+      "alias_input": "spin",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "__________"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        },
+        {
+          "name": "lines",
+          "value": "1"
+        },
+        {
+          "name": "spin-category",
+          "value": "t"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "__________"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        }
+      ],
+      "canonical_text": "$forward spin --field __________ --next I --lines 1 --spin-category t",
+      "alias_text": "$spin-cover --field __________ --next I",
+      "canonical_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--rule",
+        "srs-plus",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t"
+      ],
+      "alias_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t"
+      ],
+      "canonical_text_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--rule",
+        "srs-plus",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "spin-finder",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "t-spins",
+        "--lines",
+        "1",
+        "--spin-category",
+        "t",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --height 8 --queue I --hold --spin-profile t-spins --rule srs-plus --lines 1 --spin-category t --format text",
+      "alias_text_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --queue I --hold --spin-profile t-spins --lines 1 --spin-category t --format text",
+      "canonical_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --height 8 --queue I --hold --spin-profile t-spins --rule srs-plus --lines 1 --spin-category t",
+      "alias_web_command": "clearra spin-finder --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --queue I --hold --spin-profile t-spins --lines 1 --spin-category t"
+    },
+    {
+      "id": "forward.damage/damage/",
+      "capability_id": "forward.damage",
+      "classification": "equivalence",
+      "problem_contract_id": "ordered-forward-damage-search",
+      "result_contract_id": "forward-damage",
+      "canonical_path": [
+        "forward",
+        "damage"
+      ],
+      "alias_path": [
+        "damage"
+      ],
+      "canonical_input": "forward-damage-v2",
+      "alias_input": "fixed-next",
+      "canonical_options": [
+        {
+          "name": "field",
+          "value": "__________"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        }
+      ],
+      "alias_options": [
+        {
+          "name": "field",
+          "value": "__________"
+        },
+        {
+          "name": "next",
+          "value": "I"
+        }
+      ],
+      "canonical_text": "$forward damage --field __________ --next I",
+      "alias_text": "$damage --field __________ --next I",
+      "canonical_argv": [
+        "damage",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "all-mini-plus",
+        "--rule",
+        "srs-plus",
+        "--initial-b2b",
+        "0"
+      ],
+      "alias_argv": [
+        "damage",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--queue",
+        "I"
+      ],
+      "canonical_text_argv": [
+        "damage",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--height",
+        "8",
+        "--queue",
+        "I",
+        "--hold",
+        "--spin-profile",
+        "all-mini-plus",
+        "--rule",
+        "srs-plus",
+        "--initial-b2b",
+        "0",
+        "--format",
+        "text"
+      ],
+      "alias_text_argv": [
+        "damage",
+        "--board-mask-v1",
+        "000000000000000000000000000000000000000000000000000000000000",
+        "--queue",
+        "I",
+        "--format",
+        "text"
+      ],
+      "canonical_text_web_command": "clearra damage --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --height 8 --queue I --hold --spin-profile all-mini-plus --rule srs-plus --initial-b2b 0 --format text",
+      "alias_text_web_command": "clearra damage --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --queue I --format text",
+      "canonical_web_command": "clearra damage --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --height 8 --queue I --hold --spin-profile all-mini-plus --rule srs-plus --initial-b2b 0",
+      "alias_web_command": "clearra damage --board-mask-v1 000000000000000000000000000000000000000000000000000000000000 --queue I"
+    }
+  ]
+}

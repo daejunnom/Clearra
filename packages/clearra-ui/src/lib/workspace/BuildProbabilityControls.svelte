@@ -3,6 +3,8 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
+    BUILD_SOURCE_PIECES_MAX,
+    BUILD_SOURCE_PIECES_MIN,
     updateBuildProbabilityDraft,
     type BuildProbabilityRequest,
     type BuildProbabilityValidationCode
@@ -29,6 +31,10 @@
   function setAggregation(aggregation: BuildProbabilityRequest['aggregation']) {
     patch({ aggregation });
   }
+
+  function setSourcePieces(input: HTMLInputElement) {
+    patch({ sourcePieces: input.value === '' ? null : input.valueAsNumber });
+  }
 </script>
 
 <WorkspaceControlPanel ariaLabel={label('buildProbability')}>
@@ -46,6 +52,21 @@
       />
     </label>
     <QueuePatternHelp {language} />
+
+    <label class="workspace-field">
+      <span>{label('sourcePieces')}</span>
+      <input
+        type="number"
+        min={BUILD_SOURCE_PIECES_MIN}
+        max={BUILD_SOURCE_PIECES_MAX}
+        step="1"
+        value={request.sourcePieces ?? ''}
+        placeholder={label('sourcePiecesAutomatic')}
+        aria-describedby="build-source-pieces-help"
+        on:input={(event) => setSourcePieces(event.currentTarget as HTMLInputElement)}
+      />
+      <small id="build-source-pieces-help" class="workspace-field-help">{label('sourcePiecesHelp')}</small>
+    </label>
 
     <div class="workspace-switch-row">
       <label class="workspace-switch-label">
@@ -134,6 +155,20 @@
         <span>{label('preserveB2B')}</span>
       </label>
     </div>
+    <div class="solution-probabilities-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.solutionProbabilities}
+          disabled={request.aggregation === 'tiling'}
+          on:change={(event) => patch({
+            solutionProbabilities: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('solutionProbabilities')}</span>
+      </label>
+    </div>
     <div class="worker-policy-control">
       <label class="workspace-switch-label">
         <input
@@ -174,6 +209,7 @@
 
 <style>
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
+  .solution-probabilities-control { display: grid; gap: 5px; margin-top: 14px; }
   .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .dependency-analysis-control { display: grid; gap: 5px; margin-top: 14px; }
 </style>

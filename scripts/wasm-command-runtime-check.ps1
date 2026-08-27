@@ -135,11 +135,17 @@ import { pathToFileURL } from 'node:url';
 const [bindingsPath, wasmPath] = process.argv.slice(2);
 const bindings = await import(pathToFileURL(bindingsPath).href);
 const wasm = await bindings.default({ module_or_path: fs.readFileSync(wasmPath) });
-const readOutput = () => new TextDecoder().decode(new Uint8Array(
-  wasm.memory.buffer,
-  wasm.clearra_wasm_output_ptr(),
-  wasm.clearra_wasm_output_len(),
-));
+const readOutput = () => {
+  try {
+    return new TextDecoder().decode(new Uint8Array(
+      wasm.memory.buffer,
+      wasm.clearra_wasm_output_ptr(),
+      wasm.clearra_wasm_output_len(),
+    ));
+  } finally {
+    wasm.clearra_wasm_output_release();
+  }
+};
 const command = new TextEncoder().encode(
   'clearra pc --lines 6 --backend cpu --queue IOTSZJLIOTSZJLI',
 );

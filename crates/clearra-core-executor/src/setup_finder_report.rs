@@ -100,6 +100,26 @@ impl SetupFinderReport {
     pub fn hold_conditions(&self) -> &[SetupHoldConditionReport] {
         &self.hold_conditions
     }
+
+    pub(crate) fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = 0_u128;
+        for value in [
+            &self.remaining_pieces,
+            &self.queue_based_pieces,
+            &self.next_cycle_remaining_pieces,
+            &self.geometry_family_count,
+        ] {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
+        }
+        bytes = bytes.checked_add(
+            (self.hold_conditions.capacity() as u128)
+                .checked_mul(core::mem::size_of::<SetupHoldConditionReport>() as u128)?,
+        )?;
+        for condition in &self.hold_conditions {
+            bytes = bytes.checked_add(condition.checked_nested_retained_bytes()?)?;
+        }
+        Some(bytes)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,6 +211,19 @@ impl SetupHoldConditionReport {
             self.complete,
             vec![candidate],
         ))
+    }
+
+    fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.condition_id.capacity() as u128)
+            .checked_add(self.pattern_expression.capacity() as u128)?;
+        bytes = bytes.checked_add(
+            (self.candidates.capacity() as u128)
+                .checked_mul(core::mem::size_of::<SetupCandidateReport>() as u128)?,
+        )?;
+        for candidate in &self.candidates {
+            bytes = bytes.checked_add(candidate.checked_nested_retained_bytes()?)?;
+        }
+        Some(bytes)
     }
 }
 
@@ -296,6 +329,33 @@ impl SetupCandidateReport {
 
     pub fn solution_paths_complete(&self) -> bool {
         self.solution_paths_complete
+    }
+
+    fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = 0_u128;
+        for value in [
+            &self.setup_id,
+            &self.build_probability,
+            &self.joint_probability,
+            &self.conditional_pc_probability,
+        ] {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
+        }
+        bytes = bytes.checked_add(
+            (self.representative_path.capacity() as u128)
+                .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+        )?;
+        bytes = bytes.checked_add(
+            (self.solution_paths.capacity() as u128)
+                .checked_mul(core::mem::size_of::<Vec<CorePathStep>>() as u128)?,
+        )?;
+        for path in &self.solution_paths {
+            bytes = bytes.checked_add(
+                (path.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+            )?;
+        }
+        Some(bytes)
     }
 }
 

@@ -2,7 +2,10 @@ use crate::{
     buildup::{CBuildUpTraceStep, CKickEvidenceView},
     problem::CBuildUpProblem,
 };
-use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
+use clearra_core_domain::{
+    execution_cancellation::ExecutionCancellationToken,
+    resource::{ExecutionAvailability, ExecutionAvailabilityReason, ResourceReport},
+};
 
 pub use crate::raw::buildup_types::{CNativeBuildVariantBuffer, CNativeBuildVariantView};
 
@@ -192,6 +195,42 @@ impl NativeBuildUpWorkspaceOutcome<'_> {
 }
 
 impl NativeBuildUpWorkspace {
+    pub const fn host_buffer_allocation_bytes() -> u128 {
+        std::mem::size_of::<CNativeBuildVariantBuffer>() as u128
+    }
+
+    /// Constructs the workspace only after the known Rust host buffer fits,
+    /// then measures the opaque native owner immediately. An over-cap native
+    /// workspace is dropped before it can reach a worker or a cache.
+    pub fn try_new_with_memory_limit(
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<Self, NativeCoreError> {
+        let projected_minimum = already_retained_bytes
+            .checked_add(Self::host_buffer_allocation_bytes())
+            .ok_or_else(|| workspace_memory_error(u128::MAX))?;
+        ensure_workspace_memory_limit(projected_minimum, max_memory_bytes)?;
+
+        let workspace = Self::new();
+        #[cfg(feature = "native-c-core")]
+        {
+            workspace.abi_status?;
+            if workspace.native_workspace.is_none() {
+                return Err(workspace_memory_error(
+                    projected_minimum.checked_add(1).unwrap_or(u128::MAX),
+                ));
+            }
+        }
+        let retained_bytes = workspace
+            .checked_retained_bytes()
+            .ok_or_else(|| workspace_memory_error(u128::MAX))?;
+        let observed_total = already_retained_bytes
+            .checked_add(retained_bytes)
+            .ok_or_else(|| workspace_memory_error(u128::MAX))?;
+        ensure_workspace_memory_limit(observed_total, max_memory_bytes)?;
+        Ok(workspace)
+    }
+
     pub fn new() -> Self {
         #[cfg(feature = "native-c-core")]
         let abi_status = ensure_workspace_abi();
@@ -228,16 +267,35 @@ impl NativeBuildUpWorkspace {
         buffer_bytes
     }
 
+    pub fn checked_retained_bytes(&self) -> Option<u128> {
+        let buffer_bytes = Self::host_buffer_allocation_bytes();
+        #[cfg(feature = "native-c-core")]
+        {
+            if self.abi_status.is_err() {
+                return Some(buffer_bytes);
+            }
+            let native_bytes = self.native_workspace.as_ref().map_or(0, |workspace| {
+                record_workspace_raw_c_entry();
+                workspace.retained_bytes()
+            });
+            return buffer_bytes.checked_add(native_bytes as u128);
+        }
+        #[cfg(not(feature = "native-c-core"))]
+        Some(buffer_bytes)
+    }
+
     pub const fn host_buffer_bytes(&self) -> usize {
         std::mem::size_of::<CNativeBuildVariantBuffer>()
     }
 
     #[cfg(feature = "native-c-core")]
-    pub(crate) fn raw_pointer(&mut self) -> Result<*mut core::ffi::c_void, NativeCoreError> {
+    pub(crate) fn raw_handle(
+        &mut self,
+    ) -> Result<crate::raw::buildup_workspace::RawBuildUpWorkspaceHandle<'_>, NativeCoreError> {
         self.ensure_abi()?;
         self.native_workspace
             .as_mut()
-            .map(crate::raw::buildup_workspace::RawBuildUpWorkspace::as_mut_ptr)
+            .map(crate::raw::buildup_workspace::RawBuildUpWorkspace::handle)
             .ok_or(NativeCoreError::Unavailable)
     }
 
@@ -415,9 +473,62 @@ impl NativeBuildUpWorkspace {
     }
 }
 
+fn workspace_memory_error(required_memory_bytes: u128) -> NativeCoreError {
+    NativeCoreError::PackingIncomplete {
+        status: C_BUILDUP_STATUS_CAPACITY_EXCEEDED,
+        resource_report: ResourceReport::admission_failure(
+            ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+                .with_required_memory_bytes(required_memory_bytes),
+        ),
+    }
+}
+
+fn ensure_workspace_memory_limit(
+    required_memory_bytes: u128,
+    max_memory_bytes: u128,
+) -> Result<(), NativeCoreError> {
+    if required_memory_bytes > max_memory_bytes {
+        return Err(workspace_memory_error(required_memory_bytes));
+    }
+    Ok(())
+}
+
 impl Default for NativeBuildUpWorkspace {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod memory_contract_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_host_buffer_is_rejected_before_native_construction() {
+        let required = NativeBuildUpWorkspace::host_buffer_allocation_bytes();
+        let error = ensure_workspace_memory_limit(required, required - 1)
+            .expect_err("one byte below the host buffer must fail");
+        let NativeCoreError::PackingIncomplete {
+            resource_report, ..
+        } = error
+        else {
+            panic!("expected typed resource failure");
+        };
+        assert_eq!(
+            resource_report
+                .execution_availability()
+                .required_memory_bytes(),
+            Some(required)
+        );
+        assert!(!resource_report.execution_started());
+        assert!(!resource_report.result_complete());
+    }
+
+    #[test]
+    fn workspace_projection_adds_existing_retained_bytes_once() {
+        let host = NativeBuildUpWorkspace::host_buffer_allocation_bytes();
+        assert!(ensure_workspace_memory_limit(host + 7, host + 7).is_ok());
+        assert!(ensure_workspace_memory_limit(host + 7, host + 6).is_err());
     }
 }
 

@@ -7,6 +7,11 @@ use crate::{
     },
 };
 
+/// Legacy Clearra metadata-page transform.
+///
+/// This type operates on `FumenLikeTrace` comment payloads and is not the
+/// product authority for v115 field, color, flag, or operation transforms.
+/// Product utility commands must use `ActualFumenDocumentTransform`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FumenTransformContract;
 

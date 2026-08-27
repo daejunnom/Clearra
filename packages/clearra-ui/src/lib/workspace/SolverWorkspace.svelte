@@ -12,6 +12,11 @@
     updateDesktopRequest
   } from '../stores';
   import {
+    loadNextProductPage as loadNextDesktopProductPage,
+    loadProductMemberPage as loadDesktopProductMemberPage,
+    releaseProductPages as releaseDesktopProductPages
+  } from '../host';
+  import {
     clearWasmTerminalResult,
     DEFAULT_RUNTIME_WARMUP_POLICY,
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
@@ -114,6 +119,7 @@
     stopElapsedTimer();
     workerController.dispose();
     if (runtime === 'desktop') {
+      void releaseDesktopProductPages().catch(() => undefined);
       disposeDesktopJobPolling();
       clearDesktopTerminalResult();
     } else {
@@ -319,6 +325,17 @@
     loadSolutionPage={runtime === 'web'
       ? (offset, limit, signal) => workerController.loadSolutionPage(offset, limit, signal)
       : null}
+    loadNextProductPage={runtime === 'web'
+      ? (signal) => workerController.loadNextProductPage(signal)
+      : (signal) => loadNextDesktopProductPage(10_000, signal)}
+    loadProductMemberPage={runtime === 'web'
+      ? (outerPageNumber, memberPageNumber, signal) =>
+          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal)
+      : (outerPageNumber, memberPageNumber, signal) =>
+          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal)}
+    releaseProductPages={runtime === 'web'
+      ? () => workerController.releaseProductPages()
+      : () => releaseDesktopProductPages()}
   />
 </WorkspaceShell>
 

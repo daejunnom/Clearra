@@ -31,7 +31,10 @@ fn workspace_abi_mismatch_rejects_every_public_raw_c_entry_before_calling_c() {
         let mut workspace = NativeBuildUpWorkspace::new();
 
         assert_eq!(workspace.retained_bytes(), workspace.host_buffer_bytes());
-        assert_eq!(workspace.raw_pointer(), Err(expected_error));
+        assert!(matches!(
+            workspace.raw_handle(),
+            Err(error) if error == expected_error
+        ));
         assert_eq!(
             workspace.buildup_exists_with_cancellation(&problem, &cancellation),
             Err(expected_error)

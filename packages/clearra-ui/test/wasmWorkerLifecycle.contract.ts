@@ -11,15 +11,19 @@ import {
 import {
   applyWasmWorkerEvent,
   clearWasmTerminalResult,
+  runWasmCommand,
   updateWasmCommandText,
   wasmWorkerState
 } from '../src/lib/wasm/wasmWorkerStore';
 import type {
+  ClearraProductPageWorkerEvent,
   ClearraSolutionPageWorkerEvent,
   ClearraWasmWorkerEvent
 } from '../src/lib/wasm/wasmCommandClient';
+import { workspaceViewFromWasm } from '../src/lib/workspace/workspaceRuntime';
 
 const originalState = get(wasmWorkerState);
+assert.doesNotMatch(originalState.request.commandText, /\bverify\b/i);
 
 async function cooperativeCancellationRemainsCancellation() {
   resetState();
@@ -169,6 +173,213 @@ async function nonSuccessFinalResponseRemainsFailure() {
   assert.equal(state.response?.status, 'execution-failed');
 }
 
+async function failedResponsePreservesTypedResourceEvidence() {
+  resetState();
+  const availability = {
+    state: 'unavailable' as const,
+    reason: 'dense-pattern-representation-unavailable' as const,
+    surface: 'browser-wasm32' as const,
+    descriptor_pattern_count: '35384428800',
+    dense_pattern_count: '35384428800',
+    required_dense_bytes: '4423053600',
+    required_memory_bytes: '8846107200'
+  };
+  const resourceReport = {
+    solver_executed: false,
+    memory_status: 'not-executed',
+    truncated: false,
+    truncation_reason: null,
+    peak_frontier_states: 0,
+    peak_candidate_rows: 0,
+    peak_hash_buckets: 0,
+    peak_gpu_bytes: 0,
+    peak_cpu_bytes: 0,
+    build_worker_backlog_peak: 0,
+    coverage_rows_emitted: 0,
+    probability_complete: false,
+    execution_availability: availability,
+    result_completeness: 'not-executed' as const
+  };
+  applyWasmWorkerEvent({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'failed',
+    job_id: 18,
+    diagnostics: {
+      diagnostics: [
+        {
+          code: 'E_RESOURCE_ADMISSION',
+          severity: 'error',
+          message: 'dense execution unavailable'
+        }
+      ]
+    },
+    resource_report: resourceReport,
+    execution_availability: availability,
+    result_completeness: 'not-executed',
+    response: {
+      status: 'execution-failed',
+      diagnostics: [
+        {
+          code: 'E_RESOURCE_ADMISSION',
+          severity: 'error',
+          message: 'dense execution unavailable'
+        }
+      ],
+      resource_report: resourceReport
+    }
+  } as unknown as ClearraWasmWorkerEvent);
+
+  const state = get(wasmWorkerState);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.response?.resource_report.solver_executed, false);
+  assert.equal(
+    state.response?.resource_report.execution_availability.required_dense_bytes,
+    '4423053600'
+  );
+  assert.equal(
+    state.response?.resource_report.execution_availability.required_memory_bytes,
+    '8846107200'
+  );
+  assert.equal(state.response?.resource_report.result_completeness, 'not-executed');
+  assert.match(state.terminalLines.at(-1) ?? '', /35384428800/u);
+}
+
+async function responseNullFailurePreservesTopLevelResourceAxes() {
+  resetState();
+  const availability = {
+    state: 'exhausted' as const,
+    reason: 'memory-budget-exceeded' as const,
+    surface: 'browser-wasm32' as const,
+    descriptor_pattern_count: '35384428800',
+    dense_pattern_count: '35384428800',
+    required_dense_bytes: '4423053600',
+    required_memory_bytes: '8846107200'
+  };
+  const resourceReport = {
+    solver_executed: false,
+    memory_status: 'not-executed',
+    truncated: false,
+    truncation_reason: null,
+    peak_frontier_states: 0,
+    peak_candidate_rows: 0,
+    peak_hash_buckets: 0,
+    peak_gpu_bytes: 0,
+    peak_cpu_bytes: 0,
+    build_worker_backlog_peak: 0,
+    coverage_rows_emitted: 0,
+    probability_complete: false,
+    execution_availability: availability,
+    result_completeness: 'not-executed' as const
+  };
+  applyWasmWorkerEvent({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'failed',
+    job_id: 19,
+    diagnostics: { diagnostics: [] },
+    response: null,
+    resource_report: resourceReport,
+    execution_availability: availability,
+    result_completeness: 'not-executed'
+  });
+
+  let state = get(wasmWorkerState);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.response, null);
+  assert.deepEqual(state.resourceReport, resourceReport);
+  assert.deepEqual(state.executionAvailability, availability);
+  assert.equal(state.resultCompleteness, 'not-executed');
+  assert.deepEqual(workspaceViewFromWasm(state).resourceReport, resourceReport);
+
+  const worker = new FakeWorker();
+  runWasmCommand(worker as unknown as Worker);
+  state = get(wasmWorkerState);
+  assert.equal(state.resourceReport, null);
+  assert.equal(state.executionAvailability, null);
+  assert.equal(state.resultCompleteness, null);
+  assert.equal(workspaceViewFromWasm(state).resourceReport, null);
+}
+
+async function inconsistentFailedResourceReportsAreRejected() {
+  resetState();
+  const availability = {
+    state: 'exhausted' as const,
+    reason: 'memory-budget-exceeded' as const,
+    surface: 'browser-wasm32' as const,
+    descriptor_pattern_count: '1058400',
+    dense_pattern_count: '1058400',
+    required_dense_bytes: '132304',
+    required_memory_bytes: '17066704'
+  };
+  const resourceReport = {
+    solver_executed: false,
+    memory_status: 'not-executed',
+    truncated: false,
+    truncation_reason: null,
+    peak_frontier_states: 0,
+    peak_candidate_rows: 0,
+    peak_hash_buckets: 0,
+    peak_gpu_bytes: 0,
+    peak_cpu_bytes: 0,
+    build_worker_backlog_peak: 0,
+    coverage_rows_emitted: 0,
+    probability_complete: false,
+    execution_availability: availability,
+    result_completeness: 'not-executed' as const
+  };
+  applyWasmWorkerEvent({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'failed',
+    job_id: 20,
+    diagnostics: { diagnostics: [] },
+    response: {
+      status: 'execution-failed',
+      diagnostics: [],
+      resource_report: resourceReport
+    },
+    resource_report: {
+      ...resourceReport,
+      execution_availability: {
+        ...availability,
+        required_memory_bytes: '17066705'
+      }
+    },
+    execution_availability: availability,
+    result_completeness: 'not-executed'
+  } as unknown as ClearraWasmWorkerEvent);
+
+  const state = get(wasmWorkerState);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.response, null);
+  assert.equal(state.resourceReport, null);
+  assert.equal(state.executionAvailability, null);
+  assert.equal(state.resultCompleteness, 'incomplete');
+  assert.equal(state.diagnostics.at(-1)?.code, 'E_WASM_RESOURCE_REPORT_MISMATCH');
+  assert.equal(workspaceViewFromWasm(state).resourceReport, null);
+}
+
+async function legacyStringFailureRemainsIncomplete() {
+  resetState();
+  applyWasmWorkerEvent({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'failed',
+    job_id: 21,
+    diagnostics: {
+      diagnostics: [
+        { code: 'E_WASM_LEGACY_FAILURE', severity: 'error', message: 'legacy failure' }
+      ]
+    }
+  });
+
+  const state = get(wasmWorkerState);
+  assert.equal(state.resourceReport, null);
+  assert.equal(state.executionAvailability, null);
+  assert.equal(state.resultCompleteness, 'incomplete');
+}
+
 async function clearingTerminalResultReleasesLogPayloads() {
   resetState();
   wasmWorkerState.update((state) => ({
@@ -274,6 +485,83 @@ async function mismatchedSolutionPageResponseIsRejected() {
   controller.dispose();
 }
 
+async function productPageRequestsReleaseOnCancelAndDispose() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  controller.prewarm(1);
+  worker.emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1
+  } as unknown as ClearraWasmWorkerEvent);
+
+  const pending = controller.loadNextProductPage();
+  assert.equal(
+    worker.messages.some((message) =>
+      (message as { type?: string; action?: string }).type === 'load_product_page' &&
+      (message as { action?: string }).action === 'next'
+    ),
+    true
+  );
+  controller.cancel();
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(
+    worker.messages.filter(
+      (message) => (message as { type?: string }).type === 'release_product_pages'
+    ).length,
+    1
+  );
+
+  const member = controller.loadProductMemberPage(1, 1);
+  controller.dispose();
+  await assert.rejects(member, /disposed/);
+}
+
+async function productPageResponsesRemainStringExact() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  controller.prewarm(1);
+  const request = controller.loadProductMemberPage(2, 1);
+  const posted = worker.messages.find(
+    (message) =>
+      (message as { type?: string; action?: string }).type === 'load_product_page' &&
+      (message as { action?: string }).action === 'get'
+  ) as { requestId: number };
+  worker.emit({
+    type: 'product_page',
+    request_id: posted.requestId,
+    payload: {
+      schema_version: 1,
+      runtime: 'clearra-wasm',
+      product_page_kind: 'coverage-portfolio',
+      state: 'page',
+      page: {
+        page_contract: 'portfolio-alternative-page.v1',
+        member_page_contract: 'portfolio-member-page.v1',
+        set_identity_sha256: 'a'.repeat(64),
+        candidate_map_sha256: 'b'.repeat(64),
+        alternative_index: '184467440737095516160',
+        optimal_cardinality: '1',
+        known_alternative_count: '184467440737095516160',
+        total_alternative_count: null,
+        enumeration_complete: false,
+        member_page_number: '1',
+        total_member_pages: '1',
+        members: [{ candidate_id: '18446744073709551615', normalized_solution_key: 'k' }]
+      }
+    }
+  });
+  const response = await request;
+  assert.equal(response.state, 'page');
+  if (response.product_page_kind === 'coverage-portfolio' && response.state === 'page') {
+    assert.equal(response.page.alternative_index, '184467440737095516160');
+    assert.equal(response.page.members[0]?.candidate_id, '18446744073709551615');
+  }
+  controller.dispose();
+}
+
 function controllerFor(worker: FakeWorker) {
   return new WasmTerminalWorkerController(() => worker as unknown as Worker);
 }
@@ -292,11 +580,14 @@ function resetState() {
     terminalLines: [],
     diagnostics: [],
     response: null,
+    resourceReport: null,
+    executionAvailability: null,
+    resultCompleteness: null,
     searchReport: null,
     webgpuBackend: null,
     error: null
   });
-  updateWasmCommandText('clearra verify kicks');
+  updateWasmCommandText('clearra pc path --lines 4 --queue IOTSZ');
 }
 
 function started(jobId: number): ClearraWasmWorkerEvent {
@@ -323,7 +614,7 @@ function delay(milliseconds: number) {
 }
 
 class FakeWorker {
-  onmessage: ((event: MessageEvent<ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent>) => void) | null = null;
+  onmessage: ((event: MessageEvent<ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent | ClearraProductPageWorkerEvent>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: (() => void) | null = null;
   messages: unknown[] = [];
@@ -337,8 +628,8 @@ class FakeWorker {
     this.terminateCount += 1;
   }
 
-  emit(event: ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent) {
-    this.onmessage?.({ data: event } as MessageEvent<ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent>);
+  emit(event: ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent | ClearraProductPageWorkerEvent) {
+    this.onmessage?.({ data: event } as MessageEvent<ClearraWasmWorkerEvent | ClearraSolutionPageWorkerEvent | ClearraProductPageWorkerEvent>);
   }
 }
 
@@ -351,11 +642,17 @@ try {
   await duplicateRunIsRejectedBeforePosting();
   await workerCreationFailureBecomesTerminalFailure();
   await nonSuccessFinalResponseRemainsFailure();
+  await failedResponsePreservesTypedResourceEvidence();
+  await responseNullFailurePreservesTopLevelResourceAxes();
+  await inconsistentFailedResourceReportsAreRejected();
+  await legacyStringFailureRemainsIncomplete();
   await clearingTerminalResultReleasesLogPayloads();
   await abortingSolutionPageRequestReleasesControllerOwnership();
   await newRunRejectsOutstandingSolutionPageRequest();
   await outstandingSolutionPageRequestPreventsWorkerTransfer();
   await mismatchedSolutionPageResponseIsRejected();
+  await productPageRequestsReleaseOnCancelAndDispose();
+  await productPageResponsesRemainStringExact();
 } finally {
   wasmWorkerState.set(originalState);
 }
@@ -369,10 +666,16 @@ console.log(
     duplicate_run: 'rejected',
     worker_creation_failure: 'reported',
     non_success_response: 'failed',
+    typed_failed_response: 'preserved',
+    response_null_resource_axes: 'preserved-and-reset',
+    resource_report_mismatch: 'rejected',
+    legacy_failure_completeness: 'incomplete',
     terminal_log_release: 'cleared',
     solution_page_abort: 'released',
     solution_page_new_run: 'rejected',
     solution_page_worker_transfer: 'guarded',
-    solution_page_response_identity: 'validated'
+    solution_page_response_identity: 'validated',
+    product_page_release_lifecycle: 'cancelled-and-disposed',
+    product_page_decimal_identity: 'string-exact'
   })
 );

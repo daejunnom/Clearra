@@ -7,7 +7,6 @@ mod packing;
 mod packing_candidate_sink;
 #[cfg(any(test, feature = "test-support"))]
 mod packing_geometry_materializer;
-#[cfg(any(test, feature = "test-support"))]
 mod packing_outcome;
 mod pruning;
 mod resource;
@@ -59,7 +58,8 @@ pub use packing_geometry_materializer::{
     C_NATIVE_PACKING_GEOMETRY_PATH_MAX_OPERATIONS,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use packing_outcome::{NativePackingOutcome, NativePackingStreamOutcome};
+pub use packing_outcome::NativePackingOutcome;
+pub use packing_outcome::NativePackingStreamOutcome;
 pub use pruning::{
     CNativePruningMinimalRecord, CNativePruningProofLedger, CNativePruningProofLedgerEntry,
     NativePruningEvidence, NativePruningLedger, NativePruningLedgerError,

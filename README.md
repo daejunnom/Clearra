@@ -36,8 +36,6 @@ clearra rules
 clearra scoring
 clearra convert
 clearra inspect
-clearra verify
-clearra verify kicks
 ```
 
 `clearra failed-queue` runs the reverse PC search and returns the exact
@@ -65,9 +63,9 @@ input and output contracts; it does not run a Java process or bundle another
 solver.
 
 Global options such as `--format text|json|fumen-like`, `--lang en|ko`,
-`--verbose`, `--diagnostics`, and `--verbose-paths` may appear before or after
-the command. Default text output is a short human summary; JSON is the complete
-stable contract.
+`--verbose`, and `--verbose-paths` may appear before or after the command.
+Default text output is a short human summary; JSON is the complete stable
+contract.
 
 ## Verification
 

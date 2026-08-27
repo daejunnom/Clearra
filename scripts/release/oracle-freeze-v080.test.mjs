@@ -1,0 +1,201 @@
+import assert from "node:assert/strict";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const oracleRoot = fileURLToPath(new URL("./oracle/", import.meta.url));
+const layerBuilder = join(oracleRoot, "create-local-layers-v080.sh");
+const freezeHelper = join(oracleRoot, "clearra-oracle-freeze-v080");
+
+const overlayEntries = [
+  "apps/clearra-discord-bot/src/admin",
+  "apps/clearra-discord-bot/src/admin/access-runtime.mjs",
+  "apps/clearra-discord-bot/src/admin/command-identity.mjs",
+  "apps/clearra-discord-bot/src/admin/discord-history-hydrator.mjs",
+  "apps/clearra-discord-bot/src/admin/discord-observer.mjs",
+  "apps/clearra-discord-bot/src/admin/document.mjs",
+  "apps/clearra-discord-bot/src/admin/identity.mjs",
+  "apps/clearra-discord-bot/src/admin/local-publisher.mjs",
+  "apps/clearra-discord-bot/src/admin/main.mjs",
+  "apps/clearra-discord-bot/src/admin/oracle-telemetry.conf",
+  "apps/clearra-discord-bot/src/admin/oracle-usage-tracker.mjs",
+  "apps/clearra-discord-bot/src/admin/runtime-extension.mjs",
+  "apps/clearra-discord-bot/src/admin/server.mjs",
+  "apps/clearra-discord-bot/src/admin/slash-runtime.mjs",
+  "apps/clearra-discord-bot/src/admin/TELEMETRY-OPERATIONS.md",
+  "apps/clearra-discord-bot/src/admin/usage-store.mjs",
+  "apps/clearra-discord-bot/src/admin/telemetry",
+  "apps/clearra-discord-bot/src/admin/telemetry/hmac.mjs",
+  "apps/clearra-discord-bot/src/admin/telemetry/rate-limiter.mjs",
+  "apps/clearra-discord-bot/src/admin/telemetry/schema.mjs",
+  "apps/clearra-discord-bot/src/admin/deploy",
+  "apps/clearra-discord-bot/src/admin/deploy/ORACLE_GATEWAY.md",
+  "apps/clearra-discord-bot/src/admin/deploy/oracle",
+  "apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run",
+  "apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway.service",
+];
+
+function writeFixtureFile(root, relative, contents = "fixture\n") {
+  const path = join(root, ...relative.split("/"));
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents, { flag: "wx" });
+}
+
+function toUnixPath(path) {
+  if (process.platform !== "win32") return path;
+  const result = spawnSync("wsl.exe", ["-e", "wslpath", "-a", "--", path], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function runUnix(executable, args, options = {}) {
+  if (process.platform === "win32") {
+    return spawnSync("wsl.exe", ["-e", executable, ...args], {
+      encoding: "utf8",
+      ...options,
+    });
+  }
+  return spawnSync(executable, args, { encoding: "utf8", ...options });
+}
+
+function inspectTar(path) {
+  const script = String.raw`
+import json, sys, tarfile
+entries = []
+with tarfile.open(sys.argv[1], "r:*") as archive:
+    for member in archive:
+        if member.isfile(): kind = "file"
+        elif member.isdir(): kind = "directory"
+        elif member.issym(): kind = "symlink"
+        else: kind = "unsupported"
+        entries.append({"name": member.name.rstrip("/"), "kind": kind,
+                        "link": member.linkname if member.issym() else None})
+print(json.dumps(entries, separators=(",", ":")))
+`;
+  const result = runUnix("python3", ["-c", script, toUnixPath(path)]);
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("v0.8 Oracle local layer builder freezes only the closed runtime set", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "clearra-oracle-layers-test-"));
+  const repository = join(temporaryRoot, "repository");
+  const output = join(temporaryRoot, "output");
+  try {
+    mkdirSync(output, { recursive: true });
+    writeFixtureFile(repository, "apps/clearra-discord-bot/package.json", "{}\n");
+    writeFixtureFile(repository, "packages/ctk3/package.json", "{}\n");
+    writeFixtureFile(repository, "packages/ctk3/dist/index.js");
+    writeFixtureFile(repository, "packages/ctk3/dist/index.d.ts");
+    writeFixtureFile(repository, "node_modules/tetris-fumen/package.json", "{}\n");
+    writeFixtureFile(repository, "node_modules/tetris-fumen/index.js");
+    for (const relative of overlayEntries) {
+      if (
+        relative.endsWith("/admin") ||
+        relative.endsWith("/telemetry") ||
+        relative.endsWith("/deploy") ||
+        relative.endsWith("/oracle")
+      ) {
+        mkdirSync(join(repository, ...relative.split("/")), { recursive: true });
+      } else {
+        writeFixtureFile(repository, relative);
+      }
+    }
+    writeFixtureFile(
+      repository,
+      "apps/clearra-discord-bot/src/admin/config.mjs",
+      "export default 'synthetic-test-only';\n",
+    );
+
+    const first = runUnix("bash", [
+      toUnixPath(layerBuilder),
+      toUnixPath(repository),
+      toUnixPath(output),
+    ]);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(
+      first.stdout.trim().split(/\r?\n/u).filter(Boolean).length,
+      3,
+      first.stdout,
+    );
+
+    const overlay = inspectTar(join(output, "private-overlay-no-config.tar"));
+    assert.deepEqual(
+      overlay.map(({ name }) => name).sort(),
+      [...overlayEntries].sort(),
+    );
+    assert.ok(!overlay.some(({ name }) => name.endsWith("/config.mjs")));
+    assert.ok(overlay.every(({ kind }) => kind === "file" || kind === "directory"));
+
+    const dist = inspectTar(join(output, "ctk3-dist.tar"));
+    assert.ok(
+      dist.every(
+        ({ name }) =>
+          name === "packages/ctk3/dist" || name.startsWith("packages/ctk3/dist/"),
+      ),
+    );
+
+    const dependencies = inspectTar(join(output, "node_modules.tar"));
+    assert.deepEqual(
+      Object.fromEntries(
+        dependencies
+          .filter(({ kind }) => kind === "symlink")
+          .map(({ name, link }) => [name, link]),
+      ),
+      {
+        "node_modules/@clearra/discord-bot": "../../apps/clearra-discord-bot",
+        "node_modules/ctk3": "../packages/ctk3",
+      },
+    );
+    assert.ok(
+      dependencies.every(
+        ({ name }) =>
+          name === "node_modules" ||
+          name === "node_modules/@clearra" ||
+          name === "node_modules/@clearra/discord-bot" ||
+          name === "node_modules/ctk3" ||
+          name === "node_modules/tetris-fumen" ||
+          name.startsWith("node_modules/tetris-fumen/"),
+      ),
+    );
+
+    const duplicate = runUnix("bash", [
+      toUnixPath(layerBuilder),
+      toUnixPath(repository),
+      toUnixPath(output),
+    ]);
+    assert.notEqual(duplicate.status, 0);
+    assert.match(duplicate.stderr, /refusing to overwrite frozen layer/u);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("v0.8 Oracle freeze helper seals uploads and preserves the active authority", () => {
+  const text = readFileSync(freezeHelper, "utf8");
+  const syntax = runUnix("dash", ["-n", toUnixPath(freezeHelper)]);
+  assert.equal(syntax.status, 0, syntax.stderr);
+
+  const seal = text.indexOf('/usr/bin/chown root:root -- "$upload_root"');
+  const validation = text.indexOf("layer_counts=$(validate_layers)");
+  assert.ok(seal >= 0 && validation > seal, "uploads must be sealed before validation");
+  assert.match(text, /require_baseline_unchanged\n\nlayer_counts=/u);
+  assert.match(text, /assemble_candidate "\$candidate_root" "\$release_id"\nrequire_baseline_unchanged/u);
+  assert.match(text, /apps\/clearra-discord-bot\/src\/admin\/config\.mjs/u);
+  assert.match(text, /candidate_files0755" = 8/u);
+  assert.match(text, /candidate_symlinks" = 2/u);
+  assert.match(text, /oracle_manifest_base64=\$manifest_base64/u);
+  assert.doesNotMatch(text, /(?:cat|head|tail|sed|awk).*\$settings_path/u);
+  assert.doesNotMatch(text, /(?:cat|head|tail|sed|awk).*\$baseline_config_path/u);
+});

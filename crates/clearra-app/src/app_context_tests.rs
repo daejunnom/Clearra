@@ -219,7 +219,11 @@ mod case_app_response_contract_contains_command_result_and_reports {
         assert_eq!(response.result().map(|result| result.kind()), Some("rules"));
         assert_eq!(response.backend_report().backend_selected(), "none");
         assert!(!response.backend_report().fallback_used());
-        assert!(response.resource_report().solver_executed());
+        assert!(!response.resource_report().solver_executed());
+        assert_eq!(
+            response.resource_report().result_completeness(),
+            clearra_host_contract::ExecutionCompletenessState::NotExecuted
+        );
         assert_eq!(
             response.capability_report().app_request_boundary(),
             "clearra-app/AppRequest"

@@ -3,8 +3,38 @@ use clearra_core_domain::board::standard_pc_board::{
     STANDARD_PC_MAX_LINES,
 };
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
-use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
-use clearra_pc_graph::request::PcScenarioQuery;
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
+use clearra_objectives::policy::score_objective_policy::{
+    ScoreProfileSelection, SpinProfileSelection,
+};
+use clearra_pc_graph::request::{PcScenarioQuery, PcSolutionProbabilityPolicy};
+use clearra_supply::QueueObservationPolicy;
+
+/// Whether a Build query must materialize exact probability evidence for every
+/// canonical solution in its final solution set.
+///
+/// This policy is intentionally distinct from the PC-family policy. The
+/// embedded `PcScenarioQuery` carries the corresponding value only as an
+/// executor transport detail; callers select Build semantics through this
+/// type.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum BuildSolutionProbabilityPolicy {
+    #[default]
+    Omit,
+    Include,
+}
+
+impl BuildSolutionProbabilityPolicy {
+    pub const fn requested(self) -> bool {
+        matches!(self, Self::Include)
+    }
+    const fn executor_transport(self) -> PcSolutionProbabilityPolicy {
+        match self {
+            Self::Omit => PcSolutionProbabilityPolicy::Omit,
+            Self::Include => PcSolutionProbabilityPolicy::Include,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum FinesseMetric {
@@ -104,6 +134,15 @@ impl FinesseScoreRequest {
         self.initial_cleared_rows = rows;
         self
     }
+
+    /// Returns heap bytes retained by the placement vector using its actual
+    /// allocation capacity. The inline request owner is excluded.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        checked_capacity_bytes(
+            self.placements.capacity() as u128,
+            core::mem::size_of::<FinessePlacement>() as u128,
+        )
+    }
 }
 
 /// Mutually exclusive finesse request carried by a build-probability query.
@@ -144,6 +183,19 @@ impl BuildProbabilityFinesseRequest {
             Self::Off | Self::Search { .. } => None,
         }
     }
+
+    /// Returns the heap payload owned by the active finesse request variant.
+    /// Off and Search are inline; Score owns exactly one placement vector.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        match self {
+            Self::Off | Self::Search { .. } => Some(0),
+            Self::Score { request, .. } => request.checked_retained_capacity_bytes(),
+        }
+    }
+}
+
+fn checked_capacity_bytes(capacity: u128, item_size: u128) -> Option<u128> {
+    capacity.checked_mul(item_size)
 }
 
 impl FinessePatternKnowledge {
@@ -572,21 +624,90 @@ pub struct BuildProbabilityQuery {
     field: BuildProbabilityField,
     aggregation: BuildProbabilityAggregation,
     finesse: BuildProbabilityFinesseRequest,
+    solution_probability_policy: BuildSolutionProbabilityPolicy,
 }
 
 impl BuildProbabilityQuery {
-    pub fn new(core_query: PcScenarioQuery, field: BuildProbabilityField) -> Self {
+    pub fn new(mut core_query: PcScenarioQuery, field: BuildProbabilityField) -> Self {
+        // A PC-family option must not silently acquire Build-family authority.
+        // The Build policy below is the sole public owner and synchronizes this
+        // executor transport whenever it changes.
+        core_query = core_query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit);
         Self {
             core_query,
             input_field: field,
             field,
             aggregation: BuildProbabilityAggregation::Buildability,
             finesse: BuildProbabilityFinesseRequest::Off,
+            solution_probability_policy: BuildSolutionProbabilityPolicy::Omit,
         }
     }
 
     pub const fn with_aggregation(mut self, aggregation: BuildProbabilityAggregation) -> Self {
         self.aggregation = aggregation;
+        self
+    }
+
+    pub fn with_solution_probability_policy(
+        mut self,
+        policy: BuildSolutionProbabilityPolicy,
+    ) -> Self {
+        self.core_query = self
+            .core_query
+            .with_solution_probability_policy(policy.executor_transport());
+        self.solution_probability_policy = policy;
+        self
+    }
+
+    /// Selects the Build queue-information contract and synchronizes the
+    /// embedded scenario transport. `VisibleSeven` is evaluated by the shared
+    /// HoldAutomaton observation-class policy; it is not a display-only hint.
+    pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {
+        self.core_query = self.core_query.with_queue_observation_policy(policy);
+        self
+    }
+
+    /// Requests the shared replay-backed score matrix for a Build product.
+    ///
+    /// This is deliberately a Build-owned adapter instead of allowing an App
+    /// caller to mutate the embedded PC transport directly.  The objective
+    /// kind (all/unique/minimum-cover) remains unchanged; score is retained as
+    /// evidence for the Build reducer, and attack never becomes an ordering or
+    /// equality coordinate.
+    pub fn with_score_summary(mut self, profile: ScoreProfileSelection, initial_b2b: u16) -> Self {
+        let objective = self
+            .core_query
+            .objective()
+            .with_score_summary()
+            .with_score_profile(profile)
+            .with_initial_b2b(u32::from(initial_b2b));
+        self.core_query = self.core_query.with_objective(objective);
+        self
+    }
+
+    /// Restricts replay evidence to paths that preserve back-to-back under the
+    /// selected spin contract.  This powers `build.evaluate.b2b-cover`; it is
+    /// not a display-only post-filter and therefore enters the compiled search
+    /// problem before candidate execution begins.
+    pub fn with_back_to_back_preservation(mut self, spin_profile: SpinProfileSelection) -> Self {
+        let objective = self
+            .core_query
+            .objective()
+            .with_back_to_back_preservation(spin_profile);
+        self.core_query = self.core_query.with_objective(objective);
+        self
+    }
+
+    /// Restricts actual Build geometry/replay evaluation to a normalized
+    /// supplied colored-field set. The embedded scenario query owns the sorted,
+    /// deduplicated identities; this method is not a display-only filter.
+    pub fn with_allowed_colored_solution_identities(
+        mut self,
+        identities: impl IntoIterator<Item = StandardBoard64ColoredTilingIdentity>,
+    ) -> Self {
+        self.core_query = self
+            .core_query
+            .with_allowed_colored_solution_identities(identities);
         self
     }
 
@@ -623,12 +744,56 @@ impl BuildProbabilityQuery {
         &self.core_query
     }
 
+    pub const fn queue_observation_policy(&self) -> QueueObservationPolicy {
+        self.core_query.queue_observation_policy()
+    }
+
+    pub fn allowed_colored_solution_identities(
+        &self,
+    ) -> Option<&[StandardBoard64ColoredTilingIdentity]> {
+        self.core_query.allowed_colored_solution_identities()
+    }
+
+    /// Splits the typed Build owner for the finite compiler without cloning
+    /// either the scenario queue or the active finesse request. The original
+    /// input field is no longer needed after validation; the normalized search
+    /// field is returned with the response policies that outlive compilation.
+    pub fn into_finite_compile_parts(
+        self,
+    ) -> (
+        PcScenarioQuery,
+        BuildProbabilityField,
+        BuildProbabilityAggregation,
+        BuildProbabilityFinesseRequest,
+        BuildSolutionProbabilityPolicy,
+    ) {
+        let Self {
+            core_query,
+            input_field: _,
+            field,
+            aggregation,
+            finesse,
+            solution_probability_policy,
+        } = self;
+        (
+            core_query,
+            field,
+            aggregation,
+            finesse,
+            solution_probability_policy,
+        )
+    }
+
     pub const fn field(&self) -> BuildProbabilityField {
         self.field
     }
 
     pub const fn aggregation(&self) -> BuildProbabilityAggregation {
         self.aggregation
+    }
+
+    pub const fn solution_probability_policy(&self) -> BuildSolutionProbabilityPolicy {
+        self.solution_probability_policy
     }
 
     pub const fn finesse_metric(&self) -> FinesseMetric {
@@ -666,17 +831,30 @@ impl BuildProbabilityQuery {
     pub const fn target_piece_count(&self) -> usize {
         self.field.target_piece_count()
     }
+
+    /// Returns the complete query-owned heap graph fieldwise using actual
+    /// allocation capacities. The embedded scenario query and active finesse
+    /// request are the only heap owners; build fields and policies are inline.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        self.core_query
+            .checked_build_probability_retained_capacity_bytes()?
+            .checked_add(self.finesse.checked_retained_capacity_bytes()?)
+    }
 }
 
 #[cfg(test)]
 mod query_tests {
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+    use clearra_objectives::policy::score_objective_policy::{
+        ScoreProfileSelection, SpinProfileSelection,
+    };
     use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::{
         BuildProbabilityField, BuildProbabilityFinesseRequest, BuildProbabilityQuery,
-        FinesseMetric, FinessePatternKnowledge, FinessePlacement, FinesseScoreRequest,
+        BuildSolutionProbabilityPolicy, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
+        FinesseScoreRequest,
     };
 
     #[test]
@@ -768,6 +946,11 @@ mod query_tests {
         assert_eq!(off.field(), field);
         assert_eq!(off.finesse_metric(), FinesseMetric::Off);
         assert!(off.finesse_score().is_none());
+        assert_eq!(
+            off.checked_retained_capacity_bytes(),
+            off.core_query()
+                .checked_build_probability_retained_capacity_bytes()
+        );
     }
 
     #[test]
@@ -775,5 +958,124 @@ mod query_tests {
         let placement = FinessePlacement::new(PieceKind::O, RotationState::Zero, 4, 0);
         assert!(FinesseScoreRequest::new(vec![placement; 60]).is_some());
         assert!(FinesseScoreRequest::new(vec![placement; 61]).is_none());
+    }
+
+    #[test]
+    fn retained_capacity_counts_scenario_and_active_finesse_buffers_once() {
+        let mut pieces = Vec::with_capacity(31);
+        pieces.push(PieceKind::O);
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(pieces)),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let field =
+            BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0x0c03, 0, 0, 0])
+                .expect("one-piece field");
+        let mut placements = Vec::with_capacity(17);
+        placements.push(FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        ));
+        let placement_capacity = placements.capacity();
+        let score = FinesseScoreRequest::new(placements).expect("one placement is valid");
+        let query = BuildProbabilityQuery::new(core, field).with_finesse_score(score);
+        let expected = query
+            .core_query()
+            .checked_build_probability_retained_capacity_bytes()
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (placement_capacity as u128)
+                        .checked_mul(core::mem::size_of::<FinessePlacement>() as u128)?,
+                )
+            });
+        let actual = query
+            .checked_retained_capacity_bytes()
+            .expect("query capacity fits u128");
+        let admitted = |limit| actual <= limit;
+
+        assert_eq!(Some(actual), expected);
+        assert!(actual > 0);
+        assert!(admitted(actual));
+        assert!(!admitted(actual - 1));
+    }
+
+    #[test]
+    fn retained_capacity_arithmetic_fails_closed_on_overflow() {
+        assert_eq!(super::checked_capacity_bytes(u128::MAX, 1), Some(u128::MAX));
+        assert_eq!(super::checked_capacity_bytes(u128::MAX, 2), None);
+    }
+
+    #[test]
+    fn build_solution_probability_policy_is_typed_and_owns_the_executor_transport() {
+        use clearra_pc_graph::request::PcSolutionProbabilityPolicy;
+
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+        let field =
+            BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0x0c03, 0, 0, 0])
+                .unwrap();
+
+        let omitted = BuildProbabilityQuery::new(core, field);
+        assert_eq!(
+            omitted.solution_probability_policy(),
+            BuildSolutionProbabilityPolicy::Omit
+        );
+        assert_eq!(
+            omitted.core_query().solution_probability_policy(),
+            PcSolutionProbabilityPolicy::Omit
+        );
+
+        let included =
+            omitted.with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include);
+        assert!(included.solution_probability_policy().requested());
+        assert_eq!(
+            included.core_query().solution_probability_policy(),
+            PcSolutionProbabilityPolicy::Include
+        );
+
+        let omitted =
+            included.with_solution_probability_policy(BuildSolutionProbabilityPolicy::Omit);
+        assert!(!omitted.solution_probability_policy().requested());
+        assert_eq!(
+            omitted.core_query().solution_probability_policy(),
+            PcSolutionProbabilityPolicy::Omit
+        );
+    }
+
+    #[test]
+    fn build_score_and_b2b_requests_enter_the_compiled_objective_transport() {
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("one-piece Build field");
+
+        let scored = BuildProbabilityQuery::new(core.clone(), field)
+            .with_score_summary(ScoreProfileSelection::Guideline, u16::MAX);
+        let score = scored.core_query().objective().score();
+        assert!(score.requested());
+        assert_eq!(score.profile(), ScoreProfileSelection::Guideline);
+        assert_eq!(score.initial_b2b(), u32::from(u16::MAX));
+
+        let b2b = BuildProbabilityQuery::new(core, field)
+            .with_back_to_back_preservation(SpinProfileSelection::AllSpinPlus);
+        let constraints = b2b.core_query().objective().execution_constraints();
+        assert!(constraints.preserves_back_to_back());
+        assert_eq!(
+            constraints.spin_profile(),
+            SpinProfileSelection::AllSpinPlus
+        );
     }
 }

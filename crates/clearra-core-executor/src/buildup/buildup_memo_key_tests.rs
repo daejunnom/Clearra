@@ -1,7 +1,11 @@
 use super::*;
+use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_supply::{
+    execution_automaton::SupplyObservationIdentity,
+    hold::hold_policy::HoldPolicy,
     hold_automaton::{HoldAutomatonState, SupplyProvenanceId},
-    piece_source::PieceSourceId,
+    piece_source::{PieceSourceId, PieceSourceKind},
+    QueueObservationPolicy,
 };
 
 fn hold_state() -> HoldAutomatonState {
@@ -83,4 +87,31 @@ fn buildup_memo_key_differs_by_reachability_state() {
     right.reachability_relevant_state ^= 0x8000;
 
     assert_ne!(left.stable_hash(), right.stable_hash());
+}
+
+#[test]
+fn buildup_memo_key_includes_source_kind_hold_policy_observation_and_provenance() {
+    let base = hold_state();
+    let base_key = memo_key(base);
+
+    let mut source_kind = base;
+    source_kind.source_kind = PieceSourceKind::ObservedWindow;
+    let mut hold_policy = base;
+    hold_policy.hold_policy = HoldPolicy::Required;
+    let mut observation = base;
+    observation.observation = SupplyObservationIdentity::new(
+        QueueObservationPolicy::VisibleSeven,
+        base.observation.observation_id + 1,
+    );
+    let mut provenance = base;
+    provenance.provenance.0 += 1;
+
+    for changed in [source_kind, hold_policy, observation, provenance] {
+        let changed_key = memo_key(changed);
+        assert_ne!(
+            base_key.hold_automaton_state,
+            changed_key.hold_automaton_state
+        );
+        assert_ne!(base_key.stable_hash(), changed_key.stable_hash());
+    }
 }

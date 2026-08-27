@@ -1,0 +1,767 @@
+#!/bin/sh
+
+set -eu
+umask 077
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+source_commit=@SOURCE_COMMIT@
+release_id=@RELEASE_ID@
+release_root=/opt/clearra/releases
+candidate_path=$release_root/$release_id
+current_link=/opt/clearra/current
+settings_path=/etc/clearra-gateway/settings
+service_name=clearra-gateway.service
+lock_path=/run/lock/clearra-oracle-release-deploy.lock
+
+expected_active_release=@EXPECTED_ACTIVE_RELEASE@
+expected_active_tree_sha256=@EXPECTED_ACTIVE_TREE_SHA256@
+expected_settings_sha256=@EXPECTED_SETTINGS_SHA256@
+expected_config_sha256=@EXPECTED_CONFIG_SHA256@
+expected_config_size=@EXPECTED_CONFIG_SIZE@
+
+expected_source_sha256=@EXPECTED_SOURCE_SHA256@
+expected_overlay_sha256=@EXPECTED_OVERLAY_SHA256@
+expected_dist_sha256=@EXPECTED_DIST_SHA256@
+expected_dependencies_sha256=@EXPECTED_DEPENDENCIES_SHA256@
+expected_tree_sha256=@EXPECTED_TREE_SHA256@
+expected_digester_sha256=@EXPECTED_DIGESTER_SHA256@
+expected_prior_digester_sha256=@EXPECTED_PRIOR_DIGESTER_SHA256@
+expected_prior_digester_size=@EXPECTED_PRIOR_DIGESTER_SIZE@
+expected_prior_launcher_sha256=@EXPECTED_PRIOR_LAUNCHER_SHA256@
+expected_prior_launcher_size=@EXPECTED_PRIOR_LAUNCHER_SIZE@
+expected_launcher_sha256=@EXPECTED_LAUNCHER_SHA256@
+expected_launcher_size=@EXPECTED_LAUNCHER_SIZE@
+
+canonical_digester=/usr/local/libexec/clearra-release-tree-digest
+canonical_launcher=/usr/local/sbin/clearra-oracle-release-deploy
+
+stage_nonce=
+self_sha256=
+self_path=
+input_root=
+stage_root=
+test_parent=
+digester_temp=
+launcher_temp=
+digester_backup=
+launcher_backup=
+digester_installed=0
+launcher_installed=0
+tools_committed=0
+
+fail() {
+  /usr/bin/printf '%s\n' 'oracle_inactive_stage=failed' >&2
+  exit "${1:-1}"
+}
+
+is_sha256() {
+  is_sha_value=$1
+  [ "${#is_sha_value}" -eq 64 ] || return 1
+  case "$is_sha_value" in
+    *[!0-9a-f]* ) return 1 ;;
+  esac
+}
+
+is_hex32() {
+  is_hex32_value=$1
+  [ "${#is_hex32_value}" -eq 32 ] || return 1
+  case "$is_hex32_value" in
+    *[!0-9a-f]* ) return 1 ;;
+  esac
+}
+
+sha256_of() {
+  /usr/bin/sha256sum -- "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+require_root_regular_mode() {
+  require_file_path=$1
+  require_file_mode=$2
+  [ -f "$require_file_path" ] && [ ! -L "$require_file_path" ] || fail 77
+  require_file_metadata=$(/usr/bin/stat -c '%u:%g:%a' -- "$require_file_path") || fail 77
+  [ "$require_file_metadata" = "0:0:$require_file_mode" ] || fail 77
+}
+
+require_root_directory_0755() {
+  require_directory_path=$1
+  [ -d "$require_directory_path" ] && [ ! -L "$require_directory_path" ] || fail 77
+  [ "$(/usr/bin/readlink -f -- "$require_directory_path")" = "$require_directory_path" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$require_directory_path")" = '0:0:755' ] || fail 77
+}
+
+require_exact_hash() {
+  require_hash_path=$1
+  require_hash_expected=$2
+  [ "$(sha256_of "$require_hash_path")" = "$require_hash_expected" ] || fail 65
+}
+
+metadata_digest() {
+  /usr/bin/python3 - "$1" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+root = os.path.realpath(sys.argv[1])
+if not os.path.isdir(root) or os.path.islink(root):
+    raise SystemExit(2)
+entries = []
+for directory, names, files in os.walk(root, topdown=True, followlinks=False):
+    names.sort()
+    files.sort()
+    for name in names + files:
+        path = os.path.join(directory, name)
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode):
+            kind = "symlink"
+            extra = os.readlink(path)
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+            extra = ""
+        elif stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+            extra = str(metadata.st_size)
+        else:
+            raise SystemExit(2)
+        entries.append(
+            (
+                relative,
+                kind,
+                metadata.st_uid,
+                metadata.st_gid,
+                stat.S_IMODE(metadata.st_mode),
+                extra,
+            )
+        )
+digest = hashlib.sha256(b"clearra-release-metadata-v1\0")
+for entry in sorted(entries):
+    digest.update("\0".join(map(str, entry)).encode("utf-8"))
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+validate_layers() {
+  /usr/bin/python3 - \
+    "$input_root/source.tar.gz" \
+    "$input_root/private-overlay-no-config.tar" \
+    "$input_root/ctk3-dist.tar" \
+    "$input_root/node_modules.tar" <<'PY'
+import posixpath
+import sys
+import tarfile
+
+layers = (
+    (sys.argv[1], {"file": @SOURCE_FILES@, "directory": @SOURCE_DIRECTORIES@, "symlink": @SOURCE_SYMLINKS@}, None),
+    (sys.argv[2], {"file": @OVERLAY_FILES@, "directory": @OVERLAY_DIRECTORIES@, "symlink": @OVERLAY_SYMLINKS@}, "apps/clearra-discord-bot/src/admin"),
+    (sys.argv[3], {"file": @DIST_FILES@, "directory": @DIST_DIRECTORIES@, "symlink": @DIST_SYMLINKS@}, "packages/ctk3/dist"),
+    (sys.argv[4], {"file": @DEPENDENCIES_FILES@, "directory": @DEPENDENCIES_DIRECTORIES@, "symlink": @DEPENDENCIES_SYMLINKS@}, "node_modules"),
+)
+expected_links = {
+    "node_modules/ctk3": "../packages/ctk3",
+    "node_modules/@clearra/discord-bot": "../../apps/clearra-discord-bot",
+}
+all_entries = {}
+observed_links = {}
+for archive_path, expected_counts, allowed_prefix in layers:
+    counts = {"file": 0, "directory": 0, "symlink": 0}
+    layer_entries = {}
+    with tarfile.open(archive_path, "r:*") as archive:
+        for member in archive:
+            name = member.name.rstrip("/")
+            if (
+                not name
+                or name.startswith("/")
+                or "\\" in name
+                or posixpath.normpath(name) != name
+                or name == ".."
+                or name.startswith("../")
+            ):
+                raise SystemExit(2)
+            if allowed_prefix is not None and not (
+                name == allowed_prefix or name.startswith(allowed_prefix + "/")
+            ):
+                raise SystemExit(2)
+            if name in layer_entries or name in all_entries:
+                raise SystemExit(2)
+            if member.isfile():
+                kind = "file"
+            elif member.isdir():
+                kind = "directory"
+            elif member.issym():
+                kind = "symlink"
+                target = member.linkname
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+                if (
+                    not target
+                    or target.startswith("/")
+                    or "\\" in target
+                    or resolved == ".."
+                    or resolved.startswith("../")
+                ):
+                    raise SystemExit(2)
+                observed_links[name] = target
+            else:
+                raise SystemExit(2)
+            layer_entries[name] = kind
+            counts[kind] += 1
+    if counts != expected_counts:
+        raise SystemExit(2)
+    all_entries.update(layer_entries)
+
+for name, kind in all_entries.items():
+    parent = posixpath.dirname(name)
+    while parent:
+        parent_kind = all_entries.get(parent)
+        if parent_kind is not None and parent_kind != "directory":
+            raise SystemExit(2)
+        parent = posixpath.dirname(parent)
+
+if observed_links != expected_links:
+    raise SystemExit(2)
+if "apps/clearra-discord-bot/src/admin/config.mjs" in all_entries:
+    raise SystemExit(2)
+PY
+}
+
+capture_baseline() {
+  [ -L "$current_link" ] || fail 77
+  baseline_current_raw=$(/usr/bin/readlink -- "$current_link") || fail 77
+  baseline_current_resolved=$(/usr/bin/readlink -f -- "$current_link") || fail 77
+  [ "$baseline_current_resolved" = "$expected_active_release" ] || fail 65
+  [ -d "$baseline_current_resolved" ] && [ ! -L "$baseline_current_resolved" ] || fail 77
+  baseline_current_link_metadata=$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$current_link") || fail 77
+  baseline_active_metadata=$(metadata_digest "$baseline_current_resolved") || fail 65
+
+  [ -f "$settings_path" ] && [ ! -L "$settings_path" ] || fail 77
+  baseline_settings_metadata=$(/usr/bin/stat -c '%d:%i:%u:%g:%a:%s' -- "$settings_path") || fail 77
+  case "$baseline_settings_metadata" in
+    *:0:0:600:@EXPECTED_SETTINGS_SIZE@ ) ;;
+    * ) fail 77 ;;
+  esac
+  baseline_settings_sha256=$(sha256_of "$settings_path") || fail 65
+  [ "$baseline_settings_sha256" = "$expected_settings_sha256" ] || fail 65
+
+  baseline_service_active=$(/usr/bin/systemctl show --property ActiveState --value "$service_name") || fail 69
+  baseline_service_sub=$(/usr/bin/systemctl show --property SubState --value "$service_name") || fail 69
+  baseline_service_pid=$(/usr/bin/systemctl show --property MainPID --value "$service_name") || fail 69
+  baseline_service_invocation=$(/usr/bin/systemctl show --property InvocationID --value "$service_name") || fail 69
+  baseline_service_restarts=$(/usr/bin/systemctl show --property NRestarts --value "$service_name") || fail 69
+  [ "$baseline_service_active" = active ] && [ "$baseline_service_sub" = running ] || fail 69
+  case "$baseline_service_pid" in
+    '' | *[!0-9]* | 0 | 1 ) fail 69 ;;
+  esac
+  is_hex32 "$baseline_service_invocation" || fail 69
+  case "$baseline_service_restarts" in
+    '' | *[!0-9]* ) fail 69 ;;
+  esac
+  baseline_service_cwd=$(/usr/bin/readlink -f -- "/proc/$baseline_service_pid/cwd") || fail 69
+  [ "$baseline_service_cwd" = "$baseline_current_resolved/apps/clearra-discord-bot" ] || fail 69
+
+  baseline_config_path=$baseline_current_resolved/apps/clearra-discord-bot/src/admin/config.mjs
+  [ -f "$baseline_config_path" ] && [ ! -L "$baseline_config_path" ] || fail 77
+  [ "$(/usr/bin/stat -c '%s' -- "$baseline_config_path")" = "$expected_config_size" ] || fail 65
+  [ "$(sha256_of "$baseline_config_path")" = "$expected_config_sha256" ] || fail 65
+}
+
+require_baseline_unchanged() {
+  [ -L "$current_link" ] || fail 77
+  [ "$(/usr/bin/readlink -- "$current_link")" = "$baseline_current_raw" ] || fail 73
+  [ "$(/usr/bin/readlink -f -- "$current_link")" = "$baseline_current_resolved" ] || fail 73
+  [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$current_link")" = "$baseline_current_link_metadata" ] || fail 73
+  [ "$(metadata_digest "$baseline_current_resolved")" = "$baseline_active_metadata" ] || fail 73
+
+  [ -f "$settings_path" ] && [ ! -L "$settings_path" ] || fail 77
+  [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a:%s' -- "$settings_path")" = "$baseline_settings_metadata" ] || fail 73
+  [ "$(sha256_of "$settings_path")" = "$baseline_settings_sha256" ] || fail 73
+
+  [ "$(/usr/bin/systemctl show --property ActiveState --value "$service_name")" = "$baseline_service_active" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property SubState --value "$service_name")" = "$baseline_service_sub" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property MainPID --value "$service_name")" = "$baseline_service_pid" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property InvocationID --value "$service_name")" = "$baseline_service_invocation" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property NRestarts --value "$service_name")" = "$baseline_service_restarts" ] || fail 73
+  [ "$(/usr/bin/readlink -f -- "/proc/$baseline_service_pid/cwd")" = "$baseline_service_cwd" ] || fail 73
+  [ -f "$baseline_config_path" ] && [ ! -L "$baseline_config_path" ] || fail 77
+  [ "$(/usr/bin/stat -c '%s' -- "$baseline_config_path")" = "$expected_config_size" ] || fail 73
+  [ "$(sha256_of "$baseline_config_path")" = "$expected_config_sha256" ] || fail 73
+}
+
+harden_release_parents() {
+  for harden_path in /opt/clearra "$release_root"
+  do
+    [ -d "$harden_path" ] && [ ! -L "$harden_path" ] || fail 77
+    [ "$(/usr/bin/readlink -f -- "$harden_path")" = "$harden_path" ] || fail 77
+    harden_before_identity=$(/usr/bin/stat -c '%d:%i' -- "$harden_path") || fail 77
+    harden_before_authority=$(/usr/bin/stat -c '%u:%g:%a' -- "$harden_path") || fail 77
+    case "$harden_before_authority" in
+      1001:1001:755 | 0:0:755 ) ;;
+      * ) fail 77 ;;
+    esac
+    /usr/bin/chown root:root -- "$harden_path"
+    /usr/bin/chmod 0755 -- "$harden_path"
+    [ "$(/usr/bin/stat -c '%d:%i' -- "$harden_path")" = "$harden_before_identity" ] || fail 77
+    require_root_directory_0755 "$harden_path"
+    require_baseline_unchanged
+  done
+}
+
+copy_root_input() {
+  [ -d "$upload_root" ] && [ ! -L "$upload_root" ] || fail 77
+  [ "$(/usr/bin/readlink -f -- "$upload_root")" = "$upload_root" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_root")" = '1001:1001:700' ] || fail 77
+  upload_unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
+    ! -name source.tar.gz \
+    ! -name private-overlay-no-config.tar \
+    ! -name ctk3-dist.tar \
+    ! -name node_modules.tar \
+    ! -name clearra-oracle-release-deploy \
+    ! -name clearra-release-tree-digest.py \
+    ! -name clearra-oracle-inactive-stage-v080 \
+    -print -quit) || fail 77
+  [ -z "$upload_unexpected" ] || fail 77
+  [ "$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 7 ] || fail 77
+
+  for upload_name in \
+    source.tar.gz \
+    private-overlay-no-config.tar \
+    ctk3-dist.tar \
+    node_modules.tar \
+    clearra-oracle-release-deploy \
+    clearra-release-tree-digest.py
+  do
+    upload_path=$upload_root/$upload_name
+    [ -f "$upload_path" ] && [ ! -L "$upload_path" ] || fail 77
+    [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_path")" = '1001:1001:600' ] || fail 77
+  done
+  upload_self=$upload_root/clearra-oracle-inactive-stage-v080
+  [ -f "$upload_self" ] && [ ! -L "$upload_self" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_self")" = '1001:1001:700' ] || fail 77
+  [ "$(sha256_of "$upload_self")" = "$self_sha256" ] || fail 65
+
+  [ ! -e "$input_root" ] && [ ! -L "$input_root" ] || fail 73
+  /usr/bin/mkdir -m 0700 -- "$input_root"
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$input_root")" = '0:0:700' ] || fail 77
+
+  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/source.tar.gz" "$input_root/source.tar.gz"
+  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/private-overlay-no-config.tar" "$input_root/private-overlay-no-config.tar"
+  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/ctk3-dist.tar" "$input_root/ctk3-dist.tar"
+  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/node_modules.tar" "$input_root/node_modules.tar"
+  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/clearra-oracle-release-deploy" "$input_root/clearra-oracle-release-deploy"
+  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/clearra-release-tree-digest.py" "$input_root/clearra-release-tree-digest.py"
+
+  require_root_regular_mode "$input_root/source.tar.gz" 600
+  require_root_regular_mode "$input_root/private-overlay-no-config.tar" 600
+  require_root_regular_mode "$input_root/ctk3-dist.tar" 600
+  require_root_regular_mode "$input_root/node_modules.tar" 600
+  require_root_regular_mode "$input_root/clearra-oracle-release-deploy" 600
+  require_root_regular_mode "$input_root/clearra-release-tree-digest.py" 600
+  require_exact_hash "$input_root/source.tar.gz" "$expected_source_sha256"
+  require_exact_hash "$input_root/private-overlay-no-config.tar" "$expected_overlay_sha256"
+  require_exact_hash "$input_root/ctk3-dist.tar" "$expected_dist_sha256"
+  require_exact_hash "$input_root/node_modules.tar" "$expected_dependencies_sha256"
+  require_exact_hash "$input_root/clearra-oracle-release-deploy" "$expected_launcher_sha256"
+  require_exact_hash "$input_root/clearra-release-tree-digest.py" "$expected_digester_sha256"
+
+  /usr/bin/install -o root -g root -m 0600 -- "$baseline_config_path" "$input_root/server-config.mjs"
+  require_root_regular_mode "$input_root/server-config.mjs" 600
+  [ "$(/usr/bin/stat -c '%s' -- "$input_root/server-config.mjs")" = "$expected_config_size" ] || fail 65
+  require_exact_hash "$input_root/server-config.mjs" "$expected_config_sha256"
+}
+
+validate_candidate() {
+  validate_root=$1
+  [ -d "$validate_root" ] && [ ! -L "$validate_root" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$validate_root")" = '0:0:755' ] || fail 77
+  validate_unsafe=$(/usr/bin/find "$validate_root" -xdev \
+    \( -type f -o -type d -o -type l \) \
+    \( ! -user root -o ! -group root \) -print -quit) || fail 77
+  [ -z "$validate_unsafe" ] || fail 77
+  validate_unsupported=$(/usr/bin/find "$validate_root" -xdev \
+    ! -type f ! -type d ! -type l -print -quit) || fail 77
+  [ -z "$validate_unsupported" ] || fail 77
+  validate_writable=$(/usr/bin/find "$validate_root" -xdev \
+    \( -type f -o -type d \) -perm /022 -print -quit) || fail 77
+  [ -z "$validate_writable" ] || fail 77
+  validate_bad_directories=$(/usr/bin/find "$validate_root" -xdev -type d ! -perm 0755 -print -quit) || fail 77
+  [ -z "$validate_bad_directories" ] || fail 77
+  validate_bad_files=$(/usr/bin/find "$validate_root" -xdev -type f ! -perm 0644 ! -perm 0755 -print -quit) || fail 77
+  [ -z "$validate_bad_files" ] || fail 77
+
+  [ "$(/usr/bin/find "$validate_root" -xdev -mindepth 1 -type d -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = @CANDIDATE_DIRECTORIES@ ] || fail 65
+  [ "$(/usr/bin/find "$validate_root" -xdev -type f -perm 0644 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = @CANDIDATE_FILES_0644@ ] || fail 65
+  [ "$(/usr/bin/find "$validate_root" -xdev -type f -perm 0755 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = @CANDIDATE_FILES_0755@ ] || fail 65
+  [ "$(/usr/bin/find "$validate_root" -xdev -type l -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = @CANDIDATE_SYMLINKS@ ] || fail 65
+
+  for validate_executable in \
+    "$validate_root/scripts/tools/package-release-cli.sh" \
+    "$validate_root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
+    "$validate_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$validate_root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
+    "$validate_root/apps/clearra-discord-bot/scripts/restore-oracle-release" \
+    "$validate_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
+    "$validate_root/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
+    "$validate_root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
+  do
+    require_root_regular_mode "$validate_executable" 755
+  done
+
+  [ -L "$validate_root/node_modules/ctk3" ] || fail 77
+  [ "$(/usr/bin/readlink -- "$validate_root/node_modules/ctk3")" = '../packages/ctk3' ] || fail 77
+  [ -L "$validate_root/node_modules/@clearra/discord-bot" ] || fail 77
+  [ "$(/usr/bin/readlink -- "$validate_root/node_modules/@clearra/discord-bot")" = '../../apps/clearra-discord-bot' ] || fail 77
+
+  validate_config=$validate_root/apps/clearra-discord-bot/src/admin/config.mjs
+  require_root_regular_mode "$validate_config" 644
+  [ "$(/usr/bin/stat -c '%s' -- "$validate_config")" = "$expected_config_size" ] || fail 65
+  require_exact_hash "$validate_config" "$expected_config_sha256"
+
+  validate_digest=$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$validate_root") || fail 65
+  [ "$validate_digest" = "$expected_tree_sha256" ] || fail 65
+}
+
+assemble_candidate() {
+  assemble_root=$1
+  [ ! -e "$assemble_root" ] && [ ! -L "$assemble_root" ] || fail 73
+  /usr/bin/mkdir -m 0755 -- "$assemble_root"
+  /usr/bin/tar --extract --gzip --no-same-owner --file="$input_root/source.tar.gz" --directory="$assemble_root"
+  /usr/bin/tar --extract --no-same-owner --file="$input_root/private-overlay-no-config.tar" --directory="$assemble_root"
+  /usr/bin/tar --extract --no-same-owner --file="$input_root/ctk3-dist.tar" --directory="$assemble_root"
+  /usr/bin/tar --extract --no-same-owner --file="$input_root/node_modules.tar" --directory="$assemble_root"
+  /usr/bin/install -o root -g root -m 0644 -- "$input_root/server-config.mjs" "$assemble_root/apps/clearra-discord-bot/src/admin/config.mjs"
+
+  for normalize_root in \
+    "$assemble_root/apps/clearra-discord-bot/src/admin" \
+    "$assemble_root/apps/clearra-discord-bot/test" \
+    "$assemble_root/packages/ctk3/dist" \
+    "$assemble_root/node_modules"
+  do
+    /usr/bin/find "$normalize_root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +
+    /usr/bin/find "$normalize_root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +
+  done
+  /usr/bin/chown -hR root:root -- "$assemble_root"
+  /usr/bin/chmod 0755 -- \
+    "$assemble_root/scripts/tools/package-release-cli.sh" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/restore-oracle-release" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
+    "$assemble_root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
+  validate_candidate "$assemble_root"
+}
+
+syntax_check_candidate() {
+  syntax_root=$1
+  /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/scripts/restore-oracle-release"
+  /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
+  for syntax_module in \
+    "$syntax_root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/src/job-service/runtime-identity.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/src/admin/main.mjs"
+  do
+    /usr/bin/node --check "$syntax_module" >/dev/null
+  done
+}
+
+run_disposable_tests() {
+  test_release=$1
+  test_digest_before=$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$test_release") || fail 65
+  [ "$test_digest_before" = "$expected_tree_sha256" ] || fail 65
+  (
+    cd "$test_release/packages/ctk3"
+    /usr/bin/timeout 300 /usr/bin/node --test ./test/*.test.mjs
+  ) >"$stage_root/ctk3-tests.tap" 2>&1 || fail 70
+  (
+    cd "$test_release/apps/clearra-discord-bot"
+    /usr/bin/timeout 300 /usr/bin/node --test ./test/*.test.mjs
+  ) >"$stage_root/discord-tests.tap" 2>&1 || fail 70
+  test_digest_after=$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$test_release") || fail 65
+  [ "$test_digest_after" = "$test_digest_before" ] || fail 65
+}
+
+prepare_canonical_tools() {
+  require_root_directory_0755 /usr/local/libexec
+  require_root_directory_0755 /usr/local/sbin
+
+  if [ -e "$canonical_digester" ] || [ -L "$canonical_digester" ]; then
+    require_root_regular_mode "$canonical_digester" 755
+    digester_current_size=$(/usr/bin/stat -c '%s' -- "$canonical_digester") || fail 77
+    digester_current_sha256=$(sha256_of "$canonical_digester") || fail 65
+    if [ "$digester_current_size" != "@EXPECTED_DIGESTER_SIZE@" ] ||
+       [ "$digester_current_sha256" != "$expected_digester_sha256" ]; then
+      [ "$expected_prior_digester_sha256" != absent ] || fail 65
+      [ "$digester_current_size" = "$expected_prior_digester_size" ] || fail 65
+      [ "$digester_current_sha256" = "$expected_prior_digester_sha256" ] || fail 65
+      digester_backup=$(/usr/bin/mktemp '/usr/local/libexec/.clearra-release-tree-digest.backup.XXXXXXXX') || fail 73
+      /usr/bin/install -o root -g root -m 0755 -- "$canonical_digester" "$digester_backup"
+      require_root_regular_mode "$digester_backup" 755
+      require_exact_hash "$digester_backup" "$expected_prior_digester_sha256"
+    else
+      return_digester_current=1
+    fi
+  else
+    [ "$expected_prior_digester_sha256" = absent ] || fail 65
+  fi
+
+  if [ "${return_digester_current:-0}" -ne 1 ]; then
+    digester_temp=$(/usr/bin/mktemp '/usr/local/libexec/.clearra-release-tree-digest.next.XXXXXXXX') || fail 73
+    /usr/bin/install -o root -g root -m 0755 -- "$input_root/clearra-release-tree-digest.py" "$digester_temp"
+    require_root_regular_mode "$digester_temp" 755
+    [ "$(/usr/bin/stat -c '%s' -- "$digester_temp")" = "@EXPECTED_DIGESTER_SIZE@" ] || fail 65
+    require_exact_hash "$digester_temp" "$expected_digester_sha256"
+  fi
+
+  if [ -e "$canonical_launcher" ] || [ -L "$canonical_launcher" ]; then
+    require_root_regular_mode "$canonical_launcher" 755
+    launcher_current_size=$(/usr/bin/stat -c '%s' -- "$canonical_launcher") || fail 77
+    launcher_current_sha256=$(sha256_of "$canonical_launcher") || fail 65
+    if [ "$launcher_current_size" != "$expected_launcher_size" ] ||
+       [ "$launcher_current_sha256" != "$expected_launcher_sha256" ]; then
+      [ "$expected_prior_launcher_sha256" != absent ] || fail 65
+      [ "$launcher_current_size" = "$expected_prior_launcher_size" ] || fail 65
+      [ "$launcher_current_sha256" = "$expected_prior_launcher_sha256" ] || fail 65
+      launcher_backup=$(/usr/bin/mktemp '/usr/local/sbin/.clearra-oracle-release-deploy.backup.XXXXXXXX') || fail 73
+      /usr/bin/install -o root -g root -m 0755 -- "$canonical_launcher" "$launcher_backup"
+      require_root_regular_mode "$launcher_backup" 755
+      require_exact_hash "$launcher_backup" "$expected_prior_launcher_sha256"
+    else
+      return_launcher_current=1
+    fi
+  else
+    [ "$expected_prior_launcher_sha256" = absent ] || fail 65
+  fi
+
+  if [ "${return_launcher_current:-0}" -ne 1 ]; then
+    launcher_temp=$(/usr/bin/mktemp '/usr/local/sbin/.clearra-oracle-release-deploy.next.XXXXXXXX') || fail 73
+    /usr/bin/install -o root -g root -m 0755 -- "$input_root/clearra-oracle-release-deploy" "$launcher_temp"
+    require_root_regular_mode "$launcher_temp" 755
+    [ "$(/usr/bin/stat -c '%s' -- "$launcher_temp")" = "$expected_launcher_size" ] || fail 65
+    require_exact_hash "$launcher_temp" "$expected_launcher_sha256"
+  fi
+}
+
+install_canonical_tools() {
+  prepare_canonical_tools
+  require_baseline_unchanged
+  [ "$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$baseline_current_resolved")" = "$expected_active_tree_sha256" ] || fail 73
+
+  if [ -n "$digester_temp" ]; then
+    /usr/bin/mv -T -f -- "$digester_temp" "$canonical_digester"
+    digester_temp=
+    digester_installed=1
+  fi
+  if [ -n "$launcher_temp" ]; then
+    /usr/bin/mv -T -f -- "$launcher_temp" "$canonical_launcher"
+    launcher_temp=
+    launcher_installed=1
+  fi
+
+  require_root_regular_mode "$canonical_digester" 755
+  [ "$(/usr/bin/stat -c '%s' -- "$canonical_digester")" = "@EXPECTED_DIGESTER_SIZE@" ] || fail 65
+  require_exact_hash "$canonical_digester" "$expected_digester_sha256"
+  require_root_regular_mode "$canonical_launcher" 755
+  [ "$(/usr/bin/stat -c '%s' -- "$canonical_launcher")" = "$expected_launcher_size" ] || fail 65
+  require_exact_hash "$canonical_launcher" "$expected_launcher_sha256"
+  require_baseline_unchanged
+}
+
+commit_canonical_tools() {
+  tools_committed=1
+  if [ -n "$launcher_backup" ]; then
+    /usr/bin/rm -f -- "$launcher_backup" || true
+    launcher_backup=
+  fi
+  if [ -n "$digester_backup" ]; then
+    /usr/bin/rm -f -- "$digester_backup" || true
+    digester_backup=
+  fi
+}
+
+remove_success_root() {
+  remove_root=$1
+  remove_expected=$2
+  [ "$remove_root" = "$remove_expected" ] || fail 64
+  [ -d "$remove_root" ] && [ ! -L "$remove_root" ] || fail 77
+  /usr/bin/rm -rf -- "$remove_root"
+  [ ! -e "$remove_root" ] && [ ! -L "$remove_root" ] || fail 73
+}
+
+cleanup() {
+  cleanup_status=$?
+  trap - EXIT HUP INT TERM
+  recovery_failed=0
+  if [ "$tools_committed" -ne 1 ] && [ "$launcher_installed" -eq 1 ]; then
+    if [ -n "$launcher_backup" ] && [ -f "$launcher_backup" ] && [ ! -L "$launcher_backup" ]; then
+      /usr/bin/mv -T -f -- "$launcher_backup" "$canonical_launcher" || recovery_failed=1
+      launcher_backup=
+    else
+      /usr/bin/rm -f -- "$canonical_launcher" || recovery_failed=1
+    fi
+  fi
+  if [ "$tools_committed" -ne 1 ] && [ "$digester_installed" -eq 1 ]; then
+    if [ -n "$digester_backup" ] && [ -f "$digester_backup" ] && [ ! -L "$digester_backup" ]; then
+      /usr/bin/mv -T -f -- "$digester_backup" "$canonical_digester" || recovery_failed=1
+      digester_backup=
+    else
+      /usr/bin/rm -f -- "$canonical_digester" || recovery_failed=1
+    fi
+  fi
+  if [ -n "$digester_temp" ] && [ -f "$digester_temp" ] && [ ! -L "$digester_temp" ]; then
+    /usr/bin/rm -f -- "$digester_temp" || true
+  fi
+  if [ -n "$launcher_temp" ] && [ -f "$launcher_temp" ] && [ ! -L "$launcher_temp" ]; then
+    /usr/bin/rm -f -- "$launcher_temp" || true
+  fi
+  if [ -n "$launcher_backup" ] && [ -f "$launcher_backup" ] && [ ! -L "$launcher_backup" ]; then
+    /usr/bin/rm -f -- "$launcher_backup" || true
+  fi
+  if [ -n "$digester_backup" ] && [ -f "$digester_backup" ] && [ ! -L "$digester_backup" ]; then
+    /usr/bin/rm -f -- "$digester_backup" || true
+  fi
+  if [ -n "$test_parent" ] && [ -n "$stage_root" ]; then
+    case "$test_parent" in
+      "$stage_root/test" )
+        if [ -d "$test_parent" ] && [ ! -L "$test_parent" ]; then
+          /usr/bin/rm -rf -- "$test_parent" || true
+        fi
+        ;;
+    esac
+  fi
+  if [ "$recovery_failed" -ne 0 ]; then
+    /usr/bin/printf '%s\n' 'oracle_inactive_stage=recovery-failed' >&2
+    exit 74
+  fi
+  exit "$cleanup_status"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --nonce)
+      [ "$#" -ge 2 ] && [ -z "$stage_nonce" ] || fail 64
+      stage_nonce=$2
+      shift 2
+      ;;
+    --self-sha256)
+      [ "$#" -ge 2 ] && [ -z "$self_sha256" ] || fail 64
+      self_sha256=$2
+      shift 2
+      ;;
+    --self-path)
+      [ "$#" -ge 2 ] && [ -z "$self_path" ] || fail 64
+      self_path=$2
+      shift 2
+      ;;
+    *) fail 64 ;;
+  esac
+done
+
+is_sha256 "$stage_nonce" || fail 64
+is_sha256 "$self_sha256" || fail 64
+case "$self_path" in
+  /usr/local/sbin/.clearra-oracle-inactive-stage-v080-@COMMIT_PREFIX@.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9] ) ;;
+  * ) fail 64 ;;
+esac
+[ "$(/usr/bin/readlink -f -- "$0")" = "$self_path" ] || fail 77
+require_root_regular_mode "$self_path" 755
+require_exact_hash "$self_path" "$self_sha256"
+require_root_directory_0755 /usr/local/sbin
+[ "$(/usr/bin/id -u)" -eq 0 ] || fail 77
+
+upload_root=/home/ubuntu/.clearra-v080-upload-@COMMIT_PREFIX@-$stage_nonce
+input_root=/opt/clearra/.v080-input-@COMMIT_PREFIX@-$stage_nonce
+stage_root=/opt/clearra/.v080-stage-@COMMIT_PREFIX@-$stage_nonce
+test_parent=$stage_root/test
+
+exec 9>"$lock_path"
+/usr/bin/flock -n 9 || fail 75
+
+capture_baseline
+harden_release_parents
+copy_root_input
+validate_layers || fail 65
+require_baseline_unchanged
+
+active_tree_sha256=$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$baseline_current_resolved") || fail 65
+[ "$active_tree_sha256" = "$expected_active_tree_sha256" ] || fail 65
+[ "$(/usr/bin/stat -c '%s' -- "$input_root/server-config.mjs")" = "$expected_config_size" ] || fail 65
+require_exact_hash "$input_root/server-config.mjs" "$expected_config_sha256"
+
+[ ! -e "$stage_root" ] && [ ! -L "$stage_root" ] || fail 73
+/usr/bin/mkdir -m 0700 -- "$stage_root"
+[ "$(/usr/bin/stat -c '%u:%g:%a' -- "$stage_root")" = '0:0:700' ] || fail 77
+[ "$(/usr/bin/stat -c '%d' -- "$stage_root")" = "$(/usr/bin/stat -c '%d' -- "$release_root")" ] || fail 77
+
+if [ -e "$candidate_path" ] || [ -L "$candidate_path" ]; then
+  validate_candidate "$candidate_path"
+else
+  /usr/bin/mkdir -m 0700 -- "$test_parent"
+  assemble_candidate "$test_parent/$release_id"
+  syntax_check_candidate "$test_parent/$release_id"
+  run_disposable_tests "$test_parent/$release_id"
+  /usr/bin/rm -rf -- "$test_parent"
+  test_parent=
+
+  final_parent=$stage_root/final
+  /usr/bin/mkdir -m 0700 -- "$final_parent"
+  assemble_candidate "$final_parent/$release_id"
+  syntax_check_candidate "$final_parent/$release_id"
+  require_baseline_unchanged
+  [ ! -e "$candidate_path" ] && [ ! -L "$candidate_path" ] || fail 73
+  /usr/bin/mv -T -n -- "$final_parent/$release_id" "$candidate_path"
+  [ ! -e "$final_parent/$release_id" ] && [ ! -L "$final_parent/$release_id" ] || fail 73
+  validate_candidate "$candidate_path"
+fi
+
+require_baseline_unchanged
+[ "$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$baseline_current_resolved")" = "$expected_active_tree_sha256" ] || fail 73
+
+if [ ! -e /usr/local/libexec ]; then
+  /usr/bin/mkdir -m 0755 -- /usr/local/libexec
+fi
+require_root_directory_0755 /usr/local/libexec
+install_canonical_tools
+[ "$("$canonical_digester" "$candidate_path")" = "$expected_tree_sha256" ] || fail 65
+
+validate_candidate "$candidate_path"
+require_baseline_unchanged
+[ "$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$baseline_current_resolved")" = "$expected_active_tree_sha256" ] || fail 73
+[ "$("$canonical_digester" "$baseline_current_resolved")" = "$expected_active_tree_sha256" ] || fail 73
+require_exact_hash "$canonical_launcher" "$expected_launcher_sha256"
+
+remove_success_root "$stage_root" "/opt/clearra/.v080-stage-@COMMIT_PREFIX@-$stage_nonce"
+test_parent=
+remove_success_root "$input_root" "/opt/clearra/.v080-input-@COMMIT_PREFIX@-$stage_nonce"
+remove_success_root "$upload_root" "/home/ubuntu/.clearra-v080-upload-@COMMIT_PREFIX@-$stage_nonce"
+
+self_identity=$(/usr/bin/stat -c '%d:%i' -- "$self_path") || fail 77
+require_root_regular_mode "$self_path" 755
+require_exact_hash "$self_path" "$self_sha256"
+[ "$(/usr/bin/stat -c '%d:%i' -- "$self_path")" = "$self_identity" ] || fail 77
+/usr/bin/rm -f -- "$self_path"
+[ ! -e "$self_path" ] && [ ! -L "$self_path" ] || fail 77
+commit_canonical_tools
+
+/usr/bin/printf '%s\n' \
+  "oracle_inactive_stage=ready" \
+  "oracle_source_commit=$source_commit" \
+  "oracle_release_id=$release_id" \
+  "oracle_release_sha256=$expected_tree_sha256" \
+  "oracle_launcher_sha256=$expected_launcher_sha256" \
+  "oracle_tree_digester_sha256=$expected_digester_sha256" \
+  "oracle_stage_nonce=$stage_nonce"
+
+trap - EXIT HUP INT TERM
+exit 0

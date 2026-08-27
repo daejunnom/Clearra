@@ -183,6 +183,40 @@ impl PcScenarioQuery<PcScenarioBoard> {
     ) -> Self {
         Self::new_with_board(initial_board, remaining_queue, piece_window)
     }
+
+    /// Returns the heap graph retained by the scenario payload embedded in a
+    /// typed Build-probability query. This deliberately does not authorize
+    /// other PC command families to use the value as a complete request
+    /// measurement.
+    ///
+    /// The queue buffer and an optional supplied colored-solution allow-list
+    /// are measured by their actual allocation capacities. A verified kick
+    /// profile remains outside this ingress contract and fails closed instead
+    /// of being silently omitted. Static profile slices, execution-policy
+    /// values, and all other fields are inline and excluded.
+    pub fn checked_build_probability_retained_capacity_bytes(&self) -> Option<u128> {
+        self.checked_retained_capacity_bytes()
+    }
+
+    /// Complete heap graph retained by this standard-board scenario query.
+    /// Static profiles and all scalar policy fields are inline.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.verified_kick_profile.is_some() {
+            return None;
+        }
+        let queue_bytes = self
+            .remaining_queue
+            .checked_build_probability_retained_capacity_bytes()?;
+        let allowed_identity_bytes =
+            self.allowed_colored_solution_identities
+                .as_ref()
+                .map_or(Some(0), |identities| {
+                    (identities.capacity() as u128).checked_mul(core::mem::size_of::<
+                        StandardBoard64ColoredTilingIdentity,
+                    >() as u128)
+                })?;
+        queue_bytes.checked_add(allowed_identity_bytes)
+    }
 }
 
 impl PcScenarioQuery<ExtendedPcScenarioBoard> {
@@ -398,6 +432,15 @@ impl<B> PcScenarioQuery<B> {
         identities.dedup();
         self.allowed_colored_solution_identities = Some(identities);
         self
+    }
+
+    /// Moves the supplied-solution filter owner into a compiled problem
+    /// without cloning its allocation. This is used by the finite Build
+    /// compiler after its pre-move capacity projection has been authorized.
+    pub fn take_allowed_colored_solution_identities(
+        &mut self,
+    ) -> Option<Vec<StandardBoard64ColoredTilingIdentity>> {
+        self.allowed_colored_solution_identities.take()
     }
 
     pub fn with_queue_observation_policy(mut self, policy: QueueObservationPolicy) -> Self {

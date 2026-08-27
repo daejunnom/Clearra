@@ -26,6 +26,7 @@ use crate::{
     reachability::ReachabilityWorkspace,
     result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
     t_spin_acceleration::TSpinAcceleration,
+    MAX_REN_QUEUE_PIECES,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +36,12 @@ pub enum ForwardSearchError {
     InvalidHeight,
     BoardOutsideField,
     PatternRequiresSpinFinder,
+    RenRequiresFixedQueue,
+    RenQueueTooLong,
+    RenInitialComboUnsupported,
+    RenInitialBackToBackUnsupported,
+    RenLineClearPolicyUnsupported,
+    RenSpinProfileMustBeDisabled,
     SpinProfileDisabled,
     UnsupportedRuleProfile(&'static str),
     Cancelled,
@@ -373,6 +380,10 @@ impl TraceArena {
     fn get_mut(&mut self, id: u32) -> &mut TraceNode {
         &mut self.chunks[id as usize >> TRACE_CHUNK_SHIFT][id as usize & TRACE_CHUNK_MASK]
     }
+
+    const fn len(&self) -> u32 {
+        self.len
+    }
 }
 
 fn trace_placement(piece: PieceKind, rotation: RotationState, x: i8, y: i8) -> ForwardBoard {
@@ -422,25 +433,27 @@ pub(crate) enum ExpandedAction {
         total_damage: u32,
         step: ForwardPathStep,
     },
+    RenTerminal {
+        board: ForwardBoard,
+        ren_count: u8,
+        step: ForwardPathStep,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct SpinOutcomeKey {
     board: ForwardBoard,
+    placement: ForwardBoard,
     piece: PieceKind,
-    rotation: RotationState,
-    x: i8,
-    y: i8,
     lines: u8,
     mini: bool,
     group: ForwardSpinGroup,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PendingOutcome {
     key: SpinOutcomeKey,
-    trace: u32,
-    total_damage: u32,
+    traces: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -448,6 +461,59 @@ struct DamageOutcome {
     board: ForwardBoard,
     traces: Vec<u32>,
     total_damage: u32,
+}
+
+#[derive(Clone)]
+struct RenOutcome {
+    board: ForwardBoard,
+    traces: Vec<u32>,
+    ren_count: u8,
+}
+
+/// Small dependency-free arbitrary-precision counter used for trace-DAG path cardinality.
+///
+/// Queue length is bounded by the typed request, but a multi-parent DAG can still represent far
+/// more witnesses than any machine integer. Result completeness must not silently saturate.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExactPathCount {
+    /// Little-endian base-1e9 limbs.
+    limbs: Vec<u32>,
+}
+
+impl ExactPathCount {
+    const BASE: u64 = 1_000_000_000;
+
+    fn one() -> Self {
+        Self { limbs: vec![1] }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        if self.limbs.len() < other.limbs.len() {
+            self.limbs.resize(other.limbs.len(), 0);
+        }
+        let mut carry = 0_u64;
+        for index in 0..self.limbs.len() {
+            let right = other.limbs.get(index).copied().unwrap_or(0) as u64;
+            let sum = self.limbs[index] as u64 + right + carry;
+            self.limbs[index] = (sum % Self::BASE) as u32;
+            carry = sum / Self::BASE;
+        }
+        if carry != 0 {
+            self.limbs.push(carry as u32);
+        }
+    }
+
+    fn decimal(&self) -> String {
+        let Some((most_significant, remaining)) = self.limbs.split_last() else {
+            return "0".to_owned();
+        };
+        let mut output = most_significant.to_string();
+        for limb in remaining.iter().rev() {
+            use std::fmt::Write as _;
+            write!(&mut output, "{limb:09}").expect("writing to String cannot fail");
+        }
+        output
+    }
 }
 
 #[derive(Eq, Hash, PartialEq)]
@@ -644,6 +710,8 @@ pub(crate) struct ForwardQueueSession {
     spin_outcomes: BTreeMap<SpinOutcomeKey, PendingOutcome>,
     damage_outcomes: BTreeMap<(u32, ForwardBoard), DamageOutcome>,
     maximum_damage: Option<u32>,
+    ren_outcomes: BTreeMap<(u8, ForwardBoard), RenOutcome>,
+    maximum_ren: Option<u8>,
     pub(crate) visited_states: u64,
     pub(crate) generated_locks: u64,
     pub(crate) peak_frontier: usize,
@@ -690,6 +758,8 @@ impl ForwardQueueSession {
             spin_outcomes: BTreeMap::new(),
             damage_outcomes: BTreeMap::new(),
             maximum_damage: None,
+            ren_outcomes: BTreeMap::new(),
+            maximum_ren: None,
             visited_states: 0,
             generated_locks: 0,
             peak_frontier: 1,
@@ -804,19 +874,27 @@ impl ForwardQueueSession {
         self.visited_states = self.visited_states.saturating_add(1);
         self.generated_locks = self.generated_locks.saturating_add(generated_locks);
 
-        let record_prefix = matches!(self.config.mode, ForwardSearchMode::MaximumDamage)
+        let record_damage_prefix = matches!(self.config.mode, ForwardSearchMode::MaximumDamage)
             && (parents.is_empty() || step.damage() > 0)
             && self
                 .maximum_damage
                 .is_none_or(|best| damage_state.total_damage() >= best);
+        let record_ren_prefix = matches!(self.config.mode, ForwardSearchMode::MaximumRen);
         let retain_terminal = terminal_actions
             .iter()
             .any(|action| self.terminal_action_is_retainable(action));
-        if record_prefix || retain_terminal {
+        if record_damage_prefix || record_ren_prefix || retain_terminal {
             let trace = self.push_trace(parents, step);
             let child_parents = TraceChain::singleton(trace);
-            if record_prefix {
+            if record_damage_prefix {
                 self.record_damage_candidate(key.board, trace, damage_state.total_damage());
+            }
+            if record_ren_prefix {
+                self.record_ren_candidate(
+                    key.board,
+                    trace,
+                    ren_count_from_damage_state(damage_state),
+                );
             }
             for action in terminal_actions.drain(..) {
                 if self.terminal_action_is_retainable(&action) {
@@ -840,8 +918,11 @@ impl ForwardQueueSession {
                         && self.maximum_damage.is_none_or(|best| *total_damage >= best)
                 }
                 ForwardSearchMode::DamageAtLeast(minimum) => *total_damage >= minimum,
-                ForwardSearchMode::SpinFinder(_) => false,
+                ForwardSearchMode::SpinFinder(_) | ForwardSearchMode::MaximumRen => false,
             },
+            ExpandedAction::RenTerminal { ren_count, .. } => {
+                self.maximum_ren.is_none_or(|maximum| *ren_count >= maximum)
+            }
             ExpandedAction::Spin { .. } | ExpandedAction::Child { .. } => true,
         }
     }
@@ -882,6 +963,14 @@ impl ForwardQueueSession {
                     total_damage,
                 );
             }
+            ExpandedAction::RenTerminal {
+                board,
+                ren_count,
+                step,
+            } => {
+                let trace = self.push_trace(parents, step);
+                self.record_ren_candidate(board, trace, ren_count);
+            }
         }
     }
 
@@ -910,11 +999,37 @@ impl ForwardQueueSession {
         step: ForwardPathStep,
     ) {
         let board = key.board;
-        let record_maximum_prefix = matches!(self.config.mode, ForwardSearchMode::MaximumDamage)
-            && (parents.is_empty() || step.damage() > 0);
+        let record_maximum_damage_prefix =
+            matches!(self.config.mode, ForwardSearchMode::MaximumDamage)
+                && (parents.is_empty() || step.damage() > 0);
+        let record_maximum_ren_prefix = matches!(self.config.mode, ForwardSearchMode::MaximumRen);
         let stored_key = self.store_state_key(key);
         let index_key = state_index_key(self.config.mode, stored_key, damage_state);
         let trace = if let Some(index) = self.next_index.get(&index_key, &self.next) {
+            if matches!(self.config.mode, ForwardSearchMode::SpinFinder(_)) {
+                // Accumulated damage is informational for forward-spin. Combo and B2B, which can
+                // affect future scoring and preservation, are already part of the state key.
+                // Keep every witness reaching this semantic state in the multi-parent trace DAG.
+                let trace = self.push_trace(parents, step);
+                let mut traces = self.next[index].traces;
+                self.append_trace(&mut traces, trace);
+                self.next[index].traces = traces;
+                return;
+            }
+            if matches!(self.config.mode, ForwardSearchMode::MaximumRen) {
+                let trace = self.push_trace(parents, step);
+                let mut traces = self.next[index].traces;
+                self.append_trace(&mut traces, trace);
+                self.next[index].traces = traces;
+                if record_maximum_ren_prefix {
+                    self.record_ren_candidate(
+                        board,
+                        trace,
+                        ren_count_from_damage_state(damage_state),
+                    );
+                }
+                return;
+            }
             let candidate_damage = damage_state.total_damage();
             let existing_damage = self.next[index].total_damage;
             if candidate_damage < existing_damage {
@@ -928,7 +1043,7 @@ impl ForwardQueueSession {
                     traces: TraceChain::singleton(trace),
                 };
                 trace
-            } else if self.config.mode.is_damage() {
+            } else if self.config.mode.preserves_all_paths() {
                 let trace = self.push_trace(parents, step);
                 let mut traces = self.next[index].traces;
                 self.append_trace(&mut traces, trace);
@@ -949,8 +1064,11 @@ impl ForwardQueueSession {
             self.next_index.insert(index_key, index);
             trace
         };
-        if record_maximum_prefix {
+        if record_maximum_damage_prefix {
             self.record_damage_candidate(board, trace, damage_state.total_damage());
+        }
+        if record_maximum_ren_prefix {
+            self.record_ren_candidate(board, trace, ren_count_from_damage_state(damage_state));
         }
     }
 
@@ -997,6 +1115,7 @@ impl ForwardQueueSession {
                 }
             }
             ForwardSearchMode::SpinFinder(_) => return,
+            ForwardSearchMode::MaximumRen => return,
         }
         let trace = self.push_trace(parents, step);
         self.record_damage_candidate(board, trace, total_damage);
@@ -1020,6 +1139,7 @@ impl ForwardQueueSession {
                 );
             }
             ForwardSearchMode::SpinFinder(_) => return,
+            ForwardSearchMode::MaximumRen => return,
         }
         self.damage_outcomes
             .entry((total_damage, board))
@@ -1027,6 +1147,25 @@ impl ForwardQueueSession {
                 board,
                 traces: Vec::new(),
                 total_damage,
+            })
+            .traces
+            .push(trace);
+    }
+
+    fn record_ren_candidate(&mut self, board: ForwardBoard, trace: u32, ren_count: u8) {
+        if self.maximum_ren.is_some_and(|best| ren_count < best) {
+            return;
+        }
+        if self.maximum_ren.is_none_or(|best| ren_count > best) {
+            self.maximum_ren = Some(ren_count);
+            self.ren_outcomes.clear();
+        }
+        self.ren_outcomes
+            .entry((ren_count, board))
+            .or_insert_with(|| RenOutcome {
+                board,
+                traces: Vec::new(),
+                ren_count,
             })
             .traces
             .push(trace);
@@ -1042,24 +1181,27 @@ impl ForwardQueueSession {
         mini: bool,
         lines: u8,
         trace: u32,
-        total_damage: u32,
+        _total_damage: u32,
     ) {
         let group = spin_group(self.config.spin_profile, piece.as_ascii());
         let key = SpinOutcomeKey {
             board,
+            placement: trace_placement(piece, rotation, x, y),
             piece,
-            rotation: canonical_result_rotation(piece, rotation),
-            x,
-            y,
             lines,
             mini,
             group,
         };
-        self.spin_outcomes.entry(key).or_insert(PendingOutcome {
-            key,
-            trace,
-            total_damage,
-        });
+        let pending = self
+            .spin_outcomes
+            .entry(key)
+            .or_insert_with(|| PendingOutcome {
+                key,
+                traces: Vec::new(),
+            });
+        if !pending.traces.contains(&trace) {
+            pending.traces.push(trace);
+        }
     }
 
     pub(crate) fn build_report(
@@ -1106,6 +1248,7 @@ impl ForwardQueueSession {
                                 None,
                                 false,
                                 0,
+                                None,
                                 best.total_damage,
                                 path,
                             ));
@@ -1125,23 +1268,103 @@ impl ForwardQueueSession {
                 outcomes
             }
             ForwardSearchMode::SpinFinder(_) => {
+                let trace_path_counts = self.trace_path_counts(control)?;
                 let mut outcomes = Vec::with_capacity(self.spin_outcomes.len());
                 for (index, pending) in self.spin_outcomes.values().enumerate() {
                     if control.is_cancelled() {
                         return Err(ForwardSearchError::Cancelled);
                     }
-                    outcomes.push(ForwardSearchOutcome::new(
-                        index as u64 + 1,
-                        self.source_pattern_index,
-                        self.queue.clone(),
-                        Some(pending.key.group),
-                        pending.key.board.words(),
-                        Some(pending.key.piece),
-                        pending.key.mini,
-                        pending.key.lines,
-                        pending.total_damage,
-                        self.reconstruct_first_path(pending.trace, control)?,
-                    ));
+                    let mut evidence_path_count = ExactPathCount::default();
+                    let mut canonical_path: Option<Vec<ForwardPathStep>> = None;
+                    for trace in &pending.traces {
+                        if control.is_cancelled() {
+                            return Err(ForwardSearchError::Cancelled);
+                        }
+                        evidence_path_count.add_assign(&trace_path_counts[*trace as usize]);
+                        let candidate = self.reconstruct_first_path(*trace, control)?;
+                        if canonical_path
+                            .as_ref()
+                            .is_none_or(|current| candidate < *current)
+                        {
+                            canonical_path = Some(candidate);
+                        }
+                    }
+                    let path = canonical_path.expect("spin outcome owns at least one trace");
+                    let total_damage = path.last().map_or(0, ForwardPathStep::total_damage);
+                    outcomes.push(
+                        ForwardSearchOutcome::new(
+                            index as u64 + 1,
+                            self.source_pattern_index,
+                            self.queue.clone(),
+                            Some(pending.key.group),
+                            pending.key.board.words(),
+                            Some(pending.key.piece),
+                            pending.key.mini,
+                            pending.key.lines,
+                            None,
+                            total_damage,
+                            path,
+                        )
+                        .with_evidence_path_count(evidence_path_count.decimal()),
+                    );
+                }
+                outcomes
+            }
+            ForwardSearchMode::MaximumRen => {
+                let mut outcomes = Vec::new();
+                let mut seen = HashSet::new();
+                for best in self.ren_outcomes.values() {
+                    if control.is_cancelled() {
+                        return Err(ForwardSearchError::Cancelled);
+                    }
+                    for trace in &best.traces {
+                        self.for_each_reconstructed_path(*trace, control, |path| {
+                            let key = DamagePathKey {
+                                board: best.board,
+                                steps: path
+                                    .iter()
+                                    .map(|step| {
+                                        (
+                                            step.piece(),
+                                            step.rotation(),
+                                            step.x(),
+                                            step.y(),
+                                            step.hold_decision(),
+                                            step.cleared_lines(),
+                                            step.spin(),
+                                            step.damage(),
+                                        )
+                                    })
+                                    .collect(),
+                            };
+                            if !seen.insert(key) {
+                                return Ok(());
+                            }
+                            let total_damage = path.last().map_or(0, ForwardPathStep::total_damage);
+                            outcomes.push(ForwardSearchOutcome::new(
+                                0,
+                                self.source_pattern_index,
+                                self.queue.clone(),
+                                None,
+                                best.board.words(),
+                                None,
+                                false,
+                                0,
+                                Some(best.ren_count),
+                                total_damage,
+                                path,
+                            ));
+                            Ok(())
+                        })?;
+                    }
+                }
+                outcomes.sort_by(|left, right| {
+                    left.path()
+                        .cmp(right.path())
+                        .then_with(|| left.final_board().cmp(&right.final_board()))
+                });
+                for (index, outcome) in outcomes.iter_mut().enumerate() {
+                    outcome.assign_id(index as u64 + 1);
                 }
                 outcomes
             }
@@ -1175,6 +1398,34 @@ impl ForwardQueueSession {
             trace = node.parent_head;
         }
         self.materialize_reverse_path(&reverse_path, control)
+    }
+
+    fn trace_path_counts(
+        &self,
+        control: &ExecutionControl,
+    ) -> Result<Vec<ExactPathCount>, ForwardSearchError> {
+        let mut counts = Vec::with_capacity(self.trace.len() as usize);
+        for trace in 0..self.trace.len() {
+            if control.is_cancelled() {
+                return Err(ForwardSearchError::Cancelled);
+            }
+            let node = self.trace.get(trace);
+            let mut count = if node.parent_head == NO_TRACE {
+                ExactPathCount::one()
+            } else {
+                ExactPathCount::default()
+            };
+            let mut parent = node.parent_head;
+            while parent != NO_TRACE {
+                if control.is_cancelled() {
+                    return Err(ForwardSearchError::Cancelled);
+                }
+                count.add_assign(&counts[parent as usize]);
+                parent = self.trace.get(parent).next;
+            }
+            counts.push(count);
+        }
+        Ok(counts)
     }
 
     fn for_each_reconstructed_path(
@@ -1338,6 +1589,9 @@ pub(crate) fn expand_search_node(
             };
             let (board_after, cleared_rows, cleared_lines) =
                 place_and_clear(10, config.height, placed);
+            if matches!(config.mode, ForwardSearchMode::MaximumRen) && cleared_lines == 0 {
+                continue;
+            }
             let perfect_clear = board_after.is_empty() && cleared_lines > 0;
             let edge = ScoringExecutionEdge::new(
                 0,
@@ -1375,7 +1629,9 @@ pub(crate) fn expand_search_node(
                 ForwardSearchMode::SpinFinder(target) => {
                     spin.filter(|event| spin_matches(target, *event))
                 }
-                ForwardSearchMode::MaximumDamage | ForwardSearchMode::DamageAtLeast(_) => None,
+                ForwardSearchMode::MaximumDamage
+                | ForwardSearchMode::DamageAtLeast(_)
+                | ForwardSearchMode::MaximumRen => None,
             };
             let (next_piece, next_cursor, next_hold) = next_active(
                 queue,
@@ -1463,10 +1719,20 @@ pub(crate) fn expand_search_node(
                     total_damage: damage.state().total_damage(),
                     step,
                 });
+            } else if config.mode.is_ren() {
+                actions.push(ExpandedAction::RenTerminal {
+                    board: board_after,
+                    ren_count: ren_count_from_damage_state(damage.state()),
+                    step,
+                });
             }
         }
     }
     Ok(generated_locks)
+}
+
+fn ren_count_from_damage_state(state: TetrioDamageState) -> u8 {
+    u8::try_from(state.combo().unwrap_or(0)).expect("REN queue validation caps the chain at 22")
 }
 
 fn state_index_key(
@@ -1524,8 +1790,28 @@ pub(crate) fn validate_query(query: &ForwardSearchQuery) -> Result<(), ForwardSe
         return Err(ForwardSearchError::QueueTooLong);
     }
     if query.piece_source().is_pattern() {
+        if query.mode().is_ren() {
+            return Err(ForwardSearchError::RenRequiresFixedQueue);
+        }
         if !matches!(query.mode(), ForwardSearchMode::SpinFinder(_)) {
             return Err(ForwardSearchError::PatternRequiresSpinFinder);
+        }
+    }
+    if query.mode().is_ren() {
+        if query.piece_source().sequence_len() > MAX_REN_QUEUE_PIECES {
+            return Err(ForwardSearchError::RenQueueTooLong);
+        }
+        if query.initial_combo().is_some() {
+            return Err(ForwardSearchError::RenInitialComboUnsupported);
+        }
+        if query.initial_back_to_back().is_some() {
+            return Err(ForwardSearchError::RenInitialBackToBackUnsupported);
+        }
+        if query.line_clear_policy() != ForwardLineClearPolicy::Any {
+            return Err(ForwardSearchError::RenLineClearPolicyUnsupported);
+        }
+        if query.spin_profile() != SpinProfileId::Disabled {
+            return Err(ForwardSearchError::RenSpinProfileMustBeDisabled);
         }
     }
     if !(1..=24).contains(&query.height()) {
@@ -1727,6 +2013,36 @@ mod tests {
         )
     }
 
+    fn ren_query(
+        board: Board256Mask,
+        height: u8,
+        queue: Vec<PieceKind>,
+        hold: bool,
+    ) -> ForwardSearchQuery {
+        ForwardSearchQuery::new(
+            board,
+            height,
+            queue,
+            hold,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::Disabled,
+            None,
+            None,
+            ForwardSearchMode::MaximumRen,
+        )
+    }
+
+    fn rows_missing_left_cell(row_count: u8) -> Board256Mask {
+        let mut words = [0_u64; 4];
+        for y in 0..row_count {
+            for x in 1_u16..10 {
+                let index = u16::from(y) * 10 + x;
+                words[usize::from(index / 64)] |= 1_u64 << (index % 64);
+            }
+        }
+        Board256Mask::from_words(words)
+    }
+
     fn compact_o_step(x: i8) -> TraceStep {
         TraceStep {
             piece: PieceKind::O,
@@ -1782,6 +2098,68 @@ mod tests {
             .expect("reconstruct paths");
 
         assert_eq!(paths, vec![vec![0, 4], vec![2, 4]]);
+    }
+
+    #[test]
+    fn spin_terminal_identity_folds_multi_parent_paths_into_exact_evidence() {
+        let query = ForwardSearchQuery::new(
+            Board256Mask::EMPTY,
+            4,
+            vec![PieceKind::O, PieceKind::T],
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::TSpins,
+            None,
+            None,
+            ForwardSearchMode::SpinFinder(ForwardSpinTarget::default()),
+        );
+        let config = ForwardSearchConfig::from_query(&query);
+        let mut session = ForwardQueueSession::new(config, vec![PieceKind::O, PieceKind::T], 0);
+        let parents = push_trace_choice(&mut session, NO_TRACE, 0, 2);
+        let terminal = session.trace.push(TraceNode {
+            parent_head: parents,
+            next: NO_TRACE,
+            step: TraceStep {
+                piece: PieceKind::T,
+                rotation: RotationState::Zero,
+                x: 4,
+                y: 0,
+                hold: TraceHoldDecision::None,
+                cleared_lines: 0,
+                spin: Some((PieceKind::T, false)),
+                damage: 0,
+            },
+        });
+        session.record_spin_outcome(
+            ForwardBoard::EMPTY,
+            RotationState::Zero,
+            4,
+            0,
+            PieceKind::T,
+            false,
+            0,
+            terminal,
+            0,
+        );
+
+        let report = session
+            .build_report(&ExecutionControl::default())
+            .expect("spin report");
+
+        assert_eq!(report.outcomes().len(), 1);
+        assert_eq!(report.outcomes()[0].evidence_path_count(), "2");
+        assert!(report.outcomes()[0].evidence_complete());
+        assert_eq!(report.outcomes()[0].path().len(), 2);
+    }
+
+    #[test]
+    fn exact_path_count_does_not_saturate_machine_integers() {
+        let mut count = ExactPathCount::one();
+        for _ in 0..128 {
+            let previous = count.clone();
+            count.add_assign(&previous);
+        }
+        assert_eq!(count.decimal(), "340282366920938463463374607431768211456");
     }
 
     #[test]
@@ -2139,6 +2517,92 @@ mod tests {
         assert!(matches!(
             ForwardSearchSession::new(damage_query),
             Err(ForwardSearchError::PatternRequiresSpinFinder)
+        ));
+    }
+
+    #[test]
+    fn ren_normalizes_initial_completed_rows_without_counting_them() {
+        let report = run(ren_query(
+            Board256Mask::from_words([0x3ff, 0, 0, 0]),
+            4,
+            vec![PieceKind::I],
+            false,
+        ));
+
+        assert_eq!(report.initial_board(), [0; 4]);
+        assert_eq!(report.maximum_ren(), None);
+        assert!(report.outcomes().is_empty());
+    }
+
+    #[test]
+    fn ren_requires_the_first_lock_to_clear_and_counts_multiline_locks_once() {
+        let no_clear = run(ren_query(Board256Mask::EMPTY, 4, vec![PieceKind::I], false));
+        assert_eq!(no_clear.maximum_ren(), None);
+
+        let report = run(ren_query(
+            rows_missing_left_cell(8),
+            8,
+            vec![PieceKind::I, PieceKind::I],
+            false,
+        ));
+        assert_eq!(report.maximum_ren(), Some(1));
+        assert_eq!(report.maximum_damage(), None);
+        assert!(!report.outcomes().is_empty());
+        assert!(report.outcomes().iter().all(|outcome| {
+            outcome.ren_count() == Some(1)
+                && outcome.path().len() == 2
+                && outcome.path().iter().all(|step| step.cleared_lines() == 4)
+        }));
+    }
+
+    #[test]
+    fn ren_hold_starts_empty_and_can_diverge_from_no_hold() {
+        let board = rows_missing_left_cell(4);
+        let without_hold = run(ren_query(board, 4, vec![PieceKind::O, PieceKind::I], false));
+        let with_hold = run(ren_query(board, 4, vec![PieceKind::O, PieceKind::I], true));
+
+        assert_eq!(without_hold.maximum_ren(), None);
+        assert_eq!(with_hold.maximum_ren(), Some(0));
+        assert!(with_hold
+            .outcomes()
+            .iter()
+            .any(|outcome| outcome.path()[0].hold_decision() == "store"));
+    }
+
+    #[test]
+    fn ren_enforces_fixed_queue_and_the_twenty_two_piece_boundary() {
+        assert!(ForwardSearchSession::new(ren_query(
+            Board256Mask::EMPTY,
+            4,
+            vec![PieceKind::I; 22],
+            true,
+        ))
+        .is_ok());
+        assert!(matches!(
+            ForwardSearchSession::new(ren_query(
+                Board256Mask::EMPTY,
+                4,
+                vec![PieceKind::I; 23],
+                true,
+            )),
+            Err(ForwardSearchError::RenQueueTooLong)
+        ));
+
+        let expression = QueuePatternExpression::parse("I", 1).expect("pattern");
+        let pattern_query = ForwardSearchQuery::new_with_source(
+            Board256Mask::EMPTY,
+            4,
+            ForwardPieceSource::pattern(expression),
+            true,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::Disabled,
+            None,
+            None,
+            ForwardSearchMode::MaximumRen,
+        );
+        assert!(matches!(
+            ForwardSearchSession::new(pattern_query),
+            Err(ForwardSearchError::RenRequiresFixedQueue)
         ));
     }
 }

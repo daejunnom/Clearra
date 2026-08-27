@@ -162,9 +162,19 @@ export function buildSetupFinderCommand(
   request: SetupFinderRequest,
   automaticWorkerLimit?: number
 ): string {
+  return buildSetupFinderCommandWithRoute(request, automaticWorkerLimit, true);
+}
+
+function buildSetupFinderCommandWithRoute(
+  request: SetupFinderRequest,
+  automaticWorkerLimit: number | undefined,
+  canonicalRankedRoute: boolean
+): string {
   const remaining = normalizedSetupResidue(request.remaining);
   const tokens = [
-    'clearra setup-finder',
+    canonicalRankedRoute
+      ? `clearra setup ${request.candidatePriority === 'all' ? 'joint' : request.candidatePriority}`
+      : 'clearra setup-finder',
     `--remaining ${remaining}`,
     request.searchMode === 'qb'
       ? `--mode qb --qb ${normalizedSetupResidue(request.qbQueue)}`
@@ -175,7 +185,9 @@ export function buildSetupFinderCommand(
       : '',
     `--rule ${request.rule}`,
     request.tablebaseEnabled ? '--tablebase' : '--no-tablebase',
-    request.candidatePriority === 'all' ? '' : `--priority ${request.candidatePriority}`,
+    canonicalRankedRoute || request.candidatePriority === 'all'
+      ? ''
+      : `--priority ${request.candidatePriority}`,
     request.lengthPreference === 'auto' ? '' : `--setup-length ${request.lengthPreference}`,
     `--max-setup-pieces ${request.maxSetupPieces}`,
     automaticWorkerLimit === undefined
@@ -195,9 +207,10 @@ export function buildSetupPathDetailCommand(
   automaticWorkerLimit?: number
 ): string {
   return [
-    buildSetupFinderCommand(
+    buildSetupFinderCommandWithRoute(
       { ...request, useAllLogicalProcessors: false },
-      automaticWorkerLimit
+      automaticWorkerLimit,
+      false
     ),
     `--paths-for ${detail.setupId}`,
     `--condition ${detail.conditionId}`

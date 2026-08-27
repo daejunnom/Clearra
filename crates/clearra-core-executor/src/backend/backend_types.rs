@@ -97,6 +97,7 @@ pub enum SearchBackendSelectionReason {
     HybridGpuNotReadyCpu,
     ExplicitFallbackToCpuGeometryExactCover,
     ExplicitFallbackToCpuParallelExact,
+    RawGeometryDeterministicSerial,
 }
 
 impl SearchBackendSelectionReason {
@@ -115,6 +116,7 @@ impl SearchBackendSelectionReason {
                 "explicit-fallback-to-cpu-geometry-exact-cover"
             }
             Self::ExplicitFallbackToCpuParallelExact => "explicit-fallback-to-cpu-parallel-exact",
+            Self::RawGeometryDeterministicSerial => "raw-geometry-deterministic-serial",
         }
     }
 }

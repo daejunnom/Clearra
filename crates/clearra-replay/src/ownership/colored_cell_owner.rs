@@ -85,6 +85,20 @@ impl ColoredCellOwnership {
         self.owners.iter().filter(|owner| owner.is_some()).count()
     }
 }
+impl ColoredCellOwnership {
+    /// Heap storage retained by the cell-owner table, excluding this inline
+    /// value.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        (self.owners.capacity() as u128)
+            .checked_mul(core::mem::size_of::<Option<ColoredCellOwner>>() as u128)
+    }
+
+    /// Heap storage requested by cloning the cell-owner table.
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        (self.owners.len() as u128)
+            .checked_mul(core::mem::size_of::<Option<ColoredCellOwner>>() as u128)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColoredCellOwnershipError {
@@ -193,6 +207,21 @@ mod tests {
         assert_eq!(
             ownership.owner_at(1, 0),
             Some(ColoredCellOwner::new(0, PieceKind::O))
+        );
+
+        assert_eq!(
+            ownership.checked_nested_retained_bytes(),
+            Some(
+                ownership.owners.capacity() as u128
+                    * core::mem::size_of::<Option<ColoredCellOwner>>() as u128
+            )
+        );
+        assert_eq!(
+            ownership.checked_clone_nested_bytes(),
+            Some(
+                ownership.owners.len() as u128
+                    * core::mem::size_of::<Option<ColoredCellOwner>>() as u128
+            )
         );
     }
 }

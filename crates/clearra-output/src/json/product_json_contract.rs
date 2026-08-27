@@ -20,9 +20,12 @@ pub(crate) fn fields_object(fields: &[JsonField]) -> JsonValue {
 
 pub(crate) fn contract_object(kind: &str, fields: &[JsonField]) -> JsonValue {
     match kind {
-        "pc" | "pc-scenario" | "continue" | "path" => {
-            contract_with_optional_diagnostics(kind, fields, [("pc", pc_contract(fields))])
-        }
+        "pc"
+        | "pc-scenario"
+        | "pc-tiling-family.v1"
+        | "pc-score-summary.v2"
+        | "continue"
+        | "path" => contract_with_optional_diagnostics(kind, fields, [("pc", pc_contract(fields))]),
         "setup" => {
             contract_with_optional_diagnostics(kind, fields, [("setup", setup_contract(fields))])
         }

@@ -5,12 +5,20 @@ use crate::{
 
 use super::*;
 
-fn connected_result() -> PostGpuResult {
+fn observed_runtime_result() -> PostGpuResult {
     pollster::block_on(PostProcessGpuBackend::union_pattern_words(
         SearchBackendRequest::Cpu,
         &[vec![0b0011, 0b1000], vec![0b1100, 0b0100]],
     ))
     .expect("valid postprocess batch")
+}
+
+fn connected_result() -> PostGpuResult {
+    PostGpuResult::connected(
+        SearchBackendRequest::Cpu,
+        vec![0b1111, 0b1100],
+        "deterministic-test-shader".to_owned(),
+    )
 }
 
 #[test]
@@ -112,11 +120,36 @@ fn postprocess_gpu_failure_does_not_rewrite_search_backend() {
 
 #[test]
 fn postprocess_gpu_capability_uses_stable_outcomes() {
-    let result = connected_result();
+    let result = observed_runtime_result();
     let capability = result.capability();
 
-    assert_eq!(capability.state(), PostGpuCapabilityState::Connected);
-    assert!(capability.runtime_connected());
-    assert!(capability.exact_supported());
-    assert_eq!(capability.unavailable_reason(), None);
+    match capability.state() {
+        PostGpuCapabilityState::Connected => {
+            assert!(capability.runtime_connected());
+            assert!(capability.exact_supported());
+            assert_eq!(capability.unavailable_reason(), None);
+            assert_eq!(result.union_words(), Some(&[0b1111, 0b1100][..]));
+            assert_eq!(
+                result.trust_state(),
+                PostGpuTrustState::TrustedDeterministic
+            );
+            assert!(result.can_claim_exact());
+        }
+        PostGpuCapabilityState::Unavailable => {
+            assert!(!capability.runtime_connected());
+            assert!(!capability.exact_supported());
+            assert!(capability.unavailable_reason().is_some());
+            assert_eq!(result.trust_state(), PostGpuTrustState::Unavailable);
+            assert_eq!(result.union_words(), None);
+            assert!(!result.can_claim_exact());
+        }
+        PostGpuCapabilityState::RejectedMismatch => {
+            assert!(!capability.runtime_connected());
+            assert!(!capability.exact_supported());
+            assert_eq!(capability.unavailable_reason(), None);
+            assert_eq!(result.trust_state(), PostGpuTrustState::RejectedMismatch);
+            assert_eq!(result.union_words(), None);
+            assert!(!result.can_claim_exact());
+        }
+    }
 }

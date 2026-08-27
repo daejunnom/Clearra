@@ -54,13 +54,17 @@ pub(crate) fn score_objective_policy(
             return Ok(clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling())
         }
         clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover => {
-            return Ok(
-                clearra_objectives::policy::objective_policy::ObjectivePolicy::minimum_cover(),
-            )
+            let objective =
+                clearra_objectives::policy::objective_policy::ObjectivePolicy::minimum_cover();
+            if mode == "score-minimals" {
+                objective.with_score_summary()
+            } else {
+                return Ok(objective);
+            }
         }
         clearra_core_domain::objective::objective_kind::ObjectiveKind::All
         | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique => {
-            if mode == "summary" {
+            if matches!(mode, "summary" | "score-finder") {
                 base.with_score_summary()
             } else {
                 return Ok(base);
@@ -100,9 +104,11 @@ pub(crate) fn score_mode_objective_kind(
     use clearra_core_domain::objective::objective_kind::ObjectiveKind;
 
     match mode {
-        "off" | "disabled" | "failed-queue" | "" | "summary" => Ok(base_kind),
+        "off" | "disabled" | "failed-queue" | "saves" | "best-save" | "" | "summary"
+        | "score-finder" => Ok(base_kind),
+        "path" => Ok(ObjectiveKind::All),
         "tiling" | "tiling-only" => Ok(ObjectiveKind::Tiling),
-        "minimum-cover" | "minimum" => Ok(ObjectiveKind::MinimumCover),
+        "minimum-cover" | "minimum" | "score-minimals" => Ok(ObjectiveKind::MinimumCover),
         value => Err(RequestBuildError::new(
             RequestBuildErrorCode::ValidationFailed,
             format!("invalid GUI score mode '{value}'"),

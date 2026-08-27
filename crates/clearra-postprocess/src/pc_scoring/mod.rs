@@ -1,6 +1,7 @@
 mod pc_scoring_postprocessor;
 
 pub use pc_scoring_postprocessor::{
-    PcPostProcessCancelled, PcScoringPostProcessInput, PcScoringPostProcessResult,
+    PcPostProcessCancelled, PcScoringMemoryGuardError, PcScoringMemoryProjection,
+    PcScoringMemoryReport, PcScoringPostProcessInput, PcScoringPostProcessResult,
     PcScoringPostProcessor,
 };

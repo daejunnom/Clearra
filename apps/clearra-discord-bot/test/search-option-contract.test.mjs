@@ -2,605 +2,559 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { encodeCtk3 } from "ctk3";
+
 import {
   findSlashCommand,
-  formatSlashCommandHelp,
-  slashCommandCatalog,
 } from "../src/discord/slash-command-catalog.mjs";
 import {
   buildSlashCommandArguments,
-  DISCORD_PACKED_OPTION_KEYS,
 } from "../src/discord/slash-command-input.mjs";
-import { DiscordInputError } from "../src/discord/i18n.mjs";
 
 const CONTRACT_URL = new URL(
   "../../../tests/fixtures/contracts/search_option_contract.tsv",
   import.meta.url,
 );
-
-test("Discord option exposure follows the shared search-option contract fixture", () => {
-  const rows = contractRows();
-  const packedByFamily = new Map([
-    ["pc", new Set(DISCORD_PACKED_OPTION_KEYS.pc)],
-    ["setup", new Set(DISCORD_PACKED_OPTION_KEYS.remaining)],
-    ["build", new Set(DISCORD_PACKED_OPTION_KEYS.cover)],
-    ["damage", new Set(DISCORD_PACKED_OPTION_KEYS["fixed-next"])],
-    ["spin-finder", new Set(DISCORD_PACKED_OPTION_KEYS["spin-structure"])],
-  ]);
-
-  for (const row of rows) {
-    if (!row.surface.startsWith("packed:")) continue;
-    if (row.family === "spin-finder" && !row.constraints.includes("spin-structure-only")) {
-      continue;
-    }
-    const key = row.surface.slice("packed:".length);
-    assert.ok(
-      packedByFamily.get(row.family)?.has(key),
-      `${row.family}.${row.option} must expose packed key ${key}`,
-    );
-  }
-
-  const registeredNames = new Set(
-    slashCommandCatalog.flatMap((command) =>
-      registrationOptions(command).map(({ name }) => name)
-    ),
-  );
-  const packedNames = new Set(Object.values(DISCORD_PACKED_OPTION_KEYS).flat());
-  for (const forbidden of [
-    "backend",
-    "fallback",
-    "workers",
-    "tablebase",
-    "dependency-dag",
-    "gpu-device",
-    "tiling",
-    "tiling-only",
-  ]) {
-    assert.equal(registeredNames.has(forbidden), false, forbidden);
-    assert.equal(packedNames.has(forbidden), false, forbidden);
-  }
-});
-
-test("every documented packed option key appears in its public EN/KO help or description", () => {
-  const helpTarget = new Map([
-    ["pc", "path"],
-    ["cover", "cover"],
-    ["spin", "spin"],
-    ["score-fixed-next", "score-finder"],
-    ["remaining", "pc-setup"],
-    ["fixed-next", "damage"],
-    ["spin-structure", "spin-structure"],
-    ["finesse-search", "finesse search"],
-    ["finesse-score", "finesse score"],
-  ]);
-  for (const [input, keys] of Object.entries(DISCORD_PACKED_OPTION_KEYS)) {
-    const target = helpTarget.get(input);
-    const command = target.startsWith("finesse")
-      ? findSlashCommand("finesse").subcommands[target.split(" ")[1]]
-      : findSlashCommand(target);
-    const optionDescription = command.registration.options
-      .find(({ name }) => name === "options")?.description ?? "";
-    const corpus = [
-      optionDescription,
-      formatSlashCommandHelp(target, "en"),
-      formatSlashCommandHelp(target, "ko"),
-    ].join("\n").replaceAll("_", "-");
-    for (const key of keys) {
-      assert.match(corpus, new RegExp(escapeRegex(key)), `${input}.${key}`);
-    }
-  }
-});
-
-test("shared Discord representatives reach the production parser for every legal single and pair Cartesian", () => {
-  const rows = contractRows();
-  const statistics = {};
-  for (const scope of DISCORD_FIXTURE_SCOPES) {
-    const exposed = rows.filter((row) =>
-      row.family === scope.family && scope.options.has(row.option)
-    );
-    const settings = exposed.flatMap((row) =>
-      row.valid.map((value) => Object.freeze({ row, value }))
-    );
-    let semanticCases = 0;
-    let parserExecutions = 0;
-
-    for (const setting of settings) {
-      assert.equal(isLegalFixtureCase(scope.id, [setting]), true, fixtureLabel([setting]));
-      parserExecutions += assertProductionParserCase(scope.id, [setting]);
-      semanticCases += 1;
-    }
-    for (let left = 0; left < settings.length; left += 1) {
-      for (let right = left + 1; right < settings.length; right += 1) {
-        const pair = [settings[left], settings[right]];
-        if (pair[0].row.option === pair[1].row.option) continue;
-        if (!isLegalFixtureCase(scope.id, pair)) continue;
-        parserExecutions += assertProductionParserCase(scope.id, pair);
-        semanticCases += 1;
-      }
-    }
-    statistics[scope.id] = { semanticCases, parserExecutions };
-  }
-
-  assert.deepEqual(statistics, EXPECTED_PRODUCTION_MATRIX_COUNTS);
-});
-
-test("fixture dependency and contradiction cases expose stable DiscordInputError codes", () => {
-  const cases = [
-    [
-      "setup qb source required",
-      () => setupArguments([
-        setting("setup", "mode", "qb"),
-      ], { omitInferredQb: true }),
-      "options.setup_qb_required",
-    ],
-    [
-      "setup oracle/qb conflict",
-      () => setupArguments([
-        setting("setup", "mode", "oracle"),
-        setting("setup", "qb", "OS"),
-      ], { preserveConflict: true }),
-      "options.setup_qb_oracle_conflict",
-    ],
-    [
-      "setup bag capacity",
-      () => setupArguments([
-        setting("setup", "remaining", "IOTSZJ"),
-        setting("setup", "qb", "OS"),
-      ], { preserveConflict: true }),
-      "options.setup_qb_bag_capacity",
-    ],
-    [
-      "setup cycle-seven borrow",
-      () => setupArguments([
-        setting("setup", "remaining", "IOTSZJL"),
-        setting("setup", "post-cycle-borrow", "on"),
-      ]),
-      "options.setup_borrow_cycle",
-    ],
-    [
-      "spin fill bounds",
-      () => spinStructureArguments([
-        setting("spin-finder", "fill-bottom", "5"),
-        setting("spin-finder", "fill-top", "4"),
-      ], { preserveConflict: true }),
-      "options.spin_fill_bounds",
-    ],
-  ];
-  for (const [label, run, code] of cases) {
-    assert.throws(run, (error) =>
-      error instanceof DiscordInputError && error.code === code,
-      label,
-    );
-  }
-});
-
-test("shared invalid representatives fail at the production Discord boundary with stable codes", () => {
-  const rows = contractRows();
-  const cases = [];
-  addInvalidCases(cases, rows, "pc", "lines", (value) =>
-    pcArguments([setting("pc", "lines", value)]), "options.invalid", {
-      exclude: new Set(["1"]),
-    });
-  for (const option of [
-    "remaining",
-    "qb",
-    "queue-knowledge",
-    "next-cycle-remaining",
-    "max-setup-pieces",
-  ]) {
-    addInvalidCases(cases, rows, "setup", option, (value) =>
-      setupArguments([setting("setup", option, value)]), "options.invalid");
-  }
-  addInvalidCases(cases, rows, "damage", "source", (value) =>
-    damageArguments([setting("damage", "source", value)]), "source.invalid");
-  for (const option of [
-    "spin-profile",
-    "minimum-damage",
-    "initial-combo",
-    "initial-b2b",
-  ]) {
-    addInvalidCases(cases, rows, "damage", option, (value) =>
-      damageArguments([setting("damage", option, value)]), "options.invalid");
-  }
-  addInvalidCases(cases, rows, "spin-finder", "source", () =>
-    buildSlashCommandArguments(findSlashCommand("spin"), [
-      { name: "field", value: EMPTY_FIELD },
-      { name: "next", value: "-" },
-    ]), "source.invalid", { include: new Set(["empty"]) });
-  addInvalidCases(cases, rows, "spin-finder", "inventory", (value) =>
-    spinStructureArguments([setting("spin-finder", "inventory", value)]), "pieces.invalid");
-  for (const option of ["fill-bottom", "fill-top", "max-placements", "minimality"]) {
-    addInvalidCases(cases, rows, "spin-finder", option, (value) =>
-      spinStructureArguments([setting("spin-finder", option, value)]), "options.invalid");
-  }
-
-  for (const { label, run, code } of cases) {
-    assert.throws(run, (error) =>
-      error instanceof DiscordInputError && error.code === code,
-      label,
-    );
-  }
-  assert.equal(cases.length, 22, "exact represented invalid fixture cases");
-
-  // The PC fixture is shared by opening and scenario surfaces. Discord's
-  // curated sfinder aliases compile to Scenario, where an odd line height is
-  // valid, so the opening-only invalid representative must remain accepted.
-  assert.doesNotThrow(() => pcArguments([setting("pc", "lines", "1")]));
-
-  // A single Discord `next` field cannot express the direct typed conflict of
-  // supplying both a fixed queue and a pattern. The backend-facing argv has
-  // exactly one canonical source switch, so those abstract `both` rows are not
-  // silently counted as parser executions.
-  for (const name of ["path", "cover", "spin"]) {
-    const command = findSlashCommand(name);
-    assert.equal(command.registration.options.filter(({ name }) => name === "next").length, 1);
-    assert.equal(command.registration.options.some(({ name }) =>
-      name === "queue" || name === "patterns"
-    ), false);
-  }
-});
-
-const DISCORD_FIXTURE_SCOPES = Object.freeze([
-  scope("pc", "pc", ["lines", "source", "hold", "rule"]),
-  scope("setup", "setup", [
-    "mode",
-    "remaining",
-    "qb",
-    "queue-knowledge",
-    "next-cycle-remaining",
-    "post-cycle-borrow",
-    "priority",
-    "length",
-    "max-setup-pieces",
-    "rule",
-  ]),
-  scope("build", "build", ["source", "hold", "rule"]),
-  scope("damage", "damage", [
-    "source",
-    "hold",
-    "rule",
-    "spin-profile",
-    "damage-mode",
-    "minimum-damage",
-    "initial-combo",
-    "initial-b2b",
-    "preserve-b2b",
-  ]),
-  scope("spin-source", "spin-finder", ["source"]),
-  scope("spin-structure", "spin-finder", [
-    "inventory",
-    "fill-bottom",
-    "fill-top",
-    "max-placements",
-    "minimality",
-  ]),
+const COLUMNS = Object.freeze([
+  "family",
+  "option",
+  "kind",
+  "valid",
+  "invalid",
+  "discordDefault",
+  "nativeDefault",
+  "disposition",
+  "discordPath",
+  "exposure",
+  "lowering",
+  "reason",
+  "dependencies",
 ]);
 
-// Filled from the deterministic fixture matrix. Keeping exact totals makes it
-// impossible to silently lose a representative or legal pair while retaining
-// a superficially green schema-enumeration test.
-const EXPECTED_PRODUCTION_MATRIX_COUNTS = Object.freeze({
-  pc: { semanticCases: 65, parserExecutions: 118 },
-  setup: { semanticCases: 433, parserExecutions: 835 },
-  build: { semanticCases: 35, parserExecutions: 61 },
-  damage: { semanticCases: 382, parserExecutions: 735 },
-  "spin-source": { semanticCases: 2, parserExecutions: 2 },
-  "spin-structure": { semanticCases: 85, parserExecutions: 156 },
+test("every live v2 named option is a typed slash field on every declared route", () => {
+  const checkedRoutes = new Set();
+  for (const row of liveContractRows().filter(({ disposition }) => disposition === "named")) {
+    for (const path of row.discordPath.split("|")) {
+      const command = commandAt(path);
+      assert.ok(command, `${row.family}.${row.option} route ${path}`);
+      const names = new Set(command.registration?.options?.map(({ name }) => name));
+      for (const exposure of row.exposure.split("|")) {
+        assert.ok(
+          names.has(exposure),
+          `${row.family}.${row.option} must expose ${exposure} on ${path}`,
+        );
+      }
+      checkedRoutes.add(path);
+    }
+  }
+
+  for (const path of checkedRoutes) {
+    const names = commandAt(path).registration.options.map(({ name }) => name);
+    assert.equal(
+      names.includes("options"),
+      false,
+      `${path} must not hide result-affecting v2 fields in packed free text`,
+    );
+  }
+
+  const archivedBuildRows = contractRows().filter(({ family }) => family === "build");
+  assert.equal(archivedBuildRows.length, 18);
+  const retiredTypedBuildRows = archivedBuildRows.filter(
+    ({ disposition }) => disposition === "named",
+  );
+  assert.equal(retiredTypedBuildRows.length, 12);
+  assert.ok(retiredTypedBuildRows.every(
+    ({ discordPath }) => discordPath === "/build cover",
+  ));
+  const buildV2Names = new Set(
+    commandAt("/build cover").registration.options.map(({ name }) => name),
+  );
+  for (const archived of retiredTypedBuildRows.flatMap(
+    ({ exposure }) => exposure.split("|"),
+  )) {
+    if (["height", "hold", "source-pieces", "kicktable"].includes(archived)) continue;
+    assert.equal(buildV2Names.has(archived), false, archived);
+  }
 });
 
-function scope(id, family, options) {
-  return Object.freeze({ id, family, options: new Set(options) });
-}
+test("every named or preset v2 ledger row reaches a production lowering token", () => {
+  const samples = loweringSamples();
+  for (const row of liveContractRows().filter(({ disposition }) => disposition !== "excluded")) {
+    const outputs = samples.get(row.family) ?? [];
+    const tokens = row.lowering.split("|");
+    assert.ok(outputs.length > 0, `${row.family}.${row.option} sample family`);
+    assert.ok(
+      outputs.some((arguments_) => tokens.some((token) => arguments_.includes(token))),
+      `${row.family}.${row.option} must lower through ${row.lowering}`,
+    );
+  }
+});
 
-function addInvalidCases(
-  cases,
-  rows,
-  family,
-  option,
-  build,
-  code,
-  filters = {},
-) {
-  const row = rows.find((candidate) =>
-    candidate.family === family && candidate.option === option
+test("native PC routes preserve objective ownership while chance owns typed unique semantics", () => {
+  const path = slashArguments("/pc path", pcBase());
+  assert.deepEqual(path.slice(0, 2), ["pc", "path"]);
+  assert.equal(path.includes("--objective"), false);
+  assert.equal(path.includes("--queue-knowledge"), false);
+  assert.equal(row("pc", "objective").nativeDefault, "all");
+  assert.equal(row("pc", "objective").discordDefault, "all");
+
+  const chanceCommand = commandAt("/pc chance");
+  const chance = slashArguments("/pc chance", pcBase());
+  assert.deepEqual(chance.slice(0, 2), ["pc", "chance"]);
+  assert.equal(chance.includes("--objective"), false);
+  assertValue(chance, "--queue", "IOTSZJL");
+  assertValue(chance, "--rule", "srs-plus");
+  assert.deepEqual(
+    chanceCommand.registration.options.map(({ name }) => name),
+    ["next", "field", "lines", "hold", "kicktable"],
   );
-  assert.ok(row, `${family}.${option} fixture row`);
-  for (const value of row.invalid) {
-    if (filters.include && !filters.include.has(value)) continue;
-    if (filters.exclude?.has(value)) continue;
-    cases.push({
-      label: `${family}.${option}=${value}`,
-      run: () => build(value),
-      code,
-    });
+  for (const name of [
+    "queue-knowledge",
+    "spin-profile",
+    "preserve-b2b",
+    "solution-probabilities",
+    "objective",
+  ]) {
+    assert.throws(
+      () => slashArguments("/pc chance", pcBase([{ name, value: "on" }])),
+      new RegExp(`unsupported option '${name}'`, "i"),
+    );
   }
-}
+  const minimals = slashArguments("/pc minimals", pcBase());
+  assert.deepEqual(minimals.slice(0, 2), ["pc", "minimals"]);
+  assert.equal(minimals.includes("--objective"), false);
 
-function setting(family, option, value) {
-  return Object.freeze({ row: Object.freeze({ family, option }), value });
-}
+  const tiling = slashArguments("/pc tiling", pcBase([
+    { name: "hold", value: "disabled" },
+  ]));
+  assert.deepEqual(tiling.slice(0, 2), ["pc", "tiling"]);
+  assert.equal(tiling.includes("--tiling-only"), false);
+  assert.equal(tiling.includes("--objective"), false);
+  assert.equal(tiling.includes("--rule"), false);
 
-function assertProductionParserCase(scopeId, settings) {
-  const forward = fixtureArguments(scopeId, settings);
-  assert.ok(forward.length > 0, fixtureLabel(settings));
-  if (settings.length === 1) return 1;
-  const reverse = fixtureArguments(scopeId, [...settings].reverse());
-  assert.deepEqual(reverse, forward, fixtureLabel(settings));
-  return 2;
-}
+  const failed = slashArguments("/pc failed-queue", pcBase([
+    { name: "queue-knowledge", value: "visible-7" },
+    { name: "spin-profile", value: "all-spin-plus" },
+    { name: "preserve-b2b", value: "on" },
+    { name: "failed-count", value: 17 },
+  ]));
+  assert.deepEqual(failed.slice(0, 2), ["pc", "failed-queue"]);
+  assertValue(failed, "--failed-count", "17");
+  assertValue(failed, "--queue-knowledge", "visible-7");
+  assert.equal(failed.includes("--objective"), false);
+  assert.equal(failed.includes("--solution-probabilities"), false);
 
-function fixtureArguments(scopeId, settings) {
-  switch (scopeId) {
-    case "pc":
-      return pcArguments(settings);
-    case "setup":
-      return setupArguments(settings);
-    case "build":
-      return buildArguments(settings);
-    case "damage":
-      return damageArguments(settings);
-    case "spin-source":
-      return spinSourceArguments(settings);
-    case "spin-structure":
-      return spinStructureArguments(settings);
-    default:
-      throw new Error(`unmapped Discord fixture scope '${scopeId}'`);
+  assert.throws(
+    () => slashArguments("/pc minimals", pcBase([
+      { name: "queue-knowledge", value: "visible-7" },
+    ])),
+    /visible-7.*unavailable.*minimum-cover/i,
+  );
+  assert.throws(
+    () => slashArguments("/pc path", pcBase([
+      { name: "spin-profile", value: "all-mini" },
+    ])),
+    /requires preserve-b2b=on/i,
+  );
+});
+
+test("canonical score and Build surfaces retain every fieldwise semantic distinction", () => {
+  const score = slashArguments("/pc score", pcBase([
+    { name: "score-profile", value: "guideline" },
+    { name: "spin-profile", value: "all-mini-plus" },
+    { name: "initial-b2b", value: 3 },
+  ]));
+  assert.deepEqual(score.slice(0, 2), ["pc", "score"]);
+  assert.equal(score.includes("--objective"), false);
+  assert.equal(score.includes("--score"), false);
+  assertValue(score, "--score-profile", "guideline");
+  assertValue(score, "--initial-b2b", "3");
+  for (const name of [
+    "queue-knowledge",
+    "preserve-b2b",
+    "solution-probabilities",
+  ]) {
+    assert.throws(
+      () => slashArguments("/pc score", pcBase([{ name, value: "on" }])),
+      new RegExp(`unsupported option '${name}'`, "i"),
+    );
   }
-}
-
-function pcArguments(settings) {
-  const raw = [{ name: "field", value: EMPTY_FIELD }];
-  const packed = [];
-  let hasSource = false;
-  for (const { row: { option }, value } of settings) {
-    if (option === "source") {
-      raw.push({ name: "next", value: sourceValue(value) });
-      hasSource = true;
-    } else if (option === "lines") {
-      raw.push({ name: "lines", value: Number(value) });
-    } else if (option === "hold") {
-      packed.push(`hold=${value}`);
-    } else if (option === "rule") {
-      raw.push({ name: "kicktable", value });
-    }
+  const scoreMinimals = slashArguments("/pc score-minimals", pcBase([
+    { name: "score-profile", value: "guideline" },
+    { name: "spin-profile", value: "all-mini-plus" },
+    { name: "initial-b2b", value: 3 },
+  ]));
+  assert.deepEqual(scoreMinimals.slice(0, 2), ["pc", "score-minimals"]);
+  assertValue(scoreMinimals, "--score-profile", "guideline");
+  assertValue(scoreMinimals, "--initial-b2b", "3");
+  for (const forbidden of [
+    "--objective", "--score", "--solution-probabilities", "--ties",
+    "--tie-snapshot", "--tie-cursor",
+  ]) assert.equal(scoreMinimals.includes(forbidden), false, forbidden);
+  for (const name of ["queue-knowledge", "preserve-b2b", "solution-probabilities"]) {
+    assert.throws(
+      () => slashArguments("/pc score-minimals", pcBase([{ name, value: "on" }])),
+      new RegExp(`unsupported option '${name}'`, "i"),
+    );
   }
-  if (!hasSource) raw.push({ name: "next", value: "IOTS" });
-  appendPacked(raw, packed);
-  return buildSlashCommandArguments(findSlashCommand("path"), raw);
-}
 
-function buildArguments(settings) {
-  const raw = [
+  const buildV2 = slashArguments("/build cover", [
+    { name: "base-mask", value: "0x0" },
+    { name: "target-mask", value: "0xf" },
+    { name: "height", value: 1 },
+    { name: "queue", value: "I" },
+  ]);
+  assert.deepEqual(buildV2.slice(0, 2), ["build", "cover"]);
+  assertValue(buildV2, "--base-mask", "0x0");
+  assertValue(buildV2, "--target-mask", "0xf");
+
+  assertValue(buildV2, "--height", "1");
+  assertValue(buildV2, "--queue", "I");
+  assertValue(buildV2, "--hold", "empty");
+  assertValue(buildV2, "--queue-knowledge", "oracle");
+  assertValue(buildV2, "--objective", "min-cover");
+  assertValue(buildV2, "--rule", "srs-plus");
+  assertValue(buildV2, "--backend", "cpu");
+  assert.equal(buildV2.includes("--no-backend-fallback"), true);
+  for (const forbidden of [
+    "--aggregate",
+    "--solution-probabilities",
+    "--finesse",
+    "--max-memory",
+    "--ties",
+  ]) assert.equal(buildV2.includes(forbidden), false, forbidden);
+
+  const legacyCover = slashArguments("/cover", [
     { name: "base", value: EMPTY_FIELD },
     { name: "target", value: FOUR_CELL_TARGET },
-  ];
-  const packed = [];
-  let hasSource = false;
-  for (const { row: { option }, value } of settings) {
-    if (option === "source") {
-      raw.push({ name: "next", value: sourceValue(value) });
-      hasSource = true;
-    } else if (option === "hold") {
-      packed.push(`hold=${value}`);
-    } else if (option === "rule") {
-      raw.push({ name: "kicktable", value });
-    }
-  }
-  if (!hasSource) raw.push({ name: "next", value: "IOTS" });
-  appendPacked(raw, packed);
-  return buildSlashCommandArguments(findSlashCommand("cover"), raw);
-}
+    { name: "next", value: "I" },
+    { name: "options", value: "hold=use" },
+  ]);
+  assert.equal(legacyCover[0], "build-probability");
+  assert.equal(legacyCover.slice(0, 2).includes("sfinder"), false);
+  assert.equal(legacyCover.includes("--no-mirror"), true);
 
-function damageArguments(settings) {
-  const raw = [{ name: "field", value: EMPTY_FIELD }];
-  const packed = [];
-  const values = fixtureValueMap(settings);
-  let hasSource = false;
-  for (const { row: { option }, value } of settings) {
-    if (option === "source") {
-      raw.push({ name: "next", value: value === "fixed" ? "IOTS" : value });
-      hasSource = true;
-    } else if (option === "hold") {
-      packed.push(`hold=${value}`);
-    } else if (option === "rule") {
-      raw.push({ name: "kicktable", value });
-    } else if (option === "spin-profile") {
-      packed.push(`spin-profile=${value}`);
-    } else if (option === "damage-mode") {
-      if (value === "at-least" && !values.has("minimum-damage")) {
-        packed.push("minimum-damage=0");
-      }
-    } else if ([
-      "minimum-damage",
-      "initial-combo",
-      "initial-b2b",
-      "preserve-b2b",
-    ].includes(option)) {
-      packed.push(`${option}=${value}`);
-    }
-  }
-  if (!hasSource) raw.push({ name: "next", value: "IOTS" });
-  appendPacked(raw, packed);
-  return buildSlashCommandArguments(findSlashCommand("damage"), raw);
-}
+  const finesse = slashArguments("/build finesse-score", finesseScoreOptions());
+  assert.deepEqual(finesse.slice(0, 2), ["finesse", "score"]);
+  assert.equal(finesse.includes("--initial-mask"), true);
+  assert.equal(finesse.includes("--placements"), true);
+  assert.equal(finesse.includes("--base-mask"), false);
+  assertValue(finesse, "--source-pieces", "7");
+});
 
-function spinSourceArguments(settings) {
-  const source = settings.find(({ row }) => row.option === "source")?.value ?? "fixed";
-  return buildSlashCommandArguments(findSlashCommand("spin"), [
+test("forward and structural families lower independent named controls", () => {
+  const damage = slashArguments("/forward damage", forwardDamageOptions());
+  assert.equal(damage[0], "damage");
+  assertValue(damage, "--height", "10");
+  assert.equal(damage.includes("--no-hold"), true);
+  assertValue(damage, "--spin-profile", "all-mini-plus");
+  assertValue(damage, "--minimum-damage", "4");
+  assertValue(damage, "--initial-combo", "2");
+  assertValue(damage, "--initial-b2b", "3");
+  assert.equal(damage.includes("--preserve-b2b"), true);
+
+  const defaultDamage = slashArguments("/forward damage", [
     { name: "field", value: EMPTY_FIELD },
-    { name: "next", value: sourceValue(source) },
+    { name: "next", value: "IOTS" },
+  ]);
+  assertValue(defaultDamage, "--spin-profile", "all-mini-plus");
+
+  const spin = slashArguments("/forward spin", forwardSpinOptions());
+  assert.equal(spin[0], "spin-finder");
+  assertValue(spin, "--patterns", "[I]!" );
+  assertValue(spin, "--spin-profile", "all-spin-plus");
+  assertValue(spin, "--lines", "2+");
+  assertValue(spin, "--spin-category", "other");
+  assert.equal(spin.includes("--preserve-b2b"), true);
+  assert.doesNotThrow(() => slashArguments("/forward spin", forwardSpinOptions([
+    { name: "spin-profile", value: "all-mini" },
+  ])));
+  assert.throws(
+    () => slashArguments("/forward spin", forwardSpinOptions([
+      { name: "spin-profile", value: "t-spins" },
+    ])),
+    /other requires.*All-Spin or All-Mini/i,
+  );
+
+  const ren = slashArguments("/forward ren", [
+    { name: "field", value: EMPTY_FIELD },
+    { name: "next", value: "IOT" },
+    { name: "height", value: 10 },
+    { name: "hold", value: "off" },
+    { name: "kicktable", value: "no-kick" },
+  ]);
+  assert.deepEqual(ren.slice(0, 1), ["ren"]);
+  assertValue(ren, "--queue", "IOT");
+  assertValue(ren, "--height", "10");
+  assertValue(ren, "--rule", "no-kick");
+  assert.equal(ren.includes("--no-hold"), true);
+  assert.equal(ren.includes("--spin-profile"), false);
+  assert.throws(
+    () => slashArguments("/forward ren", [
+      { name: "field", value: EMPTY_FIELD },
+      { name: "next", value: "I".repeat(23) },
+    ]),
+    /at most 22 pieces/i,
+  );
+
+  const structure = slashArguments("/spin-structure search", spinStructureOptions());
+  assert.deepEqual(structure.slice(0, 2), ["spin-structure", "search"]);
+  assertValue(structure, "--pieces", "IOTS");
+  assertValue(structure, "--height", "8");
+  assertValue(structure, "--fill-bottom", "1");
+  assertValue(structure, "--fill-top", "5");
+  assertValue(structure, "--max-placements", "4");
+  assertValue(structure, "--minimality", "minimum-piece-count");
+  assert.ok(findSlashCommand("spin-structure").subcommands.search);
+});
+
+function loweringSamples() {
+  const pcPath = slashArguments("/pc path", pcBase([
+    { name: "hold", value: "I" },
+    { name: "kicktable", value: "no-kick" },
+    { name: "spin-profile", value: "all-spin-plus" },
+    { name: "preserve-b2b", value: "on" },
+  ]));
+  const pcScore = slashArguments("/pc score", pcBase([
+    { name: "score-profile", value: "guideline" },
+    { name: "initial-b2b", value: 1 },
+  ]));
+  const pcScoreMinimals = slashArguments("/pc score-minimals", pcBase());
+  const pcTiling = slashArguments("/pc tiling", pcBase());
+  const pcFailed = slashArguments("/pc failed-queue", pcBase([
+    { name: "failed-count", value: 17 },
+  ]));
+
+  const legacyCover = slashArguments("/cover", [
+    { name: "base", value: EMPTY_FIELD },
+    { name: "target", value: FOUR_CELL_TARGET },
+    { name: "next", value: "I" },
+  ]);
+
+  const setup = slashArguments("/setup joint", setupOptions());
+  const setupBuild = slashArguments("/setup build", [
+    { name: "remaining", value: "IOT" },
+  ]);
+  const setupPc = slashArguments("/setup pc", [
+    { name: "remaining", value: "IOT" },
+  ]);
+
+  return new Map([
+    ["pc", [pcPath, pcScore, pcScoreMinimals, pcTiling, pcFailed]],
+    ["setup", [setup, setupBuild, setupPc]],
+    ["forward-damage", [slashArguments("/forward damage", forwardDamageOptions())]],
+    ["forward-spin", [slashArguments("/forward spin", forwardSpinOptions())]],
+    ["spin-structure", [slashArguments("/spin-structure search", spinStructureOptions())]],
+    ["finesse-score", [slashArguments("/build finesse-score", finesseScoreOptions())]],
+    ["sequence-dependencies", [
+      slashArguments("/utility sequence-dependencies", sequenceDependenciesOptions()),
+    ]],
+    ["sequence", [
+      slashArguments("/utility sequence", sequenceOptions()),
+    ]],
   ]);
 }
 
-function spinStructureArguments(settings, options = {}) {
-  const raw = [{ name: "field", value: TWENTY_FOUR_ROW_FIELD }];
-  const packed = [];
-  const values = fixtureValueMap(settings);
-  let hasInventory = false;
-  for (const { row: { option }, value } of settings) {
-    if (option === "inventory") {
-      raw.push({ name: "pieces", value });
-      hasInventory = true;
-    } else if (["fill-bottom", "fill-top", "max-placements", "minimality"].includes(option)) {
-      packed.push(`${option}=${value}`);
-    }
-  }
-  if (!hasInventory) raw.push({ name: "pieces", value: "IOTSZJL" });
-  if (values.has("fill-bottom") && !values.has("fill-top") && !options.preserveConflict) {
-    packed.push("fill-top=24");
-  }
-  appendPacked(raw, packed);
-  return buildSlashCommandArguments(findSlashCommand("spin-structure"), raw);
+function pcBase(additional = []) {
+  return mergeOptions([
+    { name: "field", value: EMPTY_FIELD },
+    { name: "next", value: "IOTSZJL" },
+    { name: "lines", value: 4 },
+  ], additional);
 }
 
-function setupArguments(settings, options = {}) {
-  const values = fixtureValueMap(settings);
-  const remaining = effectiveSetupRemaining(values);
-  const raw = [];
-  const packed = [];
-  let hasRemaining = false;
-  for (const { row: { option }, value } of settings) {
-    if (option === "remaining") {
-      raw.push({ name: "remaining", value });
-      hasRemaining = true;
-    } else if (option === "mode") {
-      packed.push(`mode=${value}`);
-    } else if (option === "qb") {
-      packed.push(`qb=${value}`);
-    } else if (option === "queue-knowledge") {
-      raw.push({ name: "queue-knowledge", value });
-    } else if (option === "next-cycle-remaining") {
-      raw.push({ name: "next-cycle-remaining", value });
-    } else if (option === "post-cycle-borrow") {
-      packed.push(`post-cycle-borrow=${value}`);
-    } else if (option === "priority") {
-      raw.push({ name: "priority", value });
-    } else if (option === "length") {
-      raw.push({ name: "setup-length", value });
-    } else if (option === "max-setup-pieces") {
-      raw.push({ name: "max-setup-pieces", value: Number(value) });
-    } else if (option === "rule") {
-      raw.push({ name: "kicktable", value });
-    }
+function buildCoverOptions(additional = []) {
+  return mergeOptions([
+    { name: "base", value: EMPTY_FIELD },
+    { name: "target", value: FOUR_CELL_TARGET },
+    { name: "next", value: "IOTSZJL" },
+    { name: "height", value: 12 },
+    { name: "hold", value: "I" },
+    { name: "source-pieces", value: 17 },
+    { name: "kicktable", value: "no-kick" },
+    { name: "aggregation", value: "spin" },
+    { name: "spin-profile", value: "all-spin-plus" },
+    { name: "preserve-b2b", value: "on" },
+    { name: "solution-probabilities", value: "on" },
+    { name: "finesse", value: "inputs" },
+    { name: "finesse-knowledge", value: "visible-7" },
+    { name: "mirror", value: "exclude" },
+  ], additional);
+}
+
+function setupOptions(additional = []) {
+  return mergeOptions([
+    { name: "remaining", value: "OTS" },
+    { name: "mode", value: "qb" },
+    { name: "qb", value: "I" },
+    { name: "queue-knowledge", value: "visible-7" },
+    { name: "next-cycle-remaining", value: "IOTSZJL" },
+    { name: "post-cycle-borrow", value: "on" },
+    { name: "setup-length", value: "longer" },
+    { name: "max-setup-pieces", value: 9 },
+    { name: "kicktable", value: "no-kick" },
+  ], additional);
+}
+
+function forwardDamageOptions(additional = []) {
+  return mergeOptions([
+    { name: "field", value: EMPTY_FIELD },
+    { name: "next", value: "IOTS" },
+    { name: "height", value: 10 },
+    { name: "hold", value: "off" },
+    { name: "kicktable", value: "no-kick" },
+    { name: "spin-profile", value: "all-mini-plus" },
+    { name: "damage-mode", value: "at-least" },
+    { name: "minimum-damage", value: 4 },
+    { name: "initial-combo", value: 2 },
+    { name: "initial-b2b", value: 3 },
+    { name: "preserve-b2b", value: "on" },
+  ], additional);
+}
+
+function forwardSpinOptions(additional = []) {
+  return mergeOptions([
+    { name: "field", value: EMPTY_FIELD },
+    { name: "next", value: "[I]!" },
+    { name: "height", value: 9 },
+    { name: "hold", value: "off" },
+    { name: "kicktable", value: "no-kick" },
+    { name: "spin-profile", value: "all-spin-plus" },
+    { name: "lines", value: "2+" },
+    { name: "spin-category", value: "other" },
+    { name: "initial-combo", value: 2 },
+    { name: "initial-b2b", value: 3 },
+    { name: "preserve-b2b", value: "on" },
+  ], additional);
+}
+
+function spinStructureOptions(additional = []) {
+  return mergeOptions([
+    { name: "pieces", value: "IOTS" },
+    { name: "field", value: EMPTY_FIELD },
+    { name: "height", value: 8 },
+    { name: "lines", value: "2+" },
+    { name: "spin-profile", value: "all-mini-plus" },
+    { name: "kicktable", value: "no-kick" },
+    { name: "fill-bottom", value: 1 },
+    { name: "fill-top", value: 5 },
+    { name: "max-placements", value: 4 },
+    { name: "minimality", value: "minimum-piece-count" },
+  ], additional);
+}
+
+function finesseScoreOptions() {
+  return [
+    { name: "document", value: encodeCtk3({
+      width: 10,
+      pages: [{
+        height: 1,
+        cells: ["G", ...Array(9).fill(null)],
+        operation: { piece: "T", rotation: "spawn", x: 4, y: 1 },
+      }],
+    }) },
+    { name: "next", value: "[T]!" },
+    { name: "hold", value: "I" },
+    { name: "knowledge", value: "visible-7" },
+    { name: "source-pieces", value: 7 },
+    { name: "kicktable", value: "no-kick" },
+  ];
+}
+
+function sequenceDependenciesOptions() {
+  return [
+    { name: "document", value: encodeCtk3({
+      width: 10,
+      pages: [{
+        height: 0,
+        cells: [],
+        operation: { piece: "O", rotation: "spawn", x: 0, y: 0 },
+      }],
+    }) },
+    { name: "rule-profile", value: "srs-x" },
+    { name: "kick-profile", value: "no-kick" },
+    { name: "timeout-seconds", value: 17 },
+  ];
+}
+
+function sequenceOptions() {
+  return [
+    { name: "document", value: encodeCtk3({
+      width: 10,
+      pages: [{
+        height: 0,
+        cells: [],
+        operation: { piece: "O", rotation: "spawn", x: 0, y: 0 },
+      }],
+    }) },
+    { name: "rule-profile", value: "srs-x" },
+    { name: "kick-profile", value: "no-kick" },
+    { name: "timeout-seconds", value: 17 },
+  ];
+}
+
+function mergeOptions(base, additional) {
+  const replacements = new Map(additional.map((option) => [option.name, option]));
+  return [
+    ...base.map((option) => replacements.get(option.name) ?? option),
+    ...additional.filter(({ name }) => !base.some((option) => option.name === name)),
+  ];
+}
+
+function slashArguments(path, options) {
+  return buildSlashCommandArguments(commandAt(path), options);
+}
+
+function commandAt(path) {
+  const [root, subcommand, ...extra] = path.replace(/^\//u, "").trim().split(/\s+/u);
+  if (extra.length > 0) return null;
+  const command = findSlashCommand(root);
+  if (root === "spin-structure" && subcommand === undefined) {
+    return command?.subcommands?.search ?? null;
   }
-  if (!hasRemaining) raw.push({ name: "remaining", value: remaining });
-  const mode = values.get("mode");
-  const qb = values.get("qb");
-  if (mode === "qb" && qb === undefined && !options.omitInferredQb) packed.push("qb=I");
-  if (qb !== undefined && mode === undefined) packed.unshift("mode=qb");
-  if (options.preserveConflict && mode === "oracle" && qb !== undefined) {
-    // The explicit conflict is already represented by the two packed entries.
-  }
-  appendPacked(raw, packed);
-  return buildSlashCommandArguments(findSlashCommand("pc-setup"), raw);
+  return subcommand ? command?.subcommands?.[subcommand] ?? null : command;
 }
 
-function isLegalFixtureCase(scopeId, settings) {
-  const values = fixtureValueMap(settings);
-  if (scopeId === "damage") {
-    return !(values.get("damage-mode") === "maximum" && values.has("minimum-damage"));
-  }
-  if (scopeId === "setup") {
-    const remaining = effectiveSetupRemaining(values);
-    const mode = values.get("mode");
-    const qb = values.get("qb") ?? (mode === "qb" ? "I" : "");
-    if (mode === "oracle" && qb) return false;
-    if (qb && remaining.length + qb.length > 7) return false;
-    if (values.get("post-cycle-borrow") === "on" && remaining.length !== 3) return false;
-    const next = values.get("next-cycle-remaining");
-    if (next !== undefined && next.length !== nextCycleRemainingCount(remaining.length)) {
-      return false;
-    }
-  }
-  if (scopeId === "spin-structure") {
-    const bottom = Number(values.get("fill-bottom") ?? 0);
-    const top = Number(values.get("fill-top") ?? 24);
-    if (bottom >= top) return false;
-    const pieces = values.get("inventory") ?? "IOTSZJL";
-    if (Number(values.get("max-placements") ?? 1) > pieces.length) return false;
-  }
-  return true;
+function assertValue(arguments_, flag, expected) {
+  const index = arguments_.indexOf(flag);
+  assert.notEqual(index, -1, `${flag} in ${arguments_.join(" ")}`);
+  assert.equal(arguments_[index + 1], expected, flag);
 }
 
-function fixtureValueMap(settings) {
-  return new Map(settings.map(({ row, value }) => [row.option, value]));
+function row(family, option) {
+  const value = contractRows().find((candidate) =>
+    candidate.family === family && candidate.option === option
+  );
+  assert.ok(value, `${family}.${option}`);
+  return value;
 }
 
-function effectiveSetupRemaining(values) {
-  if (values.has("remaining")) return values.get("remaining");
-  const next = values.get("next-cycle-remaining");
-  if (next !== undefined) {
-    return ({ 1: "IOTS", 4: "IOTSZJL", 7: "IOT" })[next.length];
-  }
-  return "IOT";
+function contractRows() {
+  return readFileSync(CONTRACT_URL, "utf8")
+    .split(/\r?\n/u)
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const values = line.split("\t");
+      assert.equal(values.length, COLUMNS.length, line);
+      return Object.fromEntries(COLUMNS.map((name, index) => [name, values[index]]));
+    });
 }
 
-function nextCycleRemainingCount(remainingCount) {
-  return ({ 7: 4, 4: 1, 1: 5, 5: 2, 2: 6, 6: 3, 3: 7 })[remainingCount];
-}
-
-function sourceValue(value) {
-  return ({ fixed: "IOTS", pattern: "*p4", empty: "*!" })[value] ?? value;
-}
-
-function appendPacked(raw, packed) {
-  if (packed.length > 0) raw.push({ name: "options", value: packed.join(" ") });
-}
-
-function fixtureLabel(settings) {
-  return settings.map(({ row, value }) => `${row.family}.${row.option}=${value}`).join(" + ");
+function liveContractRows() {
+  // The frozen Build rows describe the retired fieldwise /build cover preset.
+  // They remain immutable evidence, while live /build is governed by the
+  // exhaustive Build v2 surface tests. The promoted pc.path v2 authority also
+  // fixes objective=all and full-oracle knowledge internally, so the old
+  // fieldwise score/B2B/probability knobs are historical evidence only.
+  const retiredPcPathOptions = new Set([
+    "queue-knowledge",
+    "objective",
+    "solution-probabilities",
+  ]);
+  return contractRows().filter(({ family, option }) =>
+    family !== "build" && !(family === "pc" && retiredPcPathOptions.has(option))
+  );
 }
 
 const EMPTY_FIELD = "__________";
 const FOUR_CELL_TARGET = "XXXX______";
-const TWENTY_FOUR_ROW_FIELD = `grid:${[
-  "#_________",
-  ...Array(23).fill("__________"),
-].join("/")}`;
-
-function contractRows() {
-  return readFileSync(CONTRACT_URL, "utf8")
-    .split(/\r?\n/)
-    .filter((line) => line && !line.startsWith("#"))
-    .map((line) => {
-      const [
-        family,
-        option,
-        kind,
-        valid,
-        invalid,
-        webDefault,
-        nativeDefault,
-        surface,
-        constraints,
-      ] = line.split("\t");
-      return {
-        family,
-        option,
-        kind,
-        valid: representatives(valid),
-        invalid: representatives(invalid),
-        webDefault,
-        nativeDefault,
-        surface,
-        constraints,
-      };
-    });
-}
-
-function representatives(value) {
-  return value === "-" ? [] : value.split("|");
-}
-
-function registrationOptions(command) {
-  if (command.input === "finesse") {
-    return Object.values(command.subcommands).flatMap((subcommand) =>
-      subcommand.registration.options
-    );
-  }
-  return command.registration.options ?? [];
-}
-
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

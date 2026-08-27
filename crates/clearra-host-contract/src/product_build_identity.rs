@@ -49,6 +49,24 @@ impl ProductBuildIdentity {
         }
     }
 
+    /// Allocation-free owned-parts seam for a boundary that has already
+    /// authorized each retained identity string.
+    pub fn from_owned_memory_authorized_parts(
+        engine_build_id: String,
+        source_commit: String,
+        contract_schema_version: String,
+        supply_semantics_id: String,
+        artifact_schema_version: String,
+    ) -> Self {
+        Self {
+            engine_build_id,
+            source_commit,
+            contract_schema_version,
+            supply_semantics_id,
+            artifact_schema_version,
+        }
+    }
+
     pub fn engine_build_id(&self) -> &str {
         &self.engine_build_id
     }
@@ -67,6 +85,22 @@ impl ProductBuildIdentity {
 
     pub fn artifact_schema_version(&self) -> &str {
         &self.artifact_schema_version
+    }
+
+    /// Returns the heap payload retained by all five identity strings, using
+    /// actual allocator capacities. Inline `String` owners are excluded.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        [
+            &self.engine_build_id,
+            &self.source_commit,
+            &self.contract_schema_version,
+            &self.supply_semantics_id,
+            &self.artifact_schema_version,
+        ]
+        .into_iter()
+        .try_fold(0_u128, |bytes, value| {
+            bytes.checked_add(value.capacity() as u128)
+        })
     }
 }
 
@@ -155,6 +189,36 @@ mod tests {
         assert!(!is_lowercase_commit_sha(
             "g123456789abcdef0123456789abcdef01234567"
         ));
+    }
+
+    #[test]
+    fn retained_capacity_counts_all_five_owned_identity_strings() {
+        fn allocated(capacity: usize, value: &str) -> String {
+            let mut output = String::with_capacity(capacity);
+            output.push_str(value);
+            output
+        }
+
+        let identity = ProductBuildIdentity::from_owned_memory_authorized_parts(
+            allocated(48, "engine"),
+            allocated(64, "source"),
+            allocated(80, "contract"),
+            allocated(96, "supply"),
+            allocated(112, "artifact"),
+        );
+        let expected = [
+            identity.engine_build_id.capacity(),
+            identity.source_commit.capacity(),
+            identity.contract_schema_version.capacity(),
+            identity.supply_semantics_id.capacity(),
+            identity.artifact_schema_version.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0_u128, |bytes, capacity| {
+            bytes.checked_add(capacity as u128)
+        });
+
+        assert_eq!(identity.checked_retained_capacity_bytes(), expected);
     }
 
     fn is_compile_identity(value: &str) -> bool {

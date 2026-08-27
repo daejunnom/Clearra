@@ -8,7 +8,17 @@ import {
 
 export type { SearchBackend } from './searchExecutionModel.ts';
 
-export type ScoreMode = 'tiling' | 'off' | 'minimum-cover' | 'summary' | 'failed-queue';
+export type ScoreMode =
+  | 'tiling'
+  | 'path'
+  | 'off'
+  | 'minimum-cover'
+  | 'summary'
+  | 'score-finder'
+  | 'score-minimals'
+  | 'failed-queue'
+  | 'saves'
+  | 'best-save';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
 export type SpinProfile =
@@ -49,6 +59,8 @@ export type SolverWorkspaceRequest = {
 export type WorkspaceValidationCode =
   | 'queue_invalid'
   | 'visible-seven-minimum-cover-unsupported'
+  | 'pc-save-fixed-queue-unsupported'
+  | 'pc-score-finder-fixed-queue-required'
   | 'target_lines_invalid'
   | 'scenario_not_tileable'
   | 'scenario_supply_mismatch'
@@ -105,7 +117,65 @@ export function normalizeWorkspaceRequest(
       precomputeBuildDependencies: false
     };
   }
-  const nonScoring = request.scoreMode !== 'summary';
+  if (request.scoreMode === 'path') {
+    return {
+      ...request,
+      queueKnowledge: 'oracle',
+      scoreProfile: 'tetrio',
+      spinProfile: 't-spins',
+      preserveB2B: false,
+      initialB2B: 0,
+      solutionProbabilities: false,
+      tablebaseEnabled: false,
+      precomputeBuildDependencies: false
+    };
+  }
+  if (
+    request.scoreMode === 'summary' ||
+    request.scoreMode === 'score-finder' ||
+    request.scoreMode === 'score-minimals'
+  ) {
+    return {
+      ...request,
+      queueKnowledge: 'oracle',
+      scoreProfile: request.scoreMode === 'score-finder' ? 'jstris-ultra' : request.scoreProfile,
+      spinProfile: request.scoreMode === 'score-finder' ? 't-spins' : request.spinProfile,
+      initialB2B: request.scoreMode === 'score-finder' ? Math.min(1, Math.max(0, Math.trunc(request.initialB2B))) : request.initialB2B,
+      preserveB2B: false,
+      solutionProbabilities: false,
+      backend: 'cpu',
+      gpuDevice: 'auto',
+      workers: 1,
+      useAllLogicalProcessors: false,
+      tablebaseEnabled: false,
+      precomputeBuildDependencies: false,
+      maxPatterns: undefined
+    };
+  }
+  if (request.scoreMode === 'saves' || request.scoreMode === 'best-save') {
+    return {
+      ...request,
+      queueKnowledge: 'oracle',
+      scoreProfile: 'tetrio',
+      spinProfile: 't-spins',
+      preserveB2B: false,
+      initialB2B: 0,
+      solutionProbabilities: false,
+      tablebaseEnabled: false,
+      precomputeBuildDependencies: false
+    };
+  }
+  if (request.scoreMode === 'minimum-cover') {
+    return {
+      ...request,
+      queueKnowledge: 'oracle',
+      scoreProfile: 'tetrio',
+      spinProfile: request.preserveB2B ? request.spinProfile : 't-spins',
+      initialB2B: 0,
+      tablebaseEnabled: false,
+      precomputeBuildDependencies: false
+    };
+  }
   if (request.scoreMode === 'failed-queue') {
     return {
       ...request,
@@ -117,9 +187,9 @@ export function normalizeWorkspaceRequest(
   }
   return {
     ...request,
-    scoreProfile: nonScoring ? 'tetrio' : request.scoreProfile,
-    spinProfile: nonScoring && !request.preserveB2B ? 't-spins' : request.spinProfile,
-    initialB2B: nonScoring ? 0 : request.initialB2B
+    scoreProfile: 'tetrio',
+    spinProfile: request.preserveB2B ? request.spinProfile : 't-spins',
+    initialB2B: 0
   };
 }
 
@@ -401,9 +471,19 @@ export function workspaceValidationCodes(
   }
   if (
     request.queueKnowledge === 'visible-7' &&
-    request.scoreMode === 'minimum-cover'
+    (request.scoreMode === 'minimum-cover' || request.scoreMode === 'score-minimals')
   ) {
     errors.push('visible-seven-minimum-cover-unsupported');
+  }
+  const parsedQueue = request.queue.trim() ? parseBrowserQueueInput(request.queue) : null;
+  if (request.scoreMode === 'score-finder' && parsedQueue?.kind !== 'fixed') {
+    errors.push('pc-score-finder-fixed-queue-required');
+  }
+  if (
+    (request.scoreMode === 'saves' || request.scoreMode === 'best-save') &&
+    parsedQueue?.kind === 'fixed'
+  ) {
+    errors.push('pc-save-fixed-queue-unsupported');
   }
   const normalized = clearCompletedRows(request.boardMask, request.lines);
   const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);
@@ -423,9 +503,28 @@ export function workspaceValidationCodes(
 
 export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   request = normalizeWorkspaceRequest(request);
+  const productSubcommand =
+    request.scoreMode === 'tiling'
+      ? 'tiling'
+      : request.scoreMode === 'path'
+        ? 'path'
+      : request.scoreMode === 'minimum-cover'
+        ? 'minimals'
+        : request.scoreMode === 'summary'
+          ? 'score'
+          : request.scoreMode === 'score-finder'
+            ? 'score-finder'
+          : request.scoreMode === 'score-minimals'
+            ? 'score-minimals'
+            : request.scoreMode === 'saves'
+              ? 'saves'
+              : request.scoreMode === 'best-save'
+                ? 'best-save'
+                : null;
   const tokens = [
     'clearra',
     request.scoreMode === 'failed-queue' ? 'failed-queue' : 'pc',
+    ...(productSubcommand ? [productSubcommand] : []),
     '--lines',
     String(request.lines)
   ];
@@ -439,7 +538,6 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     '--pieces',
     String(pieceWindow ?? 1)
   );
-  if (request.scoreMode === 'tiling') tokens.push('--tiling-only');
   if (request.holdEnabled) tokens.push('--hold', request.holdPiece ?? 'empty');
   else tokens.push('--no-hold');
   if (request.queue) {
@@ -448,11 +546,38 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
       parsedQueue?.source ?? request.queue
     );
   }
-  tokens.push(
-    '--count',
-    request.scoreMode === 'off' || request.scoreMode === 'tiling' ? 'unique' : 'all'
-  );
-  if (request.scoreMode !== 'tiling') {
+  if (request.scoreMode === 'score-finder') {
+    tokens.push('--rule', request.rule);
+    tokens.push('--initial-b2b', String(request.initialB2B));
+  } else if (request.scoreMode === 'summary' || request.scoreMode === 'score-minimals') {
+    tokens.push('--rule', request.rule);
+    tokens.push('--score-profile', request.scoreProfile);
+    tokens.push('--spin-profile', request.spinProfile);
+    tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
+  } else if (request.scoreMode === 'path') {
+    tokens.push('--rule', request.rule);
+    tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
+    if (request.maxPatterns !== undefined) {
+      tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+    }
+  } else if (request.scoreMode === 'minimum-cover') {
+    tokens.push('--rule', request.rule);
+    if (request.solutionProbabilities) tokens.push('--solution-probabilities');
+    if (request.preserveB2B) {
+      tokens.push('--spin-profile', request.spinProfile, '--preserve-b2b');
+    }
+    tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
+    if (request.maxPatterns !== undefined) {
+      tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+    }
+  } else if (request.scoreMode === 'saves' || request.scoreMode === 'best-save') {
+    tokens.push('--rule', request.rule);
+    tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
+    if (request.maxPatterns !== undefined) {
+      tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+    }
+  } else if (request.scoreMode !== 'tiling') {
+    tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');
     tokens.push('--rule', request.rule);
     tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
     tokens.push(
@@ -462,20 +587,15 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     );
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
     tokens.push('--queue-knowledge', request.queueKnowledge);
-    if (request.scoreMode === 'minimum-cover') tokens.push('--objective', 'minimum-cover');
-    if (request.scoreMode === 'summary') tokens.push('--score');
-    if (request.scoreMode === 'summary') {
-      tokens.push('--score-profile', request.scoreProfile);
-      tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
+    if (request.preserveB2B) {
+      tokens.push('--spin-profile', request.spinProfile, '--preserve-b2b');
     }
-    if (request.scoreMode === 'summary' || request.preserveB2B) {
-      tokens.push('--spin-profile', request.spinProfile);
+    tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
+    if (request.maxPatterns !== undefined) {
+      tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
-    if (request.preserveB2B) tokens.push('--preserve-b2b');
-  }
-  tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
-  if (request.maxPatterns !== undefined) {
-    tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+  } else {
+    tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
   }
   return tokens.join(' ');
 }
@@ -502,7 +622,11 @@ export function workspaceRequestForDesktop(
     visible_height: request.lines,
     piece_window: scenarioPieceWindow(request),
     count_policy:
-      request.scoreMode === 'off' || request.scoreMode === 'tiling' ? 'unique' : 'all',
+      request.scoreMode === 'off' ||
+      request.scoreMode === 'tiling' ||
+      request.scoreMode === 'minimum-cover'
+        ? ('unique' as const)
+        : ('all' as const),
     score_mode: request.scoreMode,
     score_profile: request.scoreProfile,
     spin_profile: request.spinProfile,
@@ -512,8 +636,8 @@ export function workspaceRequestForDesktop(
     // The general PC/failed-queue workspace does not request finesse. Keep the
     // new desktop bridge fields explicit so it cannot inherit a prior job's
     // build-probability policy.
-    finesse: 'off',
-    pattern_knowledge: 'both',
+    finesse: 'off' as const,
+    pattern_knowledge: 'both' as const,
     initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
     solution_probabilities: request.solutionProbabilities,
     memory_budget_mb: 0,

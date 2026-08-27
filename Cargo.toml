@@ -7,6 +7,7 @@ members = [
     "crates/clearra-core-executor",
     "crates/clearra-replay",
     "crates/clearra-fumen",
+    "crates/clearra-ctk3",
     "crates/clearra-render",
     "crates/clearra-profiles",
     "crates/clearra-piece-registry",
@@ -27,6 +28,7 @@ members = [
     "crates/clearra-spin-structure-search",
     "crates/clearra-postprocess",
     "crates/clearra-postprocess-gpu",
+    "crates/clearra-platform-fs",
     "crates/clearra-output",
     "crates/clearra-validation",
     "crates/clearra-i18n",
@@ -45,12 +47,14 @@ members = [
 exclude = ["apps/clearra-desktop/src-tauri"]
 
 [workspace.package]
-version = "0.7.5"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+libc = "=0.2.186"
 serde_json = "=1.0.145"
+windows-sys = { version = "=0.61.2", default-features = false }
 
 [patch.crates-io]
 document-features = { path = "tools/vendor/document-features" }

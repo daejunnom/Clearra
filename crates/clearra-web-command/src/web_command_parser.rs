@@ -1,3 +1,12 @@
+use clearra_app::{
+    BuildObjective, BuildQueueKnowledge, BuildScoreProfile, FieldDocumentFormat,
+    FieldDocumentTransformAppCommand, FieldDocumentTransformKind, FumenAppCommand,
+    FumenTransformKind, ParityAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin,
+    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcSaveIngressOrigin, PcScoreIngressOrigin,
+    PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, RenderAppCommand, RenderArtifactFormat,
+    RequestStructuralProfiles, SpinStructureProductMode, PC_SCORE_MAX_PATTERNS,
+    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
+};
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_forward_search::{
@@ -37,12 +46,25 @@ use clearra_supply::{
 
 use crate::{
     ctk3_mask_input::parse_ctk3_board_mask, web_virtual_file::reject_native_path_semantics,
-    WebBuildProbabilityInput, WebCommandError, WebCommandErrorCode, WebCommandRequest,
-    WebPcScenarioInput, WebVirtualFileHandle,
+    WebBuildProbabilityInput, WebBuildV2Capability, WebBuildV2Input, WebCommandError,
+    WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput, WebSetupScoreInput,
+    WebSetupScoreQueueInput, WebVirtualFileHandle,
 };
 
 #[derive(Clone, Debug, Default)]
 pub struct WebCommandParser;
+
+pub(crate) const PC_SCORE_MAX_ARGUMENT_TOKENS: usize = 64;
+pub(crate) const PC_SCORE_MAX_ARGUMENT_BYTES: usize = 2_048;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WebCompatibilityAuthority {
+    /// Preserve the legacy public semantics without minting a typed product claim.
+    #[default]
+    PublicLegacyCompatibility,
+    /// Preserve closed candidate provenance while the typed product remains internal.
+    InternalTypedCandidate,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct BackendFallbackOverride {
@@ -72,6 +94,13 @@ enum BuildAggregationKind {
     Buildability,
     Tiling,
     Spin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpinStructureRoute {
+    Search,
+    Cover,
+    Guaranteed,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -105,9 +134,43 @@ impl WebCommandParser {
         command_text: &str,
         worker_hardware_limit: usize,
     ) -> Result<WebCommandRequest, WebCommandError> {
+        validate_raw_pc_score_command_text(
+            command_text,
+            WebCompatibilityAuthority::PublicLegacyCompatibility,
+        )?;
         reject_process_semantics(command_text)?;
         let tokens = tokenize(command_text)?;
-        Self::parse_tokens_with_worker_limit(&tokens, worker_hardware_limit)
+        Self::parse_tokens_with_worker_limit_and_authority(
+            &tokens,
+            worker_hardware_limit,
+            WebCompatibilityAuthority::PublicLegacyCompatibility,
+        )
+    }
+
+    pub fn parse_internal_typed_candidate(
+        command_text: &str,
+    ) -> Result<WebCommandRequest, WebCommandError> {
+        Self::parse_internal_typed_candidate_with_worker_limit(
+            command_text,
+            WorkerPolicy::hardware_worker_limit(),
+        )
+    }
+
+    pub fn parse_internal_typed_candidate_with_worker_limit(
+        command_text: &str,
+        worker_hardware_limit: usize,
+    ) -> Result<WebCommandRequest, WebCommandError> {
+        validate_raw_pc_score_command_text(
+            command_text,
+            WebCompatibilityAuthority::InternalTypedCandidate,
+        )?;
+        reject_process_semantics(command_text)?;
+        let tokens = tokenize(command_text)?;
+        Self::parse_tokens_with_worker_limit_and_authority(
+            &tokens,
+            worker_hardware_limit,
+            WebCompatibilityAuthority::InternalTypedCandidate,
+        )
     }
 
     pub fn parse_tokens(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
@@ -118,7 +181,47 @@ impl WebCommandParser {
         tokens: &[String],
         worker_hardware_limit: usize,
     ) -> Result<WebCommandRequest, WebCommandError> {
-        let tokens = crate::sfinder_compat::translate_command(tokens)?;
+        Self::parse_tokens_with_worker_limit_and_authority(
+            tokens,
+            worker_hardware_limit,
+            WebCompatibilityAuthority::PublicLegacyCompatibility,
+        )
+    }
+
+    pub fn parse_tokens_internal_typed_candidate(
+        tokens: &[String],
+    ) -> Result<WebCommandRequest, WebCommandError> {
+        Self::parse_tokens_internal_typed_candidate_with_worker_limit(
+            tokens,
+            WorkerPolicy::hardware_worker_limit(),
+        )
+    }
+
+    pub fn parse_tokens_internal_typed_candidate_with_worker_limit(
+        tokens: &[String],
+        worker_hardware_limit: usize,
+    ) -> Result<WebCommandRequest, WebCommandError> {
+        Self::parse_tokens_with_worker_limit_and_authority(
+            tokens,
+            worker_hardware_limit,
+            WebCompatibilityAuthority::InternalTypedCandidate,
+        )
+    }
+
+    fn parse_tokens_with_worker_limit_and_authority(
+        tokens: &[String],
+        worker_hardware_limit: usize,
+        compatibility_authority: WebCompatibilityAuthority,
+    ) -> Result<WebCommandRequest, WebCommandError> {
+        validate_pretranslation_pc_score_tokens(tokens, compatibility_authority)?;
+        let translated =
+            crate::sfinder_compat::translate_command_with_origin(tokens, compatibility_authority)?;
+        let pc_chance_origin = translated.pc_chance_origin();
+        let pc_score_origin = translated.pc_score_origin();
+        let pc_save_origin = translated.pc_save_origin();
+        let (tokens, request_structural_profiles) =
+            extract_request_structural_profile_options(translated.tokens())?;
+        let tokens = tokens.as_slice();
         let mut cursor = 0usize;
 
         if tokens.get(cursor).map(String::as_str) == Some("clearra") {
@@ -129,36 +232,732 @@ impl WebCommandParser {
             WebCommandError::new(WebCommandErrorCode::EmptyCommand, "empty web command")
         })?;
         cursor += 1;
-
-        match command.as_str() {
-            "pc" => parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1), false),
-            "failed-queue" | "failed_queue" => {
+        let request = match command.as_str() {
+            "pc" => match tokens.get(cursor).map(String::as_str) {
+                Some("allspin-sol") => parse_pc_allspin_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    PcAllSpinCommandKind::ExactQueue,
+                ),
+                Some("allspin-pres-chance") => parse_pc_allspin_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    PcAllSpinCommandKind::PatternChance,
+                ),
+                Some("chance") => parse_pc_chance_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    pc_chance_origin.unwrap_or(PcChanceIngressOrigin::CanonicalPcChance),
+                ),
+                Some("minimals") => {
+                    parse_pc_minimals_command(&tokens[cursor + 1..], worker_hardware_limit.max(1))
+                }
+                Some("path") => {
+                    parse_pc_path_command(&tokens[cursor + 1..], worker_hardware_limit.max(1))
+                }
+                Some("score") => parse_pc_score_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    pc_score_origin.unwrap_or(PcScoreIngressOrigin::CanonicalPcScore),
+                ),
+                Some("score-finder") => parse_pc_score_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    PcScoreIngressOrigin::CanonicalPcScoreFinder,
+                ),
+                Some("score-minimals") => parse_pc_score_minimals_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                ),
+                Some("saves") => parse_pc_save_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    pc_save_origin.unwrap_or(PcSaveIngressOrigin::CanonicalPcSaves),
+                ),
+                Some("best-save") => parse_pc_save_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    pc_save_origin.unwrap_or(PcSaveIngressOrigin::CanonicalPcBestSave),
+                ),
+                Some("tiling") => {
+                    parse_pc_tiling_command(&tokens[cursor + 1..], worker_hardware_limit.max(1))
+                }
+                Some("failed-queue") => parse_pc_failed_queue_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    PcFailedQueueIngressOrigin::CanonicalFailedQueue,
+                ),
+                Some("failed_queue") => Err(WebCommandError::new(
+                    WebCommandErrorCode::UnsupportedCommand,
+                    "pc failed_queue is not an authorized canonical spelling",
+                )),
+                _ => parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1), false),
+            },
+            "failed-queue" => {
+                parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1), true)
+            }
+            "failed_queue"
+                if compatibility_authority == WebCompatibilityAuthority::InternalTypedCandidate =>
+            {
+                parse_pc_failed_queue_command(
+                    &tokens[cursor..],
+                    worker_hardware_limit.max(1),
+                    PcFailedQueueIngressOrigin::CompatibilityFailedQueueUnderscore,
+                )
+            }
+            "failed_queue" => {
                 parse_pc_command(&tokens[cursor..], worker_hardware_limit.max(1), true)
             }
             "percent" => parse_percent_command(&tokens[cursor..], worker_hardware_limit.max(1)),
             "build-probability" => {
                 parse_build_probability_command(&tokens[cursor..], worker_hardware_limit.max(1))
             }
+            "build" => parse_build_v2_command(&tokens[cursor..], worker_hardware_limit.max(1)),
             "finesse" => parse_finesse_command(&tokens[cursor..], worker_hardware_limit.max(1)),
-            "setup-finder" | "setup" => {
-                parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1))
+            "setup-finder" => {
+                parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1), None)
             }
-            "damage" => {
-                parse_forward_command(&tokens[cursor..], false, worker_hardware_limit.max(1))
-            }
+            "setup" => match tokens.get(cursor).map(String::as_str) {
+                Some("joint") => parse_setup_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    Some(clearra_problem::SetupCandidatePriority::All),
+                ),
+                Some("build") => parse_setup_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    Some(clearra_problem::SetupCandidatePriority::BuildProbabilityFirst),
+                ),
+                Some("pc") => parse_setup_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    Some(clearra_problem::SetupCandidatePriority::PcProbabilityFirst),
+                ),
+                Some("score") => {
+                    parse_setup_score_command(&tokens[cursor + 1..], worker_hardware_limit.max(1))
+                }
+                _ => parse_setup_command(&tokens[cursor..], worker_hardware_limit.max(1), None),
+            },
+            "damage" => parse_forward_command(
+                &tokens[cursor..],
+                false,
+                false,
+                worker_hardware_limit.max(1),
+            ),
             "spin-finder" => {
-                parse_forward_command(&tokens[cursor..], true, worker_hardware_limit.max(1))
+                parse_forward_command(&tokens[cursor..], true, false, worker_hardware_limit.max(1))
             }
-            "spin-structure" => {
-                parse_spin_structure_command(&tokens[cursor..], worker_hardware_limit.max(1))
+            "ren" => {
+                parse_forward_command(&tokens[cursor..], false, true, worker_hardware_limit.max(1))
             }
+            "spin-structure" => match tokens.get(cursor).map(String::as_str) {
+                Some("search") => parse_spin_structure_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    SpinStructureRoute::Search,
+                ),
+                Some("cover") => parse_spin_structure_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    SpinStructureRoute::Cover,
+                ),
+                Some("guaranteed") => parse_spin_structure_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                    SpinStructureRoute::Guaranteed,
+                ),
+                _ => parse_spin_structure_command(
+                    &tokens[cursor..],
+                    worker_hardware_limit.max(1),
+                    SpinStructureRoute::Search,
+                ),
+            },
             "verify" => parse_verify_command(&tokens[cursor..]),
+            "utility" => parse_utility_command(&tokens[cursor..]),
             _ => Err(WebCommandError::new(
                 WebCommandErrorCode::UnsupportedCommand,
                 format!("unsupported web command '{command}'"),
             )),
+        }?;
+        Ok(request.with_request_structural_profiles(request_structural_profiles))
+    }
+}
+
+fn extract_request_structural_profile_options(
+    tokens: &[String],
+) -> Result<(Vec<String>, RequestStructuralProfiles), WebCommandError> {
+    let mut forwarded = Vec::with_capacity(tokens.len());
+    let mut board = None::<String>;
+    let mut piece = None::<String>;
+    let mut bag = None::<String>;
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        let slot = match option {
+            "--board-profile" => Some((&mut board, "board")),
+            "--piece-profile" => Some((&mut piece, "piece")),
+            "--bag-profile" => Some((&mut bag, "bag")),
+            _ => None,
+        };
+        if let Some((slot, kind)) = slot {
+            if slot.is_some() {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("request {kind} profile may be specified only once"),
+                ));
+            }
+            let value = tokens.get(cursor + 1).ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::MissingValue,
+                    format!("{option} requires a canonical profile id"),
+                )
+            })?;
+            *slot = Some(value.clone());
+            cursor += 2;
+            continue;
+        }
+        forwarded.push(tokens[cursor].clone());
+        cursor += 1;
+    }
+    let board = board.as_deref().unwrap_or("standard-10");
+    let piece = piece.as_deref().unwrap_or("standard-tetrominoes");
+    let bag = bag.as_deref().unwrap_or("standard-7-bag");
+    let profiles =
+        RequestStructuralProfiles::parse_canonical(board, piece, bag).map_err(|error| {
+            WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("invalid request profile selection: {error}"),
+            )
+        })?;
+    Ok((forwarded, profiles))
+}
+
+fn parse_pc_save_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+    origin: PcSaveIngressOrigin,
+) -> Result<WebCommandRequest, WebCommandError> {
+    for token in tokens {
+        if matches!(
+            token.as_str(),
+            "--queue"
+                | "--objective"
+                | "--count"
+                | "--score"
+                | "--tiling-only"
+                | "--solution-probabilities"
+                | "--queue-knowledge"
+                | "--max-memory-mib"
+                | "--visible-seven"
+                | "--tablebase"
+                | "--tb"
+                | "--precompute-build-dependencies"
+                | "--build-dependency-dag"
+        ) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("pc saves does not accept an explicit {token} override"),
+            ));
         }
     }
+    let mut forwarded = Vec::with_capacity(tokens.len() + 2);
+    forwarded.extend_from_slice(tokens);
+    forwarded.extend(["--objective".to_owned(), "all".to_owned()]);
+    parse_pc_command(&forwarded, worker_hardware_limit, false).map(|request| {
+        request
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_pc_save_product_capability(origin)
+    })
+}
+
+fn parse_pc_tiling_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    validate_pc_tiling_options(tokens)?;
+    // The canonical subcommand is the sole authority. Objective lowering is
+    // applied after generic field parsing so legacy `--tiling-only` and
+    // `--objective tiling` requests cannot acquire this product contract.
+    parse_pc_command(tokens, worker_hardware_limit, false).map(|request| {
+        request
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_pc_tiling_product_capability(PcTilingIngressOrigin::CanonicalPcTiling)
+    })
+}
+
+fn validate_pc_tiling_options(tokens: &[String]) -> Result<(), WebCommandError> {
+    let mut seen = Vec::<&'static str>::new();
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        let (slot, takes_value) = match option {
+            "--lines" => ("lines", true),
+            "--queue" => ("queue", true),
+            "--patterns" => ("patterns", true),
+            "--board-mask" => ("board-mask", true),
+            "--height" => ("height", true),
+            "--pieces" => ("pieces", true),
+            "--hold" => ("hold", true),
+            "--no-hold" => ("hold", false),
+            "--source-pieces" => ("source-pieces", true),
+            "--backend" => ("backend", true),
+            "--gpu-device" => ("gpu-device", true),
+            "--workers" => ("workers", true),
+            "--auto-workers" => ("auto-workers", true),
+            "--use-all-cpu-threads" => ("use-all-cpu-threads", false),
+            "--cpu-warmup" => ("cpu-warmup", false),
+            "--gpu-warmup" => ("gpu-warmup", false),
+            "--max-patterns" => ("max-patterns", true),
+            "--max-nodes" => ("max-nodes", true),
+            "--max-frontier-states" => ("max-frontier-states", true),
+            "--max-candidates" => ("max-candidates", true),
+            "--max-memory-mib" => ("max-memory-mib", true),
+            "--allow-backend-fallback" => ("backend-fallback", false),
+            "--no-backend-fallback" => ("backend-fallback", false),
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("pc tiling does not accept {flag}"),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected pc tiling token '{value}'"),
+                ));
+            }
+        };
+        if seen.contains(&slot) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("pc tiling option {option} duplicates the {slot} selection"),
+            ));
+        }
+        seen.push(slot);
+        if takes_value {
+            let _ = next_value(tokens, &mut cursor, option)?;
+        } else {
+            cursor += 1;
+        }
+    }
+    if seen.contains(&"workers") && seen.contains(&"auto-workers") {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "pc tiling --workers and --auto-workers are mutually exclusive",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_pc_chance_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+    origin: PcChanceIngressOrigin,
+) -> Result<WebCommandRequest, WebCommandError> {
+    parse_pc_command(tokens, worker_hardware_limit, false)
+        .map(|request| request.with_pc_chance_product_capability(origin))
+}
+
+fn parse_pc_minimals_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    for token in tokens {
+        if matches!(
+            token.as_str(),
+            "--objective"
+                | "--count"
+                | "--score"
+                | "--tiling-only"
+                | "--max-memory-mib"
+                | "--tablebase"
+                | "--precompute-build-dependencies"
+        ) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("pc minimals does not accept an explicit {token} override"),
+            ));
+        }
+    }
+    let mut forwarded = Vec::with_capacity(tokens.len() + 2);
+    forwarded.extend_from_slice(tokens);
+    forwarded.extend(["--objective".to_owned(), "minimum-cover".to_owned()]);
+    parse_pc_command(&forwarded, worker_hardware_limit, false).map(|request| {
+        request
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_pc_minimals_product_capability(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+    })
+}
+
+fn parse_pc_path_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    for token in tokens {
+        if matches!(
+            token.as_str(),
+            "--objective"
+                | "--count"
+                | "--score"
+                | "--tiling-only"
+                | "--solution-probabilities"
+                | "--queue-knowledge"
+                | "--max-memory-mib"
+                | "--tablebase"
+                | "--tb"
+                | "--precompute-build-dependencies"
+                | "--build-dependency-dag"
+        ) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("pc path does not accept an explicit {token} override"),
+            ));
+        }
+    }
+    let mut forwarded = Vec::with_capacity(tokens.len() + 2);
+    forwarded.extend_from_slice(tokens);
+    forwarded.extend(["--objective".to_owned(), "all".to_owned()]);
+    parse_pc_command(&forwarded, worker_hardware_limit, false).map(|request| {
+        request
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_pc_path_product_capability(PcPathIngressOrigin::CanonicalPcPath)
+    })
+}
+
+fn parse_pc_failed_queue_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+    origin: PcFailedQueueIngressOrigin,
+) -> Result<WebCommandRequest, WebCommandError> {
+    parse_pc_command(tokens, worker_hardware_limit, true)
+        .map(|request| request.with_pc_failed_queue_product_capability(origin))
+}
+
+fn parse_pc_score_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+    origin: PcScoreIngressOrigin,
+) -> Result<WebCommandRequest, WebCommandError> {
+    validate_pc_score_arguments(tokens)?;
+    validate_pc_score_options(tokens)?;
+    if origin.is_score_finder() {
+        validate_pc_score_finder_options(tokens)?;
+    }
+    let mut forwarded = Vec::with_capacity(tokens.len() + 12);
+    forwarded.extend_from_slice(tokens);
+    forwarded.extend([
+        "--objective".to_owned(),
+        "all".to_owned(),
+        "--score".to_owned(),
+        "--backend".to_owned(),
+        "cpu".to_owned(),
+        "--workers".to_owned(),
+        "1".to_owned(),
+        "--no-backend-fallback".to_owned(),
+        "--max-patterns".to_owned(),
+        PC_SCORE_MAX_PATTERNS.to_string(),
+    ]);
+    if matches!(
+        origin,
+        PcScoreIngressOrigin::CompatibilityScore | PcScoreIngressOrigin::CanonicalPcScoreFinder
+    ) {
+        forwarded.extend(["--score-profile".to_owned(), "jstris-ultra".to_owned()]);
+    }
+    if origin.is_score_finder() {
+        forwarded.extend(["--spin-profile".to_owned(), "t-spins".to_owned()]);
+    }
+    parse_pc_command(&forwarded, worker_hardware_limit, false)
+        .map(|request| request.with_pc_score_product_capability(origin))
+}
+
+fn validate_pc_score_finder_options(tokens: &[String]) -> Result<(), WebCommandError> {
+    let mut fixed_queue = false;
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        match tokens[cursor].as_str() {
+            "--patterns" | "--pattern" | "-p" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "pc score-finder requires one exact fixed queue",
+                ));
+            }
+            "--score-profile" | "--spin-profile" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "pc score-finder owns its fixed jstris-ultra and t-spins profiles",
+                ));
+            }
+            "--queue" => {
+                if fixed_queue {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "pc score-finder queue may be specified only once",
+                    ));
+                }
+                fixed_queue = true;
+                let _ = next_value(tokens, &mut cursor, "--queue")?;
+            }
+            _ => cursor += 1,
+        }
+    }
+    if !fixed_queue {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "pc score-finder requires one exact fixed queue",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_pc_score_minimals_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    validate_pc_score_arguments(tokens)?;
+    validate_pc_score_options(tokens)?;
+    let mut forwarded = Vec::with_capacity(tokens.len() + 12);
+    forwarded.extend_from_slice(tokens);
+    forwarded.extend([
+        "--objective".to_owned(),
+        "minimum-cover".to_owned(),
+        "--score".to_owned(),
+        "--backend".to_owned(),
+        "cpu".to_owned(),
+        "--workers".to_owned(),
+        "1".to_owned(),
+        "--no-backend-fallback".to_owned(),
+        "--max-patterns".to_owned(),
+        PC_SCORE_MAX_PATTERNS.to_string(),
+    ]);
+    parse_pc_command(&forwarded, worker_hardware_limit, false).map(|request| {
+        request
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_pc_score_minimals_product_capability(
+                PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals,
+            )
+    })
+}
+
+fn validate_pc_score_options(tokens: &[String]) -> Result<(), WebCommandError> {
+    let mut score_profile = false;
+    let mut spin_profile = false;
+    let mut initial_b2b = false;
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--objective"
+            | "--count"
+            | "--score"
+            | "--tiling-only"
+            | "--preserve-b2b"
+            | "--solution-probabilities" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("pc score does not accept an explicit {option} override"),
+                ));
+            }
+            "--backend"
+            | "--workers"
+            | "--auto-workers"
+            | "--gpu-device"
+            | "--use-all-cpu-threads"
+            | "--cpu-warmup"
+            | "--gpu-warmup"
+            | "--allow-backend-fallback"
+            | "--no-backend-fallback"
+            | "--tablebase"
+            | "--tb"
+            | "--no-tablebase"
+            | "--no-tb"
+            | "--build-dependency-dag"
+            | "--no-build-dependency-dag"
+            | "--retained-traces"
+            | "--max-patterns"
+            | "--max-nodes"
+            | "--max-frontier-states"
+            | "--max-candidates"
+            | "--max-memory-mib" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("pc score does not accept an explicit {option} execution override"),
+                ));
+            }
+            "--score-profile" | "--spin-profile" | "--initial-b2b" => {
+                let seen = match option {
+                    "--score-profile" => &mut score_profile,
+                    "--spin-profile" => &mut spin_profile,
+                    "--initial-b2b" => &mut initial_b2b,
+                    _ => unreachable!(),
+                };
+                if *seen {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("pc score {option} may be specified only once"),
+                    ));
+                }
+                *seen = true;
+                let _ = next_value(tokens, &mut cursor, option)?;
+            }
+            _ => cursor += 1,
+        }
+    }
+    Ok(())
+}
+
+fn validate_raw_pc_score_command_text(
+    command_text: &str,
+    compatibility_authority: WebCompatibilityAuthority,
+) -> Result<(), WebCommandError> {
+    let mut tokens = command_text.split_whitespace();
+    let mut command = tokens.next();
+    let mut prefix_bytes = 0usize;
+    if command == Some("clearra") {
+        prefix_bytes = "clearra ".len();
+        command = tokens.next();
+    }
+    let score_prefix_bytes = match command {
+        Some("pc") => match tokens.next() {
+            Some("score") => Some(prefix_bytes + "pc score".len()),
+            Some("score-minimals") => Some(prefix_bytes + "pc score-minimals".len()),
+            Some("score-finder") => Some(prefix_bytes + "pc score-finder".len()),
+            _ => None,
+        },
+        Some(command)
+            if compatibility_authority == WebCompatibilityAuthority::InternalTypedCandidate
+                && command.eq_ignore_ascii_case("score") =>
+        {
+            Some(prefix_bytes + "score".len())
+        }
+        Some(command)
+            if compatibility_authority == WebCompatibilityAuthority::InternalTypedCandidate
+                && command.eq_ignore_ascii_case("sfinder")
+                && tokens
+                    .next()
+                    .is_some_and(|command| command.eq_ignore_ascii_case("score")) =>
+        {
+            Some(prefix_bytes + "sfinder score".len())
+        }
+        _ => None,
+    };
+    let raw_limit = score_prefix_bytes.map(|prefix_bytes| {
+        prefix_bytes + PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS
+    });
+    if raw_limit.is_some_and(|limit| command_text.len() > limit) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!(
+                "pc score command text exceeds the {}-byte ingress limit",
+                raw_limit.expect("score prefix produced a raw limit")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pretranslation_pc_score_tokens(
+    tokens: &[String],
+    compatibility_authority: WebCompatibilityAuthority,
+) -> Result<(), WebCommandError> {
+    let mut command_index = usize::from(tokens.first().map(String::as_str) == Some("clearra"));
+    let Some(command) = tokens.get(command_index).map(String::as_str) else {
+        return Ok(());
+    };
+    command_index += 1;
+    let argument_index = if command == "pc"
+        && matches!(
+            tokens.get(command_index).map(String::as_str),
+            Some("score" | "score-minimals" | "score-finder")
+        ) {
+        Some(command_index + 1)
+    } else if compatibility_authority == WebCompatibilityAuthority::InternalTypedCandidate
+        && command.eq_ignore_ascii_case("score")
+    {
+        Some(command_index)
+    } else if compatibility_authority == WebCompatibilityAuthority::InternalTypedCandidate
+        && command.eq_ignore_ascii_case("sfinder")
+        && tokens
+            .get(command_index)
+            .is_some_and(|command| command.eq_ignore_ascii_case("score"))
+    {
+        Some(command_index + 1)
+    } else {
+        None
+    };
+    argument_index.map_or(Ok(()), |index| {
+        validate_pc_score_arguments(&tokens[index..])
+    })
+}
+
+fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandError> {
+    if arguments.len() > PC_SCORE_MAX_ARGUMENT_TOKENS {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("pc score accepts at most {PC_SCORE_MAX_ARGUMENT_TOKENS} argument tokens"),
+        ));
+    }
+    let argument_bytes = arguments
+        .iter()
+        .try_fold(0usize, |total, argument| total.checked_add(argument.len()));
+    if argument_bytes.is_none_or(|bytes| bytes > PC_SCORE_MAX_ARGUMENT_BYTES) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("pc score accepts at most {PC_SCORE_MAX_ARGUMENT_BYTES} argument bytes"),
+        ));
+    }
+
+    for (index, option) in arguments.iter().enumerate() {
+        let Some(value) = arguments
+            .get(index + 1)
+            .filter(|value| !value.starts_with("--"))
+        else {
+            continue;
+        };
+        match option.as_str() {
+            "--patterns" | "--pattern" => {
+                if value.len() > PC_SCORE_MAX_PATTERN_BYTES {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "pc score --patterns accepts at most {PC_SCORE_MAX_PATTERN_BYTES} UTF-8 bytes"
+                        ),
+                    ));
+                }
+                if value.contains(';') {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "pc score --patterns accepts one factorized expression without alternatives",
+                    ));
+                }
+            }
+            "--queue" => {
+                if value.len() > PC_SCORE_MAX_SOURCE_PIECES {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "pc score --queue accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"
+                        ),
+                    ));
+                }
+            }
+            "--source-pieces" => {
+                if value
+                    .parse::<usize>()
+                    .is_ok_and(|pieces| pieces > PC_SCORE_MAX_SOURCE_PIECES)
+                {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"
+                        ),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn parse_finesse_command(
@@ -315,6 +1114,7 @@ fn invalid_finesse_placement(index: usize) -> WebCommandError {
 fn parse_spin_structure_command(
     tokens: &[String],
     worker_hardware_limit: usize,
+    route: SpinStructureRoute,
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut board = StructureBoard::EMPTY;
     let mut board_option = None;
@@ -333,6 +1133,13 @@ fn parse_spin_structure_command(
     let mut workers = None;
     let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
+    let mut max_patterns = SpinStructureProductMode::default_max_patterns();
+    let mut max_patterns_seen = false;
+    let mut objective_seen = false;
+    let mut final_piece = PieceKind::T;
+    let mut final_piece_seen = false;
+    let mut dependency_report = false;
+    let mut dependency_report_seen = false;
     let mut cursor = 0_usize;
 
     while cursor < tokens.len() {
@@ -421,6 +1228,93 @@ fn parse_spin_structure_command(
                     )
                 })?;
             }
+            "--objective" => {
+                if route != SpinStructureRoute::Cover {
+                    return Err(spin_structure_route_option_error(route, "--objective"));
+                }
+                if objective_seen {
+                    return Err(repeated_spin_structure_option("--objective"));
+                }
+                let value = next_value(tokens, &mut cursor, "--objective")?;
+                if !matches!(value, "min-cover" | "minimum-cover") {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid spin-structure cover objective '{value}'; expected min-cover"
+                        ),
+                    ));
+                }
+                objective_seen = true;
+            }
+            "--max-patterns" => {
+                if route == SpinStructureRoute::Search {
+                    return Err(spin_structure_route_option_error(route, "--max-patterns"));
+                }
+                if max_patterns_seen {
+                    return Err(repeated_spin_structure_option("--max-patterns"));
+                }
+                let value = next_value(tokens, &mut cursor, "--max-patterns")?;
+                max_patterns = parse_nonnegative_usize(value, "--max-patterns")?;
+                if !(1..=SpinStructureProductMode::default_max_patterns()).contains(&max_patterns) {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "spin-structure --max-patterns must be between 1 and {}",
+                            SpinStructureProductMode::default_max_patterns()
+                        ),
+                    ));
+                }
+                max_patterns_seen = true;
+            }
+            "--final-piece" => {
+                if route != SpinStructureRoute::Guaranteed {
+                    return Err(spin_structure_route_option_error(route, "--final-piece"));
+                }
+                if final_piece_seen {
+                    return Err(repeated_spin_structure_option("--final-piece"));
+                }
+                let value = next_value(tokens, &mut cursor, "--final-piece")?;
+                let mut chars = value.chars();
+                let piece = chars.next().ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--final-piece requires one standard tetromino",
+                    )
+                })?;
+                if chars.next().is_some() {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --final-piece value '{value}'; expected one of I,O,T,S,Z,J,L"
+                        ),
+                    ));
+                }
+                final_piece = PieceKind::from_ascii(piece.to_ascii_uppercase()).map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --final-piece value '{value}'; expected one of I,O,T,S,Z,J,L"
+                        ),
+                    )
+                })?;
+                final_piece_seen = true;
+            }
+            "--dependency-report" | "--no-dependency-report" => {
+                if route != SpinStructureRoute::Guaranteed {
+                    return Err(spin_structure_route_option_error(
+                        route,
+                        tokens[cursor].as_str(),
+                    ));
+                }
+                if dependency_report_seen {
+                    return Err(repeated_spin_structure_option(
+                        "--dependency-report/--no-dependency-report",
+                    ));
+                }
+                dependency_report = tokens[cursor] == "--dependency-report";
+                dependency_report_seen = true;
+                cursor += 1;
+            }
             "--workers" => {
                 workers = Some(parse_positive(
                     next_value(tokens, &mut cursor, "--workers")?,
@@ -433,7 +1327,7 @@ fn parse_spin_structure_command(
                     "--auto-workers",
                 )?);
             }
-            "--use-all-cpu-threads" => {
+            "--use-all-cpu-threads" | "--use-all-logical-processors" => {
                 use_all_logical_processors = true;
                 cursor += 1;
             }
@@ -472,6 +1366,23 @@ fn parse_spin_structure_command(
             "spin-structure requires --pieces",
         )
     })?;
+    if route == SpinStructureRoute::Guaranteed {
+        if inventory.count(final_piece) == 0 {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "spin-structure guaranteed --final-piece {} is absent from the supplied inventory",
+                    final_piece.as_ascii()
+                ),
+            ));
+        }
+        if mode.t_only() && final_piece != PieceKind::T {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "T-spin profiles require --final-piece T",
+            ));
+        }
+    }
     if max_placements.is_some_and(|limit| u16::from(limit) > inventory.total()) {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
@@ -500,7 +1411,17 @@ fn parse_spin_structure_command(
         use_all_logical_processors,
         worker_hardware_limit,
     )?;
+    let product_mode = match route {
+        SpinStructureRoute::Search => SpinStructureProductMode::Search,
+        SpinStructureRoute::Cover => SpinStructureProductMode::Cover { max_patterns },
+        SpinStructureRoute::Guaranteed => SpinStructureProductMode::Guaranteed {
+            final_piece,
+            max_patterns,
+            dependency_report,
+        },
+    };
     let mut request = WebCommandRequest::spin_structure(query)
+        .with_spin_structure_product_mode(product_mode)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(workers) = workers {
@@ -509,6 +1430,25 @@ fn parse_spin_structure_command(
         request = request.with_automatic_worker_limit(workers);
     }
     Ok(request)
+}
+
+fn repeated_spin_structure_option(option: &str) -> WebCommandError {
+    WebCommandError::new(
+        WebCommandErrorCode::InvalidValue,
+        format!("spin-structure option {option} may be specified only once"),
+    )
+}
+
+fn spin_structure_route_option_error(route: SpinStructureRoute, option: &str) -> WebCommandError {
+    let route = match route {
+        SpinStructureRoute::Search => "search",
+        SpinStructureRoute::Cover => "cover",
+        SpinStructureRoute::Guaranteed => "guaranteed",
+    };
+    WebCommandError::new(
+        WebCommandErrorCode::InvalidValue,
+        format!("spin-structure {route} does not accept {option}"),
+    )
 }
 
 fn set_spin_structure_board_option(
@@ -653,13 +1593,331 @@ fn parse_percent_command(
     Ok(WebCommandRequest::percent(query, failed_pattern_limit))
 }
 
-fn parse_setup_command(
+fn parse_setup_score_command(
     tokens: &[String],
     worker_hardware_limit: usize,
 ) -> Result<WebCommandRequest, WebCommandError> {
+    let mut document_format = None;
+    let mut document = None;
+    let mut setup_queue = None;
+    let mut setup_patterns = None;
+    let mut solution_queue = None;
+    let mut solution_patterns = None;
+    let mut clear_height = 4_u8;
+    let mut clear_seen = false;
+    let mut hold_enabled = true;
+    let mut hold_seen = false;
+    let mut score_profile = ScoreProfileSelection::Tetrio;
+    let mut score_profile_seen = false;
+    let mut initial_b2b = 0_u32;
+    let mut initial_b2b_seen = false;
+    let mut rule = srs_plus();
+    let mut rule_seen = false;
+    let mut max_patterns = None;
+    let mut workers = None;
+    let mut automatic_worker_limit = None;
+    let mut use_all_logical_processors = false;
+    let mut use_all_seen = false;
+    let mut backend_seen = false;
+    let mut no_fallback_seen = false;
+    let mut cursor = 0_usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--document-format" => {
+                if document_format.is_some() {
+                    return Err(repeated_setup_score_option(option));
+                }
+                let value = next_value(tokens, &mut cursor, option)?;
+                document_format = Some(FieldDocumentFormat::parse(value).map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid Setup score document format '{value}'; expected ctk3 or fumen"
+                        ),
+                    )
+                })?);
+            }
+            "--document" => set_unique_string(
+                &mut document,
+                next_value(tokens, &mut cursor, option)?,
+                "Setup score repeats --document",
+            )?,
+            "--setup-queue" => set_unique_string(
+                &mut setup_queue,
+                next_value(tokens, &mut cursor, option)?,
+                "Setup score repeats --setup-queue",
+            )?,
+            "--setup-patterns" => set_unique_string(
+                &mut setup_patterns,
+                next_value(tokens, &mut cursor, option)?,
+                "Setup score repeats --setup-patterns",
+            )?,
+            "--solution-queue" => set_unique_string(
+                &mut solution_queue,
+                next_value(tokens, &mut cursor, option)?,
+                "Setup score repeats --solution-queue",
+            )?,
+            "--solution-patterns" => set_unique_string(
+                &mut solution_patterns,
+                next_value(tokens, &mut cursor, option)?,
+                "Setup score repeats --solution-patterns",
+            )?,
+            "--clear" | "--clear-height" => {
+                if clear_seen {
+                    return Err(repeated_setup_score_option("--clear"));
+                }
+                let value = next_value(tokens, &mut cursor, option)?;
+                clear_height = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|value| (1..=6).contains(value))
+                    .ok_or_else(|| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "Setup score --clear must be an integer in 1..=6",
+                        )
+                    })?;
+                clear_seen = true;
+            }
+            "--hold" => {
+                if hold_seen {
+                    return Err(repeated_setup_score_option("--hold/--no-hold"));
+                }
+                hold_enabled = true;
+                hold_seen = true;
+                cursor += 1;
+            }
+            "--no-hold" => {
+                if hold_seen {
+                    return Err(repeated_setup_score_option("--hold/--no-hold"));
+                }
+                hold_enabled = false;
+                hold_seen = true;
+                cursor += 1;
+            }
+            "--score-profile" => {
+                if score_profile_seen {
+                    return Err(repeated_setup_score_option(option));
+                }
+                let value = next_value(tokens, &mut cursor, option)?;
+                score_profile = ScoreProfileSelection::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid Setup score profile '{value}'; expected tetrio, guideline, or jstris-ultra"
+                        ),
+                    )
+                })?;
+                score_profile_seen = true;
+            }
+            "--initial-b2b" => {
+                if initial_b2b_seen {
+                    return Err(repeated_setup_score_option(option));
+                }
+                initial_b2b = next_value(tokens, &mut cursor, option)?
+                    .parse::<u32>()
+                    .map_err(|_| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "Setup score --initial-b2b must be an unsigned integer",
+                        )
+                    })?;
+                initial_b2b_seen = true;
+            }
+            "--rule" => {
+                if rule_seen {
+                    return Err(repeated_setup_score_option(option));
+                }
+                rule = parse_rule_profile(next_value(tokens, &mut cursor, option)?)?;
+                rule_seen = true;
+            }
+            "--max-patterns" => {
+                if max_patterns.is_some() {
+                    return Err(repeated_setup_score_option(option));
+                }
+                max_patterns = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
+            }
+            "--workers" => {
+                if workers.is_some() {
+                    return Err(repeated_setup_score_option(option));
+                }
+                workers = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
+            }
+            "--auto-workers" | "--automatic-worker-limit" => {
+                if automatic_worker_limit.is_some() {
+                    return Err(repeated_setup_score_option("--auto-workers"));
+                }
+                automatic_worker_limit = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
+            }
+            "--use-all-cpu-threads" | "--use-all-logical-processors" => {
+                if use_all_seen {
+                    return Err(repeated_setup_score_option("--use-all-logical-processors"));
+                }
+                use_all_logical_processors = true;
+                use_all_seen = true;
+                cursor += 1;
+            }
+            "--backend" => {
+                if backend_seen {
+                    return Err(repeated_setup_score_option(option));
+                }
+                let value = next_value(tokens, &mut cursor, option)?;
+                if RequestedSearchBackend::parse(value) != Some(RequestedSearchBackend::Cpu) {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "Setup score is CPU-only",
+                    ));
+                }
+                backend_seen = true;
+            }
+            "--no-backend-fallback" => {
+                if no_fallback_seen {
+                    return Err(repeated_setup_score_option(option));
+                }
+                no_fallback_seen = true;
+                cursor += 1;
+            }
+            "--allow-backend-fallback" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "Setup score does not accept backend fallback",
+                ));
+            }
+            "--max-memory"
+            | "--max-memory-mib"
+            | "--gpu-device"
+            | "--gpu-warmup"
+            | "--cpu-warmup"
+            | "--max-nodes"
+            | "--max-frontier-states"
+            | "--max-candidates"
+            | "--queue"
+            | "--patterns"
+            | "--objective"
+            | "--queue-knowledge"
+            | "--source-pieces" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("Setup score does not accept {option}"),
+                ));
+            }
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::UnsupportedCommand,
+                    format!("unsupported Setup score option '{flag}'"),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected Setup score token '{value}'"),
+                ));
+            }
+        }
+    }
+    let setup_source = match (setup_queue, setup_patterns) {
+        (Some(queue), None) => WebSetupScoreQueueInput::queue(queue),
+        (None, Some(patterns)) => WebSetupScoreQueueInput::patterns(patterns),
+        (Some(_), Some(_)) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "Setup score requires exactly one of --setup-queue or --setup-patterns",
+            ));
+        }
+        (None, None) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "Setup score requires exactly one of --setup-queue or --setup-patterns",
+            ));
+        }
+    };
+    let solution_source = match (solution_queue, solution_patterns) {
+        (Some(queue), None) => WebSetupScoreQueueInput::queue(queue),
+        (None, Some(patterns)) => WebSetupScoreQueueInput::patterns(patterns),
+        (Some(_), Some(_)) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "Setup score requires exactly one of --solution-queue or --solution-patterns",
+            ));
+        }
+        (None, None) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "Setup score requires exactly one of --solution-queue or --solution-patterns",
+            ));
+        }
+    };
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
+    let input = WebSetupScoreInput::new(
+        document_format.ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "Setup score requires --document-format",
+            )
+        })?,
+        document.ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "Setup score requires --document",
+            )
+        })?,
+        setup_source,
+        solution_source,
+    )
+    .with_clear_height(clear_height)
+    .with_setup_hold_enabled(hold_enabled)
+    .with_score_profile(score_profile)
+    .with_initial_b2b(initial_b2b);
+    let mut request = WebCommandRequest::setup_score(input)
+        .with_backend(RequestedSearchBackend::Cpu)
+        .with_allow_backend_fallback(false)
+        .with_rule(rule)
+        .with_worker_hardware_limit(worker_hardware_limit)
+        .with_runtime_webgpu_available(false)
+        .with_hold_enabled(hold_enabled)
+        .with_use_all_logical_processors(use_all_logical_processors);
+    if let Some(limit) = max_patterns {
+        request = request.with_max_patterns(limit);
+    }
+    if let Some(workers) = workers {
+        request = request.with_workers(workers);
+    } else if let Some(limit) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(limit);
+    }
+    Ok(request)
+}
+
+fn repeated_setup_score_option(option: &str) -> WebCommandError {
+    WebCommandError::new(
+        WebCommandErrorCode::InvalidValue,
+        format!("Setup score option {option} may be specified only once"),
+    )
+}
+
+fn parse_setup_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+    canonical_priority: Option<clearra_problem::SetupCandidatePriority>,
+) -> Result<WebCommandRequest, WebCommandError> {
     let mut remaining = "IOTSZJL".to_owned();
     let mut allow_post_cycle_borrow = false;
-    let mut candidate_priority = clearra_problem::SetupCandidatePriority::All;
+    let mut candidate_priority =
+        canonical_priority.unwrap_or(clearra_problem::SetupCandidatePriority::All);
     let mut length_preference = clearra_problem::SetupLengthPreference::Auto;
     let mut max_setup_pieces = 9_u8;
     let mut explicit_search_mode = None;
@@ -722,6 +1980,15 @@ fn parse_setup_command(
                         format!("invalid setup priority '{value}'; expected all, build, or pc"),
                     ));
                 };
+                if canonical_priority.is_some_and(|expected| expected != priority) {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "canonical setup family fixes --priority to '{}'",
+                            candidate_priority.keyword()
+                        ),
+                    ));
+                }
                 candidate_priority = priority;
             }
             "--setup-length" => {
@@ -896,6 +2163,12 @@ fn parse_setup_command(
     }
     match (path_detail_setup_id, path_detail_condition_id) {
         (Some(setup_id), Some(condition_id)) => {
+            if canonical_priority.is_some() {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "canonical setup ranked families do not accept path-detail options",
+                ));
+            }
             let detail = clearra_problem::SetupPathDetail::from_setup_id(&setup_id, condition_id)
                 .ok_or_else(|| {
                 WebCommandError::new(
@@ -945,6 +2218,7 @@ fn setup_next_cycle_remaining_count(cycle: u8) -> usize {
 fn parse_forward_command(
     tokens: &[String],
     spin_finder: bool,
+    ren: bool,
     worker_hardware_limit: usize,
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut board = Board256Mask::EMPTY;
@@ -955,7 +2229,13 @@ fn parse_forward_command(
     let mut piece_source: Option<ForwardPieceSource> = None;
     let mut hold_enabled = true;
     let mut rule = RuleProfileId::SrsPlus;
-    let mut spin_profile = SpinProfileId::TSpins;
+    let mut spin_profile = if ren {
+        SpinProfileId::Disabled
+    } else if spin_finder {
+        SpinProfileId::TSpins
+    } else {
+        SpinProfileId::AllMiniPlus
+    };
     let mut initial_combo = None;
     let mut initial_back_to_back = None;
     let mut line_clear_policy = ForwardLineClearPolicy::Any;
@@ -1015,7 +2295,11 @@ fn parse_forward_command(
             "--patterns" => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::UnsupportedCommand,
-                    "damage search accepts only an exact --queue",
+                    if ren {
+                        "REN search accepts only an exact --queue"
+                    } else {
+                        "damage search accepts only an exact --queue"
+                    },
                 ));
             }
             "--hold" => {
@@ -1029,7 +2313,7 @@ fn parse_forward_command(
             "--rule" => {
                 rule = parse_rule_profile(next_value(tokens, &mut cursor, "--rule")?)?.id();
             }
-            "--spin-profile" => {
+            "--spin-profile" if !ren => {
                 let value = next_value(tokens, &mut cursor, "--spin-profile")?;
                 spin_profile = SpinProfileId::parse(value).ok_or_else(|| {
                     WebCommandError::new(
@@ -1038,7 +2322,7 @@ fn parse_forward_command(
                     )
                 })?;
             }
-            "--initial-combo" => {
+            "--initial-combo" if !ren => {
                 let value = next_value(tokens, &mut cursor, "--initial-combo")?;
                 let parsed = value.parse::<u16>().map_err(|_| {
                     WebCommandError::new(
@@ -1048,7 +2332,7 @@ fn parse_forward_command(
                 })?;
                 initial_combo = (parsed > 0).then_some(parsed);
             }
-            "--initial-b2b" => {
+            "--initial-b2b" if !ren => {
                 let value = next_value(tokens, &mut cursor, "--initial-b2b")?;
                 let parsed = value.parse::<u16>().map_err(|_| {
                     WebCommandError::new(
@@ -1058,11 +2342,11 @@ fn parse_forward_command(
                 })?;
                 initial_back_to_back = parsed.checked_sub(1);
             }
-            "--preserve-b2b" => {
+            "--preserve-b2b" if !ren => {
                 line_clear_policy = ForwardLineClearPolicy::PreserveBackToBack;
                 cursor += 1;
             }
-            "--minimum-damage" if !spin_finder => {
+            "--minimum-damage" if !spin_finder && !ren => {
                 let value = next_value(tokens, &mut cursor, "--minimum-damage")?;
                 minimum_damage = Some(value.parse::<u32>().map_err(|_| {
                     WebCommandError::new(
@@ -1170,11 +2454,19 @@ fn parse_forward_command(
             WebCommandErrorCode::MissingValue,
             if spin_finder {
                 "spin-finder requires --queue or --patterns"
+            } else if ren {
+                "REN search requires --queue"
             } else {
                 "damage search requires --queue"
             },
         )
     })?;
+    if ren && piece_source.sequence_len() > clearra_forward_search::MAX_REN_QUEUE_PIECES {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "REN search accepts at most 22 queue pieces",
+        ));
+    }
     if spin_finder && spin_profile == SpinProfileId::Disabled {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
@@ -1190,7 +2482,9 @@ fn parse_forward_command(
             "--spin-category other requires an all-spin or all-mini spin profile",
         ));
     }
-    let mode = if spin_finder {
+    let mode = if ren {
+        ForwardSearchMode::MaximumRen
+    } else if spin_finder {
         ForwardSearchMode::SpinFinder(ForwardSpinTarget::with_line_requirement(
             target_lines,
             target_category,
@@ -1218,10 +2512,16 @@ fn parse_forward_command(
         use_all_logical_processors,
         worker_hardware_limit,
     )?;
-    let mut request =
-        WebCommandRequest::forward(if spin_finder { "spin-finder" } else { "damage" }, query)
-            .with_worker_hardware_limit(worker_hardware_limit)
-            .with_use_all_logical_processors(use_all_logical_processors);
+    let command_kind = if ren {
+        "ren"
+    } else if spin_finder {
+        "spin-finder"
+    } else {
+        "damage"
+    };
+    let mut request = WebCommandRequest::forward(command_kind, query)
+        .with_worker_hardware_limit(worker_hardware_limit)
+        .with_use_all_logical_processors(use_all_logical_processors);
     if let Some(workers) = workers {
         request = request.with_workers(workers);
     } else if let Some(workers) = automatic_worker_limit {
@@ -1256,6 +2556,514 @@ fn set_forward_piece_source(
     Ok(())
 }
 
+fn parse_build_v2_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    let subcommand = tokens.first().ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "build requires a canonical subcommand",
+        )
+    })?;
+    let (capability, options) = match subcommand.as_str() {
+        "cover" => (WebBuildV2Capability::Cover, &tokens[1..]),
+        "setup" => (WebBuildV2Capability::Setup, &tokens[1..]),
+        "congruent" => (WebBuildV2Capability::Congruent, &tokens[1..]),
+        "congruent-cover" => (WebBuildV2Capability::CongruentCover, &tokens[1..]),
+        "setup-cover" => (WebBuildV2Capability::SetupCover, &tokens[1..]),
+        "setup-cover-percent" => (WebBuildV2Capability::SetupCoverPercent, &tokens[1..]),
+        "setup-cover-score" => (WebBuildV2Capability::SetupCoverScore, &tokens[1..]),
+        "evaluate" => {
+            let evaluation = tokens.get(1).ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::MissingValue,
+                    "build evaluate requires a canonical subcommand",
+                )
+            })?;
+            let capability = match evaluation.as_str() {
+                "cover" => WebBuildV2Capability::EvaluateCover,
+                "minimals" => WebBuildV2Capability::EvaluateMinimals,
+                "score" => WebBuildV2Capability::EvaluateScore,
+                "b2b-cover" => WebBuildV2Capability::EvaluateB2bCover,
+                "cover-percent" => WebBuildV2Capability::EvaluateCoverPercent,
+                value => {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::UnsupportedCommand,
+                        format!("unsupported build evaluate subcommand '{value}'"),
+                    ));
+                }
+            };
+            (capability, &tokens[2..])
+        }
+        value => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::UnsupportedCommand,
+                format!("unsupported build subcommand '{value}'"),
+            ));
+        }
+    };
+
+    let mut base_words = None;
+    let mut target_words = None;
+    let mut visible_height = None;
+    let mut target_format = None;
+    let mut target_document = None;
+    let mut solution_format = None;
+    let mut solution_document = None;
+    let mut queue = None;
+    let mut patterns = None;
+    let mut hold_piece = None;
+    let mut hold_enabled = true;
+    let mut hold_option_seen = false;
+    let mut source_piece_count = None;
+    let mut queue_knowledge = None;
+    let mut objective = None;
+    let mut score_profile = None;
+    let mut initial_b2b = None;
+    let mut rule = srs_plus();
+    let mut rule_seen = false;
+    let mut max_patterns = None;
+    let mut max_nodes = None;
+    let mut max_frontier_states = None;
+    let mut max_candidates = None;
+    let mut workers = None;
+    let mut automatic_worker_limit = None;
+    let mut use_all_logical_processors = false;
+    let mut use_all_seen = false;
+    let mut cpu_warmup = false;
+    let mut cpu_warmup_seen = false;
+    let mut backend_seen = false;
+    let mut no_backend_fallback_seen = false;
+    let mut cursor = 0usize;
+
+    while cursor < options.len() {
+        let option = options[cursor].as_str();
+        match option {
+            "--base-mask" => {
+                let value = parse_board_words(
+                    next_value(options, &mut cursor, "--base-mask")?,
+                    "--base-mask",
+                )?;
+                set_build_v2_option(&mut base_words, value, "--base-mask")?;
+            }
+            "--target-mask" => {
+                let value = parse_board_words(
+                    next_value(options, &mut cursor, "--target-mask")?,
+                    "--target-mask",
+                )?;
+                set_build_v2_option(&mut target_words, value, "--target-mask")?;
+            }
+            "--height" => {
+                let value =
+                    parse_positive(next_value(options, &mut cursor, "--height")?, "--height")?;
+                set_build_v2_option(&mut visible_height, value, "--height")?;
+            }
+            "--target-format" => {
+                let value = next_value(options, &mut cursor, "--target-format")?;
+                let format = FieldDocumentFormat::parse(value).map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --target-format value '{value}'; expected ctk3 or fumen"),
+                    )
+                })?;
+                set_build_v2_option(&mut target_format, format, "--target-format")?;
+            }
+            "--target-document" => {
+                let value = next_value(options, &mut cursor, "--target-document")?.to_owned();
+                set_build_v2_option(&mut target_document, value, "--target-document")?;
+            }
+            "--solution-format" => {
+                let value = next_value(options, &mut cursor, "--solution-format")?;
+                let format = FieldDocumentFormat::parse(value).map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --solution-format value '{value}'; expected ctk3 or fumen"
+                        ),
+                    )
+                })?;
+                set_build_v2_option(&mut solution_format, format, "--solution-format")?;
+            }
+            "--solution-document" => {
+                let value = next_value(options, &mut cursor, "--solution-document")?.to_owned();
+                set_build_v2_option(&mut solution_document, value, "--solution-document")?;
+            }
+            "--queue" => {
+                let value = next_value(options, &mut cursor, "--queue")?.to_owned();
+                set_build_v2_option(&mut queue, value, "--queue")?;
+            }
+            "--patterns" | "--pattern" => {
+                let value = next_value(options, &mut cursor, option)?.to_owned();
+                set_build_v2_option(&mut patterns, value, "--patterns")?;
+            }
+            "--hold" => {
+                if hold_option_seen {
+                    return Err(repeated_build_v2_option("--hold/--no-hold"));
+                }
+                hold_piece = parse_hold_piece(next_value(options, &mut cursor, "--hold")?)?;
+                hold_enabled = true;
+                hold_option_seen = true;
+            }
+            "--no-hold" => {
+                if hold_option_seen {
+                    return Err(repeated_build_v2_option("--hold/--no-hold"));
+                }
+                hold_enabled = false;
+                hold_option_seen = true;
+                cursor += 1;
+            }
+            "--source-pieces" => {
+                let value = parse_positive(
+                    next_value(options, &mut cursor, "--source-pieces")?,
+                    "--source-pieces",
+                )?;
+                set_build_v2_option(&mut source_piece_count, value, "--source-pieces")?;
+            }
+            "--queue-knowledge" => {
+                let value = next_value(options, &mut cursor, "--queue-knowledge")?;
+                let parsed = BuildQueueKnowledge::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --queue-knowledge value '{value}'; expected oracle or visible-7"
+                        ),
+                    )
+                })?;
+                set_build_v2_option(&mut queue_knowledge, parsed, "--queue-knowledge")?;
+            }
+            "--objective" => {
+                let value = next_value(options, &mut cursor, "--objective")?;
+                let parsed = BuildObjective::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --objective value '{value}'; expected all, unique, min-cover, max-probability-minimum, or max-score-cover"
+                        ),
+                    )
+                })?;
+                set_build_v2_option(&mut objective, parsed, "--objective")?;
+            }
+            "--score-profile" => {
+                let value = next_value(options, &mut cursor, "--score-profile")?;
+                let parsed = BuildScoreProfile::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --score-profile value '{value}'; expected tetrio, guideline, or jstris-ultra"
+                        ),
+                    )
+                })?;
+                set_build_v2_option(&mut score_profile, parsed, "--score-profile")?;
+            }
+            "--initial-b2b" => {
+                let value = next_value(options, &mut cursor, "--initial-b2b")?;
+                let parsed = value.parse::<u16>().map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --initial-b2b value '{value}'; expected 0..65535"),
+                    )
+                })?;
+                set_build_v2_option(&mut initial_b2b, parsed, "--initial-b2b")?;
+            }
+            "--rule" => {
+                if rule_seen {
+                    return Err(repeated_build_v2_option("--rule"));
+                }
+                rule = parse_rule_profile(next_value(options, &mut cursor, "--rule")?)?;
+                rule_seen = true;
+            }
+            "--max-patterns" => {
+                let value = parse_positive(
+                    next_value(options, &mut cursor, "--max-patterns")?,
+                    "--max-patterns",
+                )?;
+                set_build_v2_option(&mut max_patterns, value, "--max-patterns")?;
+            }
+            "--max-nodes" => {
+                let value = parse_positive(
+                    next_value(options, &mut cursor, "--max-nodes")?,
+                    "--max-nodes",
+                )?;
+                set_build_v2_option(&mut max_nodes, value, "--max-nodes")?;
+            }
+            "--max-frontier-states" => {
+                let value = parse_positive(
+                    next_value(options, &mut cursor, "--max-frontier-states")?,
+                    "--max-frontier-states",
+                )?;
+                set_build_v2_option(&mut max_frontier_states, value, "--max-frontier-states")?;
+            }
+            "--max-candidates" => {
+                let value = parse_positive(
+                    next_value(options, &mut cursor, "--max-candidates")?,
+                    "--max-candidates",
+                )?;
+                set_build_v2_option(&mut max_candidates, value, "--max-candidates")?;
+            }
+            "--workers" => {
+                let value =
+                    parse_positive(next_value(options, &mut cursor, "--workers")?, "--workers")?;
+                set_build_v2_option(&mut workers, value, "--workers")?;
+            }
+            "--auto-workers" | "--automatic-worker-limit" => {
+                let value = parse_positive(next_value(options, &mut cursor, option)?, option)?;
+                set_build_v2_option(&mut automatic_worker_limit, value, "--auto-workers")?;
+            }
+            "--use-all-cpu-threads" | "--use-all-logical-processors" => {
+                if use_all_seen {
+                    return Err(repeated_build_v2_option("--use-all-cpu-threads"));
+                }
+                use_all_logical_processors = true;
+                use_all_seen = true;
+                cursor += 1;
+            }
+            "--cpu-warmup" => {
+                if cpu_warmup_seen {
+                    return Err(repeated_build_v2_option("--cpu-warmup"));
+                }
+                cpu_warmup = true;
+                cpu_warmup_seen = true;
+                cursor += 1;
+            }
+            "--backend" => {
+                if backend_seen {
+                    return Err(repeated_build_v2_option("--backend"));
+                }
+                let value = next_value(options, &mut cursor, "--backend")?;
+                let backend = RequestedSearchBackend::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --backend value '{value}'"),
+                    )
+                })?;
+                if backend != RequestedSearchBackend::Cpu {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "Build v2 is CPU-only",
+                    ));
+                }
+                backend_seen = true;
+            }
+            "--no-backend-fallback" => {
+                if no_backend_fallback_seen {
+                    return Err(repeated_build_v2_option("--no-backend-fallback"));
+                }
+                no_backend_fallback_seen = true;
+                cursor += 1;
+            }
+            "--allow-backend-fallback" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "Build v2 is CPU-only and does not accept backend fallback",
+                ));
+            }
+            "--max-memory-mib" | "--max-memory" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "Build v2 does not accept max-memory-mib until governed request and response memory authority exists",
+                ));
+            }
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::UnsupportedCommand,
+                    format!("unsupported {} option '{flag}'", capability.capability_id()),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected {} token '{value}'", capability.capability_id()),
+                ));
+            }
+        }
+    }
+
+    match (&queue, &patterns) {
+        (Some(_), Some(_)) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "Build v2 accepts exactly one of --queue or --patterns",
+            ));
+        }
+        (None, None) => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "Build v2 requires exactly one of --queue or --patterns",
+            ));
+        }
+        _ => {}
+    }
+    validate_worker_options(
+        workers,
+        automatic_worker_limit,
+        use_all_logical_processors,
+        worker_hardware_limit,
+    )?;
+
+    let objective = objective.unwrap_or_else(|| capability.default_objective());
+    if !capability.supports_objective(objective) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!(
+                "{} does not accept objective '{}'",
+                capability.capability_id(),
+                objective.as_str()
+            ),
+        ));
+    }
+    if !capability.score_capable() && (score_profile.is_some() || initial_b2b.is_some()) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!(
+                "{} does not accept score-profile or initial-b2b options",
+                capability.capability_id()
+            ),
+        ));
+    }
+
+    let mut input = if capability == WebBuildV2Capability::Cover {
+        if target_format.is_some()
+            || target_document.is_some()
+            || solution_format.is_some()
+            || solution_document.is_some()
+        {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "build.cover accepts base/target masks, not a target or solution document",
+            ));
+        }
+        let input = WebBuildV2Input::cover(
+            base_words.ok_or_else(|| missing_build_v2_option(capability, "--base-mask"))?,
+            target_words.ok_or_else(|| missing_build_v2_option(capability, "--target-mask"))?,
+            visible_height.ok_or_else(|| missing_build_v2_option(capability, "--height"))?,
+            objective,
+        )?;
+        match source_piece_count {
+            Some(count) => input.with_source_piece_count(count)?,
+            None => input,
+        }
+    } else if capability.uses_target_document() {
+        if base_words.is_some()
+            || target_words.is_some()
+            || visible_height.is_some()
+            || source_piece_count.is_some()
+            || solution_format.is_some()
+            || solution_document.is_some()
+        {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "{} accepts only a nominal target document",
+                    capability.capability_id()
+                ),
+            ));
+        }
+        WebBuildV2Input::target_document(
+            capability,
+            target_format.ok_or_else(|| missing_build_v2_option(capability, "--target-format"))?,
+            target_document
+                .as_deref()
+                .ok_or_else(|| missing_build_v2_option(capability, "--target-document"))?,
+            objective,
+        )?
+    } else {
+        if base_words.is_some()
+            || target_words.is_some()
+            || visible_height.is_some()
+            || source_piece_count.is_some()
+            || target_format.is_some()
+            || target_document.is_some()
+        {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!(
+                    "{} accepts only a nominal supplied-solution document",
+                    capability.capability_id()
+                ),
+            ));
+        }
+        WebBuildV2Input::solution_document(
+            capability,
+            solution_format
+                .ok_or_else(|| missing_build_v2_option(capability, "--solution-format"))?,
+            solution_document
+                .as_deref()
+                .ok_or_else(|| missing_build_v2_option(capability, "--solution-document"))?,
+            objective,
+        )?
+    };
+
+    input = input
+        .with_queue_knowledge(queue_knowledge.unwrap_or_default())
+        .with_hold_piece(hold_piece)
+        .with_allow_hold(hold_enabled);
+    if capability.score_capable() {
+        input = input
+            .with_score_options(score_profile.unwrap_or_default(), initial_b2b.unwrap_or(0))?;
+    }
+
+    let mut request = WebCommandRequest::build_v2(input)
+        .with_backend(RequestedSearchBackend::Cpu)
+        .with_allow_backend_fallback(false)
+        .with_rule(rule)
+        .with_worker_hardware_limit(worker_hardware_limit)
+        .with_runtime_webgpu_available(false)
+        .with_hold_enabled(hold_enabled)
+        .with_use_all_logical_processors(use_all_logical_processors)
+        .with_cpu_warmup(cpu_warmup);
+    if let Some(queue) = queue {
+        request = request.with_queue(queue);
+    }
+    if let Some(patterns) = patterns {
+        request = request.with_patterns(patterns);
+    }
+    if let Some(limit) = max_patterns {
+        request = request.with_max_patterns(limit);
+    }
+    if let Some(limit) = max_nodes {
+        request = request.with_max_nodes(limit);
+    }
+    if let Some(limit) = max_frontier_states {
+        request = request.with_max_frontier_states(limit);
+    }
+    if let Some(limit) = max_candidates {
+        request = request.with_max_candidates(limit);
+    }
+    if let Some(workers) = workers {
+        request = request.with_workers(workers);
+    } else if let Some(workers) = automatic_worker_limit {
+        request = request.with_automatic_worker_limit(workers);
+    }
+    Ok(request)
+}
+
+fn set_build_v2_option<T>(
+    slot: &mut Option<T>,
+    value: T,
+    option: &str,
+) -> Result<(), WebCommandError> {
+    if slot.replace(value).is_some() {
+        Err(repeated_build_v2_option(option))
+    } else {
+        Ok(())
+    }
+}
+
+fn repeated_build_v2_option(option: &str) -> WebCommandError {
+    WebCommandError::new(
+        WebCommandErrorCode::InvalidValue,
+        format!("Build v2 option {option} may be specified only once"),
+    )
+}
+
+fn missing_build_v2_option(capability: WebBuildV2Capability, option: &str) -> WebCommandError {
+    WebCommandError::new(
+        WebCommandErrorCode::MissingValue,
+        format!("{} requires {option}", capability.capability_id()),
+    )
+}
+
 fn parse_build_probability_command(
     tokens: &[String],
     worker_hardware_limit: usize,
@@ -1283,6 +3091,8 @@ fn parse_build_probability_command(
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
     let mut build_dependency_option_requested = false;
+    let mut solution_probabilities = false;
+    let mut queue_knowledge = None;
     let mut finesse_metric = FinesseMetric::Off;
     let mut finesse_option_requested = false;
     let mut finesse_pattern_knowledge = FinessePatternKnowledge::Both;
@@ -1436,6 +3246,37 @@ fn parse_build_probability_command(
                 build_dependency_option_requested = true;
                 cursor += 1;
             }
+            "--solution-probabilities" => {
+                if solution_probabilities {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "build-probability solution probabilities may be requested only once",
+                    ));
+                }
+                solution_probabilities = true;
+                cursor += 1;
+            }
+            "--queue-knowledge" => {
+                let value = next_value(tokens, &mut cursor, "--queue-knowledge")?;
+                let policy = match value {
+                    "oracle" => QueueObservationPolicy::FullQueueOracle,
+                    "visible-7" => QueueObservationPolicy::VisibleSeven,
+                    _ => {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!(
+                                "unsupported --queue-knowledge value '{value}'; expected oracle or visible-7"
+                            ),
+                        ));
+                    }
+                };
+                if queue_knowledge.replace(policy).is_some() {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "build-probability queue knowledge may be specified only once",
+                    ));
+                }
+            }
             "--finesse" => {
                 let value = next_value(tokens, &mut cursor, "--finesse")?;
                 finesse_metric = FinesseMetric::parse(value).ok_or_else(|| {
@@ -1486,17 +3327,25 @@ fn parse_build_probability_command(
     }
     let aggregation_kind = aggregation.resolve();
     let tiling_only = aggregation_kind == BuildAggregationKind::Tiling;
+    let queue_knowledge = queue_knowledge.unwrap_or_default();
+    if tiling_only && queue_knowledge == QueueObservationPolicy::VisibleSeven {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "visible-7 queue knowledge is unavailable with tiling-only Build semantics",
+        ));
+    }
     if tiling_only
         && (spin_profile.is_some()
             || preserve_back_to_back
             || build_dependency_option_requested
+            || solution_probabilities
             || finesse_option_requested
             || pattern_knowledge_option_requested
             || rule_requested)
     {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
-            "tiling aggregation cannot be combined with rule, spin, B2B-preservation, BuildUp dependency, or finesse options",
+            "tiling aggregation cannot be combined with rule, spin, B2B-preservation, BuildUp dependency, per-solution probability, or finesse options",
         ));
     }
     if spin_profile.is_some()
@@ -1557,7 +3406,9 @@ fn parse_build_probability_command(
         .with_hold_enabled(hold_enabled)
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
-        .with_precompute_build_dependencies(precompute_build_dependencies);
+        .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_solution_probabilities(solution_probabilities)
+        .with_queue_observation_policy(queue_knowledge);
     if tiling_only {
         request = request.with_objective(ObjectivePolicy::tiling());
     } else if preserve_back_to_back {
@@ -1606,6 +3457,663 @@ fn parse_verify_command(tokens: &[String]) -> Result<WebCommandRequest, WebComma
             "verify accepts at most one scope",
         )),
     }
+}
+
+fn parse_utility_command(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
+    let subcommand = match tokens.first().map(String::as_str) {
+        Some(
+            value @ ("sequence"
+            | "sequence-dependencies"
+            | "parity"
+            | "fumen"
+            | "render"
+            | "to-gray"
+            | "mirror"),
+        ) => value,
+        _ => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::UnsupportedCommand,
+                "utility requires sequence, sequence-dependencies, parity, fumen, render, to-gray, or mirror",
+            ));
+        }
+    };
+    match subcommand {
+        "sequence" | "sequence-dependencies" => {
+            parse_operation_document_utility(subcommand, &tokens[1..])
+        }
+        "parity" => parse_parity_utility(&tokens[1..]),
+        "fumen" => parse_fumen_utility(&tokens[1..]),
+        "render" => parse_render_utility(&tokens[1..]),
+        "to-gray" | "mirror" => parse_field_document_transform_utility(subcommand, &tokens[1..]),
+        _ => unreachable!("subcommand was closed above"),
+    }
+}
+
+fn parse_operation_document_utility(
+    subcommand: &str,
+    tokens: &[String],
+) -> Result<WebCommandRequest, WebCommandError> {
+    let mut document = None::<String>;
+    let mut rule_profile = None::<String>;
+    let mut kick_profile = None::<String>;
+    let mut timeout_seconds = None::<u16>;
+    let mut cursor = 0_usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        let target = match option {
+            "--document" => &mut document,
+            "--rule-profile" => &mut rule_profile,
+            "--kick-profile" => &mut kick_profile,
+            "--timeout-seconds" => {
+                if timeout_seconds.is_some() {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("utility {subcommand} repeats --timeout-seconds"),
+                    ));
+                }
+                let value = next_value(tokens, &mut cursor, option)?;
+                timeout_seconds = Some(value.parse::<u16>().map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "utility {subcommand} timeout-seconds must be an integer in 1..=900"
+                        ),
+                    )
+                })?);
+                continue;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("utility {subcommand} does not accept {flag}"),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected utility {subcommand} token '{value}'"),
+                ));
+            }
+        };
+        if target.is_some() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("utility {subcommand} repeats {option}"),
+            ));
+        }
+        *target = Some(next_value(tokens, &mut cursor, option)?.to_owned());
+    }
+    let document = document.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            format!("utility {subcommand} requires --document <CTK3_OR_FUMEN>"),
+        )
+    })?;
+    if subcommand == "sequence" {
+        crate::operation_sequence_request_from_document(
+            &document,
+            rule_profile.as_deref(),
+            kick_profile.as_deref(),
+            timeout_seconds,
+        )
+    } else {
+        crate::sequence_dependencies_request_from_document(
+            &document,
+            rule_profile.as_deref(),
+            kick_profile.as_deref(),
+            timeout_seconds,
+        )
+    }
+}
+
+fn parse_parity_utility(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
+    let (format, document) = parse_single_typed_document_options("parity", tokens, &[])?;
+    let command = ParityAppCommand::new(format, document)
+        .map_err(|error| invalid_utility("parity", error))?;
+    Ok(WebCommandRequest::parity(command))
+}
+
+fn parse_field_document_transform_utility(
+    subcommand: &str,
+    tokens: &[String],
+) -> Result<WebCommandRequest, WebCommandError> {
+    let (format, document) = parse_single_typed_document_options(subcommand, tokens, &[])?;
+    let transform = FieldDocumentTransformKind::parse(subcommand)
+        .map_err(|error| invalid_utility(subcommand, error))?;
+    let command = FieldDocumentTransformAppCommand::new(transform, format, document)
+        .map_err(|error| invalid_utility(subcommand, error))?;
+    Ok(WebCommandRequest::field_document_transform(command))
+}
+
+fn parse_fumen_utility(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
+    let transform = tokens.first().ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "utility fumen requires a closed transform",
+        )
+    })?;
+    let transform =
+        FumenTransformKind::parse(transform).map_err(|error| invalid_utility("fumen", error))?;
+    let mut format = None;
+    let mut documents = Vec::new();
+    let mut page_number = None;
+    let mut page_shift = None;
+    let mut comments = Vec::new();
+    let mut cursor = 1_usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--format" => set_unique_string(
+                &mut format,
+                next_value(tokens, &mut cursor, option)?,
+                "utility fumen repeats --format",
+            )?,
+            "--document" => documents.push(next_value(tokens, &mut cursor, option)?.to_owned()),
+            "--page" => {
+                if page_number.is_some() {
+                    return Err(invalid_web("utility fumen repeats --page"));
+                }
+                page_number = Some(parse_usize(
+                    next_value(tokens, &mut cursor, option)?,
+                    "utility fumen page must be a positive integer",
+                )?);
+            }
+            "--offset" => {
+                if page_shift.is_some() {
+                    return Err(invalid_web("utility fumen repeats --offset"));
+                }
+                page_shift = Some(
+                    next_value(tokens, &mut cursor, option)?
+                        .parse::<isize>()
+                        .map_err(|_| {
+                            invalid_web("utility fumen offset must be a signed integer")
+                        })?,
+                );
+            }
+            "--comment" => comments.push(next_value(tokens, &mut cursor, option)?.to_owned()),
+            flag if flag.starts_with("--") => {
+                return Err(invalid_web(format!("utility fumen does not accept {flag}")))
+            }
+            value => {
+                return Err(invalid_web(format!(
+                    "unexpected utility fumen token '{value}'"
+                )))
+            }
+        }
+    }
+    let format = required_format(format, "fumen")?;
+    let command = FumenAppCommand::new(
+        format,
+        transform,
+        documents,
+        page_number,
+        page_shift,
+        comments,
+    )
+    .map_err(|error| invalid_utility("fumen", error))?;
+    Ok(WebCommandRequest::fumen(command))
+}
+
+fn parse_render_utility(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
+    let mut format = None;
+    let mut document = None;
+    let mut artifact_format = None;
+    let mut page_number = None;
+    let mut cursor = 0_usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--format" => set_unique_string(
+                &mut format,
+                next_value(tokens, &mut cursor, option)?,
+                "utility render repeats --format",
+            )?,
+            "--document" => set_unique_string(
+                &mut document,
+                next_value(tokens, &mut cursor, option)?,
+                "utility render repeats --document",
+            )?,
+            "--artifact-format" => set_unique_string(
+                &mut artifact_format,
+                next_value(tokens, &mut cursor, option)?,
+                "utility render repeats --artifact-format",
+            )?,
+            "--page" => {
+                if page_number.is_some() {
+                    return Err(invalid_web("utility render repeats --page"));
+                }
+                page_number = Some(parse_usize(
+                    next_value(tokens, &mut cursor, option)?,
+                    "utility render page must be a positive integer",
+                )?);
+            }
+            flag if flag.starts_with("--") => {
+                return Err(invalid_web(format!(
+                    "utility render does not accept {flag}"
+                )))
+            }
+            value => {
+                return Err(invalid_web(format!(
+                    "unexpected utility render token '{value}'"
+                )))
+            }
+        }
+    }
+    let format = required_format(format, "render")?;
+    let document = document.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "utility render requires --document",
+        )
+    })?;
+    let artifact_format =
+        RenderArtifactFormat::parse(artifact_format.as_deref().ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "utility render requires --artifact-format png|gif",
+            )
+        })?)
+        .map_err(|error| invalid_utility("render", error))?;
+    let command = RenderAppCommand::new(format, document, artifact_format, page_number)
+        .map_err(|error| invalid_utility("render", error))?;
+    Ok(WebCommandRequest::render(command))
+}
+
+fn parse_single_typed_document_options(
+    command: &str,
+    tokens: &[String],
+    _extra: &[&str],
+) -> Result<(FieldDocumentFormat, String), WebCommandError> {
+    let mut format = None;
+    let mut document = None;
+    let mut cursor = 0_usize;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--format" => set_unique_string(
+                &mut format,
+                next_value(tokens, &mut cursor, option)?,
+                &format!("utility {command} repeats --format"),
+            )?,
+            "--document" => set_unique_string(
+                &mut document,
+                next_value(tokens, &mut cursor, option)?,
+                &format!("utility {command} repeats --document"),
+            )?,
+            flag if flag.starts_with("--") => {
+                return Err(invalid_web(format!(
+                    "utility {command} does not accept {flag}"
+                )))
+            }
+            value => {
+                return Err(invalid_web(format!(
+                    "unexpected utility {command} token '{value}'"
+                )))
+            }
+        }
+    }
+    Ok((
+        required_format(format, command)?,
+        document.ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                format!("utility {command} requires --document"),
+            )
+        })?,
+    ))
+}
+
+fn required_format(
+    format: Option<String>,
+    command: &str,
+) -> Result<FieldDocumentFormat, WebCommandError> {
+    let format = format.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            format!("utility {command} requires --format ctk3|fumen"),
+        )
+    })?;
+    FieldDocumentFormat::parse(&format).map_err(|error| invalid_utility(command, error))
+}
+
+fn set_unique_string(
+    target: &mut Option<String>,
+    value: &str,
+    repeated_message: &str,
+) -> Result<(), WebCommandError> {
+    if target.is_some() {
+        return Err(invalid_web(repeated_message));
+    }
+    *target = Some(value.to_owned());
+    Ok(())
+}
+
+fn parse_usize(value: &str, message: &str) -> Result<usize, WebCommandError> {
+    value.parse::<usize>().map_err(|_| invalid_web(message))
+}
+
+fn invalid_utility(command: &str, error: impl core::fmt::Display) -> WebCommandError {
+    invalid_web(format!("invalid utility {command} request: {error}"))
+}
+
+fn invalid_web(message: impl Into<String>) -> WebCommandError {
+    WebCommandError::new(WebCommandErrorCode::InvalidValue, message)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PcAllSpinCommandKind {
+    ExactQueue,
+    PatternChance,
+}
+
+impl PcAllSpinCommandKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ExactQueue => "allspin-sol",
+            Self::PatternChance => "allspin-pres-chance",
+        }
+    }
+
+    const fn product_capability_contract(self) -> clearra_app::ProductCapabilityContract {
+        match self {
+            Self::ExactQueue => clearra_app::ProductCapabilityContract::PcAllSpinSolution,
+            Self::PatternChance => {
+                clearra_app::ProductCapabilityContract::PcAllSpinPreservationChance
+            }
+        }
+    }
+}
+
+fn parse_pc_allspin_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+    kind: PcAllSpinCommandKind,
+) -> Result<WebCommandRequest, WebCommandError> {
+    let mut seen = Vec::new();
+    let mut required_input_supplied = false;
+    let mut spin_profile = None;
+    let mut board_mask_supplied = false;
+    let mut visible_height = None;
+    let mut pieces_supplied = false;
+    let mut lines = None;
+    let mut cursor = 0_usize;
+
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--queue" if kind == PcAllSpinCommandKind::ExactQueue => {
+                next_unique_pc_allspin_value(
+                    tokens,
+                    &mut cursor,
+                    &mut seen,
+                    "required-input",
+                    option,
+                )?;
+                required_input_supplied = true;
+            }
+            "--patterns" | "--pattern" if kind == PcAllSpinCommandKind::PatternChance => {
+                next_unique_pc_allspin_value(
+                    tokens,
+                    &mut cursor,
+                    &mut seen,
+                    "required-input",
+                    option,
+                )?;
+                required_input_supplied = true;
+            }
+            "--queue" | "--patterns" | "--pattern" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!(
+                        "pc {} does not accept {option}; exact solution search requires --queue and preservation chance requires --patterns",
+                        kind.name()
+                    ),
+                ));
+            }
+            "--spin-profile" => {
+                let value = next_unique_pc_allspin_value(
+                    tokens,
+                    &mut cursor,
+                    &mut seen,
+                    "spin-profile",
+                    option,
+                )?;
+                spin_profile = Some(parse_canonical_pc_allspin_profile(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --spin-profile value '{value}'; pc All-Spin requires one explicit canonical six-profile value"
+                        ),
+                    )
+                })?);
+            }
+            "--board-mask" => {
+                next_unique_pc_allspin_value(
+                    tokens,
+                    &mut cursor,
+                    &mut seen,
+                    "initial-board-mask",
+                    option,
+                )?;
+                board_mask_supplied = true;
+            }
+            "--height" => {
+                let value = next_unique_pc_allspin_value(
+                    tokens,
+                    &mut cursor,
+                    &mut seen,
+                    "initial-height",
+                    option,
+                )?;
+                let height = parse_positive::<u16>(value, option)?;
+                if !(1..=6).contains(&height) {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "pc All-Spin initial --height must be in 1..=6 for a 10-column u64 board",
+                    ));
+                }
+                visible_height = Some(height);
+            }
+            "--pieces" => {
+                let value = next_unique_pc_allspin_value(
+                    tokens,
+                    &mut cursor,
+                    &mut seen,
+                    "initial-pieces",
+                    option,
+                )?;
+                parse_positive::<usize>(value, option)?;
+                pieces_supplied = true;
+            }
+            "--lines" => {
+                let value =
+                    next_unique_pc_allspin_value(tokens, &mut cursor, &mut seen, "lines", option)?;
+                lines = Some(parse_positive::<u8>(value, option)?);
+            }
+            "--rule"
+            | "--backend"
+            | "--gpu-device"
+            | "--workers"
+            | "--auto-workers"
+            | "--max-patterns"
+            | "--max-nodes"
+            | "--max-frontier-states"
+            | "--max-candidates"
+            | "--max-memory-mib" => {
+                let canonical = match option {
+                    "--rule" => "rule",
+                    "--backend" => "backend",
+                    "--gpu-device" => "gpu-device",
+                    "--workers" => "workers",
+                    "--auto-workers" => "auto-workers",
+                    "--max-patterns" => "max-patterns",
+                    "--max-nodes" => "max-nodes",
+                    "--max-frontier-states" => "max-frontier-states",
+                    "--max-candidates" => "max-candidates",
+                    "--max-memory-mib" => "max-memory-mib",
+                    _ => unreachable!("matched PC All-Spin value option"),
+                };
+                next_unique_pc_allspin_value(tokens, &mut cursor, &mut seen, canonical, option)?;
+            }
+            "--no-hold" | "--use-all-cpu-threads" | "--cpu-warmup" | "--gpu-warmup" => {
+                let canonical = match option {
+                    "--no-hold" => "hold-policy",
+                    "--use-all-cpu-threads" => "logical-processors",
+                    "--cpu-warmup" => "cpu-warmup",
+                    "--gpu-warmup" => "gpu-warmup",
+                    _ => unreachable!("matched PC All-Spin flag"),
+                };
+                record_pc_allspin_option(&mut seen, canonical, option)?;
+                cursor += 1;
+            }
+            "--tablebase" | "--tb" | "--no-tablebase" | "--no-tb" => {
+                record_pc_allspin_option(&mut seen, "tablebase-policy", option)?;
+                cursor += 1;
+            }
+            "--build-dependency-dag" | "--no-build-dependency-dag" => {
+                record_pc_allspin_option(&mut seen, "dependency-dag-policy", option)?;
+                cursor += 1;
+            }
+            "--allow-backend-fallback" | "--no-backend-fallback" => {
+                record_pc_allspin_option(&mut seen, "backend-fallback-policy", option)?;
+                cursor += 1;
+            }
+            "--hold"
+            | "--source-pieces"
+            | "--count"
+            | "--objective"
+            | "--tiling-only"
+            | "--score"
+            | "--score-profile"
+            | "--initial-b2b"
+            | "--retained-traces"
+            | "--solution-probabilities"
+            | "--queue-knowledge"
+            | "--preserve-b2b"
+            | "--solution-fumen"
+            | "--input"
+            | "--file"
+            | "--fixture"
+            | "--output" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("pc {} does not accept {option}", kind.name()),
+                ));
+            }
+            flag if flag.starts_with("--") => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::UnsupportedCommand,
+                    format!("unsupported pc {} option '{flag}'", kind.name()),
+                ));
+            }
+            value => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unexpected pc {} token '{value}'", kind.name()),
+                ));
+            }
+        }
+    }
+
+    if !required_input_supplied {
+        let option = match kind {
+            PcAllSpinCommandKind::ExactQueue => "--queue",
+            PcAllSpinCommandKind::PatternChance => "--patterns",
+        };
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            format!("pc {} requires exactly one {option}", kind.name()),
+        ));
+    }
+    let spin_profile = spin_profile.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            format!(
+                "pc {} requires exactly one explicit --spin-profile",
+                kind.name()
+            ),
+        )
+    })?;
+
+    let scenario_option_count = usize::from(board_mask_supplied)
+        + usize::from(visible_height.is_some())
+        + usize::from(pieces_supplied);
+    if !matches!(scenario_option_count, 0 | 3) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "pc All-Spin initial field requires --board-mask, --height, and --pieces together",
+        ));
+    }
+    if scenario_option_count == 3 {
+        if let Some(lines) = lines {
+            if Some(u16::from(lines)) != visible_height {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "pc All-Spin --lines must equal initial-field --height when both are supplied",
+                ));
+            }
+        }
+    } else if lines.is_some_and(|lines| !matches!(lines, 2 | 4 | 6)) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "opening PC All-Spin --lines must be 2, 4, or 6",
+        ));
+    }
+
+    // The public forms intentionally cannot request preservation themselves.
+    // Inject the fixed existential B2B constraint only after every public
+    // option has passed the dedicated fail-closed preflight.
+    let mut forwarded = tokens.to_vec();
+    if scenario_option_count == 3 && lines.is_none() {
+        forwarded.push("--lines".to_owned());
+        forwarded.push(
+            visible_height
+                .expect("complete scenario trio requires a parsed height")
+                .to_string(),
+        );
+    }
+    forwarded.push("--preserve-b2b".to_owned());
+    parse_pc_command(&forwarded, worker_hardware_limit, false).map(|request| {
+        request.with_pc_allspin_product_capability(kind.product_capability_contract(), spin_profile)
+    })
+}
+
+fn parse_canonical_pc_allspin_profile(value: &str) -> Option<SpinProfileSelection> {
+    match value {
+        "t-spins" => Some(SpinProfileSelection::TSpins),
+        "t-spins-plus" => Some(SpinProfileSelection::TSpinsPlus),
+        "all-spin" => Some(SpinProfileSelection::AllSpin),
+        "all-spin-plus" => Some(SpinProfileSelection::AllSpinPlus),
+        "all-mini" => Some(SpinProfileSelection::AllMini),
+        "all-mini-plus" => Some(SpinProfileSelection::AllMiniPlus),
+        _ => None,
+    }
+}
+
+fn next_unique_pc_allspin_value<'a>(
+    tokens: &'a [String],
+    cursor: &mut usize,
+    seen: &mut Vec<&'static str>,
+    canonical: &'static str,
+    option: &str,
+) -> Result<&'a str, WebCommandError> {
+    record_pc_allspin_option(seen, canonical, option)?;
+    next_value(tokens, cursor, option)
+}
+
+fn record_pc_allspin_option(
+    seen: &mut Vec<&'static str>,
+    canonical: &'static str,
+    option: &str,
+) -> Result<(), WebCommandError> {
+    if seen.contains(&canonical) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            format!("pc All-Spin option {option} duplicates an existing {canonical} selection"),
+        ));
+    }
+    seen.push(canonical);
+    Ok(())
 }
 
 fn parse_pc_command(
@@ -2334,12 +4842,53 @@ fn next_value<'a>(
 }
 
 fn tokenize(command_text: &str) -> Result<Vec<String>, WebCommandError> {
-    let tokens = command_text
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut token_started = false;
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in command_text.chars() {
+        if quoted {
+            if escaped {
+                if !matches!(character, '"' | '\\') {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "web command quoted values only escape quote or backslash",
+                    ));
+                }
+                token.push(character);
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        if character == '"' {
+            quoted = true;
+            token_started = true;
+        } else if character.is_whitespace() {
+            if token_started {
+                tokens.push(core::mem::take(&mut token));
+                token_started = false;
+            }
+        } else {
+            token.push(character);
+            token_started = true;
+        }
+    }
+    if quoted || escaped {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "web command contains an unterminated quoted value",
+        ));
+    }
+    if token_started {
+        tokens.push(token);
+    }
     if tokens.is_empty() {
         return Err(WebCommandError::new(
             WebCommandErrorCode::EmptyCommand,

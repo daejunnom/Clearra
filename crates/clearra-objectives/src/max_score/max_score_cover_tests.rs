@@ -124,21 +124,55 @@ fn max_score_cover_selects_best_score_by_pattern() {
 }
 
 #[test]
-fn score_aware_cover_can_rank_by_attack_expectation() {
+fn attack_cannot_change_score_tie_selection() {
     let weights = WeightedPatternSet::new(vec![weight(1.0)]).expect("weights");
     let required = bitset(1, &[0]);
     let candidates = vec![
         ScoredCoverageCandidate::new(0, bitset(1, &[0]), 200, 0),
-        ScoredCoverageCandidate::new(1, bitset(1, &[0]), 20, 8),
+        ScoredCoverageCandidate::new(1, bitset(1, &[0]), 200, 999),
     ];
-    let policy = MaxScoreCoverPolicy::new(0.0, 1.0).expect("attack policy");
 
-    let result =
-        MaxScoreCover::select(&candidates, &required, &weights, policy).expect("selection");
+    let result = MaxScoreCover::select(
+        &candidates,
+        &required,
+        &weights,
+        MaxScoreCoverPolicy::default(),
+    )
+    .expect("selection");
 
-    assert_eq!(result.selected_candidate_ids(), &[1]);
-    assert_eq!(result.expected_score(), 20.0);
-    assert_eq!(result.expected_attack(), 8.0);
+    assert_eq!(result.selected_candidate_ids(), &[0]);
+    assert_eq!(result.expected_score(), 200.0);
+    assert_eq!(result.expected_attack(), 0.0);
+}
+
+#[test]
+fn score_optimal_portfolios_preserve_all_original_candidate_identities() {
+    let weights = WeightedPatternSet::uniform(3).expect("weights");
+    let required = bitset(3, &[0, 1, 2]);
+    let candidates = vec![
+        ScoredCoverageCandidate::new(10, bitset(3, &[0, 1]), 100, 999),
+        ScoredCoverageCandidate::new(20, bitset(3, &[0]), 100, 0),
+        ScoredCoverageCandidate::new(30, bitset(3, &[1, 2]), 100, 1),
+    ];
+    let mut portfolios = MaxScoreCover::portfolio_enumerator(
+        &candidates,
+        &required,
+        &weights,
+        MaxScoreCoverPolicy::default(),
+    )
+    .expect("portfolio enumerator");
+
+    let page = portfolios.next_page(10, 10).expect("all alternatives");
+    assert_eq!(page.optimal_cardinality(), 2);
+    assert_eq!(
+        page.portfolios()
+            .iter()
+            .map(|portfolio| portfolio.candidate_ids().to_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![10, 30], vec![20, 30]]
+    );
+    assert_eq!(page.total_alternative_count_decimal(), Some("2"));
+    assert!(page.enumeration_complete());
 }
 
 #[test]
@@ -195,4 +229,35 @@ fn max_score_policy_rejects_invalid_weights() {
         MaxScoreCoverPolicy::new(0.0, 0.0),
         Err(MaxScoreCoverPolicyError::EmptyObjective)
     );
+    assert_eq!(
+        MaxScoreCoverPolicy::new(1.0, 0.001),
+        Err(MaxScoreCoverPolicyError::AttackWeightNotAllowed)
+    );
+}
+
+#[test]
+fn matrix_uses_canonical_trace_attack_only_as_information() {
+    let weights = WeightedPatternSet::uniform(1).expect("weights");
+    let required = bitset(1, &[0]);
+    let matrix = MaterializedScoreMatrix::new(
+        1,
+        vec![
+            MaterializedScoreCell::new(7, pattern(0), "trace-z", 500, 99, "exact"),
+            MaterializedScoreCell::new(7, pattern(0), "trace-a", 500, 1, "exact"),
+        ],
+        "test",
+        "exact",
+        true,
+    );
+
+    let result =
+        MaxScoreCover::select_matrix(&matrix, &required, &weights, MaxScoreCoverPolicy::default())
+            .expect("matrix selection");
+
+    assert_eq!(result.selected_candidate_ids(), &[7]);
+    assert_eq!(
+        result.pattern_contributions()[0].trace_identity(),
+        Some("trace-a")
+    );
+    assert_eq!(result.pattern_contributions()[0].attack(), 1);
 }

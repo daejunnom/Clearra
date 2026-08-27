@@ -239,6 +239,135 @@ impl StructuralBuildVerifier {
         )
     }
 
+    /// Replays one exact no-hold piece order against a validated static
+    /// structure. Operations with the same piece kind remain distinct and are
+    /// matched exhaustively; the reserved scoring operation must be the final
+    /// element of the supplied order.
+    pub(crate) fn accepts_piece_order(
+        &mut self,
+        query: &SpinStructureQuery,
+        operations: &[StructureOperation],
+        target: StructureOperation,
+        piece_order: &[PieceKind],
+    ) -> bool {
+        if piece_order.len() != operations.len()
+            || piece_order.last().copied() != Some(target.piece())
+        {
+            return false;
+        }
+        let Some(target_index) = operations.iter().position(|operation| *operation == target)
+        else {
+            return false;
+        };
+        let mut remaining = operations.to_vec();
+        remaining.remove(target_index);
+        remaining.sort_unstable();
+        let logical_board = LogicalBoard::from_initial(query.initial_board);
+        let deleted_rows = logical_board.initial_deleted_rows(query.height);
+        let position = BuildPosition {
+            board: logical_board.compact(deleted_rows, query.height),
+            logical_board,
+            deleted_rows,
+        };
+        let mut failed = BTreeSet::new();
+        self.build_ordered_non_target(
+            query,
+            position,
+            &remaining,
+            target,
+            operations,
+            &piece_order[..piece_order.len() - 1],
+            0,
+            &mut failed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_ordered_non_target(
+        &mut self,
+        query: &SpinStructureQuery,
+        position: BuildPosition,
+        remaining: &[StructureOperation],
+        target: StructureOperation,
+        canonical_operations: &[StructureOperation],
+        piece_order: &[PieceKind],
+        cursor: usize,
+        failed: &mut BTreeSet<BuildMemoKey>,
+    ) -> bool {
+        self.metrics.build_states += 1;
+        if remaining.is_empty() {
+            return cursor == piece_order.len()
+                && self
+                    .lock_target(query, position, target, canonical_operations, &[])
+                    .is_some();
+        }
+        let Some(next_piece) = piece_order.get(cursor).copied() else {
+            return false;
+        };
+        let key = BuildMemoKey {
+            logical_board: position.logical_board,
+            deleted_rows: position.deleted_rows,
+            remaining: remaining.to_vec(),
+        };
+        if failed.contains(&key) {
+            return false;
+        }
+        for operation_index in 0..remaining.len() {
+            if remaining[operation_index].piece() != next_piece
+                || (operation_index != 0
+                    && remaining[operation_index] == remaining[operation_index - 1])
+            {
+                continue;
+            }
+            let operation = remaining[operation_index];
+            let entry_result = self.reachable_locks(position.board, next_piece, false, false);
+            for lock in entry_result.locks {
+                let occupied = position.board.union(lock.mask);
+                let (board_after, _, _) = place_and_clear(query.height, occupied);
+                let Some(logical_lock) = apply_physical_lock(
+                    position.logical_board,
+                    position.deleted_rows,
+                    query.height,
+                    next_piece,
+                    lock.rotation,
+                    lock.x,
+                    lock.mask,
+                ) else {
+                    continue;
+                };
+                if logical_lock.identity != operation {
+                    continue;
+                }
+                debug_assert_eq!(
+                    logical_lock
+                        .board_after
+                        .compact(logical_lock.deleted_after, query.height),
+                    board_after
+                );
+                let mut next_remaining = remaining.to_vec();
+                next_remaining.remove(operation_index);
+                if self.build_ordered_non_target(
+                    query,
+                    BuildPosition {
+                        board: board_after,
+                        logical_board: logical_lock.board_after,
+                        deleted_rows: logical_lock.deleted_after,
+                    },
+                    &next_remaining,
+                    target,
+                    canonical_operations,
+                    piece_order,
+                    cursor + 1,
+                    failed,
+                ) {
+                    return true;
+                }
+            }
+        }
+        failed.insert(key);
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_non_target(
         &mut self,

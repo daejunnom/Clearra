@@ -294,6 +294,80 @@ impl ReplayTrace {
     }
 }
 
+impl ReplayTrace {
+    /// Heap storage retained by this trace, excluding the inline trace value.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let event_nested_bytes = self.events.iter().try_fold(0_u128, |bytes, event| {
+            bytes.checked_add(event.checked_nested_retained_bytes()?)
+        })?;
+        checked_replay_trace_nested_bytes(
+            self.variant_id.capacity(),
+            self.solution_trace.checked_nested_retained_bytes()?,
+            self.events.capacity(),
+            event_nested_bytes,
+            self.colored_cell_ownership
+                .checked_nested_retained_bytes()?,
+        )
+    }
+
+    /// Heap storage requested by `Clone`, excluding the cloned inline value.
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        let event_nested_bytes = self.events.iter().try_fold(0_u128, |bytes, event| {
+            bytes.checked_add(event.checked_clone_nested_bytes()?)
+        })?;
+        checked_replay_trace_nested_bytes(
+            self.variant_id.len(),
+            self.solution_trace.checked_clone_nested_bytes()?,
+            self.events.len(),
+            event_nested_bytes,
+            self.colored_cell_ownership.checked_clone_nested_bytes()?,
+        )
+    }
+
+    /// Peak bytes while this trace and a fieldwise clone coexist.
+    pub fn checked_clone_peak_bytes(&self) -> Option<u128> {
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(self.checked_nested_retained_bytes()?)?
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(self.checked_clone_nested_bytes()?)
+    }
+}
+
+fn checked_replay_trace_nested_bytes(
+    variant_id_bytes: usize,
+    solution_trace_bytes: u128,
+    event_capacity: usize,
+    event_nested_bytes: u128,
+    colored_cell_ownership_bytes: u128,
+) -> Option<u128> {
+    (variant_id_bytes as u128)
+        .checked_add(solution_trace_bytes)?
+        .checked_add(
+            (event_capacity as u128).checked_mul(core::mem::size_of::<ReplayEvent>() as u128)?,
+        )?
+        .checked_add(event_nested_bytes)?
+        .checked_add(colored_cell_ownership_bytes)
+}
+
+#[cfg(test)]
+mod retained_memory_projection_tests {
+    use super::*;
+
+    #[test]
+    fn replay_trace_nested_projection_is_fieldwise_and_checked() {
+        let projected =
+            checked_replay_trace_nested_bytes(17, 31, 5, 37, 43).expect("bounded projection");
+        assert_eq!(
+            projected,
+            17 + 31 + 5_u128 * core::mem::size_of::<ReplayEvent>() as u128 + 37 + 43
+        );
+        assert_eq!(
+            checked_replay_trace_nested_bytes(0, u128::MAX, 1, 0, 0),
+            None
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplayEngine;
 

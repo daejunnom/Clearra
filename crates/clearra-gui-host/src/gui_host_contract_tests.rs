@@ -1,7 +1,8 @@
 use crate::{
     DesktopTauriCommandBridge, GuiAppState, GuiBackendChoice, GuiBackendForm, GuiExecutionPhase,
     GuiExecutionState, GuiHostLanguageResolver, GuiJobId, GuiOpeningPcForm, GuiOutputFormat,
-    GuiProblemForm, GuiScreen, PcRequestBuilder, SetupRequestBuilder,
+    GuiProblemForm, GuiScenarioPcForm, GuiScreen, PcRequestBuilder, ScenarioRequestBuilder,
+    SetupRequestBuilder,
 };
 use serde_json::Value;
 
@@ -24,6 +25,31 @@ fn assert_product_runtime_identity(value: &Value) {
         identity["artifact_schema_version"],
         expected.artifact_schema_version()
     );
+}
+
+#[test]
+fn gui_state_binds_verified_structural_profiles_into_the_app_request() {
+    let state = GuiAppState::default().with_problem_form(GuiProblemForm::OpeningPc(
+        GuiOpeningPcForm::new(2, "srs-plus"),
+    ));
+    let request = crate::GuiToAppRequest::build(&state)
+        .expect("canonical GUI request")
+        .into_app_request();
+    let profiles = request.request_profiles();
+    assert_eq!(profiles.board().as_str(), "standard-10");
+    assert_eq!(profiles.piece_set().as_str(), "standard-tetrominoes");
+    assert_eq!(profiles.bag().as_str(), "standard-7-bag");
+    assert_eq!(profiles.rule().as_str(), "srs-plus");
+}
+
+#[test]
+fn gui_state_rejects_an_unverified_rule_profile_without_fallback() {
+    let state = GuiAppState::default().with_problem_form(GuiProblemForm::OpeningPc(
+        GuiOpeningPcForm::new(2, "custom"),
+    ));
+    let error = crate::GuiToAppRequest::build(&state)
+        .expect_err("unverified GUI rule must fail closed at App authority");
+    assert!(error.message().contains("profile"));
 }
 
 mod case_gui_pc_request_preserves_back_to_back_constraint {
@@ -155,6 +181,396 @@ mod case_gui_pc_request_preserves_visible_seven_queue_knowledge {
             command.query().queue_observation_policy(),
             QueueObservationPolicy::VisibleSeven
         );
+    }
+}
+
+mod case_gui_pc_tiling_authority_boundary {
+    use clearra_app::{
+        AppCommand, PcResultProjection, PcTilingIngressOrigin, ProductCapabilityContract,
+    };
+    use clearra_supply::QueueObservationPolicy;
+
+    use super::*;
+    use crate::GuiToAppRequest;
+
+    fn tiling_form() -> GuiOpeningPcForm {
+        GuiOpeningPcForm::new(2, "srs-plus").with_score_input("tiling", 0)
+    }
+
+    #[test]
+    fn canonical_gui_pc_tiling_attaches_projection_and_product_contract() {
+        let state =
+            GuiAppState::default().with_problem_form(GuiProblemForm::OpeningPc(tiling_form()));
+        let request = GuiToAppRequest::build(&state)
+            .expect("canonical GUI pc tiling request")
+            .into_app_request();
+
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcTiling)
+        );
+        let AppCommand::Pc(command) = request.command() else {
+            panic!("expected opening PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
+        );
+    }
+
+    #[test]
+    fn generic_tiling_objective_does_not_gain_typed_pc_tiling_authority() {
+        let state = GuiAppState::default().with_problem_form(GuiProblemForm::OpeningPc(
+            GuiOpeningPcForm::new(2, "srs-plus").with_score_input("tiling-only", 0),
+        ));
+        let request = GuiToAppRequest::build(&state)
+            .expect("generic GUI tiling objective")
+            .into_app_request();
+
+        assert_eq!(request.product_capability_contract(), None);
+        let AppCommand::Pc(command) = request.command() else {
+            panic!("expected opening PC command");
+        };
+        assert_eq!(command.result_projection(), PcResultProjection::Standard);
+    }
+
+    #[test]
+    fn canonical_gui_pc_tiling_rejects_inactive_semantics() {
+        let invalid_forms = [
+            GuiOpeningPcForm::new(2, "srs").with_score_input("tiling", 0),
+            tiling_form().with_score_profiles("guideline", "t-spins"),
+            tiling_form().with_score_profiles("tetrio", "all-spin"),
+            GuiOpeningPcForm::new(2, "srs-plus").with_score_input("tiling", 1),
+            tiling_form().with_back_to_back_preservation(true),
+            tiling_form().with_solution_probabilities(true),
+            tiling_form().with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
+        ];
+        for form in invalid_forms {
+            let error = PcRequestBuilder::build_command(&form, &GuiBackendForm::default())
+                .expect_err("inactive pc tiling semantics must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+
+        for backend in [
+            GuiBackendForm::default().with_tablebase_requested(true),
+            GuiBackendForm::default().with_precompute_build_dependencies(true),
+        ] {
+            let error = PcRequestBuilder::build_command(&tiling_form(), &backend)
+                .expect_err("inactive pc tiling backend semantics must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+    }
+}
+
+mod case_gui_pc_portfolio_authority_boundary {
+    use clearra_app::{
+        AppCommand, PcMinimalsIngressOrigin, PcResultProjection, PcScoreIngressOrigin,
+        PcScoreMinimalsIngressOrigin, ProductCapabilityContract, PC_SCORE_MAX_PATTERNS,
+    };
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+    use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend, WorkerPolicy};
+
+    use super::*;
+    use crate::GuiToAppRequest;
+
+    fn scenario_form(mode: &str) -> GuiScenarioPcForm {
+        GuiScenarioPcForm::new(1, 0x3f, "I", "srs-plus")
+            .with_execution_input(1, None, true, "all")
+            .with_score_input(mode, 0)
+    }
+
+    fn score_finder_form() -> GuiScenarioPcForm {
+        scenario_form("score-finder").with_score_profiles("jstris-ultra", "t-spins")
+    }
+
+    #[test]
+    fn canonical_gui_pc_minimals_attaches_exact_projection_and_unique_count() {
+        let state = GuiAppState::default()
+            .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("minimum-cover")));
+        let request = GuiToAppRequest::build(&state)
+            .expect("canonical GUI pc minimals request")
+            .into_app_request();
+
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcMinimals)
+        );
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+        );
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
+    }
+
+    #[test]
+    fn canonical_gui_pc_score_owns_the_fixed_cpu_single_session_policy() {
+        let state = GuiAppState::default()
+            .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("summary")));
+        let request = GuiToAppRequest::build(&state)
+            .expect("canonical GUI pc score request")
+            .into_app_request();
+
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScore)
+        );
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScore)
+        );
+        let policy = command.query().execution_policy();
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert_eq!(policy.workers(), 1);
+        assert!(!policy.allow_backend_fallback());
+        assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+    }
+
+    #[test]
+    fn canonical_gui_pc_score_finder_attaches_the_fixed_witness_contract() {
+        let state = GuiAppState::default()
+            .with_problem_form(GuiProblemForm::ScenarioPc(score_finder_form()));
+        let request = GuiToAppRequest::build(&state)
+            .expect("canonical GUI pc score-finder request")
+            .into_app_request();
+
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScoreFinder)
+        );
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScoreFinder)
+        );
+        assert_eq!(command.query().remaining_queue().mode(), "fixed");
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+        assert_eq!(command.query().retained_trace_limit(), 1);
+        assert_eq!(
+            command.query().objective().score().profile().as_str(),
+            "jstris-ultra"
+        );
+        assert_eq!(
+            command.query().objective().score().spin_profile().as_str(),
+            "t-spins"
+        );
+        let policy = command.query().execution_policy();
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert!(!policy.allow_backend_fallback());
+        assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+    }
+
+    #[test]
+    fn canonical_gui_pc_score_finder_rejects_opening_and_nonfixed_or_inactive_inputs() {
+        let opening = GuiOpeningPcForm::new(2, "srs-plus")
+            .with_score_input("score-finder", 0)
+            .with_score_profiles("jstris-ultra", "t-spins");
+        let error = PcRequestBuilder::build_command(&opening, &GuiBackendForm::default())
+            .expect_err("score-finder must require a scenario board");
+        assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+
+        let invalid_forms = [
+            GuiScenarioPcForm::new(1, 0x3f, "", "srs-plus")
+                .with_execution_input(1, None, true, "all")
+                .with_score_input("score-finder", 0)
+                .with_score_profiles("jstris-ultra", "t-spins"),
+            score_finder_form().with_queue_pattern(),
+            score_finder_form().with_standard_7_bag(),
+            scenario_form("score-finder"),
+            score_finder_form().with_score_input("score-finder", 2),
+            score_finder_form().with_back_to_back_preservation(true),
+        ];
+        for form in invalid_forms {
+            let error = ScenarioRequestBuilder::build_command(&form, &GuiBackendForm::default())
+                .expect_err("noncanonical pc score-finder input must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+
+        for backend in [
+            GuiBackendForm::new(GuiBackendChoice::Gpu),
+            GuiBackendForm::default().with_workers(2),
+            GuiBackendForm::default().with_tablebase_requested(true),
+        ] {
+            let error = ScenarioRequestBuilder::build_command(&score_finder_form(), &backend)
+                .expect_err("pc score-finder execution override must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+    }
+
+    #[test]
+    fn canonical_gui_pc_score_minimals_binds_score_only_minimum_cover_and_fixed_execution() {
+        let state = GuiAppState::default()
+            .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("score-minimals")));
+        let request = GuiToAppRequest::build(&state)
+            .expect("canonical GUI pc score-minimals request")
+            .into_app_request();
+
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScoreMinimals)
+        );
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::ScorePortfolioV2(
+                PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals
+            )
+        );
+        assert_eq!(
+            command.query().objective().kind(),
+            ObjectiveKind::MinimumCover
+        );
+        assert!(command.query().objective().score().requested());
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+        assert_eq!(command.query().retained_trace_limit(), 1);
+        let policy = command.query().execution_policy();
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert!(!policy.allow_backend_fallback());
+        assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+    }
+
+    #[test]
+    fn generic_minimum_alias_does_not_gain_pc_minimals_product_authority() {
+        let state = GuiAppState::default()
+            .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("minimum")));
+        let request = GuiToAppRequest::build(&state)
+            .expect("generic GUI minimum-cover objective")
+            .into_app_request();
+
+        assert_eq!(request.product_capability_contract(), None);
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(command.result_projection(), PcResultProjection::Standard);
+    }
+
+    #[test]
+    fn canonical_gui_portfolio_modes_reject_unaccounted_execution_overrides() {
+        for backend in [
+            GuiBackendForm::default().with_memory_budget_mb(64),
+            GuiBackendForm::default().with_tablebase_requested(true),
+            GuiBackendForm::default().with_precompute_build_dependencies(true),
+        ] {
+            let error =
+                ScenarioRequestBuilder::build_command(&scenario_form("minimum-cover"), &backend)
+                    .expect_err("pc minimals inactive execution override must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+
+        for backend in [
+            GuiBackendForm::new(GuiBackendChoice::Gpu),
+            GuiBackendForm::default().with_workers(2),
+            GuiBackendForm::default().with_use_all_logical_processors(true),
+        ] {
+            let error = ScenarioRequestBuilder::build_command(&scenario_form("summary"), &backend)
+                .expect_err("pc score execution override must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+
+            let error =
+                ScenarioRequestBuilder::build_command(&scenario_form("score-minimals"), &backend)
+                    .expect_err("pc score-minimals execution override must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+
+        for form in [
+            scenario_form("score-minimals").with_back_to_back_preservation(true),
+            scenario_form("score-minimals").with_solution_probabilities(true),
+        ] {
+            let error = ScenarioRequestBuilder::build_command(&form, &GuiBackendForm::default())
+                .expect_err("pc score-minimals semantic override must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+    }
+}
+
+mod case_gui_pc_save_authority_boundary {
+    use clearra_app::{
+        AppCommand, PcResultProjection, PcSaveIngressOrigin, ProductCapabilityContract,
+    };
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+    use clearra_pc_graph::request::PcCountPolicy;
+    use clearra_supply::QueueObservationPolicy;
+
+    use super::*;
+    use crate::GuiToAppRequest;
+
+    fn save_form(mode: &str) -> GuiScenarioPcForm {
+        GuiScenarioPcForm::new(2, 0xf3fcf, "", "srs-plus")
+            .with_standard_7_bag()
+            .with_execution_input(1, None, false, "all")
+            .with_score_input(mode, 0)
+    }
+
+    #[test]
+    fn canonical_gui_pc_save_modes_attach_distinct_contracts_and_fixed_semantics() {
+        for (mode, contract, projection) in [
+            (
+                "saves",
+                ProductCapabilityContract::PcSaves,
+                PcResultProjection::SaveGroupsV2(PcSaveIngressOrigin::CanonicalPcSaves),
+            ),
+            (
+                "best-save",
+                ProductCapabilityContract::PcBestSave,
+                PcResultProjection::BestSaveV2(PcSaveIngressOrigin::CanonicalPcBestSave),
+            ),
+        ] {
+            let state = GuiAppState::default()
+                .with_problem_form(GuiProblemForm::ScenarioPc(save_form(mode)));
+            let request = GuiToAppRequest::build(&state)
+                .expect("canonical GUI pc save request")
+                .into_app_request();
+
+            assert_eq!(request.product_capability_contract(), Some(contract));
+            let AppCommand::Scenario(command) = request.command() else {
+                panic!("expected scenario PC command");
+            };
+            assert_eq!(command.result_projection(), projection);
+            assert_eq!(command.query().objective().kind(), ObjectiveKind::All);
+            assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+            assert_eq!(command.query().retained_trace_limit(), 1);
+            assert_eq!(command.query().remaining_queue().mode(), "standard-7-bag");
+        }
+    }
+
+    #[test]
+    fn canonical_gui_pc_save_modes_reject_ambiguous_or_inactive_semantics() {
+        let invalid_forms = [
+            GuiScenarioPcForm::new(2, 0xf3fcf, "I", "srs-plus")
+                .with_execution_input(1, None, false, "all")
+                .with_score_input("saves", 0),
+            save_form("saves").with_execution_input(1, None, false, "unique"),
+            save_form("saves").with_back_to_back_preservation(true),
+            save_form("saves").with_solution_probabilities(true),
+            save_form("saves").with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
+        ];
+        for form in invalid_forms {
+            let error = ScenarioRequestBuilder::build_command(&form, &GuiBackendForm::default())
+                .expect_err("noncanonical pc save semantics must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+
+        for backend in [
+            GuiBackendForm::default().with_memory_budget_mb(64),
+            GuiBackendForm::default().with_tablebase_requested(true),
+            GuiBackendForm::default().with_precompute_build_dependencies(true),
+        ] {
+            let error = ScenarioRequestBuilder::build_command(&save_form("best-save"), &backend)
+                .expect_err("pc best-save execution override must fail closed");
+            assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
     }
 }
 
@@ -461,31 +877,38 @@ mod case_tauri_command_calls_clearra_gui_host_only {
         assert_eq!(render_capability["gif_supported"], true);
         assert_eq!(render_capability["render_exact"], true);
         assert!(render_capability["unsupported_reason"].is_null());
-        #[cfg(not(any(feature = "native-c-core", feature = "wasm-cpu-runtime")))]
-        {
-            assert_eq!(value["command"], "pc");
-            assert_eq!(value["status"], "unsupported");
-            assert!(value["result"].is_null());
-            assert_eq!(value["backend_report"]["backend_selected"], "none");
-            assert_eq!(value["backend_report"]["fallback_used"], false);
-            assert_eq!(value["resource_report"]["solver_executed"], false);
-            assert_eq!(value["resource_report"]["probability_complete"], false);
-            assert!(value["diagnostics"]
-                .as_array()
-                .expect("diagnostics array")
-                .iter()
-                .any(|diagnostic| diagnostic["code"] == "E_PRODUCT_RUNTIME_UNSUPPORTED"));
+        assert_eq!(value["command"], "pc");
+        let diagnostics = value["diagnostics"].as_array().expect("diagnostics array");
+        let status = value["status"]
+            .as_str()
+            .expect("desktop response status string");
+
+        if cfg!(any(feature = "native-c-core", feature = "wasm-cpu-runtime")) {
+            assert_eq!(status, "success");
         }
-        #[cfg(any(feature = "native-c-core", feature = "wasm-cpu-runtime"))]
-        {
-            assert_eq!(value["command"], "pc");
-            assert_eq!(value["status"], "success");
-            assert_eq!(value["resource_report"]["solver_executed"], true);
-            assert!(!value["diagnostics"]
-                .as_array()
-                .expect("diagnostics array")
-                .iter()
-                .any(|diagnostic| diagnostic["code"] == "E_NATIVE_CORE_UNAVAILABLE"));
+
+        match status {
+            "success" => {
+                assert!(!value["result"].is_null());
+                assert_eq!(value["resource_report"]["solver_executed"], true);
+                assert!(!diagnostics.iter().any(|diagnostic| {
+                    matches!(
+                        diagnostic["code"].as_str(),
+                        Some("E_PRODUCT_RUNTIME_UNSUPPORTED" | "E_NATIVE_CORE_UNAVAILABLE")
+                    )
+                }));
+            }
+            "unsupported" => {
+                assert!(value["result"].is_null());
+                assert_eq!(value["backend_report"]["backend_selected"], "none");
+                assert_eq!(value["backend_report"]["fallback_used"], false);
+                assert_eq!(value["resource_report"]["solver_executed"], false);
+                assert_eq!(value["resource_report"]["probability_complete"], false);
+                assert!(diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == "E_PRODUCT_RUNTIME_UNSUPPORTED"));
+            }
+            other => panic!("unexpected desktop runtime status: {other}"),
         }
     }
 }

@@ -88,3 +88,77 @@ test('visible-seven minimum cover is rejected before workspace execution', () =>
   assert.match(controls, /\{#each validationCodes as code\}/u);
   assert.match(workspace, /if \(active \|\| validationCodes\.length\) return;/u);
 });
+
+test('PC save products reject fixed queues while accepting a proven bag pattern', () => {
+  for (const scoreMode of ['saves', 'best-save']) {
+    const fixedCodes = production.workspaceValidationCodes(
+      {
+        ...production.createDefaultWorkspaceRequest(),
+        lines: 2,
+        boardMask: 0xf3fcfn,
+        queue: 'I',
+        holdEnabled: false,
+        scoreMode
+      },
+      'web'
+    );
+    assert.ok(fixedCodes.includes('pc-save-fixed-queue-unsupported'), scoreMode);
+
+    const patternCodes = production.workspaceValidationCodes(
+      {
+        ...production.createDefaultWorkspaceRequest(),
+        lines: 2,
+        boardMask: 0xf3fcfn,
+        queue: 'P7',
+        holdEnabled: false,
+        scoreMode
+      },
+      'web'
+    );
+    assert.equal(patternCodes.includes('pc-save-fixed-queue-unsupported'), false, scoreMode);
+  }
+  assert.match(
+    production.workspaceMessage('en', 'pc-save-fixed-queue-unsupported'),
+    /bag boundaries/i
+  );
+  assert.match(
+    production.workspaceMessage('ko', 'pc-save-fixed-queue-unsupported'),
+    /가방 경계/u
+  );
+});
+
+test('PC score-finder requires an exact fixed queue before execution', () => {
+  for (const queue of ['', 'P7', '[OISZ]p2']) {
+    const codes = production.workspaceValidationCodes(
+      {
+        ...production.createDefaultWorkspaceRequest(),
+        lines: 1,
+        boardMask: 0x3fn,
+        queue,
+        scoreMode: 'score-finder'
+      },
+      'web'
+    );
+    assert.ok(codes.includes('pc-score-finder-fixed-queue-required'), queue || 'empty');
+  }
+
+  const fixedCodes = production.workspaceValidationCodes(
+    {
+      ...production.createDefaultWorkspaceRequest(),
+      lines: 1,
+      boardMask: 0x3fn,
+      queue: 'I',
+      scoreMode: 'score-finder'
+    },
+    'web'
+  );
+  assert.equal(fixedCodes.includes('pc-score-finder-fixed-queue-required'), false);
+  assert.match(
+    production.workspaceMessage('en', 'pc-score-finder-fixed-queue-required'),
+    /exact queue/i
+  );
+  assert.match(
+    production.workspaceMessage('ko', 'pc-score-finder-fixed-queue-required'),
+    /정확한 큐/u
+  );
+});

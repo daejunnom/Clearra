@@ -19,7 +19,15 @@ use clearra_problem::{
     SetupCandidatePriority, SetupCycleResetBorrowPolicy, SetupLengthPreference,
     SetupSearchCondition, SetupSearchQuery, SetupTerminalSupplyTarget,
 };
-use clearra_supply::pattern_universe::PatternPiecePositionIndex;
+use clearra_supply::{
+    execution_automaton::{
+        SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState,
+        SupplyObservationIdentity, SupplyProvenanceId,
+    },
+    hold::hold_policy::HoldPolicy,
+    pattern_universe::PatternPiecePositionIndex,
+    piece_source::{PieceSourceId, PieceSourceKind},
+};
 
 use crate::{
     CoreExecutionResult, SetupCandidateReport, SetupFinderReport, SetupHoldConditionReport,
@@ -855,7 +863,12 @@ pub(super) fn setup_supply_transitions(
     if hold_code == TERMINAL_USED_HELD_CODE {
         return transitions;
     }
-    let queue_position = usize::from(initial_cursor) + usize::from(depth) + usize::from(extra_draw);
+    let Some(queue_position) = usize::from(initial_cursor)
+        .checked_add(usize::from(depth))
+        .and_then(|position| position.checked_add(usize::from(extra_draw)))
+    else {
+        return transitions;
+    };
     if terminal
         && hold_enabled
         && projects_unplaced_lookahead
@@ -877,12 +890,28 @@ pub(super) fn setup_supply_transitions(
             word_index,
             projects_standard_bag_lookahead,
         );
-    transitions.push(
-        extra_draw,
+    if let Some(step) = setup_supply_step(
+        pattern_index,
+        queue_position,
+        hold_enabled,
         hold_code,
-        use_current,
-        SetupHoldAction::UseCurrent,
-    );
+        SupplyBranchKind::Current,
+        desired_piece,
+        None,
+    ) {
+        if let Some(next_extra_draw) =
+            projected_extra_draw(extra_draw, step.evidence.queue_advances)
+        {
+            transitions.push(
+                next_extra_draw,
+                step.next_state
+                    .hold_piece
+                    .map_or(0, |piece| piece_index(piece) as u8 + 1),
+                use_current,
+                SetupHoldAction::UseCurrent,
+            );
+        }
+    }
     if !hold_enabled {
         return transitions;
     }
@@ -895,12 +924,28 @@ pub(super) fn setup_supply_transitions(
                     word_index,
                     projects_standard_bag_lookahead,
                 );
-            transitions.push(
-                extra_draw,
+            if let Some(step) = setup_supply_step(
+                pattern_index,
+                queue_position,
+                hold_enabled,
+                hold_code,
+                SupplyBranchKind::SwapHeld,
                 current_piece,
-                swap_bits,
-                SetupHoldAction::SwapHeld,
-            );
+                None,
+            ) {
+                if let Some(next_extra_draw) =
+                    projected_extra_draw(extra_draw, step.evidence.queue_advances)
+                {
+                    transitions.push(
+                        next_extra_draw,
+                        step.next_state
+                            .hold_piece
+                            .map_or(0, |piece| piece_index(piece) as u8 + 1),
+                        swap_bits,
+                        SetupHoldAction::SwapHeld,
+                    );
+                }
+            }
         }
     } else if hold_code == 0 && extra_draw == 0 {
         for current_piece in 1..=7 {
@@ -911,21 +956,89 @@ pub(super) fn setup_supply_transitions(
                     word_index,
                     projects_standard_bag_lookahead,
                 )
-                & pattern_index.piece_word_with_projected_standard_bag_lookahead(
-                    queue_position + 1,
-                    desired_piece,
-                    word_index,
-                    projects_standard_bag_lookahead,
-                );
-            transitions.push(
-                1,
+                & queue_position.checked_add(1).map_or(0, |next_position| {
+                    pattern_index.piece_word_with_projected_standard_bag_lookahead(
+                        next_position,
+                        desired_piece,
+                        word_index,
+                        projects_standard_bag_lookahead,
+                    )
+                });
+            if let Some(step) = setup_supply_step(
+                pattern_index,
+                queue_position,
+                hold_enabled,
+                hold_code,
+                SupplyBranchKind::StoreCurrent,
                 current_piece,
-                store_bits,
-                SetupHoldAction::StoreCurrentUseNext,
-            );
+                Some(desired_piece),
+            ) {
+                if let Some(next_extra_draw) =
+                    projected_extra_draw(extra_draw, step.evidence.queue_advances)
+                {
+                    transitions.push(
+                        next_extra_draw,
+                        step.next_state
+                            .hold_piece
+                            .map_or(0, |piece| piece_index(piece) as u8 + 1),
+                        store_bits,
+                        SetupHoldAction::StoreCurrentUseNext,
+                    );
+                }
+            }
         }
     }
     transitions
+}
+
+fn setup_supply_step(
+    pattern_index: &PatternPiecePositionIndex,
+    queue_position: usize,
+    hold_enabled: bool,
+    hold_code: u8,
+    branch_kind: SupplyBranchKind,
+    current_piece: u8,
+    next_piece: Option<u8>,
+) -> Option<clearra_supply::SupplyExecutionStep> {
+    let cursor = u16::try_from(queue_position).ok()?;
+    let hold_piece = match hold_code {
+        0 => None,
+        1..=7 => Some(PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)]),
+        _ => return None,
+    };
+    let identity = ((pattern_index.sequence_len() as u64) << 32)
+        ^ pattern_index.global_pattern_count() as u64
+        ^ 0x5355_5050_4c59;
+    let state = SupplyExecutionState::with_contract(
+        PieceSourceId::new(identity),
+        PieceSourceKind::MaterializedPatternUniverse,
+        cursor,
+        hold_piece,
+        if hold_enabled {
+            HoldPolicy::Allowed
+        } else {
+            HoldPolicy::Forbidden
+        },
+        0,
+        0,
+        SupplyObservationIdentity::full_queue_oracle(),
+        SupplyProvenanceId(identity),
+    );
+    let current_piece =
+        *PieceKind::STANDARD_TETROMINOES.get(usize::from(current_piece.checked_sub(1)?))?;
+    let next_piece = match next_piece {
+        Some(piece) => {
+            Some(*PieceKind::STANDARD_TETROMINOES.get(usize::from(piece.checked_sub(1)?))?)
+        }
+        None => None,
+    };
+    SupplyExecutionAutomaton::sequence()
+        .transition(state, branch_kind, current_piece, next_piece)
+        .ok()
+}
+
+fn projected_extra_draw(extra_draw: u8, queue_advances: u8) -> Option<u8> {
+    extra_draw.checked_add(queue_advances.checked_sub(1)?)
 }
 
 pub(super) fn compile_setup_pattern_index(
@@ -2430,6 +2543,66 @@ fn setup_candidate_set_hash(
         return Err(WasmExactSearchError::Cancelled);
     }
     Ok(format!("css1:{hash:016x}"))
+}
+
+#[cfg(test)]
+mod supply_automaton_tests {
+    use clearra_supply::PatternUniverseMaterializer;
+
+    use super::*;
+
+    fn pattern_index() -> PatternPiecePositionIndex {
+        let universe =
+            PatternUniverseMaterializer::standard_7_bag(2, 2, 0x55).expect("test pattern universe");
+        PatternPiecePositionIndex::compile(&universe).expect("test pattern index")
+    }
+
+    #[test]
+    fn setup_projection_matches_disabled_empty_and_occupied_hold_transitions() {
+        let index = pattern_index();
+        let current = setup_supply_step(&index, 0, false, 0, SupplyBranchKind::Current, 1, None)
+            .expect("disabled hold still consumes current");
+        assert_eq!(current.next_state.cursor, 1);
+        assert_eq!(current.next_state.hold_piece, None);
+        assert!(
+            setup_supply_step(&index, 0, false, 3, SupplyBranchKind::SwapHeld, 1, None,).is_none()
+        );
+
+        let stored = setup_supply_step(
+            &index,
+            0,
+            true,
+            0,
+            SupplyBranchKind::StoreCurrent,
+            1,
+            Some(2),
+        )
+        .expect("empty hold stores current");
+        assert_eq!(stored.used_piece, PieceKind::O);
+        assert_eq!(stored.next_state.cursor, 2);
+        assert_eq!(stored.next_state.hold_piece, Some(PieceKind::I));
+        assert_eq!(stored.evidence.queue_advances, 2);
+
+        let swapped = setup_supply_step(&index, 0, true, 3, SupplyBranchKind::SwapHeld, 1, None)
+            .expect("occupied hold swaps");
+        assert_eq!(swapped.used_piece, PieceKind::T);
+        assert_eq!(swapped.next_state.hold_piece, Some(PieceKind::I));
+    }
+
+    #[test]
+    fn setup_projection_rejects_cursor_overflow() {
+        let index = pattern_index();
+        assert!(setup_supply_step(
+            &index,
+            usize::from(u16::MAX) + 1,
+            true,
+            0,
+            SupplyBranchKind::Current,
+            1,
+            None,
+        )
+        .is_none());
+    }
 }
 
 #[cfg(test)]

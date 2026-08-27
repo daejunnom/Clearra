@@ -96,7 +96,7 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     priorOracleReleaseId,
     health,
   });
-  const priorOracleSettingsBackup = `/etc/clearra-gateway/settings.pre-v0.7.5-${deploymentNonce}`;
+  const priorOracleSettingsBackup = `/etc/clearra-gateway/settings.pre-v0.8.0-${deploymentNonce}`;
   writeBackup(priorOracleSettingsBackup, settingsBytes);
 
   return Object.freeze({
@@ -117,7 +117,7 @@ function writeSettingsBackup(path, bytes) {
   const backupPath = resolve(String(path));
   if (
     dirname(backupPath) !== "/etc/clearra-gateway" ||
-    !basename(backupPath).startsWith("settings.pre-v0.7.5-")
+    !basename(backupPath).startsWith("settings.pre-v0.8.0-")
   ) {
     throw new Error(
       "Oracle settings backup path is outside the approved namespace",

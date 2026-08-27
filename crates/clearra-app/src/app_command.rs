@@ -1,8 +1,10 @@
 use crate::commands::{
-    BuildProbabilityAppCommand, ContinueAppCommand, ConvertAppCommand, CoverAppCommand,
-    DamageAppCommand, InspectUnsupportedAppCommand, PathAppCommand, PcAppCommand,
-    PercentAppCommand, RulesAppCommand, ScenarioAppCommand, ScoringAppCommand, SetupAppCommand,
-    SpinFinderAppCommand, SpinStructureAppCommand, VerifyAppCommand,
+    BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand, ConvertAppCommand,
+    CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand, FumenAppCommand,
+    InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
+    PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand, RulesAppCommand,
+    ScenarioAppCommand, ScoringAppCommand, SequenceDependenciesAppCommand, SetupAppCommand,
+    SetupScoreAppCommand, SpinFinderAppCommand, SpinStructureAppCommand, VerifyAppCommand,
 };
 use crate::{app_context::AppExecutionContext, app_response::AppResponse};
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;
@@ -17,7 +19,7 @@ use clearra_validation::{
     },
 };
 
-pub trait RunnableAppCommand {
+pub(crate) trait RunnableAppCommand {
     fn validate(&self) -> DiagnosticReport {
         DiagnosticReport::new()
     }
@@ -37,9 +39,12 @@ pub enum AppCommand {
     Path(PathAppCommand),
     Percent(PercentAppCommand),
     Setup(SetupAppCommand),
+    SetupScore(SetupScoreAppCommand),
     BuildProbability(BuildProbabilityAppCommand),
+    BuildV2(BuildV2AppCommand),
     Damage(DamageAppCommand),
     SpinFinder(SpinFinderAppCommand),
+    Ren(RenAppCommand),
     SpinStructure(SpinStructureAppCommand),
     Cover(CoverAppCommand),
     Rules(RulesAppCommand),
@@ -49,6 +54,13 @@ pub enum AppCommand {
     InspectUnsupported(InspectUnsupportedAppCommand),
     Verify(VerifyAppCommand),
     VerifyKicks(VerifyAppCommand),
+    UtilitySequence(OperationSequenceAppCommand),
+    UtilitySequenceDependencies(SequenceDependenciesAppCommand),
+    UtilityParity(ParityAppCommand),
+    UtilityFumen(FumenAppCommand),
+    UtilityRender(RenderAppCommand),
+    UtilityToGray(FieldDocumentTransformAppCommand),
+    UtilityMirror(FieldDocumentTransformAppCommand),
 }
 
 impl AppCommand {
@@ -57,10 +69,12 @@ impl AppCommand {
             Self::Pc(_) | Self::Scenario(_) => AppCommandKind::Pc,
             Self::Path(_) => AppCommandKind::Path,
             Self::Percent(_) => AppCommandKind::Percent,
-            Self::Setup(_) => AppCommandKind::Setup,
+            Self::Setup(_) | Self::SetupScore(_) => AppCommandKind::Setup,
             Self::BuildProbability(_) => AppCommandKind::BuildProbability,
+            Self::BuildV2(_) => AppCommandKind::BuildProbability,
             Self::Damage(_) => AppCommandKind::Damage,
             Self::SpinFinder(_) => AppCommandKind::SpinFinder,
+            Self::Ren(_) => AppCommandKind::Ren,
             Self::SpinStructure(_) => AppCommandKind::SpinStructure,
             Self::Cover(_) => AppCommandKind::Cover,
             Self::Rules(_) => AppCommandKind::Rules,
@@ -76,6 +90,13 @@ impl AppCommand {
                 }
             }
             Self::VerifyKicks(_) => AppCommandKind::VerifyKicks,
+            Self::UtilitySequence(_) => AppCommandKind::UtilitySequence,
+            Self::UtilitySequenceDependencies(_) => AppCommandKind::UtilitySequenceDependencies,
+            Self::UtilityParity(_) => AppCommandKind::UtilityParity,
+            Self::UtilityFumen(_) => AppCommandKind::UtilityFumen,
+            Self::UtilityRender(_) => AppCommandKind::UtilityRender,
+            Self::UtilityToGray(_) => AppCommandKind::UtilityToGray,
+            Self::UtilityMirror(_) => AppCommandKind::UtilityMirror,
         }
     }
 }
@@ -86,10 +107,12 @@ impl AppCommand {
             Self::Scenario(_) => QueryEnvelope::PcScenario,
             Self::Path(_) => QueryEnvelope::PathOpening,
             Self::Percent(_) => QueryEnvelope::PercentScenario,
-            Self::Setup(_) => QueryEnvelope::SetupSearch,
+            Self::Setup(_) | Self::SetupScore(_) => QueryEnvelope::SetupSearch,
             Self::BuildProbability(_) => QueryEnvelope::BuildProbability,
+            Self::BuildV2(_) => QueryEnvelope::BuildCoverage,
             Self::Damage(_) => QueryEnvelope::Damage,
             Self::SpinFinder(_) => QueryEnvelope::SpinFinder,
+            Self::Ren(_) => QueryEnvelope::Ren,
             Self::SpinStructure(_) => QueryEnvelope::SpinStructure,
             Self::Cover(_) => QueryEnvelope::BuildCoverage,
             Self::Rules(_) => QueryEnvelope::Rules,
@@ -105,6 +128,13 @@ impl AppCommand {
                 }
             }
             Self::VerifyKicks(_) => QueryEnvelope::VerifyKicks,
+            Self::UtilitySequence(_) => QueryEnvelope::UtilitySequence,
+            Self::UtilitySequenceDependencies(_) => QueryEnvelope::UtilitySequenceDependencies,
+            Self::UtilityParity(_) => QueryEnvelope::UtilityParity,
+            Self::UtilityFumen(_) => QueryEnvelope::UtilityFumen,
+            Self::UtilityRender(_) => QueryEnvelope::UtilityRender,
+            Self::UtilityToGray(_) => QueryEnvelope::UtilityToGray,
+            Self::UtilityMirror(_) => QueryEnvelope::UtilityMirror,
         }
     }
 }
@@ -144,7 +174,8 @@ impl AppCommand {
                     .execution_policy()
                     .allow_backend_fallback(),
             ),
-            Self::Damage(_) | Self::SpinFinder(_) | Self::SpinStructure(_) => {
+            Self::BuildV2(_) | Self::SetupScore(_) => BackendPolicy::new("cpu", false),
+            Self::Damage(_) | Self::SpinFinder(_) | Self::Ren(_) | Self::SpinStructure(_) => {
                 BackendPolicy::new("cpu", false)
             }
             Self::Path(command) => BackendPolicy::new(
@@ -191,6 +222,7 @@ impl AppCommand {
                     .gpu_device()
                     .as_display_string(),
             ),
+            Self::BuildV2(_) => None,
             _ => None,
         }
     }
@@ -209,8 +241,9 @@ impl AppCommand {
                 ObjectiveKind::Unique | ObjectiveKind::Tiling
             ),
             Self::BuildProbability(command) => !command.query().aggregation().is_tiling_only(),
+            Self::BuildV2(_) | Self::SetupScore(_) => true,
             Self::Percent(_) => true,
-            Self::Damage(_) | Self::SpinFinder(_) | Self::SpinStructure(_) => false,
+            Self::Damage(_) | Self::SpinFinder(_) | Self::Ren(_) | Self::SpinStructure(_) => false,
             _ => false,
         }
     }
@@ -224,8 +257,10 @@ impl RunnableAppCommand for AppCommand {
             Self::Path(command) => validate_opening_pc_search_query(command.query()),
             Self::Percent(command) => command.validate(),
             Self::Setup(command) => validate_setup_search_query(command.query()),
+            Self::SetupScore(_) => DiagnosticReport::new(),
             Self::BuildProbability(_) => DiagnosticReport::new(),
-            Self::Damage(_) | Self::SpinFinder(_) | Self::SpinStructure(_) => {
+            Self::BuildV2(_) => DiagnosticReport::new(),
+            Self::Damage(_) | Self::SpinFinder(_) | Self::Ren(_) | Self::SpinStructure(_) => {
                 DiagnosticReport::new()
             }
             Self::Cover(command) => validate_build_coverage_query(command.query()),
@@ -236,6 +271,13 @@ impl RunnableAppCommand for AppCommand {
             Self::InspectUnsupported(command) => command.validate(),
             Self::Verify(command) => command.validate(),
             Self::VerifyKicks(command) => command.validate(),
+            Self::UtilitySequence(_) => DiagnosticReport::new(),
+            Self::UtilitySequenceDependencies(_) => DiagnosticReport::new(),
+            Self::UtilityParity(_)
+            | Self::UtilityFumen(_)
+            | Self::UtilityRender(_)
+            | Self::UtilityToGray(_)
+            | Self::UtilityMirror(_) => DiagnosticReport::new(),
         }
     }
 
@@ -253,9 +295,12 @@ impl RunnableAppCommand for AppCommand {
             Self::Path(command) => command.run(context),
             Self::Percent(command) => command.run(context),
             Self::Setup(command) => command.run(context),
+            Self::SetupScore(command) => command.run(context),
             Self::BuildProbability(command) => command.run(context),
+            Self::BuildV2(command) => command.run(context),
             Self::Damage(command) => command.run(context),
             Self::SpinFinder(command) => command.run(context),
+            Self::Ren(command) => command.run(context),
             Self::SpinStructure(command) => command.run(context),
             Self::Cover(command) => command.run(context),
             Self::Rules(command) => command.run(context),
@@ -265,6 +310,13 @@ impl RunnableAppCommand for AppCommand {
             Self::InspectUnsupported(command) => command.run(context),
             Self::Verify(command) => command.run(context),
             Self::VerifyKicks(command) => command.run(context),
+            Self::UtilitySequence(command) => command.run(context),
+            Self::UtilitySequenceDependencies(command) => command.run(context),
+            Self::UtilityParity(command) => command.run(context),
+            Self::UtilityFumen(command) => command.run(context),
+            Self::UtilityRender(command) => command.run(context),
+            Self::UtilityToGray(command) => command.run(context),
+            Self::UtilityMirror(command) => command.run(context),
         }
     }
 }

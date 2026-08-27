@@ -1,16 +1,158 @@
 // SRP rationale: this test module has one behavior-level change reason: verifying the complete public WASM command and JSON envelope contract.
 
 use clearra_app::{
-    AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppResponse, AppServices,
-    FinesseReport,
+    decode_ctk3_exact, encode_ctk3_compact, AppCommand, AppContext, AppCoreExecutorService,
+    AppRenderModel, AppResponse, AppServices, Ctk3Color, Ctk3Document, Ctk3Operation, Ctk3Page,
+    Ctk3PageFlags, Ctk3Piece, Ctk3Rotation, DistributedSearchPreparation, FinesseReport,
 };
-use clearra_core_executor::CoreExecutionResult;
-use clearra_host_contract::AppStatus;
+use clearra_core_domain::resource::{
+    ExecutionAvailabilityReason, ExecutionAvailabilityState as CoreExecutionAvailabilityState,
+};
+use clearra_core_executor::{
+    CoreExecutionResult, WasmBuildProbabilityCandidateProducer, WasmCpuSearchError,
+    WasmCpuSearchSession,
+};
+use clearra_host_contract::{AppStatus, ProductResultPayloadContent};
+use clearra_host_contract::{
+    ExecutionAvailabilityState as HostExecutionAvailabilityState, ExecutionCompletenessState,
+};
+use clearra_problem::ProblemCompiler;
 use serde_json::Value;
 
 use crate::wasm_command_runtime::solution_page_store_is_public;
 
 use super::*;
+
+#[test]
+fn wasm_sequence_dependencies_exposes_exact_decimal_report() {
+    let mut page = Ctk3Page::new(0, Vec::new());
+    page.flags = Ctk3PageFlags::default();
+    page.operation = Some(Ctk3Operation {
+        piece: Ctk3Piece::O,
+        rotation: Ctk3Rotation::Spawn,
+        x: 0,
+        y: 0,
+    });
+    let document =
+        encode_ctk3_compact(&Ctk3Document::new(10, vec![page])).expect("one-operation CTK3");
+    let result = WasmCommandRuntime::default()
+        .run_command_text(&format!(
+            "clearra utility sequence-dependencies --document {document} --rule-profile srs-plus --kick-profile srs-plus --timeout-seconds 900"
+        ))
+        .expect("WASM sequence-dependencies execution");
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let report = result
+        .search_report()
+        .expect("typed WASM dependency report");
+    assert_eq!(report.backend_selected, "wasm-cpu-sequence-dependencies");
+    assert!(report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| { key == "contract_id" && value == "operation-dependency-report.v1" }));
+    assert!(report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| key == "exact_order_count" && value == "1"));
+}
+
+#[test]
+fn wasm_sequence_exposes_normalized_replay_report() {
+    let mut page = Ctk3Page::new(0, Vec::new());
+    page.flags = Ctk3PageFlags::default();
+    page.operation = Some(Ctk3Operation {
+        piece: Ctk3Piece::O,
+        rotation: Ctk3Rotation::Spawn,
+        x: 0,
+        y: 0,
+    });
+    let document =
+        encode_ctk3_compact(&Ctk3Document::new(10, vec![page])).expect("one-operation CTK3");
+    let result = WasmCommandRuntime::default()
+        .run_command_text(&format!(
+            "clearra utility sequence --document {document} --rule-profile srs-plus --kick-profile srs-plus --timeout-seconds 900"
+        ))
+        .expect("WASM sequence execution");
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let report = result.search_report().expect("typed WASM sequence report");
+    assert_eq!(report.backend_selected, "wasm-cpu-operation-sequence");
+    assert!(report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| key == "contract_id" && value == "operation-sequence.v1"));
+    assert!(report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| key == "normalized_trace" && value == "0:O:0:0:0"));
+}
+
+#[test]
+fn wasm_typed_field_document_transforms_share_app_authority() {
+    let mut page = Ctk3Page::new(
+        1,
+        vec![
+            Ctk3Color::Piece(Ctk3Piece::J),
+            Ctk3Color::Empty,
+            Ctk3Color::Piece(Ctk3Piece::S),
+            Ctk3Color::Gray,
+        ],
+    );
+    page.comment = "WASM identity".to_owned();
+    let source = encode_ctk3_compact(&Ctk3Document::new(4, vec![page])).expect("CTK3");
+    let runtime = WasmCommandRuntime::default();
+
+    let gray = runtime
+        .run_command_text(&format!(
+            "clearra utility to-gray --format ctk3 --document {source}"
+        ))
+        .expect("WASM to-gray execution");
+    assert_eq!(gray.app_response().status(), AppStatus::Success);
+    let ProductResultPayloadContent::FieldDocument(gray_payload) = gray
+        .app_response()
+        .product_result_payload()
+        .expect("to-gray payload")
+        .content()
+    else {
+        panic!("expected field-document payload")
+    };
+    assert_eq!(gray_payload.filename(), "clearra-to-gray.ctk3");
+    let decoded = decode_ctk3_exact(gray_payload.document()).expect("gray CTK3");
+    assert!(decoded.pages[0]
+        .cells
+        .iter()
+        .all(|cell| matches!(cell, Ctk3Color::Empty | Ctk3Color::Gray)));
+
+    let once = runtime
+        .run_command_text(&format!(
+            "clearra utility mirror --format ctk3 --document {source}"
+        ))
+        .expect("WASM mirror execution");
+    let ProductResultPayloadContent::FieldDocument(once_payload) = once
+        .app_response()
+        .product_result_payload()
+        .expect("mirror payload")
+        .content()
+    else {
+        panic!("expected field-document payload")
+    };
+    let twice = runtime
+        .run_command_text(&format!(
+            "clearra utility mirror --format ctk3 --document {}",
+            once_payload.document()
+        ))
+        .expect("second WASM mirror execution");
+    let ProductResultPayloadContent::FieldDocument(twice_payload) = twice
+        .app_response()
+        .product_result_payload()
+        .expect("second mirror payload")
+        .content()
+    else {
+        panic!("expected field-document payload")
+    };
+    assert_eq!(
+        decode_ctk3_exact(twice_payload.document()),
+        decode_ctk3_exact(&source)
+    );
+}
 
 #[test]
 fn wasm_command_compiles_to_app_request() {
@@ -45,6 +187,21 @@ fn wasm_command_compiles_to_app_request() {
         .resource_report()
         .probability_complete());
     assert_eq!(
+        result
+            .app_response()
+            .resource_report()
+            .execution_availability()
+            .state(),
+        HostExecutionAvailabilityState::Available
+    );
+    assert_eq!(
+        result
+            .app_response()
+            .resource_report()
+            .result_completeness(),
+        ExecutionCompletenessState::Complete
+    );
+    assert_eq!(
         result.webgpu_backend().outcome_state,
         WebGpuBackendOutcomeState::Unavailable
     );
@@ -68,6 +225,41 @@ fn wasm_command_compiles_to_app_request() {
         .expect("WASM CPU CoreExecutionResult");
     assert!(core_result.solution_found());
     assert_eq!(core_result.field("count_complete"), Some("true"));
+}
+
+#[test]
+fn wasm_command_profiles_are_request_local_and_fail_closed() {
+    let runtime = WasmCommandRuntime::default();
+    let request = runtime
+        .compile_command_text(
+            "clearra pc --lines 2 --backend cpu \
+             --board-profile standard-10 \
+             --piece-profile standard-tetrominoes \
+             --bag-profile standard-7-bag \
+             --rule srs-x --score-profile guideline --spin-profile all-mini-plus",
+        )
+        .expect("verified WASM request-local profiles");
+    let profiles = request.request_profiles();
+    assert_eq!(profiles.board().as_str(), "standard-10");
+    assert_eq!(profiles.piece_set().as_str(), "standard-tetrominoes");
+    assert_eq!(profiles.bag().as_str(), "standard-7-bag");
+    assert_eq!(profiles.rule().as_str(), "srs-x");
+    assert_eq!(profiles.spin().as_str(), "all-mini-plus");
+    assert_eq!(profiles.score().as_str(), "guideline");
+
+    for command in [
+        "clearra pc --lines 2 --board-profile wide-10",
+        "clearra pc --lines 2 --piece-profile pentominoes",
+        "clearra pc --lines 2 --bag-profile history-6-rolls",
+        "clearra pc --lines 2 --rule custom",
+        "clearra pc --lines 2 --spin-profile unverified-spin",
+        "clearra pc --lines 2 --score-profile classic-score",
+    ] {
+        assert!(
+            runtime.compile_command_text(command).is_err(),
+            "{command} must reject without fallback"
+        );
+    }
 }
 
 #[test]
@@ -120,14 +312,14 @@ fn unavailable_gpu_and_hybrid_keep_distinct_cpu_selection_semantics() {
 }
 
 #[test]
-fn tiling_only_returns_exact_geometry_without_buildup_or_probability() {
+fn canonical_pc_tiling_returns_exact_geometry_without_buildup_or_probability() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
-            "clearra pc --lines 2 --queue IIOOO --tiling-only \
+            "clearra pc tiling --lines 2 --queue IIOOO \
              --backend cpu --workers 1 --no-hold",
         )
-        .expect("tiling-only search");
-    let report = result.search_report().expect("tiling-only report");
+        .expect("canonical pc tiling search");
+    let report = result.search_report().expect("canonical pc tiling report");
 
     assert!(report.unique_solution_count > 0);
     assert!(!report.buildability_verified);
@@ -140,6 +332,419 @@ fn tiling_only_returns_exact_geometry_without_buildup_or_probability() {
     assert!(report.solution_count_calculated);
     assert!(report.solution_set_materialized);
     assert!(report.solution_keys_complete);
+    assert_ne!(report.normalized_solution_set_hash, "not-calculated");
+}
+
+#[test]
+fn browser_worker_final_event_keeps_the_pc_tiling_product_result_kind() {
+    let mut runtime = WasmWorkerJobRuntime::default();
+    let job_id = runtime
+        .start_job(
+            "clearra pc tiling --lines 2 --queue IIOOO \
+             --backend cpu --workers 1 --no-hold",
+        )
+        .expect("browser pc tiling job");
+    while !runtime
+        .advance_job(job_id, 4096)
+        .expect("advance browser pc tiling job")
+        .is_terminal()
+    {}
+
+    let json = runtime
+        .drain_events_json(job_id)
+        .expect("browser pc tiling event JSON");
+    let events: Value = serde_json::from_str(&json).expect("valid browser pc tiling events");
+    let final_event = events
+        .as_array()
+        .and_then(|events| {
+            events
+                .iter()
+                .find(|event| event["event"] == "final_response")
+        })
+        .expect("final browser pc tiling response");
+
+    assert_eq!(final_event["response"]["status"], "success");
+    assert_eq!(
+        final_event["response"]["result"],
+        serde_json::json!({"kind": "pc-tiling-family.v1"})
+    );
+    assert!(final_event["response"]
+        .get("product_capability_result")
+        .is_none());
+    assert!(!json.contains("pc_tiling_memory_admission_evidence"));
+}
+
+#[test]
+fn browser_worker_pc_save_products_keep_distinct_full_typed_families() {
+    for (subcommand, payload_kind, result_kind) in [
+        ("saves", "pc-save-groups", "pc-save-groups.v2"),
+        ("best-save", "pc-best-save", "pc-best-save.v2"),
+    ] {
+        let mut runtime = WasmWorkerJobRuntime::default();
+        let command = format!(
+            "clearra pc {subcommand} --lines 2 --board-mask 0xf3fcf \
+             --height 2 --pieces 1 --patterns P7 --no-hold --backend cpu"
+        );
+        let job_id = runtime.start_job(&command).expect("browser PC save job");
+        let mut terminal = false;
+        for _ in 0..256 {
+            terminal = runtime
+                .advance_job(job_id, 4096)
+                .expect("advance browser PC save job")
+                .is_terminal();
+            if terminal {
+                break;
+            }
+        }
+        assert!(terminal, "tiny browser PC save command must finish");
+
+        let json = runtime
+            .drain_events_json(job_id)
+            .expect("browser PC save event JSON");
+        let events: Value = serde_json::from_str(&json).expect("valid browser PC save events");
+        let final_event = events
+            .as_array()
+            .and_then(|events| {
+                events
+                    .iter()
+                    .find(|event| event["event"] == "final_response")
+            })
+            .expect("final browser PC save response");
+        let response = &final_event["response"];
+        assert_eq!(response["status"], "success", "{command}: {json}");
+        assert_eq!(response["result"]["kind"], result_kind);
+        assert_eq!(
+            response["product_result_payload"]["content"]["payload_kind"],
+            payload_kind
+        );
+        let payload = &response["product_result_payload"]["content"]["payload"];
+        assert_eq!(payload["metadata"]["completeness"]["complete"], true);
+        assert!(payload["metadata"]["pc_probability"].is_string());
+
+        if subcommand == "saves" {
+            let groups = payload["groups"].as_array().expect("full save groups");
+            assert_eq!(payload["group_count"], groups.len().to_string());
+            assert_eq!(groups.len(), 1);
+            assert!(groups[0]["canonical_candidate_id"].is_string());
+            assert!(groups[0]["unconditional_probability"].is_string());
+            assert!(groups[0]["conditional_probability_given_pc"].is_string());
+        } else {
+            let winners = payload["winners"]
+                .as_array()
+                .expect("ordinary full best-save winner list");
+            assert_eq!(payload["winner_count"], winners.len().to_string());
+            assert_eq!(winners.len(), 1);
+            assert_eq!(payload["schema_id"], "clearra-save-v1");
+            assert_eq!(payload["probability_basis"], "whole-universe-unconditional");
+            assert!(winners[0]["group"]["canonical_candidate_id"].is_string());
+            assert!(!json.contains("portfolio"));
+            assert!(!json.contains("tie_cursor"));
+            assert!(!json.contains("tie_metadata"));
+        }
+    }
+}
+
+#[test]
+fn browser_worker_spin_structure_routes_keep_closed_payloads_and_live_cover_paging() {
+    for (route, result_kind, payload_kind) in [
+        (
+            "search",
+            "spin-structure-family.v2",
+            "spin-structure-family",
+        ),
+        (
+            "cover --objective min-cover --max-patterns 8",
+            "spin-structure-coverage.v1",
+            "coverage-portfolio",
+        ),
+        (
+            "guaranteed --final-piece T --max-patterns 8 --dependency-report",
+            "spin-structure-guaranteed.v1",
+            "spin-structure-family",
+        ),
+    ] {
+        let mut runtime = WasmWorkerJobRuntime::default();
+        let command = format!(
+            "clearra spin-structure {route} --board-mask 0x14000043ff --height 4 \
+             --pieces T --spin-profile t-spins --lines any --fill-top 4 \
+             --max-placements 1"
+        );
+        let job_id = runtime.start_job(&command).expect("browser spin job");
+        let mut terminal = false;
+        for _ in 0..256 {
+            terminal = runtime
+                .advance_job(job_id, 4096)
+                .expect("advance browser spin job")
+                .is_terminal();
+            if terminal {
+                break;
+            }
+        }
+        assert!(terminal, "tiny browser spin command must finish: {command}");
+
+        let json = runtime
+            .drain_events_json(job_id)
+            .expect("browser spin event JSON");
+        let events: Value = serde_json::from_str(&json).expect("valid browser spin events");
+        let response = events
+            .as_array()
+            .and_then(|events| {
+                events
+                    .iter()
+                    .find(|event| event["event"] == "final_response")
+            })
+            .map(|event| &event["response"])
+            .expect("final browser spin response");
+        assert_eq!(response["status"], "success", "{command}: {json}");
+        assert_eq!(response["result"]["kind"], result_kind, "{command}");
+        assert_eq!(
+            response["product_result_payload"]["content"]["payload_kind"], payload_kind,
+            "{command}"
+        );
+        let payload = &response["product_result_payload"]["content"]["payload"];
+        if payload_kind == "coverage-portfolio" {
+            assert_eq!(payload["set_contract"], "portfolio-alternative-set.v1");
+            assert_eq!(payload["alternative_index"], "1");
+            assert!(payload["enumeration_complete"].is_boolean());
+            assert_eq!(payload["page_handle_available"], true);
+            assert!(payload["members"]
+                .as_array()
+                .is_some_and(|members| !members.is_empty()));
+        } else if result_kind == "spin-structure-guaranteed.v1" {
+            assert_eq!(payload["schema_id"], "spin-structure-guaranteed.v1");
+            assert_eq!(payload["guaranteed_final_piece"], "T");
+            assert_eq!(
+                payload["guarantee_basis"],
+                "every-unique-non-target-piece-order-exact-replay-final-piece-last"
+            );
+            assert_eq!(payload["dependency_report_included"], true);
+            assert_eq!(
+                payload["dependency_relation"],
+                "non-target-universal-precedence"
+            );
+            assert_eq!(payload["dependency_edge_count"], "0");
+        } else {
+            assert_eq!(payload["schema_id"], "spin-structure-family.v2");
+            assert!(payload["guaranteed_final_piece"].is_null());
+            assert!(payload["dependency_report_included"].is_null());
+        }
+
+        let page_source = runtime.take_completed_product_page_source_owner();
+        if payload_kind == "coverage-portfolio" {
+            let mut store = ProductPageStore::from_source(
+                page_source.expect("spin cover transfers its immutable page source"),
+            )
+            .expect("open spin cover page store");
+            let coverage = store
+                .coverage_portfolio_mut()
+                .expect("spin cover uses the common coverage portfolio pager");
+            assert_eq!(coverage.loaded_page_count(), 1);
+            let mut enumeration_complete = false;
+            for _ in 0..10_000 {
+                let advance = coverage
+                    .next_page(u64::MAX, &mut || false)
+                    .expect("advance exact spin cover alternatives");
+                enumeration_complete = advance.checkpoint().enumeration_complete();
+                if enumeration_complete {
+                    break;
+                }
+            }
+            assert!(enumeration_complete, "finite exact tie paging must finish");
+            assert!(coverage.loaded_page_count() >= 1);
+        } else {
+            assert!(page_source.is_none(), "ordinary spin families do not page");
+        }
+    }
+}
+
+#[test]
+fn wasm_pc_score_minimals_returns_the_score_only_portfolio_and_live_page_owner() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 \
+             --pieces 1 --queue I --hold empty --score-profile tetrio \
+             --spin-profile t-spins --initial-b2b 0",
+        )
+        .expect("canonical WASM pc score-minimals search");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    assert!(result.product_page_source_owner().is_some());
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("score-minimals product payload");
+    assert_eq!(payload.contract(), "pc.score-minimals");
+    assert_eq!(payload.result_kind(), "pc-score-portfolio.v2");
+    let ProductResultPayloadContent::CoveragePortfolio(page) = payload.content() else {
+        panic!("expected score-minimals coverage portfolio payload")
+    };
+    assert!(page.page_handle_available());
+    assert_eq!(page.alternative_index(), "1");
+    assert_eq!(page.member_page_number(), "1");
+    assert!(!page.members().is_empty());
+    assert!(page
+        .members()
+        .iter()
+        .all(|member| !member.candidate_id().starts_with('0')));
+}
+
+#[test]
+fn wasm_pc_minimals_returns_the_exact_portfolio_and_live_page_owner() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 \
+             --pieces 1 --queue I --hold empty",
+        )
+        .expect("canonical WASM pc minimals search");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    assert!(result.product_page_source_owner().is_some());
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("pc minimals product payload");
+    assert_eq!(payload.contract(), "pc.minimals");
+    assert_eq!(payload.result_kind(), "pc-minimum-cover.v2");
+    let ProductResultPayloadContent::CoveragePortfolio(page) = payload.content() else {
+        panic!("expected pc minimals coverage portfolio payload")
+    };
+    assert!(page.page_handle_available());
+    assert_eq!(page.alternative_index(), "1");
+    assert_eq!(page.member_page_number(), "1");
+    assert!(!page.members().is_empty());
+    assert!(page
+        .members()
+        .iter()
+        .all(|member| !member.candidate_id().starts_with('0')));
+}
+
+#[test]
+fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 \
+             --pieces 1 --queue I --hold empty",
+        )
+        .expect("canonical WASM pc.path search");
+
+    assert_eq!(
+        result.app_response().status(),
+        AppStatus::Success,
+        "{:#?}",
+        result.app_response()
+    );
+    assert!(result.product_page_source_owner().is_none());
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("pc.path product payload");
+    assert_eq!(payload.contract(), "pc.path");
+    assert_eq!(payload.result_kind(), "pc-path-family.v2");
+    let ProductResultPayloadContent::PcPathFamily(family) = payload.content() else {
+        panic!("expected pc.path replay-family payload")
+    };
+    assert_eq!(family.witness_contract(), "pc-path-witness.v2");
+    assert_eq!(
+        family.ordering(),
+        "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending"
+    );
+    assert!(family.complete());
+    assert_eq!(family.witness_count(), family.witnesses().len().to_string());
+    assert!(!family.witnesses().is_empty());
+    assert!(family.witnesses().windows(2).all(|pair| {
+        (
+            pair[0].candidate_id(),
+            pair[0].pattern_id(),
+            pair[0].normalized_trace_key(),
+        ) < (
+            pair[1].candidate_id(),
+            pair[1].pattern_id(),
+            pair[1].normalized_trace_key(),
+        )
+    }));
+    assert!(family.witnesses().iter().all(|witness| {
+        !witness.steps().is_empty()
+            && witness.steps().last().is_some_and(|step| {
+                step.board_after_line_clear_mask() == "0x0000000000000000"
+                    && step.cleared_lines() == "1"
+                    && !step.line_clear_identity().is_empty()
+            })
+    }));
+}
+
+#[test]
+fn wasm_pc_score_returns_the_score_only_attack_informational_winner_family() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc score --lines 1 --board-mask 0x3f --height 1 \
+             --pieces 1 --queue I --hold empty --score-profile tetrio \
+             --spin-profile t-spins --initial-b2b 0",
+        )
+        .expect("canonical WASM pc score search");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    assert!(result.product_page_source_owner().is_none());
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("pc score product payload");
+    assert_eq!(payload.contract(), "pc.score");
+    assert_eq!(payload.result_kind(), "pc-score-summary.v2");
+    let ProductResultPayloadContent::ScorePatternWinnerFamily(family) = payload.content() else {
+        panic!("expected pc score winner-family payload")
+    };
+    assert_eq!(family.winner_contract(), "pc-score-pattern-winner.v1");
+    assert_eq!(
+        family.ordering(),
+        "pattern-id-ascending-then-candidate-id-ascending"
+    );
+    assert_eq!(family.equality(), "score-only-attack-informational");
+    assert_eq!(
+        family.informational_attack_basis(),
+        "canonical-equal-score-trace"
+    );
+    assert_eq!(family.winner_count(), family.winners().len().to_string());
+}
+
+#[test]
+fn wasm_pc_score_finder_returns_the_complete_normal_score_only_witness_family() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text(
+            "clearra pc score-finder --lines 1 --board-mask 0x3f --height 1 \
+             --pieces 1 --queue I --hold empty --initial-b2b 1",
+        )
+        .expect("canonical WASM pc score-finder search");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    assert!(result.product_page_source_owner().is_none());
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("pc score-finder product payload");
+    assert_eq!(payload.contract(), "pc.score-finder");
+    assert_eq!(payload.result_kind(), "pc-fixed-score-witness.v2");
+    let ProductResultPayloadContent::ScorePatternWinnerFamily(family) = payload.content() else {
+        panic!("expected pc score-finder winner-family payload")
+    };
+    assert_eq!(family.winner_contract(), "pc-score-pattern-winner.v1");
+    assert_eq!(
+        family.ordering(),
+        "pattern-id-ascending-then-candidate-id-ascending"
+    );
+    assert_eq!(family.equality(), "score-only-attack-informational");
+    assert_eq!(
+        family.informational_attack_basis(),
+        "canonical-equal-score-trace"
+    );
+    assert_eq!(family.winner_count(), family.winners().len().to_string());
+    assert!(family
+        .winners()
+        .windows(2)
+        .all(|pair| pair[0].candidate_id() < pair[1].candidate_id()));
+    assert!(family
+        .winners()
+        .iter()
+        .all(|winner| winner.pattern_id() == "0"));
 }
 
 #[test]
@@ -662,6 +1267,14 @@ fn browser_worker_final_event_keeps_the_fixed_score_typed_report() {
 
     assert_eq!(final_event["response"]["status"], "success");
     assert_eq!(
+        final_event["response"]["resource_report"]["execution_availability"]["state"],
+        "available"
+    );
+    assert_eq!(
+        final_event["response"]["resource_report"]["result_completeness"],
+        "complete"
+    );
+    assert_eq!(
         final_event["response"]["result"],
         serde_json::json!({"kind": "build-probability"})
     );
@@ -980,9 +1593,301 @@ fn cancel_long_6l_stops_before_natural_completion_and_releases_scope() {
             ..
         }
     )));
+    let serialized = crate::json_event_envelope::serialize_worker_events(&cancelled_events)
+        .expect("serialize cancelled worker events");
+    let serialized: Value = serde_json::from_str(&serialized).expect("cancelled event JSON");
+    let cancelled = serialized
+        .as_array()
+        .and_then(|events| events.iter().find(|event| event["event"] == "cancelled"))
+        .expect("serialized cancelled event");
+    assert_eq!(cancelled["execution_availability"]["state"], "cancelled");
+    assert_eq!(
+        cancelled["execution_availability"]["reason"],
+        "cancelled-by-caller"
+    );
+    assert_eq!(cancelled["result_completeness"], "incomplete");
     assert!(!cancelled_events
         .iter()
         .any(|event| matches!(event, WasmWorkerJobEvent::FinalResponse { .. })));
+}
+
+#[test]
+fn parse_stage_failure_is_not_executed_and_never_emits_a_final_response() {
+    let mut runtime = WasmWorkerJobRuntime::default();
+    let job_id = runtime
+        .start_job("clearra pc --lines not-a-number")
+        .expect("queued job");
+
+    assert_eq!(
+        runtime.advance_job(job_id, 1).expect("parse failure"),
+        WasmWorkerAdvanceStatus::Failed
+    );
+    let events = runtime.drain_events(job_id);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, WasmWorkerJobEvent::FinalResponse { .. })));
+    let serialized = crate::json_event_envelope::serialize_worker_events(&events)
+        .expect("serialize parse failure");
+    let value: Value = serde_json::from_str(&serialized).expect("parse failure JSON");
+    let failed = value
+        .as_array()
+        .and_then(|events| events.iter().find(|event| event["event"] == "failed"))
+        .expect("failed event");
+    assert!(failed["response"].is_null());
+    assert_eq!(failed["execution_availability"]["state"], "unavailable");
+    assert_eq!(failed["execution_availability"]["reason"], "not-executed");
+    assert!(failed["execution_availability"]["descriptor_pattern_count"].is_null());
+    assert!(failed["execution_availability"]["dense_pattern_count"].is_null());
+    assert!(failed["execution_availability"]["required_dense_bytes"].is_null());
+    assert!(failed["execution_availability"]["required_memory_bytes"].is_null());
+    assert_eq!(failed["result_completeness"], "not-executed");
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn six_line_budget_admission_remains_typed_below_inactive_raw_wasm_boundaries() {
+    let command = "clearra pc --lines 6 --backend cpu --workers 2 --max-memory-mib 64";
+    let command_runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // Test-only lower-layer admission oracle. Raw distributed and Worker
+    // entry points are asserted separately below and must not use this parse.
+    let request = command_runtime
+        .compile_command_text(command)
+        .expect("compile six-line command");
+    let AppCommand::Pc(pc) = request.command() else {
+        panic!("six-line command must compile as PC");
+    };
+    let problem = ProblemCompiler::compile_opening_pc(pc.query()).expect("six-line problem");
+    assert_eq!(
+        problem
+            .piece_source()
+            .materialized_universe()
+            .unwrap()
+            .total_possible_pattern_count(),
+        1_066_867_200
+    );
+    assert_eq!(
+        problem
+            .piece_source()
+            .materialized_universe()
+            .unwrap()
+            .pattern_count(),
+        1_066_867_200
+    );
+    let admission_error = match WasmCpuSearchSession::new(&problem) {
+        Ok(_) => panic!("six-line dense representation must exceed sixty-four MiB"),
+        Err(error) => error,
+    };
+    let WasmCpuSearchError::ResourceAdmission { resource_report } = admission_error else {
+        panic!("expected typed six-line admission failure, got {admission_error:?}");
+    };
+    let availability = resource_report.execution_availability();
+    assert!(!resource_report.execution_started());
+    assert!(!resource_report.result_complete());
+    assert_eq!(
+        availability.state(),
+        CoreExecutionAvailabilityState::Exhausted
+    );
+    assert_eq!(
+        availability.reason(),
+        Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+    );
+    assert_eq!(availability.descriptor_pattern_count(), Some(1_066_867_200));
+    assert_eq!(availability.dense_pattern_count(), Some(1_066_867_200));
+    assert_eq!(availability.required_dense_bytes(), Some(133_358_400));
+    assert_eq!(availability.required_memory_bytes(), Some(133_358_400));
+
+    let distributed_rejection = match WasmDistributedCoordinator::prepare(&command_runtime, command)
+    {
+        Err(error) => error,
+        Ok(_) => panic!("raw finite distributed entry has no parser/owner authority"),
+    };
+    assert_eq!(
+        distributed_rejection.code(),
+        "E_WASM_FINITE_AUTHORITY_UNAVAILABLE"
+    );
+    assert!(distributed_rejection.message().is_empty());
+    assert_eq!(distributed_rejection.message_capacity_for_test(), 0);
+    assert!(distributed_rejection.resource_report().is_none());
+
+    let mut worker = WasmWorkerJobRuntime::new(command_runtime);
+    let rejection = worker
+        .start_job(command)
+        .expect_err("raw finite worker entry has no parser/owner authority");
+    assert_eq!(rejection.code(), "E_WASM_FINITE_AUTHORITY_UNAVAILABLE");
+    assert!(rejection.message().is_empty());
+    assert_eq!(rejection.message_capacity_for_test(), 0);
+    assert!(rejection.resource_report().is_none());
+}
+
+#[test]
+fn distributed_build_admission_remains_typed_below_inactive_raw_wasm_boundaries() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra build-probability --base-mask 0x0 \
+        --target-mask 0xffffffffff --height 4 \
+        --no-hold --no-mirror --workers 2 --max-memory-mib 1";
+    // Test-only lower-layer admission oracle; this preparation is not public
+    // finite-ingress evidence.
+    let prepared_command = runtime
+        .prepare_command_text(command)
+        .expect("compile finite Build admission fixture");
+    let (request, _) = prepared_command.into_parts();
+    let prepared = match runtime.app_context().prepare_distributed_search(request) {
+        DistributedSearchPreparation::Search(prepared) => prepared,
+        DistributedSearchPreparation::Ready(_) => {
+            panic!("Build command must prepare a typed search")
+        }
+    };
+    let (field, aggregation) = prepared
+        .build_probability_request()
+        .expect("Build probability request");
+    let (finesse_metric, finesse_pattern_knowledge) = prepared
+        .build_probability_finesse_request()
+        .unwrap_or_default();
+    let admission_error = match WasmBuildProbabilityCandidateProducer::new_with_finesse_typed(
+        prepared.problem(),
+        field,
+        aggregation,
+        finesse_metric,
+        finesse_pattern_knowledge,
+    ) {
+        Ok(_) => panic!("one-replica Build plan must exceed one MiB"),
+        Err(error) => error,
+    };
+    let WasmCpuSearchError::ResourceAdmission { resource_report } = admission_error else {
+        panic!("expected typed Build admission failure, got {admission_error:?}");
+    };
+    let availability = resource_report.execution_availability();
+    assert!(!resource_report.execution_started());
+    assert!(!resource_report.result_complete());
+    assert_eq!(
+        availability.state(),
+        CoreExecutionAvailabilityState::Exhausted
+    );
+    assert_eq!(
+        availability.reason(),
+        Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+    );
+    assert_eq!(availability.descriptor_pattern_count(), Some(1_058_400));
+    assert_eq!(availability.dense_pattern_count(), Some(1_058_400));
+    assert_eq!(availability.required_dense_bytes(), Some(132_304));
+    assert_eq!(availability.required_memory_bytes(), Some(17_066_704));
+
+    let distributed_rejection = match WasmDistributedCoordinator::prepare(&runtime, command) {
+        Err(error) => error,
+        Ok(_) => panic!("raw finite distributed entry has no parser/owner authority"),
+    };
+    assert_eq!(
+        distributed_rejection.code(),
+        "E_WASM_FINITE_AUTHORITY_UNAVAILABLE"
+    );
+    assert!(distributed_rejection.message().is_empty());
+    assert_eq!(distributed_rejection.message_capacity_for_test(), 0);
+    assert!(distributed_rejection.resource_report().is_none());
+
+    let mut worker = WasmWorkerJobRuntime::new(runtime);
+    let rejection = worker
+        .start_job(command)
+        .expect_err("raw finite worker entry has no parser/owner authority");
+    assert_eq!(rejection.code(), "E_WASM_FINITE_AUTHORITY_UNAVAILABLE");
+    assert!(rejection.message().is_empty());
+    assert_eq!(rejection.message_capacity_for_test(), 0);
+    assert!(rejection.resource_report().is_none());
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn distributed_build_aggregate_admission_remains_typed_below_the_raw_boundary() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra build-probability --base-mask 0x0 \
+        --target-mask 0xffffffffff --height 4 \
+        --no-hold --no-mirror --workers 2 --max-memory-mib 20";
+    // Test-only lower-layer admission oracle; the production raw boundary is
+    // checked after the producer-plus-verifier accounting assertions.
+    let prepared_command = runtime
+        .prepare_command_text(command)
+        .expect("compile aggregate-admission command");
+    let (request, _) = prepared_command.into_parts();
+    let prepared = match runtime.app_context().prepare_distributed_search(request) {
+        DistributedSearchPreparation::Search(prepared) => prepared,
+        DistributedSearchPreparation::Ready(_) => {
+            panic!("build command must prepare a distributed search")
+        }
+    };
+    let (field, aggregation) = prepared
+        .build_probability_request()
+        .expect("build-probability request");
+    let (finesse_metric, finesse_pattern_knowledge) = prepared
+        .build_probability_finesse_request()
+        .unwrap_or_default();
+
+    let standalone = WasmBuildProbabilityCandidateProducer::new_with_finesse_typed(
+        prepared.problem(),
+        field,
+        aggregation,
+        finesse_metric,
+        finesse_pattern_knowledge,
+    )
+    .expect("one-replica plan fits twenty MiB");
+    drop(standalone);
+
+    let aggregate_error =
+        match WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
+            prepared.problem(),
+            field,
+            aggregation,
+            finesse_metric,
+            finesse_pattern_knowledge,
+            1,
+            0,
+        ) {
+            Ok(_) => panic!("producer plus verifier must not fit twenty MiB"),
+            Err(error) => error,
+        };
+    let WasmCpuSearchError::ResourceAdmission { resource_report } = aggregate_error else {
+        panic!("expected typed aggregate admission failure, got {aggregate_error:?}");
+    };
+    assert!(!resource_report.execution_started());
+    assert!(!resource_report.result_complete());
+    assert_eq!(
+        resource_report.execution_availability().reason(),
+        Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+    );
+    assert_eq!(
+        resource_report
+            .execution_availability()
+            .descriptor_pattern_count(),
+        Some(1_058_400)
+    );
+    assert_eq!(
+        resource_report
+            .execution_availability()
+            .dense_pattern_count(),
+        Some(1_058_400)
+    );
+    assert_eq!(
+        resource_report
+            .execution_availability()
+            .required_dense_bytes(),
+        Some(132_304)
+    );
+    assert_eq!(
+        resource_report
+            .execution_availability()
+            .required_memory_bytes(),
+        Some(34_133_408)
+    );
+
+    let rejection = match WasmDistributedCoordinator::prepare(&runtime, command) {
+        Err(error) => error,
+        Ok(_) => panic!("raw finite distributed entry has no parser/owner authority"),
+    };
+    assert_eq!(rejection.code(), "E_WASM_FINITE_AUTHORITY_UNAVAILABLE");
+    assert!(rejection.message().is_empty());
+    assert_eq!(rejection.message_capacity_for_test(), 0);
+    assert!(rejection.resource_report().is_none());
 }
 
 #[test]
@@ -1077,6 +1982,66 @@ fn distributed_build_probability_b2b_constraint_matches_serial_exact_result() {
     );
     assert!(distributed_report.cpu_parallel_execution);
     assert_eq!(distributed_report.workers_used, 2);
+}
+
+#[test]
+fn distributed_build_solution_probabilities_match_serial_complete_canonical_reports() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const COMMAND: &str = "clearra build-probability --base-mask 0x0 \
+        --target-mask 0xffffffffff --height 4 --queue OTSZJLIOTI \
+        --no-hold --no-mirror --preserve-b2b --spin-profile t-spins \
+        --solution-probabilities";
+    let serial = runtime
+        .run_command_text(&format!("{COMMAND} --workers 1"))
+        .expect("serial per-solution probability result");
+    let distributed = run_distributed_cpu(&runtime, &format!("{COMMAND} --workers 2"));
+    let serial_report = serial.search_report().expect("serial search report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed search report");
+
+    assert!(!serial_report.solution_probabilities.is_empty());
+    assert_eq!(serial_report.solution_probabilities.len(), 8);
+    assert_eq!(
+        distributed_report.solution_probabilities,
+        serial_report.solution_probabilities
+    );
+    let report_keys = serial_report
+        .solution_probabilities
+        .iter()
+        .map(|entry| entry.solution_key.as_str())
+        .collect::<Vec<_>>();
+    let normalized_keys = serial_report
+        .normalized_solution_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(report_keys, normalized_keys);
+    assert!(report_keys.windows(2).all(|pair| pair[0] < pair[1]));
+    for entry in &serial_report.solution_probabilities {
+        assert_eq!(entry.probability, "1", "{}", entry.solution_key);
+        assert_eq!(entry.covered_pattern_count, 1, "{}", entry.solution_key);
+        assert_eq!(entry.pattern_count, 1, "{}", entry.solution_key);
+        assert!(entry.probability_complete, "{}", entry.solution_key);
+    }
+
+    let expected_metadata = [
+        ("solution_probabilities_requested", "true"),
+        ("solution_probability_count", "8"),
+        ("solution_probability_complete", "true"),
+        (
+            "solution_probability_basis",
+            "normalized-solution-pattern-bitset-or-union",
+        ),
+        ("solution_probability_incomplete_reason", "none"),
+    ];
+    for (key, expected) in expected_metadata {
+        let serial_value = search_summary_field(serial_report, key);
+        let distributed_value = search_summary_field(distributed_report, key);
+        assert_eq!(serial_value, expected, "serial {key}");
+        assert_eq!(distributed_value, serial_value, "distributed {key}");
+    }
 }
 
 #[test]
@@ -1187,8 +2152,9 @@ fn distributed_finesse_finalizer_records_every_coordinator_profile_stage() {
         WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
         _ => panic!("finesse search must use the distributed coordinator"),
     };
-    let mut verifier =
-        WasmDistributedVerifierRuntime::prepare(&runtime, command).expect("distributed verifier");
+    let mut verifier = coordinator
+        .prepare_in_process_verifier(&runtime, command)
+        .expect("distributed verifier");
     loop {
         match coordinator
             .advance_producer(16_384, 16)
@@ -1292,19 +2258,28 @@ fn distributed_build_probability_tiling_matches_serial_without_buildup() {
     let serial = runtime
         .run_command_text(serial_command)
         .expect("serial build-probability tiling result");
+    let (serial_solution_count, serial_solution_set_hash) = {
+        let report = serial.search_report().expect("serial search report");
+        (
+            report.unique_solution_count,
+            report.normalized_solution_set_hash.clone(),
+        )
+    };
+    // Release only retained output memory before the next large run. This does
+    // not grant verifier authority; coordinator delegation/fallback does that.
+    drop(serial);
     let distributed = run_distributed_cpu(&runtime, distributed_command);
-    let serial_report = serial.search_report().expect("serial search report");
     let distributed_report = distributed
         .search_report()
         .expect("distributed search report");
 
     assert_eq!(
         distributed_report.unique_solution_count,
-        serial_report.unique_solution_count
+        serial_solution_count
     );
     assert_eq!(
         distributed_report.normalized_solution_set_hash,
-        serial_report.normalized_solution_set_hash
+        serial_solution_set_hash
     );
     assert_eq!(distributed_report.total_build_order_nodes, 0);
     assert_eq!(distributed_report.coverage_product_edge_checks, 0);
@@ -1321,20 +2296,29 @@ fn distributed_build_probability_tiling_unions_distinct_mirror_passes() {
     let serial = runtime
         .run_command_text(serial_command)
         .expect("serial mirrored build-probability tiling result");
+    let (serial_solution_count, serial_solution_set_hash) = {
+        let report = serial.search_report().expect("serial search report");
+        (
+            report.unique_solution_count,
+            report.normalized_solution_set_hash.clone(),
+        )
+    };
+    // Release only retained output memory before the next large run. This does
+    // not grant verifier authority; coordinator delegation/fallback does that.
+    drop(serial);
     let distributed = run_distributed_cpu(&runtime, distributed_command);
-    let serial_report = serial.search_report().expect("serial search report");
     let distributed_report = distributed
         .search_report()
         .expect("distributed search report");
 
-    assert!(serial_report.unique_solution_count > 0);
+    assert!(serial_solution_count > 0);
     assert_eq!(
         distributed_report.unique_solution_count,
-        serial_report.unique_solution_count
+        serial_solution_count
     );
     assert_eq!(
         distributed_report.normalized_solution_set_hash,
-        serial_report.normalized_solution_set_hash
+        serial_solution_set_hash
     );
     assert!(distributed_report
         .summary_fields
@@ -1357,19 +2341,28 @@ fn distributed_tiling_root_tasks_match_serial_hold_supply_result() {
     let serial = runtime
         .run_command_text(serial_command)
         .expect("serial tiling result");
+    let (serial_solution_count, serial_solution_set_hash) = {
+        let report = serial.search_report().expect("serial search report");
+        (
+            report.unique_solution_count,
+            report.normalized_solution_set_hash.clone(),
+        )
+    };
+    // Release only retained output memory before the next large run. This does
+    // not grant verifier authority; coordinator delegation/fallback does that.
+    drop(serial);
     let distributed = run_distributed_cpu(&runtime, distributed_command);
-    let serial_report = serial.search_report().expect("serial search report");
     let distributed_report = distributed
         .search_report()
         .expect("distributed search report");
 
     assert_eq!(
         distributed_report.unique_solution_count,
-        serial_report.unique_solution_count
+        serial_solution_count
     );
     assert_eq!(
         distributed_report.normalized_solution_set_hash,
-        serial_report.normalized_solution_set_hash
+        serial_solution_set_hash
     );
     assert!(!distributed_report.buildability_verified);
     assert_eq!(distributed_report.workers_used, 2);
@@ -1476,6 +2469,14 @@ fn assert_build_probability_semantics_match(
     assert_eq!(distributed.representative_path, serial.representative_path);
 }
 
+fn search_summary_field<'a>(report: &'a WasmSearchReport, key: &str) -> &'a str {
+    report
+        .summary_fields
+        .iter()
+        .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
+        .unwrap_or_else(|| panic!("missing search summary field {key}"))
+}
+
 fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecutionResult {
     let preparation =
         WasmDistributedCoordinator::prepare(runtime, command).expect("distributed preparation");
@@ -1483,8 +2484,9 @@ fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecu
         WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
         _ => panic!("two-worker request must use the distributed product path"),
     };
-    let mut verifier =
-        WasmDistributedVerifierRuntime::prepare(runtime, command).expect("distributed verifier");
+    let mut verifier = coordinator
+        .prepare_in_process_verifier(runtime, command)
+        .expect("distributed verifier");
     loop {
         match coordinator
             .advance_producer(16_384, 16)
@@ -1532,6 +2534,81 @@ fn visible_seven_pc_uses_the_global_serial_policy_finalizer() {
     .expect("visible-seven distributed preparation");
 
     assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+}
+
+#[test]
+fn typed_pc_tiling_with_multiple_workers_stays_on_the_serial_product_authority() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra pc tiling --lines 4 --queue OTSZJLIOTI --no-hold \
+                   --backend cpu --workers 2";
+
+    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
+        .expect("typed pc tiling distributed plan");
+    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+
+    let request = runtime
+        .compile_command_text(command)
+        .expect("typed pc tiling request");
+    assert!(request.product_capability_contract().is_some());
+    assert_eq!(request.resource_budget().workers(), 1);
+    let response = runtime.app_context().run(request);
+    assert_eq!(
+        response.status(),
+        clearra_app::AppStatus::Success,
+        "{response:?}"
+    );
+    let report_json = serialize_search_report_from_app_response(&response)
+        .expect("typed pc tiling WASM JSON report");
+    let report_value: Value =
+        serde_json::from_str(&report_json).expect("typed pc tiling JSON value");
+    assert_eq!(report_value["workers_used"], 1);
+    let family = response
+        .product_capability_result()
+        .and_then(|result| result.pc_tiling_family_v1())
+        .expect("pc-tiling-family.v1 wrapper");
+    let core = response
+        .render_model()
+        .and_then(AppRenderModel::core_result)
+        .expect("typed pc tiling core result");
+    assert!(family.normalized_solution_count() > family.initial_page_limit());
+    assert_eq!(
+        family.initial_page_keys().len(),
+        family.initial_page_limit()
+    );
+    assert_eq!(
+        report_value["unique_solution_count"],
+        family.normalized_solution_count()
+    );
+    assert_eq!(report_value["solution_keys_materialized_count"], 100);
+    assert_eq!(report_value["solution_keys_complete"], false);
+    assert_eq!(report_value["solution_page_available"], true);
+    assert_eq!(
+        report_value["normalized_solution_set_hash"],
+        family.normalized_solution_set_hash()
+    );
+    assert_eq!(
+        report_value["normalized_solution_keys"]
+            .as_array()
+            .map(Vec::len),
+        Some(100)
+    );
+    assert!(core.pc_tiling_family_publication_contract_is_valid());
+    assert!(solution_page_store_is_public(core));
+    let generic_trace = core.clone().with_replaced_fields(vec![(
+        "search_output_policy".to_owned(),
+        "trace".to_owned(),
+    )]);
+    assert!(!generic_trace.pc_tiling_family_publication_contract_is_valid());
+    assert!(!solution_page_store_is_public(&generic_trace));
+    assert_eq!(
+        core.usize_field("normalized_unique_solution_count"),
+        Some(family.normalized_solution_count())
+    );
+    assert_eq!(
+        core.field("normalized_solution_set_hash"),
+        Some(family.normalized_solution_set_hash())
+    );
 }
 
 #[test]

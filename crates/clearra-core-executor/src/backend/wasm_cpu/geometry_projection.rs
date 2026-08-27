@@ -108,6 +108,14 @@ impl ProjectionCatalog {
         let mut row_signatures = Vec::new();
         row_signatures.try_reserve_exact(rows.len()).ok()?;
         let mut piece_options: [Vec<u64>; 7] = core::array::from_fn(|_| Vec::new());
+        let mut piece_option_counts = [0_usize; 7];
+        for row in rows {
+            piece_option_counts[piece_index(row.piece)] =
+                piece_option_counts[piece_index(row.piece)].checked_add(1)?;
+        }
+        for (options, count) in piece_options.iter_mut().zip(piece_option_counts) {
+            options.try_reserve_exact(count).ok()?;
+        }
         let mut piece_minimum: [Vec<u8>; 7] =
             core::array::from_fn(|_| vec![u8::MAX; width as usize]);
         let mut piece_maximum: [Vec<u8>; 7] = core::array::from_fn(|_| vec![0; width as usize]);
@@ -236,6 +244,22 @@ impl ProjectionCatalog {
                 .chain(&self.piece_maximum)
                 .map(|values| values.capacity() * core::mem::size_of::<u8>())
                 .sum::<usize>()
+    }
+
+    /// Conservative peak while the projected-row scratch, signature scratch,
+    /// and retained per-piece option arrays coexist. All counts are checked;
+    /// the bound intentionally includes pre-dedup option slots.
+    pub fn checked_compile_peak_upper_bound(row_count: usize, width: u8) -> Option<u128> {
+        let row_count = row_count as u128;
+        row_count
+            .checked_mul(core::mem::size_of::<ProjectedRow>() as u128)?
+            .checked_add(row_count.checked_mul(core::mem::size_of::<u64>() as u128)?)?
+            .checked_add(row_count.checked_mul(core::mem::size_of::<u64>() as u128)?)?
+            .checked_add(
+                u128::from(width)
+                    .checked_mul(14)?
+                    .checked_mul(core::mem::size_of::<u8>() as u128)?,
+            )
     }
 
     fn cheap_bounds_allow(&self, counts: [u8; 7], demand: u64) -> bool {

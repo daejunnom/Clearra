@@ -1,3 +1,8 @@
+//! Legacy helpers for Clearra metadata stored in Fumen comment pages.
+//!
+//! These helpers do not transform decoded v115 geometry. Product document
+//! commands use `ActualFumenDocumentTransform` instead.
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CombineTransform;
 

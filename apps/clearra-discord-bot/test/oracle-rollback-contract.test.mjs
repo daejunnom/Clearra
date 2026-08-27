@@ -170,7 +170,7 @@ prior_release="$release_root/prior-release"
 candidate_release="$release_root/candidate-release"
 settings_directory="$fixture_root/etc/clearra-gateway"
 settings_path="$settings_directory/settings"
-settings_backup="$settings_directory/settings.pre-v0.7.5-rollback"
+settings_backup="$settings_directory/settings.pre-v0.8.0-rollback"
 
 mkdir -p \
   "$bin_directory" \

@@ -153,6 +153,7 @@ mod pc_contract {
             ("rule", pc_rule_contract(fields)),
             ("supply", supply_contract(fields)),
             ("objective", prefixed_object(fields, "objective_")),
+            ("tiling", prefixed_object(fields, "tiling_")),
             (
                 "checkpoint_schedule",
                 pick_object(
@@ -399,6 +400,8 @@ mod pc_scoring_contract {
                 "score_summary_incomplete_reason",
                 "score_all_universe_patterns_covered",
                 "score_pattern_optimal_count",
+                "score_failed_pc_pattern_count",
+                "score_failed_pc_pattern_score",
                 "score_covered_probability",
                 "score_unconditional_expected_score",
                 "score_unconditional_expected_attack",

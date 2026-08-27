@@ -10,6 +10,7 @@ pub enum QueryEnvelope {
     BuildProbability,
     Damage,
     SpinFinder,
+    Ren,
     SpinStructure,
     BuildCoverage,
     ContinueToken,
@@ -19,6 +20,13 @@ pub enum QueryEnvelope {
     InspectUnsupported,
     Verify,
     VerifyKicks,
+    UtilitySequence,
+    UtilitySequenceDependencies,
+    UtilityParity,
+    UtilityFumen,
+    UtilityRender,
+    UtilityToGray,
+    UtilityMirror,
 }
 
 impl QueryEnvelope {
@@ -32,6 +40,7 @@ impl QueryEnvelope {
             Self::BuildProbability => "build-probability",
             Self::Damage => "damage",
             Self::SpinFinder => "spin-finder",
+            Self::Ren => "ren",
             Self::SpinStructure => "spin-structure",
             Self::BuildCoverage => "build-coverage",
             Self::ContinueToken => "continue-token",
@@ -41,6 +50,13 @@ impl QueryEnvelope {
             Self::InspectUnsupported => "inspect-unsupported",
             Self::Verify => "verify",
             Self::VerifyKicks => "verify-kicks",
+            Self::UtilitySequence => "utility-sequence",
+            Self::UtilitySequenceDependencies => "utility-sequence-dependencies",
+            Self::UtilityParity => "utility-parity",
+            Self::UtilityFumen => "utility-fumen",
+            Self::UtilityRender => "utility-render",
+            Self::UtilityToGray => "utility-to-gray",
+            Self::UtilityMirror => "utility-mirror",
         }
     }
 }

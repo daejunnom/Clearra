@@ -19,7 +19,6 @@ function Test-RustUnsafeBoundaryAllowed([string]$RelativePath) {
 
     foreach ($allowedOwner in @(
             "crates/clearra-core-ffi/src/memory/native_memory_bindings.rs",
-            "crates/clearra-core-ffi/src/native/buildup.rs",
             "crates/clearra-core-ffi/src/native/geometry_catalog.rs",
             "crates/clearra-core-ffi/src/native/geometry_solution_graph.rs"
         )) {
@@ -86,7 +85,7 @@ foreach ($file in Get-ProductionRustFiles) {
         $contents = Get-Content -LiteralPath $file.FullName -Raw
         if ((Test-RustProductionContainsUnsafeBoundary $contents) -and
             -not (Test-RustUnsafeBoundaryAllowed $relativePath)) {
-            Add-ArchitectureError "$relativePath must not contain unsafe, extern C, NonNull, or raw pointer code outside an approved ABI or host-clock boundary"
+            Add-ArchitectureError "$relativePath must not contain unsafe/raw pointer boundary code outside clearra-core-ffi raw/native binding allowlist or a separately approved ABI/host-clock boundary"
         }
     }
 foreach ($crateDir in @(

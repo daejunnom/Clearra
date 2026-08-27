@@ -130,6 +130,33 @@ mod case_buildup_runner_promotes_packing_candidates_to_coverage_and_objectives {
 }
 
 #[cfg(feature = "native-c-core")]
+mod case_pc_save_marker_materializes_complete_postprocess_batch {
+    use super::*;
+
+    #[test]
+    fn pc_save_marker_materializes_complete_postprocess_batch() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountAll);
+        let problem = ProblemCompiler::compile_scenario_pc_save(&query).expect("problem");
+        let packing = PackingRunner::run(&problem).expect("packing");
+
+        let buildup = BuildUpRunner::run(&problem, &packing).expect("buildup");
+
+        assert!(buildup.solution_found());
+        assert_eq!(buildup.build_variant_count(), 4);
+        assert_eq!(buildup.postprocess_executions().len(), 4);
+        assert_eq!(buildup.postprocess_pattern_weights().len(), 7);
+        assert!(buildup.postprocess_execution_complete());
+    }
+}
+
+#[cfg(feature = "native-c-core")]
 
 mod case_setup_preset_promotes_packing_candidates_to_buildup_variants {
     use super::*;

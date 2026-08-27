@@ -82,7 +82,13 @@ impl JsonContract {
                 product_build_identity_object(identity),
             ));
         }
-        if let Some(report) = resource_report_object(&fields) {
+        if let Some(report) = fields
+            .iter()
+            .find(|field| field.key() == "resource_report")
+            .map(|field| field.value().clone())
+        {
+            root_members.push(("resource_report".to_owned(), report));
+        } else if let Some(report) = resource_report_object(&fields) {
             root_members.push(("resource_report".to_owned(), report));
         }
         if let Some(report) = fields
@@ -91,6 +97,13 @@ impl JsonContract {
             .map(|field| field.value().clone())
         {
             root_members.push(("finesse_report".to_owned(), report));
+        }
+        if let Some(error) = fields
+            .iter()
+            .find(|field| field.key() == "error")
+            .map(|field| field.value().clone())
+        {
+            root_members.push(("error".to_owned(), error));
         }
         let root = JsonValue::object(root_members);
 

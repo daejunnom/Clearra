@@ -37,7 +37,8 @@ pub mod verify_args;
 
 pub use cli_args::{CliArgs, CliCommand};
 pub use cli_parser::{
-    CliHelpTopic, CliParseError, CliParser, ParsedCliCommand, ParsedCliInvocation, ProductHelpTopic,
+    CliHelpTopic, CliParseError, CliParser, ExplicitTieOptions, ParsedCliCommand,
+    ParsedCliInvocation, ProductHelpTopic,
 };
 pub use continue_args::ContinueArgs;
 pub use convert_args::ConvertArgs;

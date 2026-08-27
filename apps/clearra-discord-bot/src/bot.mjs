@@ -6,6 +6,7 @@ import {
   tilingOnlyRequested,
 } from "./clearra/command.mjs";
 import { ClearraDirectExecutor } from "./clearra/direct-executor.mjs";
+import { buildDiscordDocumentUtilityResult } from "./clearra/document-utility-result.mjs";
 import { parseClearraTextRequest } from "./clearra/text-command.mjs";
 import { buildCtk3Result } from "./clearra/ctk3-result.mjs";
 import {
@@ -35,6 +36,14 @@ import {
   resolveSlashCommandInvocation,
 } from "./discord/slash-command-catalog.mjs";
 import {
+  selectDiscordBestSaveWinner,
+  validDiscordPcSaveResult,
+} from "./discord/pc-save-result.mjs";
+import {
+  discordPcScoreMinimalsSummaryLines,
+  validDiscordPcScoreMinimalsResult,
+} from "./discord/pc-score-minimals-result.mjs";
+import {
   findCommandModalCommand,
   readCommandModalLocale,
   readCommandModalOptions,
@@ -60,9 +69,13 @@ import {
 import { DiscordBotAdministratorAuthority } from "./discord/bot-administrators.mjs";
 import {
   buildSlashCommandArgumentPlan,
+  normalizeTypedFieldDocument,
   readHelpArgument,
 } from "./discord/slash-command-input.mjs";
-import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "./discord/public-search-contract.mjs";
+import {
+  DISCORD_HIDDEN_TEXT_SEARCH_CONTRACT,
+  DISCORD_PUBLIC_SEARCH_CONTRACT,
+} from "./discord/public-search-contract.mjs";
 import { BoundedGifRenderer } from "./viewer/async-gif.mjs";
 import {
   decodeViewerFile,
@@ -107,9 +120,16 @@ export class Clearrabot {
             authorizationToken: config.jobToken,
             expectedRuntimeIdentity: config.expectedJobRuntimeIdentity,
             timeoutMs: config.searchTimeoutMs,
+            pcSearchTimeoutMs: config.pcSearchTimeoutMs,
             reverseSearchTimeoutMs: config.reverseSearchTimeoutMs,
+            buildSearchTimeoutMs: config.buildSearchTimeoutMs,
+            setupSearchTimeoutMs: config.setupSearchTimeoutMs,
             forwardSearchTimeoutMs: config.forwardSearchTimeoutMs,
+            structureSearchTimeoutMs: config.structureSearchTimeoutMs,
+            utilitySearchTimeoutMs: config.utilitySearchTimeoutMs,
+            diagnosticTimeoutMs: config.diagnosticTimeoutMs,
             maxOutputBytes: config.maxOutputBytes,
+            maxArtifactBytes: config.maxGifBytes,
             pollIntervalMs: config.jobPollIntervalMs,
             cancelTimeoutMs: config.jobCancelTimeoutMs,
           })
@@ -391,7 +411,11 @@ export class Clearrabot {
     try {
       const invocation = resolveSlashCommandInvocation(command, rawOptions);
       executionCommand = invocation.command;
-      executionOptions = invocation.rawOptions;
+      executionOptions = await this.resolveTypedDocumentAttachmentOptions(
+        interaction,
+        executionCommand,
+        invocation.rawOptions,
+      );
       const argumentPlan = buildSlashCommandArgumentPlan(
         executionCommand,
         executionOptions,
@@ -415,6 +439,7 @@ export class Clearrabot {
         previewDocument,
         locale,
         catalogPublicResultKind(executionCommand),
+        catalogTimeoutClass(executionCommand),
       );
     } else {
       await this.runInteractionCommandSeries(
@@ -423,6 +448,7 @@ export class Clearrabot {
         previewDocument,
         locale,
         catalogPublicResultKind(executionCommand),
+        catalogTimeoutClass(executionCommand),
       );
     }
     return true;
@@ -703,13 +729,14 @@ export class Clearrabot {
     previewDocument = null,
     locale = "en",
     requestedResultKind = null,
+    timeoutClass = undefined,
   ) {
     const controller = new AbortController();
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
       Math.min(
         ...argumentSets.map((arguments_) =>
-          this.searchDeadlineDurationMs(arguments_)
+          this.searchDeadlineDurationMs(arguments_, timeoutClass)
         ),
       ),
     );
@@ -737,14 +764,17 @@ export class Clearrabot {
           const result = await this.executor.execute(arguments_, {
             signal: controller.signal,
             deadlineUnixMs,
+            timeoutClass,
             ...interactionJobOptions(interaction, index),
           });
           const message = labelResultMessage(
             resultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+              maxArtifactBytes: this.config.maxGifBytes,
               locale,
               resultKind: requestedResultKind ??
                 interactionPublicResultKind(interaction, arguments_),
+              allspinExpectation: allspinResultExpectation(arguments_),
             }),
             t(locale, "search.auto_target", {
               lines: pcLineLabel(arguments_),
@@ -779,12 +809,13 @@ export class Clearrabot {
     previewDocument = null,
     locale = "en",
     requestedResultKind = null,
+    timeoutClass = undefined,
   ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
-      this.searchDeadlineDurationMs(arguments_),
+      this.searchDeadlineDurationMs(arguments_, timeoutClass),
     );
     this.controllers.add(controller);
     try {
@@ -792,15 +823,18 @@ export class Clearrabot {
         () => this.executor.execute(arguments_, {
           signal: controller.signal,
           deadlineUnixMs,
+          timeoutClass,
           ...interactionJobOptions(interaction, 0),
         }),
         { deadlineUnixMs, signal: controller.signal },
       ).then(
         (value) => resultMessage(value, tilingOnly, {
           maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+          maxArtifactBytes: this.config.maxGifBytes,
           locale,
           resultKind: requestedResultKind ??
             interactionPublicResultKind(interaction, arguments_),
+          allspinExpectation: allspinResultExpectation(arguments_),
         }),
         (error) => textMessage(this.operationFailureText(error, locale)),
       ).catch((error) => textMessage(this.operationFailureText(error, locale)));
@@ -886,6 +920,126 @@ export class Clearrabot {
 
   async readAttachmentDocuments(attachments = []) {
     return this.readBoundedAttachmentDocuments(attachments);
+  }
+
+  async resolveOperationDocumentAttachmentOptions(
+    interaction,
+    command,
+    rawOptions = [],
+  ) {
+    try {
+      return await this.resolveTypedDocumentAttachmentOptions(
+        interaction,
+        command,
+        rawOptions,
+      );
+    } catch (error) {
+      if (error?.message === "Supply only one of document, documents, or attachment.") {
+        throw new Error(
+          "Supply exactly one document string or one CTK3 attachment, not both.",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async resolveTypedDocumentAttachmentOptions(
+    interaction,
+    command,
+    rawOptions = [],
+  ) {
+    const typedInputs = new Set([
+      "operation-document-v1",
+      "field-document-v1",
+      "fumen-transform-v1",
+      "render-document-v1",
+    ]);
+    if (!typedInputs.has(command?.input)) return rawOptions;
+    if (!Array.isArray(rawOptions)) {
+      throw new Error("Discord supplied invalid typed-document options.");
+    }
+    const documents = rawOptions.filter((option) => option?.name === "document");
+    const documentSets = rawOptions.filter((option) => option?.name === "documents");
+    const attachments = rawOptions.filter((option) => option?.name === "attachment");
+    if (documents.length > 1 || documentSets.length > 1 || attachments.length > 1) {
+      throw new Error("document, documents, and attachment may each be supplied at most once.");
+    }
+    if (
+      Number(documents.length > 0) +
+        Number(documentSets.length > 0) +
+        Number(attachments.length > 0) >
+      1
+    ) {
+      throw new Error("Supply only one of document, documents, or attachment.");
+    }
+    if (attachments.length === 0) return rawOptions;
+
+    const attachmentId = attachments[0]?.value;
+    if (typeof attachmentId !== "string" || attachmentId.length === 0) {
+      throw new Error("Discord supplied an invalid typed-document attachment.");
+    }
+    const attachment = interaction?.data?.resolved?.attachments?.[attachmentId];
+    if (!attachment) {
+      throw new Error("Discord did not resolve the typed-document attachment.");
+    }
+
+    if (command.input === "operation-document-v1") {
+      const decoded = await this.readBoundedAttachmentDocuments([attachment], {
+        maxDocuments: 1,
+        maxPages: 4096,
+        maxSourceChars: 2_000_000,
+      });
+      if (decoded.length !== 1) {
+        throw new Error("The operation-document attachment must be one CTK3 file.");
+      }
+      return Object.freeze([
+        ...rawOptions.filter((option) => option?.name !== "attachment"),
+        Object.freeze({ name: "document", type: 3, value: decoded[0].source }),
+      ]);
+    }
+
+    const source = await this.readBoundedTypedDocumentAttachment(attachment);
+    const optionName = command.input === "fumen-transform-v1" &&
+        rawOptions.some((option) => option?.name === "transform" && option?.value === "combine")
+      ? "documents"
+      : "document";
+    const normalized = optionName === "documents"
+      ? source.split(/\r?\n/u).map((entry) => entry.trim()).filter(Boolean).map(
+        (entry) => normalizeTypedFieldDocument(entry),
+      ).join("\n")
+      : normalizeTypedFieldDocument(source.trim());
+    return Object.freeze([
+      ...rawOptions.filter((option) => option?.name !== "attachment"),
+      Object.freeze({ name: optionName, type: 3, value: normalized }),
+    ]);
+  }
+
+  async readBoundedTypedDocumentAttachment(attachment) {
+    const filename = String(attachment?.filename ?? "").toLowerCase();
+    const contentType = String(attachment?.content_type ?? "").toLowerCase();
+    const supportedName = /\.(?:ctk3|fumen|txt)$/u.test(filename);
+    const supportedType = contentType === "text/plain" ||
+      contentType.includes("ctk3") ||
+      contentType.includes("fumen");
+    if (!supportedName && !supportedType) {
+      throw new Error("Typed-document attachments must be CTK3, Fumen, or plain text.");
+    }
+    const limit = Math.min(
+      this.config.maxCtk3FileBytes ?? 16 * 1024 * 1024,
+      16 * 1024 * 1024,
+    );
+    if (Number(attachment?.size) > limit) {
+      throw new Error("The typed-document attachment is too large.");
+    }
+    if (!attachment?.url) {
+      throw new Error("The typed-document attachment URL is missing.");
+    }
+    const bytes = await this.rest.downloadAttachment(attachment.url, limit);
+    const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+    if (source.length === 0) {
+      throw new Error("The typed-document attachment is empty.");
+    }
+    return source;
   }
 
   async readBoundedAttachmentDocuments(attachments = [], options = {}) {
@@ -999,6 +1153,7 @@ export class Clearrabot {
         prepared.previewDocument,
         prepared.locale,
         prepared.resultKind,
+        prepared.timeoutClass,
       );
     } else if (prepared.arguments_) {
       await this.runOracleMessageCommand(
@@ -1007,6 +1162,7 @@ export class Clearrabot {
         prepared.previewDocument,
         prepared.locale,
         prepared.resultKind,
+        prepared.timeoutClass,
       );
     }
     return prepared.handled;
@@ -1184,6 +1340,7 @@ export class Clearrabot {
       automaticPcTargets: textRequest?.automaticPcTargets === true,
       locale,
       resultKind: catalogPublicResultKind(textRequest?.command),
+      timeoutClass: catalogTimeoutClass(textRequest?.command),
       previewDocument:
         (textRequest?.command
           ? safeSearchPreviewDocument(
@@ -1273,24 +1430,29 @@ export class Clearrabot {
     previewDocument,
     locale = "en",
     requestedResultKind = null,
+    timeoutClass = undefined,
   ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
-    const deadlineUnixMs = Date.now() + this.searchDeadlineDurationMs(arguments_);
+    const deadlineUnixMs = Date.now() +
+      this.searchDeadlineDurationMs(arguments_, timeoutClass);
     this.controllers.add(controller);
     try {
       const outcome = this.withSearchSlot(
         () => this.executor.execute(arguments_, {
           signal: controller.signal,
           deadlineUnixMs,
+          timeoutClass,
         }),
         { deadlineUnixMs, signal: controller.signal },
       ).then(
         (value) => ({
           outgoing: resultMessage(value, tilingOnly, {
             maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+            maxArtifactBytes: this.config.maxGifBytes,
             locale,
             resultKind: requestedResultKind ?? publicResultKind(arguments_),
+            allspinExpectation: allspinResultExpectation(arguments_),
           }),
           error: null,
         }),
@@ -1332,11 +1494,12 @@ export class Clearrabot {
     previewDocument = null,
     locale = "en",
     requestedResultKind = null,
+    timeoutClass = undefined,
   ) {
     const controller = new AbortController();
     const deadlineUnixMs = Date.now() + Math.min(
       ...argumentSets.map((arguments_) =>
-        this.searchDeadlineDurationMs(arguments_)
+        this.searchDeadlineDurationMs(arguments_, timeoutClass)
       ),
     );
     let delivered = 0;
@@ -1363,12 +1526,15 @@ export class Clearrabot {
           const result = await this.executor.execute(arguments_, {
             signal: controller.signal,
             deadlineUnixMs,
+            timeoutClass,
           });
           const outgoing = labelResultMessage(
             resultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+              maxArtifactBytes: this.config.maxGifBytes,
               locale,
               resultKind: requestedResultKind ?? publicResultKind(arguments_),
+              allspinExpectation: allspinResultExpectation(arguments_),
             }),
             t(locale, "search.auto_target", {
               lines: pcLineLabel(arguments_),
@@ -1507,10 +1673,10 @@ export class Clearrabot {
     );
   }
 
-  searchDeadlineDurationMs(arguments_) {
+  searchDeadlineDurationMs(arguments_, timeoutClass = undefined) {
     return Math.min(
       this.interactionDeadlineMs,
-      searchTimeoutMsForArguments(arguments_, this.config),
+      searchTimeoutMsForArguments(arguments_, this.config, timeoutClass),
     );
   }
 
@@ -1725,13 +1891,39 @@ function delayedValue(delayMs, value) {
 
 function resultMessage(result, tilingOnly = false, options = {}) {
   const locale = options.locale ?? "en";
+  const allspinIntent = options.allspinExpectation !== undefined ||
+    ALLSPIN_RESULT_CONTRACTS.has(options.resultKind);
   if (result.exitCode === 0 && result.stdout) {
     const parsed = parseStructuredResult(result.stdout);
+    if (allspinIntent && !parsed) {
+      return textMessage(t(locale, "error.result_consistency"));
+    }
     const resultKind = parsed
-      ? requestedStructuredResultKind(parsed, options.resultKind)
+      ? requestedStructuredResultKind(
+          parsed,
+          options.resultKind,
+          options.allspinExpectation,
+        )
       : null;
     if (parsed && resultKind === null) {
       return textMessage(t(locale, "error.result_consistency"));
+    }
+    if (parsed && ["parity", "fumen", "render", "to-gray", "mirror"].includes(resultKind)) {
+      try {
+        const plan = buildDiscordDocumentUtilityResult(
+          parsed,
+          result,
+          resultKind,
+          {
+            locale,
+            maxDocumentBytes: options.maxCtk3FileBytes,
+            maxArtifactBytes: options.maxArtifactBytes,
+          },
+        );
+        return attachmentMessage(plan.content, plan.files);
+      } catch {
+        return textMessage(t(locale, "error.result_consistency"));
+      }
     }
     const structured = parsed ? { ...parsed, kind: resultKind } : parsed;
     if (structured) {
@@ -1751,6 +1943,9 @@ function resultMessage(result, tilingOnly = false, options = {}) {
         ),
       );
     }
+  }
+  if (result.exitCode === 0 && allspinIntent) {
+    return textMessage(t(locale, "error.result_consistency"));
   }
   if (result.exitCode !== 0) {
     if (!isCliUserInputError(result)) {
@@ -1784,13 +1979,339 @@ function resultMessage(result, tilingOnly = false, options = {}) {
   );
 }
 
-function requestedStructuredResultKind(structured, fallback) {
+function requestedStructuredResultKind(structured, fallback, allspinExpectation) {
   if (
     isPlainObject(structured?.finesse_report) &&
     (fallback === "finesse-search" || fallback === "finesse-score") &&
     publicStructuredResultKind(structured?.kind, fallback) === fallback
   ) return fallback;
-  return publicStructuredResultKind(structured?.kind, fallback);
+  const publicKind = publicStructuredResultKind(structured?.kind, fallback);
+  if (publicKind === null) return null;
+  if (publicKind === "pc-score" && !validPcScoreSummary(structured)) {
+    return null;
+  }
+  if (
+    publicKind === "score-minimals" &&
+    !validDiscordPcScoreMinimalsResult(structured)
+  ) return null;
+  if (
+    (publicKind === "saves" || publicKind === "best-save") &&
+    !validDiscordPcSaveResult(structured, publicKind)
+  ) return null;
+  const expectedContract = ALLSPIN_RESULT_CONTRACTS.get(publicKind);
+  if (
+    expectedContract &&
+    (!allspinExpectation ||
+      !allspinExpectation.publicKinds.includes(publicKind) ||
+      structured?.kind !== allspinExpectation.engineKind ||
+      !validAllspinSummary(
+        structured?.summary,
+        expectedContract,
+        allspinExpectation,
+      ))
+  ) return null;
+  return publicKind;
+}
+
+function validPcScoreSummary(structured) {
+  if (
+    structured?.kind !== "pc-score-summary.v2" ||
+    structured?.contract?.command?.kind !== "pc-score-summary.v2" ||
+    !isPlainObject(structured?.summary) ||
+    !isPlainObject(structured?.resource_report) ||
+    structured.resource_report.probability_complete !== true ||
+    structured.resource_report.count_complete !== true ||
+    structured.resource_report.truncated !== false ||
+    structured.resource_report.truncation_reason !== null ||
+    structured.resource_report.count_truncated_reason !== null ||
+    structured.resource_report.materialized_probability_mass !== 1 ||
+    structured.resource_report.renormalized !== false
+  ) return false;
+  const summary = structured.summary;
+  const contractScoring = structured.contract?.pc?.scoring;
+  const executionScoring = structured.contract?.pc?.execution_report?.scoring;
+  if (
+    !validPcScoreContractProjection(contractScoring, summary) ||
+    !validPcScoreContractProjection(executionScoring, summary)
+  ) return false;
+  if (Object.keys(summary).some((key) =>
+    PC_SCORE_PRIVATE_SUMMARY_KEYS.has(key) ||
+    /^(?:private_|transient_|pc_score_.*evidence|exact_scoring_|postprocess_score_cells)/u
+      .test(key)
+  )) return false;
+  if (
+    summary.score_accuracy_level !== "basic-approximation" ||
+    summary.score_accuracy_reason !==
+      "profile-specific basic score/attack tables with configurable spin detection" ||
+    summary.score_profile_specific_exact !== false ||
+    summary.score_objective_mode !== "summary" ||
+    summary.score_matrix_accuracy_level !== "basic-approximation" ||
+    summary.count_truncated_reason !== "none" ||
+    summary.resource_truncation_reason !== "none" ||
+    summary.objective_incomplete_reason !== "none" ||
+    summary.score_matrix_incomplete_reason !== "none" ||
+    summary.score_summary_incomplete_reason !== "none" ||
+    summary.score_failed_pc_pattern_score !== 0
+  ) return false;
+  if ([...PC_SCORE_REQUIRED_TRUE_FIELDS].some((key) => summary[key] !== true)) {
+    return false;
+  }
+  if (
+    summary.resource_truncated !== false ||
+    summary.solution_probabilities_requested === true ||
+    !safeContractToken(summary.score_profile_requested) ||
+    !safeContractToken(summary.spin_profile_requested) ||
+    !safeContractToken(summary.score_profile) ||
+    summary.score_matrix_profile_id !== summary.score_profile
+  ) return false;
+  for (const key of PC_SCORE_REQUIRED_NON_NEGATIVE_INTEGERS) {
+    if (nonNegativeInteger(summary[key]) === null) return false;
+  }
+  if (
+    summary.materialized_pattern_count < 1 ||
+    summary.total_possible_pattern_count !== summary.materialized_pattern_count ||
+    summary.score_matrix_pattern_count !== summary.materialized_pattern_count ||
+    summary.score_pattern_optimal_count + summary.score_failed_pc_pattern_count !==
+      summary.materialized_pattern_count ||
+    summary.materialized_probability_mass !== 1 ||
+    unitProbability(summary.score_covered_probability) === null
+  ) return false;
+  for (const key of [
+    "score_unconditional_expected_score",
+    "score_unconditional_expected_attack",
+  ]) {
+    if (nonNegativeFiniteNumber(summary[key]) === null) return false;
+  }
+  for (const key of [
+    "score_best_score",
+    "score_best_attack",
+    "score_covered_pattern_conditional_average_score",
+  ]) {
+    if (
+      summary[key] !== null && summary[key] !== undefined &&
+      nonNegativeFiniteNumber(summary[key]) === null
+    ) return false;
+  }
+  return true;
+}
+
+function validPcScoreContractProjection(scoring, summary) {
+  if (!isPlainObject(scoring)) return false;
+  for (const key of [
+    "score_profile",
+    "score_matrix_profile_id",
+    "score_accuracy_level",
+    "score_matrix_accuracy_level",
+    "score_accuracy_reason",
+    "score_profile_specific_exact",
+    "score_evaluation_complete",
+    "score_matrix_materialized",
+    "score_matrix_complete",
+    "score_best_complete",
+    "score_summary_complete",
+    "score_all_universe_patterns_covered",
+    "score_matrix_incomplete_reason",
+    "score_summary_incomplete_reason",
+  ]) {
+    if (scoring[key] !== summary[key]) return false;
+  }
+  return scoring.score_profile_accuracy_mode === "basic-approximation";
+}
+
+function safeContractToken(value) {
+  return typeof value === "string" &&
+    value.length >= 1 && value.length <= 128 && /^[a-z0-9][a-z0-9+._-]*$/u.test(value);
+}
+
+function validAllspinSummary(summary, expectedContract, expectation) {
+  if (!isPlainObject(summary)) return false;
+  const witnessContract = expectedContract === "pc-b2b-preserving-witness.v1";
+  const probabilityContract =
+    expectedContract === "pc-b2b-preservation-probability.v1";
+  if (!witnessContract && !probabilityContract) return false;
+
+  const allowedKeys = witnessContract
+    ? ALLSPIN_WITNESS_SUMMARY_KEYS
+    : ALLSPIN_PROBABILITY_SUMMARY_KEYS;
+  if (Object.keys(summary).some((key) =>
+    key.startsWith("pc_allspin_") && !allowedKeys.has(key)
+  )) return false;
+  if ([...ALLSPIN_COMMON_SUMMARY_KEYS].some((key) => !Object.hasOwn(summary, key))) {
+    return false;
+  }
+  if (
+    summary.pc_allspin_result_contract !== expectedContract ||
+    summary.pc_allspin_spin_profile !== expectation.spinProfile ||
+    summary.pc_allspin_problem_preset !== expectation.problemPreset ||
+    summary.pc_allspin_mode !== (
+      witnessContract ? "exact-queue-witness" : "pattern-preservation-chance"
+    ) ||
+    !ALLSPIN_SPIN_PROFILES.has(summary.pc_allspin_spin_profile) ||
+    !["opening-pc", "scenario-pc"].includes(summary.pc_allspin_problem_preset) ||
+    summary.pc_allspin_initial_field_supplied !==
+      (summary.pc_allspin_problem_preset === "scenario-pc") ||
+    summary.pc_allspin_target_field_supplied !== false ||
+    summary.pc_allspin_clear_contract !== "inverse-lock-clear-to-empty" ||
+    summary.pc_allspin_semantics !== "clearra-explicit-spin-profile" ||
+    summary.pc_allspin_compatibility !== "sfinderbot-command-intent-only" ||
+    typeof summary.pc_allspin_complete !== "boolean" ||
+    typeof summary.pc_allspin_incomplete_reason !== "string" ||
+    summary.pc_allspin_incomplete_reason.length < 1 ||
+    summary.pc_allspin_incomplete_reason.length > 512 ||
+    !/^[a-z0-9,-]+$/.test(summary.pc_allspin_incomplete_reason) ||
+    summary.pc_allspin_denominator_semantics !== "original-materialized-queue" ||
+    summary.pc_allspin_evaluation_basis !== "candidate-pattern-existence" ||
+    summary.pc_allspin_path_multiplicity_counted !== false ||
+    typeof summary.pc_allspin_count_complete !== "boolean" ||
+    typeof summary.pc_allspin_probability_complete !== "boolean"
+  ) return false;
+
+  const preserving = allspinCount(summary.pc_allspin_preserving_queue_count);
+  const original = allspinCount(summary.pc_allspin_original_queue_count);
+  const probability = allspinProbability(
+    summary.pc_allspin_preservation_probability,
+  );
+  if (preserving === undefined || original === undefined || probability === undefined) {
+    return false;
+  }
+  if (
+    (preserving !== null && original !== null && preserving > original) ||
+    (summary.pc_allspin_count_complete && (preserving === null || original === null)) ||
+    (summary.pc_allspin_probability_complete && probability === null)
+  ) return false;
+
+  const complete = summary.pc_allspin_complete;
+  if (
+    (complete && (
+      summary.pc_allspin_incomplete_reason !== "none" ||
+      !summary.pc_allspin_count_complete ||
+      !summary.pc_allspin_probability_complete ||
+      preserving === null ||
+      original === null ||
+      original < 1 ||
+      probability === null
+    )) ||
+    (!complete && summary.pc_allspin_incomplete_reason === "none")
+  ) return false;
+
+  if (!witnessContract) {
+    if (
+      summary.pc_allspin_count_complete &&
+      summary.pc_allspin_probability_complete &&
+      preserving !== null &&
+      original !== null &&
+      probability !== null
+    ) {
+      if (original < 1) return false;
+      if (preserving === 0 && probability !== 0) return false;
+      if (preserving === original && probability !== 1) return false;
+      if (
+        preserving > 0 &&
+        preserving < original &&
+        !(probability > 0 && probability < 1)
+      ) return false;
+    }
+    return true;
+  }
+  if ([...ALLSPIN_WITNESS_ONLY_SUMMARY_KEYS].some(
+    (key) => !Object.hasOwn(summary, key),
+  )) return false;
+  if (
+    (original !== null && original !== 1) ||
+    (preserving !== null && preserving > 1) ||
+    (preserving !== null && probability !== null && probability !== preserving) ||
+    typeof summary.pc_allspin_witness_required !== "boolean" ||
+    typeof summary.pc_allspin_witness_available !== "boolean" ||
+    typeof summary.pc_allspin_witness_deterministic !== "boolean"
+  ) return false;
+
+  const preservingWitness = preserving === 1;
+  if (summary.pc_allspin_witness_required !== preservingWitness) return false;
+  if (complete) {
+    if (summary.pc_allspin_preserves_b2b !== preservingWitness) return false;
+  } else if (summary.pc_allspin_preserves_b2b !== "not-calculated") {
+    return false;
+  }
+
+  const witnessMustBePublic = complete && preservingWitness;
+  if (
+    summary.pc_allspin_witness_available !== witnessMustBePublic ||
+    summary.pc_allspin_witness_deterministic !== witnessMustBePublic
+  ) return false;
+  if (witnessMustBePublic) {
+    return summary.pc_allspin_witness_kind === "candidate-pattern" &&
+      typeof summary.pc_allspin_witness_candidate_key === "string" &&
+      summary.pc_allspin_witness_candidate_key.length > 0 &&
+      summary.pc_allspin_witness_candidate_key.length <= 4096 &&
+      summary.pc_allspin_witness_candidate_key !== "not-materialized" &&
+      summary.pc_allspin_witness_pattern_index === 0;
+  }
+  return summary.pc_allspin_witness_kind === "none" &&
+    summary.pc_allspin_witness_candidate_key === "not-materialized" &&
+    summary.pc_allspin_witness_pattern_index === "not-materialized";
+}
+
+function allspinResultExpectation(arguments_) {
+  if (!Array.isArray(arguments_) || arguments_.length < 2) return undefined;
+  const namespace = String(arguments_[0]).toLowerCase().replaceAll("_", "-");
+  const command = String(arguments_[1]).toLowerCase().replaceAll("_", "-");
+  if (
+    namespace !== "pc" ||
+    !["allspin-sol", "allspin-pres-chance"].includes(command)
+  ) return undefined;
+
+  const values = new Map([
+    ["--spin-profile", []],
+    ["--board-mask", []],
+    ["--height", []],
+    ["--pieces", []],
+  ]);
+  for (let index = 2; index < arguments_.length; index += 1) {
+    const optionValues = values.get(arguments_[index]);
+    if (!optionValues) continue;
+    const value = arguments_[index + 1];
+    if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
+      return null;
+    }
+    optionValues.push(value);
+    index += 1;
+  }
+  const spinProfiles = values.get("--spin-profile");
+  const scenarioCounts = ["--board-mask", "--height", "--pieces"]
+    .map((option) => values.get(option).length);
+  if (
+    spinProfiles.length !== 1 ||
+    !ALLSPIN_SPIN_PROFILES.has(spinProfiles[0]) ||
+    !(
+      scenarioCounts.every((count) => count === 0) ||
+      scenarioCounts.every((count) => count === 1)
+    )
+  ) return null;
+  const scenario = scenarioCounts[0] === 1;
+  return Object.freeze({
+    publicKinds: Object.freeze(
+      command === "allspin-sol"
+        ? ["allspin-sol", "allspin-sol-finder"]
+        : ["allspin-pres-chance"],
+    ),
+    spinProfile: spinProfiles[0],
+    problemPreset: scenario ? "scenario-pc" : "opening-pc",
+    engineKind: scenario ? "pc-scenario" : "pc",
+  });
+}
+
+function allspinCount(value) {
+  if (value === "not-calculated") return null;
+  return typeof value === "number" && nonNegativeInteger(value) !== null
+    ? value
+    : undefined;
+}
+
+function allspinProbability(value) {
+  if (value === "not-calculated") return null;
+  return typeof value === "number" && unitProbability(value) !== null
+    ? value
+    : undefined;
 }
 
 function publicResultKind(arguments_) {
@@ -1804,18 +2325,38 @@ function publicResultKind(arguments_) {
   if (namespace === "finesse" && ["search", "score"].includes(command)) {
     return `finesse-${command}`;
   }
+  if (
+    namespace === "pc" &&
+    ["allspin-sol", "allspin-pres-chance"].includes(command)
+  ) return command;
+  if (namespace === "pc") {
+    const typedPcResult = ({
+      chance: "pc-chance",
+      score: "pc-score",
+      "score-minimals": "score-minimals",
+      saves: "saves",
+      "best-save": "best-save",
+      tiling: "tiling",
+      "failed-queue": "failed-queue",
+    })[command];
+    if (typedPcResult) return typedPcResult;
+  }
   const direct = namespace.replaceAll("_", "-");
   return PUBLIC_RESULT_KINDS.has(direct) ? direct : "search";
 }
 
 function catalogPublicResultKind(command) {
-  if (command?.subcommand === "search" || command?.subcommand === "score") {
-    return `finesse-${command.subcommand}`;
-  }
-  const name = String(command?.name ?? "")
+  const name = String(
+    command?.resultAuthorityId ?? command?.publicResultKind ?? command?.name ?? "",
+  )
     .toLowerCase()
     .replaceAll("_", "-");
   return PUBLIC_RESULT_KINDS.has(name) ? name : null;
+}
+
+function catalogTimeoutClass(command) {
+  const value = command?.timeoutClass;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function interactionPublicResultKind(interaction, arguments_) {
@@ -1828,7 +2369,7 @@ function interactionPublicResultKind(interaction, arguments_) {
 function ctk3ResultMessage(structured, ctk3, tilingOnly, options) {
   const locale = options.locale ?? "en";
   const finesseCompleteness = structuredCompleteness(
-    null,
+    structured.summary,
     structured.finesse_report,
   );
   const bytes = new TextEncoder().encode(ctk3.source);
@@ -1887,10 +2428,48 @@ function structuredResultSummary(
       kind: friendlyResultKind(structured.kind, locale),
       partial: complete ? "" : t(locale, "result.partial_suffix"),
     }),
-    t(locale, "result.ctk3_pages", { count: pageCount }),
   );
+  if (!["sequence", "sequence-dependencies", "score-minimals"].includes(structured.kind)) {
+    lines.push(t(locale, "result.ctk3_pages", { count: pageCount }));
+  }
   const summary = structured.summary;
-  if (summary && typeof summary === "object" && !Array.isArray(summary)) {
+  if (structured.kind === "score-minimals") {
+    lines.push(...(discordPcScoreMinimalsSummaryLines(structured, locale) ?? []));
+  }
+  if (
+    structured.kind !== "score-minimals" &&
+    summary && typeof summary === "object" && !Array.isArray(summary)
+  ) {
+    if (structured.kind === "sequence-dependencies") {
+      for (const key of SEQUENCE_DEPENDENCY_SUMMARY_FIELDS) {
+        const value = summary[key];
+        if (
+          typeof value === "string" ||
+          typeof value === "number" ||
+          typeof value === "boolean"
+        ) {
+          lines.push(`${t(locale, `summary.${key}`)}: ${summaryValue(key, value, locale)}`);
+        }
+      }
+    }
+    if (structured.kind === "sequence") {
+      for (const key of OPERATION_SEQUENCE_SUMMARY_FIELDS) {
+        const value = summary[key];
+        if (
+          typeof value === "string" ||
+          typeof value === "number" ||
+          typeof value === "boolean"
+        ) {
+          lines.push(`${t(locale, `summary.${key}`)}: ${summaryValue(key, value, locale)}`);
+        }
+      }
+      if (typeof summary.normalized_trace === "string") {
+        const trace = summary.normalized_trace;
+        const preview = trace.slice(0, OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT);
+        const suffix = trace.length > OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT ? "…" : "";
+        lines.push(`${t(locale, "summary.normalized_trace_preview")}: ${preview}${suffix}`);
+      }
+    }
     const solutionCountCalculated =
       coverageSummaryDisposition(summary) === "non-coverage" &&
       summary.solution_count_calculated !== false &&
@@ -1905,8 +2484,31 @@ function structuredResultSummary(
         continue;
       }
       const value = summary[key];
-      if (typeof value === "string" || typeof value === "number") {
-        lines.push(`${t(locale, `summary.${key}`)}: ${summaryValue(key, value)}`);
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        lines.push(`${t(locale, `summary.${key}`)}: ${summaryValue(key, value, locale)}`);
+      }
+    }
+    if (structured.kind === "saves") {
+      lines.push(
+        `${t(locale, "summary.save_group_count")}: ${summary.save_groups.length}`,
+        `${t(locale, "summary.save_pc_probability")}: ${summaryValue("save_pc_probability", summary.save_pc_probability, locale)}`,
+      );
+    }
+    if (structured.kind === "best-save") {
+      const winner = selectDiscordBestSaveWinner(summary);
+      if (winner) {
+        lines.push(
+          `${t(locale, "summary.best_save_schema")}: ${summary.best_save_schema}`,
+          `${t(locale, "summary.best_save_weighted_total")}: ${winner.weighted_total}`,
+          `${t(locale, "summary.best_save_balanced_jl_count")}: ${winner.balanced_jl_count}`,
+          `${t(locale, "summary.best_save_exact_group_probability")}: ${summaryValue("best_save_exact_group_probability", winner.exact_group_probability, locale)}`,
+          `${t(locale, "summary.best_save_group")}: ${winner.group.identity}`,
+          `${t(locale, "summary.best_save_canonical_candidate_id")}: ${winner.group.canonical_candidate_id}`,
+        );
       }
     }
   }
@@ -1926,7 +2528,10 @@ function structuredResultSummary(
   return lines.join("\n").slice(0, DISCORD_CONTENT_LIMIT);
 }
 
-function summaryValue(key, value) {
+function summaryValue(key, value, locale) {
+  if (typeof value === "boolean") {
+    return t(locale, value ? "summary.boolean_true" : "summary.boolean_false");
+  }
   if (!PROBABILITY_SUMMARY_FIELDS.has(key)) return String(value);
   const probability = Number(value);
   if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
@@ -2105,6 +2710,74 @@ const RESULT_SUMMARY_FIELDS = Object.freeze([
   "mini_count",
   "minimum_placements",
   "maximum_damage",
+  "maximum_ren",
+  "score_profile",
+  "score_accuracy_level",
+  "score_profile_specific_exact",
+  "pc_allspin_spin_profile",
+  "pc_allspin_preserving_queue_count",
+  "pc_allspin_original_queue_count",
+  "pc_allspin_preservation_probability",
+  "pc_allspin_preserves_b2b",
+  "pc_allspin_witness_available",
+  "pc_allspin_count_complete",
+  "pc_allspin_probability_complete",
+]);
+
+const SEQUENCE_DEPENDENCY_SUMMARY_FIELDS = Object.freeze([
+  "candidate_id",
+  "operation_count",
+  "exact_order_count",
+  "universal_dependency_count",
+  "transitive_reduction_count",
+  "independent_pair_count",
+  "representative_order",
+]);
+
+const OPERATION_SEQUENCE_SUMMARY_FIELDS = Object.freeze([
+  "operation_count",
+  "cleared_line_count",
+  "trace_key",
+  "rule_profile",
+  "kick_profile",
+]);
+const OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT = 240;
+
+const PC_SCORE_REQUIRED_TRUE_FIELDS = new Set([
+  "probability_complete",
+  "resource_probability_complete",
+  "count_complete",
+  "objective_search_complete",
+  "objective_complete",
+  "postprocess_scoring_requested",
+  "score_evaluation_complete",
+  "score_matrix_materialized",
+  "score_matrix_complete",
+  "score_best_complete",
+  "score_summary_complete",
+  "score_all_universe_patterns_covered",
+]);
+
+const PC_SCORE_REQUIRED_NON_NEGATIVE_INTEGERS = Object.freeze([
+  "coverage_pattern_count",
+  "materialized_pattern_count",
+  "total_possible_pattern_count",
+  "score_initial_b2b",
+  "score_matrix_cell_count",
+  "score_matrix_pattern_count",
+  "score_pattern_optimal_count",
+  "score_failed_pc_pattern_count",
+]);
+
+const PC_SCORE_PRIVATE_SUMMARY_KEYS = new Set([
+  "origin",
+  "query",
+  "problem_owner",
+  "execution_authority",
+  "memory_evidence",
+  "pc_score_problem_evidence",
+  "exact_scoring_execution_batches",
+  "postprocess_score_cells",
 ]);
 
 const PUBLIC_RESULT_KIND_CONTRACT = new Map([
@@ -2117,6 +2790,7 @@ const PUBLIC_RESULT_KIND_CONTRACT = new Map([
     "setup",
     "damage",
     "spin-finder",
+    "ren",
     "spin-structure",
     "verify",
     "verify-kicks",
@@ -2125,16 +2799,80 @@ const PUBLIC_RESULT_KIND_CONTRACT = new Map([
     id,
     new Set(engineKinds),
   ]),
+  ...DISCORD_HIDDEN_TEXT_SEARCH_CONTRACT.map(({ id, engineKinds }) => [
+    id,
+    new Set(engineKinds),
+  ]),
 ]);
 const PUBLIC_RESULT_KEYS = new Map(
-  DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ id, resultKey }) => [id, resultKey]),
+  [
+    ...DISCORD_PUBLIC_SEARCH_CONTRACT,
+    ...DISCORD_HIDDEN_TEXT_SEARCH_CONTRACT,
+  ].map(({ id, resultKey }) => [id, resultKey]),
 );
 const PUBLIC_RESULT_KINDS = new Set(PUBLIC_RESULT_KIND_CONTRACT.keys());
+
+const ALLSPIN_RESULT_CONTRACTS = new Map(
+  DISCORD_PUBLIC_SEARCH_CONTRACT
+    .filter(({ resultContractId }) => [
+      "pc-b2b-preserving-witness.v1",
+      "pc-b2b-preservation-probability.v1",
+    ].includes(resultContractId))
+    .map(({ id, resultContractId }) => [id, resultContractId]),
+);
+
+const ALLSPIN_SPIN_PROFILES = new Set([
+  "t-spins",
+  "t-spins-plus",
+  "all-spin",
+  "all-spin-plus",
+  "all-mini",
+  "all-mini-plus",
+]);
+
+const ALLSPIN_COMMON_SUMMARY_KEYS = new Set([
+  "pc_allspin_result_contract",
+  "pc_allspin_mode",
+  "pc_allspin_spin_profile",
+  "pc_allspin_problem_preset",
+  "pc_allspin_initial_field_supplied",
+  "pc_allspin_target_field_supplied",
+  "pc_allspin_clear_contract",
+  "pc_allspin_semantics",
+  "pc_allspin_compatibility",
+  "pc_allspin_complete",
+  "pc_allspin_incomplete_reason",
+  "pc_allspin_denominator_semantics",
+  "pc_allspin_evaluation_basis",
+  "pc_allspin_path_multiplicity_counted",
+  "pc_allspin_preserving_queue_count",
+  "pc_allspin_original_queue_count",
+  "pc_allspin_preservation_probability",
+  "pc_allspin_count_complete",
+  "pc_allspin_probability_complete",
+]);
+const ALLSPIN_WITNESS_ONLY_SUMMARY_KEYS = new Set([
+  "pc_allspin_preserves_b2b",
+  "pc_allspin_witness_required",
+  "pc_allspin_witness_available",
+  "pc_allspin_witness_deterministic",
+  "pc_allspin_witness_kind",
+  "pc_allspin_witness_candidate_key",
+  "pc_allspin_witness_pattern_index",
+]);
+const ALLSPIN_PROBABILITY_SUMMARY_KEYS = new Set(ALLSPIN_COMMON_SUMMARY_KEYS);
+const ALLSPIN_WITNESS_SUMMARY_KEYS = new Set([
+  ...ALLSPIN_COMMON_SUMMARY_KEYS,
+  ...ALLSPIN_WITNESS_ONLY_SUMMARY_KEYS,
+]);
 
 const PROBABILITY_SUMMARY_FIELDS = new Set([
   "coverage_probability",
   "probability",
   "weighted_probability",
+  "pc_allspin_preservation_probability",
+  "save_pc_probability",
+  "best_save_exact_group_probability",
 ]);
 
 const SOLUTION_COUNT_SUMMARY_FIELDS = new Set([

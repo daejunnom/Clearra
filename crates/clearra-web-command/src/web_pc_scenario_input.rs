@@ -124,4 +124,16 @@ impl WebPcScenarioInput {
     pub const fn hold_piece(&self) -> Option<PieceKind> {
         self.hold_piece
     }
+
+    pub const fn allow_hold(&self) -> bool {
+        self.allow_hold
+    }
+
+    pub const fn count_policy(&self) -> PcCountPolicy {
+        self.count_policy
+    }
+
+    pub fn has_allowed_colored_solution_identities(&self) -> bool {
+        self.allowed_colored_solution_identities.is_some()
+    }
 }

@@ -1,5 +1,5 @@
 mod bridge {
-    use clearra_app::AppContext;
+    use clearra_app::{AppContext, ProductPageStore};
     #[cfg(feature = "wasm-cpu-runtime")]
     use clearra_app::{AppCoreExecutorService, AppServices};
 
@@ -11,6 +11,7 @@ mod bridge {
         pub(super) queue: GuiJobQueue,
         pub(super) active_job: Option<GuiJobHandle>,
         pub(super) active_job_id: Option<GuiJobId>,
+        pub(super) product_page_store: Option<ProductPageStore>,
     }
 
     impl DesktopTauriCommandBridge {
@@ -20,6 +21,7 @@ mod bridge {
                 queue: GuiJobQueue::new(),
                 active_job: None,
                 active_job_id: None,
+                product_page_store: None,
             }
         }
     }
@@ -48,7 +50,7 @@ mod cancel_job {
     use super::{bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError};
 
     impl DesktopTauriCommandBridge {
-        pub fn cancel_job(&self, job_id: u64) -> Result<(), DesktopTauriCommandError> {
+        pub fn cancel_job(&mut self, job_id: u64) -> Result<(), DesktopTauriCommandError> {
             if self.active_job_id.map(GuiJobId::get) != Some(job_id) {
                 return Err(DesktopTauriCommandError::job("desktop active job mismatch"));
             }
@@ -56,6 +58,7 @@ mod cancel_job {
                 .as_ref()
                 .ok_or_else(|| DesktopTauriCommandError::job("desktop job handle missing"))?
                 .cancel();
+            self.product_page_store = None;
             Ok(())
         }
     }
@@ -112,7 +115,12 @@ mod error {
     impl std::error::Error for DesktopTauriCommandError {}
 }
 mod form_parser {
-    use clearra_app::AppRequest;
+    use clearra_app::{
+        AppCommand, AppRequest, BuildObjective, BuildQueueKnowledge, BuildScoreProfile,
+        FieldDocumentFormat, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
+        FumenAppCommand, FumenTransformKind, ParityAppCommand, RenderAppCommand,
+        RenderArtifactFormat, RequestStructuralProfiles,
+    };
     use clearra_core_domain::{
         board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
         piece::piece_kind::PieceKind,
@@ -123,7 +131,8 @@ mod form_parser {
     };
     use clearra_i18n::LanguageId;
     use clearra_objectives::policy::{
-        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+        objective_policy::ObjectivePolicy,
+        score_objective_policy::{ScoreProfileSelection, SpinProfileSelection},
     };
     use clearra_pc_graph::request::{
         validate_pc_observation_objective, GpuDeviceSelection, RequestedSearchBackend, WorkerPolicy,
@@ -134,7 +143,11 @@ mod form_parser {
     };
     use clearra_scoring::profile::SpinProfileId;
     use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
-    use clearra_web_command::{WebBuildProbabilityInput, WebCommandRequest};
+    use clearra_web_command::{
+        operation_sequence_request_from_document, sequence_dependencies_request_from_document,
+        WebBuildProbabilityInput, WebBuildV2Capability, WebBuildV2Input, WebCommandParser,
+        WebCommandRequest, WebSetupScoreInput, WebSetupScoreQueueInput,
+    };
     use serde_json::Value;
 
     use crate::{
@@ -153,6 +166,7 @@ mod form_parser {
         let value: Value = serde_json::from_str(request_json)
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
         validate_app_request_envelope(&value)?;
+        let request_structural_profiles = parse_request_structural_profiles(&value)?;
         let command = text_or_default(&value, &["command"], "pc")?;
         let request = match command {
             "pc" | "pc-scenario" => {
@@ -162,8 +176,19 @@ mod form_parser {
                     .into_app_request()
             }
             "setup" => build_setup_app_request(&value)?,
+            "setup-score" => build_setup_score_app_request(&value)?,
             "build-probability" => build_probability_app_request(&value)?,
-            "damage" | "spin-finder" => build_forward_app_request(&value, command)?,
+            "build-v2" => build_v2_app_request(&value)?,
+            "spin-structure" => build_spin_structure_app_request(&value)?,
+            "damage" | "spin-finder" | "ren" => build_forward_app_request(&value, command)?,
+            "utility-sequence" => build_operation_sequence_app_request(&value)?,
+            "utility-sequence-dependencies" => build_sequence_dependencies_app_request(&value)?,
+            "utility-parity" => build_parity_app_request(&value)?,
+            "utility-fumen" => build_fumen_app_request(&value)?,
+            "utility-render" => build_render_app_request(&value)?,
+            "utility-to-gray" | "utility-mirror" => {
+                build_field_document_transform_app_request(&value, command)?
+            }
             _ => unreachable!("desktop command allowlist validated before dispatch"),
         };
         let language = optional_text(&value, &["language"])?
@@ -176,7 +201,709 @@ mod form_parser {
             })
             .transpose()?
             .unwrap_or(LanguageId::En);
-        Ok(request.with_language(language))
+        request
+            .with_language(language)
+            .with_request_structural_profiles(request_structural_profiles)
+            .map_err(|error| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "invalid desktop request profile selection: {error}"
+                ))
+            })
+    }
+
+    const DESKTOP_SETUP_SCORE_FIELDS: &[&str] = &[
+        "app_request_model",
+        "command",
+        "language",
+        "document_format",
+        "document",
+        "setup_queue",
+        "setup_patterns",
+        "solution_queue",
+        "solution_patterns",
+        "clear_height",
+        "hold_enabled",
+        "score_profile",
+        "initial_b2b",
+        "rule",
+        "max_patterns",
+        "workers",
+        "use_all_logical_processors",
+        "backend",
+        "allow_backend_fallback",
+    ];
+
+    const DESKTOP_SPIN_STRUCTURE_FIELDS: &[&str] = &[
+        "app_request_model",
+        "command",
+        "language",
+        "capability_id",
+        "board_mask_v1",
+        "visible_height",
+        "inventory",
+        "spin_profile",
+        "lines",
+        "fill_bottom",
+        "fill_top",
+        "rule",
+        "max_placements",
+        "minimality",
+        "objective",
+        "max_patterns",
+        "final_piece",
+        "dependency_report",
+        "workers",
+        "use_all_logical_processors",
+        "backend",
+        "allow_backend_fallback",
+    ];
+
+    fn build_spin_structure_app_request(
+        value: &Value,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop request must be a JSON object")
+        })?;
+        if let Some(field) = object.keys().find(|field| {
+            field.as_str() != "profiles" && !DESKTOP_SPIN_STRUCTURE_FIELDS.contains(&field.as_str())
+        }) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop spin-structure does not accept field '{field}'"
+            )));
+        }
+        let required_string = |key: &'static str| {
+            value
+                .get(key)
+                .ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "desktop spin-structure requires {key}"
+                    ))
+                })?
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "desktop spin-structure {key} must be a nonempty string"
+                    ))
+                })
+        };
+        if required_string("app_request_model")? != "clearra-app/AppRequest"
+            || required_string("command")? != "spin-structure"
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop spin-structure requires the clearra-app/AppRequest model and spin-structure command",
+            ));
+        }
+        if required_string("backend")? != "cpu" {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop spin-structure is CPU-only",
+            ));
+        }
+        if optional_bool(value, &["allow_backend_fallback"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop spin-structure requires boolean allow_backend_fallback",
+            )
+        })? {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop spin-structure requires allow_backend_fallback=false",
+            ));
+        }
+
+        let capability_id = required_string("capability_id")?;
+        let route = match capability_id {
+            "spin-structure.search" => "search",
+            "spin-structure.cover" => "cover",
+            "spin-structure.guaranteed" => "guaranteed",
+            _ => {
+                return Err(DesktopTauriCommandError::invalid_request(format!(
+                    "unsupported desktop spin-structure capability_id '{capability_id}'"
+                )))
+            }
+        };
+        let required_u8 = |key: &'static str| {
+            optional_u8_any(value, &[key])?.ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop spin-structure requires integer {key}"
+                ))
+            })
+        };
+        let required_usize = |key: &'static str| {
+            optional_usize_any(value, &[key])?.ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop spin-structure requires integer {key}"
+                ))
+            })
+        };
+        let height = required_u8("visible_height")?;
+        let fill_bottom = required_u8("fill_bottom")?;
+        let fill_top = required_u8("fill_top")?;
+        let max_placements = required_u8("max_placements")?;
+        let workers = required_usize("workers")?;
+        let use_all = optional_bool(value, &["use_all_logical_processors"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop spin-structure requires boolean use_all_logical_processors",
+            )
+        })?;
+        if workers == 0 {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop spin-structure workers must be positive",
+            ));
+        }
+
+        let mut tokens = vec![
+            "clearra".to_owned(),
+            "spin-structure".to_owned(),
+            route.to_owned(),
+            "--board-mask-v1".to_owned(),
+            required_string("board_mask_v1")?.to_owned(),
+            "--height".to_owned(),
+            height.to_string(),
+            "--pieces".to_owned(),
+            required_string("inventory")?.to_owned(),
+            "--spin-profile".to_owned(),
+            required_string("spin_profile")?.to_owned(),
+            "--lines".to_owned(),
+            required_string("lines")?.to_owned(),
+            "--fill-bottom".to_owned(),
+            fill_bottom.to_string(),
+            "--fill-top".to_owned(),
+            fill_top.to_string(),
+            "--rule".to_owned(),
+            required_string("rule")?.to_owned(),
+            "--max-placements".to_owned(),
+            max_placements.to_string(),
+            "--minimality".to_owned(),
+            required_string("minimality")?.to_owned(),
+        ];
+        if use_all {
+            tokens.push("--use-all-logical-processors".to_owned());
+        } else {
+            tokens.push("--workers".to_owned());
+            tokens.push(workers.to_string());
+        }
+
+        match route {
+            "search" => reject_spin_structure_fields(
+                value,
+                capability_id,
+                &[
+                    "objective",
+                    "max_patterns",
+                    "final_piece",
+                    "dependency_report",
+                ],
+            )?,
+            "cover" => {
+                reject_spin_structure_fields(
+                    value,
+                    capability_id,
+                    &["final_piece", "dependency_report"],
+                )?;
+                if required_string("objective")? != "min-cover" {
+                    return Err(DesktopTauriCommandError::invalid_request(
+                        "desktop spin-structure.cover objective must be min-cover",
+                    ));
+                }
+                tokens.extend([
+                    "--objective".to_owned(),
+                    "min-cover".to_owned(),
+                    "--max-patterns".to_owned(),
+                    required_usize("max_patterns")?.to_string(),
+                ]);
+            }
+            "guaranteed" => {
+                reject_spin_structure_fields(value, capability_id, &["objective"])?;
+                tokens.extend([
+                    "--final-piece".to_owned(),
+                    required_string("final_piece")?.to_owned(),
+                    "--max-patterns".to_owned(),
+                    required_usize("max_patterns")?.to_string(),
+                ]);
+                let dependency_report =
+                    optional_bool(value, &["dependency_report"])?.ok_or_else(|| {
+                        DesktopTauriCommandError::invalid_request(
+                            "desktop spin-structure.guaranteed requires boolean dependency_report",
+                        )
+                    })?;
+                tokens.push(
+                    if dependency_report {
+                        "--dependency-report"
+                    } else {
+                        "--no-dependency-report"
+                    }
+                    .to_owned(),
+                );
+            }
+            _ => unreachable!("closed spin-structure route"),
+        }
+
+        WebCommandParser::parse_tokens_with_worker_limit(
+            &tokens,
+            WorkerPolicy::hardware_worker_limit(),
+        )
+        .and_then(|request| request.to_app_request())
+        .map_err(|error| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop spin-structure request: {error}"
+            ))
+        })
+    }
+
+    fn reject_spin_structure_fields(
+        value: &Value,
+        capability_id: &str,
+        fields: &[&str],
+    ) -> Result<(), DesktopTauriCommandError> {
+        if let Some(field) = fields.iter().find(|field| value.get(**field).is_some()) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop {capability_id} does not accept field '{field}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn build_setup_score_app_request(
+        value: &Value,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop request must be a JSON object")
+        })?;
+        if let Some(field) = object.keys().find(|field| {
+            field.as_str() != "profiles" && !DESKTOP_SETUP_SCORE_FIELDS.contains(&field.as_str())
+        }) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop setup-score does not accept field '{field}'"
+            )));
+        }
+        let required_string = |key: &'static str| {
+            value
+                .get(key)
+                .ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "desktop setup-score requires {key}"
+                    ))
+                })?
+                .as_str()
+                .ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "desktop setup-score {key} must be a string"
+                    ))
+                })
+        };
+        if required_string("app_request_model")? != "clearra-app/AppRequest"
+            || required_string("command")? != "setup-score"
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires the clearra-app/AppRequest model and setup-score command",
+            ));
+        }
+        if required_string("backend")? != "cpu" {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score is CPU-only",
+            ));
+        }
+        if optional_bool(value, &["allow_backend_fallback"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires boolean allow_backend_fallback",
+            )
+        })? {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires allow_backend_fallback=false",
+            ));
+        }
+        let format = match required_string("document_format")? {
+            "ctk3" => FieldDocumentFormat::Ctk3,
+            "fumen" => FieldDocumentFormat::Fumen,
+            format => {
+                return Err(DesktopTauriCommandError::invalid_request(format!(
+                    "invalid desktop setup-score document_format '{format}'"
+                )));
+            }
+        };
+        let document = required_string("document")?;
+        if document.is_empty() {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score document must not be empty",
+            ));
+        }
+        let queue_source = |queue_key: &'static str,
+                            pattern_key: &'static str|
+         -> Result<WebSetupScoreQueueInput, DesktopTauriCommandError> {
+            let queue = required_string(queue_key)?;
+            let patterns = required_string(pattern_key)?;
+            match (queue.is_empty(), patterns.is_empty()) {
+                (false, true) => Ok(WebSetupScoreQueueInput::queue(queue)),
+                (true, false) => Ok(WebSetupScoreQueueInput::patterns(patterns)),
+                _ => Err(DesktopTauriCommandError::invalid_request(format!(
+                    "desktop setup-score requires exactly one nonempty {queue_key} or {pattern_key}"
+                ))),
+            }
+        };
+        let setup_source = queue_source("setup_queue", "setup_patterns")?;
+        let solution_source = queue_source("solution_queue", "solution_patterns")?;
+        let clear_height = optional_u8_any(value, &["clear_height"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires integer clear_height",
+            )
+        })?;
+        if !(1..=6).contains(&clear_height) {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score clear_height must be between 1 and 6",
+            ));
+        }
+        let hold_enabled = optional_bool(value, &["hold_enabled"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires boolean hold_enabled",
+            )
+        })?;
+        let score_profile = ScoreProfileSelection::parse(required_string("score_profile")?)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop setup-score score_profile must be tetrio, guideline, or jstris-ultra",
+                )
+            })?;
+        let initial_b2b = optional_usize_any(value, &["initial_b2b"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires integer initial_b2b",
+            )
+        })?;
+        let initial_b2b = u32::try_from(initial_b2b).map_err(|_| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score initial_b2b exceeds the supported range",
+            )
+        })?;
+        let max_patterns = optional_usize_any(value, &["max_patterns"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires integer max_patterns",
+            )
+        })?;
+        if max_patterns == 0 {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score max_patterns must be positive",
+            ));
+        }
+        let workers = optional_usize_any(value, &["workers"])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop setup-score requires integer workers",
+            )
+        })?;
+        let use_all_logical_processors = optional_bool(value, &["use_all_logical_processors"])?
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop setup-score requires boolean use_all_logical_processors",
+                )
+            })?;
+        if workers > 0 && use_all_logical_processors {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop setup-score workers and use_all_logical_processors are mutually exclusive",
+            ));
+        }
+
+        let input = WebSetupScoreInput::new(format, document, setup_source, solution_source)
+            .with_clear_height(clear_height)
+            .with_setup_hold_enabled(hold_enabled)
+            .with_score_profile(score_profile)
+            .with_initial_b2b(initial_b2b);
+        let rule = parse_rule_profile(required_string("rule")?)
+            .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
+        let mut request = WebCommandRequest::setup_score(input)
+            .with_rule(rule)
+            .with_hold_enabled(hold_enabled)
+            .with_backend(RequestedSearchBackend::Cpu)
+            .with_allow_backend_fallback(false)
+            .with_worker_hardware_limit(WorkerPolicy::hardware_worker_limit())
+            .with_max_patterns(max_patterns)
+            .with_use_all_logical_processors(use_all_logical_processors);
+        if workers > 0 {
+            request = request.with_workers(workers);
+        }
+        typed_web_request_to_app_request("setup-score", request)
+    }
+
+    fn build_parity_app_request(value: &Value) -> Result<AppRequest, DesktopTauriCommandError> {
+        validate_utility_fields(
+            value,
+            "utility-parity",
+            &[
+                "app_request_model",
+                "command",
+                "language",
+                "format",
+                "document",
+            ],
+        )?;
+        let format = parse_field_document_format(value, "utility-parity")?;
+        let document = required_text(value, &["document"], "document")?;
+        let command = ParityAppCommand::new(format, document.to_owned()).map_err(|error| {
+            DesktopTauriCommandError::validation(format!(
+                "invalid desktop utility-parity request: {error}"
+            ))
+        })?;
+        Ok(AppRequest::new(AppCommand::UtilityParity(command)))
+    }
+
+    fn build_fumen_app_request(value: &Value) -> Result<AppRequest, DesktopTauriCommandError> {
+        validate_utility_fields(
+            value,
+            "utility-fumen",
+            &[
+                "app_request_model",
+                "command",
+                "language",
+                "format",
+                "transform",
+                "documents",
+                "page_number",
+                "page_shift",
+                "comments",
+            ],
+        )?;
+        let format = parse_field_document_format(value, "utility-fumen")?;
+        let transform =
+            FumenTransformKind::parse(required_text(value, &["transform"], "transform")?).map_err(
+                |error| {
+                    DesktopTauriCommandError::validation(format!(
+                        "invalid desktop utility-fumen transform: {error}"
+                    ))
+                },
+            )?;
+        let documents = optional_string_array(value, "documents")?.unwrap_or_default();
+        let comments = optional_string_array(value, "comments")?.unwrap_or_default();
+        let page_number = optional_usize_any(value, &["page_number"])?;
+        let page_shift = optional_isize(value, "page_shift")?;
+        let command = FumenAppCommand::new(
+            format,
+            transform,
+            documents,
+            page_number,
+            page_shift,
+            comments,
+        )
+        .map_err(|error| {
+            DesktopTauriCommandError::validation(format!(
+                "invalid desktop utility-fumen request: {error}"
+            ))
+        })?;
+        Ok(AppRequest::new(AppCommand::UtilityFumen(command)))
+    }
+
+    fn build_render_app_request(value: &Value) -> Result<AppRequest, DesktopTauriCommandError> {
+        validate_utility_fields(
+            value,
+            "utility-render",
+            &[
+                "app_request_model",
+                "command",
+                "language",
+                "format",
+                "document",
+                "artifact_format",
+                "page_number",
+            ],
+        )?;
+        let format = parse_field_document_format(value, "utility-render")?;
+        let document = required_text(value, &["document"], "document")?;
+        let artifact_format = RenderArtifactFormat::parse(required_text(
+            value,
+            &["artifact_format"],
+            "artifact_format",
+        )?)
+        .map_err(|error| {
+            DesktopTauriCommandError::validation(format!(
+                "invalid desktop utility-render artifact format: {error}"
+            ))
+        })?;
+        let page_number = optional_usize_any(value, &["page_number"])?;
+        let command =
+            RenderAppCommand::new(format, document.to_owned(), artifact_format, page_number)
+                .map_err(|error| {
+                    DesktopTauriCommandError::validation(format!(
+                        "invalid desktop utility-render request: {error}"
+                    ))
+                })?;
+        Ok(AppRequest::new(AppCommand::UtilityRender(command)))
+    }
+
+    fn build_field_document_transform_app_request(
+        value: &Value,
+        command_name: &str,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        validate_utility_fields(
+            value,
+            command_name,
+            &[
+                "app_request_model",
+                "command",
+                "language",
+                "format",
+                "document",
+            ],
+        )?;
+        let format = parse_field_document_format(value, command_name)?;
+        let document = required_text(value, &["document"], "document")?;
+        let transform = match command_name {
+            "utility-to-gray" => FieldDocumentTransformKind::ToGray,
+            "utility-mirror" => FieldDocumentTransformKind::Mirror,
+            _ => unreachable!("closed desktop field-document transform"),
+        };
+        let command = FieldDocumentTransformAppCommand::new(transform, format, document.to_owned())
+            .map_err(|error| {
+                DesktopTauriCommandError::validation(format!(
+                    "invalid desktop {command_name} request: {error}"
+                ))
+            })?;
+        Ok(AppRequest::new(match transform {
+            FieldDocumentTransformKind::ToGray => AppCommand::UtilityToGray(command),
+            FieldDocumentTransformKind::Mirror => AppCommand::UtilityMirror(command),
+        }))
+    }
+
+    fn validate_utility_fields(
+        value: &Value,
+        command: &str,
+        allowed_fields: &[&str],
+    ) -> Result<(), DesktopTauriCommandError> {
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop request must be a JSON object")
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|key| key.as_str() != "profiles" && !allowed_fields.contains(&key.as_str()))
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop {command} does not accept field '{field}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn parse_field_document_format(
+        value: &Value,
+        command: &str,
+    ) -> Result<FieldDocumentFormat, DesktopTauriCommandError> {
+        FieldDocumentFormat::parse(required_text(value, &["format"], "format")?).map_err(|error| {
+            DesktopTauriCommandError::validation(format!(
+                "invalid desktop {command} document format: {error}"
+            ))
+        })
+    }
+
+    fn optional_string_array(
+        value: &Value,
+        key: &str,
+    ) -> Result<Option<Vec<String>>, DesktopTauriCommandError> {
+        let Some(entry) = value.get(key) else {
+            return Ok(None);
+        };
+        let values = entry.as_array().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop {key} must be an array of strings"
+            ))
+        })?;
+        let mut result = Vec::new();
+        result.try_reserve_exact(values.len()).map_err(|_| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop {key} array exceeds available capacity"
+            ))
+        })?;
+        for item in values {
+            let text = item.as_str().ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop {key} must be an array of strings"
+                ))
+            })?;
+            result.push(text.to_owned());
+        }
+        Ok(Some(result))
+    }
+
+    fn optional_isize(value: &Value, key: &str) -> Result<Option<isize>, DesktopTauriCommandError> {
+        let Some(entry) = value.get(key) else {
+            return Ok(None);
+        };
+        entry
+            .as_i64()
+            .and_then(|number| isize::try_from(number).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop {key} must be a signed integer that fits isize"
+                ))
+            })
+    }
+
+    fn build_sequence_dependencies_app_request(
+        value: &Value,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        const ALLOWED_FIELDS: &[&str] = &[
+            "app_request_model",
+            "command",
+            "language",
+            "document",
+            "rule_profile",
+            "kick_profile",
+            "timeout_seconds",
+        ];
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop request must be a JSON object")
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|key| key.as_str() != "profiles" && !ALLOWED_FIELDS.contains(&key.as_str()))
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop utility-sequence-dependencies does not accept field '{field}'"
+            )));
+        }
+        let document = required_text(value, &["document"], "document")?;
+        let rule_profile = optional_text(value, &["rule_profile"])?;
+        let kick_profile = optional_text(value, &["kick_profile"])?;
+        let timeout_seconds = optional_u16(value, "timeout_seconds")?;
+        sequence_dependencies_request_from_document(
+            document,
+            rule_profile,
+            kick_profile,
+            timeout_seconds,
+        )
+        .and_then(|request| request.to_app_request())
+        .map_err(|error| DesktopTauriCommandError::validation(error.to_string()))
+    }
+
+    fn build_operation_sequence_app_request(
+        value: &Value,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        const ALLOWED_FIELDS: &[&str] = &[
+            "app_request_model",
+            "command",
+            "language",
+            "document",
+            "rule_profile",
+            "kick_profile",
+            "timeout_seconds",
+        ];
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop request must be a JSON object")
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|key| key.as_str() != "profiles" && !ALLOWED_FIELDS.contains(&key.as_str()))
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop utility-sequence does not accept field '{field}'"
+            )));
+        }
+        let document = required_text(value, &["document"], "document")?;
+        let rule_profile = optional_text(value, &["rule_profile"])?;
+        let kick_profile = optional_text(value, &["kick_profile"])?;
+        let timeout_seconds = optional_u16(value, "timeout_seconds")?;
+        operation_sequence_request_from_document(
+            document,
+            rule_profile,
+            kick_profile,
+            timeout_seconds,
+        )
+        .and_then(|request| request.to_app_request())
+        .map_err(|error| DesktopTauriCommandError::validation(error.to_string()))
     }
 
     pub(super) fn desktop_form_builds_app_request(
@@ -271,8 +998,14 @@ mod form_parser {
             }
         };
         let score_mode = text_or_default(&value, &["score_mode"], "off")?;
+        let canonical_pc_path = score_mode == "path";
+        let canonical_pc_save = matches!(score_mode, "saves" | "best-save");
+        let canonical_pc_score_finder = score_mode == "score-finder";
+        let canonical_pc_score_minimals = score_mode == "score-minimals";
         let base_objective_kind = match command {
-            "pc" if score_mode == "failed-queue" => ObjectiveKind::All,
+            "pc" if score_mode == "failed-queue" || canonical_pc_save || canonical_pc_path => {
+                ObjectiveKind::All
+            }
             "pc-scenario" if matches!(count_policy, "all" | "count-all") => ObjectiveKind::All,
             _ => ObjectiveKind::Unique,
         };
@@ -300,7 +1033,7 @@ mod form_parser {
             bool_or_default(&value, &["tablebase_requested", "tablebase_enabled"], false)?;
         let finesse = text_or_default(&value, &["finesse"], "off")?;
         let pattern_knowledge = text_or_default(&value, &["pattern_knowledge"], "both")?;
-        let score_active = score_mode == "summary";
+        let score_active = matches!(score_mode, "summary" | "score-finder" | "score-minimals");
         if (!score_active && initial_b2b != 0)
             || (!score_active && score_profile != "tetrio")
             || (!score_active && !preserve_b2b && spin_profile != "t-spins")
@@ -326,6 +1059,72 @@ mod form_parser {
         {
             return Err(DesktopTauriCommandError::invalid_request(
                 "desktop tiling-only PC request contains a noncanonical inactive option",
+            ));
+        }
+        if canonical_pc_save
+            && (count_policy != "all"
+                || !queue.trim().is_empty()
+                || preserve_b2b
+                || solution_probabilities
+                || precompute_build_dependencies
+                || tablebase_requested
+                || queue_observation_policy.requires_observation_policy()
+                || finesse != "off"
+                || pattern_knowledge != "both")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop pc save request contains a noncanonical inactive option or lacks bag provenance",
+            ));
+        }
+        if canonical_pc_path
+            && (count_policy != "all"
+                || score_profile != "tetrio"
+                || spin_profile != "t-spins"
+                || initial_b2b != 0
+                || preserve_b2b
+                || solution_probabilities
+                || precompute_build_dependencies
+                || tablebase_requested
+                || queue_observation_policy.requires_observation_policy()
+                || finesse != "off"
+                || pattern_knowledge != "both")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop pc path requires objective-all/count-all and no score, probability, observation, tablebase, finesse, or dependency override",
+            ));
+        }
+        if canonical_pc_score_minimals
+            && (count_policy != "all"
+                || preserve_b2b
+                || solution_probabilities
+                || precompute_build_dependencies
+                || tablebase_requested
+                || queue_observation_policy.requires_observation_policy()
+                || finesse != "off"
+                || pattern_knowledge != "both")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop pc score-minimals request requires count-all score-only semantics and contains no constraint, probability, observation, tablebase, finesse, or dependency override",
+            ));
+        }
+        if canonical_pc_score_finder
+            && (command != "pc-scenario"
+                || count_policy != "all"
+                || queue.trim().is_empty()
+                || !patterns.trim().is_empty()
+                || score_profile != "jstris-ultra"
+                || spin_profile != "t-spins"
+                || initial_b2b > 1
+                || preserve_b2b
+                || solution_probabilities
+                || precompute_build_dependencies
+                || tablebase_requested
+                || queue_observation_policy.requires_observation_policy()
+                || finesse != "off"
+                || pattern_knowledge != "both")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop pc score-finder requires an explicit scenario, one fixed queue, jstris-ultra/t-spins, initial B2B 0 or 1, count-all, and no inactive semantic override",
             ));
         }
         let problem_form = problem_form
@@ -544,6 +1343,7 @@ mod form_parser {
         let preserve_b2b = bool_or_default(value, &["preserve_b2b"], false)?;
         let precompute_build_dependencies =
             bool_or_default(value, &["precompute_build_dependencies"], false)?;
+        let solution_probabilities = bool_or_default(value, &["solution_probabilities"], false)?;
         let finesse_text = text_or_default(value, &["finesse"], "off")?;
         let finesse_metric = FinesseMetric::parse(finesse_text).ok_or_else(|| {
             DesktopTauriCommandError::invalid_request(format!(
@@ -573,6 +1373,7 @@ mod form_parser {
         if matches!(aggregation, BuildProbabilityAggregation::TilingOnly)
             && (preserve_b2b
                 || precompute_build_dependencies
+                || solution_probabilities
                 || finesse_metric.requested()
                 || spin_profile != SpinProfileSelection::TSpins
                 || pattern_knowledge != FinessePatternKnowledge::Both
@@ -614,6 +1415,7 @@ mod form_parser {
             .with_rule(parse_desktop_rule(value)?)
             .with_hold_enabled(hold_enabled)
             .with_precompute_build_dependencies(precompute_build_dependencies)
+            .with_solution_probabilities(solution_probabilities)
             .with_cpu_warmup(bool_or_default(value, &["cpu_warmup"], false)?)
             .with_gpu_warmup(bool_or_default(value, &["gpu_warmup"], false)?);
         let backend_text = text_or_default(value, &["backend"], "cpu")?;
@@ -649,6 +1451,400 @@ mod form_parser {
         typed_web_request_to_app_request("build-probability", request)
     }
 
+    const DESKTOP_BUILD_V2_FIELDS: &[&str] = &[
+        "app_request_model",
+        "command",
+        "language",
+        "capability_id",
+        "base_mask",
+        "target_mask",
+        "visible_height",
+        "source_piece_count",
+        "target_format",
+        "target_document",
+        "solution_format",
+        "solution_document",
+        "queue",
+        "patterns",
+        "queue_knowledge",
+        "hold_enabled",
+        "hold_piece",
+        "objective",
+        "score_profile",
+        "initial_b2b",
+        "rule",
+        "workers",
+        "use_all_logical_processors",
+        "backend",
+        "allow_backend_fallback",
+    ];
+
+    fn build_v2_app_request(value: &Value) -> Result<AppRequest, DesktopTauriCommandError> {
+        validate_build_v2_fields(value)?;
+        require_build_v2_literal(value, "app_request_model", "clearra-app/AppRequest")?;
+        require_build_v2_literal(value, "command", "build-v2")?;
+        match required_build_v2_string(value, "language")? {
+            "en" | "ko" => {}
+            language => {
+                return Err(DesktopTauriCommandError::invalid_request(format!(
+                    "invalid desktop build-v2 language '{language}'"
+                )));
+            }
+        }
+        require_build_v2_literal(value, "backend", "cpu")?;
+        if required_build_v2_bool(value, "allow_backend_fallback")? {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop build-v2 requires allow_backend_fallback=false",
+            ));
+        }
+
+        let capability =
+            parse_build_v2_capability(required_build_v2_string(value, "capability_id")?)?;
+        let objective = parse_build_v2_objective(required_build_v2_string(value, "objective")?)?;
+        let queue_knowledge = match required_build_v2_string(value, "queue_knowledge")? {
+            "oracle" => BuildQueueKnowledge::Oracle,
+            "visible-7" => BuildQueueKnowledge::VisibleSeven,
+            policy => {
+                return Err(DesktopTauriCommandError::invalid_request(format!(
+                    "invalid desktop build-v2 queue_knowledge '{policy}'"
+                )));
+            }
+        };
+
+        let hold_enabled = required_build_v2_bool(value, "hold_enabled")?;
+        let hold_text = required_build_v2_string(value, "hold_piece")?;
+        if !matches!(hold_text, "empty" | "I" | "O" | "T" | "S" | "Z" | "J" | "L") {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop build-v2 hold_piece must be empty or one of I, O, T, S, Z, J, L",
+            ));
+        }
+        let hold_piece = parse_hold_piece_kind(value.get("hold_piece"))?;
+        if !hold_enabled && hold_piece.is_some() {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop build-v2 cannot combine disabled hold with an occupied hold slot",
+            ));
+        }
+
+        let queue = required_build_v2_string(value, "queue")?;
+        let patterns = required_build_v2_string(value, "patterns")?;
+        match (queue.is_empty(), patterns.is_empty()) {
+            (false, true) | (true, false) => {}
+            _ => {
+                return Err(DesktopTauriCommandError::invalid_request(
+                    "desktop build-v2 requires exactly one nonempty queue or patterns field",
+                ));
+            }
+        }
+
+        let mut input = if capability == WebBuildV2Capability::Cover {
+            reject_build_v2_fields(
+                value,
+                capability,
+                &[
+                    "target_format",
+                    "target_document",
+                    "solution_format",
+                    "solution_document",
+                ],
+            )?;
+            let height = required_build_v2_u16(value, "visible_height")?;
+            if !(1..=24).contains(&height) {
+                return Err(DesktopTauriCommandError::invalid_request(
+                    "desktop build-v2 visible_height must be between 1 and 24",
+                ));
+            }
+            let input = WebBuildV2Input::cover(
+                parse_build_v2_mask(value, "base_mask")?,
+                parse_build_v2_mask(value, "target_mask")?,
+                height,
+                objective,
+            )
+            .map_err(build_v2_web_error)?;
+            match optional_usize_any(value, &["source_piece_count"])? {
+                Some(0) => {
+                    return Err(DesktopTauriCommandError::invalid_request(
+                        "desktop build-v2 source_piece_count must be positive",
+                    ));
+                }
+                Some(count) => input
+                    .with_source_piece_count(count)
+                    .map_err(build_v2_web_error)?,
+                None => input,
+            }
+        } else if capability.uses_target_document() {
+            reject_build_v2_fields(
+                value,
+                capability,
+                &[
+                    "base_mask",
+                    "target_mask",
+                    "visible_height",
+                    "source_piece_count",
+                    "solution_format",
+                    "solution_document",
+                ],
+            )?;
+            WebBuildV2Input::target_document(
+                capability,
+                parse_build_v2_format(value, "target_format")?,
+                required_nonempty_build_v2_string(value, "target_document")?,
+                objective,
+            )
+            .map_err(build_v2_web_error)?
+        } else {
+            reject_build_v2_fields(
+                value,
+                capability,
+                &[
+                    "base_mask",
+                    "target_mask",
+                    "visible_height",
+                    "source_piece_count",
+                    "target_format",
+                    "target_document",
+                ],
+            )?;
+            WebBuildV2Input::solution_document(
+                capability,
+                parse_build_v2_format(value, "solution_format")?,
+                required_nonempty_build_v2_string(value, "solution_document")?,
+                objective,
+            )
+            .map_err(build_v2_web_error)?
+        };
+
+        input = input
+            .with_queue_knowledge(queue_knowledge)
+            .with_hold_piece(hold_piece)
+            .with_allow_hold(hold_enabled);
+        if capability.score_capable() {
+            let score_profile = match optional_text(value, &["score_profile"])? {
+                Some(profile) => parse_build_v2_score_profile(profile)?,
+                None => BuildScoreProfile::default(),
+            };
+            let initial_b2b = optional_u16_any(value, &["initial_b2b"])?.unwrap_or(0);
+            input = input
+                .with_score_options(score_profile, initial_b2b)
+                .map_err(build_v2_web_error)?;
+        } else if value.get("score_profile").is_some() || value.get("initial_b2b").is_some() {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop {} does not accept score_profile or initial_b2b",
+                capability.capability_id()
+            )));
+        }
+
+        let rule = parse_rule_profile(required_nonempty_build_v2_string(value, "rule")?)
+            .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
+        let workers = required_build_v2_usize(value, "workers")?;
+        let use_all_logical_processors =
+            required_build_v2_bool(value, "use_all_logical_processors")?;
+        if workers > 0 && use_all_logical_processors {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop build-v2 workers and use_all_logical_processors are mutually exclusive",
+            ));
+        }
+
+        let mut request = WebCommandRequest::build_v2(input)
+            .with_rule(rule)
+            .with_hold_enabled(hold_enabled)
+            .with_backend(RequestedSearchBackend::Cpu)
+            .with_allow_backend_fallback(false)
+            .with_worker_hardware_limit(WorkerPolicy::hardware_worker_limit())
+            .with_use_all_logical_processors(use_all_logical_processors);
+        request = if queue.is_empty() {
+            request.with_patterns(patterns)
+        } else {
+            request.with_queue(queue)
+        };
+        if workers > 0 {
+            request = request.with_workers(workers);
+        }
+        typed_web_request_to_app_request("build-v2", request)
+    }
+
+    fn validate_build_v2_fields(value: &Value) -> Result<(), DesktopTauriCommandError> {
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop request must be a JSON object")
+        })?;
+        if let Some(field) = object.keys().find(|field| {
+            field.as_str() != "profiles" && !DESKTOP_BUILD_V2_FIELDS.contains(&field.as_str())
+        }) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 does not accept field '{field}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn required_build_v2_string<'a>(
+        value: &'a Value,
+        key: &str,
+    ) -> Result<&'a str, DesktopTauriCommandError> {
+        value
+            .get(key)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop build-v2 requires {key}"
+                ))
+            })?
+            .as_str()
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop build-v2 {key} must be a string"
+                ))
+            })
+    }
+
+    fn required_nonempty_build_v2_string<'a>(
+        value: &'a Value,
+        key: &str,
+    ) -> Result<&'a str, DesktopTauriCommandError> {
+        let text = required_build_v2_string(value, key)?;
+        if text.is_empty() {
+            Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 {key} must not be empty"
+            )))
+        } else {
+            Ok(text)
+        }
+    }
+
+    fn required_build_v2_bool(value: &Value, key: &str) -> Result<bool, DesktopTauriCommandError> {
+        optional_bool(value, &[key])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 requires boolean {key}"
+            ))
+        })
+    }
+
+    fn required_build_v2_u16(value: &Value, key: &str) -> Result<u16, DesktopTauriCommandError> {
+        optional_u16_any(value, &[key])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 requires integer {key}"
+            ))
+        })
+    }
+
+    fn required_build_v2_usize(
+        value: &Value,
+        key: &str,
+    ) -> Result<usize, DesktopTauriCommandError> {
+        optional_usize_any(value, &[key])?.ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 requires integer {key}"
+            ))
+        })
+    }
+
+    fn require_build_v2_literal(
+        value: &Value,
+        key: &str,
+        expected: &str,
+    ) -> Result<(), DesktopTauriCommandError> {
+        let actual = required_build_v2_string(value, key)?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 {key} must be '{expected}'"
+            )))
+        }
+    }
+
+    fn parse_build_v2_capability(
+        capability: &str,
+    ) -> Result<WebBuildV2Capability, DesktopTauriCommandError> {
+        match capability {
+            "build.cover" => Ok(WebBuildV2Capability::Cover),
+            "build.setup" => Ok(WebBuildV2Capability::Setup),
+            "build.congruent" => Ok(WebBuildV2Capability::Congruent),
+            "build.congruent-cover" => Ok(WebBuildV2Capability::CongruentCover),
+            "build.setup-cover" => Ok(WebBuildV2Capability::SetupCover),
+            "build.setup-cover-percent" => Ok(WebBuildV2Capability::SetupCoverPercent),
+            "build.setup-cover-score" => Ok(WebBuildV2Capability::SetupCoverScore),
+            "build.evaluate.cover" => Ok(WebBuildV2Capability::EvaluateCover),
+            "build.evaluate.minimals" => Ok(WebBuildV2Capability::EvaluateMinimals),
+            "build.evaluate.score" => Ok(WebBuildV2Capability::EvaluateScore),
+            "build.evaluate.b2b-cover" => Ok(WebBuildV2Capability::EvaluateB2bCover),
+            "build.evaluate.cover-percent" => Ok(WebBuildV2Capability::EvaluateCoverPercent),
+            _ => Err(DesktopTauriCommandError::invalid_request(format!(
+                "unsupported desktop build-v2 capability_id '{capability}'"
+            ))),
+        }
+    }
+
+    fn parse_build_v2_objective(
+        objective: &str,
+    ) -> Result<BuildObjective, DesktopTauriCommandError> {
+        match objective {
+            "all" => Ok(BuildObjective::All),
+            "unique" => Ok(BuildObjective::Unique),
+            "min-cover" => Ok(BuildObjective::MinCover),
+            "max-probability-minimum" => Ok(BuildObjective::MaxProbabilityMinimum),
+            "max-score-cover" => Ok(BuildObjective::MaxScoreCover),
+            _ => Err(DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop build-v2 objective '{objective}'"
+            ))),
+        }
+    }
+
+    fn parse_build_v2_score_profile(
+        profile: &str,
+    ) -> Result<BuildScoreProfile, DesktopTauriCommandError> {
+        if !matches!(profile, "guideline" | "jstris-ultra" | "tetrio") {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop build-v2 score_profile '{profile}'"
+            )));
+        }
+        BuildScoreProfile::parse(profile).ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop build-v2 score_profile '{profile}'"
+            ))
+        })
+    }
+
+    fn parse_build_v2_format(
+        value: &Value,
+        key: &str,
+    ) -> Result<FieldDocumentFormat, DesktopTauriCommandError> {
+        match required_build_v2_string(value, key)? {
+            "ctk3" => Ok(FieldDocumentFormat::Ctk3),
+            "fumen" => Ok(FieldDocumentFormat::Fumen),
+            format => Err(DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop build-v2 {key} '{format}'"
+            ))),
+        }
+    }
+
+    fn parse_build_v2_mask(value: &Value, key: &str) -> Result<[u64; 4], DesktopTauriCommandError> {
+        let text = required_nonempty_build_v2_string(value, key)?;
+        parse_board_words_text(text).ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "desktop build-v2 {key} must be a 256-bit decimal or hexadecimal string"
+            ))
+        })
+    }
+
+    fn reject_build_v2_fields(
+        value: &Value,
+        capability: WebBuildV2Capability,
+        fields: &[&str],
+    ) -> Result<(), DesktopTauriCommandError> {
+        if let Some(field) = fields.iter().find(|field| value.get(**field).is_some()) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop {} does not accept field '{field}'",
+                capability.capability_id()
+            )));
+        }
+        Ok(())
+    }
+
+    fn build_v2_web_error(error: impl core::fmt::Display) -> DesktopTauriCommandError {
+        DesktopTauriCommandError::invalid_request(format!(
+            "invalid desktop build-v2 request: {error}"
+        ))
+    }
+
     fn build_forward_app_request(
         value: &Value,
         command: &str,
@@ -667,7 +1863,12 @@ mod form_parser {
 
         let piece_source = parse_forward_piece_source(value, command == "spin-finder")?;
         let rule = parse_desktop_rule(value)?;
-        let spin_profile_text = text_or_default(value, &["spin_profile"], "t-spins")?;
+        let default_spin_profile = if command == "ren" {
+            "disabled"
+        } else {
+            "t-spins"
+        };
+        let spin_profile_text = text_or_default(value, &["spin_profile"], default_spin_profile)?;
         let spin_profile = SpinProfileId::parse(spin_profile_text).ok_or_else(|| {
             DesktopTauriCommandError::invalid_request(format!(
                 "invalid desktop forward-search spin_profile '{spin_profile_text}'"
@@ -700,7 +1901,7 @@ mod form_parser {
                     )));
                 }
             }
-        } else {
+        } else if command == "spin-finder" {
             if optional_value(value, &["aggregation"])?.is_some() {
                 return Err(DesktopTauriCommandError::invalid_request(
                     "desktop spin-finder request cannot contain damage aggregation options",
@@ -719,6 +1920,8 @@ mod form_parser {
                 parse_spin_line_requirement(optional_value(value, &["spin_lines"])?)?,
                 spin_category,
             ))
+        } else {
+            ForwardSearchMode::MaximumRen
         };
         let line_clear_policy = if bool_or_default(value, &["preserve_b2b"], false)? {
             ForwardLineClearPolicy::PreserveBackToBack
@@ -771,6 +1974,44 @@ mod form_parser {
     ) -> Result<clearra_rules::profile::rule_profile::RuleProfile, DesktopTauriCommandError> {
         parse_rule_profile(text_or_default(value, &["rule"], "srs-plus")?)
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))
+    }
+
+    fn parse_request_structural_profiles(
+        value: &Value,
+    ) -> Result<RequestStructuralProfiles, DesktopTauriCommandError> {
+        let Some(profiles) = value.get("profiles") else {
+            return Ok(RequestStructuralProfiles::STANDARD);
+        };
+        let object = profiles.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request(
+                "desktop profiles must be an object with board, piece, and bag",
+            )
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|key| !matches!(key.as_str(), "board" | "piece" | "bag"))
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop profiles does not accept field '{field}'"
+            )));
+        }
+        let profile_text = |key: &'static str| {
+            object.get(key).and_then(Value::as_str).ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(format!(
+                    "desktop profiles requires canonical string field '{key}'"
+                ))
+            })
+        };
+        RequestStructuralProfiles::parse_canonical(
+            profile_text("board")?,
+            profile_text("piece")?,
+            profile_text("bag")?,
+        )
+        .map_err(|error| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid desktop request profile selection: {error}"
+            ))
+        })
     }
 
     fn apply_queue(
@@ -1340,6 +2581,14 @@ mod form_parser {
     const BUILD_COMMAND: &[&str] = &["build-probability"];
     const DAMAGE_COMMAND: &[&str] = &["damage"];
     const SPIN_FINDER_COMMAND: &[&str] = &["spin-finder"];
+    const SPIN_PROFILE_COMMANDS: &[&str] = &[
+        "pc",
+        "pc-scenario",
+        "build-probability",
+        "damage",
+        "spin-finder",
+        "ren",
+    ];
     const PC_AND_SETUP_COMMANDS: &[&str] = &["pc", "pc-scenario", "setup"];
     const PC_AND_BUILD_COMMANDS: &[&str] = &["pc", "pc-scenario", "build-probability"];
     const PC_SCENARIO_AND_BUILD_COMMANDS: &[&str] = &["pc-scenario", "build-probability"];
@@ -1350,9 +2599,23 @@ mod form_parser {
         "damage",
         "spin-finder",
     ];
-    const PC_SCENARIO_AND_FORWARD_COMMANDS: &[&str] = &["pc-scenario", "damage", "spin-finder"];
-    const SCENARIO_BUILD_FORWARD_COMMANDS: &[&str] =
-        &["pc-scenario", "build-probability", "damage", "spin-finder"];
+    const PC_BUILD_ALL_FORWARD_COMMANDS: &[&str] = &[
+        "pc",
+        "pc-scenario",
+        "build-probability",
+        "damage",
+        "spin-finder",
+        "ren",
+    ];
+    const PC_SCENARIO_AND_FORWARD_COMMANDS: &[&str] =
+        &["pc-scenario", "damage", "spin-finder", "ren"];
+    const SCENARIO_BUILD_FORWARD_COMMANDS: &[&str] = &[
+        "pc-scenario",
+        "build-probability",
+        "damage",
+        "spin-finder",
+        "ren",
+    ];
     const PC_AND_DAMAGE_COMMANDS: &[&str] = &["pc", "pc-scenario", "damage"];
     const ALL_NON_SETUP_COMMANDS: &[&str] = &[
         "pc",
@@ -1360,6 +2623,7 @@ mod form_parser {
         "build-probability",
         "damage",
         "spin-finder",
+        "ren",
     ];
 
     const INACTIVE_FIELD_RULES: &[InactiveFieldRule] = &[
@@ -1386,7 +2650,7 @@ mod form_parser {
         InactiveFieldRule {
             key: "hold_enabled",
             canonical: CanonicalInactiveValue::Bool(true),
-            active_commands: PC_BUILD_FORWARD_COMMANDS,
+            active_commands: PC_BUILD_ALL_FORWARD_COMMANDS,
         },
         InactiveFieldRule {
             key: "hold_piece",
@@ -1406,7 +2670,7 @@ mod form_parser {
         InactiveFieldRule {
             key: "spin_profile",
             canonical: CanonicalInactiveValue::Text("t-spins"),
-            active_commands: PC_BUILD_FORWARD_COMMANDS,
+            active_commands: SPIN_PROFILE_COMMANDS,
         },
         InactiveFieldRule {
             key: "preserve_b2b",
@@ -1456,7 +2720,7 @@ mod form_parser {
         InactiveFieldRule {
             key: "solution_probabilities",
             canonical: CanonicalInactiveValue::Bool(false),
-            active_commands: PC_COMMANDS,
+            active_commands: PC_AND_BUILD_COMMANDS,
         },
         InactiveFieldRule {
             key: "gpu_device",
@@ -1673,17 +2937,51 @@ mod form_parser {
         let command = text_or_default(value, &["command"], "pc")?;
         if !matches!(
             command,
-            "pc" | "pc-scenario" | "setup" | "build-probability" | "damage" | "spin-finder"
+            "pc" | "pc-scenario"
+                | "setup"
+                | "setup-score"
+                | "build-probability"
+                | "build-v2"
+                | "spin-structure"
+                | "damage"
+                | "spin-finder"
+                | "ren"
+                | "utility-sequence"
+                | "utility-sequence-dependencies"
+                | "utility-parity"
+                | "utility-fumen"
+                | "utility-render"
+                | "utility-to-gray"
+                | "utility-mirror"
         ) {
             return Err(DesktopTauriCommandError::invalid_request(
-                "desktop request bridge supports pc, pc-scenario, setup, build-probability, damage, and spin-finder commands",
+                "desktop request bridge supports pc, pc-scenario, setup, setup-score, build-probability, build-v2, spin-structure, damage, spin-finder, ren, utility-sequence, utility-sequence-dependencies, utility-parity, utility-fumen, utility-render, utility-to-gray, and utility-mirror commands",
             ));
         }
-        validate_command_inactive_fields(value, command)
+        if matches!(
+            command,
+            "build-v2"
+                | "spin-structure"
+                | "setup-score"
+                | "utility-sequence"
+                | "utility-sequence-dependencies"
+                | "utility-parity"
+                | "utility-fumen"
+                | "utility-render"
+                | "utility-to-gray"
+                | "utility-mirror"
+        ) {
+            // The operation-document command has its own closed allowlist;
+            // generic search defaults are not members of this JSON contract.
+            Ok(())
+        } else {
+            validate_command_inactive_fields(value, command)
+        }
     }
 }
 mod get_job_events {
     use crate::{GuiJobEvent, GuiJobId};
+    use clearra_app::ProductPageStore;
 
     use super::{
         bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError,
@@ -1727,6 +3025,24 @@ mod get_job_events {
                     .finish(GuiJobId::new(job_id))
                     .map_err(|error| DesktopTauriCommandError::job(error.to_string()))?;
                 self.active_job_id = None;
+            }
+
+            for event in &mut events {
+                if let GuiJobEvent::Completed {
+                    product_page_source_owner,
+                    ..
+                } = event
+                {
+                    if let Some(source) = product_page_source_owner.take() {
+                        self.product_page_store =
+                            Some(ProductPageStore::from_source(source).map_err(|error| {
+                                DesktopTauriCommandError::job(format!(
+                                    "open desktop product page store: {}",
+                                    error.as_str()
+                                ))
+                            })?);
+                    }
+                }
             }
 
             Ok(events)
@@ -1811,6 +3127,7 @@ mod job_event_json {
                     job_id,
                     response,
                     search_report_json,
+                    product_page_source_owner: _,
                 } => {
                     map.serialize_entry("event", "completed")?;
                     map.serialize_entry("job_id", &job_id.get())?;
@@ -1835,7 +3152,194 @@ mod job_event_json {
         }
     }
 }
+mod product_pages {
+    use clearra_app::{CoveragePortfolioPageStore, PortfolioAlternativeAdvance, ProductPageStore};
+    use clearra_host_contract::ParityReportPagePayload;
+
+    use super::{bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError};
+
+    impl DesktopTauriCommandBridge {
+        pub fn product_page_next(
+            &mut self,
+            maximum_work_steps: u64,
+        ) -> Result<String, DesktopTauriCommandError> {
+            if let Some(store) = self
+                .product_page_store
+                .as_mut()
+                .and_then(ProductPageStore::parity_report_mut)
+            {
+                let next = store.next_page().map_err(|error| {
+                    DesktopTauriCommandError::job(format!(
+                        "advance desktop parity page: {}",
+                        error.as_str()
+                    ))
+                })?;
+                return next.map_or_else(parity_exhausted_json, parity_page_json);
+            }
+            let (advance, loaded_page_number) = {
+                let store = coverage_store_mut(self)?;
+                let advance = store
+                    .next_page(maximum_work_steps.max(1), &mut || false)
+                    .map_err(|error| {
+                        DesktopTauriCommandError::job(format!(
+                            "advance desktop product page: {}",
+                            error.as_str()
+                        ))
+                    })?;
+                (advance, store.loaded_page_count())
+            };
+            if advance.page().is_some() {
+                return page_json(coverage_store(self)?, loaded_page_number, 1);
+            }
+            advance_json(&advance)
+        }
+
+        pub fn product_page_get(
+            &self,
+            outer_page_number: usize,
+            member_page_number: usize,
+        ) -> Result<String, DesktopTauriCommandError> {
+            if let Some(store) = self
+                .product_page_store
+                .as_ref()
+                .and_then(ProductPageStore::parity_report)
+            {
+                if member_page_number != 1 {
+                    return Err(DesktopTauriCommandError::job(
+                        "desktop parity pages have exactly one member page",
+                    ));
+                }
+                let page = store.page(outer_page_number).map_err(|error| {
+                    DesktopTauriCommandError::job(format!(
+                        "load desktop parity page: {}",
+                        error.as_str()
+                    ))
+                })?;
+                return parity_page_json(page);
+            }
+            page_json(coverage_store(self)?, outer_page_number, member_page_number)
+        }
+
+        pub fn product_page_release(&mut self) {
+            self.product_page_store = None;
+        }
+    }
+
+    fn coverage_store(
+        bridge: &DesktopTauriCommandBridge,
+    ) -> Result<&CoveragePortfolioPageStore, DesktopTauriCommandError> {
+        bridge
+            .product_page_store
+            .as_ref()
+            .and_then(ProductPageStore::coverage_portfolio)
+            .ok_or_else(|| DesktopTauriCommandError::job("desktop product page store unavailable"))
+    }
+
+    fn coverage_store_mut(
+        bridge: &mut DesktopTauriCommandBridge,
+    ) -> Result<&mut CoveragePortfolioPageStore, DesktopTauriCommandError> {
+        bridge
+            .product_page_store
+            .as_mut()
+            .and_then(ProductPageStore::coverage_portfolio_mut)
+            .ok_or_else(|| DesktopTauriCommandError::job("desktop product page store unavailable"))
+    }
+
+    fn page_json(
+        store: &CoveragePortfolioPageStore,
+        outer_page_number: usize,
+        member_page_number: usize,
+    ) -> Result<String, DesktopTauriCommandError> {
+        let page = store
+            .page(outer_page_number)
+            .ok_or_else(|| DesktopTauriCommandError::job("desktop product page not loaded"))?;
+        let members = store
+            .member_page(outer_page_number, member_page_number)
+            .map_err(|error| {
+                DesktopTauriCommandError::job(format!(
+                    "load desktop product member page: {}",
+                    error.as_str()
+                ))
+            })?;
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "runtime": "clearra-desktop",
+            "product_page_kind": "coverage-portfolio",
+            "state": "page",
+            "page": {
+                "page_contract": page.contract_id(),
+                "member_page_contract": members.contract_id(),
+                "set_identity_sha256": page.set_identity_sha256(),
+                "candidate_map_sha256": page.candidate_map_sha256(),
+                "alternative_index": page.alternative_index_decimal(),
+                "optimal_cardinality": page.optimal_cardinality().to_string(),
+                "known_alternative_count": page.known_alternative_count_decimal(),
+                "total_alternative_count": page.total_alternative_count_decimal(),
+                "enumeration_complete": page.enumeration_complete(),
+                "member_page_number": members.member_page_number().to_string(),
+                "total_member_pages": members.total_member_pages().to_string(),
+                "members": members.members().iter().map(|member| serde_json::json!({
+                    "candidate_id": member.candidate_id().to_string(),
+                    "normalized_solution_key": member.normalized_key(),
+                })).collect::<Vec<_>>()
+            }
+        }))
+        .map_err(|error| {
+            DesktopTauriCommandError::job(format!("serialize desktop product page: {error}"))
+        })
+    }
+
+    fn advance_json(
+        advance: &PortfolioAlternativeAdvance,
+    ) -> Result<String, DesktopTauriCommandError> {
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "runtime": "clearra-desktop",
+            "product_page_kind": "coverage-portfolio",
+            "state": advance.stop().as_str(),
+            "known_alternative_count": advance.checkpoint().known_alternative_count_decimal(),
+            "enumeration_complete": advance.checkpoint().enumeration_complete(),
+        }))
+        .map_err(|error| {
+            DesktopTauriCommandError::job(format!(
+                "serialize desktop product page advance: {error}"
+            ))
+        })
+    }
+
+    fn parity_page_json(page: ParityReportPagePayload) -> Result<String, DesktopTauriCommandError> {
+        if page.feasibility_claim() || page.pruning_authority() != "none" {
+            return Err(DesktopTauriCommandError::job(
+                "desktop parity page attempted to claim feasibility or pruning authority",
+            ));
+        }
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "runtime": "clearra-desktop",
+            "product_page_kind": "parity-report",
+            "state": "page",
+            "page": page,
+        }))
+        .map_err(|error| {
+            DesktopTauriCommandError::job(format!("serialize desktop parity page: {error}"))
+        })
+    }
+
+    fn parity_exhausted_json() -> Result<String, DesktopTauriCommandError> {
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "runtime": "clearra-desktop",
+            "product_page_kind": "parity-report",
+            "state": "exhausted",
+        }))
+        .map_err(|error| {
+            DesktopTauriCommandError::job(format!("serialize desktop parity page advance: {error}"))
+        })
+    }
+}
 mod run_request {
+    use clearra_host_contract::HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES;
+
     use super::{
         bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError,
         form_parser::desktop_request_builds_app_request,
@@ -1845,7 +3349,10 @@ mod run_request {
         pub fn run_request(&self, request_json: &str) -> Result<String, DesktopTauriCommandError> {
             let request = desktop_request_builds_app_request(request_json)?;
             let response = self.app_context.run(request);
-            serde_json::to_string(&response.to_host_response()).map_err(|error| {
+            serde_json::to_string(&response.to_host_response_with_solution_set_artifact(Some(
+                HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
+            )))
+            .map_err(|error| {
                 DesktopTauriCommandError::job(format!("serialize AppResponse: {error}"))
             })
         }
@@ -1862,6 +3369,7 @@ mod start_job {
     impl DesktopTauriCommandBridge {
         pub fn start_job(&mut self, request_json: &str) -> Result<u64, DesktopTauriCommandError> {
             self.reap_finished_job_before_start()?;
+            self.product_page_store = None;
             let request = desktop_request_builds_app_request(request_json)?;
             let queued = self
                 .queue
@@ -1910,6 +3418,7 @@ mod start_job {
     }
 }
 mod validate_request {
+    use clearra_app::AppRequest;
     use serde_json::json;
 
     use super::{
@@ -1923,7 +3432,11 @@ mod validate_request {
             request_json: &str,
         ) -> Result<String, DesktopTauriCommandError> {
             let request = desktop_request_builds_app_request(request_json)?;
-            let report = self.app_context.validate_request(&request);
+            Ok(self.validate_built_request(&request))
+        }
+
+        fn validate_built_request(&self, request: &AppRequest) -> String {
+            let report = self.app_context.validate_request(request);
             let diagnostics = report
                 .validation()
                 .diagnostics()
@@ -1932,14 +3445,48 @@ mod validate_request {
                 .collect::<Vec<_>>();
             let valid = !report.has_errors();
 
-            Ok(json!({
+            json!({
                 "schema_version": 1,
                 "command": "validate_request",
                 "app_request_model": "clearra-app/AppRequest",
                 "valid": valid,
                 "diagnostics": diagnostics
             })
-            .to_string())
+            .to_string()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use clearra_app::AppRequest;
+        use clearra_web_command::WebCommandParser;
+        use serde_json::Value;
+
+        use super::DesktopTauriCommandBridge;
+
+        #[test]
+        fn desktop_validate_endpoint_rejects_missing_product_capability_contract() {
+            let attached = WebCommandParser::parse(
+                "clearra pc allspin-pres-chance --lines 2 --patterns [TI]! --spin-profile all-mini-plus",
+            )
+            .expect("typed PC product request")
+            .to_app_request()
+            .expect("typed PC AppRequest");
+            let missing = AppRequest::new(attached.into_command());
+
+            let response: Value = serde_json::from_str(
+                &DesktopTauriCommandBridge::default().validate_built_request(&missing),
+            )
+            .expect("desktop validation response JSON");
+
+            assert_eq!(response["valid"], false);
+            let diagnostics = response["diagnostics"]
+                .as_array()
+                .expect("desktop diagnostic codes");
+            assert_eq!(
+                diagnostics.last().and_then(Value::as_str),
+                Some("E_FRONTEND_TYPED_REQUEST_REQUIRED")
+            );
         }
     }
 }
@@ -1951,13 +3498,26 @@ pub use error::DesktopTauriCommandError;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use clearra_app::AppCommand;
+    use clearra_app::{
+        encode_ctk3_compact, AppCommand, BuildColoredTargetDocument, BuildV2AppRequest, Ctk3Color,
+        Ctk3Document, Ctk3Operation, Ctk3Page, Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
+        FieldDocumentFormat, PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection,
+        PcSaveIngressOrigin, PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin,
+        PcTilingIngressOrigin, ProductCapabilityContract, QueryEnvelope, SpinStructureProductMode,
+        PC_SCORE_MAX_PATTERNS,
+    };
+    use clearra_core_domain::{
+        objective::objective_kind::ObjectiveKind, piece::piece_kind::PieceKind,
+    };
     use clearra_forward_search::{
         ForwardLineClearPolicy, ForwardSearchMode, ForwardSpinCategory, ForwardSpinLineRequirement,
     };
-    use clearra_pc_graph::request::{GpuDeviceSelection, RequestedSearchBackend};
+    use clearra_pc_graph::request::{
+        GpuDeviceSelection, PcCountPolicy, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
+    };
     use clearra_problem::{
-        BuildProbabilityAggregation, SetupCandidatePriority, SetupLengthPreference, SetupSearchMode,
+        BuildProbabilityAggregation, BuildSolutionProbabilityPolicy, SetupCandidatePriority,
+        SetupLengthPreference, SetupSearchMode,
     };
     use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
     use clearra_web_command::WebCommandParser;
@@ -1969,6 +3529,824 @@ mod tests {
         form_parser::{desktop_form_builds_app_request, desktop_request_builds_app_request},
         DesktopTauriCommandBridge,
     };
+
+    #[test]
+    fn desktop_profiles_object_binds_the_verified_structural_bundle() {
+        let request = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "profiles": {
+                    "board": "standard-10",
+                    "piece": "standard-tetrominoes",
+                    "bag": "standard-7-bag"
+                }
+            })
+            .to_string(),
+        )
+        .expect("canonical desktop profiles");
+        let profiles = request.request_profiles();
+        assert_eq!(profiles.board().as_str(), "standard-10");
+        assert_eq!(profiles.piece_set().as_str(), "standard-tetrominoes");
+        assert_eq!(profiles.bag().as_str(), "standard-7-bag");
+    }
+
+    #[test]
+    fn desktop_profiles_and_unverified_rules_fail_closed_without_fallback() {
+        for request in [
+            json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "profiles": {
+                    "board": "wide-10",
+                    "piece": "standard-tetrominoes",
+                    "bag": "standard-7-bag"
+                }
+            }),
+            json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "rule": "custom"
+            }),
+            json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "score_mode": "summary",
+                "spin_profile": "unverified-spin"
+            }),
+            json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "score_mode": "summary",
+                "score_profile": "classic-score"
+            }),
+        ] {
+            let error = desktop_request_builds_app_request(&request.to_string())
+                .expect_err("unsupported profile must be rejected");
+            assert!(error.message().contains("profile"), "{error}");
+        }
+    }
+
+    fn one_operation_document() -> String {
+        let mut page = Ctk3Page::new(0, Vec::new());
+        page.flags = Ctk3PageFlags::default();
+        page.operation = Some(Ctk3Operation {
+            piece: Ctk3Piece::O,
+            rotation: Ctk3Rotation::Spawn,
+            x: 0,
+            y: 0,
+        });
+        encode_ctk3_compact(&Ctk3Document::new(10, vec![page])).expect("one-operation CTK3")
+    }
+
+    fn two_page_field_document() -> String {
+        encode_ctk3_compact(&Ctk3Document::new(
+            2,
+            vec![
+                Ctk3Page::new(1, vec![Ctk3Color::Gray, Ctk3Color::Empty]),
+                Ctk3Page::new(1, vec![Ctk3Color::Empty, Ctk3Color::Gray]),
+            ],
+        ))
+        .expect("two-page CTK3")
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ExpectedBuildV2Request {
+        Cover,
+        Setup,
+        Congruent,
+        CongruentCover,
+        SetupCover,
+        SetupCoverPercent,
+        SetupCoverScore,
+        EvaluateCover,
+        EvaluateMinimals,
+        EvaluateScore,
+        EvaluateB2bCover,
+        EvaluateCoverPercent,
+    }
+
+    fn build_v2_colored_document() -> String {
+        let mut cells = vec![Ctk3Color::Empty; 40];
+        cells[30..34].fill(Ctk3Color::Piece(Ctk3Piece::I));
+        encode_ctk3_compact(&Ctk3Document::new(10, vec![Ctk3Page::new(4, cells)]))
+            .expect("one-piece Build v2 CTK3 document")
+    }
+
+    fn desktop_build_v2_json(capability_id: &str, document: &str) -> Value {
+        let objective = match capability_id {
+            "build.cover" | "build.congruent-cover" | "build.setup-cover" => "min-cover",
+            "build.setup" | "build.congruent" | "build.setup-cover-percent" => "unique",
+            "build.setup-cover-score" | "build.evaluate.score" => "max-score-cover",
+            "build.evaluate.cover" | "build.evaluate.b2b-cover" => "all",
+            "build.evaluate.minimals" => "min-cover",
+            "build.evaluate.cover-percent" => "unique",
+            _ => panic!("unknown Build v2 test capability {capability_id}"),
+        };
+        let mut request = json!({
+            "app_request_model": "clearra-app/AppRequest",
+            "command": "build-v2",
+            "language": "ko",
+            "capability_id": capability_id,
+            "queue": "I",
+            "patterns": "",
+            "queue_knowledge": "oracle",
+            "hold_enabled": false,
+            "hold_piece": "empty",
+            "objective": objective,
+            "rule": "srs-plus",
+            "workers": 1,
+            "use_all_logical_processors": false,
+            "backend": "cpu",
+            "allow_backend_fallback": false,
+        });
+        let object = request.as_object_mut().expect("Build v2 test object");
+        if capability_id == "build.cover" {
+            object.insert("base_mask".to_owned(), json!("0"));
+            object.insert("target_mask".to_owned(), json!("15"));
+            object.insert("visible_height".to_owned(), json!(4));
+            object.insert("source_piece_count".to_owned(), json!(1));
+        } else if capability_id.starts_with("build.evaluate.") {
+            object.insert("solution_format".to_owned(), json!("ctk3"));
+            object.insert("solution_document".to_owned(), json!(document));
+        } else {
+            object.insert("target_format".to_owned(), json!("ctk3"));
+            object.insert("target_document".to_owned(), json!(document));
+        }
+        if matches!(
+            capability_id,
+            "build.setup-cover-score" | "build.evaluate.score"
+        ) {
+            object.insert("score_profile".to_owned(), json!("guideline"));
+            object.insert("initial_b2b".to_owned(), json!(7));
+        }
+        request
+    }
+
+    fn build_v2_request_kind(request: &BuildV2AppRequest) -> ExpectedBuildV2Request {
+        match request {
+            BuildV2AppRequest::BuildCover(_) => ExpectedBuildV2Request::Cover,
+            BuildV2AppRequest::BuildSetup(_) => ExpectedBuildV2Request::Setup,
+            BuildV2AppRequest::BuildCongruent(_) => ExpectedBuildV2Request::Congruent,
+            BuildV2AppRequest::BuildCongruentCover(_) => ExpectedBuildV2Request::CongruentCover,
+            BuildV2AppRequest::BuildSetupCover(_) => ExpectedBuildV2Request::SetupCover,
+            BuildV2AppRequest::BuildSetupCoverPercent(_) => {
+                ExpectedBuildV2Request::SetupCoverPercent
+            }
+            BuildV2AppRequest::BuildSetupCoverScore(_) => ExpectedBuildV2Request::SetupCoverScore,
+            BuildV2AppRequest::BuildEvaluateCover(_) => ExpectedBuildV2Request::EvaluateCover,
+            BuildV2AppRequest::BuildEvaluateMinimals(_) => ExpectedBuildV2Request::EvaluateMinimals,
+            BuildV2AppRequest::BuildEvaluateScore(_) => ExpectedBuildV2Request::EvaluateScore,
+            BuildV2AppRequest::BuildEvaluateB2bCover(_) => ExpectedBuildV2Request::EvaluateB2bCover,
+            BuildV2AppRequest::BuildEvaluateCoverPercent(_) => {
+                ExpectedBuildV2Request::EvaluateCoverPercent
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_build_v2_json_exhaustively_lowers_all_twelve_nominal_capabilities() {
+        let document = build_v2_colored_document();
+        let cases = [
+            ("build.cover", ExpectedBuildV2Request::Cover),
+            ("build.setup", ExpectedBuildV2Request::Setup),
+            ("build.congruent", ExpectedBuildV2Request::Congruent),
+            (
+                "build.congruent-cover",
+                ExpectedBuildV2Request::CongruentCover,
+            ),
+            ("build.setup-cover", ExpectedBuildV2Request::SetupCover),
+            (
+                "build.setup-cover-percent",
+                ExpectedBuildV2Request::SetupCoverPercent,
+            ),
+            (
+                "build.setup-cover-score",
+                ExpectedBuildV2Request::SetupCoverScore,
+            ),
+            (
+                "build.evaluate.cover",
+                ExpectedBuildV2Request::EvaluateCover,
+            ),
+            (
+                "build.evaluate.minimals",
+                ExpectedBuildV2Request::EvaluateMinimals,
+            ),
+            (
+                "build.evaluate.score",
+                ExpectedBuildV2Request::EvaluateScore,
+            ),
+            (
+                "build.evaluate.b2b-cover",
+                ExpectedBuildV2Request::EvaluateB2bCover,
+            ),
+            (
+                "build.evaluate.cover-percent",
+                ExpectedBuildV2Request::EvaluateCoverPercent,
+            ),
+        ];
+
+        for (capability_id, expected) in cases {
+            let request_json = desktop_build_v2_json(capability_id, &document).to_string();
+            let request = desktop_request_builds_app_request(&request_json)
+                .unwrap_or_else(|error| panic!("lower {capability_id}: {error}"));
+            assert_eq!(
+                request.query(),
+                &QueryEnvelope::BuildCoverage,
+                "{capability_id}"
+            );
+            assert_eq!(
+                request.backend_policy().backend_requested(),
+                "cpu",
+                "{capability_id}"
+            );
+            assert!(
+                !request.backend_policy().allow_backend_fallback(),
+                "{capability_id}"
+            );
+            assert_eq!(
+                request.resource_budget().memory_mib(),
+                None,
+                "{capability_id}"
+            );
+            let AppCommand::BuildV2(command) = request.command() else {
+                panic!("{capability_id} did not lower to AppCommand::BuildV2");
+            };
+            assert_eq!(build_v2_request_kind(command.request()), expected);
+        }
+    }
+
+    fn desktop_spin_structure_json(capability_id: &str) -> Value {
+        let mut request = json!({
+            "app_request_model": "clearra-app/AppRequest",
+            "command": "spin-structure",
+            "language": "ko",
+            "capability_id": capability_id,
+            "board_mask_v1": format!("{:060x}", 0x14000043ff_u64),
+            "visible_height": 4,
+            "inventory": "T",
+            "spin_profile": "t-spins",
+            "lines": "any",
+            "fill_bottom": 0,
+            "fill_top": 4,
+            "rule": "srs-plus",
+            "max_placements": 1,
+            "minimality": "subset-minimal",
+            "workers": 1,
+            "use_all_logical_processors": false,
+            "backend": "cpu",
+            "allow_backend_fallback": false
+        });
+        let object = request.as_object_mut().expect("spin request object");
+        match capability_id {
+            "spin-structure.search" => {}
+            "spin-structure.cover" => {
+                object.insert("objective".to_owned(), json!("min-cover"));
+                object.insert("max_patterns".to_owned(), json!(8));
+            }
+            "spin-structure.guaranteed" => {
+                object.insert("max_patterns".to_owned(), json!(8));
+                object.insert("final_piece".to_owned(), json!("T"));
+                object.insert("dependency_report".to_owned(), json!(true));
+            }
+            _ => panic!("unknown spin-structure test capability"),
+        }
+        request
+    }
+
+    #[test]
+    fn desktop_spin_structure_json_lowers_all_three_nominal_capabilities() {
+        let cases = [
+            ("spin-structure.search", SpinStructureProductMode::Search),
+            (
+                "spin-structure.cover",
+                SpinStructureProductMode::Cover { max_patterns: 8 },
+            ),
+            (
+                "spin-structure.guaranteed",
+                SpinStructureProductMode::Guaranteed {
+                    final_piece: PieceKind::T,
+                    max_patterns: 8,
+                    dependency_report: true,
+                },
+            ),
+        ];
+        for (capability_id, expected) in cases {
+            let request = desktop_request_builds_app_request(
+                &desktop_spin_structure_json(capability_id).to_string(),
+            )
+            .unwrap_or_else(|error| panic!("lower {capability_id}: {error}"));
+            assert_eq!(request.backend_policy().backend_requested(), "cpu");
+            assert!(!request.backend_policy().allow_backend_fallback());
+            assert_eq!(request.resource_budget().memory_mib(), None);
+            let AppCommand::SpinStructure(command) = request.command() else {
+                panic!("{capability_id} did not lower to SpinStructure");
+            };
+            assert_eq!(command.product_mode(), expected, "{capability_id}");
+            assert_eq!(command.query().inventory.total(), 1, "{capability_id}");
+        }
+    }
+
+    #[test]
+    fn desktop_spin_structure_strictly_rejects_unknown_cross_route_and_resource_fields() {
+        let mut invalid = Vec::new();
+        for field in [
+            "gpu_device",
+            "max_memory_mib",
+            "memory_budget_mb",
+            "hold_enabled",
+            "queue",
+        ] {
+            let mut request = desktop_spin_structure_json("spin-structure.search");
+            request.as_object_mut().expect("request").insert(
+                field.to_owned(),
+                json!(if field == "hold_enabled" { true } else { false }),
+            );
+            invalid.push(request);
+        }
+        let mut fallback = desktop_spin_structure_json("spin-structure.search");
+        fallback["allow_backend_fallback"] = json!(true);
+        invalid.push(fallback);
+        let mut gpu = desktop_spin_structure_json("spin-structure.search");
+        gpu["backend"] = json!("gpu");
+        invalid.push(gpu);
+        let mut wrong_type = desktop_spin_structure_json("spin-structure.search");
+        wrong_type["workers"] = json!("1");
+        invalid.push(wrong_type);
+        let mut cover_final = desktop_spin_structure_json("spin-structure.cover");
+        cover_final["final_piece"] = json!("T");
+        invalid.push(cover_final);
+        let mut guaranteed_objective = desktop_spin_structure_json("spin-structure.guaranteed");
+        guaranteed_objective["objective"] = json!("min-cover");
+        invalid.push(guaranteed_objective);
+        let mut search_patterns = desktop_spin_structure_json("spin-structure.search");
+        search_patterns["max_patterns"] = json!(8);
+        invalid.push(search_patterns);
+        for request in invalid {
+            let error = desktop_request_builds_app_request(&request.to_string())
+                .expect_err("invalid desktop spin-structure request must fail closed");
+            assert_eq!(error.code(), "desktop-invalid-request", "{request}");
+        }
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_actual_build_solution_results_attach_bounded_native_sidecars() {
+        use crate::GuiJobEvent;
+
+        let executable_document = encode_ctk3_compact(&Ctk3Document::new(
+            10,
+            vec![Ctk3Page::new(
+                1,
+                [
+                    vec![Ctk3Color::Piece(Ctk3Piece::I); 4],
+                    vec![Ctk3Color::Empty; 6],
+                ]
+                .concat(),
+            )],
+        ))
+        .expect("executable desktop Build v2 target");
+        for (capability_id, result_kind, selection_kind, key_algorithm) in [
+            (
+                "build.cover",
+                "build-coverage-portfolio.v2",
+                "portfolio-alternative",
+                "portfolio-member-normalized-tiling-key.v1",
+            ),
+            (
+                "build.setup",
+                "build-target-family.v2",
+                "solution-family",
+                "clearra-colored-field-key-v1",
+            ),
+        ] {
+            let mut bridge = DesktopTauriCommandBridge::default();
+            let request = desktop_build_v2_json(capability_id, &executable_document).to_string();
+            let job_id = bridge
+                .start_job(&request)
+                .expect("start desktop Build v2 job");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let response = 'wait: loop {
+                for event in bridge
+                    .drain_job_events(job_id)
+                    .expect("drain desktop Build v2 events")
+                {
+                    match event {
+                        GuiJobEvent::Completed { response, .. } => break 'wait response,
+                        GuiJobEvent::Failed { code, .. } => {
+                            panic!("desktop Build v2 failed: {code}")
+                        }
+                        GuiJobEvent::Cancelled { .. } => {
+                            panic!("desktop Build v2 was cancelled")
+                        }
+                        GuiJobEvent::Started { .. }
+                        | GuiJobEvent::Progress { .. }
+                        | GuiJobEvent::Diagnostic { .. } => {}
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "desktop Build v2 did not complete"
+                );
+                std::thread::yield_now();
+            };
+            assert_eq!(
+                response.status(),
+                clearra_host_contract::AppStatus::Success,
+                "{capability_id} diagnostics: {:?}",
+                response.diagnostics()
+            );
+            assert!(
+                response.product_result_payload().is_some(),
+                "{capability_id} product payload"
+            );
+            let artifact = response
+                .solution_set_artifact()
+                .expect("desktop Build v2 solution sidecar");
+            assert_eq!(artifact.source_result_kind(), result_kind);
+            assert_eq!(artifact.selection_kind(), selection_kind);
+            assert_eq!(artifact.normalized_key_algorithm(), key_algorithm);
+            assert!(artifact.solution_count() >= 1);
+            assert!(artifact.formats().iter().all(|format| format.available()));
+
+            let synchronous: Value = serde_json::from_str(
+                &bridge
+                    .run_request(&request)
+                    .expect("run synchronous desktop Build v2 request"),
+            )
+            .expect("desktop Build v2 response JSON");
+            assert_eq!(
+                synchronous["solution_set_artifact"]["source_result_kind"],
+                result_kind
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_build_v2_preserves_the_colored_supplied_document_identity_and_height() {
+        let document = build_v2_colored_document();
+        let decoded = BuildColoredTargetDocument::decode(FieldDocumentFormat::Ctk3, &document)
+            .expect("Build v2 colored fixture");
+        let request = desktop_request_builds_app_request(
+            &desktop_build_v2_json("build.evaluate.minimals", &document).to_string(),
+        )
+        .expect("desktop supplied Build v2 request");
+        let AppCommand::BuildV2(command) = request.command() else {
+            panic!("expected Build v2 command");
+        };
+        let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+            panic!("expected supplied minimals request");
+        };
+        assert_eq!(
+            request.supplied().document_hash(),
+            decoded.target().document_hash()
+        );
+        assert_eq!(
+            request.supplied().identities(),
+            decoded.target().identities()
+        );
+        assert_eq!(request.supplied().visible_height(), 4);
+        assert_eq!(request.query().field().height(), 4);
+    }
+
+    #[test]
+    fn desktop_build_v2_strictly_rejects_unknown_fields_and_wrong_json_types() {
+        let document = build_v2_colored_document();
+        let base = desktop_build_v2_json("build.cover", &document);
+        let mutations = [
+            ("unknown_option", json!(true)),
+            ("capability_id", json!(12)),
+            ("queue", json!(false)),
+            ("queue_knowledge", json!(7)),
+            ("hold_enabled", json!("false")),
+            ("hold_piece", json!(false)),
+            ("objective", json!(false)),
+            ("rule", json!(false)),
+            ("workers", json!("1")),
+            ("use_all_logical_processors", json!(0)),
+            ("allow_backend_fallback", json!("false")),
+            ("visible_height", json!(4.5)),
+            ("base_mask", json!(0)),
+        ];
+        for (field, replacement) in mutations {
+            let mut request = base.clone();
+            request
+                .as_object_mut()
+                .expect("Build v2 object")
+                .insert(field.to_owned(), replacement);
+            let error = desktop_request_builds_app_request(&request.to_string())
+                .expect_err("strict Build v2 JSON type or unknown field");
+            assert_eq!(error.code(), "desktop-invalid-request", "{field}");
+        }
+
+        let mut missing = base;
+        missing
+            .as_object_mut()
+            .expect("Build v2 object")
+            .remove("workers");
+        desktop_request_builds_app_request(&missing.to_string())
+            .expect_err("strict Build v2 JSON requires workers");
+    }
+
+    #[test]
+    fn desktop_build_v2_rejects_cross_source_gpu_fallback_memory_and_illegal_options() {
+        let document = build_v2_colored_document();
+        let mut requests = Vec::new();
+
+        let mut cross_target = desktop_build_v2_json("build.cover", &document);
+        cross_target["target_format"] = json!("ctk3");
+        cross_target["target_document"] = json!(document);
+        requests.push(cross_target);
+
+        let mut cross_solution = desktop_build_v2_json("build.setup", &document);
+        cross_solution["solution_format"] = json!("ctk3");
+        cross_solution["solution_document"] = json!(document);
+        requests.push(cross_solution);
+
+        let mut cross_mask = desktop_build_v2_json("build.evaluate.cover", &document);
+        cross_mask["base_mask"] = json!("0");
+        requests.push(cross_mask);
+
+        let mut gpu = desktop_build_v2_json("build.cover", &document);
+        gpu["backend"] = json!("gpu");
+        requests.push(gpu);
+
+        let mut fallback = desktop_build_v2_json("build.cover", &document);
+        fallback["allow_backend_fallback"] = json!(true);
+        requests.push(fallback);
+
+        for memory_field in ["max_memory_mib", "memory_budget_mb"] {
+            let mut memory = desktop_build_v2_json("build.cover", &document);
+            memory[memory_field] = json!(64);
+            requests.push(memory);
+        }
+
+        let mut score = desktop_build_v2_json("build.setup", &document);
+        score["score_profile"] = json!("tetrio");
+        requests.push(score);
+
+        let mut source_count = desktop_build_v2_json("build.setup", &document);
+        source_count["source_piece_count"] = json!(1);
+        requests.push(source_count);
+
+        let mut both_sources = desktop_build_v2_json("build.cover", &document);
+        both_sources["patterns"] = json!("I");
+        requests.push(both_sources);
+
+        let mut no_source = desktop_build_v2_json("build.cover", &document);
+        no_source["queue"] = json!("");
+        requests.push(no_source);
+
+        let mut objective = desktop_build_v2_json("build.setup", &document);
+        objective["objective"] = json!("min-cover");
+        requests.push(objective);
+
+        for request in requests {
+            let error = desktop_request_builds_app_request(&request.to_string())
+                .expect_err("illegal Desktop Build v2 state must fail closed");
+            assert_eq!(error.code(), "desktop-invalid-request", "{request}");
+        }
+    }
+
+    #[test]
+    fn desktop_typed_document_utilities_use_closed_explicit_json_contracts() {
+        let parity = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-parity",
+                "format": "ctk3",
+                "document": two_page_field_document(),
+            })
+            .to_string(),
+        )
+        .expect("typed desktop parity request");
+        assert!(matches!(parity.command(), AppCommand::UtilityParity(_)));
+
+        let fumen = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-fumen",
+                "format": "fumen",
+                "transform": "text-to-fumen",
+                "documents": [],
+                "comments": ["first", "second"],
+            })
+            .to_string(),
+        )
+        .expect("typed desktop Fumen request");
+        assert!(matches!(fumen.command(), AppCommand::UtilityFumen(_)));
+
+        let render = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-render",
+                "format": "ctk3",
+                "document": two_page_field_document(),
+                "artifact_format": "png",
+                "page_number": 1,
+            })
+            .to_string(),
+        )
+        .expect("typed desktop render request");
+        assert!(matches!(render.command(), AppCommand::UtilityRender(_)));
+
+        let to_gray = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-to-gray",
+                "format": "ctk3",
+                "document": two_page_field_document(),
+            })
+            .to_string(),
+        )
+        .expect("typed desktop to-gray request");
+        assert!(matches!(to_gray.command(), AppCommand::UtilityToGray(_)));
+
+        let mirror = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-mirror",
+                "format": "ctk3",
+                "document": two_page_field_document(),
+            })
+            .to_string(),
+        )
+        .expect("typed desktop mirror request");
+        assert!(matches!(mirror.command(), AppCommand::UtilityMirror(_)));
+
+        let rejected = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-fumen",
+                "format": "fumen",
+                "transform": "roundtrip",
+                "documents": ["v115@vhA"],
+                "queue": "IOTSZJL",
+            })
+            .to_string(),
+        )
+        .expect_err("utility JSON must reject queue inference");
+        assert!(rejected.message().contains("does not accept field 'queue'"));
+
+        let rejected = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-mirror",
+                "format": "ctk3",
+                "document": two_page_field_document(),
+                "hold": true,
+            })
+            .to_string(),
+        )
+        .expect_err("transform JSON must reject hold inference");
+        assert!(rejected.message().contains("does not accept field 'hold'"));
+    }
+
+    #[test]
+    fn desktop_parity_job_transfers_browsable_owner_until_explicit_release() {
+        use clearra_host_contract::ProductResultPayloadContent;
+
+        use crate::GuiJobEvent;
+
+        let request = json!({
+            "app_request_model": "clearra-app/AppRequest",
+            "command": "utility-parity",
+            "format": "ctk3",
+            "document": two_page_field_document(),
+        })
+        .to_string();
+        let mut bridge = DesktopTauriCommandBridge::default();
+        let job_id = bridge.start_job(&request).expect("start parity job");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let response = loop {
+            let events = bridge
+                .drain_job_events(job_id)
+                .expect("drain desktop parity events");
+            if let Some(response) = events.into_iter().find_map(|event| match event {
+                GuiJobEvent::Completed { response, .. } => Some(response),
+                GuiJobEvent::Failed { code, .. } => panic!("desktop parity failed: {code}"),
+                GuiJobEvent::Cancelled { .. } => panic!("desktop parity was cancelled"),
+                GuiJobEvent::Started { .. }
+                | GuiJobEvent::Progress { .. }
+                | GuiJobEvent::Diagnostic { .. } => None,
+            }) {
+                break response;
+            }
+            assert!(Instant::now() < deadline, "desktop parity did not complete");
+            std::thread::yield_now();
+        };
+        let ProductResultPayloadContent::ParityReportPage(first) = response
+            .product_result_payload()
+            .expect("parity payload")
+            .content()
+        else {
+            panic!("expected parity page payload")
+        };
+        assert_eq!(first.page_number(), 1);
+        assert_eq!(first.total_pages(), 2);
+        assert!(!first.feasibility_claim());
+        assert_eq!(first.pruning_authority(), "none");
+
+        let first_page: Value = serde_json::from_str(
+            &bridge
+                .product_page_get(1, 1)
+                .expect("load first desktop parity page"),
+        )
+        .expect("first parity JSON");
+        assert_eq!(first_page["product_page_kind"], "parity-report");
+        assert_eq!(first_page["page"]["page_number"], 1);
+        assert_eq!(first_page["page"]["feasibility_claim"], false);
+        assert_eq!(first_page["page"]["pruning_authority"], "none");
+
+        let second_page: Value = serde_json::from_str(
+            &bridge
+                .product_page_next(1)
+                .expect("advance desktop parity page"),
+        )
+        .expect("second parity JSON");
+        assert_eq!(second_page["page"]["page_number"], 2);
+        let exhausted: Value = serde_json::from_str(
+            &bridge
+                .product_page_next(1)
+                .expect("exhaust desktop parity pages"),
+        )
+        .expect("parity exhausted JSON");
+        assert_eq!(exhausted["state"], "exhausted");
+
+        bridge.product_page_release();
+        assert!(bridge.product_page_get(1, 1).is_err());
+    }
+
+    #[test]
+    fn desktop_sequence_dependencies_uses_exact_json_contract_and_forbids_queue_hold() {
+        let request = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-sequence-dependencies",
+                "document": one_operation_document(),
+                "rule_profile": "srs-plus",
+                "kick_profile": "srs-plus",
+                "timeout_seconds": 900,
+            })
+            .to_string(),
+        )
+        .expect("typed desktop operation document");
+        let AppCommand::UtilitySequenceDependencies(command) = request.command() else {
+            panic!("expected sequence-dependencies command");
+        };
+        assert_eq!(command.problem().timeout_seconds, 900);
+
+        let error = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-sequence-dependencies",
+                "document": one_operation_document(),
+                "queue": "O",
+            })
+            .to_string(),
+        )
+        .expect_err("queue must never enter the operation-document contract");
+        assert!(error.message().contains("does not accept field 'queue'"));
+    }
+
+    #[test]
+    fn desktop_sequence_uses_replay_json_contract_and_forbids_queue_hold() {
+        let request = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-sequence",
+                "document": one_operation_document(),
+                "rule_profile": "srs-plus",
+                "kick_profile": "srs-plus",
+                "timeout_seconds": 900,
+            })
+            .to_string(),
+        )
+        .expect("typed desktop operation sequence");
+        let AppCommand::UtilitySequence(command) = request.command() else {
+            panic!("expected operation sequence command");
+        };
+        assert_eq!(command.problem().timeout_seconds, 900);
+
+        let error = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "utility-sequence",
+                "document": one_operation_document(),
+                "hold_enabled": true,
+            })
+            .to_string(),
+        )
+        .expect_err("hold must never enter the operation-sequence contract");
+        assert!(error
+            .message()
+            .contains("does not accept field 'hold_enabled'"));
+    }
 
     fn canonical_desktop_search_request(command: &str) -> Value {
         let mut request: Value = serde_json::from_str(
@@ -2520,7 +4898,7 @@ mod tests {
 
     #[test]
     fn desktop_tiling_requests_reject_noncanonical_inactive_options() {
-        desktop_request_builds_app_request(
+        let canonical = desktop_request_builds_app_request(
             r#"{
                 "app_request_model": "clearra-app/AppRequest",
                 "command": "pc-scenario",
@@ -2532,6 +4910,36 @@ mod tests {
             }"#,
         )
         .expect("canonical desktop tiling PC request");
+        assert_eq!(
+            canonical.product_capability_contract(),
+            Some(ProductCapabilityContract::PcTiling)
+        );
+        let AppCommand::Scenario(command) = canonical.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
+        );
+        assert_eq!(
+            command.query().supply_window_size(),
+            Some(SupplyWindowSize::new(6))
+        );
+
+        let generic = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc",
+                "lines": 2,
+                "score_mode": "tiling-only"
+            }"#,
+        )
+        .expect("generic desktop tiling objective");
+        assert_eq!(generic.product_capability_contract(), None);
+        let AppCommand::Pc(command) = generic.command() else {
+            panic!("expected opening PC command");
+        };
+        assert_eq!(command.result_projection(), PcResultProjection::Standard);
 
         for option in [
             r#""rule": "srs""#,
@@ -2605,6 +5013,602 @@ mod tests {
     }
 
     #[test]
+    fn desktop_portfolio_modes_attach_their_typed_product_contracts() {
+        let minimals = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 1,
+                "visible_height": 1,
+                "board_mask": "0x3f",
+                "piece_window": 1,
+                "queue": "I",
+                "hold_enabled": true,
+                "hold_piece": "empty",
+                "count_policy": "all",
+                "score_mode": "minimum-cover"
+            }"#,
+        )
+        .expect("canonical desktop pc minimals request");
+        assert_eq!(
+            minimals.product_capability_contract(),
+            Some(ProductCapabilityContract::PcMinimals)
+        );
+        let AppCommand::Scenario(command) = minimals.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+        );
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
+        assert_eq!(command.query().exact_pieces(), Some(1));
+
+        let score = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 1,
+                "visible_height": 1,
+                "board_mask": "0x3f",
+                "piece_window": 1,
+                "queue": "I",
+                "hold_enabled": true,
+                "hold_piece": "empty",
+                "count_policy": "all",
+                "score_mode": "summary",
+                "score_profile": "tetrio",
+                "spin_profile": "t-spins",
+                "backend": "cpu",
+                "workers": 1,
+                "allow_backend_fallback": false
+            }"#,
+        )
+        .expect("canonical desktop pc score request");
+        assert_eq!(
+            score.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScore)
+        );
+        let AppCommand::Scenario(command) = score.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScore)
+        );
+        assert_eq!(command.query().exact_pieces(), Some(1));
+        assert_eq!(command.query().retained_trace_limit(), 1);
+        let policy = command.query().execution_policy();
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert!(!policy.allow_backend_fallback());
+        assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+
+        let score_minimals = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 1,
+                "visible_height": 1,
+                "board_mask": "0x3f",
+                "piece_window": 1,
+                "queue": "I",
+                "hold_enabled": true,
+                "hold_piece": "empty",
+                "count_policy": "all",
+                "score_mode": "score-minimals",
+                "score_profile": "tetrio",
+                "spin_profile": "t-spins",
+                "backend": "cpu",
+                "workers": 1,
+                "allow_backend_fallback": false
+            }"#,
+        )
+        .expect("canonical desktop pc score-minimals request");
+        assert_eq!(
+            score_minimals.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScoreMinimals)
+        );
+        let AppCommand::Scenario(command) = score_minimals.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::ScorePortfolioV2(
+                PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals
+            )
+        );
+        assert_eq!(
+            command.query().objective().kind(),
+            ObjectiveKind::MinimumCover
+        );
+        assert!(command.query().objective().score().requested());
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+        assert_eq!(command.query().retained_trace_limit(), 1);
+        let policy = command.query().execution_policy();
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert!(!policy.allow_backend_fallback());
+        assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+    }
+
+    #[test]
+    fn desktop_pc_path_attaches_the_complete_ordinary_replay_family_contract() {
+        let request = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "pc-scenario",
+                "lines": 1,
+                "visible_height": 1,
+                "board_mask": "0x3f0",
+                "piece_window": 1,
+                "queue": "I",
+                "hold_enabled": true,
+                "hold_piece": "empty",
+                "count_policy": "all",
+                "score_mode": "path"
+            }"#,
+        )
+        .expect("canonical desktop pc.path request");
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcPath)
+        );
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::PathFamilyV2(PcPathIngressOrigin::CanonicalPcPath)
+        );
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+        assert_eq!(command.query().exact_pieces(), Some(1));
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_actual_pc_path_returns_the_complete_ordinary_replay_family() {
+        let response = DesktopTauriCommandBridge::default()
+            .run_request(
+                r#"{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 1,
+                    "visible_height": 1,
+                    "board_mask": "0x3f0",
+                    "piece_window": 1,
+                    "queue": "I",
+                    "hold_enabled": true,
+                    "hold_piece": "empty",
+                    "count_policy": "all",
+                    "score_mode": "path"
+                }"#,
+            )
+            .expect("desktop actual pc.path request");
+        let response: Value = serde_json::from_str(&response).expect("desktop response JSON");
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["result"]["kind"], "pc-path-family.v2");
+        assert_eq!(response["product_result_payload"]["contract"], "pc.path");
+        assert_eq!(
+            response["product_result_payload"]["result_kind"],
+            "pc-path-family.v2"
+        );
+        let content = &response["product_result_payload"]["content"];
+        assert_eq!(content["payload_kind"], "pc-path-family");
+        let payload = &content["payload"];
+        assert_eq!(payload["complete"], true);
+        let witness_count = payload["witnesses"].as_array().unwrap().len().to_string();
+        assert_eq!(
+            payload["witness_count"].as_str(),
+            Some(witness_count.as_str())
+        );
+        assert!(payload.get("tie_metadata").is_none());
+        assert!(payload.get("tie_cursor").is_none());
+    }
+
+    #[test]
+    fn desktop_pc_score_finder_attaches_its_fixed_witness_contract_and_rejects_drift() {
+        const CANONICAL: &str = r#"{
+            "app_request_model": "clearra-app/AppRequest",
+            "command": "pc-scenario",
+            "lines": 1,
+            "visible_height": 1,
+            "board_mask": "0x3f",
+            "piece_window": 1,
+            "queue": "I",
+            "hold_enabled": true,
+            "hold_piece": "empty",
+            "count_policy": "all",
+            "score_mode": "score-finder",
+            "score_profile": "jstris-ultra",
+            "spin_profile": "t-spins",
+            "initial_b2b": 1,
+            "backend": "cpu",
+            "workers": 1,
+            "allow_backend_fallback": false
+        }"#;
+
+        let request = desktop_request_builds_app_request(CANONICAL)
+            .expect("canonical desktop pc score-finder request");
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScoreFinder)
+        );
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScoreFinder)
+        );
+        assert_eq!(command.query().remaining_queue().mode(), "fixed");
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+        assert_eq!(command.query().retained_trace_limit(), 1);
+        assert_eq!(
+            command.query().objective().score().profile().as_str(),
+            "jstris-ultra"
+        );
+        assert_eq!(
+            command.query().objective().score().spin_profile().as_str(),
+            "t-spins"
+        );
+
+        for request in [
+            CANONICAL.replace("\"command\": \"pc-scenario\"", "\"command\": \"pc\""),
+            CANONICAL.replace("\"queue\": \"I\"", "\"queue\": \"\""),
+            CANONICAL.replace("\"queue\": \"I\"", "\"patterns\": \"P7\""),
+            CANONICAL.replace(
+                "\"score_profile\": \"jstris-ultra\"",
+                "\"score_profile\": \"tetrio\"",
+            ),
+            CANONICAL.replace("\"initial_b2b\": 1", "\"initial_b2b\": 2"),
+            CANONICAL.replace("\"count_policy\": \"all\"", "\"count_policy\": \"unique\""),
+        ] {
+            let error = desktop_request_builds_app_request(&request)
+                .expect_err("desktop pc score-finder drift must fail closed");
+            assert_eq!(error.code(), "desktop-invalid-request");
+        }
+    }
+
+    #[test]
+    fn desktop_pc_save_modes_attach_distinct_typed_product_contracts() {
+        for (mode, contract, projection) in [
+            (
+                "saves",
+                ProductCapabilityContract::PcSaves,
+                PcResultProjection::SaveGroupsV2(PcSaveIngressOrigin::CanonicalPcSaves),
+            ),
+            (
+                "best-save",
+                ProductCapabilityContract::PcBestSave,
+                PcResultProjection::BestSaveV2(PcSaveIngressOrigin::CanonicalPcBestSave),
+            ),
+        ] {
+            let request = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 2,
+                    "visible_height": 2,
+                    "board_mask": "0xf3fcf",
+                    "piece_window": 1,
+                    "patterns": "P7",
+                    "hold_enabled": false,
+                    "hold_piece": "empty",
+                    "count_policy": "all",
+                    "score_mode": "{mode}",
+                    "backend": "cpu",
+                    "workers": 1,
+                    "allow_backend_fallback": false
+                }}"#,
+            ))
+            .expect("canonical desktop pc save request");
+            assert_eq!(request.product_capability_contract(), Some(contract));
+            let AppCommand::Scenario(command) = request.command() else {
+                panic!("expected scenario PC command");
+            };
+            assert_eq!(command.result_projection(), projection);
+            assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+            assert_eq!(command.query().retained_trace_limit(), 1);
+        }
+
+        for option in [
+            r#""queue": "I""#,
+            r#""count_policy": "unique""#,
+            r#""queue_knowledge": "visible-7""#,
+            r#""solution_probabilities": true"#,
+            r#""memory_budget_mb": 64"#,
+        ] {
+            let error = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 2,
+                    "visible_height": 2,
+                    "board_mask": "0xf3fcf",
+                    "piece_window": 1,
+                    "hold_enabled": false,
+                    "hold_piece": "empty",
+                    "count_policy": "all",
+                    "score_mode": "saves",
+                    "backend": "cpu",
+                    {option}
+                }}"#,
+            ))
+            .expect_err("desktop pc save override must fail closed");
+            assert_eq!(
+                error.code(),
+                if option.contains("memory_budget_mb") {
+                    "desktop-validation-failed"
+                } else {
+                    "desktop-invalid-request"
+                },
+                "{option}"
+            );
+        }
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_actual_pc_score_finder_returns_a_normal_score_only_witness_family() {
+        let response = DesktopTauriCommandBridge::default()
+            .run_request(
+                r#"{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 1,
+                    "visible_height": 1,
+                    "board_mask": "0x3f",
+                    "piece_window": 1,
+                    "queue": "I",
+                    "hold_enabled": true,
+                    "hold_piece": "empty",
+                    "count_policy": "all",
+                    "score_mode": "score-finder",
+                    "score_profile": "jstris-ultra",
+                    "spin_profile": "t-spins",
+                    "initial_b2b": 1,
+                    "backend": "cpu",
+                    "workers": 1,
+                    "allow_backend_fallback": false
+                }"#,
+            )
+            .expect("desktop actual pc score-finder request");
+        let response: Value = serde_json::from_str(&response).expect("desktop response JSON");
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["result"]["kind"], "pc-fixed-score-witness.v2");
+        assert_eq!(
+            response["product_result_payload"]["contract"],
+            "pc.score-finder"
+        );
+        assert_eq!(
+            response["product_result_payload"]["result_kind"],
+            "pc-fixed-score-witness.v2"
+        );
+        assert_eq!(
+            response["product_result_payload"]["content"]["payload_kind"],
+            "score-pattern-winner-family"
+        );
+        let payload = &response["product_result_payload"]["content"]["payload"];
+        assert_eq!(payload["equality"], "score-only-attack-informational");
+        assert_eq!(
+            payload["informational_attack_basis"],
+            "canonical-equal-score-trace"
+        );
+        assert!(payload.get("tie_metadata").is_none());
+        assert!(payload.get("tie_cursor").is_none());
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_actual_pc_save_products_keep_full_distinct_typed_families() {
+        use clearra_host_contract::ProductResultPayloadContent;
+
+        use crate::GuiJobEvent;
+
+        fn wait_for_completion(
+            bridge: &mut DesktopTauriCommandBridge,
+            job_id: u64,
+        ) -> clearra_host_contract::AppResponse {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                for event in bridge
+                    .drain_job_events(job_id)
+                    .expect("drain desktop pc save events")
+                {
+                    match event {
+                        GuiJobEvent::Completed { response, .. } => return response,
+                        GuiJobEvent::Failed { code, .. } => {
+                            panic!("desktop pc save failed: {code}")
+                        }
+                        GuiJobEvent::Cancelled { .. } => panic!("desktop pc save was cancelled"),
+                        GuiJobEvent::Started { .. }
+                        | GuiJobEvent::Progress { .. }
+                        | GuiJobEvent::Diagnostic { .. } => {}
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "desktop pc save did not complete"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        let mut bridge = DesktopTauriCommandBridge::default();
+        for (mode, contract, result_kind) in [
+            ("saves", "pc.saves", "pc-save-groups.v2"),
+            ("best-save", "pc.best-save", "pc-best-save.v2"),
+        ] {
+            let request = format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 2,
+                    "visible_height": 2,
+                    "board_mask": "0xf3fcf",
+                    "piece_window": 1,
+                    "patterns": "P7",
+                    "hold_enabled": false,
+                    "hold_piece": "empty",
+                    "count_policy": "all",
+                    "score_mode": "{mode}",
+                    "backend": "cpu",
+                    "workers": 1,
+                    "allow_backend_fallback": false
+                }}"#,
+            );
+            let job_id = bridge.start_job(&request).expect("start desktop pc save");
+            let response = wait_for_completion(&mut bridge, job_id);
+            let payload = response
+                .product_result_payload()
+                .expect("desktop pc save retains product payload");
+            assert_eq!(payload.contract(), contract);
+            assert_eq!(payload.result_kind(), result_kind);
+            match (mode, payload.content()) {
+                ("saves", ProductResultPayloadContent::PcSaveGroups(groups)) => {
+                    assert_eq!(groups.group_count(), groups.groups().len().to_string());
+                    assert!(!groups.groups().is_empty());
+                    assert!(groups.metadata().completeness().complete());
+                }
+                ("best-save", ProductResultPayloadContent::PcBestSave(best)) => {
+                    assert_eq!(best.winner_count(), best.winners().len().to_string());
+                    assert!(!best.winners().is_empty());
+                    assert!(best.metadata().completeness().complete());
+                }
+                _ => panic!("desktop pc save product family mismatch"),
+            }
+        }
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_actual_pc_minimals_transfers_pages_and_releases_on_navigation_cancel_and_release() {
+        use clearra_host_contract::ProductResultPayloadContent;
+
+        use crate::GuiJobEvent;
+
+        const REQUEST: &str = r#"{
+            "app_request_model": "clearra-app/AppRequest",
+            "command": "pc-scenario",
+            "lines": 1,
+            "visible_height": 1,
+            "board_mask": "0x3f",
+            "piece_window": 1,
+            "queue": "I",
+            "hold_enabled": true,
+            "hold_piece": "empty",
+            "count_policy": "unique",
+            "score_mode": "minimum-cover",
+            "backend": "cpu",
+            "workers": 1,
+            "allow_backend_fallback": false
+        }"#;
+
+        fn wait_for_completion(
+            bridge: &mut DesktopTauriCommandBridge,
+            job_id: u64,
+        ) -> clearra_host_contract::AppResponse {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                for event in bridge
+                    .drain_job_events(job_id)
+                    .expect("drain desktop pc minimals events")
+                {
+                    match event {
+                        GuiJobEvent::Completed { response, .. } => return response,
+                        GuiJobEvent::Failed { code, .. } => {
+                            panic!("desktop pc minimals failed: {code}")
+                        }
+                        GuiJobEvent::Cancelled { .. } => {
+                            panic!("desktop pc minimals was cancelled")
+                        }
+                        GuiJobEvent::Started { .. }
+                        | GuiJobEvent::Progress { .. }
+                        | GuiJobEvent::Diagnostic { .. } => {}
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "desktop pc minimals did not complete"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        let mut bridge = DesktopTauriCommandBridge::default();
+        let first_job = bridge
+            .start_job(REQUEST)
+            .expect("start desktop pc minimals");
+        let response = wait_for_completion(&mut bridge, first_job);
+        let payload = response
+            .product_result_payload()
+            .expect("desktop completed response retains product payload");
+        assert_eq!(payload.contract(), "pc.minimals");
+        assert_eq!(payload.result_kind(), "pc-minimum-cover.v2");
+        let ProductResultPayloadContent::CoveragePortfolio(canonical) = payload.content() else {
+            panic!("expected desktop coverage portfolio payload")
+        };
+        assert!(canonical.page_handle_available());
+        assert_eq!(canonical.member_page_number(), "1");
+        assert_eq!(canonical.members()[0].candidate_id(), "1");
+
+        let page: Value = serde_json::from_str(
+            &bridge
+                .product_page_get(1, 1)
+                .expect("load canonical desktop product page"),
+        )
+        .expect("desktop product page JSON");
+        assert_eq!(page["state"], "page");
+        assert_eq!(page["page"]["alternative_index"], "1");
+        assert_eq!(page["page"]["member_page_number"], "1");
+        assert_eq!(page["page"]["members"][0]["candidate_id"], "1");
+        let next: Value = serde_json::from_str(
+            &bridge
+                .product_page_next(10_000)
+                .expect("advance desktop product pages"),
+        )
+        .expect("desktop product page advance JSON");
+        assert!(matches!(
+            next["state"].as_str(),
+            Some("page" | "sealed" | "work-budget-exhausted")
+        ));
+
+        let replacement_job = bridge
+            .start_job(REQUEST)
+            .expect("new desktop search replaces the page owner");
+        assert!(bridge.product_page_get(1, 1).is_err());
+        bridge
+            .cancel_job(replacement_job)
+            .expect("cancel replacement desktop search");
+        assert!(bridge.product_page_get(1, 1).is_err());
+        let cancel_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let terminal = bridge
+                .drain_job_events(replacement_job)
+                .expect("drain cancelled desktop pc minimals job")
+                .iter()
+                .any(GuiJobEvent::is_terminal);
+            if terminal {
+                break;
+            }
+            assert!(
+                Instant::now() < cancel_deadline,
+                "cancelled desktop pc minimals job did not terminate"
+            );
+            std::thread::yield_now();
+        }
+
+        let release_job = bridge
+            .start_job(REQUEST)
+            .expect("start desktop pc minimals for explicit release");
+        let _ = wait_for_completion(&mut bridge, release_job);
+        assert!(bridge.product_page_get(1, 1).is_ok());
+        bridge.product_page_release();
+        assert!(bridge.product_page_get(1, 1).is_err());
+    }
+
+    #[test]
     fn desktop_requests_reject_inactive_score_spin_and_knowledge_options() {
         for option in [
             r#""initial_b2b": 1"#,
@@ -2670,6 +5674,146 @@ mod tests {
         assert!(policy.allow_backend_fallback());
         assert_eq!(policy.gpu_device(), &GpuDeviceSelection::Index(2));
         assert!(policy.gpu_warmup());
+    }
+
+    #[test]
+    fn desktop_build_probability_includes_requested_solution_probabilities() {
+        let request = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "build-probability",
+                "height": 1,
+                "base_mask": 0,
+                "target_mask": 15,
+                "queue": "I",
+                "solution_probabilities": true
+            }"#,
+        )
+        .expect("desktop build solution-probability request");
+        let AppCommand::BuildProbability(command) = request.command() else {
+            panic!("expected build-probability command");
+        };
+        assert_eq!(
+            command.query().solution_probability_policy(),
+            BuildSolutionProbabilityPolicy::Include
+        );
+    }
+
+    #[test]
+    fn desktop_build_probability_omits_solution_probabilities_by_default() {
+        let request = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "build-probability",
+                "height": 1,
+                "base_mask": 0,
+                "target_mask": 15,
+                "queue": "I"
+            }"#,
+        )
+        .expect("desktop default build request");
+        let AppCommand::BuildProbability(command) = request.command() else {
+            panic!("expected build-probability command");
+        };
+        assert_eq!(
+            command.query().solution_probability_policy(),
+            BuildSolutionProbabilityPolicy::Omit
+        );
+    }
+
+    #[test]
+    fn desktop_tiling_build_rejects_solution_probabilities() {
+        let error = desktop_request_builds_app_request(
+            r#"{
+                "app_request_model": "clearra-app/AppRequest",
+                "command": "build-probability",
+                "height": 1,
+                "base_mask": 0,
+                "target_mask": 15,
+                "queue": "I",
+                "build_aggregation": "tiling",
+                "solution_probabilities": true
+            }"#,
+        )
+        .expect_err("tiling-only build must reject solution probabilities");
+
+        assert_eq!(error.code(), "desktop-invalid-request");
+        assert!(error.message().contains("noncanonical inactive option"));
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_build_source_pieces_changes_executed_universe_and_coverage() {
+        use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let execute = |aggregation: &str, source_piece_count: usize| {
+            let request = desktop_request_builds_app_request(&format!(
+                r#"{{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "build-probability",
+                    "height": 1,
+                    "base_mask": 0,
+                    "target_mask": 15,
+                    "queue": "",
+                    "patterns": "",
+                    "hold_enabled": true,
+                    "hold_piece": "empty",
+                    "backend": "cpu",
+                    "workers": 1,
+                    "include_horizontal_mirror": false,
+                    "build_aggregation": "{aggregation}",
+                    "source_piece_count": {source_piece_count}
+                }}"#
+            ))
+            .expect("typed desktop build source request");
+            let response = context.run(request);
+            assert_eq!(response.status(), AppStatus::Success);
+            let result = response
+                .render_model()
+                .and_then(|model| model.core_result())
+                .expect("executed build-probability result");
+            (
+                result
+                    .usize_field("source_sequence_length")
+                    .expect("source sequence length"),
+                result
+                    .field("total_possible_pattern_count")
+                    .expect("pattern universe")
+                    .to_owned(),
+                result
+                    .usize_field("covered_pattern_count")
+                    .expect("covered pattern count"),
+                result
+                    .field("coverage_probability")
+                    .expect("coverage probability")
+                    .to_owned(),
+            )
+        };
+
+        let one = execute("buildability", 1);
+        let two = execute("buildability", 2);
+        assert_eq!(
+            one,
+            (1, "7".to_owned(), 1, "0.14285714285714285".to_owned())
+        );
+        assert_eq!(
+            two,
+            (2, "42".to_owned(), 12, "0.2857142857142857".to_owned())
+        );
+        let tiling_one = execute("tiling", 1);
+        let tiling_two = execute("tiling", 2);
+        assert_eq!(
+            tiling_one,
+            (1, "7".to_owned(), 0, "not-calculated".to_owned())
+        );
+        assert_eq!(
+            tiling_two,
+            (2, "42".to_owned(), 0, "not-calculated".to_owned())
+        );
+        assert_ne!(tiling_one, tiling_two);
     }
 
     #[test]

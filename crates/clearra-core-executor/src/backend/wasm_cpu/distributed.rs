@@ -1,13 +1,17 @@
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::SearchProblem;
+use sha2::{Digest, Sha256};
 
-use crate::{CoreExecutionResult, CorePostProcessScoreCell};
+use crate::{CoreExecutionResult, CorePostProcessScoreCell, WasmCpuSearchError};
 
 use super::{
     mix_digest,
     result::{DistributedGeometryAdvance, ExactSearchAdvance, WasmExactSearchSession},
     WasmExactSearchError,
 };
+
+pub const CANONICAL_WASM_CANDIDATE_PACKET_MAGIC: u32 = 0x4342_4131;
+pub const CANONICAL_WASM_CANDIDATE_PACKET_WIRE_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmCandidatePacket {
@@ -55,6 +59,62 @@ impl WasmCandidatePacket {
 
     pub fn row_ids(&self) -> &[u32] {
         &self.row_ids
+    }
+
+    /// Returns the heap payload retained by the private row-id buffer using
+    /// its actual allocation capacity. The inline candidate packet and inline
+    /// `Vec` owner are excluded.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        (self.row_ids.capacity() as u128).checked_mul(core::mem::size_of::<u32>() as u128)
+    }
+}
+
+/// Encodes the sole canonical candidate packet stream shared by native and
+/// browser verifier transports. Callers must pass packets emitted by the
+/// actual `WasmBuildProbabilityCandidateProducer`; this codec does not mint
+/// candidate authority on its own.
+pub fn encode_canonical_wasm_candidate_packet_batch(candidates: &[WasmCandidatePacket]) -> Vec<u8> {
+    let row_count = candidates
+        .iter()
+        .map(|candidate| candidate.row_ids().len())
+        .sum::<usize>();
+    let mut output = Vec::with_capacity(12 + candidates.len() * 20 + row_count * 4);
+    output.extend_from_slice(&CANONICAL_WASM_CANDIDATE_PACKET_MAGIC.to_le_bytes());
+    output.extend_from_slice(&CANONICAL_WASM_CANDIDATE_PACKET_WIRE_VERSION.to_le_bytes());
+    output.extend_from_slice(&(candidates.len() as u32).to_le_bytes());
+    for candidate in candidates {
+        output.extend_from_slice(&candidate.ordinal().to_le_bytes());
+        output.extend_from_slice(&u32::from(candidate.pass_index()).to_le_bytes());
+        output.extend_from_slice(&candidate.target_index().to_le_bytes());
+        output.extend_from_slice(&(candidate.row_ids().len() as u32).to_le_bytes());
+        for row_id in candidate.row_ids() {
+            output.extend_from_slice(&row_id.to_le_bytes());
+        }
+    }
+    output
+}
+
+pub fn canonical_wasm_candidate_packet_batch_sha256(candidates: &[WasmCandidatePacket]) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(encode_canonical_wasm_candidate_packet_batch(candidates))
+    )
+}
+
+#[cfg(test)]
+mod candidate_packet_retained_bytes_tests {
+    use super::WasmCandidatePacket;
+
+    #[test]
+    fn nested_retained_bytes_counts_private_row_id_capacity_not_length() {
+        let mut row_ids = Vec::with_capacity(64);
+        row_ids.extend([3_u32, 7]);
+        assert!(row_ids.capacity() > row_ids.len());
+        let expected =
+            (row_ids.capacity() as u128).checked_mul(core::mem::size_of::<u32>() as u128);
+        let candidate = WasmCandidatePacket::for_pass(11, 2, 5, row_ids);
+
+        assert_eq!(candidate.checked_nested_retained_bytes(), expected);
     }
 }
 
@@ -137,10 +197,14 @@ pub struct WasmCpuCandidateProducer {
 
 impl WasmCpuCandidateProducer {
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+        Self::new_typed(problem).map_err(WasmCpuSearchError::reason)
+    }
+
+    pub fn new_typed(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
         let verification_required = problem.objective().kind()
             != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         Ok(Self {
-            session: WasmExactSearchSession::new(problem).map_err(map_error)?,
+            session: WasmExactSearchSession::new(problem).map_err(map_typed_error)?,
             candidate_count: 0,
             candidate_digest: 0,
             verification_required,
@@ -449,8 +513,17 @@ impl WasmDistributedResultMerger {
 }
 
 pub(super) fn map_error(error: WasmExactSearchError) -> &'static str {
+    error.reason()
+}
+
+fn map_typed_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     match error {
-        WasmExactSearchError::InvalidProblem(reason) => reason,
-        WasmExactSearchError::Cancelled => "wasm_cpu_search_cancelled",
+        WasmExactSearchError::InvalidProblem(reason) => {
+            WasmCpuSearchError::InvalidProblem { reason }
+        }
+        WasmExactSearchError::ResourceAdmission(resource_report) => {
+            WasmCpuSearchError::ResourceAdmission { resource_report }
+        }
+        WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }
 }

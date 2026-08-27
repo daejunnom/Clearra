@@ -95,6 +95,9 @@ fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError
         super::wasm_cpu::WasmExactSearchError::InvalidProblem(reason) => {
             WasmCpuSearchError::InvalidProblem { reason }
         }
+        super::wasm_cpu::WasmExactSearchError::ResourceAdmission(resource_report) => {
+            WasmCpuSearchError::ResourceAdmission { resource_report }
+        }
         super::wasm_cpu::WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }
 }

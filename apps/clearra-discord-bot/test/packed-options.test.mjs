@@ -42,7 +42,7 @@ test("damage packed options accept every representative single and legal pair in
   ]);
 });
 
-test("spin-structure packed options accept every representative single and legal pair", () => {
+test("spin-structure named options accept every representative single and legal pair", () => {
   const settings = [
     ["fill-bottom", "1"],
     ["fill-top", "4"],
@@ -216,10 +216,15 @@ function setupArguments(settings, remaining = "IOT") {
 }
 
 function spinStructureArguments(settings) {
-  return buildSlashCommandArguments(findSlashCommand("spin-structure"), [
+  return buildSlashCommandArguments(findSlashCommand("spin-structure").subcommands.search, [
     { name: "pieces", value: "IOTS" },
     { name: "field", value: EMPTY },
-    ...packed(settings),
+    ...settings.map(([name, value]) => ({
+      name,
+      value: ["fill-bottom", "fill-top", "max-placements"].includes(name)
+        ? Number(value)
+        : value,
+    })),
   ]);
 }
 

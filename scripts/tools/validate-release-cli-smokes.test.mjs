@@ -40,6 +40,96 @@ test("canonical release workflow passes the smoke validator", async () => {
   assert.match(result.stdout, /Release CLI smoke contract passed\./u);
 });
 
+test("rejects the generic Linux pc objective in place of canonical pc.tiling", async () => {
+  const genericPackageScript = replaceExactlyOnce(
+    canonicalPackageScript,
+    "    --format json pc tiling --lines 2 --queue IIOOO --no-hold \\\n    --backend cpu --workers 1",
+    "    --format json pc --lines 2 --queue IIOOO --no-hold \\\n    --objective tiling --backend cpu --workers 1",
+  );
+  const result = await runValidator(normalizedWorkflow, genericPackageScript);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects a forged Linux pc.tiling result kind expectation", async () => {
+  const forgedPackageScript = replaceExactlyOnce(
+    canonicalPackageScript,
+    '"kind":"pc-tiling-family.v1"',
+    '"kind":"pc"',
+  );
+  const result = await runValidator(normalizedWorkflow, forgedPackageScript);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects the generic Windows pc objective in place of canonical pc.tiling", async () => {
+  const genericWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "            -CommandArguments @('--format', 'json', 'pc', 'tiling', '--lines', '2', '--queue', 'IIOOO', '--no-hold', '--backend', 'cpu', '--workers', '1') `\n",
+    "            -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IIOOO', '--no-hold', '--objective', 'tiling', '--backend', 'cpu', '--workers', '1') `\n",
+  );
+  const result = await runValidator(genericWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects a Windows pc.tiling smoke without its typed result kind", async () => {
+  const untypedWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "            -ExpectedKind 'pc-tiling-family.v1' `\n",
+    "",
+  );
+  const result = await runValidator(untypedWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects a skipped product capability registry authority", async () => {
+  const skippedWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "      - name: Require the product capability and alias parser authority\n        run: |\n",
+    "      - name: Require the product capability and alias parser authority\n        if: false\n        run: |\n",
+  );
+  const result = await runValidator(skippedWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects a skipped upstream drift snapshot contract", async () => {
+  const skippedWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "          node --test scripts/tools/audit-upstream-drift.test.mjs\n",
+    "          # node --test scripts/tools/audit-upstream-drift.test.mjs\n",
+  );
+  const result = await runValidator(skippedWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects removal of the final-source attempt journal regression", async () => {
+  const weakenedWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "node --test scripts/release/final-source-attempt-journal.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
+    "node --test scripts/release/validate-final-source-revalidation.test.mjs",
+  );
+  const result = await runValidator(weakenedWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects disabled Linux typed pc.tiling result enforcement", async () => {
+  const disabledPackageScript = replaceExactlyOnce(
+    canonicalPackageScript,
+    '            if (Object.hasOwn(expected, "kind") && parsed?.kind !== expected.kind) {',
+    '            if (false && Object.hasOwn(expected, "kind") && parsed?.kind !== expected.kind) {',
+  );
+  const result = await runValidator(normalizedWorkflow, disabledPackageScript);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects disabled Windows typed pc.tiling result enforcement", async () => {
+  const disabledWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {",
+    "            if ($false -and $ExpectedKind -and $parsed.kind -ne $ExpectedKind) {",
+  );
+  const result = await runValidator(disabledWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
 for (const [name, mutate] of [
   [
     "rejects workflow defaults that can replace protected shells",
@@ -170,7 +260,7 @@ for (const [name, mutate] of [
   });
 }
 
-async function runValidator(workflow) {
+async function runValidator(workflow, packageScript = canonicalPackageScript) {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "clearra-release-smoke-"));
   try {
     const fixtureValidator = join(
@@ -197,7 +287,7 @@ async function runValidator(workflow) {
     ]);
     await Promise.all([
       writeFile(fixtureValidator, canonicalValidator, "utf8"),
-      writeFile(fixturePackageScript, canonicalPackageScript, "utf8"),
+      writeFile(fixturePackageScript, packageScript, "utf8"),
       writeFile(fixtureWorkflow, workflow, "utf8"),
     ]);
     const childEnvironment = { ...process.env };

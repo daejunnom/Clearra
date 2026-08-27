@@ -19,7 +19,16 @@ use clearra_replay::{
     ExactScoringExecutionGraph, RotationRequest, ScoringExecutionEdge, ScoringExecutionNode,
     ScoringLockEvidence,
 };
-use clearra_supply::pattern_universe::PatternPiecePositionIndex;
+use clearra_supply::{
+    execution_automaton::{
+        SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState,
+        SupplyObservationIdentity, SupplyProvenanceId,
+    },
+    hold::hold_policy::HoldPolicy,
+    hold_automaton::HoldAutomatonState,
+    pattern_universe::PatternPiecePositionIndex,
+    piece_source::{PieceSourceId, PieceSourceKind},
+};
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
@@ -35,7 +44,7 @@ use super::{
     queue_observation_policy::{
         QueueObservationCoverage, QueueObservationPolicyEvaluator, RootedPieceLanguageUnion,
     },
-    reachability::ReachabilityWorkspace,
+    reachability::{checked_reachability_retained_upper_bound, ReachabilityWorkspace},
     realization_feasibility::{RealizationFeasibility, RealizationFeasibilityWorkspace},
     standard_bag_coverage::{StandardBagCoverage, StandardBagCoverageResult},
     WasmExactSearchError,
@@ -748,6 +757,77 @@ pub(super) struct CandidateProjection {
     state_generations: Vec<u32>,
     generation: u32,
     pub all_placed: usize,
+}
+
+/// Conservative constructor/live-set peak for one serial candidate check.
+///
+/// The exact graph shape is not known before construction, so this deliberately
+/// uses the full subset lattice and every operation edge, plus the complete
+/// graph x hold-product state space. It is an upper bound, not an exact retained
+/// claim. The final factor of two covers replacement/recycling moments where a
+/// prior workspace allocation and its larger successor coexist.
+pub(super) fn checked_candidate_verification_peak_upper_bound(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    retain_trace: bool,
+) -> Option<u128> {
+    let operation_count = candidate.row_ids().len();
+    if operation_count == 0 || operation_count > super::MAX_BOARD64_PIECES {
+        return None;
+    }
+    let subset_count = 1_u128.checked_shl(u32::try_from(operation_count).ok()?)?;
+    let edge_count = subset_count.checked_mul(operation_count as u128)?;
+    let product_state_count = subset_count
+        .checked_mul(super::coverage_product::EXTRA_DRAW_STATE_COUNT as u128)?
+        .checked_mul(super::coverage_product::HOLD_STATE_COUNT as u128)?;
+    let universe = problem.piece_source().materialized_universe()?;
+    let pattern_word_count = (universe.pattern_count() as u128).checked_add(63)? / 64;
+
+    let projection_and_feasibility_per_subset = (core::mem::size_of::<u16>()
+        + core::mem::size_of::<u64>()
+        + core::mem::size_of::<u32>()
+        + core::mem::size_of::<u32>() * 3
+        + core::mem::size_of::<u16>() * 2) as u128;
+    let graph_per_subset = (core::mem::size_of::<BuildNode>()
+        + core::mem::size_of::<u32>() * 2
+        + core::mem::size_of::<u16>()) as u128;
+    let graph_edge_bytes = edge_count
+        .checked_mul(core::mem::size_of::<BuildEdge>() as u128)?
+        // operation, piece-deduplicated, scratch, and prepared copies
+        .checked_mul(4)?;
+    let product_bytes = product_state_count.checked_mul(
+        (core::mem::size_of::<u64>()
+            + core::mem::size_of::<u32>()
+            + core::mem::size_of::<usize>()
+            + core::mem::size_of::<u128>() * u64::BITS as usize) as u128,
+    )?;
+    let pattern_bytes = pattern_word_count
+        .checked_mul(core::mem::size_of::<u64>() as u128)?
+        .checked_mul(6)?;
+    let language_cache_bytes = edge_count.checked_mul((core::mem::size_of::<u64>() * 8) as u128)?;
+    let trace_bytes = if retain_trace {
+        (operation_count as u128).checked_mul(core::mem::size_of::<CorePathStep>() as u128)?
+    } else {
+        0
+    };
+    let reachability_bytes = checked_reachability_retained_upper_bound(
+        catalog.width(),
+        catalog.height(),
+        problem.kick_profile().profile_id(),
+    )?;
+
+    subset_count
+        .checked_mul(projection_and_feasibility_per_subset)?
+        .checked_add(subset_count.checked_mul(graph_per_subset)?)?
+        .checked_add(graph_edge_bytes)?
+        .checked_add(product_bytes)?
+        .checked_add(pattern_bytes)?
+        .checked_add(language_cache_bytes)?
+        .checked_add(trace_bytes)?
+        .checked_add(reachability_bytes)?
+        .checked_add(core::mem::size_of::<CandidateBuildResult>() as u128)?
+        .checked_mul(2)
 }
 
 impl CandidateProjection {
@@ -1486,6 +1566,7 @@ fn verify_candidate_with_projection(
                     problem.supply().hold_enabled(),
                     problem.supply().projects_unplaced_lookahead(),
                     problem.supply().projects_standard_bag_lookahead(),
+                    problem.initial_hold(),
                     CoverageState {
                         node: graph.root,
                         cursor: problem.initial_hold().cursor(),
@@ -1836,13 +1917,35 @@ fn fixed_witness_branches(
         return branches;
     };
     let current_code = witness_piece_code(current_piece);
-    branches.push(FixedWitnessBranch {
-        desired_piece: current_code,
-        next_extra_draw: state.extra_draw,
-        next_hold_code: state.hold_code,
-        terminal_projection_consumed: state.terminal_projection_consumed,
-        hold_kind: "use-current",
-    });
+    let Some(cursor) = u16::try_from(queue_position).ok() else {
+        return branches;
+    };
+    if state.hold_code > 7 {
+        return branches;
+    }
+    let hold_piece = witness_piece_from_code(state.hold_code);
+    let identity = fixed_witness_supply_identity(sequence, cursor, hold_piece, hold_enabled);
+    if let Some(step) = sequence_supply_transition(
+        identity,
+        cursor,
+        hold_piece,
+        hold_enabled,
+        SupplyBranchKind::Current,
+        current_piece,
+        None,
+    ) {
+        if let Some(next_extra_draw) =
+            projected_witness_extra_draw(state.extra_draw, step.evidence.queue_advances)
+        {
+            branches.push(FixedWitnessBranch {
+                desired_piece: witness_piece_code(step.used_piece),
+                next_extra_draw,
+                next_hold_code: step.next_state.hold_piece.map_or(0, witness_piece_code),
+                terminal_projection_consumed: state.terminal_projection_consumed,
+                hold_kind: "use-current",
+            });
+        }
+    }
     if !hold_enabled {
         return branches;
     }
@@ -1850,26 +1953,90 @@ fn fixed_witness_branches(
         // Swapping equal pieces reaches the exact same semantic state as using
         // current, so it is not a second search branch.
         if state.hold_code != current_code {
-            branches.push(FixedWitnessBranch {
-                desired_piece: state.hold_code,
-                next_extra_draw: state.extra_draw,
-                next_hold_code: current_code,
-                terminal_projection_consumed: state.terminal_projection_consumed,
-                hold_kind: "swap-held",
-            });
+            if let Some(step) = sequence_supply_transition(
+                identity,
+                cursor,
+                hold_piece,
+                hold_enabled,
+                SupplyBranchKind::SwapHeld,
+                current_piece,
+                None,
+            ) {
+                if let Some(next_extra_draw) =
+                    projected_witness_extra_draw(state.extra_draw, step.evidence.queue_advances)
+                {
+                    branches.push(FixedWitnessBranch {
+                        desired_piece: witness_piece_code(step.used_piece),
+                        next_extra_draw,
+                        next_hold_code: step.next_state.hold_piece.map_or(0, witness_piece_code),
+                        terminal_projection_consumed: state.terminal_projection_consumed,
+                        hold_kind: "swap-held",
+                    });
+                }
+            }
         }
     } else if state.extra_draw == 0 {
-        if let Some(next_piece) = sequence.get(queue_position.saturating_add(1)).copied() {
-            branches.push(FixedWitnessBranch {
-                desired_piece: witness_piece_code(next_piece),
-                next_extra_draw: 1,
-                next_hold_code: current_code,
-                terminal_projection_consumed: state.terminal_projection_consumed,
-                hold_kind: "store-current-use-next",
-            });
+        if let Some(next_piece) = queue_position
+            .checked_add(1)
+            .and_then(|position| sequence.get(position))
+            .copied()
+        {
+            if let Some(step) = sequence_supply_transition(
+                identity,
+                cursor,
+                hold_piece,
+                hold_enabled,
+                SupplyBranchKind::StoreCurrent,
+                current_piece,
+                Some(next_piece),
+            ) {
+                if let Some(next_extra_draw) =
+                    projected_witness_extra_draw(state.extra_draw, step.evidence.queue_advances)
+                {
+                    branches.push(FixedWitnessBranch {
+                        desired_piece: witness_piece_code(step.used_piece),
+                        next_extra_draw,
+                        next_hold_code: step.next_state.hold_piece.map_or(0, witness_piece_code),
+                        terminal_projection_consumed: state.terminal_projection_consumed,
+                        hold_kind: "store-current-use-next",
+                    });
+                }
+            }
         }
     }
     branches
+}
+
+fn fixed_witness_supply_identity(
+    sequence: &[PieceKind],
+    cursor: u16,
+    hold_piece: Option<PieceKind>,
+    hold_enabled: bool,
+) -> HoldAutomatonState {
+    let mut identity = 0xcbf2_9ce4_8422_2325_u64;
+    for piece in sequence.iter().copied() {
+        identity ^= u64::from(witness_piece_code(piece));
+        identity = identity.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    SupplyExecutionState::with_contract(
+        PieceSourceId::new(identity),
+        PieceSourceKind::FixedQueue,
+        cursor,
+        hold_piece,
+        if hold_enabled {
+            HoldPolicy::Allowed
+        } else {
+            HoldPolicy::Forbidden
+        },
+        0,
+        0,
+        SupplyObservationIdentity::full_queue_oracle(),
+        SupplyProvenanceId(identity),
+    )
+}
+
+fn projected_witness_extra_draw(extra_draw: u8, queue_advances: u8) -> Option<u8> {
+    extra_draw.checked_add(queue_advances.checked_sub(1)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2036,6 +2203,17 @@ fn visit_witness_state(
             continue;
         };
         let desired_piece = witness_piece_code(edge.piece);
+        let Some(supply_cursor) = u16::try_from(queue_position).ok() else {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_witness_queue_position_overflow",
+            ));
+        };
+        if state.hold_code > 7 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_witness_hold_state_invalid",
+            ));
+        }
+        let hold_piece = witness_piece_from_code(state.hold_code);
         if super::terminal_hold_projection::finite_terminal_release_allowed(
             pattern_index.sequence_len(),
             queue_position,
@@ -2095,12 +2273,34 @@ fn visit_witness_state(
                 problem.supply().projects_standard_bag_lookahead(),
             );
         if use_current != 0 {
+            let Some(supply_step) = sequence_supply_transition(
+                problem.initial_hold(),
+                supply_cursor,
+                hold_piece,
+                problem.supply().hold_enabled(),
+                SupplyBranchKind::Current,
+                edge.piece,
+                None,
+            ) else {
+                continue;
+            };
             path.push(WitnessStep {
                 edge,
                 hold_kind: "use-current",
             });
             let next = WitnessProductState {
                 subset: edge.to as u16,
+                extra_draw: projected_witness_extra_draw(
+                    state.extra_draw,
+                    supply_step.evidence.queue_advances,
+                )
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_witness_extra_draw_overflow",
+                ))?,
+                hold_code: supply_step
+                    .next_state
+                    .hold_piece
+                    .map_or(0, witness_piece_code),
                 active_patterns: use_current,
                 ..state
             };
@@ -2140,13 +2340,34 @@ fn visit_witness_state(
                 if swap_bits == 0 {
                     continue;
                 }
+                let Some(supply_step) = sequence_supply_transition(
+                    problem.initial_hold(),
+                    supply_cursor,
+                    hold_piece,
+                    true,
+                    SupplyBranchKind::SwapHeld,
+                    PieceKind::STANDARD_TETROMINOES[usize::from(current_piece - 1)],
+                    None,
+                ) else {
+                    continue;
+                };
                 path.push(WitnessStep {
                     edge,
                     hold_kind: "swap-held",
                 });
                 let next = WitnessProductState {
                     subset: edge.to as u16,
-                    hold_code: current_piece,
+                    extra_draw: projected_witness_extra_draw(
+                        state.extra_draw,
+                        supply_step.evidence.queue_advances,
+                    )
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_witness_extra_draw_overflow",
+                    ))?,
+                    hold_code: supply_step
+                        .next_state
+                        .hold_piece
+                        .map_or(0, witness_piece_code),
                     active_patterns: swap_bits,
                     ..state
                 };
@@ -2172,8 +2393,11 @@ fn visit_witness_state(
                 path.pop();
             }
         } else if state.hold_code == 0 && state.extra_draw == 0 {
+            let Some(next_queue_position) = queue_position.checked_add(1) else {
+                continue;
+            };
             let desired_next = pattern_index.piece_word_with_projected_standard_bag_lookahead(
-                queue_position.saturating_add(1),
+                next_queue_position,
                 desired_piece,
                 word_index,
                 problem.supply().projects_standard_bag_lookahead(),
@@ -2190,14 +2414,34 @@ fn visit_witness_state(
                 if store_bits == 0 {
                     continue;
                 }
+                let Some(supply_step) = sequence_supply_transition(
+                    problem.initial_hold(),
+                    supply_cursor,
+                    hold_piece,
+                    true,
+                    SupplyBranchKind::StoreCurrent,
+                    PieceKind::STANDARD_TETROMINOES[usize::from(current_piece - 1)],
+                    Some(edge.piece),
+                ) else {
+                    continue;
+                };
                 path.push(WitnessStep {
                     edge,
                     hold_kind: "store-current-use-next",
                 });
                 let next = WitnessProductState {
                     subset: edge.to as u16,
-                    extra_draw: 1,
-                    hold_code: current_piece,
+                    extra_draw: projected_witness_extra_draw(
+                        state.extra_draw,
+                        supply_step.evidence.queue_advances,
+                    )
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_witness_extra_draw_overflow",
+                    ))?,
+                    hold_code: supply_step
+                        .next_state
+                        .hold_piece
+                        .map_or(0, witness_piece_code),
                     terminal_projection_consumed: state.terminal_projection_consumed,
                     active_patterns: store_bits,
                 };
@@ -2296,6 +2540,20 @@ const fn witness_piece_code(piece: PieceKind) -> u8 {
         PieceKind::Z => 5,
         PieceKind::J => 6,
         PieceKind::L => 7,
+    }
+}
+
+const fn witness_piece_from_code(code: u8) -> Option<PieceKind> {
+    match code {
+        0 => None,
+        1 => Some(PieceKind::I),
+        2 => Some(PieceKind::O),
+        3 => Some(PieceKind::T),
+        4 => Some(PieceKind::S),
+        5 => Some(PieceKind::Z),
+        6 => Some(PieceKind::J),
+        7 => Some(PieceKind::L),
+        _ => None,
     }
 }
 
@@ -2470,6 +2728,9 @@ impl BuildOrderGraph {
         workspace.graph_subset_node_ids[0] = 0;
         let mut nodes = core::mem::take(&mut workspace.graph_nodes);
         nodes.clear();
+        nodes.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_build_order_node_storage_unavailable")
+        })?;
         nodes.push(BuildNode {
             edge_start: 0,
             edge_count: 0,
@@ -2481,6 +2742,9 @@ impl BuildOrderGraph {
         });
         let mut subset_queue = core::mem::take(&mut workspace.graph_subset_queue);
         subset_queue.clear();
+        subset_queue.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_build_order_queue_storage_unavailable")
+        })?;
         subset_queue.push(0);
         let mut edges = core::mem::take(&mut workspace.graph_edges);
         edges.clear();
@@ -2547,7 +2811,7 @@ impl BuildOrderGraph {
                             deleted_rows,
                             realization,
                         ) {
-                            edge_scratch.push(edge);
+                            try_push_build_edge(&mut edge_scratch, edge)?;
                         }
                     }
                 } else if piece_language_projection_only {
@@ -2566,7 +2830,7 @@ impl BuildOrderGraph {
                         ) else {
                             continue;
                         };
-                        edge_scratch.push(edge);
+                        try_push_build_edge(&mut edge_scratch, edge)?;
                         if workspace.reachability.lock_harddrop_reachable_instantiated(
                             catalog.width(),
                             board,
@@ -2598,7 +2862,7 @@ impl BuildOrderGraph {
                     };
                     edge_scratch.truncate(scratch_start);
                     if let Some(edge) = selected {
-                        edge_scratch.push(edge);
+                        try_push_build_edge(&mut edge_scratch, edge)?;
                     }
                 } else {
                     for realization in catalog.instantiations(row_id, deleted_rows) {
@@ -2620,7 +2884,7 @@ impl BuildOrderGraph {
                             row.piece,
                             realization,
                         ) {
-                            edge_scratch.push(edge);
+                            try_push_build_edge(&mut edge_scratch, edge)?;
                         }
                     }
                 }
@@ -2673,11 +2937,19 @@ impl BuildOrderGraph {
                 for edge in &edge_scratch {
                     let key = (edge.to, edge.piece);
                     if previous_piece_transition != Some(key) {
+                        piece_edges.try_reserve(1).map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_build_order_piece_edge_storage_unavailable",
+                            )
+                        })?;
                         piece_edges.push(*edge);
                         previous_piece_transition = Some(key);
                     }
                 }
             }
+            edges.try_reserve(edge_scratch.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_build_order_edge_storage_unavailable")
+            })?;
             edges.extend_from_slice(&edge_scratch);
             nodes[node_index].edge_count = edge_scratch.len() as u32;
             nodes[node_index].piece_edge_count = if share_piece_edges {
@@ -2737,6 +3009,17 @@ impl BuildOrderGraph {
         };
         &edges[start..start + node.piece_edge_count as usize]
     }
+}
+
+fn try_push_build_edge(
+    storage: &mut Vec<BuildEdge>,
+    edge: BuildEdge,
+) -> Result<(), WasmExactSearchError> {
+    storage.try_reserve(1).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_build_order_edge_scratch_storage_unavailable")
+    })?;
+    storage.push(edge);
+    Ok(())
 }
 
 fn annotate_and_prune_finesse_graph(
@@ -3054,6 +3337,131 @@ pub(super) fn exact_scoring_execution_graph(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ExactScoringGraphMemoryProjection {
+    /// Peak additional storage while the reusable Build workspace, its
+    /// topological graph, the scoring conversion scratch, and the retained
+    /// scoring graph coexist.
+    pub peak_additional_bytes: u128,
+    /// Heap storage retained by the returned graph, excluding its outer slot.
+    pub retained_graph_nested_bytes: u128,
+}
+
+/// Checked conservative upper bound for one exact scoring-graph replay.
+///
+/// A candidate with `n` placements has at most `2^n` subset nodes. Every
+/// operation is absent from exactly half of those subsets, and one raw catalog
+/// realization can yield at most one build edge for that operation/subset.
+/// This therefore bounds both build-edge stores and the final scoring edges
+/// without claiming that the bound is an exact allocation measurement.
+pub(super) fn exact_scoring_execution_graph_memory_projection(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    identity: StandardBoard64TilingIdentity,
+) -> Result<ExactScoringGraphMemoryProjection, WasmExactSearchError> {
+    let placement_count = identity.placement_count();
+    if placement_count == 0 || placement_count > super::MAX_BOARD64_PIECES {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_placement_count_invalid",
+        ));
+    }
+    let state_count =
+        1_u128
+            .checked_shl(placement_count as u32)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_scoring_projection_state_count_overflow",
+            ))?;
+    let mut realization_sum = 0_u128;
+    for index in 0..placement_count {
+        let placement = identity
+            .placement(index)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_scoring_identity_placement_missing",
+            ))?;
+        let row_id = catalog
+            .skeleton_id(placement.piece(), placement.cells_mask())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_scoring_identity_not_in_geometry_catalog",
+            ))?;
+        realization_sum = realization_sum
+            .checked_add(catalog.realizations(row_id).len() as u128)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_scoring_projection_realization_count_overflow",
+            ))?;
+    }
+    let edge_bound = state_count
+        .checked_div(2)
+        .and_then(|half| half.checked_mul(realization_sum))
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_edge_count_overflow",
+        ))?;
+    let state_workspace_bytes = state_count
+        .checked_mul(
+            (core::mem::size_of::<BuildNode>()
+                + core::mem::size_of::<u16>()
+                + core::mem::size_of::<u32>() * 2
+                + core::mem::size_of::<u16>()
+                + core::mem::size_of::<u64>()
+                + core::mem::size_of::<u32>()) as u128,
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_workspace_overflow",
+        ))?;
+    let build_edge_bytes = edge_bound
+        .checked_mul((core::mem::size_of::<BuildEdge>() * 2) as u128)
+        .and_then(|bytes| {
+            realization_sum
+                .checked_mul(core::mem::size_of::<BuildEdge>() as u128)
+                .and_then(|scratch| bytes.checked_add(scratch))
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_build_edge_overflow",
+        ))?;
+    let retained_graph_nested_bytes = state_count
+        .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)
+        .and_then(|nodes| {
+            edge_bound
+                .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)
+                .and_then(|edges| nodes.checked_add(edges))
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_retained_graph_overflow",
+        ))?;
+    let conversion_scratch_bytes = state_count
+        .checked_mul(core::mem::size_of::<usize>() as u128)
+        .and_then(|subsets| {
+            (placement_count as u128)
+                .checked_mul(core::mem::size_of::<u32>() as u128)
+                .and_then(|rows| subsets.checked_add(rows))
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_conversion_overflow",
+        ))?;
+    let reachability_bytes = super::reachability::checked_reachability_retained_upper_bound(
+        catalog.width(),
+        catalog.height(),
+        problem.kick_profile().profile_id(),
+    )
+    .ok_or(WasmExactSearchError::InvalidProblem(
+        "wasm_scoring_projection_reachability_overflow",
+    ))?;
+    let peak_additional_bytes = state_workspace_bytes
+        .checked_add(build_edge_bytes)
+        .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+        .and_then(|bytes| bytes.checked_add(conversion_scratch_bytes))
+        .and_then(|bytes| bytes.checked_add(reachability_bytes))
+        .and_then(|bytes| {
+            bytes.checked_add(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)
+        })
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_scoring_projection_peak_overflow",
+        ))?;
+    Ok(ExactScoringGraphMemoryProjection {
+        peak_additional_bytes,
+        retained_graph_nested_bytes,
+    })
+}
+
 pub(super) fn exact_scoring_execution_graph_for_completion(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -3062,7 +3470,12 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
     workspace: &mut BuildUpWorkspace,
     completion: BuildCompletion,
 ) -> Result<Option<ExactScoringExecutionGraph>, WasmExactSearchError> {
-    let mut row_ids = Vec::with_capacity(identity.placement_count());
+    let mut row_ids = Vec::new();
+    row_ids
+        .try_reserve_exact(identity.placement_count())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_scoring_row_storage_unavailable")
+        })?;
     for index in 0..identity.placement_count() {
         let placement = identity
             .placement(index)
@@ -3113,7 +3526,11 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         return Ok(None);
     }
 
-    let mut subsets = vec![usize::MAX; graph.nodes.len()];
+    let mut subsets = Vec::new();
+    subsets.try_reserve_exact(graph.nodes.len()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_scoring_subset_storage_unavailable")
+    })?;
+    subsets.resize(graph.nodes.len(), usize::MAX);
     subsets[graph.root as usize] = 0;
     for node_index in 0..graph.nodes.len() {
         let subset = subsets[node_index];
@@ -3135,8 +3552,18 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         }
     }
 
-    let mut scoring_nodes = Vec::with_capacity(graph.nodes.len());
+    let mut scoring_nodes = Vec::new();
+    scoring_nodes
+        .try_reserve_exact(graph.nodes.len())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_scoring_node_storage_unavailable")
+        })?;
     let mut scoring_edges = Vec::new();
+    scoring_edges
+        .try_reserve_exact(graph.edges.len())
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_scoring_edge_storage_unavailable")
+        })?;
     for (node_index, node) in graph.nodes.iter().enumerate() {
         let edge_start = scoring_edges.len() as u32;
         if node.live {
@@ -3288,6 +3715,7 @@ fn first_pattern_path(
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
+    supply_identity: HoldAutomatonState,
     initial: CoverageState,
     finesse_guard: Option<FinessePathGuard<'_>>,
 ) -> Vec<CorePathStep> {
@@ -3297,6 +3725,7 @@ fn first_pattern_path(
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
         projects_standard_bag_lookahead: bool,
+        supply_identity: HoldAutomatonState,
         state: CoverageState,
         finesse_guard: Option<FinessePathGuard<'_>>,
         seen: &mut ExactHashSet<CoverageState>,
@@ -3307,9 +3736,10 @@ fn first_pattern_path(
         }
         let node = &graph.nodes[state.node as usize];
         if node.accepting() {
+            let projected_terminal_cursor = sequence.len().checked_add(1);
             return !projects_unplaced_lookahead
                 || (state.cursor as usize == sequence.len() && state.hold.is_none())
-                || (state.cursor as usize == sequence.len().saturating_add(1)
+                || (Some(state.cursor as usize) == projected_terminal_cursor
                     && state.hold.is_some());
         }
         for edge in graph
@@ -3340,6 +3770,7 @@ fn first_pattern_path(
                 hold_enabled,
                 projects_unplaced_lookahead,
                 projects_standard_bag_lookahead,
+                supply_identity,
                 state,
                 edge.piece,
                 finesse_guard,
@@ -3358,6 +3789,7 @@ fn first_pattern_path(
                     hold_enabled,
                     projects_unplaced_lookahead,
                     projects_standard_bag_lookahead,
+                    supply_identity,
                     CoverageState {
                         node: edge.to,
                         ..next
@@ -3382,6 +3814,7 @@ fn first_pattern_path(
         hold_enabled,
         projects_unplaced_lookahead,
         projects_standard_bag_lookahead,
+        supply_identity,
         initial,
         finesse_guard,
         &mut seen,
@@ -3402,6 +3835,7 @@ pub(super) fn representative_pattern_path(
         problem.supply().hold_enabled(),
         problem.supply().projects_unplaced_lookahead(),
         problem.supply().projects_standard_bag_lookahead(),
+        problem.initial_hold(),
         CoverageState {
             node: graph.root,
             cursor: problem.initial_hold().cursor(),
@@ -3419,57 +3853,45 @@ fn hold_successors(
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
+    supply_identity: HoldAutomatonState,
     state: CoverageState,
     required_piece: PieceKind,
     finesse_guard: Option<FinessePathGuard<'_>>,
 ) -> Vec<(&'static str, CoverageState)> {
-    let cursor = state.cursor as usize;
-    let Some(current) = sequence.get(cursor).copied() else {
-        if projects_unplaced_lookahead
-            && projects_standard_bag_lookahead
-            && hold_enabled
-            && cursor == sequence.len()
-        {
-            let Some(lookahead) = first_standard_bag_lookahead(sequence) else {
-                return Vec::new();
-            };
-            let mut successors = Vec::with_capacity(2);
-            if lookahead == required_piece {
-                successors.push((
-                    "use-unplaced-lookahead",
-                    CoverageState {
-                        cursor: state.cursor.saturating_add(1),
-                        ..state
-                    },
-                ));
-            }
-            if state.hold == Some(required_piece)
-                && finesse_guard.is_none_or(|guard| {
-                    guard.current_piece_can_spawn(state.node as usize, lookahead)
-                })
-            {
-                successors.push((
-                    "swap-held-with-unplaced-lookahead",
-                    CoverageState {
-                        cursor: state.cursor.saturating_add(1),
-                        hold: Some(lookahead),
-                        ..state
-                    },
-                ));
-            }
-            return successors;
-        }
+    let cursor = usize::from(state.cursor);
+    let Some(current) = projected_supply_piece(
+        sequence,
+        hold_enabled,
+        projects_unplaced_lookahead,
+        projects_standard_bag_lookahead,
+        cursor,
+    ) else {
         return Vec::new();
     };
     let mut successors = Vec::with_capacity(3);
     if current == required_piece {
-        successors.push((
-            "use-current",
-            CoverageState {
-                cursor: state.cursor.saturating_add(1),
-                ..state
-            },
-        ));
+        if let Some(step) = sequence_supply_transition(
+            supply_identity,
+            state.cursor,
+            state.hold,
+            hold_enabled,
+            SupplyBranchKind::Current,
+            current,
+            None,
+        ) {
+            successors.push((
+                if cursor < sequence.len() {
+                    "use-current"
+                } else {
+                    "use-unplaced-lookahead"
+                },
+                CoverageState {
+                    cursor: step.next_state.cursor,
+                    hold: step.next_state.hold_piece,
+                    ..state
+                },
+            ));
+        }
     }
     if !hold_enabled {
         return successors;
@@ -3480,41 +3902,108 @@ fn hold_successors(
         return successors;
     }
     if state.hold == Some(required_piece) {
-        successors.push((
-            "swap-held",
-            CoverageState {
-                cursor: state.cursor.saturating_add(1),
-                hold: Some(current),
-                ..state
-            },
-        ));
+        if let Some(step) = sequence_supply_transition(
+            supply_identity,
+            state.cursor,
+            state.hold,
+            hold_enabled,
+            SupplyBranchKind::SwapHeld,
+            current,
+            None,
+        ) {
+            successors.push((
+                if cursor < sequence.len() {
+                    "swap-held"
+                } else {
+                    "swap-held-with-unplaced-lookahead"
+                },
+                CoverageState {
+                    cursor: step.next_state.cursor,
+                    hold: step.next_state.hold_piece,
+                    ..state
+                },
+            ));
+        }
     }
-    if state.hold.is_none() && sequence.get(cursor + 1).copied() == Some(required_piece) {
-        successors.push((
-            "store-current-use-next",
-            CoverageState {
-                cursor: state.cursor.saturating_add(2),
-                hold: Some(current),
-                ..state
-            },
-        ));
-    }
-    if state.hold.is_none()
-        && projects_unplaced_lookahead
-        && projects_standard_bag_lookahead
-        && cursor + 1 == sequence.len()
-        && first_standard_bag_lookahead(sequence) == Some(required_piece)
-    {
-        successors.push((
-            "store-current-use-unplaced-lookahead",
-            CoverageState {
-                cursor: state.cursor.saturating_add(2),
-                hold: Some(current),
-                ..state
-            },
-        ));
+    if state.hold.is_none() {
+        let next_index = cursor.checked_add(1);
+        let next_piece = next_index.and_then(|index| {
+            projected_supply_piece(
+                sequence,
+                hold_enabled,
+                projects_unplaced_lookahead,
+                projects_standard_bag_lookahead,
+                index,
+            )
+        });
+        if next_piece == Some(required_piece) {
+            if let Some(step) = sequence_supply_transition(
+                supply_identity,
+                state.cursor,
+                state.hold,
+                hold_enabled,
+                SupplyBranchKind::StoreCurrent,
+                current,
+                next_piece,
+            ) {
+                successors.push((
+                    if next_index.is_some_and(|index| index < sequence.len()) {
+                        "store-current-use-next"
+                    } else {
+                        "store-current-use-unplaced-lookahead"
+                    },
+                    CoverageState {
+                        cursor: step.next_state.cursor,
+                        hold: step.next_state.hold_piece,
+                        ..state
+                    },
+                ));
+            }
+        }
     }
     successors
+}
+
+fn sequence_supply_transition(
+    identity: HoldAutomatonState,
+    cursor: u16,
+    hold_piece: Option<PieceKind>,
+    hold_enabled: bool,
+    branch_kind: SupplyBranchKind,
+    current_piece: PieceKind,
+    next_piece: Option<PieceKind>,
+) -> Option<clearra_supply::SupplyExecutionStep> {
+    let state = SupplyExecutionState {
+        cursor,
+        hold_piece,
+        hold_empty: hold_piece.is_none(),
+        hold_policy: if hold_enabled {
+            HoldPolicy::Allowed
+        } else {
+            HoldPolicy::Forbidden
+        },
+        ..identity
+    };
+    SupplyExecutionAutomaton::sequence()
+        .transition(state, branch_kind, current_piece, next_piece)
+        .ok()
+}
+
+fn projected_supply_piece(
+    sequence: &[PieceKind],
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
+    index: usize,
+) -> Option<PieceKind> {
+    sequence.get(index).copied().or_else(|| {
+        (hold_enabled
+            && projects_unplaced_lookahead
+            && projects_standard_bag_lookahead
+            && index == sequence.len())
+        .then(|| first_standard_bag_lookahead(sequence))
+        .flatten()
+    })
 }
 
 fn first_standard_bag_lookahead(sequence: &[PieceKind]) -> Option<PieceKind> {
@@ -3522,7 +4011,7 @@ fn first_standard_bag_lookahead(sequence: &[PieceKind]) -> Option<PieceKind> {
     if used_in_current_bag != PieceKind::STANDARD_TETROMINOES.len() - 1 {
         return None;
     }
-    let current_bag_start = sequence.len().saturating_sub(used_in_current_bag);
+    let current_bag_start = sequence.len() - used_in_current_bag;
     let mut missing = PieceKind::STANDARD_TETROMINOES.into_iter().filter(|piece| {
         !sequence[current_bag_start..]
             .iter()

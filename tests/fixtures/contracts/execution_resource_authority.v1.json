@@ -1,0 +1,157 @@
+{
+  "schema_version": "clearra.execution-resource-authority.v1",
+  "availability_cases": [
+    {
+      "id": "available-but-not-yet-complete",
+      "state": "available",
+      "reason": null,
+      "result_completeness": "incomplete"
+    },
+    {
+      "id": "capability-unavailable",
+      "state": "unavailable",
+      "reason": "capability-unavailable",
+      "result_completeness": "not-executed"
+    },
+    {
+      "id": "shared-resource-deferred",
+      "state": "deferred",
+      "reason": "shared-resource-contention",
+      "result_completeness": "not-executed"
+    },
+    {
+      "id": "memory-budget-exhausted",
+      "state": "exhausted",
+      "reason": "memory-budget-exceeded",
+      "result_completeness": "not-executed"
+    },
+    {
+      "id": "caller-cancelled",
+      "state": "cancelled",
+      "reason": "cancelled-by-caller",
+      "result_completeness": "incomplete"
+    },
+    {
+      "id": "partial-execution",
+      "state": "incomplete",
+      "reason": "partial-execution",
+      "result_completeness": "incomplete"
+    }
+  ],
+  "dense_pattern_cases": [
+    {
+      "id": "six-line-native-dense",
+      "surface": "native",
+      "descriptor_pattern_count": "35384428800",
+      "dense_pattern_count": "35384428800",
+      "required_dense_bytes": "4423053600",
+      "required_memory_bytes": "4423053600",
+      "state": "unavailable",
+      "reason": "dense-pattern-representation-unavailable",
+      "result_completeness": "not-executed"
+    },
+    {
+      "id": "six-line-browser-wasm32",
+      "surface": "browser-wasm32",
+      "descriptor_pattern_count": "35384428800",
+      "dense_pattern_count": "35384428800",
+      "required_dense_bytes": "4423053600",
+      "required_memory_bytes": "4423053600",
+      "state": "unavailable",
+      "reason": "pattern-count-address-space-exceeded",
+      "result_completeness": "not-executed"
+    },
+    {
+      "id": "six-line-bounded-materialization",
+      "surface": "browser-wasm32",
+      "descriptor_pattern_count": "35384428800",
+      "dense_pattern_count": "4096",
+      "required_dense_bytes": "512",
+      "required_memory_bytes": "512",
+      "state": "available",
+      "reason": null,
+      "result_completeness": "incomplete"
+    },
+    {
+      "id": "six-line-public-standard-bag-64mib",
+      "surface": "browser-wasm32",
+      "descriptor_pattern_count": "1066867200",
+      "dense_pattern_count": "1066867200",
+      "required_dense_bytes": "133358400",
+      "required_memory_bytes": "133358400",
+      "state": "exhausted",
+      "reason": "memory-budget-exceeded",
+      "result_completeness": "not-executed"
+    }
+  ],
+  "lease_cases": {
+    "capacity": {
+      "compute_units": 4,
+      "memory_bytes": "1024"
+    },
+    "primary": {
+      "owner": "owner-a",
+      "request": {
+        "compute_units": 3,
+        "memory_bytes": "768"
+      },
+      "epoch": "1",
+      "available_after_acquire": {
+        "compute_units": 1,
+        "memory_bytes": "256"
+      }
+    },
+    "contender": {
+      "owner": "owner-b",
+      "request": {
+        "compute_units": 2,
+        "memory_bytes": "300"
+      },
+      "state": "deferred",
+      "reason": "shared-resource-contention"
+    },
+    "compute_oversized": {
+      "owner": "owner-c",
+      "request": {
+        "compute_units": 5,
+        "memory_bytes": "100"
+      },
+      "state": "exhausted",
+      "reason": "compute-budget-exceeded"
+    },
+    "memory_oversized": {
+      "owner": "owner-d",
+      "request": {
+        "compute_units": 1,
+        "memory_bytes": "1025"
+      },
+      "state": "exhausted",
+      "reason": "memory-budget-exceeded"
+    },
+    "parent_child": {
+      "parent": {
+        "owner": "parent-owner",
+        "request": {
+          "compute_units": 4,
+          "memory_bytes": "1024"
+        }
+      },
+      "children": [
+        {
+          "owner": "child-a",
+          "request": {
+            "compute_units": 1,
+            "memory_bytes": "256"
+          }
+        },
+        {
+          "owner": "child-b",
+          "request": {
+            "compute_units": 3,
+            "memory_bytes": "768"
+          }
+        }
+      ]
+    }
+  }
+}

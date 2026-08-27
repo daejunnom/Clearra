@@ -56,11 +56,24 @@ BuildUp evidence after replay conversion, not from search hot-path score logic.
 evaluation from retained/sample evaluation, while `score_evaluation_basis`
 keeps the exact basis value (`all-traces`, `retained-traces`, or `sample`).
 
-The product score path reports one field average. Every legal execution is
-evaluated, the highest legal score is selected independently for each concrete
-supply pattern, and materialized pattern weights are applied afterward. A
-pattern with no PC execution contributes score zero. Covered-pattern
-conditional average remains diagnostic; the field average includes the entire
-materialized universe. Per-solution averages and score-aware cover objectives
-are not product request modes. Ordinary minimum solutions remain the exact
-minimum PC coverage objective and do not depend on scoring.
+The ordinary product score path reports one field average. Every legal
+execution is evaluated, the highest legal integer score is selected
+independently for each concrete supply pattern, and materialized pattern
+weights are applied afterward. A pattern with no PC execution contributes score
+zero. Covered-pattern conditional average remains diagnostic; the field average
+includes the entire materialized universe.
+
+Score equality is strictly score-only. Attack never changes score equality,
+candidate eligibility, dominance, ranking, portfolio membership, canonical
+order, or Discord selection. Equal-score traces may expose one informational
+attack value only through the smallest normalized trace key and must state
+`informational_attack_basis=canonical_equal_score_trace`. Any existing
+`(score, attack)` comparator is not product authority for v0.8 score selection.
+
+`pc.score-minimals` and typed Build `max-score-cover` modes are product request
+modes. For each `(candidate, pattern)`, retain the maximum score across legal
+replays without reducing equal scores by attack. For each pattern, retain all
+candidates at the global maximum score. The resulting candidate rows enter an
+exact minimum-cardinality cover, and every portfolio at that cardinality is an
+equal product alternative governed by `REQ-V080-021`. Ordinary minimum
+solutions remain the exact PC coverage objective and do not depend on scoring.

@@ -1,11 +1,14 @@
 use clearra_core_domain::{
     execution_cancellation::ExecutionCancellationToken,
     pruning::PruningEvidencePolicy,
-    resource::{ResourceReport, ResourceTruncationReason},
+    resource::{
+        ExecutionAvailability, ExecutionAvailabilityReason, ResourceReport,
+        ResourceTruncationReason,
+    },
 };
 use clearra_core_ffi::{
-    CPackingProblem, CoreCNative, NativeGeometryPathConsumer, NativeGeometryPathSinkError,
-    NativeGeometrySolutionTask,
+    CPackingProblem, CoreCNative, NativeCoreError, NativeGeometryPathConsumer,
+    NativeGeometryPathSinkError, NativeGeometrySolutionTask,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SearchProblem;
@@ -14,6 +17,7 @@ use crate::{
     buildup::buildup_native_bridge::uses_standard_bag_automaton,
     packing::PackingRunnerError,
     performance::{ExecutorSearchStage, SearchStageSpan},
+    resource::ExecutionMemoryBound,
 };
 
 use super::{
@@ -33,11 +37,18 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
     backend: SelectedSearchBackend,
     requested_worker_count: usize,
 ) -> Result<PackingBackendOutcome, PackingRunnerError> {
+    if cancellation.is_cancelled() {
+        return Err(PackingRunnerError::ExecutionCancelled);
+    }
+    let memory_bound = engine_memory_bound(search_problem, problem)?;
     let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::PackingCpuCatalogCompile);
     let catalog = CoreCNative::compile_geometry_catalog_with_cancellation(problem, cancellation)
-        .map_err(PackingRunnerError::Native)?;
+        .map_err(|error| enrich_native_memory_error(search_problem, error))?;
     catalog_span.finish(catalog.view().skeleton_cell_masks().len() as u64);
-    let catalog_bytes = catalog.resident_bytes();
+    let catalog_bytes = catalog.resident_bytes() as u128;
+    memory_bound
+        .ensure(catalog_bytes, 0)
+        .map_err(packing_resource_error)?;
     let graph_span = SearchStageSpan::begin(ExecutorSearchStage::PackingCpuGeometryGraph);
     let geometry_search = CoreCNative::search_geometry_solution_graph(
         &catalog,
@@ -45,26 +56,60 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
         cancellation,
         PruningEvidencePolicy::BestEffort,
     )
-    .map_err(PackingRunnerError::Native)?;
+    .map_err(|error| enrich_native_memory_error(search_problem, error))?;
     graph_span.finish(geometry_search.graph.node_count() as u64);
+    let graph_bytes = geometry_search.graph.resident_bytes() as u128;
+    let immutable_graph_bytes = catalog_bytes
+        .checked_add(graph_bytes)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(
+            immutable_graph_bytes.max(geometry_search.resource_report.peak_cpu_bytes as u128),
+            0,
+        )
+        .map_err(packing_resource_error)?;
     let desired_task_count = requested_worker_count
         .max(1)
-        .saturating_mul(TASKS_PER_WORKER);
+        .checked_mul(TASKS_PER_WORKER)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    let task_sizing = geometry_search
+        .graph
+        .checked_task_split_sizing(desired_task_count)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(
+            immutable_graph_bytes,
+            task_sizing
+                .checked_peak_increment_bytes()
+                .ok_or_else(|| packing_projection_overflow(search_problem))?,
+        )
+        .map_err(packing_resource_error)?;
     let task_span = SearchStageSpan::begin(ExecutorSearchStage::PackingCpuTaskSplit);
     let (tasks, task_split_scratch_bytes) = geometry_search
         .graph
-        .split_tasks(desired_task_count)
-        .map_err(PackingRunnerError::Native)?;
+        .split_tasks_with_memory_limit(
+            desired_task_count,
+            immutable_graph_bytes,
+            memory_bound.cap_bytes(),
+        )
+        .map_err(|error| enrich_native_memory_error(search_problem, error))?;
     task_span.finish(tasks.len() as u64);
     let worker_count = requested_worker_count.max(1).min(tasks.len().max(1));
-    let graph_bytes = geometry_search.graph.resident_bytes();
-    let task_bytes = tasks
-        .capacity()
-        .saturating_mul(std::mem::size_of::<NativeGeometrySolutionTask>());
+    let task_bytes = (tasks.capacity() as u128)
+        .checked_mul(std::mem::size_of::<NativeGeometrySolutionTask>() as u128)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
     let base_resident_bytes = catalog_bytes
-        .saturating_add(graph_bytes)
-        .saturating_add(task_bytes);
-    let task_split_peak_bytes = base_resident_bytes.saturating_add(task_split_scratch_bytes);
+        .checked_add(graph_bytes)
+        .and_then(|bytes| bytes.checked_add(task_bytes))
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    let task_split_peak_bytes = base_resident_bytes
+        .checked_add(task_split_scratch_bytes as u128)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(task_split_peak_bytes, 0)
+        .map_err(packing_resource_error)?;
+    let base_resident_bytes_usize = usize::try_from(base_resident_bytes)
+        .map_err(|_| packing_projection_overflow(search_problem))?;
     let standard_bag = uses_standard_bag_automaton(search_problem);
     #[cfg(feature = "search-stage-profiling")]
     eprintln!(
@@ -81,7 +126,7 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
         &catalog,
         cancellation,
         worker_count,
-        base_resident_bytes,
+        base_resident_bytes_usize,
         move |worker_index, worker_count, consumer| {
             for task in tasks.iter().skip(worker_index).step_by(worker_count) {
                 if consumer.should_stop() {
@@ -116,7 +161,10 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
 
     let mut resource_report = catalog.compile_resource_report().clone();
     merge_sequential_stage_metrics(&mut resource_report, &geometry_search.resource_report);
-    resource_report.observe_cpu_bytes(task_split_peak_bytes);
+    resource_report.observe_cpu_bytes(
+        usize::try_from(task_split_peak_bytes)
+            .map_err(|_| packing_projection_overflow(search_problem))?,
+    );
     let mut pruning_ledgers = vec![
         catalog.pruning_ledger().clone(),
         geometry_search.pruning_ledger,
@@ -130,29 +178,36 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
             .map_err(PackingRunnerError::Native)?;
 
     resource_report.observe_candidate_rows(reduction.generated_count);
+    let retained_reduction_bytes = (reduction.workspace_bytes as u128)
+        .checked_add(reduction.reducer_bytes as u128)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    let observed_peak_bytes = base_resident_bytes
+        .checked_add(retained_reduction_bytes)
+        .ok_or_else(|| packing_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(observed_peak_bytes, 0)
+        .map_err(packing_resource_error)?;
     let peak_cpu_bytes = resource_report.peak_cpu_bytes.max(
-        base_resident_bytes
-            .saturating_add(reduction.workspace_bytes)
-            .saturating_add(reduction.reducer_bytes),
+        usize::try_from(observed_peak_bytes)
+            .map_err(|_| packing_projection_overflow(search_problem))?,
     );
     resource_report.observe_cpu_bytes(peak_cpu_bytes);
     resource_report.observe_build_worker_backlog(0);
     match reduction.truncation {
         1 => resource_report.mark_truncated(ResourceTruncationReason::CandidateBudgetExceeded),
-        2 => resource_report.mark_truncated(ResourceTruncationReason::MemoryExceeded),
-        _ => {}
-    }
-    if problem.budget.has_max_memory_mib != 0 {
-        let max_memory_bytes = (problem.budget.max_memory_mib as usize)
-            .checked_mul(1024 * 1024)
-            .unwrap_or(usize::MAX);
-        if peak_cpu_bytes > max_memory_bytes {
-            resource_report.mark_truncated(ResourceTruncationReason::MemoryExceeded);
+        2 => {
+            let required_memory_bytes = observed_peak_bytes
+                .max(memory_bound.cap_bytes().checked_add(1).unwrap_or(u128::MAX));
+            return Err(packing_memory_exhausted(
+                search_problem,
+                required_memory_bytes,
+            ));
         }
+        _ => {}
     }
     debug_assert!(reduction.buildable_count >= reduction.candidates.len());
 
-    Ok(PackingBackendOutcome::exact(
+    Ok(PackingBackendOutcome::buildability_prefiltered_exact(
         backend,
         reduction.candidates,
         resource_report,
@@ -160,8 +215,109 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
     )
     .with_workers_used(reduction.worker_count)
     .with_geometry_catalog(catalog)
-    .with_pruning_ledger(pruning_ledger)
-    .with_buildability_preverified())
+    .with_pruning_ledger(pruning_ledger))
+}
+
+fn engine_memory_bound(
+    search_problem: &SearchProblem,
+    problem: &CPackingProblem,
+) -> Result<ExecutionMemoryBound, PackingRunnerError> {
+    let max_memory_bytes = if problem.budget.has_max_memory_mib == 0 {
+        u128::MAX
+    } else {
+        u128::from(problem.budget.max_memory_mib) * 1024 * 1024
+    };
+    ExecutionMemoryBound::unbounded_for_problem(search_problem)
+        .and_then(|bound| bound.with_cap(max_memory_bytes))
+        .map_err(packing_resource_error)
+}
+
+fn packing_resource_error(resource_report: ResourceReport) -> PackingRunnerError {
+    PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+        status: 6,
+        resource_report,
+    })
+}
+
+fn packing_resource_report(
+    search_problem: &SearchProblem,
+    reason: ExecutionAvailabilityReason,
+    required_memory_bytes: u128,
+) -> ResourceReport {
+    let Some(universe) = search_problem.piece_source().materialized_universe() else {
+        return ResourceReport::admission_failure(ExecutionAvailability::unavailable(
+            ExecutionAvailabilityReason::CapabilityUnavailable,
+        ));
+    };
+    let descriptor_pattern_count = universe.total_possible_pattern_count();
+    let dense_pattern_count = universe.pattern_count() as u128;
+    let required_dense_bytes = dense_pattern_count
+        .checked_add(63)
+        .and_then(|count| count.checked_div(64))
+        .and_then(|words| words.checked_mul(core::mem::size_of::<u64>() as u128))
+        .unwrap_or(u128::MAX);
+    let availability = match reason {
+        ExecutionAvailabilityReason::MemoryBudgetExceeded => {
+            ExecutionAvailability::exhausted(reason)
+        }
+        _ => ExecutionAvailability::unavailable(reason),
+    }
+    .with_pattern_evidence(
+        descriptor_pattern_count,
+        dense_pattern_count,
+        required_dense_bytes,
+    )
+    .with_required_memory_bytes(required_memory_bytes);
+    ResourceReport::admission_failure(availability)
+}
+
+fn packing_projection_overflow(search_problem: &SearchProblem) -> PackingRunnerError {
+    packing_resource_error(packing_resource_report(
+        search_problem,
+        ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
+        u128::MAX,
+    ))
+}
+
+fn packing_memory_exhausted(
+    search_problem: &SearchProblem,
+    required_memory_bytes: u128,
+) -> PackingRunnerError {
+    packing_resource_error(packing_resource_report(
+        search_problem,
+        ExecutionAvailabilityReason::MemoryBudgetExceeded,
+        required_memory_bytes,
+    ))
+}
+
+fn enrich_native_memory_error(
+    search_problem: &SearchProblem,
+    error: NativeCoreError,
+) -> PackingRunnerError {
+    if let NativeCoreError::PackingIncomplete {
+        status,
+        resource_report,
+    } = error
+    {
+        let availability = resource_report.execution_availability();
+        if availability.reason() == Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+            && availability.descriptor_pattern_count().is_none()
+        {
+            return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+                status,
+                resource_report: packing_resource_report(
+                    search_problem,
+                    ExecutionAvailabilityReason::MemoryBudgetExceeded,
+                    availability.required_memory_bytes().unwrap_or(u128::MAX),
+                ),
+            });
+        }
+        return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+            status,
+            resource_report,
+        });
+    }
+    PackingRunnerError::Native(error)
 }
 
 fn merge_sequential_stage_metrics(target: &mut ResourceReport, source: &ResourceReport) {

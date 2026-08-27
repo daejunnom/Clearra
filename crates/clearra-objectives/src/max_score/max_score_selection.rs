@@ -1,5 +1,6 @@
 use clearra_core_domain::probability::probability_value::ProbabilityValue;
 use clearra_coverage::{
+    cover::ExactMinimumCoverPortfolioError,
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
     probability::union_probability::UnionProbabilityError,
 };
@@ -7,7 +8,6 @@ use clearra_coverage::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaxScoreCoverPolicy {
     score_weight: f64,
-    attack_weight: f64,
 }
 
 impl MaxScoreCoverPolicy {
@@ -18,21 +18,18 @@ impl MaxScoreCoverPolicy {
         if score_weight < 0.0 || attack_weight < 0.0 {
             return Err(MaxScoreCoverPolicyError::NegativeWeight);
         }
-        if score_weight == 0.0 && attack_weight == 0.0 {
+        if attack_weight != 0.0 {
+            return Err(MaxScoreCoverPolicyError::AttackWeightNotAllowed);
+        }
+        if score_weight == 0.0 {
             return Err(MaxScoreCoverPolicyError::EmptyObjective);
         }
-        Ok(Self {
-            score_weight,
-            attack_weight,
-        })
+        Ok(Self { score_weight })
     }
 }
 impl MaxScoreCoverPolicy {
     pub fn score_only() -> Self {
-        Self {
-            score_weight: 1.0,
-            attack_weight: 0.0,
-        }
+        Self { score_weight: 1.0 }
     }
 }
 impl MaxScoreCoverPolicy {
@@ -42,12 +39,7 @@ impl MaxScoreCoverPolicy {
 }
 impl MaxScoreCoverPolicy {
     pub fn attack_weight(self) -> f64 {
-        self.attack_weight
-    }
-}
-impl MaxScoreCoverPolicy {
-    pub(crate) fn candidate_value(self, score: u64, attack: u32) -> f64 {
-        self.score_weight * score as f64 + self.attack_weight * attack as f64
+        0.0
     }
 }
 
@@ -62,6 +54,7 @@ pub enum MaxScoreCoverPolicyError {
     NonFiniteWeight,
     NegativeWeight,
     EmptyObjective,
+    AttackWeightNotAllowed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -272,4 +265,5 @@ pub enum MaxScoreCoverError {
         actual: usize,
     },
     Probability(UnionProbabilityError),
+    Portfolio(ExactMinimumCoverPortfolioError),
 }

@@ -71,10 +71,56 @@ test("direct execution preserves the caller's absolute deadline and AbortSignal"
   assert.equal(result.stdout, "done");
   assert.deepEqual(calls[0].job, {
     arguments: ["pc", "--lines", "2"],
+    timeoutClass: "pc_reverse",
     deadlineUnixMs: 12_000,
     maxOutputBytes: 128,
+    maxArtifactBytes: 128,
   });
   assert.equal(calls[0].options.signal, controller.signal);
+});
+
+test("direct execution never forwards tie paging flags", () => {
+  let calls = 0;
+  const executor = new ClearraDirectExecutor(directConfig(), {
+    runner: {
+      async execute() {
+        calls += 1;
+        return { exitCode: 0, signal: null, stdout: "", stderr: "" };
+      },
+    },
+  });
+
+  for (const arguments_ of [
+    ["pc", "minimals", "--ties"],
+    ["pc", "minimals", "--tie-snapshot=result.jsonl"],
+    ["continue", "--tie-cursor", "cursor"],
+  ]) {
+    assert.throws(
+      () => executor.execute(arguments_),
+      /does not expose alternative-result paging options/,
+    );
+  }
+  assert.equal(calls, 0);
+});
+
+test("direct execution rejects alternative metadata but permits normal families", async () => {
+  const outputs = [
+    JSON.stringify({ kind: "best-save", summary: { best_save_winners: [] } }),
+    JSON.stringify({ kind: "pc-minimum-cover.v2", portfolio_alternative_page: {} }),
+  ];
+  const executor = new ClearraDirectExecutor(directConfig(), {
+    runner: {
+      async execute() {
+        return { exitCode: 0, signal: null, stdout: outputs.shift(), stderr: "" };
+      },
+    },
+  });
+
+  await executor.execute(["pc", "best-save"]);
+  await assert.rejects(
+    executor.execute(["pc", "minimals"]),
+    /alternative-result metadata/,
+  );
 });
 
 test("direct execution cannot extend a caller deadline or its command-class bound", async () => {
@@ -97,14 +143,18 @@ test("direct execution cannot extend a caller deadline or its command-class boun
   assert.deepEqual(deadlines, [11_000, 13_000]);
 });
 
-test("direct execution applies reverse and forward limits before invoking the runner", async () => {
+test("direct execution preserves every canonical family class and limit", async () => {
   const jobs = [];
   const executor = new ClearraDirectExecutor(
     directConfig({
       searchTimeoutMs: 2_000,
-      reverseSearchTimeoutMs: 5_000,
-      forwardSearchTimeoutMs: 15_000,
-      interactionDeadlineMs: 14_000,
+      pcSearchTimeoutMs: 5_000,
+      buildSearchTimeoutMs: 6_000,
+      setupSearchTimeoutMs: 7_000,
+      forwardSearchTimeoutMs: 8_000,
+      structureSearchTimeoutMs: 9_000,
+      diagnosticTimeoutMs: 3_000,
+      interactionDeadlineMs: 20_000,
     }),
     {
       now: () => 10_000,
@@ -118,13 +168,35 @@ test("direct execution applies reverse and forward limits before invoking the ru
   );
 
   await executor.execute(["pc"], { deadlineUnixMs: 99_000 });
-  await executor.execute(["damage"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["pc", "chance"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["pc", "score"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["pc", "failed-queue"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["build-probability"], { deadlineUnixMs: 99_000 });
   await executor.execute(["setup-finder"], { deadlineUnixMs: 99_000 });
-  await executor.execute(["verify", "pc"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["damage"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["spin-structure"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["sfinder", "verify", "pc"], { deadlineUnixMs: 99_000 });
 
   assert.deepEqual(
-    jobs.map(({ deadlineUnixMs }) => deadlineUnixMs),
-    [15_000, 24_000, 24_000, 12_000],
+    jobs.map(({ timeoutClass, deadlineUnixMs }) => [timeoutClass, deadlineUnixMs]),
+    [
+      ["pc_reverse", 15_000],
+      ["pc_reverse", 15_000],
+      ["pc_reverse", 15_000],
+      ["pc_reverse", 15_000],
+      ["build_long", 16_000],
+      ["setup_long", 17_000],
+      ["forward_long", 18_000],
+      ["structure_long", 19_000],
+      ["diagnostic", 13_000],
+    ],
+  );
+  assert.deepEqual(jobs[1].arguments, ["pc", "chance"]);
+  assert.deepEqual(jobs[2].arguments, ["pc", "score"]);
+  assert.deepEqual(jobs[3].arguments, ["pc", "failed-queue"]);
+  assert.throws(
+    () => executor.execute(["damage"], { timeoutClass: "pc_reverse" }),
+    /does not match/,
   );
 });
 

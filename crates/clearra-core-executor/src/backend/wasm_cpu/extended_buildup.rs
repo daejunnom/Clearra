@@ -1,6 +1,6 @@
 // SRP rationale: this module has one behavior-level change reason: constructing and annotating exact extended-board BuildUp order languages.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write as _};
 
 use clearra_core_domain::{
     board::standard_pc_board::StandardPcBoard, execution_cancellation::ExecutionControl,
@@ -78,33 +78,47 @@ impl ExtendedTilingKey {
     }
 
     pub fn canonical_key(&self, initial_board: ExtendedBoard, height: u8) -> String {
-        let mut key = format!(
-            "ctk2|height={height}|initial={}|placements=",
-            board_hex(initial_board)
-        );
+        let mut key = String::with_capacity(self.canonical_key_len(height));
+        let words = initial_board.words();
+        write!(
+            &mut key,
+            "ctk2|height={height}|initial={:016x}{:016x}{:016x}{:016x}|placements=",
+            words[3], words[2], words[1], words[0]
+        )
+        .expect("writing to String cannot fail");
         for (index, placement) in self.placements.iter().enumerate() {
             if index != 0 {
                 key.push(',');
             }
             key.push(placement.piece.as_ascii());
             key.push(':');
-            key.push_str(&board_hex(placement.cells));
+            let words = placement.cells.words();
+            write!(
+                &mut key,
+                "{:016x}{:016x}{:016x}{:016x}",
+                words[3], words[2], words[1], words[0]
+            )
+            .expect("writing to String cannot fail");
         }
+        debug_assert_eq!(key.len(), self.canonical_key_len(height));
         key
+    }
+
+    pub fn canonical_key_len(&self, height: u8) -> usize {
+        let height_digits = if height >= 10 { 2 } else { 1 };
+        "ctk2|height=".len()
+            + height_digits
+            + "|initial=".len()
+            + 64
+            + "|placements=".len()
+            + self.placements.len() * 66
+            + self.placements.len().saturating_sub(1)
     }
 
     pub fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             + self.placements.capacity() * core::mem::size_of::<ExtendedPlacementKey>()
     }
-}
-
-fn board_hex(board: ExtendedBoard) -> String {
-    let words = board.words();
-    format!(
-        "{:016x}{:016x}{:016x}{:016x}",
-        words[3], words[2], words[1], words[0]
-    )
 }
 
 pub(super) enum ExtendedBuildOrderResult {

@@ -41,10 +41,13 @@ test("grid preview treats lowercase pieces as their colors and occupancy markers
 });
 
 test("spin-structure compact grids preserve completed rows in the input preview", () => {
-  const preview = buildSearchPreviewDocument(findSlashCommand("spin-structure"), [
+  const preview = buildSearchPreviewDocument(
+    findSlashCommand("spin-structure").subcommands.search,
+    [
     { name: "pieces", value: "IOTS" },
     { name: "field", value: "grid:##########/#_________" },
-  ]);
+    ],
+  );
 
   assert.ok(preview);
   assert.equal(preview.document.pages.length, 1);
@@ -57,6 +60,62 @@ test("spin-structure compact grids preserve completed rows in the input preview"
   assert.deepEqual(
     decodeCtk3(preview.source).pages[0].cells,
     preview.document.pages[0].cells,
+  );
+});
+
+test("canonical typed schemas preview only their declared board fields", () => {
+  for (const path of [
+    ["pc", "path"],
+    ["pc", "score"],
+    ["pc", "tiling"],
+    ["pc", "failed-queue"],
+    ["pc", "allspin-sol"],
+    ["pc", "allspin-pres-chance"],
+    ["forward", "spin"],
+    ["forward", "damage"],
+    ["spin-structure", "search"],
+  ]) {
+    const [root, subcommand] = path;
+    const command = subcommand
+      ? findSlashCommand(root).subcommands[subcommand]
+      : findSlashCommand(root);
+    const options = [
+      { name: "field", value: "I_________" },
+      ...(root === "spin-structure"
+        ? [{ name: "pieces", value: "IOTS" }]
+        : [{ name: "next", value: "I" }]),
+      { name: "options", value: "PRIVATE ADVANCED TEXT" },
+      { name: "document", value: "PRIVATE DOCUMENT" },
+    ];
+    const preview = buildSearchPreviewDocument(command, options);
+    assert.deepEqual(preview.document.pages[0].cells, [
+      "I",
+      ...Array(9).fill(null),
+    ]);
+    assert.doesNotMatch(preview.source, /PRIVATE/u);
+  }
+
+  const build = buildSearchPreviewDocument(
+    findSlashCommand("build").subcommands.cover,
+    [
+      { name: "base", value: "GGGG______" },
+      { name: "target", value: "____IIII__" },
+      { name: "next", value: "I" },
+      { name: "finesse-knowledge", value: "PRIVATE" },
+    ],
+  );
+  assert.equal(build, null);
+  assert.equal(
+    buildSearchPreviewDocument(
+      findSlashCommand("build").subcommands.cover,
+      [
+        { name: "base-mask", value: "0" },
+        { name: "target-mask", value: "15" },
+        { name: "height", value: 1 },
+        { name: "queue", value: "I" },
+      ],
+    ),
+    null,
   );
 });
 

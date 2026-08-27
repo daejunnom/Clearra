@@ -56,7 +56,6 @@ mod linked {
             out_view: *mut CNativeGeometryCatalogView,
         ) -> bool;
 
-        #[cfg(any(test, feature = "test-support"))]
         pub fn clearra_geometry_exact_cover_search_family_to_sink(
             catalog: *const c_void,
             problem: *const CPackingProblem,
@@ -374,7 +373,6 @@ mod linked {
             unsafe { clearra_geometry_catalog_borrow_view(catalog, out_view) }
         }
 
-        #[cfg(any(test, feature = "test-support"))]
         pub fn search_partition_to_sink(
             catalog: *const c_void,
             problem: &CPackingProblem,

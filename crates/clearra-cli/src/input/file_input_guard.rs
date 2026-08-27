@@ -5,6 +5,7 @@ use std::{
 };
 
 const MAX_JSON_INPUT_BYTES: u64 = 1024 * 1024;
+const MAX_TYPED_DOCUMENT_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 thread_local! {
     static VERBOSE_PATHS: Cell<bool> = const { Cell::new(false) };
@@ -13,6 +14,20 @@ thread_local! {
 pub(crate) fn read_json_file(path: impl AsRef<Path>) -> Result<String, FileInputError> {
     let path = path.as_ref();
     validate_json_file_path(path)?;
+    fs::read_to_string(path).map_err(|error| FileInputError::Read {
+        path: display_input_path(path),
+        reason: error.to_string(),
+    })
+}
+
+/// Reads one native typed-document argument without following link-like files.
+///
+/// Unlike JSON fixtures, document files deliberately have no extension
+/// authority: their canonical `ctk3*`/`v115@` prefix is the only format
+/// authority at the command boundary.
+pub(crate) fn read_typed_document_file(path: impl AsRef<Path>) -> Result<String, FileInputError> {
+    let path = path.as_ref();
+    validate_typed_document_file_path(path)?;
     fs::read_to_string(path).map_err(|error| FileInputError::Read {
         path: display_input_path(path),
         reason: error.to_string(),
@@ -79,6 +94,57 @@ fn validate_json_file_path(path: &Path) -> Result<(), FileInputError> {
     }
 
     Ok(())
+}
+
+fn validate_typed_document_file_path(path: &Path) -> Result<(), FileInputError> {
+    let display = display_input_path(path);
+    if path.as_os_str().is_empty() {
+        return Err(FileInputError::EmptyPath);
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| FileInputError::MissingFileName {
+            path: display.clone(),
+        })?;
+    if path.components().any(secret_like_component) || is_secret_like_name(&file_name) {
+        return Err(FileInputError::SensitivePath { path: display });
+    }
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| FileInputError::Metadata {
+        path: display.clone(),
+        reason: error.to_string(),
+    })?;
+    if link_like_file(&metadata) {
+        return Err(FileInputError::Symlink { path: display });
+    }
+    if !metadata.is_file() {
+        return Err(FileInputError::NotFile { path: display });
+    }
+    if metadata.len() > MAX_TYPED_DOCUMENT_INPUT_BYTES {
+        return Err(FileInputError::TooLarge {
+            path: display,
+            bytes: metadata.len(),
+            limit: MAX_TYPED_DOCUMENT_INPUT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn link_like_file(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn secret_like_component(component: Component<'_>) -> bool {

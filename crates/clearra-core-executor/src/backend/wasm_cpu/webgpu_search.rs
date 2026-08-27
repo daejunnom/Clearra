@@ -180,6 +180,12 @@ impl WasmWebGpuSearchSession {
                         };
                         let resolution = failure.resolve(fallback_policy);
                         if resolution.fallback_used() {
+                            // A score-requested exact session leases the full
+                            // configured host cap. Release the failed GPU
+                            // coordinator lease before admitting its CPU
+                            // replacement; otherwise the replacement can only
+                            // observe self-inflicted shared-cap contention.
+                            self.exact = None;
                             let mut cpu = WasmExactSearchSession::new(&self.problem)?;
                             cpu.mark_cpu_fallback(
                                 resolution
@@ -190,7 +196,6 @@ impl WasmWebGpuSearchSession {
                                 resolution.discarded_partial_gpu_result(),
                                 resolution.original_gpu_result_incomplete(),
                             );
-                            self.exact = None;
                             self.phase = WebGpuSearchPhase::CpuFallback(cpu);
                             continue;
                         }
@@ -286,6 +291,11 @@ impl WasmWebGpuSearchSession {
                     let outcome = cpu.advance(work_budget, control)?;
                     if matches!(outcome, ExactSearchAdvance::Pending) {
                         self.phase = WebGpuSearchPhase::CpuFallback(cpu);
+                    } else {
+                        // Preserve the completed/final CPU session so the
+                        // terminal memory authority keeps its admission lease
+                        // alive through public post-processing.
+                        self.exact = Some(cpu);
                     }
                     return Ok(outcome);
                 }
@@ -296,6 +306,19 @@ impl WasmWebGpuSearchSession {
                 }
             }
         }
+    }
+
+    pub(crate) fn validate_public_result_memory_with_future(
+        &self,
+        result: &crate::CoreExecutionResult,
+        checked_future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        self.exact
+            .as_ref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "webgpu_terminal_exact_session_missing",
+            ))?
+            .validate_public_result_memory_with_future(result, checked_future_bytes)
     }
 }
 

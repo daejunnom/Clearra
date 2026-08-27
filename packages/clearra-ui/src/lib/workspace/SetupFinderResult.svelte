@@ -8,6 +8,7 @@
     ClearraSetupHoldCondition
   } from '../wasm/wasmCommandClient';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import ProductResultPager from './ProductResultPager.svelte';
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import type {
@@ -286,6 +287,9 @@
   failureDiagnostics={view.diagnostics}
   failureMessage={view.error ?? ''}
 >
+  {#if view.response?.product_result_payload}
+    <ProductResultPager payload={view.response.product_result_payload} {language} />
+  {/if}
   {#if view.status === 'idle' && !report}
     <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSetupResult')}</p></div>
   {:else if report && view.status !== 'failed' && view.status !== 'terminated'}

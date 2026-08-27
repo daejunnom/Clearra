@@ -13,6 +13,11 @@ import {
   type ClearraWasmSearchReport,
   type ClearraWasmWorkerEvent
 } from './wasmCommandClient';
+import {
+  isExecutionAvailabilityReport,
+  type ExecutionAvailabilityReport,
+  type ExecutionCompletenessState
+} from './executionAvailability';
 import type { ClearraWasmForcedTerminationReason } from './wasmWorkerLifecycle';
 
 export type WasmWorkerState = {
@@ -36,6 +41,9 @@ export type WasmWorkerState = {
   terminalLines: string[];
   diagnostics: ClearraDiagnostic[];
   response: ClearraHostAppResponse | null;
+  resourceReport: ClearraHostAppResponse['resource_report'] | null;
+  executionAvailability: ExecutionAvailabilityReport | null;
+  resultCompleteness: ExecutionCompletenessState | null;
   searchReport: ClearraWasmSearchReport | null;
   webgpuBackend: ClearraWebGpuBackendReport | null;
   tablebaseWarmup: WasmTablebaseWarmupState;
@@ -71,6 +79,9 @@ const wasmWorkerInitialState: WasmWorkerState = {
   terminalLines: ['clearra web runtime ready'],
   diagnostics: [],
   response: null,
+  resourceReport: null,
+  executionAvailability: null,
+  resultCompleteness: null,
   searchReport: null,
   webgpuBackend: null,
   tablebaseWarmup: {
@@ -101,6 +112,9 @@ export function clearWasmTerminalResult() {
       terminalLines: ['clearra web runtime ready'],
       diagnostics: [],
       response: null,
+      resourceReport: null,
+      executionAvailability: null,
+      resultCompleteness: null,
       searchReport: null,
       webgpuBackend: null,
       error: null
@@ -135,6 +149,9 @@ export function runWasmCommand(
     forwardPatternTotal: 0,
     progressTelemetry: null,
     response: null,
+    resourceReport: null,
+    executionAvailability: null,
+    resultCompleteness: null,
     searchReport: null,
     webgpuBackend: null,
     diagnostics: [],
@@ -231,6 +248,9 @@ function reduceWasmWorkerEvent(
       };
     case 'final_response': {
       const succeeded = event.response.status === 'success';
+      const resourceReport = isResourceReport(event.response.resource_report)
+        ? event.response.resource_report
+        : null;
       const error = succeeded
         ? null
         : event.response.diagnostics
@@ -242,6 +262,9 @@ function reduceWasmWorkerEvent(
         status: succeeded ? 'completed' : 'failed',
         terminationReason: null,
         response: event.response,
+        resourceReport,
+        executionAvailability: resourceReport?.execution_availability ?? null,
+        resultCompleteness: resourceReport?.result_completeness ?? null,
         searchReport: event.search_report,
         webgpuBackend: event.webgpu_backend,
         progressTelemetry: null,
@@ -257,6 +280,9 @@ function reduceWasmWorkerEvent(
         status: 'cancelled',
         terminationReason: null,
         progressTelemetry: null,
+        resourceReport: null,
+        executionAvailability: event.execution_availability ?? null,
+        resultCompleteness: event.result_completeness ?? null,
         terminalLines: [
           ...state.terminalLines,
           event.scope_released ? 'job cancelled; computation scope released' : 'job cancelled'
@@ -273,14 +299,38 @@ function reduceWasmWorkerEvent(
         status: 'terminated',
         terminationReason: event.reason,
         progressTelemetry: null,
+        resourceReport: null,
+        executionAvailability: null,
+        resultCompleteness: null,
         error,
         diagnostics: event.diagnostics.diagnostics,
         terminalLines: [...state.terminalLines, error]
       };
     }
     case 'failed': {
+      const suppliedResponse = event.response ?? null;
+      const projection = reconcileFailedResourceReport(event, suppliedResponse);
+      const response = projection.valid ? suppliedResponse : null;
+      const executionAvailability = projection.valid
+        ? projection.report?.execution_availability ?? event.execution_availability ?? null
+        : null;
+      const resultCompleteness = projection.valid
+        ? projection.report?.result_completeness ?? event.result_completeness ?? 'incomplete'
+        : 'incomplete';
+      const diagnostics = [
+        ...(response?.diagnostics ?? event.diagnostics.diagnostics),
+        ...(projection.valid
+          ? []
+          : [
+              {
+                code: 'E_WASM_RESOURCE_REPORT_MISMATCH',
+                severity: 'error',
+                message: 'WASM failed-event resource evidence was inconsistent'
+              }
+            ])
+      ];
       const error =
-        event.diagnostics.diagnostics
+        diagnostics
           .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
           .join('\n') || 'WASM execution failed';
       return {
@@ -289,14 +339,113 @@ function reduceWasmWorkerEvent(
         status: 'failed',
         terminationReason: null,
         progressTelemetry: null,
+        response,
+        resourceReport: projection.valid ? projection.report : null,
+        executionAvailability,
+        resultCompleteness,
+        searchReport: null,
+        webgpuBackend: null,
         error,
-        diagnostics: event.diagnostics.diagnostics,
-        terminalLines: [...state.terminalLines, error]
+        diagnostics,
+        terminalLines: [
+          ...state.terminalLines,
+          response ? JSON.stringify(response, null, 2) : error
+        ]
       };
     }
     default:
       return state;
   }
+}
+
+type FailedEvent = Extract<ClearraWasmWorkerEvent, { event: 'failed' }>;
+type ResourceReport = ClearraHostAppResponse['resource_report'];
+
+function reconcileFailedResourceReport(
+  event: FailedEvent,
+  response: ClearraHostAppResponse | null
+): { valid: boolean; report: ResourceReport | null } {
+  const eventReport = event.resource_report ?? null;
+  const responseReport = response?.resource_report ?? null;
+  if (eventReport && !isResourceReport(eventReport)) return { valid: false, report: null };
+  if (responseReport && !isResourceReport(responseReport)) return { valid: false, report: null };
+  if (eventReport && responseReport && !resourceReportsEqual(eventReport, responseReport)) {
+    return { valid: false, report: null };
+  }
+  const report = eventReport ?? responseReport;
+  if (!report) return { valid: true, report: null };
+  if (
+    !event.execution_availability ||
+    !event.result_completeness ||
+    !availabilityReportsEqual(
+      report.execution_availability,
+      event.execution_availability
+    ) ||
+    report.result_completeness !== event.result_completeness
+  ) {
+    return { valid: false, report: null };
+  }
+  return { valid: true, report };
+}
+
+function isResourceReport(value: unknown): value is ResourceReport {
+  if (!value || typeof value !== 'object') return false;
+  const report = value as Partial<ResourceReport>;
+  const counts = [
+    report.peak_frontier_states,
+    report.peak_candidate_rows,
+    report.peak_hash_buckets,
+    report.peak_gpu_bytes,
+    report.peak_cpu_bytes,
+    report.build_worker_backlog_peak,
+    report.coverage_rows_emitted
+  ];
+  return (
+    typeof report.solver_executed === 'boolean' &&
+    typeof report.memory_status === 'string' &&
+    typeof report.truncated === 'boolean' &&
+    (report.truncation_reason === null || typeof report.truncation_reason === 'string') &&
+    typeof report.probability_complete === 'boolean' &&
+    isExecutionAvailabilityReport(report.execution_availability) &&
+    (report.result_completeness === 'not-executed' ||
+      report.result_completeness === 'complete' ||
+      report.result_completeness === 'incomplete') &&
+    counts.every((count) => Number.isSafeInteger(count) && (count as number) >= 0)
+  );
+}
+
+function resourceReportsEqual(left: ResourceReport, right: ResourceReport): boolean {
+  return (
+    left.solver_executed === right.solver_executed &&
+    left.memory_status === right.memory_status &&
+    left.truncated === right.truncated &&
+    left.truncation_reason === right.truncation_reason &&
+    left.peak_frontier_states === right.peak_frontier_states &&
+    left.peak_candidate_rows === right.peak_candidate_rows &&
+    left.peak_hash_buckets === right.peak_hash_buckets &&
+    left.peak_gpu_bytes === right.peak_gpu_bytes &&
+    left.peak_cpu_bytes === right.peak_cpu_bytes &&
+    left.build_worker_backlog_peak === right.build_worker_backlog_peak &&
+    left.coverage_rows_emitted === right.coverage_rows_emitted &&
+    left.probability_complete === right.probability_complete &&
+    availabilityReportsEqual(left.execution_availability, right.execution_availability) &&
+    left.result_completeness === right.result_completeness
+  );
+}
+
+function availabilityReportsEqual(
+  left: ExecutionAvailabilityReport,
+  right: ExecutionAvailabilityReport
+): boolean {
+  return (
+    left.state === right.state &&
+    left.reason === right.reason &&
+    left.surface === right.surface &&
+    left.descriptor_pattern_count === right.descriptor_pattern_count &&
+    left.dense_pattern_count === right.dense_pattern_count &&
+    left.required_dense_bytes === right.required_dense_bytes &&
+    left.required_memory_bytes === right.required_memory_bytes
+  );
 }
 
 function appendDistinctProgress(lines: string[], label: string): string[] {

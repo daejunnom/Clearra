@@ -3,6 +3,11 @@ use clearra_core_domain::{
     execution_cancellation::ExecutionCancellationToken, resource::ResourceReport,
 };
 
+#[cfg(feature = "native-c-core")]
+use clearra_core_domain::resource::{
+    ExecutionAvailability, ExecutionAvailabilityReason, ResourceTruncationReason,
+};
+
 use crate::problem::CBuildUpProblem;
 use crate::problem::CPackingProblem;
 
@@ -12,6 +17,7 @@ use super::{NativeCoreError, NativeGeometryCatalog, NativePruningLedger};
 
 pub const C_NATIVE_GEOMETRY_TASK_MAX_OPERATIONS: usize = 15;
 pub const C_NATIVE_GEOMETRY_PATH_MAX_OPERATIONS: usize = C_NATIVE_GEOMETRY_TASK_MAX_OPERATIONS;
+const NATIVE_MEMORY_BUDGET_QUANTUM_BYTES: u128 = 1024 * 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -50,6 +56,51 @@ impl NativeGeometrySolutionTask {
     }
 }
 
+/// Allocation-free upper bound for the Rust task buffer and the temporary C
+/// path-count table used by `clearra_geometry_solution_graph_split_tasks`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeGeometryTaskSplitSizing {
+    task_capacity: usize,
+    task_buffer_bytes: u128,
+    peak_scratch_bytes: u128,
+}
+
+impl NativeGeometryTaskSplitSizing {
+    pub fn checked(node_count: u32, desired_task_count: usize) -> Option<Self> {
+        let task_capacity = desired_task_count.clamp(1, u32::MAX as usize);
+        let task_buffer_bytes = (task_capacity as u128)
+            .checked_mul(core::mem::size_of::<NativeGeometrySolutionTask>() as u128)?;
+        let peak_scratch_bytes = if task_capacity == 1 {
+            0
+        } else {
+            u128::from(node_count)
+                .checked_add(2)?
+                .checked_mul(core::mem::size_of::<u64>() as u128)?
+        };
+        Some(Self {
+            task_capacity,
+            task_buffer_bytes,
+            peak_scratch_bytes,
+        })
+    }
+
+    pub const fn task_capacity(self) -> usize {
+        self.task_capacity
+    }
+
+    pub const fn task_buffer_bytes(self) -> u128 {
+        self.task_buffer_bytes
+    }
+
+    pub const fn peak_scratch_bytes(self) -> u128 {
+        self.peak_scratch_bytes
+    }
+
+    pub const fn checked_peak_increment_bytes(self) -> Option<u128> {
+        self.task_buffer_bytes.checked_add(self.peak_scratch_bytes)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeGeometryPathSinkError {
     Invalid,
@@ -76,7 +127,33 @@ mod linked {
     use crate::native::CNativeResourceReport;
 
     const PACKING_OK: i32 = 0;
+    const PACKING_CAPACITY_EXCEEDED: i32 = 6;
     const PACKING_CANCELLED: i32 = 7;
+
+    fn configured_request_memory_bytes(problem: &CPackingProblem) -> Option<u128> {
+        (problem.budget.has_max_memory_mib != 0)
+            .then(|| u128::from(problem.budget.max_memory_mib) * NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)
+    }
+
+    fn memory_budget_error(required_memory_bytes: u128) -> NativeCoreError {
+        NativeCoreError::PackingIncomplete {
+            status: PACKING_CAPACITY_EXCEEDED,
+            resource_report: ResourceReport::admission_failure(
+                ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+                    .with_required_memory_bytes(required_memory_bytes),
+            ),
+        }
+    }
+
+    fn ensure_memory_budget(
+        max_memory_bytes: Option<u128>,
+        required_memory_bytes: u128,
+    ) -> Result<(), NativeCoreError> {
+        if max_memory_bytes.is_some_and(|max_bytes| required_memory_bytes > max_bytes) {
+            return Err(memory_budget_error(required_memory_bytes));
+        }
+        Ok(())
+    }
 
     struct NativeGeometrySolutionGraphInner {
         pointer: NonNull<c_void>,
@@ -108,6 +185,8 @@ mod linked {
         ) -> Result<NativeGeometryGraphSearchOutcome, NativeCoreError> {
             let _control =
                 crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
+            let max_memory_bytes = configured_request_memory_bytes(problem);
+            ensure_memory_budget(max_memory_bytes, catalog.resident_bytes() as u128)?;
             let mut report = CNativeResourceReport::default();
             let mut pruning_ledger = CNativePruningProofLedger::default();
             let evidence_policy = match evidence_policy {
@@ -126,6 +205,14 @@ mod linked {
             }
             let resource_report = report.to_domain();
             if status != PACKING_OK {
+                if resource_report.truncation_reason
+                    == Some(ResourceTruncationReason::MemoryExceeded)
+                {
+                    let required_memory_bytes = max_memory_bytes
+                        .and_then(|max_bytes| max_bytes.checked_add(1))
+                        .unwrap_or(u128::MAX);
+                    return Err(memory_budget_error(required_memory_bytes));
+                }
                 return Err(NativeCoreError::packing_with_resource_report(
                     status,
                     resource_report,
@@ -139,6 +226,11 @@ mod linked {
                     resource_report: resource_report.clone(),
                 }),
             };
+            let retained_bytes = (graph.catalog().resident_bytes() as u128)
+                .checked_add(graph.resident_bytes() as u128)
+                .ok_or_else(|| memory_budget_error(u128::MAX))?;
+            let observed_peak_bytes = resource_report.peak_cpu_bytes as u128;
+            ensure_memory_budget(max_memory_bytes, retained_bytes.max(observed_peak_bytes))?;
             Ok(NativeGeometryGraphSearchOutcome {
                 graph,
                 resource_report,
@@ -176,6 +268,43 @@ mod linked {
                 capacity,
             )
             .map_err(NativeCoreError::PackingStatus)
+        }
+
+        pub fn checked_task_split_sizing(
+            &self,
+            desired_task_count: usize,
+        ) -> Option<NativeGeometryTaskSplitSizing> {
+            NativeGeometryTaskSplitSizing::checked(self.node_count(), desired_task_count)
+        }
+
+        pub fn split_tasks_with_memory_limit(
+            &self,
+            desired_task_count: usize,
+            already_retained_bytes: u128,
+            max_memory_bytes: u128,
+        ) -> Result<(Vec<NativeGeometrySolutionTask>, usize), NativeCoreError> {
+            let sizing = self
+                .checked_task_split_sizing(desired_task_count)
+                .ok_or_else(|| memory_budget_error(u128::MAX))?;
+            let projected_peak_bytes = already_retained_bytes
+                .checked_add(
+                    sizing
+                        .checked_peak_increment_bytes()
+                        .ok_or_else(|| memory_budget_error(u128::MAX))?,
+                )
+                .ok_or_else(|| memory_budget_error(u128::MAX))?;
+            ensure_memory_budget(Some(max_memory_bytes), projected_peak_bytes)?;
+
+            let (tasks, peak_scratch_bytes) = self.split_tasks(desired_task_count)?;
+            let task_buffer_bytes = (tasks.capacity() as u128)
+                .checked_mul(core::mem::size_of::<NativeGeometrySolutionTask>() as u128)
+                .ok_or_else(|| memory_budget_error(u128::MAX))?;
+            let observed_peak_bytes = already_retained_bytes
+                .checked_add(task_buffer_bytes)
+                .and_then(|bytes| bytes.checked_add(peak_scratch_bytes as u128))
+                .ok_or_else(|| memory_budget_error(u128::MAX))?;
+            ensure_memory_budget(Some(max_memory_bytes), observed_peak_bytes)?;
+            Ok((tasks, peak_scratch_bytes))
         }
 
         pub fn stream_task_paths(
@@ -218,7 +347,7 @@ mod linked {
         ) -> Result<NativeBuildableGeometryTaskOutcome, NativeCoreError> {
             let _control =
                 crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
-            let workspace = buildup_workspace.raw_pointer()?;
+            let mut workspace = buildup_workspace.raw_handle()?;
             let mut report = CNativeBuildableGeometryStreamReport::default();
             let mut pruning_ledger = CNativePruningProofLedger::default();
             let native_evidence_policy = match evidence_policy {
@@ -234,7 +363,7 @@ mod linked {
                     task,
                     packing_problem,
                     buildup_scratch,
-                    workspace,
+                    workspace.as_mut_ptr(),
                     sink.as_mut(),
                     native_evidence_policy,
                     &mut pruning_ledger,
@@ -300,6 +429,22 @@ impl NativeGeometrySolutionGraph {
         Err(NativeCoreError::Unavailable)
     }
 
+    pub fn checked_task_split_sizing(
+        &self,
+        desired_task_count: usize,
+    ) -> Option<NativeGeometryTaskSplitSizing> {
+        NativeGeometryTaskSplitSizing::checked(0, desired_task_count)
+    }
+
+    pub fn split_tasks_with_memory_limit(
+        &self,
+        _desired_task_count: usize,
+        _already_retained_bytes: u128,
+        _max_memory_bytes: u128,
+    ) -> Result<(Vec<NativeGeometrySolutionTask>, usize), NativeCoreError> {
+        Err(NativeCoreError::Unavailable)
+    }
+
     pub fn stream_task_paths(
         &self,
         _task: &NativeGeometrySolutionTask,
@@ -330,3 +475,40 @@ const _: () = assert!(core::mem::size_of::<NativeGeometrySolutionTask>() == 128)
 // Rust workspace can compile without creating a native process fallback.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<CNativeBuildableGeometryStreamReport>() == 40);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_split_sizing_matches_native_task_and_path_count_allocations() {
+        let sizing = NativeGeometryTaskSplitSizing::checked(10, 4).expect("checked sizing");
+        assert_eq!(sizing.task_capacity(), 4);
+        assert_eq!(sizing.task_buffer_bytes(), 4 * 128);
+        assert_eq!(sizing.peak_scratch_bytes(), 12 * 8);
+        assert_eq!(
+            sizing.checked_peak_increment_bytes(),
+            Some(4 * 128 + 12 * 8)
+        );
+    }
+
+    #[test]
+    fn single_task_split_has_no_path_count_scratch_allocation() {
+        let sizing =
+            NativeGeometryTaskSplitSizing::checked(u32::MAX, 1).expect("single task sizing");
+        assert_eq!(sizing.task_buffer_bytes(), 128);
+        assert_eq!(sizing.peak_scratch_bytes(), 0);
+    }
+
+    #[test]
+    fn task_split_sizing_clamps_to_the_native_u32_capacity() {
+        if usize::BITS > u32::BITS {
+            let sizing = NativeGeometryTaskSplitSizing::checked(
+                1,
+                usize::try_from(u64::from(u32::MAX) + 1).expect("64-bit usize"),
+            )
+            .expect("clamped sizing");
+            assert_eq!(sizing.task_capacity(), u32::MAX as usize);
+        }
+    }
+}

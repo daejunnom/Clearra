@@ -150,6 +150,10 @@ impl BuildUpRunResult {
     pub fn coverage_rows(&self) -> &[CoverageRow] {
         &self.coverage_rows
     }
+
+    pub(crate) fn into_coverage_rows(self) -> Vec<CoverageRow> {
+        self.coverage_rows
+    }
 }
 impl BuildUpRunResult {
     pub fn objective_result(&self) -> Option<&ObjectiveReductionResult> {

@@ -19,6 +19,14 @@ where
     }
 }
 
+#[cfg(test)]
+#[path = "cli_entry_sequence_dependencies_tests.rs"]
+mod sequence_dependencies_tests;
+
+#[cfg(test)]
+#[path = "cli_entry_document_utility_tests.rs"]
+mod document_utility_tests;
+
 #[cfg(all(test, feature = "native-c-core"))]
 #[path = "cli_entry_tests.rs"]
 mod tests;

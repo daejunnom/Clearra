@@ -8,7 +8,7 @@
     ClearraSearchProgressTelemetry,
     ClearraWasmSearchReport
   } from '../wasm/wasmCommandClient';
-  import type { ForwardDamageAggregation } from './forwardSearchModel';
+  import type { ForwardDamageAggregation, ForwardTool } from './forwardSearchModel';
   import { replayForwardPlacementBoard } from './forwardPlacementBoard';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import SolutionCopyButton from './SolutionCopyButton.svelte';
@@ -37,7 +37,7 @@
   export let language: WorkspaceLanguage;
   export let height: number;
   export let initialBoardMask: bigint;
-  export let tool: 'damage' | 'spin-finder';
+  export let tool: ForwardTool;
   export let damageAggregation: ForwardDamageAggregation = 'maximum';
   export let minimumDamage = 0;
 
@@ -52,7 +52,7 @@
   let preparedResults: PreparedForwardOutcome[] = [];
   let preparedReport: ClearraWasmSearchReport | null | undefined;
   let preparedOutcomes: ClearraForwardSearchOutcome[] | undefined;
-  let preparedTool: 'damage' | 'spin-finder' | undefined;
+  let preparedTool: ForwardTool | undefined;
   let preparedHeight: number | undefined;
   let preparedInitialBoardMask: bigint | undefined;
   let preparationGeneration = 0;
@@ -60,6 +60,11 @@
   let preparationTimer: ReturnType<typeof setTimeout> | null = null;
   let copyFormat: SolutionCopyFormat = 'ctk';
   $: label = (key: Parameters<typeof workspaceMessage>[1], values: Record<string, string | number> = {}) => workspaceMessage(language, key, values);
+  $: toolLabelKey = tool === 'damage'
+    ? 'maximumDamage'
+    : tool === 'spin-finder'
+      ? 'spinFinder'
+      : 'maximumRen';
   $: outcomes = report?.forward_search_kind === tool ? report.forward_outcomes : [];
   $: resultInitialBoardMask = parseInitialBoard(report?.forward_initial_board_mask, initialBoardMask);
   $: if (
@@ -187,6 +192,14 @@
     return '';
   }
 
+  function evidencePathCount(outcome: ClearraForwardSearchOutcome): string {
+    try {
+      return BigInt(outcome.evidence_path_count).toLocaleString(language);
+    } catch {
+      return outcome.evidence_path_count;
+    }
+  }
+
   function parseInitialBoard(value: string | null | undefined, fallback: bigint): bigint {
     try {
       return value ? BigInt(value) : fallback;
@@ -235,12 +248,14 @@
   statusLabel={label(status)}
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
-  progressProfile={tool === 'damage' ? 'damage' : 'spin'}
+  progressProfile={tool === 'damage' ? 'damage' : tool === 'spin-finder' ? 'spin' : 'ren'}
   progressMode={tool === 'damage'
     ? damageAggregation === 'at-least'
       ? 'damage-at-least'
       : 'damage-maximum'
-    : 'spin'}
+    : tool === 'spin-finder'
+      ? 'spin'
+      : 'ren'}
   {language}
   {progressLabel}
   {progressDetail}
@@ -257,13 +272,15 @@
       <div class="empty"><SearchX size={20} strokeWidth={1.7} /><p>{label('noForwardResult')}</p></div>
     {:else}
       <header class="result-header">
-      <h2>{label(tool === 'damage' ? 'maximumDamage' : 'spinFinder')}</h2>
+      <h2>{label(toolLabelKey)}</h2>
       <dl>
         {#if tool === 'damage'}
           <div><dt>{label('maximumDamage')}</dt><dd>{report.maximum_damage ?? '-'}</dd></div>
           {#if damageAggregation === 'at-least'}<div><dt>{label('minimumDamage')}</dt><dd>{minimumDamage}</dd></div>{/if}
+        {:else if tool === 'ren'}
+          <div><dt>{label('maximumRen')}</dt><dd>{report.maximum_ren ?? '-'}</dd></div>
         {/if}
-        <div><dt>{label(tool === 'damage' ? (damageAggregation === 'maximum' ? 'bestRoutes' : 'matchingDamageRoutes') : 'spinResults')}</dt><dd>{outcomes.length.toLocaleString(language)}</dd></div>
+        <div><dt>{label(tool === 'damage' ? (damageAggregation === 'maximum' ? 'bestRoutes' : 'matchingDamageRoutes') : tool === 'spin-finder' ? 'spinResults' : 'renResults')}</dt><dd>{outcomes.length.toLocaleString(language)}</dd></div>
       </dl>
       </header>
       <div class="copy-format-row">
@@ -281,9 +298,9 @@
           {#each preparedResults as result, index}
             <article hidden={index >= visibleCount}>
               <div class="card-heading">
-                <strong>{tool === 'damage' ? label('damageRoute', { number: index + 1 }) : label('spinResult', { number: index + 1 })}</strong>
+                <strong>{tool === 'damage' ? label('damageRoute', { number: index + 1 }) : tool === 'spin-finder' ? label('spinResult', { number: index + 1 }) : label('renResult', { number: index + 1 })}</strong>
                 <div class="card-actions">
-                  {#if tool === 'damage'}<b>{result.outcome.total_damage} {label('damage')}</b>{:else}<b>{groupLabel(result.outcome)} · {result.outcome.spin_lines}L{result.outcome.spin_mini ? ` · ${label('mini')}` : ''}</b>{/if}
+                  {#if tool === 'damage'}<b>{result.outcome.total_damage} {label('damage')}</b>{:else if tool === 'spin-finder'}<b>{groupLabel(result.outcome)} · {result.outcome.spin_lines}L{result.outcome.spin_mini ? ` · ${label('mini')}` : ''}</b>{:else}<b>{result.outcome.ren_count ?? 0} REN</b>{/if}
                   <SolutionCopyButton
                     page={result.board?.page ?? null}
                     format={copyFormat}
@@ -291,7 +308,10 @@
                   />
                 </div>
               </div>
-              {#if tool === 'spin-finder'}<p class="source-queue">{label('sourceQueue')}: <b>{result.outcome.source_queue}</b></p>{/if}
+              {#if tool !== 'damage'}<p class="source-queue">{label('sourceQueue')}: <b>{result.outcome.source_queue}</b></p>{/if}
+              {#if tool === 'spin-finder' && result.outcome.evidence_complete && result.outcome.evidence_path_count !== '1'}
+                <p class="evidence-count">{label('foldedEvidencePaths', { count: evidencePathCount(result.outcome) })}</p>
+              {/if}
               {#if result.board}
                 <div class="board" style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`} aria-label={label('minoPlacement')}>
                   {#each result.board.cells as cell}
@@ -337,6 +357,7 @@
   .card-actions { align-items: center; display: flex; gap: 6px; }
   .source-queue { color: #697570; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; margin: -4px 0 9px; }
   .source-queue b { color: #23433e; }
+  .evidence-count { color: #52645e; font-size: 10px; margin: -3px 0 9px; }
   .board { background: #111918; display: grid; gap: 0; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-template-rows: repeat(var(--rows), minmax(0, 1fr)); margin: 0 auto; overflow: hidden; width: min(100%, 230px); }
   .board i { background: var(--cell-color); box-shadow: 0 0 0 .5px var(--cell-color); min-height: 0; min-width: 0; }
   .board i.empty { --cell-color: #1d2927; box-shadow: inset 0 0 0 1px rgba(216,226,222,.16); }

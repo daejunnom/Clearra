@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_objectives::max_score::{MaterializedScoreCell, MaterializedScoreMatrix};
@@ -17,7 +20,7 @@ pub struct ScoreCell {
     trace_identity: String,
     score: u64,
     attack: u32,
-    accuracy_level: String,
+    accuracy_level: Cow<'static, str>,
 }
 
 impl ScoreCell {
@@ -35,7 +38,25 @@ impl ScoreCell {
             trace_identity: trace_identity.into(),
             score,
             attack,
-            accuracy_level: accuracy_level.into(),
+            accuracy_level: Cow::Owned(accuracy_level.into()),
+        }
+    }
+
+    pub fn new_with_static_accuracy(
+        candidate_id: u64,
+        pattern_id: usize,
+        trace_identity: impl Into<String>,
+        score: u64,
+        attack: u32,
+        accuracy_level: &'static str,
+    ) -> Self {
+        Self {
+            candidate_id,
+            pattern_id,
+            trace_identity: trace_identity.into(),
+            score,
+            attack,
+            accuracy_level: Cow::Borrowed(accuracy_level),
         }
     }
 
@@ -60,7 +81,15 @@ impl ScoreCell {
     }
 
     pub fn accuracy_level(&self) -> &str {
-        &self.accuracy_level
+        self.accuracy_level.as_ref()
+    }
+
+    fn checked_string_retained_bytes(&self) -> Option<u128> {
+        let accuracy_bytes = match &self.accuracy_level {
+            Cow::Borrowed(_) => 0,
+            Cow::Owned(value) => value.capacity() as u128,
+        };
+        (self.trace_identity.capacity() as u128).checked_add(accuracy_bytes)
     }
 }
 
@@ -75,12 +104,140 @@ pub struct ScoreMatrix {
     incomplete_reason: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScoreMatrixMemoryProjection {
+    pub cell_capacity: usize,
+    pub cell_outer_storage_bytes: u128,
+    pub cell_string_storage_bytes: u128,
+    pub profile_id_storage_bytes: u128,
+    pub accuracy_level_storage_bytes: u128,
+    pub required_peak_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScoreMatrixMemoryReport {
+    pub projection: ScoreMatrixMemoryProjection,
+    pub retained_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScoreMatrixMemoryGuardError {
+    ProjectionOverflow,
+    LimitExceeded {
+        required_memory_bytes: u128,
+        max_memory_bytes: u128,
+    },
+    AllocationFailed,
+}
+
 impl ScoreMatrix {
     pub fn from_materialized_cells(
+        cells: Vec<ScoreCell>,
+        profile: &ScoreProfile,
+        pattern_count: usize,
+        source_complete: bool,
+    ) -> Self {
+        let profile_id = profile.id().to_owned();
+        let accuracy_level = profile.accuracy_level().as_str().to_owned();
+        Self::finish_materialized_cells(
+            cells,
+            profile,
+            pattern_count,
+            source_complete,
+            profile_id,
+            accuracy_level,
+        )
+    }
+
+    pub fn checked_materialized_cells_memory_projection(
+        cells: &[ScoreCell],
+        cell_capacity: usize,
+        profile: &ScoreProfile,
+    ) -> Option<ScoreMatrixMemoryProjection> {
+        (cell_capacity >= cells.len()).then_some(())?;
+        let cell_outer_storage_bytes =
+            (cell_capacity as u128).checked_mul(core::mem::size_of::<ScoreCell>() as u128)?;
+        let cell_string_storage_bytes = cells.iter().try_fold(0_u128, |total, cell| {
+            total.checked_add(cell.checked_string_retained_bytes()?)
+        })?;
+        let profile_id_storage_bytes = profile.id().len() as u128;
+        let accuracy_level_storage_bytes = profile.accuracy_level().as_str().len() as u128;
+        let required_peak_bytes = cell_outer_storage_bytes
+            .checked_add(cell_string_storage_bytes)?
+            .checked_add(profile_id_storage_bytes)?
+            .checked_add(accuracy_level_storage_bytes)?;
+        Some(ScoreMatrixMemoryProjection {
+            cell_capacity,
+            cell_outer_storage_bytes,
+            cell_string_storage_bytes,
+            profile_id_storage_bytes,
+            accuracy_level_storage_bytes,
+            required_peak_bytes,
+        })
+    }
+
+    /// Builds matrix metadata fallibly while charging the caller-owned cell
+    /// buffer and its strings under the same total cap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_materialized_cells_with_memory_guard(
+        cells: Vec<ScoreCell>,
+        profile: &ScoreProfile,
+        pattern_count: usize,
+        source_complete: bool,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<(Self, ScoreMatrixMemoryReport), ScoreMatrixMemoryGuardError> {
+        let projection =
+            Self::checked_materialized_cells_memory_projection(&cells, cells.capacity(), profile)
+                .ok_or(ScoreMatrixMemoryGuardError::ProjectionOverflow)?;
+        let required_memory_bytes = already_retained_bytes
+            .checked_add(projection.required_peak_bytes)
+            .ok_or(ScoreMatrixMemoryGuardError::ProjectionOverflow)?;
+        if required_memory_bytes > max_memory_bytes {
+            return Err(ScoreMatrixMemoryGuardError::LimitExceeded {
+                required_memory_bytes,
+                max_memory_bytes,
+            });
+        }
+
+        let profile_id = try_owned_str(profile.id())?;
+        let accuracy_level = try_owned_str(profile.accuracy_level().as_str())?;
+        let matrix = Self::finish_materialized_cells(
+            cells,
+            profile,
+            pattern_count,
+            source_complete,
+            profile_id,
+            accuracy_level,
+        );
+        let retained_bytes = matrix
+            .checked_retained_bytes()
+            .ok_or(ScoreMatrixMemoryGuardError::ProjectionOverflow)?;
+        let actual_required_memory_bytes = already_retained_bytes
+            .checked_add(retained_bytes)
+            .ok_or(ScoreMatrixMemoryGuardError::ProjectionOverflow)?;
+        if actual_required_memory_bytes > max_memory_bytes {
+            return Err(ScoreMatrixMemoryGuardError::LimitExceeded {
+                required_memory_bytes: actual_required_memory_bytes,
+                max_memory_bytes,
+            });
+        }
+        Ok((
+            matrix,
+            ScoreMatrixMemoryReport {
+                projection,
+                retained_bytes,
+            },
+        ))
+    }
+
+    fn finish_materialized_cells(
         mut cells: Vec<ScoreCell>,
         profile: &ScoreProfile,
         pattern_count: usize,
         source_complete: bool,
+        profile_id: String,
+        accuracy_level: String,
     ) -> Self {
         let profile_supported = !matches!(
             profile.accuracy_level(),
@@ -90,7 +247,7 @@ impl ScoreMatrix {
             && cells.iter().all(|cell| {
                 cell.candidate_id != 0
                     && cell.pattern_id < pattern_count
-                    && cell.accuracy_level == profile.accuracy_level().as_str()
+                    && cell.accuracy_level.as_ref() == profile.accuracy_level().as_str()
             });
         cells.sort_by(|left, right| {
             (
@@ -134,8 +291,8 @@ impl ScoreMatrix {
         Self {
             cells,
             pattern_count,
-            profile_id: profile.id().to_owned(),
-            accuracy_level: profile.accuracy_level().as_str().to_owned(),
+            profile_id,
+            accuracy_level,
             materialized,
             complete,
             incomplete_reason,
@@ -254,7 +411,7 @@ impl ScoreMatrix {
                     trace_identity: execution.trace_identity().to_owned(),
                     score: evaluation.final_state().score(),
                     attack: evaluation.final_state().attack(),
-                    accuracy_level: profile.accuracy_level().as_str().to_owned(),
+                    accuracy_level: Cow::Borrowed(profile.accuracy_level().as_str()),
                 });
             }
         }
@@ -338,6 +495,20 @@ impl ScoreMatrix {
         self.incomplete_reason
     }
 
+    /// Checked retained heap storage after score cells have been moved into
+    /// the matrix. Static metadata such as `incomplete_reason` is not charged.
+    pub fn checked_retained_bytes(&self) -> Option<u128> {
+        let outer_storage_bytes = (self.cells.capacity() as u128)
+            .checked_mul(core::mem::size_of::<ScoreCell>() as u128)?;
+        let cell_string_bytes = self.cells.iter().try_fold(0_u128, |total, cell| {
+            total.checked_add(cell.checked_string_retained_bytes()?)
+        })?;
+        outer_storage_bytes
+            .checked_add(cell_string_bytes)?
+            .checked_add(self.profile_id.capacity() as u128)?
+            .checked_add(self.accuracy_level.capacity() as u128)
+    }
+
     pub fn to_objective_matrix(&self) -> Option<MaterializedScoreMatrix> {
         let cells = self
             .cells
@@ -349,7 +520,7 @@ impl ScoreMatrix {
                     cell.trace_identity.clone(),
                     cell.score,
                     cell.attack,
-                    cell.accuracy_level.clone(),
+                    cell.accuracy_level.to_string(),
                 ))
             })
             .collect::<Option<Vec<_>>>()?;
@@ -384,6 +555,28 @@ impl ScoreMatrix {
         extrema_by_pattern(self.highest_legal_cells_by_candidate_pattern(), true)
     }
 
+    /// Returns every candidate that reaches the maximum score for each
+    /// pattern. Multiple traces belonging to the same candidate are reduced
+    /// first, so one canonical trace represents that candidate. Attack stays
+    /// informational and never participates in either reduction.
+    pub fn highest_score_cells_by_pattern_preserving_candidate_ties(&self) -> Vec<&ScoreCell> {
+        let candidate_maxima = self.highest_legal_cells_by_candidate_pattern();
+        let mut maximum_score_by_pattern = BTreeMap::<usize, u64>::new();
+        for cell in &candidate_maxima {
+            maximum_score_by_pattern
+                .entry(cell.pattern_id)
+                .and_modify(|score| *score = (*score).max(cell.score))
+                .or_insert(cell.score);
+        }
+
+        candidate_maxima
+            .into_iter()
+            .filter(|cell| {
+                maximum_score_by_pattern.get(&cell.pattern_id).copied() == Some(cell.score)
+            })
+            .collect()
+    }
+
     pub fn minimal_shape_cells_by_pattern(&self) -> Vec<&ScoreCell> {
         extrema_by_pattern(self.highest_legal_cells_by_candidate_pattern(), false)
     }
@@ -394,6 +587,25 @@ pub struct ScoreMatrixCancelled;
 
 fn score_matrix_materialized(pattern_count: usize, source_complete: bool, has_cells: bool) -> bool {
     pattern_count > 0 && (source_complete || has_cells)
+}
+
+fn try_owned_str(value: &str) -> Result<String, ScoreMatrixMemoryGuardError> {
+    try_owned_str_with_capacity(value, value.len())
+}
+
+fn try_owned_str_with_capacity(
+    value: &str,
+    capacity: usize,
+) -> Result<String, ScoreMatrixMemoryGuardError> {
+    if capacity < value.len() {
+        return Err(ScoreMatrixMemoryGuardError::ProjectionOverflow);
+    }
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(capacity)
+        .map_err(|_| ScoreMatrixMemoryGuardError::AllocationFailed)?;
+    owned.push_str(value);
+    Ok(owned)
 }
 
 fn trace_satisfies_requirement(events: &[ReplayEvent], requirement: TraceRequirement) -> bool {
@@ -488,7 +700,7 @@ fn extrema_by_pattern(mut cells: Vec<&ScoreCell>, maximum: bool) -> Vec<&ScoreCe
 }
 
 fn score_cell_is_preferred(candidate: &ScoreCell, current: &ScoreCell, maximum: bool) -> bool {
-    let score_order = (candidate.score, candidate.attack).cmp(&(current.score, current.attack));
+    let score_order = candidate.score.cmp(&current.score);
     if !score_order.is_eq() {
         return if maximum {
             score_order.is_gt()
@@ -501,8 +713,8 @@ fn score_cell_is_preferred(candidate: &ScoreCell, current: &ScoreCell, maximum: 
 }
 
 fn score_cell_order(left: &ScoreCell, right: &ScoreCell) -> std::cmp::Ordering {
-    (left.score, left.attack)
-        .cmp(&(right.score, right.attack))
+    left.score
+        .cmp(&right.score)
         .then_with(|| right.candidate_id.cmp(&left.candidate_id))
         .then_with(|| right.trace_identity.cmp(&left.trace_identity))
 }
@@ -511,10 +723,188 @@ fn score_cell_order(left: &ScoreCell, right: &ScoreCell) -> std::cmp::Ordering {
 mod tests {
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
     use clearra_geometry::layout::board64_layout::Board64Layout;
+    use clearra_objectives::policy::score_objective_policy::ScoreObjectivePolicy;
     use clearra_replay::{BuildVariantOperation, BuildVariantReplayInput, ReplayEngine};
 
     use super::*;
-    use crate::{CandidateExecution, CandidateExecutionAggregate};
+    use crate::{
+        CandidateExecution, CandidateExecutionAggregate, PcScoringPostProcessInput,
+        PcScoringPostProcessor,
+    };
+
+    fn cell_signatures(cells: Vec<&ScoreCell>) -> Vec<(u64, usize, String, u64, u32)> {
+        cells
+            .into_iter()
+            .map(|cell| {
+                (
+                    cell.candidate_id(),
+                    cell.pattern_id(),
+                    cell.trace_identity().to_owned(),
+                    cell.score(),
+                    cell.attack(),
+                )
+            })
+            .collect()
+    }
+
+    fn field_value<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find_map(|(field_key, value)| (field_key == key).then_some(value.as_str()))
+    }
+
+    #[test]
+    fn score_extrema_reduce_each_candidate_to_its_highest_trace_before_pattern_reductions() {
+        let profile = ScoreProfile::new("score-extrema", "Score extrema");
+        let accuracy = profile.accuracy_level().as_str();
+        let cells = vec![
+            // Score alone defines the optimum. Attack is informational, and
+            // the lexicographically smaller trace represents an exact tie.
+            ScoreCell::new_with_static_accuracy(1, 0, "score-loses", 19, 99, accuracy),
+            ScoreCell::new_with_static_accuracy(1, 0, "attack-loses", 20, 1, accuracy),
+            ScoreCell::new_with_static_accuracy(1, 0, "trace-z", 20, 2, accuracy),
+            ScoreCell::new_with_static_accuracy(1, 0, "trace-a", 20, 2, accuracy),
+            // Exact cross-candidate ties choose the smaller candidate id.
+            ScoreCell::new_with_static_accuracy(2, 0, "candidate-two", 20, 2, accuracy),
+            ScoreCell::new_with_static_accuracy(3, 0, "candidate-three", 20, 2, accuracy),
+            // The lower envelope must see candidate 4's maximum (15), not its
+            // otherwise globally minimal but non-selected trace (1).
+            ScoreCell::new_with_static_accuracy(4, 0, "hidden-low-trace", 1, 0, accuracy),
+            ScoreCell::new_with_static_accuracy(4, 0, "candidate-four-max", 15, 8, accuracy),
+        ];
+        let mut reversed_cells = cells.clone();
+        reversed_cells.reverse();
+        let forward = ScoreMatrix::from_materialized_cells(cells, &profile, 1, true);
+        let reversed = ScoreMatrix::from_materialized_cells(reversed_cells, &profile, 1, true);
+
+        let expected_candidate_maxima = vec![
+            (1, 0, "attack-loses".to_owned(), 20, 1),
+            (2, 0, "candidate-two".to_owned(), 20, 2),
+            (3, 0, "candidate-three".to_owned(), 20, 2),
+            (4, 0, "candidate-four-max".to_owned(), 15, 8),
+        ];
+        let expected_pattern_maximum = vec![(1, 0, "attack-loses".to_owned(), 20, 1)];
+        let expected_pattern_maximum_ties = vec![
+            (1, 0, "attack-loses".to_owned(), 20, 1),
+            (2, 0, "candidate-two".to_owned(), 20, 2),
+            (3, 0, "candidate-three".to_owned(), 20, 2),
+        ];
+        let expected_score_minimal = vec![(4, 0, "candidate-four-max".to_owned(), 15, 8)];
+
+        for matrix in [&forward, &reversed] {
+            assert!(matrix.complete());
+            assert_eq!(
+                cell_signatures(matrix.highest_legal_cells_by_candidate_pattern()),
+                expected_candidate_maxima
+            );
+            assert_eq!(
+                cell_signatures(matrix.highest_legal_cells_by_pattern()),
+                expected_pattern_maximum
+            );
+            assert_eq!(
+                cell_signatures(matrix.highest_score_cells_by_pattern_preserving_candidate_ties()),
+                expected_pattern_maximum_ties
+            );
+            assert_eq!(
+                cell_signatures(matrix.minimal_shape_cells_by_pattern()),
+                expected_score_minimal
+            );
+        }
+    }
+
+    #[test]
+    fn missing_required_trace_keeps_the_score_matrix_and_objective_incomplete() {
+        let profile = ScoreProfile::new("kick-required", "Kick required")
+            .with_trace_requirement(TraceRequirement::KickEvidenceTrace);
+        let input = BuildVariantReplayInput::new(
+            "no-kick-evidence",
+            Board64Layout::standard_10_by_lines(2).expect("layout"),
+            0,
+            vec![BuildVariantOperation::new(
+                PieceKind::O,
+                RotationState::Zero,
+                0,
+                0,
+            )],
+        );
+        let trace = ReplayEngine::build_variant_to_trace(&input).expect("replay");
+        assert!(!trace
+            .events()
+            .iter()
+            .any(|event| matches!(event, ReplayEvent::KickEvidence(_))));
+        let aggregates = [CandidateExecutionAggregate::new(
+            1,
+            vec![CandidateExecution::new(0, "no-kick-evidence", trace)],
+        )];
+
+        let matrix = ScoreMatrix::materialize(&aggregates, &profile, 1, true);
+
+        assert!(matrix.materialized());
+        assert!(!matrix.complete());
+        assert_eq!(matrix.cell_count(), 0);
+        assert_eq!(
+            matrix.incomplete_reason(),
+            Some("score_trace_requirement_not_met")
+        );
+        assert!(!matrix
+            .to_objective_matrix()
+            .expect("objective matrix")
+            .complete());
+    }
+
+    #[test]
+    fn invalid_weights_cannot_make_a_complete_matrix_summary_or_objective_complete() {
+        let policy = ScoreObjectivePolicy::summary();
+        let profile = crate::score_profile_selection::score_profile(policy);
+        let matrix = ScoreMatrix::from_materialized_cells(
+            vec![ScoreCell::new_with_static_accuracy(
+                1,
+                0,
+                "complete-cell",
+                100,
+                1,
+                profile.accuracy_level().as_str(),
+            )],
+            &profile,
+            2,
+            true,
+        );
+        let missing = [];
+        let non_finite = [f64::NAN, 0.0];
+        let negative = [-0.1, 1.1];
+        let incomplete_total = [0.25, 0.25];
+
+        assert!(matrix.complete());
+        for weights in [
+            missing.as_slice(),
+            non_finite.as_slice(),
+            negative.as_slice(),
+            incomplete_total.as_slice(),
+        ] {
+            let fields = PcScoringPostProcessor::process_materialized_with_control(
+                PcScoringPostProcessInput::new(None, &[], weights, 2, true, policy, true, "1", 1),
+                matrix.clone(),
+                &ExecutionControl::default(),
+            )
+            .expect("postprocess")
+            .fields();
+
+            assert_eq!(field_value(&fields, "score_matrix_complete"), Some("true"));
+            assert_eq!(
+                field_value(&fields, "score_summary_complete"),
+                Some("false")
+            );
+            assert_eq!(
+                field_value(&fields, "score_summary_incomplete_reason"),
+                Some("pattern_weight_model_not_materialized")
+            );
+            assert_eq!(field_value(&fields, "objective_complete"), Some("false"));
+            assert_eq!(
+                field_value(&fields, "objective_incomplete_reason"),
+                Some("pattern_weight_model_not_materialized")
+            );
+        }
+    }
 
     #[test]
     fn partial_replay_matrix_is_materialized_but_incomplete() {
@@ -570,6 +960,104 @@ mod tests {
         assert_eq!(
             matrix.incomplete_reason(),
             Some("score_execution_source_incomplete")
+        );
+        let expected_retained_bytes = (matrix.cells.capacity() as u128)
+            * (core::mem::size_of::<ScoreCell>() as u128)
+            + matrix
+                .cells
+                .iter()
+                .map(|cell| {
+                    cell.trace_identity.capacity() as u128
+                        + match &cell.accuracy_level {
+                            Cow::Borrowed(_) => 0,
+                            Cow::Owned(value) => value.capacity() as u128,
+                        }
+                })
+                .sum::<u128>()
+            + matrix.profile_id.capacity() as u128
+            + matrix.accuracy_level.capacity() as u128;
+        assert_eq!(
+            matrix.checked_retained_bytes(),
+            Some(expected_retained_bytes)
+        );
+    }
+
+    #[test]
+    fn static_accuracy_cell_does_not_allocate_per_cell_accuracy_storage() {
+        let cell =
+            ScoreCell::new_with_static_accuracy(1, 0, "fixed-trace", 100, 0, "basic-approximation");
+
+        assert!(matches!(cell.accuracy_level, Cow::Borrowed(_)));
+        assert_eq!(cell.accuracy_level(), "basic-approximation");
+    }
+
+    #[test]
+    fn guarded_materialized_matrix_checks_exact_cap_underflow_overflow_and_allocation() {
+        let profile = ScoreProfile::new("guarded-profile", "Guarded profile");
+        let make_cells = || {
+            vec![ScoreCell::new_with_static_accuracy(
+                1,
+                0,
+                "guarded-trace",
+                100,
+                1,
+                profile.accuracy_level().as_str(),
+            )]
+        };
+        let cells = make_cells();
+        let projection = ScoreMatrix::checked_materialized_cells_memory_projection(
+            &cells,
+            cells.capacity(),
+            &profile,
+        )
+        .expect("matrix projection");
+        let already_retained_bytes = 5;
+        let exact_cap = already_retained_bytes + projection.required_peak_bytes;
+        let legacy = ScoreMatrix::from_materialized_cells(cells.clone(), &profile, 1, true);
+        let (guarded, report) = ScoreMatrix::from_materialized_cells_with_memory_guard(
+            cells,
+            &profile,
+            1,
+            true,
+            already_retained_bytes,
+            exact_cap,
+        )
+        .expect("exact cap");
+        assert_eq!(guarded, legacy);
+        assert_eq!(report.projection, projection);
+        assert!(report.retained_bytes <= projection.required_peak_bytes);
+
+        let under = ScoreMatrix::from_materialized_cells_with_memory_guard(
+            make_cells(),
+            &profile,
+            1,
+            true,
+            already_retained_bytes,
+            exact_cap - 1,
+        )
+        .expect_err("one byte under");
+        assert_eq!(
+            under,
+            ScoreMatrixMemoryGuardError::LimitExceeded {
+                required_memory_bytes: exact_cap,
+                max_memory_bytes: exact_cap - 1,
+            }
+        );
+
+        let overflow = ScoreMatrix::from_materialized_cells_with_memory_guard(
+            make_cells(),
+            &profile,
+            1,
+            true,
+            u128::MAX,
+            u128::MAX,
+        )
+        .expect_err("retained plus matrix projection overflow");
+        assert_eq!(overflow, ScoreMatrixMemoryGuardError::ProjectionOverflow);
+
+        assert_eq!(
+            try_owned_str_with_capacity("", usize::MAX),
+            Err(ScoreMatrixMemoryGuardError::AllocationFailed)
         );
     }
 

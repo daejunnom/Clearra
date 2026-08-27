@@ -24,7 +24,7 @@ use crate::{
 const INIT_MAGIC: u32 = u32::from_le_bytes(*b"FWIN");
 const TASK_MAGIC: u32 = u32::from_le_bytes(*b"FWTK");
 const RESULT_MAGIC: u32 = u32::from_le_bytes(*b"FWRS");
-const WIRE_VERSION: u32 = 8;
+const WIRE_VERSION: u32 = 10;
 const MAX_WIRE_ITEMS: usize = 10_000_000;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
 const MAX_REORDER_BATCHES_PER_WORKER: usize = 4;
@@ -70,6 +70,22 @@ impl ForwardParallelError {
             }
             Self::Search(ForwardSearchError::PatternRequiresSpinFinder) => {
                 "forward_search_pattern_requires_spin_finder"
+            }
+            Self::Search(ForwardSearchError::RenRequiresFixedQueue) => {
+                "forward_ren_requires_fixed_queue"
+            }
+            Self::Search(ForwardSearchError::RenQueueTooLong) => "forward_ren_queue_too_long",
+            Self::Search(ForwardSearchError::RenInitialComboUnsupported) => {
+                "forward_ren_initial_combo_unsupported"
+            }
+            Self::Search(ForwardSearchError::RenInitialBackToBackUnsupported) => {
+                "forward_ren_initial_back_to_back_unsupported"
+            }
+            Self::Search(ForwardSearchError::RenLineClearPolicyUnsupported) => {
+                "forward_ren_line_clear_policy_unsupported"
+            }
+            Self::Search(ForwardSearchError::RenSpinProfileMustBeDisabled) => {
+                "forward_ren_spin_profile_must_be_disabled"
             }
             Self::Search(ForwardSearchError::SpinProfileDisabled) => {
                 "forward_search_spin_profile_disabled"
@@ -908,6 +924,8 @@ fn canonicalize_outcomes(
             left.spin_mini(),
             left.spin_lines(),
             left.total_damage(),
+            left.evidence_path_count(),
+            left.evidence_complete(),
             left.path(),
         )
             .cmp(&(
@@ -920,6 +938,8 @@ fn canonicalize_outcomes(
                 right.spin_mini(),
                 right.spin_lines(),
                 right.total_damage(),
+                right.evidence_path_count(),
+                right.evidence_complete(),
                 right.path(),
             ))
     });
@@ -935,6 +955,8 @@ fn canonicalize_outcomes(
             && left.spin_mini() == right.spin_mini()
             && left.spin_lines() == right.spin_lines()
             && left.total_damage() == right.total_damage()
+            && left.evidence_path_count() == right.evidence_path_count()
+            && left.evidence_complete() == right.evidence_complete()
             && left.path() == right.path()
     });
     if control.is_cancelled() {
@@ -1161,6 +1183,7 @@ fn encode_config(output: &mut Vec<u8>, config: ForwardSearchConfig) {
                 ForwardSpinCategory::Other => 2,
             });
         }
+        ForwardSearchMode::MaximumRen => output.push(3),
     }
 }
 
@@ -1207,6 +1230,7 @@ fn decode_config(reader: &mut Reader<'_>) -> Result<ForwardSearchConfig, Forward
             };
             ForwardSearchMode::SpinFinder(ForwardSpinTarget::with_line_requirement(lines, category))
         }
+        3 => ForwardSearchMode::MaximumRen,
         _ => return Err(ForwardParallelError::InvalidWire("forward_mode_invalid")),
     };
     Ok(ForwardSearchConfig {
@@ -1302,6 +1326,16 @@ fn encode_action(output: &mut Vec<u8>, action: &ExpandedAction) {
             put_u32(output, *total_damage);
             encode_action_step(output, step);
         }
+        ExpandedAction::RenTerminal {
+            board,
+            ren_count,
+            step,
+        } => {
+            output.push(3);
+            encode_board(output, *board);
+            output.push(*ren_count);
+            encode_action_step(output, step);
+        }
     }
 }
 
@@ -1330,6 +1364,11 @@ fn decode_action(reader: &mut Reader<'_>) -> Result<ExpandedAction, ForwardParal
             mini: reader.bool()?,
             lines: reader.u8()?,
             total_damage: reader.u32()?,
+            step: decode_action_step(reader)?,
+        }),
+        3 => Ok(ExpandedAction::RenTerminal {
+            board: decode_board(reader)?,
+            ren_count: reader.u8()?,
             step: decode_action_step(reader)?,
         }),
         _ => Err(ForwardParallelError::InvalidWire(
@@ -1361,7 +1400,10 @@ fn encode_report(output: &mut Vec<u8>, report: &ForwardSearchReport) {
         output.push(outcome.spin_piece().map_or(u8::MAX, piece_code));
         output.push(u8::from(outcome.spin_mini()));
         output.push(outcome.spin_lines());
+        output.push(outcome.ren_count().unwrap_or(u8::MAX));
         put_u32(output, outcome.total_damage());
+        put_decimal_string(output, outcome.evidence_path_count());
+        output.push(u8::from(outcome.evidence_complete()));
         put_u32(output, outcome.path().len() as u32);
         for step in outcome.path() {
             encode_step(output, step);
@@ -1403,24 +1445,44 @@ fn decode_report(reader: &mut Reader<'_>) -> Result<ForwardSearchReport, Forward
         };
         let spin_mini = reader.bool()?;
         let spin_lines = reader.u8()?;
+        let ren_count = match reader.u8()? {
+            u8::MAX => None,
+            value @ 0..=21 => Some(value),
+            _ => {
+                return Err(ForwardParallelError::InvalidWire(
+                    "forward_ren_count_invalid",
+                ))
+            }
+        };
         let total_damage = reader.u32()?;
+        let evidence_path_count = reader.decimal_string()?;
+        let evidence_complete = reader.bool()?;
+        if !evidence_complete {
+            return Err(ForwardParallelError::InvalidWire(
+                "forward_evidence_incomplete",
+            ));
+        }
         let path_count = reader.count()?;
         let mut path = Vec::with_capacity(path_count);
         for _ in 0..path_count {
             path.push(decode_step(reader)?);
         }
-        outcomes.push(ForwardSearchOutcome::new(
-            0,
-            source_pattern_index,
-            source_queue,
-            group,
-            final_board,
-            spin_piece,
-            spin_mini,
-            spin_lines,
-            total_damage,
-            path,
-        ));
+        outcomes.push(
+            ForwardSearchOutcome::new(
+                0,
+                source_pattern_index,
+                source_queue,
+                group,
+                final_board,
+                spin_piece,
+                spin_mini,
+                spin_lines,
+                ren_count,
+                total_damage,
+                path,
+            )
+            .with_evidence_path_count(evidence_path_count),
+        );
     }
     Ok(ForwardSearchReport::new(
         true,
@@ -1701,6 +1763,17 @@ fn put_u64(output: &mut Vec<u8>, value: u64) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
+fn put_decimal_string(output: &mut Vec<u8>, value: &str) {
+    debug_assert!(!value.is_empty());
+    debug_assert!(value.bytes().all(|byte| byte.is_ascii_digit()));
+    debug_assert!(value == "0" || !value.starts_with('0'));
+    put_u32(
+        output,
+        u32::try_from(value.len()).expect("forward decimal count length fits the wire"),
+    );
+    output.extend_from_slice(value.as_bytes());
+}
+
 struct Reader<'a> {
     input: &'a [u8],
     cursor: usize,
@@ -1741,6 +1814,22 @@ impl<'a> Reader<'a> {
             1 => Ok(true),
             _ => Err(ForwardParallelError::InvalidWire("forward_bool_invalid")),
         }
+    }
+
+    fn decimal_string(&mut self) -> Result<String, ForwardParallelError> {
+        let length = self.count()?;
+        let bytes = self.take(length)?;
+        if bytes.is_empty()
+            || !bytes.iter().all(u8::is_ascii_digit)
+            || bytes == b"0"
+            || (bytes.len() > 1 && bytes[0] == b'0')
+        {
+            return Err(ForwardParallelError::InvalidWire(
+                "forward_decimal_count_invalid",
+            ));
+        }
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| ForwardParallelError::InvalidWire("forward_decimal_count_invalid"))
     }
 
     fn option_u16(&mut self) -> Result<Option<u16>, ForwardParallelError> {
@@ -1885,6 +1974,41 @@ mod tests {
         assert_eq!(left.peak_frontier(), right.peak_frontier());
         assert_eq!(left.maximum_damage(), right.maximum_damage());
         assert_eq!(left.outcomes(), right.outcomes());
+    }
+
+    #[test]
+    fn report_wire_preserves_arbitrary_precision_spin_evidence_count() {
+        let expected = "340282366920938463463374607431768211456";
+        let report = ForwardSearchReport::new(
+            true,
+            [0; 4],
+            1,
+            0,
+            0,
+            0,
+            vec![ForwardSearchOutcome::new(
+                1,
+                0,
+                vec![PieceKind::T],
+                Some(ForwardSpinGroup::T),
+                [0; 4],
+                Some(PieceKind::T),
+                false,
+                1,
+                None,
+                0,
+                Vec::new(),
+            )
+            .with_evidence_path_count(expected.to_owned())],
+        );
+        let mut bytes = Vec::new();
+        encode_report(&mut bytes, &report);
+        let mut reader = Reader::new(&bytes);
+        let decoded = decode_report(&mut reader).expect("decode report");
+        reader.finish().expect("consume report bytes");
+
+        assert_eq!(decoded.outcomes()[0].evidence_path_count(), expected);
+        assert!(decoded.outcomes()[0].evidence_complete());
     }
 
     #[test]

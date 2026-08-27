@@ -5,7 +5,7 @@ import type {
 import type { WorkspaceMessageKey } from './workspaceI18n';
 import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
-export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin';
+export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin' | 'ren';
 export type WorkspaceProgressMode =
   | 'default'
   | 'pc-all'
@@ -18,7 +18,8 @@ export type WorkspaceProgressMode =
   | 'build-spin'
   | 'damage-maximum'
   | 'damage-at-least'
-  | 'spin';
+  | 'spin'
+  | 'ren';
 export type WorkspaceProgressStageStatus = 'pending' | 'running' | 'complete' | 'stopped';
 
 export type WorkspaceProgressStage = {
@@ -123,6 +124,13 @@ function profileStages(
       { id: 'classify', labelKey: 'progressStageDamage' }
     ];
   }
+  if (profile === 'ren') {
+    return [
+      COMMON_PREPARE,
+      { id: 'forward', labelKey: 'progressStageForwardSearch' },
+      { id: 'classify', labelKey: 'progressStageRen' }
+    ];
+  }
   return [
     COMMON_PREPARE,
     { id: 'patterns', labelKey: 'progressStagePatterns' },
@@ -145,7 +153,7 @@ export function buildWorkspaceProgressModel(
 
   if (input.status === 'idle') return summarize(stages);
 
-  if (input.profile === 'damage' || input.profile === 'spin') {
+  if (input.profile === 'damage' || input.profile === 'spin' || input.profile === 'ren') {
     applyForwardProgress(stages, input);
   } else if (input.profile === 'setup') {
     applySetupProgress(stages, input);
@@ -622,7 +630,7 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
     classify.status =
       classificationStarted ? 'running' : 'pending';
     if (telemetry) {
-      if (input.profile === 'damage') {
+      if (input.profile !== 'spin') {
         applyMetric(
           classify,
           telemetryCount(

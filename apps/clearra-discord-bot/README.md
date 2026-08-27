@@ -13,7 +13,7 @@ The registered slash commands are `/render-file`, `/path`, `/percent`, `/chance`
 `/score`, `/score-minimals`, `/saves`, `/best-save`, `/cover`, `/setup`,
 `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`,
 `/special-cover`, `/spin-cover`, `/spin`, `/spin-structure`, `/score-finder`, `/damage`, `/pc-setup`,
-`/best-setup`, `/dpc-finder`, `/finesse search`, `/finesse score`, `/verify`, and `/help`. `/help` accepts an
+`/best-setup`, `/dpc-finder`, `/finesse search`, `/finesse score`, and `/help`. `/help` accepts an
 optional command name in `arguments`; without it, the command lists the active
 groups. Search commands use structured primary inputs instead of one raw argv
 string. For example:
@@ -34,7 +34,6 @@ ID.
 /finesse search target:<target delta> next:<queue or pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>]
 /finesse score document:<CTK3 or Fumen with operations> next:<queue or pattern> [kicktable:<built-in>] [options:<hold and knowledge>]
 /pc-setup remaining:<unordered piece inventory> [priority:<all|build|pc>] [max-setup-pieces:<1..10>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>]
-/verify scope:<pc|setup|cover|build|kicks>
 ```
 
 `/best-setup` and `/dpc-finder` expose the same seven setup-ranking options.
@@ -63,8 +62,8 @@ Gateway.
 
 Invoking any search command without all of its required runtime inputs opens a
 stateless command-specific Modal. Besides fields, the forms expose `next`, PC
-height, initial B2B state, the built-in kick table, hold policy, T-spin type,
-remaining pieces, or verification scope as applicable. A setup-ranking Modal
+height, initial B2B state, the built-in kick table, hold policy, T-spin type, or
+remaining pieces as applicable. A setup-ranking Modal
 uses Discord's five-component limit for `remaining`, `kicktable`, `priority`,
 `max-setup-pieces`, and `queue-knowledge`, in that order. The lower-priority
 `next-cycle-remaining` and `setup-length` settings remain available through a
@@ -473,8 +472,8 @@ administrator who also needs the slash entries must be granted a user/role
 override by a server administrator under **Server Settings -> Integrations ->
 ClearraBot**; Discord does not accept a bot token for that overwrite. The DM
 `$bot-control help` path remains available without that per-server override.
-Search/help/verification commands remain available through ordinary Discord
-channel and application-command permissions.
+Search and help commands remain available through ordinary Discord channel and
+application-command permissions.
 
 Oracle owns the Discord token and performs the same lazy owner lookup for the
 small set of operations that actually require it.
@@ -701,7 +700,7 @@ $projectId = gcloud config get-value project
 $sourceCommit = "<same-full-40-character-accepted-commit>"
 $image = "asia-northeast1-docker.pkg.dev/$projectId/clearra/clearra-current-job:source-$sourceCommit"
 $serviceName = "clearra-current-job"
-$revisionSuffix = "v075-" + $sourceCommit.Substring(0, 7)
+$revisionSuffix = "v080-" + $sourceCommit.Substring(0, 7)
 $candidateTag = "candidate-" + $sourceCommit.Substring(0, 7)
 $runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
 $jobBearerSecret = "clearra-job-token"
@@ -777,7 +776,7 @@ if ($priorCapture.priorRevision -cne $priorRevision -or
     $priorCapture.priorOracleReleaseId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or
     $priorCapture.priorOracleRelease -cne "/opt/clearra/releases/$($priorCapture.priorOracleReleaseId)" -or
     $priorCapture.priorOracleReleaseSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-    $priorCapture.priorOracleSettingsBackup -cnotmatch '^/etc/clearra-gateway/settings\.pre-v0\.7\.5-[0-9a-f]{64}$' -or
+    $priorCapture.priorOracleSettingsBackup -cnotmatch '^/etc/clearra-gateway/settings\.pre-v0\.8\.0-[0-9a-f]{64}$' -or
     $priorCapture.priorOracleSettingsSha256 -cnotmatch '^[0-9a-f]{64}$' -or
     $priorCapture.priorRuntimeAuthorityKind -cne $priorRuntimeAuthorityKind -or
     $priorCapture.priorRuntimeAuthoritySha256 -cnotmatch '^[0-9a-f]{64}$' -or

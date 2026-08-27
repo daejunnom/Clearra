@@ -5,16 +5,25 @@ mod execution_supply;
 pub mod score_matrix;
 mod t_spin_coverage_only_materializer;
 
-pub use b2b_execution_filter::{BackToBackEdgePolicy, BackToBackExecutionFilter};
+pub use b2b_execution_filter::{
+    BackToBackEdgePolicy, BackToBackExecutionFilter, BackToBackFilterError,
+    BackToBackFilterMemoryProjection, BackToBackFilterMemoryReport,
+};
 pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAggregate};
 #[cfg(feature = "stage-profiling")]
 pub use exact_scoring_execution_materializer::ExactScoringExecutionProfile;
 pub use exact_scoring_execution_materializer::{
-    ExactScoredExecution, ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
+    ExactScoreCellMaterialization, ExactScoreCellMaterializationError,
+    ExactScoreCellMemoryProjection, ExactScoreCellMemoryReport, ExactScoredExecution,
+    ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
     ExactScoringExecutionMaterializer,
 };
-pub use score_matrix::{ScoreCell, ScoreMatrix};
+pub use score_matrix::{
+    ScoreCell, ScoreMatrix, ScoreMatrixMemoryGuardError, ScoreMatrixMemoryProjection,
+    ScoreMatrixMemoryReport,
+};
 pub use t_spin_coverage_only_materializer::{
-    CandidatePatternCoverage, SpinCoverageTarget, TSpinCoverageOnlyMaterialization,
+    CandidatePatternCoverage, SpinCoverageTarget, TSpinCoverageMaterializationError,
+    TSpinCoverageMemoryProjection, TSpinCoverageMemoryReport, TSpinCoverageOnlyMaterialization,
     TSpinCoverageOnlyMaterializer,
 };

@@ -85,6 +85,16 @@ impl PcQueryAssembler {
         } else {
             PcHoldPolicy::Disabled
         };
+        let spin_profile = args
+            .spin_profile()
+            .map(|value| {
+                SpinProfileSelection::parse(value).ok_or_else(|| {
+                    PcQueryAssemblyError::UnsupportedSpinProfile {
+                        value: value.to_owned(),
+                    }
+                })
+            })
+            .transpose()?;
         if args.score_requested() && !objective.score().requested() {
             objective = objective.with_score_summary();
         }
@@ -99,13 +109,14 @@ impl PcQueryAssembler {
             })?;
             objective = objective.with_score_profile(profile);
         }
-        if let Some(value) = args.spin_profile() {
-            let profile = SpinProfileSelection::parse(value).ok_or_else(|| {
-                PcQueryAssemblyError::UnsupportedSpinProfile {
-                    value: value.to_owned(),
-                }
-            })?;
-            objective = objective.with_spin_profile(profile);
+        if args.score_requested() {
+            if let Some(profile) = spin_profile {
+                objective = objective.with_spin_profile(profile);
+            }
+        }
+        if args.preserves_back_to_back() {
+            let profile = spin_profile.unwrap_or(SpinProfileSelection::TSpins);
+            objective = objective.with_back_to_back_preservation(profile);
         }
         let rule = parse_rule(args.rule())?;
         let verified_profile = parse_verified_kick_profile(args.kick_profile_json())?;
@@ -219,6 +230,7 @@ fn validate_tiling_only_options(args: &PcArgs) -> Result<(), PcQueryAssemblyErro
         (args.score_requested(), "--score"),
         (args.score_profile().is_some(), "--score-profile"),
         (args.spin_profile().is_some(), "--spin-profile"),
+        (args.preserves_back_to_back(), "--preserve-b2b"),
         (args.initial_b2b().is_some(), "--initial-b2b"),
         (args.rule().is_some(), "--rule"),
         (args.kick_profile_json().is_some(), "--kick-profile-json"),

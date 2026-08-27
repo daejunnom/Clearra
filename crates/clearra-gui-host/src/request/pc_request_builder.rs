@@ -1,4 +1,8 @@
-use clearra_app::{AppCommand, PcAppCommand, PercentAppCommand};
+use clearra_app::{
+    AppCommand, PcAppCommand, PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection,
+    PcSaveIngressOrigin, PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin,
+    PercentAppCommand,
+};
 use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput, PcSolutionProbabilityPolicy, SupplyWindowSize,
@@ -28,11 +32,22 @@ impl PcRequestBuilder {
                 format!("invalid GUI PC line target: {error:?}"),
             )
         })?;
-        let base_objective = if form.score_mode() == "failed-queue" {
-            clearra_objectives::policy::objective_policy::ObjectivePolicy::all()
-        } else {
-            clearra_objectives::policy::objective_policy::ObjectivePolicy::unique()
-        };
+        if form.score_mode() == "score-finder" {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "canonical GUI pc score-finder requires an explicit initial-field scenario",
+            ));
+        }
+        let canonical_pc_path = form.score_mode() == "path";
+        let canonical_pc_saves = form.score_mode() == "saves";
+        let canonical_pc_best_save = form.score_mode() == "best-save";
+        let canonical_pc_save = canonical_pc_saves || canonical_pc_best_save;
+        let base_objective =
+            if form.score_mode() == "failed-queue" || canonical_pc_save || canonical_pc_path {
+                clearra_objectives::policy::objective_policy::ObjectivePolicy::all()
+            } else {
+                clearra_objectives::policy::objective_policy::ObjectivePolicy::unique()
+            };
         let objective = score_objective_policy(
             form.score_mode(),
             form.score_profile(),
@@ -40,8 +55,30 @@ impl PcRequestBuilder {
             form.initial_b2b(),
             base_objective,
         )?;
-        let tiling_only = objective.kind() == ObjectiveKind::Tiling;
-        if tiling_only
+        let canonical_pc_tiling = form.score_mode() == "tiling";
+        let canonical_pc_minimals = form.score_mode() == "minimum-cover";
+        let canonical_pc_score = form.score_mode() == "summary";
+        let canonical_pc_score_minimals = form.score_mode() == "score-minimals";
+        let tiling_objective = objective.kind() == ObjectiveKind::Tiling;
+        if canonical_pc_tiling
+            && (form.rule() != "srs-plus"
+                || form.score_profile() != "tetrio"
+                || form.spin_profile() != "t-spins"
+                || form.initial_b2b() != 0
+                || form.preserve_b2b()
+                || form.solution_probabilities()
+                || form
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || backend.precompute_build_dependencies()
+                || backend.tablebase_requested())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "canonical GUI pc tiling request contains a noncanonical inactive option",
+            ));
+        }
+        if tiling_objective
             && (form.preserve_b2b()
                 || form.solution_probabilities()
                 || form
@@ -54,7 +91,69 @@ impl PcRequestBuilder {
                 "GUI tiling-only search cannot use BuildUp, coverage, probability, or dependency-analysis options",
             ));
         }
-        let policy = BackendRequestBuilder::build_execution_policy(backend)?;
+        if canonical_pc_minimals
+            && (backend.memory_budget_mb() != 0
+                || backend.precompute_build_dependencies()
+                || backend.tablebase_requested())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "canonical GUI pc minimals request contains an unaccounted memory, tablebase, or dependency-analysis override",
+            ));
+        }
+        if canonical_pc_path
+            && (form.score_profile() != "tetrio"
+                || form.spin_profile() != "t-spins"
+                || form.initial_b2b() != 0
+                || form.preserve_b2b()
+                || form.solution_probabilities()
+                || form
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || backend.memory_budget_mb() != 0
+                || backend.precompute_build_dependencies()
+                || backend.tablebase_requested())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "canonical GUI pc path requires objective-all/count-all and no score, probability, observation, memory, tablebase, or dependency override",
+            ));
+        }
+        if canonical_pc_score_minimals
+            && (form.preserve_b2b()
+                || form.solution_probabilities()
+                || form
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || backend.precompute_build_dependencies()
+                || backend.tablebase_requested())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "canonical GUI pc score-minimals request contains a noncanonical constraint, probability, observation, tablebase, or dependency-analysis option",
+            ));
+        }
+        if canonical_pc_save
+            && (form.fixed_queue().is_some()
+                || form.preserve_b2b()
+                || form.solution_probabilities()
+                || form
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || backend.memory_budget_mb() != 0
+                || backend.precompute_build_dependencies()
+                || backend.tablebase_requested())
+        {
+            return Err(RequestBuildError::new(
+                RequestBuildErrorCode::ValidationFailed,
+                "canonical GUI pc save request requires bag provenance, the full-queue oracle, and no probability, constraint, memory, tablebase, or dependency-analysis override",
+            ));
+        }
+        let policy = if canonical_pc_score || canonical_pc_score_minimals {
+            BackendRequestBuilder::build_pc_score_execution_policy(backend)?
+        } else {
+            BackendRequestBuilder::build_execution_policy(backend)?
+        };
         let objective = execution_constraint_objective_policy(
             form.preserve_b2b(),
             form.spin_profile(),
@@ -108,7 +207,39 @@ impl PcRequestBuilder {
                 PercentAppCommand::failed_queue_opening(query),
             ))
         } else {
-            Ok(AppCommand::Pc(PcAppCommand::new(query)))
+            let command = PcAppCommand::new(query);
+            let command = if canonical_pc_tiling {
+                command.with_result_projection(PcResultProjection::TilingFamilyV1(
+                    PcTilingIngressOrigin::CanonicalPcTiling,
+                ))
+            } else if canonical_pc_minimals {
+                command.with_result_projection(PcResultProjection::MinimumCoverV2(
+                    PcMinimalsIngressOrigin::CanonicalPcMinimals,
+                ))
+            } else if canonical_pc_path {
+                command.with_result_projection(PcResultProjection::PathFamilyV2(
+                    PcPathIngressOrigin::CanonicalPcPath,
+                ))
+            } else if canonical_pc_score {
+                command.with_result_projection(PcResultProjection::ScoreSummaryV2(
+                    PcScoreIngressOrigin::CanonicalPcScore,
+                ))
+            } else if canonical_pc_score_minimals {
+                command.with_result_projection(PcResultProjection::ScorePortfolioV2(
+                    PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals,
+                ))
+            } else if canonical_pc_saves {
+                command.with_result_projection(PcResultProjection::SaveGroupsV2(
+                    PcSaveIngressOrigin::CanonicalPcSaves,
+                ))
+            } else if canonical_pc_best_save {
+                command.with_result_projection(PcResultProjection::BestSaveV2(
+                    PcSaveIngressOrigin::CanonicalPcBestSave,
+                ))
+            } else {
+                command
+            };
+            Ok(AppCommand::Pc(command))
         }
     }
 }

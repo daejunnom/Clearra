@@ -27,6 +27,40 @@ impl ProblemCompiler {
     }
 }
 impl ProblemCompiler {
+    /// Compiles the canonical `pc.tiling` opening preset with a distinct output
+    /// policy. App remains the authority for validating the closed product
+    /// request; this compiler prevents the generic tiling objective from
+    /// acquiring the typed result identity by coincidence.
+    pub fn compile_opening_pc_tiling(
+        query: &OpeningPcSearchQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_opening_pc(query)
+            .map(|problem| problem.with_output_policy(SearchOutputPolicy::TilingOnly))
+    }
+
+    /// Compiles the closed terminal-supply evidence producer used by both
+    /// save products. Generic PC Trace requests never acquire this marker.
+    pub fn compile_opening_pc_save(
+        query: &OpeningPcSearchQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_opening_pc(query).map(SearchProblem::with_pc_save_groups_v2_evidence)
+    }
+
+    /// Scenario counterpart to `compile_opening_pc_tiling`.
+    pub fn compile_scenario_pc_tiling(
+        query: &PcScenarioQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_scenario_pc(query)
+            .map(|problem| problem.with_output_policy(SearchOutputPolicy::TilingOnly))
+    }
+
+    pub fn compile_scenario_pc_save(
+        query: &PcScenarioQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_scenario_pc(query).map(SearchProblem::with_pc_save_groups_v2_evidence)
+    }
+}
+impl ProblemCompiler {
     pub fn compile_scenario_pc(
         query: &PcScenarioQuery,
     ) -> Result<SearchProblem, ProblemCompileError> {
@@ -37,7 +71,6 @@ impl ProblemCompiler {
         )
     }
 }
-
 fn normalize_standard_pc_initial_board(query: &PcScenarioQuery) -> PcScenarioQuery {
     query
         .clone()

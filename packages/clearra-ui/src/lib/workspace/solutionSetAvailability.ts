@@ -8,6 +8,9 @@ export type SolutionSetReportLike = {
   solution_keys_materialized_count?: number;
   solution_keys_complete?: boolean;
   solution_page_available?: boolean;
+  count_complete?: boolean;
+  execution_availability?: { state?: string };
+  result_completeness?: string;
   summary_fields?: ReadonlyArray<readonly [string, string]>;
 };
 
@@ -16,13 +19,13 @@ export function workspaceSolutionCountCalculated(
 ): boolean {
   if (!report) return false;
   if (coverageSummaryDisposition(report) !== 'non-coverage') return false;
+  if (!reportPermitsCompletedCount(report)) return false;
   if (typeof report.solution_count_calculated === 'boolean') {
     return report.solution_count_calculated;
   }
   const summaryValue = summaryBoolean(report, 'solution_count_calculated');
   if (summaryValue !== null) return summaryValue;
-  return Number.isSafeInteger(report.unique_solution_count) &&
-    (report.unique_solution_count ?? -1) >= 0;
+  return false;
 }
 
 export function workspaceSolutionCount(
@@ -38,6 +41,7 @@ export function workspaceSolutionSetMaterialized(
 ): boolean {
   if (!report) return false;
   if (coverageSummaryDisposition(report) !== 'non-coverage') return false;
+  if (!reportPermitsCompletedCount(report)) return false;
   if (typeof report.solution_set_materialized === 'boolean') {
     return report.solution_set_materialized;
   }
@@ -50,6 +54,7 @@ export function workspaceSolutionKeysComplete(
 ): boolean {
   if (!report) return false;
   if (coverageSummaryDisposition(report) !== 'non-coverage') return false;
+  if (!reportPermitsCompletedCount(report)) return false;
   if (typeof report.solution_keys_complete === 'boolean') {
     return report.solution_keys_complete;
   }
@@ -62,10 +67,17 @@ export function workspaceSolutionPageAvailable(
 ): boolean {
   if (!report) return false;
   if (coverageSummaryDisposition(report) !== 'non-coverage') return false;
+  if (!reportPermitsCompletedCount(report)) return false;
   if (typeof report.solution_page_available === 'boolean') {
     return report.solution_page_available;
   }
   return summaryBoolean(report, 'solution_page_available') ?? false;
+}
+
+function reportPermitsCompletedCount(report: SolutionSetReportLike): boolean {
+  return report.count_complete === true &&
+    report.execution_availability?.state === 'available' &&
+    report.result_completeness === 'complete';
 }
 
 function summaryBoolean(report: SolutionSetReportLike, key: string): boolean | null {
@@ -100,7 +112,7 @@ const COVERAGE_SUMMARY_OPTIONAL_SENTINELS = Object.freeze([
   'mirror_normalized_solution_set_hash'
 ]);
 
-const NON_COVERAGE_POLICIES = new Set(['summary', 'trace', 'coverage-rows']);
+const NON_COVERAGE_POLICIES = new Set(['summary', 'trace', 'tiling-only', 'coverage-rows']);
 
 function coverageSummaryDisposition(report: SolutionSetReportLike): CoverageSummaryDisposition {
   const policyValues = summaryValues(report, 'search_output_policy');

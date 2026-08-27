@@ -1,3 +1,4 @@
+use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
 use clearra_replay::{
     ExactScoringExecutionBatch, ExactScoringExecutionGraph, ScoringExecutionEdge,
@@ -40,7 +41,238 @@ impl BackToBackEdgePolicy {
 
 pub struct BackToBackExecutionFilter;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackToBackFilterMemoryProjection {
+    pub output_retained_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackToBackFilterMemoryReport {
+    pub projection: BackToBackFilterMemoryProjection,
+    pub output_retained_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackToBackFilterError {
+    ProjectionOverflow,
+    MemoryCapacityExceeded {
+        required_memory_bytes: u128,
+        max_memory_bytes: u128,
+    },
+    AllocationFailed {
+        required_output_bytes: u128,
+    },
+}
+
 impl BackToBackExecutionFilter {
+    pub fn checked_scoring_batch_memory_projection(
+        batch: &ExactScoringExecutionBatch,
+        spin_profile: SpinProfileId,
+    ) -> Option<BackToBackFilterMemoryProjection> {
+        let policy = BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile));
+        let mut output_retained_bytes = core::mem::size_of::<ExactScoringExecutionBatch>() as u128;
+        output_retained_bytes = output_retained_bytes.checked_add(
+            (batch.patterns().len() as u128)
+                .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?,
+        )?;
+        for pattern in batch.patterns() {
+            output_retained_bytes = output_retained_bytes.checked_add(
+                (pattern.len() as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?;
+        }
+        output_retained_bytes = output_retained_bytes.checked_add(
+            (batch.graphs().len() as u128)
+                .checked_mul(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)?,
+        )?;
+        for graph in batch.graphs() {
+            output_retained_bytes = output_retained_bytes.checked_add(
+                (graph.node_count() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)?,
+            )?;
+            let allowed_edges = checked_allowed_edge_count(
+                graph.node_count(),
+                |index| graph.node(index),
+                |node| graph.edges(node),
+                policy,
+            )?;
+            output_retained_bytes = output_retained_bytes.checked_add(
+                (allowed_edges as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)?,
+            )?;
+        }
+        Some(BackToBackFilterMemoryProjection {
+            output_retained_bytes,
+        })
+    }
+
+    pub fn checked_spin_batch_memory_projection(
+        batch: &SpinCoverageExecutionBatch,
+        spin_profile: SpinProfileId,
+    ) -> Option<BackToBackFilterMemoryProjection> {
+        let policy = BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile));
+        let mut output_retained_bytes = core::mem::size_of::<SpinCoverageExecutionBatch>() as u128;
+        output_retained_bytes = output_retained_bytes.checked_add(
+            (batch.patterns().len() as u128)
+                .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?,
+        )?;
+        for pattern in batch.patterns() {
+            output_retained_bytes = output_retained_bytes.checked_add(
+                (pattern.len() as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?;
+        }
+        output_retained_bytes = output_retained_bytes.checked_add(
+            (batch.graphs().len() as u128)
+                .checked_mul(core::mem::size_of::<SpinCoverageExecutionGraph>() as u128)?,
+        )?;
+        for graph in batch.graphs() {
+            output_retained_bytes = output_retained_bytes
+                .checked_add(graph.candidate_key().len() as u128)?
+                .checked_add(
+                    (graph.node_count() as u128)
+                        .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)?,
+                )?;
+            let allowed_edges = checked_allowed_edge_count(
+                graph.node_count(),
+                |index| graph.node(index),
+                |node| graph.edges(node),
+                policy,
+            )?;
+            output_retained_bytes = output_retained_bytes.checked_add(
+                (allowed_edges as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)?,
+            )?;
+        }
+        Some(BackToBackFilterMemoryProjection {
+            output_retained_bytes,
+        })
+    }
+
+    pub fn scoring_batch_with_memory_limit(
+        batch: &ExactScoringExecutionBatch,
+        spin_profile: SpinProfileId,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<(ExactScoringExecutionBatch, BackToBackFilterMemoryReport), BackToBackFilterError>
+    {
+        let projection = Self::checked_scoring_batch_memory_projection(batch, spin_profile)
+            .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+        check_memory_limit(
+            already_retained_bytes,
+            projection.output_retained_bytes,
+            max_memory_bytes,
+        )?;
+        let policy = BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile));
+        let patterns = try_clone_patterns(batch.patterns(), projection.output_retained_bytes)?;
+        let mut graphs = Vec::new();
+        graphs
+            .try_reserve_exact(batch.graphs().len())
+            .map_err(|_| BackToBackFilterError::AllocationFailed {
+                required_output_bytes: projection.output_retained_bytes,
+            })?;
+        for graph in batch.graphs() {
+            graphs.push(try_filter_scoring_graph(
+                graph,
+                policy,
+                projection.output_retained_bytes,
+            )?);
+        }
+        let filtered = ExactScoringExecutionBatch::new(
+            batch.layout(),
+            batch.initial_occupied(),
+            patterns,
+            batch.initial_cursor(),
+            batch.initial_hold(),
+            batch.hold_enabled(),
+            batch.projects_unplaced_lookahead(),
+            batch.projects_standard_bag_lookahead(),
+            batch.kick_table_id(),
+            batch.rule_profile_id(),
+            graphs,
+            batch.complete(),
+        );
+        let output_retained_bytes = (core::mem::size_of::<ExactScoringExecutionBatch>() as u128)
+            .checked_add(
+                filtered
+                    .checked_nested_retained_bytes()
+                    .ok_or(BackToBackFilterError::ProjectionOverflow)?,
+            )
+            .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+        check_memory_limit(
+            already_retained_bytes,
+            output_retained_bytes,
+            max_memory_bytes,
+        )?;
+        Ok((
+            filtered,
+            BackToBackFilterMemoryReport {
+                projection,
+                output_retained_bytes,
+            },
+        ))
+    }
+
+    pub fn spin_batch_with_memory_limit(
+        batch: &SpinCoverageExecutionBatch,
+        spin_profile: SpinProfileId,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<(SpinCoverageExecutionBatch, BackToBackFilterMemoryReport), BackToBackFilterError>
+    {
+        let projection = Self::checked_spin_batch_memory_projection(batch, spin_profile)
+            .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+        check_memory_limit(
+            already_retained_bytes,
+            projection.output_retained_bytes,
+            max_memory_bytes,
+        )?;
+        let policy = BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile));
+        let patterns = try_clone_patterns(batch.patterns(), projection.output_retained_bytes)?;
+        let mut graphs = Vec::new();
+        graphs
+            .try_reserve_exact(batch.graphs().len())
+            .map_err(|_| BackToBackFilterError::AllocationFailed {
+                required_output_bytes: projection.output_retained_bytes,
+            })?;
+        for graph in batch.graphs() {
+            graphs.push(try_filter_spin_graph(
+                graph,
+                policy,
+                projection.output_retained_bytes,
+            )?);
+        }
+        let filtered = SpinCoverageExecutionBatch::new(
+            patterns,
+            batch.initial_cursor(),
+            batch.initial_hold(),
+            batch.hold_enabled(),
+            batch.projects_unplaced_lookahead(),
+            batch.projects_standard_bag_lookahead(),
+            batch.kick_table_id(),
+            batch.rule_profile_id(),
+            graphs,
+            batch.complete(),
+        );
+        let output_retained_bytes = (core::mem::size_of::<SpinCoverageExecutionBatch>() as u128)
+            .checked_add(
+                filtered
+                    .checked_nested_retained_bytes()
+                    .ok_or(BackToBackFilterError::ProjectionOverflow)?,
+            )
+            .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+        check_memory_limit(
+            already_retained_bytes,
+            output_retained_bytes,
+            max_memory_bytes,
+        )?;
+        Ok((
+            filtered,
+            BackToBackFilterMemoryReport {
+                projection,
+                output_retained_bytes,
+            },
+        ))
+    }
+
     pub fn scoring_batch(
         batch: &ExactScoringExecutionBatch,
         spin_profile: SpinProfileId,
@@ -130,6 +362,171 @@ fn filter_spin_graph(
     )
 }
 
+fn check_memory_limit(
+    already_retained_bytes: u128,
+    output_retained_bytes: u128,
+    max_memory_bytes: u128,
+) -> Result<(), BackToBackFilterError> {
+    let required_memory_bytes = already_retained_bytes
+        .checked_add(output_retained_bytes)
+        .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+    if required_memory_bytes > max_memory_bytes {
+        return Err(BackToBackFilterError::MemoryCapacityExceeded {
+            required_memory_bytes,
+            max_memory_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn try_clone_patterns(
+    patterns: &[Vec<PieceKind>],
+    required_output_bytes: u128,
+) -> Result<Vec<Vec<PieceKind>>, BackToBackFilterError> {
+    let allocation_error = || BackToBackFilterError::AllocationFailed {
+        required_output_bytes,
+    };
+    let mut cloned = Vec::new();
+    cloned
+        .try_reserve_exact(patterns.len())
+        .map_err(|_| allocation_error())?;
+    for pattern in patterns {
+        let mut cloned_pattern = Vec::new();
+        cloned_pattern
+            .try_reserve_exact(pattern.len())
+            .map_err(|_| allocation_error())?;
+        cloned_pattern.extend_from_slice(pattern);
+        cloned.push(cloned_pattern);
+    }
+    Ok(cloned)
+}
+
+fn try_filter_scoring_graph(
+    graph: &ExactScoringExecutionGraph,
+    policy: BackToBackPreservationPolicy,
+    required_output_bytes: u128,
+) -> Result<ExactScoringExecutionGraph, BackToBackFilterError> {
+    let (nodes, edges) = try_filter_graph_edges(
+        graph.node_count(),
+        |index| graph.node(index),
+        |node| graph.edges(node),
+        policy,
+        required_output_bytes,
+    )?;
+    Ok(ExactScoringExecutionGraph::new(
+        graph.candidate_id(),
+        graph.identity(),
+        graph.root(),
+        nodes,
+        edges,
+    ))
+}
+
+fn try_filter_spin_graph(
+    graph: &SpinCoverageExecutionGraph,
+    policy: BackToBackPreservationPolicy,
+    required_output_bytes: u128,
+) -> Result<SpinCoverageExecutionGraph, BackToBackFilterError> {
+    let (nodes, edges) = try_filter_graph_edges(
+        graph.node_count(),
+        |index| graph.node(index),
+        |node| graph.edges(node),
+        policy,
+        required_output_bytes,
+    )?;
+    let candidate_key = try_owned_string(graph.candidate_key(), required_output_bytes)?;
+    Ok(SpinCoverageExecutionGraph::new(
+        graph.candidate_id(),
+        candidate_key,
+        graph.root(),
+        nodes,
+        edges,
+    ))
+}
+
+fn try_owned_string(
+    value: &str,
+    required_output_bytes: u128,
+) -> Result<String, BackToBackFilterError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| BackToBackFilterError::AllocationFailed {
+            required_output_bytes,
+        })?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+fn checked_allowed_edge_count<'a>(
+    node_count: usize,
+    mut node_at: impl FnMut(u32) -> Option<ScoringExecutionNode>,
+    mut edges_for: impl FnMut(ScoringExecutionNode) -> &'a [ScoringExecutionEdge],
+    policy: BackToBackPreservationPolicy,
+) -> Option<usize> {
+    let mut allowed = 0_usize;
+    for index in 0..node_count {
+        let node = node_at(u32::try_from(index).ok()?)?;
+        allowed = allowed.checked_add(
+            edges_for(node)
+                .iter()
+                .filter(|edge| policy.allows(**edge))
+                .count(),
+        )?;
+    }
+    Some(allowed)
+}
+
+fn try_filter_graph_edges<'a>(
+    node_count: usize,
+    mut node_at: impl FnMut(u32) -> Option<ScoringExecutionNode>,
+    mut edges_for: impl FnMut(ScoringExecutionNode) -> &'a [ScoringExecutionEdge],
+    policy: BackToBackPreservationPolicy,
+    required_output_bytes: u128,
+) -> Result<(Vec<ScoringExecutionNode>, Vec<ScoringExecutionEdge>), BackToBackFilterError> {
+    let allowed_edge_count =
+        checked_allowed_edge_count(node_count, &mut node_at, &mut edges_for, policy)
+            .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+    let allocation_error = || BackToBackFilterError::AllocationFailed {
+        required_output_bytes,
+    };
+    let mut nodes = Vec::new();
+    nodes
+        .try_reserve_exact(node_count)
+        .map_err(|_| allocation_error())?;
+    let mut edges = Vec::new();
+    edges
+        .try_reserve_exact(allowed_edge_count)
+        .map_err(|_| allocation_error())?;
+    for index in 0..node_count {
+        let Some(node) =
+            node_at(u32::try_from(index).map_err(|_| BackToBackFilterError::ProjectionOverflow)?)
+        else {
+            continue;
+        };
+        let edge_start =
+            u32::try_from(edges.len()).map_err(|_| BackToBackFilterError::ProjectionOverflow)?;
+        for edge in edges_for(node)
+            .iter()
+            .copied()
+            .filter(|edge| policy.allows(*edge))
+        {
+            edges.push(edge);
+        }
+        let edge_count = edges
+            .len()
+            .checked_sub(edge_start as usize)
+            .and_then(|count| u32::try_from(count).ok())
+            .ok_or(BackToBackFilterError::ProjectionOverflow)?;
+        nodes.push(ScoringExecutionNode::new(
+            edge_start,
+            edge_count,
+            node.accepting(),
+        ));
+    }
+    Ok((nodes, edges))
+}
+
 fn filter_graph_edges<'a>(
     node_count: usize,
     mut node_at: impl FnMut(u32) -> Option<ScoringExecutionNode>,
@@ -174,7 +571,9 @@ mod tests {
 
     use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
 
-    use super::{BackToBackEdgePolicy, BackToBackExecutionFilter};
+    use super::{
+        check_memory_limit, BackToBackEdgePolicy, BackToBackExecutionFilter, BackToBackFilterError,
+    };
     use crate::TSpinCoverageOnlyMaterializer;
 
     #[test]
@@ -233,6 +632,53 @@ mod tests {
         assert_eq!(materialized.covered_patterns().count_ones(), 1);
         assert_eq!(materialized.candidate_keys().count(), 1);
         assert_eq!(materialized.witnessed_pattern_count(), 1);
+    }
+
+    #[test]
+    fn guarded_filter_accepts_exact_projection_and_rejects_peak_minus_one() {
+        let batch = batch_with_edges(vec![edge(1, 1), edge(2, 0)]);
+        let projection = BackToBackExecutionFilter::checked_scoring_batch_memory_projection(
+            &batch,
+            SpinProfileId::TSpins,
+        )
+        .expect("projection");
+        let already_retained_bytes = 11_u128;
+        let exact_cap = already_retained_bytes
+            .checked_add(projection.output_retained_bytes)
+            .expect("exact cap");
+        let (filtered, report) = BackToBackExecutionFilter::scoring_batch_with_memory_limit(
+            &batch,
+            SpinProfileId::TSpins,
+            already_retained_bytes,
+            exact_cap,
+        )
+        .expect("exact projected cap");
+        assert_eq!(
+            filtered,
+            BackToBackExecutionFilter::scoring_batch(&batch, SpinProfileId::TSpins)
+        );
+        assert!(report.output_retained_bytes <= projection.output_retained_bytes);
+
+        assert!(matches!(
+            BackToBackExecutionFilter::scoring_batch_with_memory_limit(
+                &batch,
+                SpinProfileId::TSpins,
+                already_retained_bytes,
+                exact_cap - 1,
+            ),
+            Err(BackToBackFilterError::MemoryCapacityExceeded {
+                required_memory_bytes,
+                max_memory_bytes,
+            }) if required_memory_bytes == exact_cap && max_memory_bytes == exact_cap - 1
+        ));
+    }
+
+    #[test]
+    fn guarded_filter_external_addition_overflow_fails_closed() {
+        assert_eq!(
+            check_memory_limit(u128::MAX, 1, u128::MAX),
+            Err(BackToBackFilterError::ProjectionOverflow)
+        );
     }
 
     fn batch_with_edges(edges: Vec<ScoringExecutionEdge>) -> ExactScoringExecutionBatch {

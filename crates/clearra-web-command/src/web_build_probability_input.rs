@@ -19,6 +19,7 @@ pub struct WebBuildProbabilityInput {
     hold_piece: Option<PieceKind>,
     allow_hold: bool,
     source_piece_count: Option<usize>,
+    preserve_visible_height: bool,
     include_horizontal_mirror: bool,
     aggregation: BuildProbabilityAggregation,
     finesse: BuildProbabilityFinesseRequest,
@@ -41,6 +42,7 @@ impl WebBuildProbabilityInput {
             hold_piece: None,
             allow_hold: true,
             source_piece_count: None,
+            preserve_visible_height: false,
             include_horizontal_mirror: true,
             aggregation: BuildProbabilityAggregation::Buildability,
             finesse: BuildProbabilityFinesseRequest::Off,
@@ -59,6 +61,11 @@ impl WebBuildProbabilityInput {
 
     pub fn with_source_piece_count(mut self, source_piece_count: usize) -> Self {
         self.source_piece_count = Some(source_piece_count);
+        self
+    }
+
+    pub fn with_visible_height_preserved(mut self, preserved: bool) -> Self {
+        self.preserve_visible_height = preserved;
         self
     }
 
@@ -102,7 +109,7 @@ impl WebBuildProbabilityInput {
     ) -> Result<BuildProbabilityQuery, BuildProbabilityFieldError> {
         let height = u8::try_from(self.visible_height)
             .map_err(|_| BuildProbabilityFieldError::HeightOutOfRange { height: u8::MAX })?;
-        let field = if self.finesse.metric().requested() {
+        let field = if self.preserve_visible_height || self.finesse.metric().requested() {
             BuildProbabilityField::from_words_preserving_height(
                 height,
                 self.base_words,
@@ -166,6 +173,10 @@ impl WebBuildProbabilityInput {
 
     pub const fn hold_piece(&self) -> Option<PieceKind> {
         self.hold_piece
+    }
+
+    pub const fn allow_hold(&self) -> bool {
+        self.allow_hold
     }
 
     pub fn with_leading_hold_piece(mut self, piece: PieceKind) -> Self {

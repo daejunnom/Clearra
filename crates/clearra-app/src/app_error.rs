@@ -25,6 +25,20 @@ pub enum AppErrorCode {
     ContinueTokenInvalid,
     VerifyTargetUnknown,
     VerifyKicksFailed,
+    OperationSequenceInvalid,
+    OperationSequenceCancelled,
+    OperationSequenceTimedOut,
+    OperationSequenceIncomplete,
+    SequenceDependenciesInvalid,
+    SequenceDependenciesCancelled,
+    SequenceDependenciesTimedOut,
+    SequenceDependenciesIncomplete,
+    UtilityParityInvalid,
+    UtilityFumenInvalid,
+    UtilityRenderInvalid,
+    UtilityRenderLimitExceeded,
+    UtilityToGrayInvalid,
+    UtilityMirrorInvalid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,6 +1,18 @@
 // SRP rationale: this module has one behavior-level change reason: rendering typed application responses into the stable CLI output contract.
 
-use clearra_app::{AppErrorCode, AppRenderModel, AppResponse, AppStatus};
+use clearra_app::{
+    setup_ranked_candidate_id, spin_structure_search_candidate_id, AppErrorCode, AppRenderModel,
+    AppResponse, AppResultKind, AppStatus, PcSaveCompletenessEvidence, PcSaveGroupV2,
+    PcSavePieceMultiset, PcSaveWitness, ProductCapabilityContract, ProductCapabilityResult,
+    ProductCapabilityResultKind, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    PC_SCORE_PATTERN_WINNER_CONTRACT,
+};
+use clearra_host_contract::{
+    BuildCoveragePortfolioV2Payload, BuildSetupFamilyV1Payload, BuildV2PayloadKind,
+    BuildV2ProductPayload, CoveragePortfolioPagePayload, PcPathFamilyPayload, ProductResultPayload,
+    ProductResultPayloadContent, ScorePatternWinnerFamilyPayload, SetupRankedFamilyPayload,
+    SetupScoreRankingPayload, SpinStructureFamilyPayload,
+};
 use clearra_spin_structure_search::{SpinStructureOutcome, SpinStructureQuery, StructureOperation};
 
 use crate::{
@@ -9,6 +21,7 @@ use crate::{
         CliOutput, CommandRenderer, RenderField, RenderFieldValue, RenderFormat,
         SummaryRenderContract,
     },
+    tie_snapshot::ExplicitPortfolioOutput,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -72,15 +85,38 @@ impl AppResponseRenderer {
         default_error: CliErrorCode,
         include_solution_data: bool,
     ) -> CliOutput {
+        Self::render_with_explicit_result(
+            response,
+            format,
+            default_error,
+            include_solution_data,
+            None,
+            false,
+        )
+    }
+
+    pub(crate) fn render_with_explicit_result(
+        response: AppResponse,
+        format: RenderFormat,
+        default_error: CliErrorCode,
+        include_solution_data: bool,
+        explicit_portfolio: Option<&ExplicitPortfolioOutput>,
+        include_score_winner_family: bool,
+    ) -> CliOutput {
         match response.status() {
-            AppStatus::Success => {
-                render_success(response, format, default_error, include_solution_data)
-            }
+            AppStatus::Success => render_success(
+                response,
+                format,
+                default_error,
+                include_solution_data,
+                explicit_portfolio,
+                include_score_winner_family,
+            ),
             AppStatus::ValidationFailed => CliOutput::validation_failed_with_format(
                 response.diagnostics().validation(),
                 format,
             ),
-            AppStatus::Unsupported | AppStatus::ExecutionFailed => {
+            AppStatus::Unsupported => {
                 let Some(error) = response.error() else {
                     return CliOutput::error(default_error, "app execution failed");
                 };
@@ -89,8 +125,234 @@ impl AppResponseRenderer {
                     error.message(),
                 )
             }
+            AppStatus::ExecutionFailed => {
+                render_execution_failure(&response, format, default_error)
+            }
         }
     }
+
+    pub(crate) fn render_portfolio_continuation(
+        portfolio: &ExplicitPortfolioOutput,
+        format: RenderFormat,
+    ) -> CliOutput {
+        CommandRenderer::render_output(
+            "portfolio-alternative-page.v1",
+            [explicit_portfolio_field(portfolio)],
+            format,
+        )
+    }
+}
+
+fn render_execution_failure(
+    response: &AppResponse,
+    format: RenderFormat,
+    default_error: CliErrorCode,
+) -> CliOutput {
+    let Some(error) = response.error() else {
+        return CliOutput::error(default_error, "app execution failed");
+    };
+    let cli_error = cli_error_for_app_error(error.code(), default_error);
+    if matches!(
+        format,
+        RenderFormat::Text | RenderFormat::TextVerbose | RenderFormat::TextDiagnostics
+    ) {
+        let report = response.resource_report();
+        if !has_authoritative_resource_report(report) {
+            return CliOutput::error(cli_error, error.message());
+        }
+        return CliOutput::new(
+            cli_error.default_exit_code(),
+            "",
+            execution_failure_text(error.message(), report),
+        );
+    }
+    if format != RenderFormat::Json {
+        return CliOutput::error(cli_error, error.message());
+    }
+    let fields = [
+        RenderField::new(
+            "error",
+            RenderFieldValue::object([
+                ("code", RenderFieldValue::string(cli_error.as_str())),
+                ("message", RenderFieldValue::string(error.message())),
+            ]),
+        ),
+        RenderField::new(
+            "resource_report",
+            resource_report_value(response.resource_report()),
+        ),
+    ];
+    match CommandRenderer::render("execution-failed", fields, RenderFormat::Json) {
+        Ok(rendered) => CliOutput::new(cli_error.default_exit_code(), rendered, ""),
+        Err(render_error) => CliOutput::error(
+            CliErrorCode::CliOutputLimitExceeded,
+            render_error.to_string(),
+        ),
+    }
+}
+
+fn has_authoritative_resource_report(report: &clearra_host_contract::ResourceReport) -> bool {
+    let availability = report.execution_availability();
+    !matches!(report.memory_status(), "not-executed" | "not-reported")
+        || report.truncated()
+        || report.truncation_reason().is_some()
+        || report.peak_frontier_states != 0
+        || report.peak_candidate_rows != 0
+        || report.peak_hash_buckets != 0
+        || report.peak_gpu_bytes != 0
+        || report.peak_cpu_bytes != 0
+        || report.build_worker_backlog_peak != 0
+        || report.coverage_rows_emitted != 0
+        || report.probability_complete()
+        || !matches!(
+            availability.reason(),
+            Some(clearra_host_contract::ExecutionAvailabilityReason::NotExecuted)
+                | Some(clearra_host_contract::ExecutionAvailabilityReason::PartialExecution)
+        )
+        || availability.descriptor_pattern_count().is_some()
+        || availability.dense_pattern_count().is_some()
+        || availability.required_dense_bytes().is_some()
+        || availability.required_memory_bytes().is_some()
+}
+
+fn execution_failure_text(message: &str, report: &clearra_host_contract::ResourceReport) -> String {
+    let availability = report.execution_availability();
+    fn optional(value: Option<&str>) -> &str {
+        value.unwrap_or("not-reported")
+    }
+    [
+        message.to_owned(),
+        format!(
+            "resource_report.solver_executed: {}",
+            report.solver_executed()
+        ),
+        format!(
+            "resource_report.execution_availability.state: {}",
+            availability.state().as_str()
+        ),
+        format!(
+            "resource_report.execution_availability.reason: {}",
+            availability
+                .reason()
+                .map_or("not-reported", |reason| reason.as_str())
+        ),
+        format!(
+            "resource_report.execution_availability.surface: {}",
+            availability.surface().as_str()
+        ),
+        format!(
+            "resource_report.execution_availability.descriptor_pattern_count: {}",
+            optional(availability.descriptor_pattern_count())
+        ),
+        format!(
+            "resource_report.execution_availability.dense_pattern_count: {}",
+            optional(availability.dense_pattern_count())
+        ),
+        format!(
+            "resource_report.execution_availability.required_dense_bytes: {}",
+            optional(availability.required_dense_bytes())
+        ),
+        format!(
+            "resource_report.execution_availability.required_memory_bytes: {}",
+            optional(availability.required_memory_bytes())
+        ),
+        format!(
+            "resource_report.result_completeness: {}",
+            report.result_completeness().as_str()
+        ),
+    ]
+    .join("\n")
+}
+
+fn resource_report_value(report: &clearra_host_contract::ResourceReport) -> RenderFieldValue {
+    let availability = report.execution_availability();
+    RenderFieldValue::object([
+        (
+            "solver_executed",
+            RenderFieldValue::bool(report.solver_executed()),
+        ),
+        (
+            "memory_status",
+            RenderFieldValue::string(report.memory_status()),
+        ),
+        ("truncated", RenderFieldValue::bool(report.truncated())),
+        (
+            "truncation_reason",
+            optional_string_value(report.truncation_reason()),
+        ),
+        (
+            "peak_frontier_states",
+            RenderFieldValue::from(report.peak_frontier_states),
+        ),
+        (
+            "peak_candidate_rows",
+            RenderFieldValue::from(report.peak_candidate_rows),
+        ),
+        (
+            "peak_hash_buckets",
+            RenderFieldValue::from(report.peak_hash_buckets),
+        ),
+        (
+            "peak_gpu_bytes",
+            RenderFieldValue::from(report.peak_gpu_bytes),
+        ),
+        (
+            "peak_cpu_bytes",
+            RenderFieldValue::from(report.peak_cpu_bytes),
+        ),
+        (
+            "build_worker_backlog_peak",
+            RenderFieldValue::from(report.build_worker_backlog_peak),
+        ),
+        (
+            "coverage_rows_emitted",
+            RenderFieldValue::from(report.coverage_rows_emitted),
+        ),
+        (
+            "probability_complete",
+            RenderFieldValue::bool(report.probability_complete()),
+        ),
+        (
+            "execution_availability",
+            RenderFieldValue::object([
+                (
+                    "state",
+                    RenderFieldValue::string(availability.state().as_str()),
+                ),
+                (
+                    "reason",
+                    availability
+                        .reason()
+                        .map(|reason| RenderFieldValue::string(reason.as_str()))
+                        .unwrap_or(RenderFieldValue::Null),
+                ),
+                (
+                    "surface",
+                    RenderFieldValue::string(availability.surface().as_str()),
+                ),
+                (
+                    "descriptor_pattern_count",
+                    optional_string_value(availability.descriptor_pattern_count()),
+                ),
+                (
+                    "dense_pattern_count",
+                    optional_string_value(availability.dense_pattern_count()),
+                ),
+                (
+                    "required_dense_bytes",
+                    optional_string_value(availability.required_dense_bytes()),
+                ),
+                (
+                    "required_memory_bytes",
+                    optional_string_value(availability.required_memory_bytes()),
+                ),
+            ]),
+        ),
+        (
+            "result_completeness",
+            RenderFieldValue::string(report.result_completeness().as_str()),
+        ),
+    ])
 }
 
 fn render_success(
@@ -98,7 +360,24 @@ fn render_success(
     format: RenderFormat,
     default_error: CliErrorCode,
     include_solution_data: bool,
+    explicit_portfolio: Option<&ExplicitPortfolioOutput>,
+    include_score_winner_family: bool,
 ) -> CliOutput {
+    if let Some(payload) = response.public_result_payload() {
+        if let Some(output) = render_public_build_result(payload, format, explicit_portfolio) {
+            return output;
+        }
+    }
+    if let Some(payload) = response
+        .product_capability_result()
+        .and_then(ProductCapabilityResult::public_result_payload)
+    {
+        if let Some(output) = render_public_build_result(&payload, format, explicit_portfolio) {
+            return output;
+        }
+    }
+    let product_result = response.product_capability_result();
+    let product_identity = product_result.map(|result| (result.contract(), result.result_kind()));
     let Some(model) = response.render_model() else {
         return CliOutput::error(default_error, "app response did not include a render model");
     };
@@ -225,7 +504,25 @@ fn render_success(
                     ));
                 }
             }
-            CommandRenderer::render_output(model.kind().as_str(), fields, format)
+            if let Err(reason) = append_pc_score_minimals_fields(&mut fields, product_result) {
+                return CliOutput::error(default_error, reason);
+            }
+            if let Err(reason) = append_pc_save_product_fields(&mut fields, product_result) {
+                return CliOutput::error(default_error, reason);
+            }
+            if let Some(portfolio) = explicit_portfolio {
+                fields.push(explicit_portfolio_field(portfolio));
+            }
+            if include_score_winner_family {
+                if let Err(reason) = append_pc_score_winner_family(&mut fields, product_result) {
+                    return CliOutput::error(default_error, reason);
+                }
+            }
+            CommandRenderer::render_output(
+                public_success_render_kind(product_identity, model.kind()),
+                fields,
+                format,
+            )
         }
         AppRenderModel::Setup(result) => {
             let mut fields = SummaryRenderContract::render_fields(result.summary_fields());
@@ -291,6 +588,15 @@ fn render_success(
                                 RenderFieldValue::array(condition.candidates().iter().map(
                                     |candidate| {
                                         RenderFieldValue::object([
+                                            (
+                                                "candidate_id",
+                                                RenderFieldValue::string(
+                                                    setup_ranked_candidate_id(
+                                                        condition.condition_id(),
+                                                        candidate,
+                                                    ),
+                                                ),
+                                            ),
                                             (
                                                 "setup_id",
                                                 RenderFieldValue::string(candidate.setup_id()),
@@ -404,7 +710,9 @@ fn render_success(
             );
             CommandRenderer::render_output(model.kind().as_str(), fields, format)
         }
-        AppRenderModel::Damage(result) | AppRenderModel::SpinFinder(result) => {
+        AppRenderModel::Damage(result)
+        | AppRenderModel::SpinFinder(result)
+        | AppRenderModel::Ren(result) => {
             let outcomes = RenderFieldValue::array(result.outcomes().iter().map(|outcome| {
                 RenderFieldValue::object([
                     ("id", RenderFieldValue::number(outcome.id().to_string())),
@@ -442,8 +750,22 @@ fn render_success(
                         RenderFieldValue::number(outcome.spin_lines().to_string()),
                     ),
                     (
+                        "ren_count",
+                        outcome.ren_count().map_or(RenderFieldValue::Null, |value| {
+                            RenderFieldValue::number(value.to_string())
+                        }),
+                    ),
+                    (
                         "total_damage",
                         RenderFieldValue::number(outcome.total_damage().to_string()),
+                    ),
+                    (
+                        "evidence_path_count",
+                        RenderFieldValue::string(outcome.evidence_path_count()),
+                    ),
+                    (
+                        "evidence_complete",
+                        RenderFieldValue::bool(outcome.evidence_complete()),
                     ),
                     (
                         "path",
@@ -485,6 +807,14 @@ fn render_success(
                     "maximum_damage",
                     result
                         .maximum_damage()
+                        .map_or(RenderFieldValue::Null, |value| {
+                            RenderFieldValue::number(value.to_string())
+                        }),
+                ),
+                RenderField::new(
+                    "maximum_ren",
+                    result
+                        .maximum_ren()
                         .map_or(RenderFieldValue::Null, |value| {
                             RenderFieldValue::number(value.to_string())
                         }),
@@ -541,8 +871,22 @@ fn render_success(
                                     ("spin_mini", RenderFieldValue::bool(outcome.spin_mini())),
                                     ("spin_lines", RenderFieldValue::from(outcome.spin_lines())),
                                     (
+                                        "ren_count",
+                                        outcome
+                                            .ren_count()
+                                            .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+                                    ),
+                                    (
                                         "total_damage",
                                         RenderFieldValue::from(outcome.total_damage()),
+                                    ),
+                                    (
+                                        "evidence_path_count",
+                                        RenderFieldValue::string(outcome.evidence_path_count()),
+                                    ),
+                                    (
+                                        "evidence_complete",
+                                        RenderFieldValue::bool(outcome.evidence_complete()),
                                     ),
                                     (
                                         "final_board",
@@ -618,6 +962,10 @@ fn render_success(
                 let outcomes = if mini { &result.mini } else { &result.regular };
                 RenderFieldValue::array(outcomes.iter().map(|outcome| {
                     RenderFieldValue::object([
+                        (
+                            "candidate_id",
+                            RenderFieldValue::string(spin_structure_search_candidate_id(outcome)),
+                        ),
                         (
                             "class",
                             RenderFieldValue::string(if mini { "mini" } else { "regular" }),
@@ -876,8 +1224,7 @@ fn render_success(
         | AppRenderModel::Rules(message)
         | AppRenderModel::Scoring(message)
         | AppRenderModel::Convert(message)
-        | AppRenderModel::Continue(message)
-        | AppRenderModel::Verify(message) => {
+        | AppRenderModel::Continue(message) => {
             if let Some(raw) = message.raw_body() {
                 CliOutput::success(raw.to_owned())
             } else {
@@ -888,7 +1235,1189 @@ fn render_success(
                 )
             }
         }
+        AppRenderModel::Verify(message) => {
+            if let Some(raw) = message.raw_body() {
+                CliOutput::success(raw.to_owned())
+            } else {
+                let fields = SummaryRenderContract::render_fields(
+                    message
+                        .fields()
+                        .iter()
+                        .map(|field| (field.key().to_owned(), field.value().as_text())),
+                );
+                CommandRenderer::render_output(message.kind().as_str(), fields, format)
+            }
+        }
     }
+}
+
+fn render_public_build_result(
+    payload: &ProductResultPayload,
+    format: RenderFormat,
+    explicit_portfolio: Option<&ExplicitPortfolioOutput>,
+) -> Option<CliOutput> {
+    let mut fields = match payload.content() {
+        ProductResultPayloadContent::CoveragePortfolio(page) => {
+            coverage_portfolio_fields(payload.contract(), payload.result_kind(), page)
+        }
+        ProductResultPayloadContent::BuildV2(build) => build_v2_fields(build),
+        ProductResultPayloadContent::BuildCoveragePortfolioV2(build) => {
+            build_cover_fields(payload.contract(), build)
+        }
+        ProductResultPayloadContent::BuildSetupFamilyV1(build) => {
+            build_setup_fields(payload.contract(), build)
+        }
+        ProductResultPayloadContent::SetupRankedFamily(family) => {
+            setup_ranked_family_fields(payload.contract(), family)
+        }
+        ProductResultPayloadContent::SetupScoreRanking(ranking) => setup_score_fields(ranking),
+        ProductResultPayloadContent::SpinStructureFamily(family) => {
+            spin_structure_family_fields(payload.contract(), family)
+        }
+        ProductResultPayloadContent::ScorePatternWinnerFamily(family)
+            if payload.contract() == ProductCapabilityContract::PcScoreFinder.as_str() =>
+        {
+            score_pattern_winner_family_fields(payload, family)
+        }
+        ProductResultPayloadContent::PcPathFamily(family) => pc_path_fields(family),
+        _ => return None,
+    };
+    if let Some(portfolio) = explicit_portfolio {
+        fields.push(explicit_portfolio_field(portfolio));
+    }
+    Some(CommandRenderer::render_output(
+        payload.result_kind(),
+        fields,
+        format,
+    ))
+}
+
+fn score_pattern_winner_family_fields(
+    payload: &ProductResultPayload,
+    family: &ScorePatternWinnerFamilyPayload,
+) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", payload.contract()),
+        RenderField::new("result_contract", payload.result_kind()),
+        RenderField::new("payload_kind", "score-pattern-winner-family"),
+        RenderField::new("score_pattern_winner_contract", family.winner_contract()),
+        RenderField::new("score_pattern_winner_ordering", family.ordering()),
+        RenderField::new("score_pattern_winner_equality", family.equality()),
+        RenderField::new(
+            "score_informational_attack_basis",
+            family.informational_attack_basis(),
+        ),
+        RenderField::new("score_pattern_winner_count", family.winner_count()),
+        RenderField::new("score_pattern_winner_complete", true),
+        RenderField::new(
+            "score_pattern_winners",
+            RenderFieldValue::array(family.winners().iter().map(|winner| {
+                RenderFieldValue::object([
+                    (
+                        "contract",
+                        RenderFieldValue::string(family.winner_contract()),
+                    ),
+                    ("pattern_id", RenderFieldValue::string(winner.pattern_id())),
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(winner.candidate_id()),
+                    ),
+                    (
+                        "normalized_solution_key",
+                        RenderFieldValue::string(winner.normalized_solution_key()),
+                    ),
+                    ("score", RenderFieldValue::string(winner.score())),
+                    (
+                        "informational_attack",
+                        RenderFieldValue::string(winner.informational_attack()),
+                    ),
+                    (
+                        "informational_attack_basis",
+                        RenderFieldValue::string(family.informational_attack_basis()),
+                    ),
+                ])
+            })),
+        ),
+    ]
+}
+
+fn coverage_portfolio_fields(
+    capability_id: &str,
+    result_contract: &str,
+    payload: &CoveragePortfolioPagePayload,
+) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", capability_id),
+        RenderField::new("result_contract", result_contract),
+        RenderField::new("payload_kind", "coverage-portfolio"),
+        RenderField::new("set_contract", payload.set_contract()),
+        RenderField::new("page_contract", payload.page_contract()),
+        RenderField::new("member_page_contract", payload.member_page_contract()),
+        RenderField::new("set_identity_sha256", payload.set_identity_sha256()),
+        RenderField::new("candidate_map_sha256", payload.candidate_map_sha256()),
+        RenderField::new("alternative_index", payload.alternative_index()),
+        RenderField::new("optimal_cardinality", payload.optimal_cardinality()),
+        RenderField::new("known_alternative_count", payload.known_alternative_count()),
+        RenderField::new(
+            "total_alternative_count",
+            optional_string_value(payload.total_alternative_count()),
+        ),
+        RenderField::new("enumeration_complete", payload.enumeration_complete()),
+        RenderField::new("member_page_number", payload.member_page_number()),
+        RenderField::new("total_member_pages", payload.total_member_pages()),
+        RenderField::new(
+            "members",
+            RenderFieldValue::array(payload.members().iter().map(|member| {
+                RenderFieldValue::object([
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(member.candidate_id()),
+                    ),
+                    (
+                        "normalized_solution_key",
+                        RenderFieldValue::string(member.normalized_solution_key()),
+                    ),
+                ])
+            })),
+        ),
+        RenderField::new("page_handle_available", payload.page_handle_available()),
+    ]
+}
+
+fn setup_ranked_family_fields(
+    capability_id: &str,
+    payload: &SetupRankedFamilyPayload,
+) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", capability_id),
+        RenderField::new("result_contract", payload.schema_id()),
+        RenderField::new("payload_kind", "setup-ranked-family"),
+        RenderField::new("query_identity_sha256", payload.query_identity_sha256()),
+        RenderField::new("rule_profile", payload.rule_profile()),
+        RenderField::new("supply_identity_sha256", payload.supply_identity_sha256()),
+        RenderField::new(
+            "universe_identity_sha256",
+            payload.universe_identity_sha256(),
+        ),
+        RenderField::new("product_build", payload.product_build()),
+        RenderField::new("ordering", payload.ordering()),
+        RenderField::new(
+            "resolved_length_preference",
+            payload.resolved_length_preference(),
+        ),
+        RenderField::new("candidate_count", payload.candidate_count()),
+        RenderField::new(
+            "candidates",
+            RenderFieldValue::array(payload.candidates().iter().map(|candidate| {
+                RenderFieldValue::object([
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(candidate.candidate_id()),
+                    ),
+                    (
+                        "condition_id",
+                        RenderFieldValue::string(candidate.condition_id()),
+                    ),
+                    ("setup_id", RenderFieldValue::string(candidate.setup_id())),
+                ])
+            })),
+        ),
+    ]
+}
+
+fn spin_structure_family_fields(
+    capability_id: &str,
+    payload: &SpinStructureFamilyPayload,
+) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", capability_id),
+        RenderField::new("result_contract", payload.schema_id()),
+        RenderField::new("payload_kind", "spin-structure-family"),
+        RenderField::new("query_identity_sha256", payload.query_identity_sha256()),
+        RenderField::new("rule_profile", payload.rule_profile()),
+        RenderField::new("spin_profile", payload.spin_profile()),
+        RenderField::new("supply_identity_sha256", payload.supply_identity_sha256()),
+        RenderField::new(
+            "universe_identity_sha256",
+            payload.universe_identity_sha256(),
+        ),
+        RenderField::new("product_build", payload.product_build()),
+        RenderField::new("ordering", payload.ordering()),
+        RenderField::new(
+            "minimum_placements",
+            optional_string_value(payload.minimum_placements()),
+        ),
+        RenderField::new(
+            "guaranteed_final_piece",
+            optional_string_value(payload.guaranteed_final_piece()),
+        ),
+        RenderField::new(
+            "guarantee_basis",
+            optional_string_value(payload.guarantee_basis()),
+        ),
+        RenderField::new(
+            "dependency_report_included",
+            optional_bool_value(payload.dependency_report_included()),
+        ),
+        RenderField::new(
+            "dependency_relation",
+            optional_string_value(payload.dependency_relation()),
+        ),
+        RenderField::new(
+            "dependency_edge_count",
+            optional_string_value(payload.dependency_edge_count()),
+        ),
+        RenderField::new("regular_count", payload.regular_count()),
+        RenderField::new("mini_count", payload.mini_count()),
+        RenderField::new("candidate_count", payload.candidate_count()),
+        RenderField::new("complete", payload.complete()),
+        RenderField::new(
+            "candidates",
+            RenderFieldValue::array(payload.candidates().iter().map(|candidate| {
+                RenderFieldValue::object([
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(candidate.candidate_id()),
+                    ),
+                    ("partition", RenderFieldValue::string(candidate.partition())),
+                    (
+                        "placement_count",
+                        RenderFieldValue::string(candidate.placement_count()),
+                    ),
+                ])
+            })),
+        ),
+    ]
+}
+
+fn pc_path_fields(payload: &PcPathFamilyPayload) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", "pc.path"),
+        RenderField::new("witness_contract", payload.witness_contract()),
+        RenderField::new("ordering", payload.ordering()),
+        RenderField::new("problem_id", payload.problem_id()),
+        RenderField::new(
+            "materialized_pattern_count",
+            payload.materialized_pattern_count(),
+        ),
+        RenderField::new("witness_count", payload.witness_count()),
+        RenderField::new("complete", payload.complete()),
+        RenderField::new(
+            "witnesses",
+            RenderFieldValue::array(payload.witnesses().iter().map(|witness| {
+                RenderFieldValue::object([
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(witness.candidate_id()),
+                    ),
+                    (
+                        "producer_candidate_id",
+                        RenderFieldValue::string(witness.producer_candidate_id()),
+                    ),
+                    ("pattern_id", RenderFieldValue::string(witness.pattern_id())),
+                    (
+                        "trace_identity",
+                        RenderFieldValue::string(witness.trace_identity()),
+                    ),
+                    (
+                        "normalized_trace_key",
+                        RenderFieldValue::string(witness.normalized_trace_key()),
+                    ),
+                    (
+                        "consumed_piece_count",
+                        RenderFieldValue::string(witness.consumed_piece_count()),
+                    ),
+                    (
+                        "terminal_hold_piece",
+                        optional_string_value(witness.terminal_hold_piece()),
+                    ),
+                    (
+                        "steps",
+                        RenderFieldValue::array(witness.steps().iter().map(|step| {
+                            RenderFieldValue::object([
+                                ("step_index", RenderFieldValue::string(step.step_index())),
+                                (
+                                    "operation_id",
+                                    RenderFieldValue::string(step.operation_id()),
+                                ),
+                                (
+                                    "active_piece",
+                                    RenderFieldValue::string(step.active_piece()),
+                                ),
+                                (
+                                    "input_cursor",
+                                    RenderFieldValue::string(step.input_cursor()),
+                                ),
+                                (
+                                    "output_cursor",
+                                    RenderFieldValue::string(step.output_cursor()),
+                                ),
+                                (
+                                    "input_hold_piece",
+                                    optional_string_value(step.input_hold_piece()),
+                                ),
+                                (
+                                    "output_hold_piece",
+                                    optional_string_value(step.output_hold_piece()),
+                                ),
+                                (
+                                    "hold_decision",
+                                    RenderFieldValue::string(step.hold_decision()),
+                                ),
+                                ("rotation", RenderFieldValue::string(step.rotation())),
+                                ("x", RenderFieldValue::string(step.x())),
+                                ("y", RenderFieldValue::string(step.y())),
+                                (
+                                    "placement_mask",
+                                    RenderFieldValue::string(step.placement_mask()),
+                                ),
+                                (
+                                    "board_before_mask",
+                                    RenderFieldValue::string(step.board_before_mask()),
+                                ),
+                                (
+                                    "board_after_placement_mask",
+                                    RenderFieldValue::string(step.board_after_placement_mask()),
+                                ),
+                                (
+                                    "board_after_line_clear_mask",
+                                    RenderFieldValue::string(step.board_after_line_clear_mask()),
+                                ),
+                                (
+                                    "cleared_row_mask",
+                                    RenderFieldValue::string(step.cleared_row_mask()),
+                                ),
+                                (
+                                    "cleared_lines",
+                                    RenderFieldValue::string(step.cleared_lines()),
+                                ),
+                                (
+                                    "line_clear_identity",
+                                    RenderFieldValue::string(step.line_clear_identity()),
+                                ),
+                            ])
+                        })),
+                    ),
+                ])
+            })),
+        ),
+    ]
+}
+
+fn setup_score_fields(payload: &SetupScoreRankingPayload) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", "setup.score"),
+        RenderField::new("result_contract", payload.schema_id()),
+        RenderField::new("payload_kind", "ranked-family"),
+        RenderField::new("input_identity_sha256", payload.input_identity_sha256()),
+        RenderField::new(
+            "evaluation_identity_sha256",
+            payload.evaluation_identity_sha256(),
+        ),
+        RenderField::new("document_format", payload.document_format()),
+        RenderField::new("rule_profile", payload.rule_profile()),
+        RenderField::new("score_profile", payload.score_profile()),
+        RenderField::new("initial_b2b", payload.initial_b2b()),
+        RenderField::new("ordering", payload.ordering()),
+        RenderField::new("source_page_count", payload.source_page_count()),
+        RenderField::new("candidate_count", payload.candidate_count()),
+        RenderField::new("setup_pattern_count", payload.setup_pattern_count()),
+        RenderField::new("average_priority_score", payload.average_priority_score()),
+        RenderField::new("complete", payload.complete()),
+        RenderField::new(
+            "candidates",
+            RenderFieldValue::array(payload.candidates().iter().map(|candidate| {
+                RenderFieldValue::object([
+                    ("rank", RenderFieldValue::string(candidate.rank())),
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(candidate.candidate_id()),
+                    ),
+                    (
+                        "completed_board_mask",
+                        RenderFieldValue::string(candidate.completed_board_mask()),
+                    ),
+                    (
+                        "setup_covered_pattern_count",
+                        RenderFieldValue::string(candidate.setup_covered_pattern_count()),
+                    ),
+                    (
+                        "setup_covered_probability",
+                        RenderFieldValue::string(candidate.setup_covered_probability()),
+                    ),
+                    (
+                        "continuation_probability",
+                        RenderFieldValue::string(candidate.continuation_probability()),
+                    ),
+                    (
+                        "unconditional_expected_score",
+                        RenderFieldValue::string(candidate.unconditional_expected_score()),
+                    ),
+                ])
+            })),
+        ),
+    ]
+}
+
+fn build_v2_fields(payload: &BuildV2ProductPayload) -> Vec<RenderField> {
+    let completeness = payload.completeness();
+    vec![
+        RenderField::new("capability_id", payload.capability_id()),
+        RenderField::new("result_contract", payload.result_contract()),
+        RenderField::new(
+            "payload_kind",
+            match payload.kind() {
+                BuildV2PayloadKind::CandidateFamily => "candidate-family",
+                BuildV2PayloadKind::Probability => "probability",
+                BuildV2PayloadKind::Portfolio => "portfolio",
+                BuildV2PayloadKind::ScorePortfolio => "score-portfolio",
+            },
+        ),
+        RenderField::new("input_identity_sha256", payload.input_identity_sha256()),
+        RenderField::new(
+            "evaluation_identity_sha256",
+            optional_string_value(payload.evaluation_identity_sha256()),
+        ),
+        RenderField::new(
+            "replay_basis",
+            optional_string_value(payload.replay_basis()),
+        ),
+        RenderField::new("objective", payload.objective()),
+        RenderField::new(
+            "score_profile",
+            optional_string_value(payload.score_profile()),
+        ),
+        RenderField::new("initial_b2b", optional_string_value(payload.initial_b2b())),
+        RenderField::new(
+            "score_accuracy",
+            optional_string_value(payload.score_accuracy()),
+        ),
+        RenderField::new(
+            "profile_specific_exact",
+            optional_bool_value(payload.profile_specific_exact()),
+        ),
+        RenderField::new(
+            "score_equality_basis",
+            optional_string_value(payload.score_equality_basis()),
+        ),
+        RenderField::new(
+            "informational_attack_basis",
+            optional_string_value(payload.informational_attack_basis()),
+        ),
+        RenderField::new("source_candidate_count", payload.source_candidate_count()),
+        RenderField::new(
+            "reachable_candidate_count",
+            payload.reachable_candidate_count(),
+        ),
+        RenderField::new(
+            "selected_candidate_count",
+            optional_string_value(payload.selected_candidate_count()),
+        ),
+        RenderField::new("pattern_count", payload.pattern_count()),
+        RenderField::new(
+            "covered_pattern_count",
+            optional_string_value(payload.covered_pattern_count()),
+        ),
+        RenderField::new(
+            "required_pattern_count",
+            optional_string_value(payload.required_pattern_count()),
+        ),
+        RenderField::new(
+            "union_probability",
+            optional_string_value(payload.union_probability()),
+        ),
+        RenderField::new(
+            "b2b_preservation_required",
+            optional_bool_value(payload.b2b_preservation_required()),
+        ),
+        RenderField::new(
+            "candidates",
+            RenderFieldValue::array(payload.candidates().iter().map(|candidate| {
+                RenderFieldValue::object([
+                    (
+                        "candidate_key",
+                        RenderFieldValue::string(candidate.candidate_key()),
+                    ),
+                    (
+                        "covered_pattern_count",
+                        RenderFieldValue::string(candidate.covered_pattern_count()),
+                    ),
+                ])
+            })),
+        ),
+        RenderField::new(
+            "canonical_candidate_keys",
+            RenderFieldValue::array(
+                payload
+                    .canonical_candidate_keys()
+                    .iter()
+                    .map(RenderFieldValue::string),
+            ),
+        ),
+        RenderField::new(
+            "winners",
+            RenderFieldValue::array(payload.winners().iter().map(|winner| {
+                RenderFieldValue::object([
+                    ("pattern_id", RenderFieldValue::string(winner.pattern_id())),
+                    (
+                        "candidate_key",
+                        RenderFieldValue::string(winner.candidate_key()),
+                    ),
+                    ("score", RenderFieldValue::string(winner.score())),
+                    (
+                        "informational_attack",
+                        RenderFieldValue::string(winner.informational_attack()),
+                    ),
+                ])
+            })),
+        ),
+        RenderField::new(
+            "completeness",
+            RenderFieldValue::object([
+                (
+                    "input_identity_bound",
+                    RenderFieldValue::bool(completeness.input_identity_bound()),
+                ),
+                (
+                    "producer_filter_bound",
+                    RenderFieldValue::bool(completeness.producer_filter_bound()),
+                ),
+                (
+                    "buildability_replay_complete",
+                    RenderFieldValue::bool(completeness.buildability_replay_complete()),
+                ),
+                (
+                    "coverage_rows_complete",
+                    RenderFieldValue::bool(completeness.coverage_rows_complete()),
+                ),
+                (
+                    "probability_weights_complete",
+                    RenderFieldValue::bool(completeness.probability_weights_complete()),
+                ),
+                (
+                    "exact_minimum_proven",
+                    RenderFieldValue::bool(completeness.exact_minimum_proven()),
+                ),
+                (
+                    "score_evidence_complete",
+                    RenderFieldValue::bool(completeness.score_evidence_complete()),
+                ),
+            ]),
+        ),
+        RenderField::new("page_source_available", payload.page_source_available()),
+        RenderField::new(
+            "page_source_identity_sha256",
+            optional_string_value(payload.page_source_identity_sha256()),
+        ),
+    ]
+}
+
+fn build_cover_fields(
+    capability_id: &str,
+    payload: &BuildCoveragePortfolioV2Payload,
+) -> Vec<RenderField> {
+    let completeness = payload.completeness();
+    vec![
+        RenderField::new("capability_id", capability_id),
+        RenderField::new("result_contract", payload.contract()),
+        RenderField::new("payload_kind", "portfolio"),
+        RenderField::new("objective", payload.objective()),
+        RenderField::new("probability_basis", payload.probability_basis()),
+        RenderField::new("source_candidate_count", payload.source_candidate_count()),
+        RenderField::new(
+            "selected_candidate_count",
+            payload.selected_candidate_count(),
+        ),
+        RenderField::new("pattern_count", payload.pattern_count()),
+        RenderField::new("required_pattern_count", payload.required_pattern_count()),
+        RenderField::new("union_probability", payload.union_probability()),
+        RenderField::new(
+            "normalized_solution_set_hash",
+            payload.normalized_solution_set_hash(),
+        ),
+        RenderField::new(
+            "canonical_first_candidate_id",
+            payload.canonical_first_candidate_id(),
+        ),
+        RenderField::new(
+            "completeness",
+            RenderFieldValue::object([
+                (
+                    "source_universe_complete",
+                    RenderFieldValue::bool(completeness.source_universe_complete()),
+                ),
+                (
+                    "coverage_rows_complete",
+                    RenderFieldValue::bool(completeness.coverage_rows_complete()),
+                ),
+                (
+                    "probability_weights_complete",
+                    RenderFieldValue::bool(completeness.probability_weights_complete()),
+                ),
+                (
+                    "exact_minimum_proven",
+                    RenderFieldValue::bool(completeness.exact_minimum_proven()),
+                ),
+                (
+                    "query_bound",
+                    RenderFieldValue::bool(completeness.query_bound()),
+                ),
+            ]),
+        ),
+        RenderField::new("page_source_available", payload.page_source_available()),
+        RenderField::new(
+            "page_source_identity_sha256",
+            optional_string_value(payload.page_source_identity_sha256()),
+        ),
+    ]
+}
+
+fn build_setup_fields(
+    capability_id: &str,
+    payload: &BuildSetupFamilyV1Payload,
+) -> Vec<RenderField> {
+    let completeness = payload.completeness();
+    vec![
+        RenderField::new("capability_id", capability_id),
+        RenderField::new("result_contract", payload.contract()),
+        RenderField::new("payload_kind", "candidate-family"),
+        RenderField::new("input_identity_sha256", payload.input_identity_sha256()),
+        RenderField::new(
+            "evaluation_identity_sha256",
+            payload.evaluation_identity_sha256(),
+        ),
+        RenderField::new("objective", payload.objective()),
+        RenderField::new("source_candidate_count", payload.source_candidate_count()),
+        RenderField::new(
+            "reachable_candidate_count",
+            payload.reachable_candidate_count(),
+        ),
+        RenderField::new("pattern_count", payload.pattern_count()),
+        RenderField::new("covered_pattern_count", payload.covered_pattern_count()),
+        RenderField::new("union_probability", payload.union_probability()),
+        RenderField::new(
+            "candidates",
+            RenderFieldValue::array(payload.candidates().iter().map(|candidate| {
+                RenderFieldValue::object([
+                    (
+                        "candidate_key",
+                        RenderFieldValue::string(candidate.candidate_key()),
+                    ),
+                    (
+                        "covered_pattern_count",
+                        RenderFieldValue::string(candidate.covered_pattern_count()),
+                    ),
+                ])
+            })),
+        ),
+        RenderField::new(
+            "completeness",
+            RenderFieldValue::object([
+                (
+                    "input_identity_bound",
+                    RenderFieldValue::bool(completeness.input_identity_bound()),
+                ),
+                (
+                    "producer_filter_bound",
+                    RenderFieldValue::bool(completeness.producer_filter_bound()),
+                ),
+                (
+                    "buildability_replay_complete",
+                    RenderFieldValue::bool(completeness.buildability_replay_complete()),
+                ),
+                (
+                    "coverage_rows_complete",
+                    RenderFieldValue::bool(completeness.coverage_rows_complete()),
+                ),
+                (
+                    "probability_weights_complete",
+                    RenderFieldValue::bool(completeness.probability_weights_complete()),
+                ),
+            ]),
+        ),
+    ]
+}
+
+fn explicit_portfolio_field(portfolio: &ExplicitPortfolioOutput) -> RenderField {
+    RenderField::new(
+        "portfolio_alternative_page",
+        RenderFieldValue::object([
+            (
+                "set_contract",
+                RenderFieldValue::string(portfolio.set_contract()),
+            ),
+            (
+                "page_contract",
+                RenderFieldValue::string(portfolio.page_contract()),
+            ),
+            (
+                "set_identity_sha256",
+                RenderFieldValue::string(portfolio.set_identity_sha256()),
+            ),
+            (
+                "candidate_map_sha256",
+                RenderFieldValue::string(portfolio.candidate_map_sha256()),
+            ),
+            (
+                "alternative_index",
+                portfolio
+                    .alternative_index_decimal()
+                    .map(RenderFieldValue::string)
+                    .unwrap_or(RenderFieldValue::Null),
+            ),
+            (
+                "optimal_cardinality",
+                RenderFieldValue::from(portfolio.optimal_cardinality()),
+            ),
+            (
+                "members",
+                RenderFieldValue::array(portfolio.members().iter().map(|member| {
+                    RenderFieldValue::object([
+                        (
+                            "candidate_id",
+                            RenderFieldValue::string(member.candidate_id_decimal()),
+                        ),
+                        (
+                            "normalized_solution_key",
+                            RenderFieldValue::string(member.normalized_key()),
+                        ),
+                    ])
+                })),
+            ),
+            (
+                "known_alternative_count",
+                RenderFieldValue::string(portfolio.known_alternative_count_decimal()),
+            ),
+            (
+                "total_alternative_count",
+                portfolio
+                    .total_alternative_count_decimal()
+                    .map(RenderFieldValue::string)
+                    .unwrap_or(RenderFieldValue::Null),
+            ),
+            (
+                "enumeration_complete",
+                RenderFieldValue::bool(portfolio.enumeration_complete()),
+            ),
+            (
+                "tie_cursor",
+                portfolio
+                    .cursor()
+                    .map(RenderFieldValue::string)
+                    .unwrap_or(RenderFieldValue::Null),
+            ),
+        ]),
+    )
+}
+
+fn append_pc_score_winner_family(
+    fields: &mut Vec<RenderField>,
+    product: Option<&ProductCapabilityResult>,
+) -> Result<(), &'static str> {
+    let report = product
+        .filter(|product| {
+            matches!(
+                (product.contract(), product.result_kind()),
+                (
+                    ProductCapabilityContract::PcScore,
+                    ProductCapabilityResultKind::PcScoreSummaryV2
+                ) | (
+                    ProductCapabilityContract::PcScoreFinder,
+                    ProductCapabilityResultKind::PcFixedScoreWitnessV2
+                )
+            )
+        })
+        .and_then(ProductCapabilityResult::pc_score_summary_v2)
+        .ok_or("pc score result did not include its typed winner-family report")?;
+    fields.extend([
+        RenderField::new(
+            "score_pattern_winner_contract",
+            PC_SCORE_PATTERN_WINNER_CONTRACT,
+        ),
+        RenderField::new(
+            "score_pattern_winner_ordering",
+            "pattern-id-ascending-then-candidate-id-ascending",
+        ),
+        RenderField::new(
+            "score_pattern_winner_equality",
+            "score-only-attack-informational",
+        ),
+        RenderField::new(
+            "score_informational_attack_basis",
+            PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+        ),
+        RenderField::new(
+            "score_pattern_winners",
+            RenderFieldValue::array(report.pattern_winners().iter().map(|winner| {
+                RenderFieldValue::object([
+                    ("contract", RenderFieldValue::string(winner.contract_id())),
+                    ("pattern_id", RenderFieldValue::from(winner.pattern_id())),
+                    (
+                        "candidate_id",
+                        RenderFieldValue::string(winner.candidate_id().to_string()),
+                    ),
+                    (
+                        "normalized_solution_key",
+                        RenderFieldValue::string(winner.normalized_solution_key().to_string()),
+                    ),
+                    ("score", RenderFieldValue::from(winner.score())),
+                    (
+                        "informational_attack",
+                        RenderFieldValue::from(winner.informational_attack()),
+                    ),
+                    (
+                        "informational_attack_basis",
+                        RenderFieldValue::string(winner.informational_attack_basis()),
+                    ),
+                ])
+            })),
+        ),
+    ]);
+    Ok(())
+}
+
+fn public_success_render_kind(
+    product_identity: Option<(ProductCapabilityContract, ProductCapabilityResultKind)>,
+    app_result_kind: AppResultKind,
+) -> &'static str {
+    match (product_identity, app_result_kind) {
+        (
+            Some((
+                ProductCapabilityContract::PcTiling,
+                ProductCapabilityResultKind::PcTilingFamilyV1,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcTilingFamilyV1.as_str(),
+        (
+            Some((ProductCapabilityContract::PcSaves, ProductCapabilityResultKind::PcSaveGroupsV2)),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcSaveGroupsV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcBestSave,
+                ProductCapabilityResultKind::PcBestSaveV2,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcBestSaveV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcMinimals,
+                ProductCapabilityResultKind::PcMinimumCoverV2,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcMinimumCoverV2.as_str(),
+        (
+            Some((ProductCapabilityContract::PcPath, ProductCapabilityResultKind::PcPathFamilyV2)),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcPathFamilyV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcChance,
+                ProductCapabilityResultKind::PcProbabilityV2,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcProbabilityV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcScore,
+                ProductCapabilityResultKind::PcScoreSummaryV2,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcScoreSummaryV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcScoreFinder,
+                ProductCapabilityResultKind::PcFixedScoreWitnessV2,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcFixedScoreWitnessV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcScoreMinimals,
+                ProductCapabilityResultKind::PcScorePortfolioV2,
+            )),
+            AppResultKind::Pc | AppResultKind::Scenario,
+        ) => ProductCapabilityResultKind::PcScorePortfolioV2.as_str(),
+        (
+            Some((
+                ProductCapabilityContract::PcFailedQueue,
+                ProductCapabilityResultKind::PcFailedQueueV2,
+            )),
+            AppResultKind::Percent,
+        ) => ProductCapabilityResultKind::PcFailedQueueV2.as_str(),
+        _ => app_result_kind.as_str(),
+    }
+}
+
+fn append_pc_score_minimals_fields(
+    fields: &mut Vec<RenderField>,
+    product: Option<&ProductCapabilityResult>,
+) -> Result<(), &'static str> {
+    let Some(product) = product else {
+        return Ok(());
+    };
+    if (product.contract(), product.result_kind())
+        != (
+            ProductCapabilityContract::PcScoreMinimals,
+            ProductCapabilityResultKind::PcScorePortfolioV2,
+        )
+    {
+        return Ok(());
+    }
+    let report = product
+        .pc_score_portfolio_v2()
+        .ok_or("pc score-minimals result did not include its typed portfolio report")?;
+    if !report.completeness().complete() {
+        return Err("pc score-minimals typed portfolio report was incomplete");
+    }
+    let canonical_candidate_id = report
+        .selected_score_candidate_ids()
+        .iter()
+        .copied()
+        .min()
+        .ok_or("pc score-minimals canonical portfolio was empty")?;
+    let candidate = report
+        .eligible_candidates()
+        .iter()
+        .find(|candidate| candidate.score_candidate_id() == canonical_candidate_id)
+        .ok_or("pc score-minimals canonical candidate identity was missing")?;
+    if !report
+        .selected_solution_keys()
+        .iter()
+        .any(|key| key == candidate.normalized_solution_key())
+    {
+        return Err("pc score-minimals canonical candidate was outside the selected portfolio");
+    }
+    fields.extend([
+        RenderField::new("score_minimals_contract", report.contract_id()),
+        RenderField::new("score_minimals_score_equality", "score-only"),
+        RenderField::new("score_minimals_attack_role", "informational-only"),
+        RenderField::new(
+            "score_minimals_canonical_selection",
+            "smallest-canonical-candidate-id",
+        ),
+        RenderField::new(
+            "score_minimals_canonical_candidate_id",
+            RenderFieldValue::string(canonical_candidate_id.to_string()),
+        ),
+        RenderField::new(
+            "score_minimals_canonical_solution_key",
+            candidate.normalized_solution_key(),
+        ),
+    ]);
+    Ok(())
+}
+
+fn append_pc_save_product_fields(
+    fields: &mut Vec<RenderField>,
+    product: Option<&ProductCapabilityResult>,
+) -> Result<(), &'static str> {
+    let Some(product) = product else {
+        return Ok(());
+    };
+    match (product.contract(), product.result_kind()) {
+        (ProductCapabilityContract::PcSaves, ProductCapabilityResultKind::PcSaveGroupsV2) => {
+            let report = product
+                .pc_save_groups_v2()
+                .ok_or("pc saves result did not include its typed report")?;
+            fields.extend([
+                RenderField::new("save_contract", report.contract_id()),
+                RenderField::new("save_origin", report.origin().as_str()),
+                RenderField::new("save_problem_preset", report.problem_preset().as_str()),
+                RenderField::new(
+                    "save_materialized_pattern_count",
+                    report.materialized_pattern_count(),
+                ),
+                RenderField::new(
+                    "save_pc_success_pattern_count",
+                    report.pc_success_pattern_count(),
+                ),
+                RenderField::new(
+                    "save_pc_probability",
+                    RenderFieldValue::number(report.pc_probability().decimal()),
+                ),
+                RenderField::new(
+                    "save_completeness",
+                    pc_save_completeness_value(report.completeness()),
+                ),
+                RenderField::new(
+                    "save_groups",
+                    RenderFieldValue::array(report.groups().iter().map(pc_save_group_value)),
+                ),
+            ]);
+            Ok(())
+        }
+        (ProductCapabilityContract::PcBestSave, ProductCapabilityResultKind::PcBestSaveV2) => {
+            let report = product
+                .pc_best_save_v2()
+                .ok_or("pc best-save result did not include its typed report")?;
+            fields.extend([
+                RenderField::new("best_save_contract", report.contract_id()),
+                RenderField::new("best_save_schema", report.schema_id()),
+                RenderField::new("best_save_probability_basis", report.probability_basis()),
+                RenderField::new("best_save_origin", report.origin().as_str()),
+                RenderField::new("best_save_problem_preset", report.problem_preset().as_str()),
+                RenderField::new(
+                    "best_save_materialized_pattern_count",
+                    report.materialized_pattern_count(),
+                ),
+                RenderField::new(
+                    "best_save_pc_success_pattern_count",
+                    report.pc_success_pattern_count(),
+                ),
+                RenderField::new(
+                    "best_save_pc_probability",
+                    RenderFieldValue::number(report.pc_probability().decimal()),
+                ),
+                RenderField::new(
+                    "best_save_completeness",
+                    pc_save_completeness_value(report.completeness()),
+                ),
+                RenderField::new(
+                    "best_save_winners",
+                    RenderFieldValue::array(report.winners().iter().map(|winner| {
+                        RenderFieldValue::object([
+                            (
+                                "weighted_total",
+                                RenderFieldValue::from(winner.weighted_total()),
+                            ),
+                            (
+                                "balanced_jl_count",
+                                RenderFieldValue::from(winner.balanced_jl_count()),
+                            ),
+                            (
+                                "exact_group_probability",
+                                RenderFieldValue::number(
+                                    winner.exact_group_probability().decimal(),
+                                ),
+                            ),
+                            ("group", pc_save_group_value(winner.group())),
+                        ])
+                    })),
+                ),
+            ]);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn pc_save_group_value(group: &PcSaveGroupV2) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "identity_contract",
+            RenderFieldValue::string(group.identity_contract()),
+        ),
+        (
+            "identity",
+            RenderFieldValue::string(group.identity().canonical_id()),
+        ),
+        ("piece_multiset", pc_save_multiset_value(group.identity())),
+        (
+            "successful_pattern_count",
+            RenderFieldValue::from(group.successful_pattern_count()),
+        ),
+        (
+            "unconditional_probability",
+            RenderFieldValue::number(group.unconditional_probability().decimal()),
+        ),
+        (
+            "conditional_probability_given_pc",
+            RenderFieldValue::number(group.conditional_probability_given_pc().decimal()),
+        ),
+        (
+            "canonical_candidate_id",
+            // Candidate ids are producer-owned u64 values.  Keep their JSON
+            // transport exact for JavaScript consumers by using canonical
+            // base-10 decimal strings rather than lossy JSON numbers.
+            RenderFieldValue::string(group.canonical_candidate_id().to_string()),
+        ),
+        (
+            "witnesses",
+            RenderFieldValue::array(group.witnesses().iter().map(pc_save_witness_value)),
+        ),
+    ])
+}
+
+fn pc_save_multiset_value(multiset: &PcSavePieceMultiset) -> RenderFieldValue {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    RenderFieldValue::object([
+        ("T", RenderFieldValue::from(multiset.count(PieceKind::T))),
+        ("I", RenderFieldValue::from(multiset.count(PieceKind::I))),
+        ("O", RenderFieldValue::from(multiset.count(PieceKind::O))),
+        ("J", RenderFieldValue::from(multiset.count(PieceKind::J))),
+        ("L", RenderFieldValue::from(multiset.count(PieceKind::L))),
+        ("S", RenderFieldValue::from(multiset.count(PieceKind::S))),
+        ("Z", RenderFieldValue::from(multiset.count(PieceKind::Z))),
+        (
+            "total_count",
+            RenderFieldValue::from(multiset.total_count()),
+        ),
+    ])
+}
+
+fn pc_save_witness_value(witness: &PcSaveWitness) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "pattern_index",
+            RenderFieldValue::from(witness.pattern_index()),
+        ),
+        (
+            "candidate_id",
+            RenderFieldValue::string(witness.candidate_id().to_string()),
+        ),
+        (
+            "trace_identity",
+            RenderFieldValue::string(witness.trace_identity()),
+        ),
+        (
+            "source_cursor",
+            RenderFieldValue::from(witness.source_cursor()),
+        ),
+        (
+            "terminal_hold",
+            witness
+                .terminal_hold()
+                .map_or(RenderFieldValue::Null, |piece| {
+                    RenderFieldValue::string(piece.as_ascii().to_string())
+                }),
+        ),
+        (
+            "active_bag_remainder",
+            pc_save_multiset_value(witness.active_bag_remainder()),
+        ),
+    ])
+}
+
+fn pc_save_completeness_value(completeness: PcSaveCompletenessEvidence) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "source_universe_complete",
+            RenderFieldValue::bool(completeness.source_universe_complete()),
+        ),
+        (
+            "fixed_bag_boundary_proven",
+            RenderFieldValue::bool(completeness.fixed_bag_boundary_proven()),
+        ),
+        (
+            "execution_batch_complete",
+            RenderFieldValue::bool(completeness.execution_batch_complete()),
+        ),
+        (
+            "pattern_weights_complete",
+            RenderFieldValue::bool(completeness.pattern_weights_complete()),
+        ),
+        (
+            "count_complete",
+            RenderFieldValue::bool(completeness.count_complete()),
+        ),
+        (
+            "probability_complete",
+            RenderFieldValue::bool(completeness.probability_complete()),
+        ),
+        ("complete", RenderFieldValue::bool(completeness.complete())),
+    ])
 }
 
 fn append_solution_data_contract(
@@ -1061,6 +2590,10 @@ fn optional_string_value(value: Option<&str>) -> RenderFieldValue {
     value.map_or(RenderFieldValue::Null, RenderFieldValue::string)
 }
 
+fn optional_bool_value(value: Option<bool>) -> RenderFieldValue {
+    value.map_or(RenderFieldValue::Null, RenderFieldValue::bool)
+}
+
 fn board_mask_hex(words: [u64; 4]) -> String {
     format!(
         "0x{:016x}{:016x}{:016x}{:016x}",
@@ -1091,6 +2624,16 @@ fn cli_error_for_app_error(code: AppErrorCode, default_error: CliErrorCode) -> C
         AppErrorCode::ContinueTokenInvalid => CliErrorCode::ContinueTokenInvalid,
         AppErrorCode::VerifyTargetUnknown => CliErrorCode::VerifyTargetUnknown,
         AppErrorCode::VerifyKicksFailed => CliErrorCode::VerifyKicksFailed,
+        AppErrorCode::OperationSequenceInvalid => CliErrorCode::OperationSequenceInvalid,
+        AppErrorCode::OperationSequenceCancelled => CliErrorCode::OperationSequenceCancelled,
+        AppErrorCode::OperationSequenceTimedOut => CliErrorCode::OperationSequenceTimedOut,
+        AppErrorCode::OperationSequenceIncomplete => CliErrorCode::OperationSequenceIncomplete,
+        AppErrorCode::UtilityParityInvalid => CliErrorCode::UtilityParityInvalid,
+        AppErrorCode::UtilityFumenInvalid => CliErrorCode::UtilityFumenInvalid,
+        AppErrorCode::UtilityRenderInvalid => CliErrorCode::UtilityRenderInvalid,
+        AppErrorCode::UtilityRenderLimitExceeded => CliErrorCode::UtilityRenderLimitExceeded,
+        AppErrorCode::UtilityToGrayInvalid => CliErrorCode::UtilityToGrayInvalid,
+        AppErrorCode::UtilityMirrorInvalid => CliErrorCode::UtilityMirrorInvalid,
         _ => default_error,
     }
 }

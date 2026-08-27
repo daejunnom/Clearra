@@ -81,6 +81,11 @@ mod case_pc_service_runs_search_problem_through_packing_buildup_coverage_and_out
         )));
         assert!(fields.contains(&("packing_runner".to_owned(), "PackingRunner::run".to_owned())));
         assert!(fields.contains(&("buildup_runner".to_owned(), "BuildUpRunner::run".to_owned())));
+        assert!(fields.contains(&("buildup_result".to_owned(), "C BuildUpResult".to_owned())));
+        assert!(fields.contains(&(
+            "packing_candidate_is_solution".to_owned(),
+            "false".to_owned()
+        )));
         assert!(fields.contains(&(
             "rust_objective_reducer".to_owned(),
             "ObjectiveReducer::reduce".to_owned()
@@ -177,6 +182,880 @@ mod case_pc_service_runs_search_problem_through_packing_buildup_coverage_and_out
                 .backend_requested(),
             "auto"
         );
+    }
+}
+
+#[cfg(feature = "native-c-core")]
+mod case_tiling_service_materializes_raw_geometry_without_buildup {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use super::*;
+    use clearra_core_domain::{
+        execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+        solution::{NormalizedTilingSolutionKey, NormalizedTilingSolutionSet},
+    };
+    use clearra_core_ffi::{
+        problem::CPackingProblem, CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits,
+        CoreCNative, NativePackingOutcome, PackingCandidateBatch,
+    };
+    use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
+    use clearra_pc_graph::request::{
+        BackendFallbackPolicy, GpuDeviceSelection, PcExecutionPolicy, PcHoldPolicy,
+        RequestedSearchBackend,
+    };
+
+    use crate::{
+        backend::{
+            BackendTrustReport, CapabilityQueryError, GpuSearchCapability, GpuUnavailableReason,
+            NativePackingExecutorRegistry, PackingBackendOutcome, PackingCandidateProvenance,
+            SearchBackendCapabilityProvider, SearchBackendExecutor, SearchBackendExecutorResolver,
+            SearchBackendFallbackReason, SelectedSearchBackend,
+        },
+        packing::{PackingRunner, PackingRunnerError},
+        service::{
+            pc_service::PcService,
+            pc_tiling_materialization::{PcTilingMaterialization, PcTilingMaterializationError},
+            PcServiceError,
+        },
+    };
+
+    #[derive(Clone, Copy)]
+    struct NoGpuCapability;
+
+    impl SearchBackendCapabilityProvider for NoGpuCapability {
+        fn gpu_capability(
+            &self,
+            _device: GpuDeviceSelection,
+        ) -> Result<GpuSearchCapability, CapabilityQueryError> {
+            Ok(GpuSearchCapability::unavailable(
+                GpuUnavailableReason::DeviceNotFound,
+            ))
+        }
+
+        fn prepared_gpu_capability(
+            &self,
+            _device: GpuDeviceSelection,
+        ) -> Result<GpuSearchCapability, CapabilityQueryError> {
+            self.gpu_capability(GpuDeviceSelection::Auto)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct ConnectedGpuCapability;
+
+    impl SearchBackendCapabilityProvider for ConnectedGpuCapability {
+        fn gpu_capability(
+            &self,
+            _device: GpuDeviceSelection,
+        ) -> Result<GpuSearchCapability, CapabilityQueryError> {
+            Ok(GpuSearchCapability::available(0))
+        }
+
+        fn prepared_gpu_capability(
+            &self,
+            _device: GpuDeviceSelection,
+        ) -> Result<GpuSearchCapability, CapabilityQueryError> {
+            self.gpu_capability(GpuDeviceSelection::Auto)
+        }
+    }
+
+    fn native_execution_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[derive(Clone, Copy)]
+    struct RawGeometryExecutor {
+        repeat_first_candidate: Option<usize>,
+    }
+
+    impl RawGeometryExecutor {
+        const fn native() -> Self {
+            Self {
+                repeat_first_candidate: None,
+            }
+        }
+
+        const fn repeated(repeat_first_candidate: usize) -> Self {
+            Self {
+                repeat_first_candidate: Some(repeat_first_candidate),
+            }
+        }
+    }
+
+    impl SearchBackendExecutor for RawGeometryExecutor {
+        fn execute_packing(
+            &self,
+            problem: &CPackingProblem,
+            _policy: &PcExecutionPolicy,
+            _cancellation: &clearra_core_domain::execution_cancellation::ExecutionCancellationToken,
+        ) -> Result<PackingBackendOutcome, PackingRunnerError> {
+            let NativePackingOutcome {
+                mut candidates,
+                resource_report,
+                ..
+            } = CoreCNative::generate_packing_candidates(problem)
+                .map_err(PackingRunnerError::Native)?;
+            if let Some(repeat_count) = self.repeat_first_candidate {
+                let first = candidates
+                    .candidate_at(0)
+                    .expect("raw geometry fixture has a candidate");
+                candidates = PackingCandidateBatch::from_candidates(
+                    candidates.board_width(),
+                    candidates.board_height(),
+                    (0..repeat_count).map(|candidate_index| {
+                        let mut candidate = first;
+                        candidate.final_board = candidate_index as u64;
+                        candidate
+                    }),
+                )
+                .map_err(PackingRunnerError::CandidateBatch)?;
+            }
+            Ok(PackingBackendOutcome::raw_geometry_exact(
+                SelectedSearchBackend::CpuGeometryExactCover,
+                candidates,
+                resource_report,
+                BackendTrustReport::cpu_exact(),
+            ))
+        }
+    }
+
+    struct RawGeometryResolver(RawGeometryExecutor);
+
+    impl SearchBackendExecutorResolver for RawGeometryResolver {
+        fn executor_for(
+            &self,
+            backend: SelectedSearchBackend,
+        ) -> Option<&dyn SearchBackendExecutor> {
+            matches!(
+                backend,
+                SelectedSearchBackend::CpuGeometryExactCover
+                    | SelectedSearchBackend::CpuParallelGeometryExactCover
+            )
+            .then_some(&self.0)
+        }
+
+        fn cpu_fallback_executor(&self) -> &dyn SearchBackendExecutor {
+            &self.0
+        }
+
+        fn supports_native_candidate_streaming(&self) -> bool {
+            true
+        }
+
+        fn use_resolved_executor_for_test(&self) -> bool {
+            true
+        }
+    }
+
+    struct UnadmittedRawGeometryResolver(RawGeometryExecutor);
+
+    impl SearchBackendExecutorResolver for UnadmittedRawGeometryResolver {
+        fn executor_for(
+            &self,
+            backend: SelectedSearchBackend,
+        ) -> Option<&dyn SearchBackendExecutor> {
+            matches!(
+                backend,
+                SelectedSearchBackend::CpuGeometryExactCover
+                    | SelectedSearchBackend::CpuParallelGeometryExactCover
+            )
+            .then_some(&self.0)
+        }
+
+        fn cpu_fallback_executor(&self) -> &dyn SearchBackendExecutor {
+            &self.0
+        }
+    }
+
+    fn tiling_problem_with_objective(objective: ObjectivePolicy) -> clearra_problem::SearchProblem {
+        tiling_problem_with_objective_and_policy(
+            objective,
+            PcExecutionPolicy::mvp_default()
+                .with_workers(1)
+                .with_worker_hardware_limit(1)
+                .with_max_candidates(5_000),
+        )
+    }
+
+    fn tiling_problem_with_objective_and_policy(
+        objective: ObjectivePolicy,
+        policy: PcExecutionPolicy,
+    ) -> clearra_problem::SearchProblem {
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_objective(objective)
+            .with_execution_policy(policy);
+        ProblemCompiler::compile_opening_pc(&query).expect("tiling problem")
+    }
+
+    fn canonical_tiling_problem_with_policy(
+        policy: PcExecutionPolicy,
+    ) -> clearra_problem::SearchProblem {
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_execution_policy(policy);
+        ProblemCompiler::compile_opening_pc_tiling(&query).expect("canonical tiling problem")
+    }
+
+    fn tiling_problem() -> clearra_problem::SearchProblem {
+        canonical_tiling_problem_with_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(1)
+                .with_worker_hardware_limit(1)
+                .with_max_candidates(5_000),
+        )
+    }
+
+    fn raw_geometry_packing(
+        problem: &clearra_problem::SearchProblem,
+        executor: RawGeometryExecutor,
+    ) -> crate::packing::PackingRunResult {
+        PackingRunner::run_with_components(
+            problem,
+            &NoGpuCapability,
+            &RawGeometryResolver(executor),
+        )
+        .expect("raw geometry packing")
+    }
+
+    fn independently_enumerated_raw_geometry(
+        problem: &clearra_problem::SearchProblem,
+    ) -> (
+        crate::packing::PackingRunResult,
+        NormalizedTilingSolutionSet,
+        NormalizedTilingSolutionKey,
+    ) {
+        let packing = raw_geometry_packing(problem, RawGeometryExecutor::native());
+        let mut independent_keys = Vec::new();
+        let mut rejected_key = None;
+        for candidate_index in 0..packing.candidate_count() {
+            let candidate = packing
+                .candidate_at(candidate_index)
+                .expect("raw geometry candidate");
+            let identity = candidate
+                .standard_board64_tiling_identity(problem.initial_board().occupied_mask())
+                .expect("raw geometry identity");
+            let key = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+            independent_keys.push(key.clone());
+
+            let buildable = CBuildUpProblemBuilder::from_packing_candidate(
+                problem,
+                &candidate,
+                u32::try_from(candidate_index).expect("candidate index fits native builder"),
+                0,
+            )
+            .ok()
+            .and_then(|buildup| {
+                CoreCNative::enumerate_buildup_variants(
+                    &buildup,
+                    &CNativeBuildUpEnumerationLimits::default(),
+                )
+                .ok()
+            })
+            .is_some_and(|outcome| outcome.accepted());
+            if !buildable && rejected_key.is_none() {
+                rejected_key = Some(key);
+            }
+        }
+
+        (
+            packing,
+            NormalizedTilingSolutionSet::new(independent_keys),
+            rejected_key.expect("fixture includes a BuildUp-rejected raw tiling"),
+        )
+    }
+
+    #[test]
+    fn raw_geometry_candidate_is_materialized_even_when_buildup_rejects_it() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem();
+        let (packing, independent_set, rejected_key) =
+            independently_enumerated_raw_geometry(&problem);
+        let expected_keys = independent_set
+            .keys()
+            .iter()
+            .map(|key| key.as_str().to_owned())
+            .collect::<Vec<_>>();
+
+        let result = PcService::finish_with_packing_for_test(&problem, packing)
+            .expect("tiling materialization");
+
+        assert_eq!(result.field("buildup_runner"), Some("not-executed"));
+        assert_eq!(result.bool_field("buildup_executed"), Some(false));
+        assert_eq!(
+            result.bool_field("additional_buildup_executed"),
+            Some(false)
+        );
+        assert_eq!(result.field("buildup_backend"), Some("none"));
+        assert_eq!(result.field("buildup_backend_owner"), Some("none"));
+        assert_eq!(result.usize_field("buildup_workspace_bytes"), Some(0));
+        assert_eq!(
+            result.field("buildup_workspace_accounting_basis"),
+            Some("none-no-buildup")
+        );
+        assert_eq!(
+            result.usize_field("resource_buildup_workspace_bytes"),
+            Some(0)
+        );
+        assert_eq!(
+            result.field("resource_buildup_workspace_accounting_basis"),
+            Some("none-no-buildup")
+        );
+        assert_eq!(
+            result.bool_field("packing_candidate_is_solution"),
+            Some(true)
+        );
+        assert_eq!(result.bool_field("packing_source_raw_geometry"), Some(true));
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(true)
+        );
+        assert_eq!(result.bool_field("tiling_objective_canonical"), Some(true));
+        assert_eq!(
+            result.bool_field("tiling_materialization_memory_admission_accounted"),
+            Some(true)
+        );
+        assert_eq!(
+            result.pc_tiling_memory_admission_evidence(),
+            Some(crate::PcTilingMemoryAdmissionEvidence::NativeInternal)
+        );
+        assert!(result.pc_tiling_family_publication_contract_is_valid());
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("none")
+        );
+        assert_eq!(result.bool_field("buildability_verified"), Some(false));
+        assert_eq!(result.bool_field("coverage_calculated"), Some(false));
+        assert_eq!(result.bool_field("probability_calculated"), Some(false));
+        assert_eq!(result.field_occurrence_count("probability_calculated"), 1);
+        assert_eq!(result.field("coverage_probability"), Some("not-calculated"));
+        assert_eq!(
+            result.usize_field("normalized_unique_solution_count"),
+            Some(independent_set.len())
+        );
+        assert_eq!(result.normalized_solution_keys(), expected_keys.as_slice());
+        assert!(result
+            .normalized_solution_keys()
+            .iter()
+            .any(|key| key == rejected_key.as_str()));
+        assert_eq!(
+            result.field("normalized_solution_set_hash"),
+            Some(independent_set.hash())
+        );
+        assert_eq!(
+            result.usize_field("solution_keys_materialized_count"),
+            Some(result.normalized_solution_keys().len())
+        );
+        assert_eq!(result.bool_field("solution_set_materialized"), Some(true));
+        assert_eq!(result.bool_field("solution_keys_complete"), Some(true));
+        let page_store = result
+            .tiling_solution_page_store()
+            .expect("complete tiling page authority");
+        assert_eq!(page_store.len(), independent_set.len());
+        assert_eq!(page_store.normalized_hash(), independent_set.hash());
+        assert_eq!(
+            page_store.page_keys(0, 100).expect("initial tiling page"),
+            expected_keys
+        );
+        assert_eq!(
+            result.usize_field("tiling_initial_page_count"),
+            Some(independent_set.len())
+        );
+        assert_eq!(result.bool_field("tiling_family_complete"), Some(true));
+        assert_eq!(
+            result.bool_field("tiling_initial_page_covers_family"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn production_raw_geometry_stream_is_complete_without_running_buildup() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem();
+        let (_, _, rejected_key) = independently_enumerated_raw_geometry(&problem);
+        let result = PcService::execute(&problem).expect("native tiling execution");
+
+        assert_eq!(result.bool_field("buildup_executed"), Some(false));
+        assert_eq!(
+            result.bool_field("additional_buildup_executed"),
+            Some(false)
+        );
+        assert_eq!(result.field("buildup_backend"), Some("none"));
+        assert_eq!(result.field("buildup_backend_owner"), Some("none"));
+        assert_eq!(result.bool_field("packing_source_raw_geometry"), Some(true));
+        assert_eq!(
+            result.bool_field("packing_source_buildability_preverified"),
+            Some(false)
+        );
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(true)
+        );
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("none")
+        );
+        assert_eq!(result.bool_field("buildability_verified"), Some(false));
+        assert_eq!(result.usize_field("buildup_workspace_bytes"), Some(0));
+        assert_eq!(
+            result.field("buildup_workspace_accounting_basis"),
+            Some("none-no-buildup")
+        );
+        assert_eq!(
+            result.usize_field("resource_buildup_workspace_bytes"),
+            Some(0)
+        );
+        assert_eq!(
+            result.field("resource_buildup_workspace_accounting_basis"),
+            Some("none-no-buildup")
+        );
+        assert_eq!(result.bool_field("count_complete"), Some(true));
+        assert_eq!(result.bool_field("solution_keys_complete"), Some(true));
+        assert_eq!(result.bool_field("resource_truncated"), Some(false));
+        assert_eq!(result.field("resource_truncation_reason"), Some("none"));
+        assert_eq!(result.usize_field("execution_workers"), Some(1));
+        assert_eq!(result.field("selected_model"), Some("bitset-algorithm-x"));
+        assert_eq!(
+            result.field("packing_algorithm"),
+            Some("geometry-exact-cover-candidate-materialization")
+        );
+        assert!(result
+            .normalized_solution_keys()
+            .iter()
+            .any(|key| key == rejected_key.as_str()));
+    }
+
+    #[test]
+    fn scenario_pc_canonical_tiling_uses_the_same_product_raw_geometry_stream() {
+        let _execution_guard = native_execution_test_guard();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])),
+            PieceWindow::new(5),
+        )
+        .with_exact_pieces(Some(5))
+        .with_allow_hold(false)
+        .with_objective(ObjectivePolicy::tiling())
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(2)
+                .with_worker_hardware_limit(2)
+                .with_max_candidates(5_000),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc_tiling(&query)
+            .expect("canonical scenario tiling problem");
+        let result = PcService::execute(&problem).expect("scenario native tiling execution");
+
+        assert_eq!(result.bool_field("packing_source_raw_geometry"), Some(true));
+        assert_eq!(result.bool_field("buildup_executed"), Some(false));
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(true)
+        );
+        assert_eq!(result.usize_field("workers_used"), Some(1));
+        assert_eq!(
+            result.field("selected_backend"),
+            Some("cpu-geometry-exact-cover")
+        );
+        assert_eq!(result.field("selected_model"), Some("bitset-algorithm-x"));
+        assert_eq!(
+            result.field("backend_selection_reason"),
+            Some("auto-small-scenario-cpu-geometry-exact-cover")
+        );
+    }
+
+    #[test]
+    fn noncanonical_tiling_objective_keeps_buildable_provenance_and_is_incomplete() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem_with_objective(ObjectivePolicy::tiling().with_score_summary());
+        let result =
+            PcService::execute(&problem).expect("incomplete tiling materialization result");
+        assert_eq!(
+            result.bool_field("packing_source_raw_geometry"),
+            Some(false)
+        );
+        assert_eq!(
+            result.bool_field("packing_source_buildability_preverified"),
+            Some(true)
+        );
+        assert_eq!(result.bool_field("tiling_objective_canonical"), Some(false));
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(false)
+        );
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("noncanonical-tiling-objective")
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("postprocess_scoring_requested"),
+            Some(true)
+        );
+        assert_eq!(
+            result.bool_field("postprocess_execution_complete"),
+            Some(false)
+        );
+        assert_eq!(result.bool_field("buildup_executed"), Some(true));
+        assert_eq!(
+            result.bool_field("additional_buildup_executed"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn generic_tiling_trace_never_receives_native_pc_tiling_authority() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem_with_objective(ObjectivePolicy::tiling());
+        let result = PcService::execute(&problem).expect("generic tiling execution");
+
+        assert_eq!(result.field("search_output_policy"), Some("trace"));
+        assert_eq!(result.bool_field("tiling_objective_canonical"), Some(false));
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(false)
+        );
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("noncanonical-tiling-objective")
+        );
+        assert_eq!(result.field("coverage_probability"), Some("not-calculated"));
+        assert_eq!(result.bool_field("probability_calculated"), Some(false));
+        assert_eq!(result.field_occurrence_count("probability_calculated"), 1);
+        assert_eq!(result.bool_field("probability_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("supply_probability_complete"),
+            Some(false)
+        );
+        assert_eq!(
+            result.bool_field("resource_probability_complete"),
+            Some(false)
+        );
+        assert!(result.pc_tiling_memory_admission_evidence().is_none());
+        assert!(!result.pc_tiling_family_publication_contract_is_valid());
+    }
+
+    #[test]
+    fn canonical_tiling_without_a_native_admission_fails_before_materialization() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem();
+        let packing = PackingRunner::run_with_components(
+            &problem,
+            &NoGpuCapability,
+            &UnadmittedRawGeometryResolver(RawGeometryExecutor::native()),
+        )
+        .expect("unadmitted raw geometry fixture");
+
+        assert_eq!(
+            PcService::finish_with_packing_for_test(&problem, packing),
+            Err(PcServiceError::TilingMaterialization(
+                PcTilingMaterializationError::MemoryAccountingUnavailable,
+            ))
+        );
+    }
+
+    #[test]
+    fn noncanonical_tiling_rejects_a_raw_fixture_at_the_runner_boundary() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem_with_objective(ObjectivePolicy::tiling().with_score_summary());
+
+        assert_eq!(
+            PackingRunner::run_with_components(
+                &problem,
+                &NoGpuCapability,
+                &RawGeometryResolver(RawGeometryExecutor::native()),
+            ),
+            Err(PackingRunnerError::CandidateProvenanceMismatch {
+                expected: PackingCandidateProvenance::BuildabilityPrefiltered,
+                actual: PackingCandidateProvenance::RawGeometry,
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_and_all_spin_objectives_keep_buildable_packing_and_buildup() {
+        let _execution_guard = native_execution_test_guard();
+        for objective in [
+            ObjectivePolicy::all(),
+            ObjectivePolicy::unique(),
+            ObjectivePolicy::minimum_cover(),
+            ObjectivePolicy::all()
+                .with_score_summary()
+                .with_spin_profile(SpinProfileSelection::AllSpin),
+        ] {
+            let problem = tiling_problem_with_objective(objective);
+            let packing = PackingRunner::run(&problem).expect("ordinary product packing");
+            assert_eq!(
+                packing.candidate_provenance(),
+                PackingCandidateProvenance::BuildabilityPrefiltered
+            );
+            drop(packing);
+
+            let result = PcService::execute(&problem).expect("ordinary product execution");
+            assert_eq!(result.bool_field("buildup_executed"), None);
+            assert_eq!(result.field("buildup_runner"), Some("BuildUpRunner::run"));
+        }
+    }
+
+    #[test]
+    fn b2b_tiling_override_does_not_inherit_raw_geometry_semantics() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem_with_objective(
+            ObjectivePolicy::tiling().with_back_to_back_preservation(SpinProfileSelection::AllSpin),
+        );
+        let result = PcService::execute(&problem).expect("noncanonical b2b tiling execution");
+
+        assert_eq!(
+            result.bool_field("packing_source_raw_geometry"),
+            Some(false)
+        );
+        assert_eq!(result.bool_field("tiling_objective_canonical"), Some(false));
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("noncanonical-tiling-objective")
+        );
+    }
+
+    #[test]
+    fn explicit_memory_accounts_tiling_materialization_under_the_shared_bound() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = canonical_tiling_problem_with_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(4)
+                .with_worker_hardware_limit(4)
+                .with_max_candidates(5_000)
+                .with_max_memory_mib(Some(64)),
+        );
+        let result = PcService::execute(&problem).expect("bounded native tiling execution");
+
+        assert_eq!(result.field("workers_requested"), Some("4"));
+        assert_eq!(result.usize_field("workers_used"), Some(1));
+        assert_eq!(result.usize_field("execution_workers"), Some(1));
+        assert_eq!(
+            result.field("selected_backend"),
+            Some("cpu-geometry-exact-cover")
+        );
+        assert_eq!(result.field("selected_model"), Some("bitset-algorithm-x"));
+        assert_eq!(
+            result.field("packing_algorithm"),
+            Some("geometry-exact-cover-candidate-materialization")
+        );
+        assert_eq!(
+            result.field("backend_selection_reason"),
+            Some("raw-geometry-deterministic-serial")
+        );
+        assert_eq!(result.bool_field("packing_source_raw_geometry"), Some(true));
+        assert_eq!(
+            result.bool_field("tiling_materialization_memory_admission_accounted"),
+            Some(true)
+        );
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(true)
+        );
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("none")
+        );
+    }
+
+    #[test]
+    fn candidate_cap_preserves_raw_provenance_but_reports_resource_truncation_separately() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = canonical_tiling_problem_with_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(4)
+                .with_worker_hardware_limit(4)
+                .with_max_candidates(1),
+        );
+        let first = PcService::execute(&problem).expect("first truncated native tiling execution");
+        let first_keys = first.normalized_solution_keys().to_vec();
+        let first_hash = first
+            .field("normalized_solution_set_hash")
+            .expect("first normalized solution-set hash")
+            .to_owned();
+        drop(first);
+        let result =
+            PcService::execute(&problem).expect("second truncated native tiling execution");
+
+        assert_eq!(result.bool_field("packing_source_raw_geometry"), Some(true));
+        assert_eq!(result.bool_field("resource_truncated"), Some(true));
+        assert_eq!(
+            result.field("resource_truncation_reason"),
+            Some("candidate_budget_exceeded")
+        );
+        assert_eq!(
+            result.field("tiling_materialization_incomplete_reason"),
+            Some("candidate_budget_exceeded")
+        );
+        assert_eq!(
+            result.bool_field("tiling_materialization_complete"),
+            Some(false)
+        );
+        assert_eq!(result.normalized_solution_keys(), first_keys.as_slice());
+        assert_eq!(
+            result.field("normalized_solution_set_hash"),
+            Some(first_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn connected_gpu_raw_geometry_fallback_is_explicitly_allowed_or_denied() {
+        let _execution_guard = native_execution_test_guard();
+        let base_policy = PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Gpu)
+            .with_workers(4)
+            .with_worker_hardware_limit(4)
+            .with_max_candidates(5_000);
+        let allowed_problem = canonical_tiling_problem_with_policy(
+            base_policy
+                .clone()
+                .with_backend_fallback(BackendFallbackPolicy::Allow),
+        );
+        let resolver = NativePackingExecutorRegistry::default();
+        let allowed = PackingRunner::run_with_components(
+            &allowed_problem,
+            &ConnectedGpuCapability,
+            &resolver,
+        )
+        .expect("connected GPU raw execution may use an explicit CPU fallback");
+
+        assert_eq!(
+            allowed.candidate_provenance(),
+            PackingCandidateProvenance::RawGeometry
+        );
+        assert_eq!(
+            allowed.actual_backend(),
+            SelectedSearchBackend::CpuGeometryExactCover
+        );
+        assert_eq!(allowed.backend_report().workers_used(), 1);
+        assert!(allowed.backend_report().backend_fallback_used());
+        assert_eq!(
+            allowed.backend_report().fallback_reason(),
+            Some(SearchBackendFallbackReason::GpuBackendNotConnected)
+        );
+        drop(allowed);
+
+        let denied_problem = canonical_tiling_problem_with_policy(
+            base_policy.with_backend_fallback(BackendFallbackPolicy::Deny),
+        );
+        let denied =
+            PackingRunner::run_with_components(&denied_problem, &ConnectedGpuCapability, &resolver);
+
+        assert!(matches!(
+            denied,
+            Err(PackingRunnerError::GpuExecutionRejected(resolution))
+                if !resolution.fallback_used()
+                    && resolution.failure_reason()
+                        == Some(SearchBackendFallbackReason::GpuBackendNotConnected)
+        ));
+    }
+
+    #[test]
+    fn pre_loop_cancellation_is_preserved_by_the_pc_service_error() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem();
+        let packing = raw_geometry_packing(&problem, RawGeometryExecutor::native());
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.handle().cancel();
+        let control = ExecutionControl::new(cancellation);
+
+        assert_eq!(
+            PcService::finish_with_packing_and_control_for_test(&problem, packing, &control),
+            Err(PcServiceError::TilingMaterialization(
+                PcTilingMaterializationError::ExecutionCancelled,
+            ))
+        );
+    }
+
+    #[test]
+    fn identity_hash_and_key_poll_checkpoints_observe_real_cancellation() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem();
+        let packing = raw_geometry_packing(&problem, RawGeometryExecutor::native());
+        for (target_stage, target_completed) in [
+            ("identities", 1_usize),
+            ("hash", 0),
+            ("hash", 1),
+            ("keys", 1),
+        ] {
+            let cancellation = ExecutionCancellationToken::new();
+            let handle = cancellation.handle();
+            let control = ExecutionControl::new(cancellation);
+            let mut checkpoint_observed = false;
+            let error = PcTilingMaterialization::from_packing_with_poll_observer_for_test(
+                &problem,
+                &packing,
+                &control,
+                1,
+                &mut |stage, completed, _| {
+                    if stage == target_stage && completed == target_completed {
+                        checkpoint_observed = true;
+                        handle.cancel();
+                    }
+                },
+            )
+            .expect_err("checkpoint cancellation must stop tiling materialization");
+
+            assert!(
+                checkpoint_observed,
+                "missing {target_stage} checkpoint {target_completed}"
+            );
+            assert_eq!(error, PcTilingMaterializationError::ExecutionCancelled);
+        }
+    }
+
+    #[test]
+    fn production_poll_stride_checks_4096_without_checking_4095() {
+        let _execution_guard = native_execution_test_guard();
+        let problem = tiling_problem();
+        let packing = raw_geometry_packing(&problem, RawGeometryExecutor::repeated(4_097));
+        assert_eq!(packing.candidate_count(), 4_097);
+        assert!(packing.execution_memory_bound().is_some());
+        let control = ExecutionControl::default();
+        let mut identity_checkpoints = Vec::new();
+
+        PcTilingMaterialization::from_packing_with_production_poll_observer_for_test(
+            &problem,
+            &packing,
+            &control,
+            &mut |stage, completed, _| {
+                if stage == "identities" {
+                    identity_checkpoints.push(completed);
+                }
+            },
+        )
+        .expect("uncancelled boundary materialization");
+
+        assert!(identity_checkpoints.contains(&4_096));
+        assert!(!identity_checkpoints.contains(&4_095));
+        assert_eq!(identity_checkpoints.first(), Some(&0));
+        assert_eq!(identity_checkpoints.last(), Some(&4_097));
     }
 }
 
@@ -489,10 +1368,9 @@ mod case_pc_service_preserves_scenario_fixture_trace_key_contract {
         assert_eq!(
             PcService::execute(&problem),
             Err(crate::service::pc_service::PcServiceError::Packing(
-                crate::packing::PackingRunnerError::BackendExecutorUnavailable {
-                    backend: crate::backend::SelectedSearchBackend::CpuGeometryExactCover,
-                    reason: "native_geometry_exact_cover_not_connected",
-                }
+                crate::packing::PackingRunnerError::Native(
+                    clearra_core_ffi::NativeCoreError::Unavailable
+                )
             ))
         );
     }

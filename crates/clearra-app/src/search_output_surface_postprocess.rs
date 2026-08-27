@@ -1,28 +1,47 @@
 //! Owns the public response boundary that removes private solution authority from summary output.
 
-use clearra_core_executor::CoreExecutionResult;
+use clearra_core_executor::{CoreExecutionError, CoreExecutionResult};
 
-pub(crate) fn finalize_coverage_summary_public_surface(
+pub(crate) fn finalize_coverage_summary_public_surface_with_memory_guard(
     result: CoreExecutionResult,
-) -> CoreExecutionResult {
+    memory_guard: &mut impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+) -> Result<CoreExecutionResult, CoreExecutionError> {
+    memory_guard(&result, 0)?;
     let availability = result.execution_report().solution_set_availability();
-    let fields = result.summary_fields();
-    let coverage_summary = fields
-        .iter()
-        .any(|(key, value)| key == "search_output_policy" && value == "coverage-summary");
-    let has_declared_policy = fields.iter().any(|(key, _)| key == "search_output_policy");
-    let invalid_declared_contract = (has_declared_policy || availability.uses_explicit_contract())
-        && (!availability.contract_valid()
-            || !availability
-                .materialized_key_count_matches(result.normalized_solution_keys().len()));
+    let policy_occurrences = result.field_occurrence_count("search_output_policy");
+    let unique_policy = result.unique_field("search_output_policy");
+    let coverage_summary = unique_policy == Some("coverage-summary");
+    let has_declared_policy = policy_occurrences != 0;
+    let invalid_declared_contract = policy_occurrences > 1
+        || ((has_declared_policy || availability.uses_explicit_contract())
+            && (!availability.contract_valid()
+                || !availability
+                    .materialized_key_count_matches(result.normalized_solution_keys().len())));
     if !coverage_summary && !invalid_declared_contract {
-        return result;
+        return Ok(result);
     }
 
     // Worker partitions bypass this public-response boundary and retain filtered authority for
     // their coordinator. Serial execution and the distributed coordinator both arrive here only
     // after all requested post-processing has consumed that authority.
-    result.into_fail_closed_public_solution_surface()
+    result
+        .without_solution_set_audit_report()
+        .try_into_fail_closed_public_solution_surface_with_memory_guard(|live, future| {
+            memory_guard(live, future)
+        })
+        .map_err(|error| match error {
+            clearra_core_executor::core_execution_result::CoreResultFieldReplacementError::ProjectionOverflow => {
+                CoreExecutionError::RuntimeUnavailable {
+                    component: "search_output_public_surface_memory_projection_overflow",
+                }
+            }
+            clearra_core_executor::core_execution_result::CoreResultFieldReplacementError::AllocationFailed { .. } => {
+                CoreExecutionError::RuntimeUnavailable {
+                    component: "search_output_public_surface_allocation_failed",
+                }
+            }
+            clearra_core_executor::core_execution_result::CoreResultFieldReplacementError::MemoryGuard(error) => error,
+        })
 }
 
 #[cfg(test)]
@@ -32,8 +51,8 @@ mod tests {
         solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
     };
     use clearra_core_executor::{
-        solution_probability::probability_reports, CoreExecutionResult, CorePathStep,
-        CorePostProcessScoreCell, CorePostProcessSpinCoverage, FinesseReport,
+        solution_probability::probability_reports, CoreExecutionError, CoreExecutionResult,
+        CorePathStep, CorePostProcessScoreCell, CorePostProcessSpinCoverage, FinesseReport,
         NormalizedSolutionCoverage, SolutionAverageScoreReport, SolutionCoverage,
     };
     use clearra_coverage::pattern::{
@@ -48,7 +67,14 @@ mod tests {
 
     use crate::AppRenderModel;
 
-    use super::finalize_coverage_summary_public_surface;
+    use super::finalize_coverage_summary_public_surface_with_memory_guard;
+
+    fn finalize_coverage_summary_public_surface(
+        result: CoreExecutionResult,
+    ) -> CoreExecutionResult {
+        finalize_coverage_summary_public_surface_with_memory_guard(result, &mut |_, _| Ok(()))
+            .expect("public surface")
+    }
 
     #[test]
     fn coverage_summary_public_surface_removes_materialized_solution_authority() {
@@ -66,6 +92,32 @@ mod tests {
 
         assert_eq!(public.coverage_pattern_words(), &[1]);
         assert_eq!(public.usize_field("covered_pattern_count"), Some(1));
+        assert_eq!(
+            public.field("b2b_preservation_selection"),
+            Some("existential")
+        );
+        assert_eq!(
+            public.field("b2b_preservation_denominator_semantics"),
+            Some("original-materialized-queue")
+        );
+        assert_eq!(
+            public.usize_field("b2b_preservation_pattern_universe_count"),
+            Some(1)
+        );
+        assert_eq!(public.usize_field("b2b_preserving_pattern_count"), Some(1));
+        assert_eq!(public.field("b2b_preservation_probability"), Some("1"));
+        assert_eq!(
+            public.bool_field("b2b_preservation_probability_complete"),
+            Some(true)
+        );
+        assert_eq!(
+            public.bool_field("b2b_preservation_witness_available"),
+            Some(false)
+        );
+        assert_eq!(
+            public.field("b2b_preservation_witness_candidate_key"),
+            Some("not-materialized")
+        );
         assert_eq!(
             public.field("b2b_preservation_evaluation_basis"),
             input.field("b2b_preservation_evaluation_basis")
@@ -281,6 +333,80 @@ mod tests {
         assert!(!text.contains("47"), "{text}");
     }
 
+    #[test]
+    fn unrelated_surface_is_a_zero_future_noop_for_the_memory_authority() {
+        let input = CoreExecutionResult::new(
+            vec![("search_kind".to_owned(), "setup".to_owned())],
+            Vec::new(),
+        );
+        let expected = input.clone();
+        let mut observed = Vec::new();
+        let actual =
+            finalize_coverage_summary_public_surface_with_memory_guard(input, &mut |_, future| {
+                observed.push(future);
+                Ok(())
+            })
+            .expect("unrelated public surface");
+        assert_eq!(actual, expected);
+        assert_eq!(observed, vec![0]);
+    }
+
+    #[test]
+    fn coverage_surface_accepts_exact_observed_peak_and_rejects_peak_minus_one() {
+        let mut peak = 0_u128;
+        finalize_coverage_summary_public_surface_with_memory_guard(
+            materialized_coverage_summary_result(),
+            &mut |live, future| {
+                let required = live
+                    .checked_resource_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .expect("checked guard input");
+                peak = peak.max(required);
+                Ok(())
+            },
+        )
+        .expect("dry public surface");
+        assert!(peak > 0);
+
+        finalize_coverage_summary_public_surface_with_memory_guard(
+            materialized_coverage_summary_result(),
+            &mut |live, future| {
+                let required = live
+                    .checked_resource_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .expect("checked guard input");
+                (required <= peak)
+                    .then_some(())
+                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                        component: "test_memory_cap",
+                    })
+            },
+        )
+        .expect("exact observed peak");
+
+        let error = finalize_coverage_summary_public_surface_with_memory_guard(
+            materialized_coverage_summary_result(),
+            &mut |live, future| {
+                let required = live
+                    .checked_resource_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .expect("checked guard input");
+                (required < peak)
+                    .then_some(())
+                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                        component: "test_memory_cap",
+                    })
+            },
+        )
+        .expect_err("peak minus one");
+        assert_eq!(
+            error,
+            CoreExecutionError::RuntimeUnavailable {
+                component: "test_memory_cap"
+            }
+        );
+    }
+
     fn materialized_coverage_summary_result() -> CoreExecutionResult {
         let identity = StandardBoard64TilingIdentity::from_placements(0, std::iter::empty())
             .expect("empty identity");
@@ -349,6 +475,48 @@ mod tests {
                     "solution-count-secret-47".to_owned(),
                 ),
                 ("covered_pattern_count".to_owned(), "1".to_owned()),
+                (
+                    "b2b_preservation_selection".to_owned(),
+                    "existential".to_owned(),
+                ),
+                (
+                    "b2b_preservation_denominator_semantics".to_owned(),
+                    "original-materialized-queue".to_owned(),
+                ),
+                (
+                    "b2b_preservation_pattern_universe_count".to_owned(),
+                    "1".to_owned(),
+                ),
+                ("b2b_preserving_pattern_count".to_owned(), "1".to_owned()),
+                ("b2b_preservation_probability".to_owned(), "1".to_owned()),
+                (
+                    "b2b_preservation_count_complete".to_owned(),
+                    "true".to_owned(),
+                ),
+                (
+                    "b2b_preservation_probability_complete".to_owned(),
+                    "true".to_owned(),
+                ),
+                (
+                    "b2b_preservation_witness_available".to_owned(),
+                    "true".to_owned(),
+                ),
+                (
+                    "b2b_preservation_witness_kind".to_owned(),
+                    "candidate-pattern".to_owned(),
+                ),
+                (
+                    "b2b_preservation_witness_pattern_semantics".to_owned(),
+                    "original-queue-index".to_owned(),
+                ),
+                (
+                    "b2b_preservation_witness_candidate_key".to_owned(),
+                    "solution-count-secret-47".to_owned(),
+                ),
+                (
+                    "b2b_preservation_witness_pattern_index".to_owned(),
+                    "0".to_owned(),
+                ),
                 (
                     "b2b_preservation_evaluation_basis".to_owned(),
                     "candidate-pattern-existence".to_owned(),

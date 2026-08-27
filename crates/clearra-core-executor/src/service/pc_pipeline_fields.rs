@@ -41,7 +41,11 @@ mod compact_problem_fields {
     }
 }
 mod execution_fields {
-    use crate::{buildup::BuildUpRunResult, packing::PackingRunResult, service::field};
+    use crate::{
+        buildup::BuildUpRunResult,
+        packing::PackingRunResult,
+        service::{field, pc_tiling_materialization::PcTilingMaterialization},
+    };
 
     pub(super) fn execution_fields(
         packing: &PackingRunResult,
@@ -67,6 +71,52 @@ mod execution_fields {
             field(
                 "packing_algorithm",
                 "geometry_catalog_exact_cover_buildable_stream",
+            ),
+        ]
+    }
+
+    pub(super) fn tiling_execution_fields(
+        packing: &PackingRunResult,
+        materialization: &PcTilingMaterialization,
+    ) -> Vec<(String, String)> {
+        vec![
+            field("packing_runner", "PackingRunner::run"),
+            field(
+                "buildup_runner",
+                if materialization.packing_source_raw_geometry() {
+                    "not-executed"
+                } else {
+                    "PackingRunner::embedded-buildability-filter"
+                },
+            ),
+            field(
+                "packing_execution_source",
+                packing.execution_source().as_str(),
+            ),
+            field(
+                "buildup_execution_source",
+                if materialization.packing_source_raw_geometry() {
+                    "not-executed-tiling"
+                } else {
+                    "embedded-in-packing"
+                },
+            ),
+            field(
+                "native_c_core_linked",
+                clearra_core_ffi::CoreCNative::linked(),
+            ),
+            field("native_c_core_executed", true),
+            field(
+                "native_c_core_fallback_policy",
+                "native-required-no-fallback",
+            ),
+            field(
+                "packing_algorithm",
+                if materialization.packing_source_raw_geometry() {
+                    "geometry-exact-cover-candidate-materialization"
+                } else {
+                    "geometry-catalog-exact-cover-buildable-stream"
+                },
             ),
         ]
     }
@@ -227,8 +277,30 @@ mod memory_fields {
         packing: &PackingRunResult,
         buildup: &BuildUpRunResult,
     ) -> Vec<(String, String)> {
+        memory_fields_with_buildup_workspace(packing, buildup.peak_workspace_bytes())
+    }
+
+    pub(super) fn tiling_memory_fields(
+        packing: &PackingRunResult,
+        materialization: &crate::service::pc_tiling_materialization::PcTilingMaterialization,
+    ) -> Vec<(String, String)> {
+        let mut fields = memory_fields_with_buildup_workspace(packing, 0);
+        fields.push(field(
+            "buildup_workspace_accounting_basis",
+            if materialization.packing_source_raw_geometry() {
+                "none-no-buildup"
+            } else {
+                "embedded-in-packing-resource-peak"
+            },
+        ));
+        fields
+    }
+
+    fn memory_fields_with_buildup_workspace(
+        packing: &PackingRunResult,
+        buildup_workspace_bytes: usize,
+    ) -> Vec<(String, String)> {
         let report = packing.memory_report();
-        let buildup_workspace_bytes = buildup.peak_workspace_bytes();
         let retained_search_bytes = report
             .retained_search_bytes()
             .saturating_add(buildup_workspace_bytes);
@@ -329,6 +401,27 @@ mod objective_fields {
         }
         fields
     }
+
+    pub(super) fn tiling_objective_fields(
+        materialization: &crate::service::pc_tiling_materialization::PcTilingMaterialization,
+        line_label: u8,
+    ) -> Vec<(String, String)> {
+        vec![
+            field("objective_search_complete", materialization.complete()),
+            field(
+                "objective_search_incomplete_reason",
+                materialization.incomplete_reason(),
+            ),
+            field("objective_complete", materialization.complete()),
+            field(
+                "objective_incomplete_reason",
+                materialization.incomplete_reason(),
+            ),
+            field("objective_coverage_matrix_rows", 0),
+            field("objective_min_cover_selected_rows", 0),
+            field("cleared_line_label", line_label),
+        ]
+    }
 }
 mod pipeline_fields {
     use clearra_core_ffi::CPackingProblem;
@@ -357,6 +450,38 @@ mod pipeline_fields {
         fields.extend(memory_fields(packing, buildup));
         fields.extend(result_contract_fields(packing, buildup, objective_policy));
         fields.extend(objective_fields(buildup, line_label, objective_policy));
+        fields
+    }
+
+    pub(crate) fn tiling_core_pipeline_fields(
+        compact_problem: &CPackingProblem,
+        packing: &PackingRunResult,
+        materialization: &crate::service::pc_tiling_materialization::PcTilingMaterialization,
+        line_label: u8,
+        objective_policy: clearra_objectives::policy::objective_policy::ObjectivePolicy,
+    ) -> Vec<(String, String)> {
+        let mut fields = compact_problem_fields(compact_problem);
+        fields.extend(super::execution_fields::tiling_execution_fields(
+            packing,
+            materialization,
+        ));
+        fields.extend(gpu_fields(packing));
+        fields.extend(hybrid_fields(packing));
+        fields.extend(super::memory_fields::tiling_memory_fields(
+            packing,
+            materialization,
+        ));
+        fields.extend(
+            super::result_contract_fields::tiling_result_contract_fields(
+                packing,
+                materialization,
+                objective_policy,
+            ),
+        );
+        fields.extend(super::objective_fields::tiling_objective_fields(
+            materialization,
+            line_label,
+        ));
         fields
     }
 }
@@ -471,6 +596,172 @@ mod result_contract_fields {
             ),
         ]
     }
+
+    pub(super) fn tiling_result_contract_fields(
+        packing: &PackingRunResult,
+        materialization: &crate::service::pc_tiling_materialization::PcTilingMaterialization,
+        objective_policy: ObjectivePolicy,
+    ) -> Vec<(String, String)> {
+        let packing_source_raw_geometry = materialization.packing_source_raw_geometry();
+        vec![
+            field(
+                "buildup",
+                if packing_source_raw_geometry {
+                    "not-executed-tiling"
+                } else {
+                    "embedded-in-packing"
+                },
+            ),
+            field("buildup_executed", packing.buildability_preverified()),
+            field("additional_buildup_executed", false),
+            field(
+                "buildup_execution_scope",
+                if packing_source_raw_geometry {
+                    "none"
+                } else {
+                    "packing-runner-buildability-prefilter"
+                },
+            ),
+            field("coverage_row_source", "not-calculated"),
+            field("search_execution_report", "attached"),
+            field("backend_report", "attached"),
+            field("packing_result", "C PackingResult"),
+            field("packing_candidate_view", "C PackingCandidateView"),
+            field("c_packing_result", "attached"),
+            field(
+                "buildup_result",
+                if packing_source_raw_geometry {
+                    "none"
+                } else {
+                    "embedded-buildability-verdict"
+                },
+            ),
+            field(
+                "c_buildup_result",
+                if packing_source_raw_geometry {
+                    "none"
+                } else {
+                    "embedded-in-packing"
+                },
+            ),
+            field("build_variant_view", "none"),
+            field("execution_variant_set", "none"),
+            field("coverage_row_view", "none"),
+            field("coverage_result", "not-calculated"),
+            field("coverage_reducer", "not-executed"),
+            field("coverage_source", "not-produced-tiling"),
+            field("coverage_rows", 0),
+            field("objective_result", "tiling-candidate-materialization"),
+            field("objective", "tiling"),
+            field(
+                "objective_execution",
+                if packing_source_raw_geometry {
+                    "geometry-tilings-only"
+                } else {
+                    "buildability-prefiltered-tiling-subset"
+                },
+            ),
+            field(
+                "objective_search_mode",
+                if packing_source_raw_geometry {
+                    "geometry-tilings-only"
+                } else {
+                    "buildability-prefiltered-tiling-subset"
+                },
+            ),
+            field("objective_applied", true),
+            field("rust_objective_reducer", "not-executed-tiling"),
+            field("rust_output_model", "CoreExecutionResult"),
+            field("replay_trace", "not-produced-tiling"),
+            field(
+                "postprocess_scoring_requested",
+                objective_policy.score().requested(),
+            ),
+            field(
+                "score_objective_mode",
+                objective_policy.score().mode().as_str(),
+            ),
+            field(
+                "score_profile_requested",
+                objective_policy.score().profile().as_str(),
+            ),
+            field(
+                "spin_profile_requested",
+                objective_policy.score().spin_profile().as_str(),
+            ),
+            field("score_initial_b2b", objective_policy.score().initial_b2b()),
+            field("postprocess_execution_owner", "none-tiling"),
+            field("postprocess_replay_seed_available", false),
+            field("postprocess_execution_count", 0),
+            field(
+                "postprocess_execution_complete",
+                !objective_policy.score().requested(),
+            ),
+            field("postprocess_pattern_weight_count", 0),
+            field("packing_candidate_is_solution", true),
+            field(
+                "packing_source_raw_geometry",
+                materialization.packing_source_raw_geometry(),
+            ),
+            field(
+                "packing_source_buildability_preverified",
+                packing.buildability_preverified(),
+            ),
+            field(
+                "tiling_objective_canonical",
+                materialization.canonical_tiling_objective(),
+            ),
+            field(
+                "tiling_materialization_memory_admission_accounted",
+                materialization.memory_admission_accounted(),
+            ),
+            field(
+                "tiling_materialization_complete",
+                materialization.complete(),
+            ),
+            field(
+                "tiling_materialization_incomplete_reason",
+                materialization.incomplete_reason(),
+            ),
+            field(
+                "tiling_materialization_semantics",
+                if materialization.complete() {
+                    "raw-geometry-candidates-no-buildup"
+                } else if packing_source_raw_geometry {
+                    "raw-geometry-candidates-no-buildup-incomplete"
+                } else {
+                    "buildability-prefiltered-candidate-subset-incomplete"
+                },
+            ),
+            field("packing_candidate_count", packing.candidate_count()),
+            field(
+                "packing_multiset_group_count",
+                packing.multiset_group_count(),
+            ),
+            field(
+                "packing_pattern_membership_kind",
+                packing.multiset_membership_kind().as_str(),
+            ),
+            field("packing_count_complete", packing.count_complete()),
+            field(
+                "packing_truncation_reason",
+                packing
+                    .truncation_reason()
+                    .map(|reason| reason.as_str())
+                    .unwrap_or("none"),
+            ),
+            field("build_variant_count", 0),
+            field("build_variant_count_exact", false),
+            field("buildability_verified", packing.buildability_preverified()),
+            field("pattern_verified_execution_count", 0),
+            field("unique_trace_count", 0),
+            field("coverage_row_count", 0),
+            field("coverage_calculated", false),
+            field("probability_calculated", false),
+            field("coverage_probability", "not-calculated"),
+        ]
+    }
 }
 
 pub(crate) use pipeline_fields::core_pipeline_fields;
+pub(crate) use pipeline_fields::tiling_core_pipeline_fields;

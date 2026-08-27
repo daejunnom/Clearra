@@ -63,9 +63,37 @@ impl SpinCoverageExecutionGraph {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.candidate_key.capacity()
-            + self.nodes.capacity() * core::mem::size_of::<ScoringExecutionNode>()
-            + self.edges.capacity() * core::mem::size_of::<ScoringExecutionEdge>()
+        usize::try_from(self.checked_nested_retained_bytes().unwrap_or(u128::MAX))
+            .unwrap_or(usize::MAX)
+    }
+
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        (self.candidate_key.capacity() as u128)
+            .checked_add(
+                (self.nodes.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)?,
+            )?
+            .checked_add(
+                (self.edges.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)?,
+            )
+    }
+
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        (self.candidate_key.len() as u128)
+            .checked_add(
+                (self.nodes.len() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)?,
+            )?
+            .checked_add(
+                (self.edges.len() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)?,
+            )
+    }
+
+    pub fn checked_clone_peak_bytes(&self) -> Option<u128> {
+        self.checked_nested_retained_bytes()?
+            .checked_add(self.checked_clone_nested_bytes()?)
     }
 }
 
@@ -162,14 +190,111 @@ impl SpinCoverageExecutionBatch {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.patterns
-            .iter()
-            .map(|pattern| pattern.capacity() * core::mem::size_of::<PieceKind>())
-            .sum::<usize>()
-            + self
-                .graphs
-                .iter()
-                .map(SpinCoverageExecutionGraph::retained_bytes)
-                .sum::<usize>()
+        usize::try_from(self.checked_nested_retained_bytes().unwrap_or(u128::MAX))
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Complete nested backing owned by this batch. In particular, the two
+    /// outer `Vec` buffers use their actual capacities rather than logical
+    /// lengths, so spare-capacity constructors cannot understate retention.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.patterns.capacity() as u128)
+            .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
+        for pattern in &self.patterns {
+            bytes = bytes.checked_add(
+                (pattern.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?;
+        }
+        bytes = bytes.checked_add(
+            (self.graphs.capacity() as u128)
+                .checked_mul(core::mem::size_of::<SpinCoverageExecutionGraph>() as u128)?,
+        )?;
+        for graph in &self.graphs {
+            bytes = bytes.checked_add(graph.checked_nested_retained_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.patterns.len() as u128)
+            .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
+        for pattern in &self.patterns {
+            bytes = bytes.checked_add(
+                (pattern.len() as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?;
+        }
+        bytes = bytes.checked_add(
+            (self.graphs.len() as u128)
+                .checked_mul(core::mem::size_of::<SpinCoverageExecutionGraph>() as u128)?,
+        )?;
+        for graph in &self.graphs {
+            bytes = bytes.checked_add(graph.checked_clone_nested_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    pub fn checked_clone_peak_bytes(&self) -> Option<u128> {
+        self.checked_nested_retained_bytes()?
+            .checked_add(self.checked_clone_nested_bytes()?)
+    }
+}
+
+#[cfg(test)]
+mod memory_projection_tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    use super::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
+
+    fn reserved(value: &str, capacity: usize) -> String {
+        let mut result = String::with_capacity(capacity);
+        result.push_str(value);
+        result
+    }
+
+    #[test]
+    fn batch_projection_uses_outer_and_nested_capacities() {
+        let mut pattern = Vec::with_capacity(7);
+        pattern.push(PieceKind::T);
+        let mut patterns = Vec::with_capacity(5);
+        patterns.push(pattern);
+
+        let graph = SpinCoverageExecutionGraph {
+            candidate_id: 1,
+            candidate_key: reserved("candidate", 43),
+            root: 0,
+            nodes: Vec::with_capacity(3),
+            edges: Vec::with_capacity(11),
+        };
+        let mut graphs = Vec::with_capacity(4);
+        graphs.push(graph);
+        let batch = SpinCoverageExecutionBatch::new(
+            patterns, 0, None, true, false, false, 1, 1, graphs, true,
+        );
+
+        let expected = 5 * core::mem::size_of::<Vec<PieceKind>>()
+            + 7 * core::mem::size_of::<PieceKind>()
+            + 4 * core::mem::size_of::<SpinCoverageExecutionGraph>()
+            + 43
+            + 3 * core::mem::size_of::<crate::ScoringExecutionNode>()
+            + 11 * core::mem::size_of::<crate::ScoringExecutionEdge>();
+        assert_eq!(
+            batch.checked_nested_retained_bytes(),
+            Some(expected as u128)
+        );
+        assert_eq!(batch.retained_bytes(), expected);
+
+        let clone_bytes = core::mem::size_of::<Vec<PieceKind>>()
+            + core::mem::size_of::<PieceKind>()
+            + core::mem::size_of::<SpinCoverageExecutionGraph>()
+            + "candidate".len();
+        assert_eq!(
+            batch.checked_clone_nested_bytes(),
+            Some(clone_bytes as u128)
+        );
+        assert_eq!(
+            batch.checked_clone_peak_bytes(),
+            Some((expected + clone_bytes) as u128)
+        );
     }
 }

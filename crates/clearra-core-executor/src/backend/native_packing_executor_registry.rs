@@ -50,6 +50,23 @@ impl SearchBackendExecutorResolver for NativePackingExecutorRegistry {
     }
 
     fn supports_native_candidate_streaming(&self) -> bool {
-        true
+        // The buildable streaming path owns native catalog allocation and its
+        // shared resource lease.  When the native C core is not linked there is
+        // no allocator to govern, so report the runtime as unavailable before
+        // attempting resource admission or materializing the packing family.
+        cfg!(feature = "native-c-core")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NativePackingExecutorRegistry, SearchBackendExecutorResolver};
+
+    #[test]
+    fn native_candidate_streaming_requires_the_linked_native_feature() {
+        assert_eq!(
+            NativePackingExecutorRegistry::default().supports_native_candidate_streaming(),
+            cfg!(feature = "native-c-core")
+        );
     }
 }

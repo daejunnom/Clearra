@@ -7,26 +7,59 @@ import {
   type ClearraWasmModule
 } from './clearraWasmRuntime';
 import { listenForWasmOwnerTermination } from '@clearra/ui/wasm-lifecycle';
+import {
+  WORKER_HEARTBEAT_INTERVAL_MS,
+  sha256Hex,
+  type DelegationAcceptance,
+  type DelegationOffer,
+  type ExecutableDelegationPermit
+} from './DurableDelegationJournal';
 
 type VerifierRequest =
+  | { type: 'delegation-offer'; offer: DelegationOffer }
+  | {
+      type: 'delegation-run';
+      taskId: string;
+      fencingTokenDecimal: string;
+    }
   | {
       type: 'prewarm';
       compiledModule?: WebAssembly.Module;
       lifecycleOwnerId?: string;
       hostCapabilities?: ClearraWasmHostCapabilities;
+      workerId: string;
     }
   | {
       type: 'initialize';
       initialization: string | ArrayBuffer;
       lifecycleOwnerId?: string;
       hostCapabilities?: ClearraWasmHostCapabilities;
+      delegation: ExecutableDelegationPermit;
     }
-  | { type: 'consume'; requestId: number; batch: ArrayBuffer }
-  | { type: 'finish'; requestId: number }
+  | {
+      type: 'consume';
+      requestId: number;
+      batch: ArrayBuffer;
+      delegation: ExecutableDelegationPermit;
+    }
+  | { type: 'finish'; requestId: number; delegation: ExecutableDelegationPermit }
   | { type: 'dispose' };
 
 type VerifierResponse =
   | { type: 'prewarmed' }
+  | { type: 'delegation-accepted'; acceptance: DelegationAcceptance }
+  | {
+      type: 'delegation-started';
+      taskId: string;
+      fencingTokenDecimal: string;
+    }
+  | {
+      type: 'delegation-rejected';
+      taskId: string;
+      fencingTokenDecimal: string;
+      code: string;
+      message: string;
+    }
   | { type: 'ready' }
   | {
       type: 'heartbeat';
@@ -50,7 +83,13 @@ let wasm: ClearraWasmModule | null = null;
 let initialized = false;
 let lifecycleOwnerId = '';
 let closeLifecycleListener: (() => void) | null = null;
-const HEARTBEAT_INTERVAL_MS = 1_000;
+const acceptedOffers = new Map<string, DelegationOffer>();
+type ExecutableVerifierRequest = Extract<
+  VerifierRequest,
+  { type: 'initialize' | 'consume' | 'finish' }
+>;
+const stagedExecutables = new Map<string, ExecutableVerifierRequest>();
+let workerId = '';
 
 self.onmessage = (event: MessageEvent<VerifierRequest>) => {
   void handleRequest(event.data);
@@ -58,6 +97,22 @@ self.onmessage = (event: MessageEvent<VerifierRequest>) => {
 
 async function handleRequest(request: VerifierRequest) {
   try {
+    if (request.type === 'delegation-offer') {
+      await acceptDelegationOffer(request.offer);
+      return;
+    }
+    if (request.type === 'delegation-run') {
+      const staged = stagedExecutables.get(request.taskId);
+      if (
+        !staged ||
+        staged.delegation.fencingTokenDecimal !== request.fencingTokenDecimal
+      ) {
+        throw new Error('executable start ACK is absent, stale, or mismatched');
+      }
+      stagedExecutables.delete(request.taskId);
+      await executeAuthorized(staged);
+      return;
+    }
     if ('lifecycleOwnerId' in request && request.lifecycleOwnerId) {
       bindLifecycleOwner(request.lifecycleOwnerId);
     }
@@ -66,6 +121,13 @@ async function handleRequest(request: VerifierRequest) {
       return;
     }
     if (request.type === 'prewarm') {
+      if (!isPositiveDecimal(request.workerId)) {
+        throw new Error('durable verifier worker ID must be a job-local positive integer');
+      }
+      if (workerId && workerId !== request.workerId) {
+        throw new Error('durable verifier worker ID changed after binding');
+      }
+      workerId = request.workerId;
       wasm ??= await loadClearraWasmModule(
         request.compiledModule,
         request.hostCapabilities
@@ -73,15 +135,72 @@ async function handleRequest(request: VerifierRequest) {
       post({ type: 'prewarmed' });
       return;
     }
-    if (request.type === 'initialize') {
-      wasm ??= await loadClearraWasmModule(undefined, request.hostCapabilities);
-      wasm.distributed_verifier_start(request.initialization);
-      initialized = true;
-      post({ type: 'ready' });
+    if (
+      request.type === 'initialize' ||
+      request.type === 'consume' ||
+      request.type === 'finish'
+    ) {
+      await stageExecutable(request);
       return;
     }
-    if (!wasm || !initialized) throw new Error('distributed verifier is not initialized');
-    if (request.type === 'consume') {
+    const unreachable: never = request;
+    throw new Error(`unsupported verifier request ${String(unreachable)}`);
+  } catch (error) {
+    if (request.type === 'delegation-offer') {
+      post({
+        type: 'delegation-rejected',
+        taskId: request.offer.taskId,
+        fencingTokenDecimal: request.offer.fencingTokenDecimal,
+        code: 'E_WASM_DELEGATION_REJECTED',
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    const failure = verifierFailure(error, wasm);
+    initialized = false;
+    try {
+      wasm?.distributed_reset();
+    } catch {
+      // The parent pool terminates this worker after receiving the failure.
+    }
+    post({
+      type: 'failed',
+      requestId: 'requestId' in request ? request.requestId : undefined,
+      code: failure.code,
+      message: failure.message
+    });
+  }
+}
+
+async function stageExecutable(request: ExecutableVerifierRequest): Promise<void> {
+  const payload =
+    request.type === 'initialize'
+      ? request.initialization
+      : request.type === 'consume'
+        ? request.batch
+        : 'clearra-verifier-finish-v1';
+  await authorizeExecutable(request.delegation, payload);
+  if (stagedExecutables.has(request.delegation.taskId)) {
+    throw new Error('executable delegation is already staged');
+  }
+  stagedExecutables.set(request.delegation.taskId, request);
+  post({
+    type: 'delegation-started',
+    taskId: request.delegation.taskId,
+    fencingTokenDecimal: request.delegation.fencingTokenDecimal
+  });
+}
+
+async function executeAuthorized(request: ExecutableVerifierRequest): Promise<void> {
+  if (request.type === 'initialize') {
+    wasm ??= await loadClearraWasmModule(undefined, request.hostCapabilities);
+    wasm.distributed_verifier_start(request.initialization);
+    initialized = true;
+    post({ type: 'ready' });
+    return;
+  }
+  if (!wasm || !initialized) throw new Error('distributed verifier is not initialized');
+  if (request.type === 'consume') {
       let lastHeartbeatAt = performance.now();
       let consumed: ClearraDistributedVerifierConsume =
         wasm.distributed_verifier_consume(request.batch);
@@ -97,7 +216,7 @@ async function handleRequest(request: VerifierRequest) {
           );
         }
         const now = performance.now();
-        if (now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+        if (now - lastHeartbeatAt >= WORKER_HEARTBEAT_INTERVAL_MS) {
           lastHeartbeatAt = postHeartbeat(request.requestId, wasm, now);
         }
         await yieldToHost();
@@ -121,26 +240,88 @@ async function handleRequest(request: VerifierRequest) {
       };
       post(response, consumed.partial ? [consumed.partial] : []);
       return;
-    }
-    postHeartbeat(request.requestId, wasm);
-    const partial = wasm.distributed_verifier_finish();
-    initialized = false;
-    post({ type: 'finished', requestId: request.requestId, partial }, [partial]);
-  } catch (error) {
-    const failure = verifierFailure(error, wasm);
-    initialized = false;
-    try {
-      wasm?.distributed_reset();
-    } catch {
-      // The parent pool terminates this worker after receiving the failure.
-    }
-    post({
-      type: 'failed',
-      requestId: 'requestId' in request ? request.requestId : undefined,
-      code: failure.code,
-      message: failure.message
-    });
   }
+  postHeartbeat(request.requestId, wasm);
+  const partial = wasm.distributed_verifier_finish();
+  initialized = false;
+  post({ type: 'finished', requestId: request.requestId, partial }, [partial]);
+}
+
+async function acceptDelegationOffer(offer: DelegationOffer): Promise<void> {
+  if (!workerId) throw new Error('durable verifier worker ID is not bound');
+  if (
+    offer.schemaVersion !== 1 ||
+    offer.jobId.length === 0 ||
+    offer.taskId.length === 0 ||
+    offer.coordinatorId.length === 0 ||
+    !isSha256(offer.payloadSha256) ||
+    !isSha256(offer.requestSha256) ||
+    !isPositiveDecimal(offer.computeUnitsDecimal) ||
+    !isDecimal(offer.memoryBytesDecimal) ||
+    !isPositiveDecimal(offer.fencingTokenDecimal) ||
+    !isDecimal(offer.acceptByUnixMsDecimal)
+  ) {
+    throw new Error('invalid durable delegation offer');
+  }
+  if (Number(offer.acceptByUnixMsDecimal) < Date.now()) {
+    throw new Error('durable delegation offer expired');
+  }
+  const existing = acceptedOffers.get(offer.taskId);
+  if (existing && existing.fencingTokenDecimal !== offer.fencingTokenDecimal) {
+    throw new Error('durable delegation task reused with a different fence');
+  }
+  if (existing) throw new Error('durable delegation offer was already accepted');
+  acceptedOffers.set(offer.taskId, offer);
+  const reservationSha256 = await sha256Hex(
+    `clearra-reservation-v1\0${workerId}\0${offer.taskId}\0${offer.fencingTokenDecimal}\0${offer.payloadSha256}`
+  );
+  post({
+    type: 'delegation-accepted',
+    acceptance: {
+      taskId: offer.taskId,
+      fencingTokenDecimal: offer.fencingTokenDecimal,
+      workerId,
+      reservationSha256
+    }
+  });
+}
+
+async function authorizeExecutable(
+  permit: ExecutableDelegationPermit,
+  payload: string | ArrayBuffer
+): Promise<void> {
+  const offer = acceptedOffers.get(permit.taskId);
+  if (
+    permit.schemaVersion !== 1 ||
+    !offer ||
+    permit.jobId !== offer.jobId ||
+    permit.workerId !== workerId ||
+    permit.fencingTokenDecimal !== offer.fencingTokenDecimal ||
+    permit.payloadSha256 !== offer.payloadSha256 ||
+    permit.requestSha256 !== offer.requestSha256 ||
+    !isPositiveDecimal(permit.publicationSequenceDecimal) ||
+    !isSha256(permit.publicationSha256) ||
+    !isDecimal(permit.expiresAtUnixMsDecimal) ||
+    Number(permit.expiresAtUnixMsDecimal) < Date.now()
+  ) {
+    throw new Error('executable delegation permit is absent, stale, or mismatched');
+  }
+  if ((await sha256Hex(payload)) !== permit.payloadSha256) {
+    throw new Error('executable delegation payload digest mismatch');
+  }
+  acceptedOffers.delete(permit.taskId);
+}
+
+function isDecimal(value: string): boolean {
+  return /^(0|[1-9][0-9]*)$/.test(value);
+}
+
+function isPositiveDecimal(value: string): boolean {
+  return /^[1-9][0-9]*$/.test(value);
+}
+
+function isSha256(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
 }
 
 function addVerifierCounts(
@@ -196,6 +377,8 @@ function disposeVerifierRuntime() {
   closeLifecycleListener?.();
   closeLifecycleListener = null;
   lifecycleOwnerId = '';
+  acceptedOffers.clear();
+  stagedExecutables.clear();
   self.close();
 }
 

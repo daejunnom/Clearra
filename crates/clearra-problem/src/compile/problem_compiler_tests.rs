@@ -308,6 +308,54 @@ mod case_percent_compiles_to_coverage_summary {
     }
 }
 
+mod case_pc_tiling_uses_a_dedicated_geometry_family_output_policy {
+    use super::*;
+
+    #[test]
+    fn generic_tiling_objective_does_not_acquire_the_product_output_policy() {
+        let opening = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_objective(ObjectivePolicy::tiling());
+        let scenario = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::default(),
+            PieceWindow::new(5),
+        )
+        .with_objective(ObjectivePolicy::tiling());
+
+        for problem in [
+            ProblemCompiler::compile_opening_pc(&opening).expect("generic opening PC"),
+            ProblemCompiler::compile_scenario_pc(&scenario).expect("generic scenario PC"),
+        ] {
+            assert_eq!(problem.output_policy(), SearchOutputPolicy::Trace);
+            assert_ne!(problem.output_policy().as_str(), "tiling-only");
+        }
+    }
+
+    #[test]
+    fn canonical_tiling_compilers_retain_only_the_complete_geometry_family() {
+        let opening = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_objective(ObjectivePolicy::tiling());
+        let scenario = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::default(),
+            PieceWindow::new(5),
+        )
+        .with_objective(ObjectivePolicy::tiling());
+
+        for problem in [
+            ProblemCompiler::compile_opening_pc_tiling(&opening).expect("typed opening PC tiling"),
+            ProblemCompiler::compile_scenario_pc_tiling(&scenario)
+                .expect("typed scenario PC tiling"),
+        ] {
+            assert_eq!(problem.output_policy(), SearchOutputPolicy::TilingOnly);
+            assert_eq!(problem.output_policy().as_str(), "tiling-only");
+            assert!(problem.output_policy().retains_solution_set());
+            assert!(!problem.output_policy().retains_representative_trace());
+            assert!(!problem.output_policy().retains_candidate_digest());
+        }
+    }
+}
+
 mod case_occupied_initial_hold_projects_terminal_standard_bag_lookahead {
     use super::*;
 

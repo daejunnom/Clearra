@@ -14,7 +14,13 @@ use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SetupTerminalSupplyTarget;
 use clearra_supply::{
+    execution_automaton::{
+        SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState,
+        SupplyObservationIdentity, SupplyProvenanceId,
+    },
+    hold::hold_policy::HoldPolicy,
     pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex},
+    piece_source::{PieceSourceId, PieceSourceKind},
     QueueObservationPolicy,
 };
 
@@ -863,6 +869,7 @@ pub(super) struct QueueObservationPolicyEvaluator {
     initial_hold_code: u8,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
+    supply_identity: SupplyExecutionState,
     terminal_supply_target: Option<SetupTerminalSupplyTarget>,
     memo: ExactHashMap<PolicyMemoState, PolicyValue>,
     zero_scores: ExactHashSet<PolicyMemoState>,
@@ -908,6 +915,7 @@ impl QueueObservationPolicyEvaluator {
             visible_piece_count,
             projects_standard_bag_lookahead,
         )?;
+        let supply_identity = universe.pattern_universe_id().get();
         Ok(Self {
             trie: Arc::new(trie),
             policy,
@@ -915,6 +923,23 @@ impl QueueObservationPolicyEvaluator {
             initial_hold_code: initial_hold.map_or(0, piece_code),
             hold_enabled,
             projects_unplaced_lookahead,
+            supply_identity: SupplyExecutionState::with_contract(
+                PieceSourceId::new(supply_identity),
+                PieceSourceKind::ObservedWindow,
+                u16::try_from(initial_cursor).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_observation_initial_cursor_overflow")
+                })?,
+                initial_hold,
+                if hold_enabled {
+                    HoldPolicy::Allowed
+                } else {
+                    HoldPolicy::Forbidden
+                },
+                0,
+                0,
+                SupplyObservationIdentity::new(policy, supply_identity),
+                SupplyProvenanceId(supply_identity),
+            ),
             terminal_supply_target,
             memo: ExactHashMap::default(),
             zero_scores: ExactHashSet::default(),
@@ -1052,6 +1077,7 @@ impl QueueObservationPolicyEvaluator {
             initial_hold_code: self.initial_hold_code,
             hold_enabled: self.hold_enabled,
             projects_unplaced_lookahead: self.projects_unplaced_lookahead,
+            supply_identity: self.supply_identity,
             terminal_supply_target: self.terminal_supply_target,
             memo: ExactHashMap::default(),
             zero_scores: ExactHashSet::default(),
@@ -1169,9 +1195,12 @@ impl QueueObservationPolicyEvaluator {
     ) -> Result<(PolicyValue, Option<PolicyTransition>), WasmExactSearchError> {
         let cursor = usize::from(state.source_cursor);
         let current_piece = self.trie.piece_at(state.observation_node, cursor);
-        let next_piece = self
-            .trie
-            .piece_at(state.observation_node, cursor.saturating_add(1));
+        let next_position = cursor
+            .checked_add(1)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_queue_position_overflow",
+            ))?;
+        let next_piece = self.trie.piece_at(state.observation_node, next_position);
         let edge_count = language.edge_count(state.language_node).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_observation_language_node_out_of_range"),
         )?;
@@ -1182,16 +1211,13 @@ impl QueueObservationPolicyEvaluator {
                 WasmExactSearchError::InvalidProblem("wasm_observation_language_edge_out_of_range"),
             )?;
             if current_piece == Some(desired_piece) {
-                let transition = PolicyTransition {
+                let transition = self.supply_transition(
+                    state,
                     child,
-                    source_cursor: state.source_cursor.checked_add(1).ok_or(
-                        WasmExactSearchError::InvalidProblem(
-                            "wasm_observation_queue_position_overflow",
-                        ),
-                    )?,
-                    hold_code: state.hold_code,
-                    action: SupplyAction::UseCurrent,
-                };
+                    SupplyBranchKind::Current,
+                    desired_piece,
+                    None,
+                )?;
                 self.consider(
                     language,
                     state,
@@ -1204,16 +1230,13 @@ impl QueueObservationPolicyEvaluator {
             }
             if self.hold_enabled && state.hold_code != 0 && state.hold_code == desired_piece {
                 if let Some(current_piece) = current_piece {
-                    let transition = PolicyTransition {
+                    let transition = self.supply_transition(
+                        state,
                         child,
-                        source_cursor: state.source_cursor.checked_add(1).ok_or(
-                            WasmExactSearchError::InvalidProblem(
-                                "wasm_observation_queue_position_overflow",
-                            ),
-                        )?,
-                        hold_code: current_piece,
-                        action: SupplyAction::SwapHeld,
-                    };
+                        SupplyBranchKind::SwapHeld,
+                        current_piece,
+                        None,
+                    )?;
                     self.consider(
                         language,
                         state,
@@ -1227,16 +1250,13 @@ impl QueueObservationPolicyEvaluator {
             } else if self.hold_enabled && state.hold_code == 0 && next_piece == Some(desired_piece)
             {
                 if let Some(current_piece) = current_piece {
-                    let transition = PolicyTransition {
+                    let transition = self.supply_transition(
+                        state,
                         child,
-                        source_cursor: state.source_cursor.checked_add(2).ok_or(
-                            WasmExactSearchError::InvalidProblem(
-                                "wasm_observation_queue_position_overflow",
-                            ),
-                        )?,
-                        hold_code: current_piece,
-                        action: SupplyAction::StoreCurrentUseNext,
-                    };
+                        SupplyBranchKind::StoreCurrent,
+                        current_piece,
+                        Some(desired_piece),
+                    )?;
                     self.consider(
                         language,
                         state,
@@ -1272,6 +1292,58 @@ impl QueueObservationPolicyEvaluator {
             }
         }
         Ok((best, best_transition))
+    }
+
+    fn supply_transition(
+        &self,
+        state: PolicyState,
+        child: u32,
+        branch_kind: SupplyBranchKind,
+        current_piece: u8,
+        next_piece: Option<u8>,
+    ) -> Result<PolicyTransition, WasmExactSearchError> {
+        let hold_piece = match state.hold_code {
+            0 => None,
+            1..=7 => Some(piece_from_code(state.hold_code)),
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_hold_state_invalid",
+                ))
+            }
+        };
+        let mut supply_state = SupplyExecutionState {
+            cursor: state.source_cursor,
+            hold_piece,
+            hold_empty: hold_piece.is_none(),
+            ..self.supply_identity
+        };
+        supply_state.observation.observation_id =
+            self.supply_identity.observation.observation_id ^ u64::from(state.observation_node);
+        let step = SupplyExecutionAutomaton::sequence()
+            .transition(
+                supply_state,
+                branch_kind,
+                piece_from_code(current_piece),
+                next_piece.map(piece_from_code),
+            )
+            .map_err(|error| match error {
+                clearra_supply::SupplyExecutionError::CursorExhausted => {
+                    WasmExactSearchError::InvalidProblem("wasm_observation_queue_position_overflow")
+                }
+                _ => WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_supply_transition_invalid",
+                ),
+            })?;
+        Ok(PolicyTransition {
+            child,
+            source_cursor: step.next_state.cursor,
+            hold_code: step.next_state.hold_piece.map_or(0, piece_code),
+            action: match step.evidence.branch_kind {
+                SupplyBranchKind::Current => SupplyAction::UseCurrent,
+                SupplyBranchKind::SwapHeld => SupplyAction::SwapHeld,
+                SupplyBranchKind::StoreCurrent => SupplyAction::StoreCurrentUseNext,
+            },
+        })
     }
 
     fn memo_state<G: ObservationPieceLanguage>(

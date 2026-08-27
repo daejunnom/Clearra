@@ -2,6 +2,12 @@
   import { AlertTriangle, CheckCircle2, LoaderCircle, Search } from '@lucide/svelte';
 
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
+  import ProductResultPager from './ProductResultPager.svelte';
+  import type {
+    ProductMemberPageLoader,
+    ProductNextPageLoader,
+    ProductPageRelease
+  } from './productResultPager';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
   import {
@@ -27,10 +33,14 @@
   export let elapsedMs = 0;
   export let targetLines = 4;
   export let loadSolutionPage: SolutionPageLoader | null = null;
+  export let loadNextProductPage: ProductNextPageLoader | null = null;
+  export let loadProductMemberPage: ProductMemberPageLoader | null = null;
+  export let releaseProductPages: ProductPageRelease | null = null;
 
   let copyFormat: SolutionCopyFormat = 'ctk';
 
   $: report = view.searchReport;
+  $: productResultPayload = view.response?.product_result_payload ?? null;
   $: solutionKeys = report?.normalized_solution_keys ?? [];
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
   $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
@@ -136,6 +146,14 @@
           />
         {/if}
       </div>
+
+      <ProductResultPager
+        payload={productResultPayload}
+        {language}
+        loadNextPage={loadNextProductPage}
+        loadMemberPage={loadProductMemberPage}
+        releasePages={releaseProductPages}
+      />
 
       {#if solutionCount === null}
         <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>

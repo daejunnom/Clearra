@@ -2,7 +2,11 @@ import {
   prepareClearraArguments,
   tokenizeCommand,
 } from "./command.mjs";
-import { findSlashCommand } from "../discord/slash-command-catalog.mjs";
+import {
+  findShadowedTextCommand,
+  findTextCommand,
+} from "../discord/slash-command-catalog.mjs";
+import { hiddenTextSearchCapabilities } from "../discord/capability-registry.mjs";
 import {
   buildSlashCommandArgumentPlan,
   DISCORD_PACKED_OPTION_KEYS,
@@ -30,6 +34,18 @@ const OPTION_ALIASES = new Map([
   ["-t", "field"],
   ["--base", "base"],
   ["--target", "target"],
+  ["--base-mask", "base-mask"],
+  ["--target-mask", "target-mask"],
+  ["--target-format", "target-format"],
+  ["--target-document", "target-document"],
+  ["--solution-format", "solution-format"],
+  ["--solution-document", "solution-document"],
+  ["--document-format", "document-format"],
+  ["--setup-queue", "setup-queue"],
+  ["--setup-patterns", "setup-patterns"],
+  ["--solution-queue", "solution-queue"],
+  ["--solution-patterns", "solution-patterns"],
+  ["--objective", "objective"],
   ["--next", "next"],
   ["--patterns", "next"],
   ["--pattern", "next"],
@@ -37,9 +53,11 @@ const OPTION_ALIASES = new Map([
   ["-p", "next"],
   ["--lines", "lines"],
   ["--clear", "lines"],
+  ["--clear-height", "clear"],
   ["-c", "lines"],
   ["--kicktable", "kicktable"],
   ["--rule", "kicktable"],
+  ["--height", "height"],
   ["--options", "options"],
   ["--remaining", "remaining"],
   ["--priority", "priority"],
@@ -50,10 +68,37 @@ const OPTION_ALIASES = new Map([
   ["--pieces", "pieces"],
   ["--inventory", "pieces"],
   ["--profile", "profile"],
-  ["--spin-profile", "profile"],
+  ["--spin-profile", "spin-profile"],
+  ["--score-profile", "score-profile"],
+  ["--spin-category", "spin-category"],
+  ["--damage-mode", "damage-mode"],
+  ["--minimum-damage", "minimum-damage"],
+  ["--failed-count", "failed-count"],
+  ["--max-patterns", "max-patterns"],
+  ["--final-piece", "final-piece"],
+  ["--dependency-report", "dependency-report"],
+  ["--max-nodes", "max-nodes"],
+  ["--max-frontier-states", "max-frontier-states"],
+  ["--max-candidates", "max-candidates"],
+  ["--max-memory-mib", "max-memory-mib"],
+  ["--initial-combo", "initial-combo"],
+  ["--initial-b2b", "initial-b2b"],
+  ["--fill-bottom", "fill-bottom"],
+  ["--fill-top", "fill-top"],
+  ["--max-placements", "max-placements"],
+  ["--minimality", "minimality"],
+  ["--mode", "mode"],
+  ["--qb", "qb"],
+  ["--post-cycle-borrow", "post-cycle-borrow"],
+  ["--source-pieces", "source-pieces"],
+  ["--aggregate", "aggregation"],
+  ["--aggregation", "aggregation"],
   ["--scope", "scope"],
   ["--image", "image"],
   ["--document", "document"],
+  ["--finesse", "finesse"],
+  ["--finesse-knowledge", "finesse-knowledge"],
+  ["--mirror", "mirror"],
 ]);
 
 const PACKED_TEXT_OPTIONS = new Map([
@@ -78,7 +123,52 @@ const PACKED_BOOLEAN_FLAGS = new Map([
   ["--no-post-cycle-borrow", ["post-cycle-borrow", "off"]],
   ["--preserve-b2b", ["preserve-b2b", "on"]],
   ["--no-preserve-b2b", ["preserve-b2b", "off"]],
+  ["--solution-probabilities", ["solution-probabilities", "on"]],
+  ["--no-solution-probabilities", ["solution-probabilities", "off"]],
+  ["--dependency-report", ["dependency-report", "on"]],
+  ["--no-dependency-report", ["dependency-report", "off"]],
 ]);
+
+// Objective selection is an advanced text-only projection over pc.path. Every
+// accepted objective resolves to its own canonical typed calculation; the
+// pc.path parser itself never receives an explicit objective override.
+const ADVANCED_PC_OBJECTIVES = new Map([
+  ["all", Object.freeze({ subcommand: "path", capabilityId: "pc.path" })],
+  ["unique", Object.freeze({ subcommand: "chance", capabilityId: "pc.chance" })],
+  ["min-cover", Object.freeze({ subcommand: "minimals", capabilityId: "pc.minimals" })],
+  ["tiling", Object.freeze({ subcommand: "tiling", capabilityId: "pc.tiling" })],
+]);
+const ADVANCED_PC_OBJECTIVE_ALIASES = new Map([
+  ["minimum-cover", "min-cover"],
+]);
+
+// Diagnostics deliberately live outside the slash/help catalog. This private
+// projection supplies only the fields required by text parsing and lowering;
+// it cannot be reached through an explicit `sfinder` namespace or Discord
+// application-command registration.
+const HIDDEN_TEXT_COMMANDS = new Map(
+  hiddenTextSearchCapabilities().map((capability) => {
+    const command = Object.freeze({
+      name: capability.canonical.root,
+      rootName: capability.canonical.root,
+      subcommand: null,
+      kind: "search",
+      group: capability.problemFamily,
+      input: capability.engine.input,
+      capabilityId: capability.id,
+      timeoutClass: capability.timeoutClass,
+      publicResultKind: capability.publicResultKind,
+      argvPrefix: Object.freeze([...capability.engine.argvPrefix]),
+      registration: Object.freeze({
+        name: capability.canonical.root,
+        options: Object.freeze([
+          Object.freeze({ name: "scope" }),
+        ]),
+      }),
+    });
+    return [command.name, command];
+  }),
+);
 
 export function parseClearraTextMessage(
   content,
@@ -146,6 +236,9 @@ export function classifyClearraTextCommand(content, prefix = "!") {
 
 function commandIdentityFromResolution(resolution) {
   const { command } = resolution;
+  if (command?.capabilityId?.startsWith("build.evaluate.")) {
+    return command.capabilityId;
+  }
   return command?.subcommand
     ? `${command.rootName ?? command.name}.${command.subcommand}`
     : command?.name ?? null;
@@ -157,6 +250,7 @@ function resolveTextCommandHead(content, prefix) {
   if (!trimmed.startsWith(prefix)) return null;
   const body = trimmed.slice(prefix.length).trim();
   if (!body) return null;
+  if (!allowsExactHiddenVerifySpelling(body, trimmed, prefix)) return null;
 
   // Only command-path tokens are read here. Values after that boundary are
   // deliberately ignored, so this fallback cannot retain fields, queues, or
@@ -169,17 +263,20 @@ function resolveTextCommandHead(content, prefix) {
   const explicitSfinder = tokens[namespaceEnd]?.toLowerCase() === "sfinder";
   if (explicitSfinder) namespaceEnd += 1;
   const commandName = tokens[namespaceEnd];
-  const candidate = findSlashCommand(normalizeCatalogName(commandName));
+  const normalizedName = normalizeCatalogName(commandName);
+  const candidate = textCommandCandidate(normalizedName, explicitSfinder);
+  if (!allowsExactHiddenTextCommand(candidate, trimmed, prefix)) return null;
   const root = explicitSfinder && candidate?.argvPrefix?.[0] !== "sfinder"
     ? null
     : candidate;
-  const command = resolveFinesseTextVariant(root, tokens, namespaceEnd + 1, false);
+  const variant = resolveCanonicalTextVariant(root, tokens, namespaceEnd + 1, false);
+  const command = variant.command;
   return {
     tokens,
     first,
     explicitSfinder,
     command,
-    argumentStart: command?.subcommand ? namespaceEnd + 2 : namespaceEnd + 1,
+    argumentStart: namespaceEnd + 1 + variant.width,
   };
 }
 
@@ -189,6 +286,7 @@ function resolveTextCommand(content, prefix) {
   if (!trimmed.startsWith(prefix)) return null;
   const body = trimmed.slice(prefix.length).trim();
   if (!body) return null;
+  if (!allowsExactHiddenVerifySpelling(body, trimmed, prefix)) return null;
 
   const tokens = tokenizeTextCommand(body);
   if (usesRetiredCatFinderName(tokens)) return null;
@@ -198,29 +296,151 @@ function resolveTextCommand(content, prefix) {
   const explicitSfinder = tokens[namespaceEnd]?.toLowerCase() === "sfinder";
   if (explicitSfinder) namespaceEnd += 1;
   const commandName = tokens[namespaceEnd];
-  const candidate = findSlashCommand(normalizeCatalogName(commandName));
+  const normalizedName = normalizeCatalogName(commandName);
+  const candidate = textCommandCandidate(normalizedName, explicitSfinder);
+  if (!allowsExactHiddenTextCommand(candidate, trimmed, prefix)) return null;
   const root = explicitSfinder && candidate?.argvPrefix?.[0] !== "sfinder"
     ? null
     : candidate;
   const baseArgumentStart = namespaceEnd + 1;
-  const command = resolveFinesseTextVariant(root, tokens, baseArgumentStart, true);
-  return {
+  const variant = resolveCanonicalTextVariant(root, tokens, baseArgumentStart, true);
+  const baseCommand = variant.command;
+  const argumentStart = baseArgumentStart + variant.width;
+  const objectiveResolution = resolveAdvancedPcObjective(
+    baseCommand,
     tokens,
+    argumentStart,
+    explicitSfinder,
+  );
+  return {
+    tokens: objectiveResolution.tokens,
     first,
     explicitSfinder,
-    command,
-    argumentStart: command?.subcommand ? baseArgumentStart + 1 : baseArgumentStart,
+    command: objectiveResolution.command,
+    argumentStart,
   };
 }
 
-function resolveFinesseTextVariant(command, tokens, subcommandIndex, strict) {
-  if (command?.input !== "finesse") return command;
+function resolveAdvancedPcObjective(command, tokens, argumentStart, explicitSfinder) {
+  // Preserve the ingress boundary for unknown command names. An otherwise
+  // unrecognised prefix must not become executable merely because its tail
+  // happens to contain the advanced option spelling.
+  if (!command) return { command, tokens };
+  if (command.input?.startsWith("build-v2-")) return { command, tokens };
+
+  let objectiveId = null;
+  const forwarded = tokens.slice(0, argumentStart);
+
+  for (let index = argumentStart; index < tokens.length; index += 1) {
+    const parsed = optionToken(tokens[index]);
+    if (parsed?.name !== "--objective") {
+      forwarded.push(tokens[index]);
+      continue;
+    }
+    if (objectiveId !== null) {
+      throw new Error("Text option --objective may be specified only once.");
+    }
+
+    let supplied = parsed.value;
+    if (supplied === null) {
+      const following = tokens[index + 1];
+      if (following === undefined || optionToken(following)) {
+        throw new Error("Text option --objective requires one registered objective ID.");
+      }
+      supplied = following;
+      index += 1;
+    }
+    if (typeof supplied !== "string" || supplied.length === 0) {
+      throw new Error("Text option --objective requires one registered objective ID.");
+    }
+    objectiveId = ADVANCED_PC_OBJECTIVE_ALIASES.get(supplied) ?? supplied;
+  }
+
+  if (objectiveId === null) return { command, tokens };
+  if (explicitSfinder) {
+    throw new Error(
+      "Text option --objective is unavailable under the explicit sfinder namespace.",
+    );
+  }
+  if (command?.capabilityId !== "pc.path") {
+    throw new Error(
+      "Text option --objective is available only on the pc.path base capability.",
+    );
+  }
+  const registered = ADVANCED_PC_OBJECTIVES.get(objectiveId);
+  if (!registered) {
+    throw new Error(`Unknown registered PC objective '${objectiveId}'.`);
+  }
+  const canonical = findTextCommand("pc")?.subcommands?.[registered.subcommand] ?? null;
+  if (canonical?.capabilityId !== registered.capabilityId) {
+    throw new Error(`PC objective '${objectiveId}' has no canonical command variant.`);
+  }
+  return {
+    command: registered.pcObjective
+      ? Object.freeze({ ...canonical, pcObjective: registered.pcObjective })
+      : canonical,
+    tokens: forwarded,
+  };
+}
+
+function textCommandCandidate(normalizedName, explicitSfinder) {
+  if (explicitSfinder) {
+    return findShadowedTextCommand(normalizedName) ?? findTextCommand(normalizedName);
+  }
+  return HIDDEN_TEXT_COMMANDS.get(normalizedName) ?? findTextCommand(normalizedName);
+}
+
+function allowsExactHiddenTextCommand(command, trimmed, prefix) {
+  if (command?.capabilityId !== "diagnostic.verify") return true;
+  return ["$", ">"].includes(prefix) && trimmed === `${prefix}verify`;
+}
+
+function allowsExactHiddenVerifySpelling(body, trimmed, prefix) {
+  const [first, second] = body.split(/\s+/u, 3);
+  const directVerify = first?.toLowerCase() === "verify";
+  const explicitSfinderVerify = first?.toLowerCase() === "sfinder" &&
+    second?.toLowerCase() === "verify";
+  if (!directVerify && !explicitSfinderVerify) return true;
+  return !explicitSfinderVerify &&
+    ["$", ">"].includes(prefix) &&
+    trimmed === `${prefix}verify`;
+}
+
+function resolveGroupedTextVariant(command, tokens, subcommandIndex, strict) {
+  if (!command?.subcommands) return command;
   const name = normalizeCatalogName(tokens[subcommandIndex]);
   const variant = command.subcommands?.[name] ?? null;
-  if (!variant && strict) {
-    throw new Error("Text command /finesse requires a search or score subcommand.");
+  if (variant) return variant;
+  const shadowed = findShadowedTextCommand(command.name);
+  if (shadowed) return shadowed;
+  if (strict) {
+    throw new Error(
+      `Text command /${command.name} requires one of: ${Object.keys(command.subcommands).join(", ")}.`,
+    );
   }
-  return variant;
+  return null;
+}
+
+function resolveCanonicalTextVariant(command, tokens, subcommandIndex, strict) {
+  if (
+    command?.name === "build" &&
+    normalizeCatalogName(tokens[subcommandIndex]) === "evaluate"
+  ) {
+    const evaluation = normalizeCatalogName(tokens[subcommandIndex + 1]);
+    const variant = command.subcommands?.[`evaluate-${evaluation}`] ?? null;
+    if (variant) return { command: variant, width: 2 };
+    if (strict) {
+      throw new Error(
+        "Text command /build evaluate requires cover, minimals, score, b2b-cover, or cover-percent.",
+      );
+    }
+    return { command: null, width: 0 };
+  }
+  const variant = resolveGroupedTextVariant(command, tokens, subcommandIndex, strict);
+  return {
+    command: variant,
+    width: variant?.subcommand ? 1 : 0,
+  };
 }
 
 function usesRetiredCatFinderName(tokens) {
@@ -313,22 +533,70 @@ function readCatalogTextOptions(command, tokens) {
 
     const controlledWidth = HOST_CONTROLLED_OPTIONS.get(parsed.name);
     if (controlledWidth !== undefined) {
+      if (["pc.score", "pc.score-minimals"].includes(command.capabilityId)) {
+        throw new Error(
+          `Text command /${command.name} does not expose execution option '${parsed.name}'.`,
+        );
+      }
       if (controlledWidth === 1 && parsed.value === null) index += 1;
       continue;
     }
     if (parsed.name === "--no-hold") {
-      settings.push("hold=avoid");
+      if (supportsNamedOption(command, "hold")) {
+        const value = command.input === "pc-v2"
+          ? "avoid"
+          : command.input === "setup-score-v1"
+            ? "off"
+          : [
+              "forward-spin-v2",
+              "forward-damage-v2",
+              "forward-ren-v1",
+              "pc-allspin-exact-v1",
+              "pc-allspin-pattern-v1",
+            ].includes(command.input)
+            ? "off"
+            : "disabled";
+        options.push({ name: "hold", value });
+      } else {
+        settings.push("hold=avoid");
+      }
       continue;
     }
     const booleanPacked = PACKED_BOOLEAN_FLAGS.get(parsed.name);
-    if (booleanPacked && supportsPackedKey(command, booleanPacked[0])) {
-      settings.push(`${booleanPacked[0]}=${booleanPacked[1]}`);
+    if (booleanPacked) {
+      if (supportsNamedOption(command, booleanPacked[0])) {
+        options.push({ name: booleanPacked[0], value: booleanPacked[1] });
+        continue;
+      }
+      if (supportsPackedKey(command, booleanPacked[0])) {
+        settings.push(`${booleanPacked[0]}=${booleanPacked[1]}`);
+        continue;
+      }
+    }
+    if (["--allow-post-cycle-borrow", "--no-post-cycle-borrow"].includes(parsed.name)) {
+      const value = parsed.name === "--allow-post-cycle-borrow" ? "on" : "off";
+      if (!supportsNamedOption(command, "post-cycle-borrow")) {
+        throw new Error(`Text command /${command.name} does not expose option '${parsed.name}'.`);
+      }
+      options.push({ name: "post-cycle-borrow", value });
       continue;
     }
     if (parsed.name === "--hold" || parsed.name === "-h") {
+      if (
+        command.input === "setup-score-v1" &&
+        parsed.value === null &&
+        (tokens[index + 1] === undefined || tokens[index + 1].startsWith("-"))
+      ) {
+        options.push({ name: "hold", value: "on" });
+        continue;
+      }
       const value = optionValue(tokens, index, parsed, "--hold");
       if (parsed.value === null) index += 1;
-      settings.push(`hold=${value}`);
+      if (supportsNamedOption(command, "hold")) {
+        options.push({ name: "hold", value });
+      } else {
+        settings.push(`hold=${value}`);
+      }
       continue;
     }
     if (parsed.name === "--type") {
@@ -337,26 +605,78 @@ function readCatalogTextOptions(command, tokens) {
       settings.push(`type=${value}`);
       continue;
     }
+    if (
+      command.input === "pc-allspin-exact-v1" &&
+      ["--patterns", "--pattern"].includes(parsed.name)
+    ) {
+      throw new Error(
+        `Text command /${command.name} requires --queue or --next, not '${parsed.name}'.`,
+      );
+    }
+    if (
+      command.input === "pc-allspin-pattern-v1" &&
+      parsed.name === "--queue"
+    ) {
+      throw new Error(
+        `Text command /${command.name} requires --patterns, --pattern, or --next, not '--queue'.`,
+      );
+    }
+    if (
+      command.input?.startsWith("build-v2-") &&
+      ["--queue", "--patterns", "--pattern"].includes(parsed.name)
+    ) {
+      const optionName = parsed.name === "--queue" ? "queue" : "patterns";
+      if (!supportsNamedOption(command, optionName)) {
+        throw new Error(`Text command /${command.name} does not expose option '${parsed.name}'.`);
+      }
+      const value = optionValue(tokens, index, parsed, parsed.name);
+      if (parsed.value === null) index += 1;
+      options.push({ name: optionName, value });
+      continue;
+    }
     if (parsed.name === "--knowledge" || parsed.name === "--queue-knowledge" || parsed.name === "--pattern-knowledge") {
       const value = optionValue(tokens, index, parsed, parsed.name);
       if (parsed.value === null) index += 1;
-      if (command.input === "remaining") {
+      if (supportsNamedOption(command, "queue-knowledge")) {
         options.push({ name: "queue-knowledge", value });
+      } else if (supportsNamedOption(command, "finesse-knowledge")) {
+        options.push({ name: "finesse-knowledge", value });
+      } else if (supportsNamedOption(command, "knowledge")) {
+        options.push({ name: "knowledge", value });
       } else {
         settings.push(`knowledge=${value}`);
       }
       continue;
     }
     const packedKey = PACKED_TEXT_OPTIONS.get(parsed.name);
-    if (packedKey && supportsPackedKey(command, packedKey)) {
+    if (packedKey) {
       const value = optionValue(tokens, index, parsed, parsed.name);
       if (parsed.value === null) index += 1;
-      settings.push(`${packedKey}=${value}`);
-      continue;
+      if (supportsNamedOption(command, packedKey)) {
+        options.push({ name: packedKey, value });
+        continue;
+      }
+      if (supportsPackedKey(command, packedKey)) {
+        settings.push(`${packedKey}=${value}`);
+        continue;
+      }
+      throw new Error(`Text command /${command.name} does not expose option '${parsed.name}'.`);
     }
 
-    const optionName = OPTION_ALIASES.get(parsed.name);
-    if (!optionName) {
+    let optionName = OPTION_ALIASES.get(parsed.name);
+    if (optionName === "lines" && command.input === "setup-score-v1") {
+      optionName = "clear";
+    }
+    if (optionName === "profile" && supportsNamedOption(command, "spin-profile")) {
+      optionName = "spin-profile";
+    } else if (optionName === "spin-profile" && supportsNamedOption(command, "profile")) {
+      optionName = "profile";
+    }
+    if (
+      !optionName ||
+      (!supportsNamedOption(command, optionName) &&
+        !supportsCompatibilityPresetOption(command, optionName))
+    ) {
       throw new Error(
         `Text command /${command.name} does not expose option '${parsed.name}'.`,
       );
@@ -379,6 +699,20 @@ function readCatalogTextOptions(command, tokens) {
 
 function supportsPackedKey(command, key) {
   return DISCORD_PACKED_OPTION_KEYS[command.input]?.includes(key) === true;
+}
+
+function supportsNamedOption(command, name) {
+  return command?.registration?.options?.some((option) => option.name === name) === true;
+}
+
+function supportsCompatibilityPresetOption(command, name) {
+  const field = ({
+    finesse: "finesse",
+    mirror: "mirror",
+    "score-profile": "scoreProfile",
+    priority: "setupPriority",
+  })[name];
+  return Boolean(field && Object.hasOwn(command?.compatibilityPreset ?? {}, field));
 }
 
 function canonicalPackedOptions(command, source) {
@@ -434,24 +768,68 @@ function positionalOptionOrder(input) {
       return ["image"];
     case "pc":
       return ["field", "next", "lines"];
+    case "pc-v2":
+    case "pc-path-v2":
+    case "pc-chance-v2":
+      return ["field", "next", "lines", "hold", "kicktable"];
+    case "pc-allspin-exact-v1":
+    case "pc-allspin-pattern-v1":
+      return ["field", "next", "lines", "spin-profile", "kicktable"];
+    case "pc-score-v2":
+      return ["field", "next", "lines", "score-profile", "kicktable"];
+    case "pc-tiling-v2":
+      return ["field", "next", "lines", "hold"];
+    case "pc-failed-v2":
+      return ["field", "next", "lines", "hold", "kicktable"];
     case "score-fixed-next":
       return ["field", "next", "lines", "options"];
+    case "score-fixed-next-v2":
+      return ["field", "next", "lines", "initial-b2b", "kicktable"];
+    case "pc-score-finder-v2":
+      return ["field", "next", "lines", "hold", "kicktable"];
     case "cover":
       return ["base", "target", "next"];
+    case "build-cover":
+      return ["base", "target", "next", "kicktable"];
+    case "build-v2-cover":
+    case "build-v2-target":
+    case "build-v2-supplied":
+      return [];
     case "spin-structure":
       return ["field", "pieces", "lines", "profile", "kicktable"];
+    case "spin-structure-v2":
+    case "spin-structure-cover-v1":
+    case "spin-structure-guaranteed-v1":
+      return ["field", "pieces", "lines", "spin-profile", "kicktable"];
     case "colored":
     case "spin":
     case "fixed-next":
       return ["field", "next"];
     case "remaining":
       return ["remaining"];
+    case "setup-v2":
+      return ["remaining"];
+    case "setup-score-v1":
+      return [];
     case "verify":
       return ["scope"];
     case "finesse-search":
       return ["target", "next", "base", "kicktable", "options"];
     case "finesse-score":
       return ["document", "next", "kicktable", "options"];
+    case "finesse-score-v2":
+      return ["document", "next", "kicktable"];
+    case "forward-spin-v2":
+    case "forward-damage-v2":
+    case "forward-ren-v1":
+      return ["field", "next"];
+    case "operation-document-v1":
+    case "field-document-v1":
+      return ["document"];
+    case "fumen-transform-v1":
+      return ["transform", "document", "page", "offset", "comments"];
+    case "render-document-v1":
+      return ["document", "artifact-format", "page"];
     default:
       throw new Error(`Unknown text-command input contract: ${input}`);
   }

@@ -2,6 +2,8 @@ use std::{borrow::Cow, collections::BTreeSet, fmt};
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
+use crate::finite_allocation::{FiniteSupplyAllocationError, FiniteSupplyAllocationTransaction};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuePatternExpression {
     source: String,
@@ -130,6 +132,124 @@ impl QueuePatternExpression {
 
     pub fn pattern_count(&self) -> usize {
         self.sequences.len()
+    }
+
+    /// Returns every heap byte retained by the expression, measured from
+    /// allocation capacity. This includes source text plus explicit outer and
+    /// nested sequence buffers, or the factorized atom and choice buffers. The
+    /// inline `QueuePatternExpression` owner is excluded.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = self.source.capacity() as u128;
+        match &self.sequences {
+            QueuePatternSequenceStorage::Explicit(sequences) => {
+                bytes = checked_add_vec_capacity_bytes(bytes, sequences)?;
+                for sequence in sequences {
+                    bytes = checked_add_vec_capacity_bytes(bytes, sequence)?;
+                }
+            }
+            QueuePatternSequenceStorage::Factorized(space) => {
+                bytes = checked_add_vec_capacity_bytes(bytes, &space.atoms)?;
+                for atom in &space.atoms {
+                    bytes = checked_add_vec_capacity_bytes(bytes, &atom.choices)?;
+                }
+            }
+        }
+        Some(bytes)
+    }
+
+    /// Duplicates this expression under the caller's finite allocation
+    /// transaction. `visible_sequence_len` changes only the visible prefix;
+    /// the canonical source and factorized atom graph remain intact.
+    ///
+    /// This is crate-owned because every returned buffer must stay inside the
+    /// same transaction until the enclosing finite PieceSource commit.
+    pub(crate) fn duplicate_finite(
+        &self,
+        visible_sequence_len: usize,
+        transaction: &mut FiniteSupplyAllocationTransaction<'_>,
+    ) -> Result<Self, FiniteSupplyAllocationError> {
+        debug_assert!(visible_sequence_len <= self.sequence_len);
+
+        let mut source = transaction.try_string_with_capacity(self.source.len())?;
+        source.push_str(&self.source);
+
+        let sequences = match &self.sequences {
+            QueuePatternSequenceStorage::Explicit(sequences) => {
+                let mut duplicate =
+                    transaction.try_vec_with_capacity::<Vec<PieceKind>>(sequences.len())?;
+                for sequence in sequences {
+                    let retained_len = visible_sequence_len.min(sequence.len());
+                    let mut pieces =
+                        transaction.try_vec_with_capacity::<PieceKind>(retained_len)?;
+                    pieces.extend_from_slice(&sequence[..retained_len]);
+                    duplicate.push(pieces);
+                }
+                QueuePatternSequenceStorage::Explicit(duplicate)
+            }
+            QueuePatternSequenceStorage::Factorized(space) => {
+                let mut atoms = transaction
+                    .try_vec_with_capacity::<FactorizedPatternAtom>(space.atoms.len())?;
+                for atom in &space.atoms {
+                    let mut choices =
+                        transaction.try_vec_with_capacity::<PieceKind>(atom.choices.len())?;
+                    choices.extend_from_slice(&atom.choices);
+                    atoms.push(FactorizedPatternAtom {
+                        choices,
+                        draw_count: atom.draw_count,
+                        variant_count: atom.variant_count,
+                    });
+                }
+                QueuePatternSequenceStorage::Factorized(FactorizedQueuePatternSpace {
+                    atoms,
+                    pattern_count: space.pattern_count,
+                    full_sequence_len: space.full_sequence_len,
+                    visible_sequence_len,
+                })
+            }
+        };
+
+        Ok(Self {
+            source,
+            sequences,
+            sequence_len: visible_sequence_len,
+        })
+    }
+
+    pub(crate) fn checked_finite_duplicate_requested_bytes(
+        &self,
+        visible_sequence_len: usize,
+    ) -> Option<u128> {
+        if visible_sequence_len > self.sequence_len {
+            return None;
+        }
+        let mut bytes = self.source.len() as u128;
+        match &self.sequences {
+            QueuePatternSequenceStorage::Explicit(sequences) => {
+                bytes = bytes.checked_add(checked_count_bytes(
+                    sequences.len() as u128,
+                    core::mem::size_of::<Vec<PieceKind>>() as u128,
+                )?)?;
+                for sequence in sequences {
+                    bytes = bytes.checked_add(checked_count_bytes(
+                        visible_sequence_len.min(sequence.len()) as u128,
+                        core::mem::size_of::<PieceKind>() as u128,
+                    )?)?;
+                }
+            }
+            QueuePatternSequenceStorage::Factorized(space) => {
+                bytes = bytes.checked_add(checked_count_bytes(
+                    space.atoms.len() as u128,
+                    core::mem::size_of::<FactorizedPatternAtom>() as u128,
+                )?)?;
+                for atom in &space.atoms {
+                    bytes = bytes.checked_add(checked_count_bytes(
+                        atom.choices.len() as u128,
+                        core::mem::size_of::<PieceKind>() as u128,
+                    )?)?;
+                }
+            }
+        }
+        Some(bytes)
     }
 
     pub fn prefix(&self, sequence_len: usize) -> Self {
@@ -614,6 +734,18 @@ fn append_permutations(
     }
 }
 
+fn checked_vec_capacity_bytes<T>(values: &Vec<T>) -> Option<u128> {
+    checked_count_bytes(values.capacity() as u128, core::mem::size_of::<T>() as u128)
+}
+
+fn checked_add_vec_capacity_bytes<T>(bytes: u128, values: &Vec<T>) -> Option<u128> {
+    bytes.checked_add(checked_vec_capacity_bytes(values)?)
+}
+
+fn checked_count_bytes(count: u128, item_size: u128) -> Option<u128> {
+    count.checked_mul(item_size)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueuePatternParseError {
     Empty,
@@ -697,9 +829,12 @@ impl std::error::Error for QueuePatternParseError {}
 
 #[cfg(test)]
 mod tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
     use super::{
-        expand_alternative, FactorizedQueuePatternSpace, QueuePatternExpression,
-        QueuePatternParseError,
+        checked_add_vec_capacity_bytes, checked_count_bytes, expand_alternative,
+        FactorizedPatternAtom, FactorizedQueuePatternSpace, QueuePatternExpression,
+        QueuePatternParseError, QueuePatternSequenceStorage,
     };
 
     #[test]
@@ -792,5 +927,93 @@ mod tests {
         assert_eq!(prefix.pattern_count(), expression.pattern_count());
         assert_eq!(prefix.sequence_len(), 10);
         assert_eq!(prefix.first_sequence().len(), 10);
+    }
+
+    #[test]
+    fn explicit_retained_capacity_counts_outer_and_nested_allocations() {
+        let mut source = String::with_capacity(1_024);
+        source.push('I');
+        let mut sequence = Vec::with_capacity(512);
+        sequence.push(PieceKind::I);
+        let mut sequences = Vec::with_capacity(256);
+        sequences.push(sequence);
+        let expression = QueuePatternExpression {
+            source,
+            sequences: QueuePatternSequenceStorage::Explicit(sequences),
+            sequence_len: 1,
+        };
+
+        let QueuePatternSequenceStorage::Explicit(sequences) = &expression.sequences else {
+            panic!("test constructs explicit storage");
+        };
+        let expected = (expression.source.capacity() as u128)
+            .checked_add(
+                (sequences.capacity() as u128) * (core::mem::size_of::<Vec<PieceKind>>() as u128),
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (sequences[0].capacity() as u128) * (core::mem::size_of::<PieceKind>() as u128),
+                )
+            })
+            .expect("test capacities fit u128");
+
+        assert_eq!(expression.checked_retained_capacity_bytes(), Some(expected));
+        assert!(expression.source.capacity() > expression.source.len());
+        assert!(sequences.capacity() > sequences.len());
+        assert!(sequences[0].capacity() > sequences[0].len());
+    }
+
+    #[test]
+    fn factorized_retained_capacity_counts_atom_and_choice_allocations() {
+        let mut source = String::with_capacity(1_024);
+        source.push_str("P7P7P2");
+        let mut choices = Vec::with_capacity(512);
+        choices.push(PieceKind::I);
+        let mut atoms = Vec::with_capacity(256);
+        atoms.push(FactorizedPatternAtom {
+            choices,
+            draw_count: 1,
+            variant_count: 1,
+        });
+        let expression = QueuePatternExpression {
+            source,
+            sequences: QueuePatternSequenceStorage::Factorized(FactorizedQueuePatternSpace {
+                atoms,
+                pattern_count: 1,
+                full_sequence_len: 1,
+                visible_sequence_len: 1,
+            }),
+            sequence_len: 1,
+        };
+
+        let QueuePatternSequenceStorage::Factorized(space) = &expression.sequences else {
+            panic!("test constructs factorized storage");
+        };
+        let expected = (expression.source.capacity() as u128)
+            .checked_add(
+                (space.atoms.capacity() as u128)
+                    * (core::mem::size_of::<FactorizedPatternAtom>() as u128),
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (space.atoms[0].choices.capacity() as u128)
+                        * (core::mem::size_of::<PieceKind>() as u128),
+                )
+            })
+            .expect("test capacities fit u128");
+
+        assert_eq!(expression.checked_retained_capacity_bytes(), Some(expected));
+        assert!(expression.source.capacity() > expression.source.len());
+        assert!(space.atoms.capacity() > space.atoms.len());
+        assert!(space.atoms[0].choices.capacity() > space.atoms[0].choices.len());
+    }
+
+    #[test]
+    fn retained_capacity_arithmetic_fails_closed_on_overflow() {
+        let one_piece = Vec::from([PieceKind::I]);
+
+        assert_eq!(checked_count_bytes(u128::MAX, 1), Some(u128::MAX));
+        assert_eq!(checked_count_bytes(u128::MAX, 2), None);
+        assert_eq!(checked_add_vec_capacity_bytes(u128::MAX, &one_piece), None);
     }
 }

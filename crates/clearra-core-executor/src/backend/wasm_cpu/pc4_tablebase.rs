@@ -1683,6 +1683,11 @@ fn mix_field(mut value: u64) -> u64 {
 fn map_catalog_error(error: WasmExactSearchError) -> Pc4TablebaseError {
     match error {
         WasmExactSearchError::InvalidProblem(reason) => Pc4TablebaseError::InvalidProblem(reason),
+        // Tablebase catalog compilation does not acquire the execution lease;
+        // preserve fail-closed compatibility if the invariant changes.
+        error @ WasmExactSearchError::ResourceAdmission(_) => {
+            Pc4TablebaseError::InvalidProblem(error.reason())
+        }
         WasmExactSearchError::Cancelled => {
             Pc4TablebaseError::InvalidProblem("pc4_tablebase_catalog_compile_cancelled")
         }

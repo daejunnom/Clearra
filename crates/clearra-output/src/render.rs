@@ -1,5 +1,13 @@
+use core::fmt;
+
 use clearra_fumen::codec::{FumenLikeTrace, FumenLikeWriter};
-use clearra_render::{ExactBitmapRenderer, RenderCapabilityReport, RenderExportLimits};
+use clearra_fumen::{
+    ActualFumenRenderColor, ActualFumenRenderDocument, ActualFumenRenderDocumentError,
+};
+use clearra_render::{
+    ExactBitmapRenderer, RenderBoard, RenderCapabilityReport, RenderCell, RenderError,
+    RenderExportLimits,
+};
 
 use crate::{
     json::json_writer::JsonWriter,
@@ -45,6 +53,25 @@ pub enum ExactBitmapOutputFormat {
     Png,
     Gif,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactFieldDocumentFormat {
+    Ctk3,
+    Fumen,
+}
+
+impl ExactFieldDocumentFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ctk3 => "ctk3",
+            Self::Fumen => "fumen",
+        }
+    }
+}
+
+/// The Discord transport limit is a second mandatory product gate. A render
+/// is public only when it satisfies both the renderer limits and this bound.
+pub const PUBLIC_BITMAP_ARTIFACT_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 impl ExactBitmapOutputFormat {
     pub const fn as_str(self) -> &'static str {
@@ -155,10 +182,266 @@ impl RenderExactOutputGate {
         })
     }
 
+    /// Renders the selected 1-based page as PNG or the document page order as
+    /// a GIF. Document pages are observations; no operation replay frames are
+    /// synthesized. Pending garbage is retained as a distinct bottom row.
+    pub fn render_field_document(
+        source: &str,
+        document_format: ExactFieldDocumentFormat,
+        format: ExactBitmapOutputFormat,
+        page_number: Option<usize>,
+    ) -> Result<ExactBitmapOutput, FieldDocumentRenderError> {
+        let pages = decode_render_pages(source, document_format)?;
+        let limits = RenderExportLimits::product_default();
+        let bytes = match format {
+            ExactBitmapOutputFormat::Png => {
+                let page_number = page_number.unwrap_or(1);
+                let page_index = page_number.checked_sub(1).ok_or(
+                    FieldDocumentRenderError::PageNumberOutOfRange {
+                        page_number,
+                        page_count: pages.len(),
+                    },
+                )?;
+                let page = pages.get(page_index).ok_or(
+                    FieldDocumentRenderError::PageNumberOutOfRange {
+                        page_number,
+                        page_count: pages.len(),
+                    },
+                )?;
+                let board = render_board(page, page.height)?;
+                ExactBitmapRenderer::render_board_png(&board, 16, limits)
+                    .map_err(FieldDocumentRenderError::Render)?
+            }
+            ExactBitmapOutputFormat::Gif => {
+                if page_number.is_some() {
+                    return Err(FieldDocumentRenderError::PageNumberNotAllowedForGif);
+                }
+                if pages.len() > limits.max_gif_frames() {
+                    return Err(FieldDocumentRenderError::Render(
+                        RenderError::ExportLimitExceeded {
+                            limit: "max_gif_frames",
+                            actual: u64::try_from(pages.len()).unwrap_or(u64::MAX),
+                            max: u64::try_from(limits.max_gif_frames()).unwrap_or(u64::MAX),
+                        },
+                    ));
+                }
+                let max_height = pages
+                    .iter()
+                    .map(|page| page.height)
+                    .max()
+                    .ok_or(FieldDocumentRenderError::EmptyDocument)?;
+                let mut frames = Vec::new();
+                frames
+                    .try_reserve(pages.len())
+                    .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+                for page in &pages {
+                    frames.push(render_board(page, max_height)?);
+                }
+                ExactBitmapRenderer::render_timeline_gif(&frames, 16, 160, limits)
+                    .map_err(FieldDocumentRenderError::Render)?
+            }
+        };
+        if bytes.len() > PUBLIC_BITMAP_ARTIFACT_MAX_BYTES {
+            return Err(FieldDocumentRenderError::ArtifactTooLarge {
+                length: bytes.len(),
+                maximum: PUBLIC_BITMAP_ARTIFACT_MAX_BYTES,
+            });
+        }
+        Ok(ExactBitmapOutput {
+            format,
+            bytes,
+            render_exact: true,
+            skin_id: "default",
+        })
+    }
+
     pub fn capability_report() -> RenderCapabilityReport {
         RenderCapabilityReport::current()
     }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TypedRenderPage {
+    width: usize,
+    height: usize,
+    cells_bottom_up: Vec<RenderCell>,
+    pending_garbage: Vec<RenderCell>,
+}
+
+fn decode_render_pages(
+    source: &str,
+    format: ExactFieldDocumentFormat,
+) -> Result<Vec<TypedRenderPage>, FieldDocumentRenderError> {
+    match format {
+        ExactFieldDocumentFormat::Ctk3 => {
+            let document =
+                crate::decode_ctk3_exact(source).map_err(FieldDocumentRenderError::Ctk3)?;
+            if document.pages.is_empty() {
+                return Err(FieldDocumentRenderError::EmptyDocument);
+            }
+            let mut pages = Vec::new();
+            pages
+                .try_reserve(document.pages.len())
+                .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+            for (page_index, page) in document.pages.into_iter().enumerate() {
+                if page.height == 0
+                    || page.cells.len()
+                        != document
+                            .width
+                            .checked_mul(page.height)
+                            .ok_or(FieldDocumentRenderError::CapacityExceeded)?
+                {
+                    return Err(FieldDocumentRenderError::InvalidPageShape { page_index });
+                }
+                let pending_garbage = match page.garbage {
+                    Some(row) if row.len() == document.width => {
+                        row.into_iter().map(ctk3_render_cell).collect()
+                    }
+                    Some(_) => {
+                        return Err(FieldDocumentRenderError::InvalidGarbageShape { page_index })
+                    }
+                    None => vec![RenderCell::Empty; document.width],
+                };
+                pages.push(TypedRenderPage {
+                    width: document.width,
+                    height: page.height,
+                    cells_bottom_up: page.cells.into_iter().map(ctk3_render_cell).collect(),
+                    pending_garbage,
+                });
+            }
+            Ok(pages)
+        }
+        ExactFieldDocumentFormat::Fumen => {
+            let document = ActualFumenRenderDocument::decode(source)
+                .map_err(FieldDocumentRenderError::Fumen)?;
+            let mut pages = Vec::new();
+            pages
+                .try_reserve(document.pages().len())
+                .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+            for page in document.pages() {
+                pages.push(TypedRenderPage {
+                    width: page.width(),
+                    height: page.height(),
+                    cells_bottom_up: page
+                        .cells_bottom_up()
+                        .iter()
+                        .copied()
+                        .map(fumen_render_cell)
+                        .collect(),
+                    pending_garbage: page
+                        .pending_garbage()
+                        .iter()
+                        .copied()
+                        .map(fumen_render_cell)
+                        .collect(),
+                });
+            }
+            Ok(pages)
+        }
+    }
+}
+
+fn render_board(
+    page: &TypedRenderPage,
+    target_field_height: usize,
+) -> Result<RenderBoard, FieldDocumentRenderError> {
+    if target_field_height < page.height || page.pending_garbage.len() != page.width {
+        return Err(FieldDocumentRenderError::InvalidPageShape { page_index: 0 });
+    }
+    let board_height = target_field_height
+        .checked_add(1)
+        .ok_or(FieldDocumentRenderError::CapacityExceeded)?;
+    let cell_count = page
+        .width
+        .checked_mul(board_height)
+        .ok_or(FieldDocumentRenderError::CapacityExceeded)?;
+    let mut cells_top_down = Vec::new();
+    cells_top_down
+        .try_reserve_exact(cell_count)
+        .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+    cells_top_down.resize(cell_count, RenderCell::Empty);
+    for source_y in 0..page.height {
+        let destination_y = target_field_height - 1 - source_y;
+        let source_offset = source_y * page.width;
+        let destination_offset = destination_y * page.width;
+        cells_top_down[destination_offset..destination_offset + page.width]
+            .copy_from_slice(&page.cells_bottom_up[source_offset..source_offset + page.width]);
+    }
+    let garbage_offset = target_field_height * page.width;
+    cells_top_down[garbage_offset..garbage_offset + page.width]
+        .copy_from_slice(&page.pending_garbage);
+    RenderBoard::from_cells(page.width, board_height, &cells_top_down)
+        .map_err(FieldDocumentRenderError::Render)
+}
+
+const fn ctk3_render_cell(color: crate::Ctk3Color) -> RenderCell {
+    match color {
+        crate::Ctk3Color::Empty => RenderCell::Empty,
+        crate::Ctk3Color::Gray => RenderCell::Garbage,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::I) => RenderCell::I,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::O) => RenderCell::O,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::T) => RenderCell::T,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::S) => RenderCell::S,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::Z) => RenderCell::Z,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::J) => RenderCell::J,
+        crate::Ctk3Color::Piece(crate::Ctk3Piece::L) => RenderCell::L,
+    }
+}
+
+const fn fumen_render_cell(color: ActualFumenRenderColor) -> RenderCell {
+    match color {
+        ActualFumenRenderColor::Empty => RenderCell::Empty,
+        ActualFumenRenderColor::I => RenderCell::I,
+        ActualFumenRenderColor::O => RenderCell::O,
+        ActualFumenRenderColor::T => RenderCell::T,
+        ActualFumenRenderColor::S => RenderCell::S,
+        ActualFumenRenderColor::Z => RenderCell::Z,
+        ActualFumenRenderColor::J => RenderCell::J,
+        ActualFumenRenderColor::L => RenderCell::L,
+        ActualFumenRenderColor::Garbage => RenderCell::Garbage,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FieldDocumentRenderError {
+    EmptyDocument,
+    PageNumberOutOfRange {
+        page_number: usize,
+        page_count: usize,
+    },
+    PageNumberNotAllowedForGif,
+    InvalidPageShape {
+        page_index: usize,
+    },
+    InvalidGarbageShape {
+        page_index: usize,
+    },
+    ArtifactTooLarge {
+        length: usize,
+        maximum: usize,
+    },
+    CapacityExceeded,
+    Ctk3(crate::Ctk3CodecError),
+    Fumen(ActualFumenRenderDocumentError),
+    Render(RenderError),
+}
+
+impl FieldDocumentRenderError {
+    pub const fn is_limit_exceeded(&self) -> bool {
+        matches!(
+            self,
+            Self::ArtifactTooLarge { .. } | Self::Render(RenderError::ExportLimitExceeded { .. })
+        )
+    }
+}
+
+impl fmt::Display for FieldDocumentRenderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for FieldDocumentRenderError {}
 impl RenderExactOutputGate {
     pub const fn bitmap_export_limits() -> BitmapExportLimitReport {
         BitmapExportLimitReport::product_default()

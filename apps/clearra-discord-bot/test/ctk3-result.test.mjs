@@ -969,6 +969,39 @@ test("forward exact masks preserve cleared history colors and validate the final
   assert.equal(page.comment, "#7 | Q=IO | D=4 | T-spin 2L");
 });
 
+test("REN Discord projection keeps only the smallest canonical candidate ID", () => {
+  const outcome = (id, sourceQueue) => ({
+    id,
+    source_queue: sourceQueue,
+    ren_count: 0,
+    total_damage: 0,
+    spin_piece: null,
+    spin_mini: false,
+    spin_lines: 0,
+    final_board: words(0xfn),
+    path: [{
+      piece: "I",
+      placement_mask: words(0xfn),
+      cleared_row_mask: 0,
+      board_after: words(0xfn),
+    }],
+  });
+  const result = buildCtk3Result({
+    kind: "ren",
+    artifacts: {
+      schema_version: ARTIFACT_SCHEMA,
+      forward: {
+        initial_board: words(0n),
+        outcomes: [outcome(9, "I"), outcome(3, "I")],
+      },
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result.pageCount, 1);
+  assert.match(decodeCtk3(result.source).pages[0].comment, /^#3\b/);
+});
+
 test("forward replay rejects board-after and final-mask mismatches", () => {
   const base = {
     schema_version: ARTIFACT_SCHEMA,

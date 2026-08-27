@@ -115,6 +115,7 @@ fn write_separator_queue_fixture() -> PathBuf {
 }
 
 fn retained_trace_key_for_example_query() -> String {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let assembly = PcScenarioQueryAssembler::assemble(
         &PcScenarioArgs::new(None)
             .with_field(Some("0x00000000000003f0".to_owned()))

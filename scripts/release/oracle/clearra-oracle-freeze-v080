@@ -1,0 +1,531 @@
+#!/bin/sh
+
+set -eu
+umask 077
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+current_link=/opt/clearra/current
+settings_path=/etc/clearra-gateway/settings
+service_name=clearra-gateway.service
+lock_path=/run/lock/clearra-oracle-release-deploy.lock
+canonical_launcher=/usr/local/sbin/clearra-oracle-release-deploy
+canonical_digester=/usr/local/libexec/clearra-release-tree-digest
+
+source_commit=
+freeze_nonce=
+self_sha256=
+self_path=
+upload_root=
+freeze_root=
+baseline_current_raw=
+baseline_current_resolved=
+baseline_current_link_metadata=
+baseline_active_metadata=
+baseline_settings_metadata=
+baseline_settings_sha256=
+baseline_service_active=
+baseline_service_sub=
+baseline_service_pid=
+baseline_service_invocation=
+baseline_service_restarts=
+baseline_service_cwd=
+baseline_config_path=
+success=0
+
+fail() {
+  /usr/bin/printf '%s\n' 'oracle_freeze=failed' >&2
+  exit "${1:-1}"
+}
+
+is_sha256() {
+  value=$1
+  [ "${#value}" -eq 64 ] || return 1
+  case "$value" in *[!0-9a-f]* ) return 1 ;; esac
+}
+
+is_source_commit() {
+  value=$1
+  [ "${#value}" -eq 40 ] || return 1
+  case "$value" in *[!0-9a-f]* ) return 1 ;; esac
+}
+
+sha256_of() {
+  /usr/bin/sha256sum -- "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+require_root_regular_mode() {
+  path=$1
+  mode=$2
+  [ -f "$path" ] && [ ! -L "$path" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$path")" = "0:0:$mode" ] || fail 77
+}
+
+require_upload_regular_mode() {
+  path=$1
+  mode=$2
+  [ -f "$path" ] && [ ! -L "$path" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$path")" = "1001:1001:$mode" ] || fail 77
+}
+
+metadata_digest() {
+  /usr/bin/python3 - "$1" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+root = os.path.realpath(sys.argv[1])
+if not os.path.isdir(root) or os.path.islink(root):
+    raise SystemExit(2)
+entries = []
+for directory, names, files in os.walk(root, topdown=True, followlinks=False):
+    names.sort()
+    files.sort()
+    for name in names + files:
+        path = os.path.join(directory, name)
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode):
+            kind, extra = "symlink", os.readlink(path)
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind, extra = "directory", ""
+        elif stat.S_ISREG(metadata.st_mode):
+            kind, extra = "file", str(metadata.st_size)
+        else:
+            raise SystemExit(2)
+        entries.append((relative, kind, metadata.st_uid, metadata.st_gid,
+                        stat.S_IMODE(metadata.st_mode), extra))
+digest = hashlib.sha256(b"clearra-release-metadata-v1\0")
+for entry in sorted(entries):
+    digest.update("\0".join(map(str, entry)).encode("utf-8"))
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+capture_baseline() {
+  [ -L "$current_link" ] || fail 77
+  baseline_current_raw=$(/usr/bin/readlink -- "$current_link") || fail 77
+  baseline_current_resolved=$(/usr/bin/readlink -f -- "$current_link") || fail 77
+  [ -d "$baseline_current_resolved" ] && [ ! -L "$baseline_current_resolved" ] || fail 77
+  case "$baseline_current_resolved" in /opt/clearra/releases/* ) ;; * ) fail 77 ;; esac
+  release_basename=$(/usr/bin/basename -- "$baseline_current_resolved") || fail 77
+  /usr/bin/printf '%s\n' "$release_basename" | /usr/bin/grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7}$' || fail 77
+  baseline_current_link_metadata=$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$current_link") || fail 77
+  baseline_active_metadata=$(metadata_digest "$baseline_current_resolved") || fail 65
+
+  [ -f "$settings_path" ] && [ ! -L "$settings_path" ] || fail 77
+  baseline_settings_metadata=$(/usr/bin/stat -c '%d:%i:%u:%g:%a:%s' -- "$settings_path") || fail 77
+  case "$baseline_settings_metadata" in *:0:0:600:[1-9]* | *:0:0:600:0 ) ;; * ) fail 77 ;; esac
+  baseline_settings_sha256=$(sha256_of "$settings_path") || fail 65
+
+  baseline_service_active=$(/usr/bin/systemctl show --property ActiveState --value "$service_name") || fail 69
+  baseline_service_sub=$(/usr/bin/systemctl show --property SubState --value "$service_name") || fail 69
+  baseline_service_pid=$(/usr/bin/systemctl show --property MainPID --value "$service_name") || fail 69
+  baseline_service_invocation=$(/usr/bin/systemctl show --property InvocationID --value "$service_name") || fail 69
+  baseline_service_restarts=$(/usr/bin/systemctl show --property NRestarts --value "$service_name") || fail 69
+  [ "$baseline_service_active" = active ] && [ "$baseline_service_sub" = running ] || fail 69
+  case "$baseline_service_pid" in '' | *[!0-9]* | 0 | 1 ) fail 69 ;; esac
+  case "$baseline_service_invocation" in '' | *[!0-9a-f]* ) fail 69 ;; esac
+  [ "${#baseline_service_invocation}" -eq 32 ] || fail 69
+  case "$baseline_service_restarts" in '' | *[!0-9]* ) fail 69 ;; esac
+  baseline_service_cwd=$(/usr/bin/readlink -f -- "/proc/$baseline_service_pid/cwd") || fail 69
+  [ "$baseline_service_cwd" = "$baseline_current_resolved/apps/clearra-discord-bot" ] || fail 69
+
+  baseline_config_path=$baseline_current_resolved/apps/clearra-discord-bot/src/admin/config.mjs
+  require_root_regular_mode "$baseline_config_path" 644
+}
+
+require_baseline_unchanged() {
+  [ -L "$current_link" ] || fail 73
+  [ "$(/usr/bin/readlink -- "$current_link")" = "$baseline_current_raw" ] || fail 73
+  [ "$(/usr/bin/readlink -f -- "$current_link")" = "$baseline_current_resolved" ] || fail 73
+  [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$current_link")" = "$baseline_current_link_metadata" ] || fail 73
+  [ "$(metadata_digest "$baseline_current_resolved")" = "$baseline_active_metadata" ] || fail 73
+  [ -f "$settings_path" ] && [ ! -L "$settings_path" ] || fail 73
+  [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a:%s' -- "$settings_path")" = "$baseline_settings_metadata" ] || fail 73
+  [ "$(sha256_of "$settings_path")" = "$baseline_settings_sha256" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property ActiveState --value "$service_name")" = "$baseline_service_active" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property SubState --value "$service_name")" = "$baseline_service_sub" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property MainPID --value "$service_name")" = "$baseline_service_pid" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property InvocationID --value "$service_name")" = "$baseline_service_invocation" ] || fail 73
+  [ "$(/usr/bin/systemctl show --property NRestarts --value "$service_name")" = "$baseline_service_restarts" ] || fail 73
+  [ "$(/usr/bin/readlink -f -- "/proc/$baseline_service_pid/cwd")" = "$baseline_service_cwd" ] || fail 73
+  require_root_regular_mode "$baseline_config_path" 644
+}
+
+validate_layers() {
+  /usr/bin/python3 - \
+    "$upload_root/source.tar.gz" \
+    "$upload_root/private-overlay-no-config.tar" \
+    "$upload_root/ctk3-dist.tar" \
+    "$upload_root/node_modules.tar" <<'PY'
+import posixpath
+import sys
+import tarfile
+
+overlay = {
+    "apps/clearra-discord-bot/src/admin",
+    "apps/clearra-discord-bot/src/admin/access-runtime.mjs",
+    "apps/clearra-discord-bot/src/admin/command-identity.mjs",
+    "apps/clearra-discord-bot/src/admin/discord-history-hydrator.mjs",
+    "apps/clearra-discord-bot/src/admin/discord-observer.mjs",
+    "apps/clearra-discord-bot/src/admin/document.mjs",
+    "apps/clearra-discord-bot/src/admin/identity.mjs",
+    "apps/clearra-discord-bot/src/admin/local-publisher.mjs",
+    "apps/clearra-discord-bot/src/admin/main.mjs",
+    "apps/clearra-discord-bot/src/admin/oracle-telemetry.conf",
+    "apps/clearra-discord-bot/src/admin/oracle-usage-tracker.mjs",
+    "apps/clearra-discord-bot/src/admin/runtime-extension.mjs",
+    "apps/clearra-discord-bot/src/admin/server.mjs",
+    "apps/clearra-discord-bot/src/admin/slash-runtime.mjs",
+    "apps/clearra-discord-bot/src/admin/TELEMETRY-OPERATIONS.md",
+    "apps/clearra-discord-bot/src/admin/usage-store.mjs",
+    "apps/clearra-discord-bot/src/admin/telemetry",
+    "apps/clearra-discord-bot/src/admin/telemetry/hmac.mjs",
+    "apps/clearra-discord-bot/src/admin/telemetry/rate-limiter.mjs",
+    "apps/clearra-discord-bot/src/admin/telemetry/schema.mjs",
+    "apps/clearra-discord-bot/src/admin/deploy",
+    "apps/clearra-discord-bot/src/admin/deploy/ORACLE_GATEWAY.md",
+    "apps/clearra-discord-bot/src/admin/deploy/oracle",
+    "apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run",
+    "apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway.service",
+}
+expected_links = {
+    "node_modules/ctk3": "../packages/ctk3",
+    "node_modules/@clearra/discord-bot": "../../apps/clearra-discord-bot",
+}
+layers = (("source", sys.argv[1]), ("overlay", sys.argv[2]),
+          ("dist", sys.argv[3]), ("dependencies", sys.argv[4]))
+all_entries = {}
+observed_links = {}
+results = []
+for label, archive_path in layers:
+    counts = {"file": 0, "directory": 0, "symlink": 0}
+    layer_entries = {}
+    with tarfile.open(archive_path, "r:*") as archive:
+        for member in archive:
+            name = member.name.rstrip("/")
+            if (not name or name.startswith("/") or "\\" in name or
+                    posixpath.normpath(name) != name or name == ".." or
+                    name.startswith("../")):
+                raise SystemExit(2)
+            if label == "overlay" and name not in overlay:
+                raise SystemExit(2)
+            if label == "dist" and not (name == "packages/ctk3/dist" or
+                    name.startswith("packages/ctk3/dist/")):
+                raise SystemExit(2)
+            if label == "dependencies" and not (
+                    name in {"node_modules", "node_modules/@clearra",
+                             "node_modules/ctk3", "node_modules/@clearra/discord-bot",
+                             "node_modules/tetris-fumen"} or
+                    name.startswith("node_modules/tetris-fumen/")):
+                raise SystemExit(2)
+            if name in layer_entries or name in all_entries:
+                raise SystemExit(2)
+            if member.isfile():
+                kind = "file"
+            elif member.isdir():
+                kind = "directory"
+            elif member.issym():
+                kind = "symlink"
+                target = member.linkname
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+                if (not target or target.startswith("/") or "\\" in target or
+                        resolved == ".." or resolved.startswith("../")):
+                    raise SystemExit(2)
+                observed_links[name] = target
+            else:
+                raise SystemExit(2)
+            layer_entries[name] = kind
+            counts[kind] += 1
+    if label == "overlay" and set(layer_entries) != overlay:
+        raise SystemExit(2)
+    all_entries.update(layer_entries)
+    results.extend((counts["file"], counts["directory"], counts["symlink"]))
+for name, kind in all_entries.items():
+    parent = posixpath.dirname(name)
+    while parent:
+        parent_kind = all_entries.get(parent)
+        if parent_kind is not None and parent_kind != "directory":
+            raise SystemExit(2)
+        parent = posixpath.dirname(parent)
+if observed_links != expected_links:
+    raise SystemExit(2)
+if "apps/clearra-discord-bot/src/admin/config.mjs" in all_entries:
+    raise SystemExit(2)
+print(":".join(map(str, results)))
+PY
+}
+
+validate_candidate() {
+  root=$1
+  [ -d "$root" ] && [ ! -L "$root" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$root")" = '0:0:755' ] || fail 77
+  unsafe=$(/usr/bin/find "$root" -xdev \( -type f -o -type d -o -type l \) \( ! -user root -o ! -group root \) -print -quit) || fail 77
+  [ -z "$unsafe" ] || fail 77
+  unsupported=$(/usr/bin/find "$root" -xdev ! -type f ! -type d ! -type l -print -quit) || fail 77
+  [ -z "$unsupported" ] || fail 77
+  writable=$(/usr/bin/find "$root" -xdev \( -type f -o -type d \) -perm /022 -print -quit) || fail 77
+  [ -z "$writable" ] || fail 77
+  bad_directories=$(/usr/bin/find "$root" -xdev -type d ! -perm 0755 -print -quit) || fail 77
+  [ -z "$bad_directories" ] || fail 77
+  bad_files=$(/usr/bin/find "$root" -xdev -type f ! -perm 0644 ! -perm 0755 -print -quit) || fail 77
+  [ -z "$bad_files" ] || fail 77
+  [ -L "$root/node_modules/ctk3" ] || fail 77
+  [ "$(/usr/bin/readlink -- "$root/node_modules/ctk3")" = '../packages/ctk3' ] || fail 77
+  [ -L "$root/node_modules/@clearra/discord-bot" ] || fail 77
+  [ "$(/usr/bin/readlink -- "$root/node_modules/@clearra/discord-bot")" = '../../apps/clearra-discord-bot' ] || fail 77
+  require_root_regular_mode "$root/apps/clearra-discord-bot/src/admin/config.mjs" 644
+}
+
+assemble_candidate() {
+  root=$1
+  release_id=$2
+  [ ! -e "$root" ] && [ ! -L "$root" ] || fail 73
+  /usr/bin/mkdir -m 0755 -- "$root"
+  /usr/bin/tar --extract --gzip --no-same-owner --file="$upload_root/source.tar.gz" --directory="$root"
+  /usr/bin/tar --extract --no-same-owner --file="$upload_root/private-overlay-no-config.tar" --directory="$root"
+  /usr/bin/tar --extract --no-same-owner --file="$upload_root/ctk3-dist.tar" --directory="$root"
+  /usr/bin/tar --extract --no-same-owner --file="$upload_root/node_modules.tar" --directory="$root"
+  /usr/bin/install -o root -g root -m 0644 -- "$baseline_config_path" "$root/apps/clearra-discord-bot/src/admin/config.mjs"
+  for normalize_root in \
+    "$root/apps/clearra-discord-bot/src/admin" \
+    "$root/apps/clearra-discord-bot/test" \
+    "$root/packages/ctk3/dist" \
+    "$root/node_modules"
+  do
+    /usr/bin/find "$normalize_root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +
+    /usr/bin/find "$normalize_root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +
+  done
+  /usr/bin/chown -hR root:root -- "$root"
+  /usr/bin/chmod 0755 -- \
+    "$root/scripts/tools/package-release-cli.sh" \
+    "$root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
+    "$root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
+    "$root/apps/clearra-discord-bot/scripts/restore-oracle-release" \
+    "$root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
+    "$root/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
+    "$root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
+  validate_candidate "$root"
+}
+
+tool_authority() {
+  path=$1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    require_root_regular_mode "$path" 755
+    /usr/bin/printf '%s:%s\n' "$(sha256_of "$path")" "$(/usr/bin/stat -c '%s' -- "$path")"
+  else
+    /usr/bin/printf '%s\n' 'absent:0'
+  fi
+}
+
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "$freeze_root" ]; then
+    case "$freeze_root" in /opt/clearra/.v080-freeze-* )
+      if [ -d "$freeze_root" ] && [ ! -L "$freeze_root" ]; then
+        /usr/bin/rm -rf -- "$freeze_root" || status=74
+      fi
+      ;;
+    esac
+  fi
+  if [ "$success" -ne 1 ]; then
+    /usr/bin/printf '%s\n' 'oracle_freeze=failed' >&2
+  fi
+  exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source-commit) [ "$#" -ge 2 ] && [ -z "$source_commit" ] || fail 64; source_commit=$2; shift 2 ;;
+    --nonce) [ "$#" -ge 2 ] && [ -z "$freeze_nonce" ] || fail 64; freeze_nonce=$2; shift 2 ;;
+    --self-sha256) [ "$#" -ge 2 ] && [ -z "$self_sha256" ] || fail 64; self_sha256=$2; shift 2 ;;
+    --self-path) [ "$#" -ge 2 ] && [ -z "$self_path" ] || fail 64; self_path=$2; shift 2 ;;
+    *) fail 64 ;;
+  esac
+done
+
+is_source_commit "$source_commit" || fail 64
+is_sha256 "$freeze_nonce" || fail 64
+is_sha256 "$self_sha256" || fail 64
+commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
+release_id=v0.8.0-$commit_prefix
+case "$self_path" in /usr/local/sbin/.clearra-oracle-freeze-v080-$commit_prefix.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9] ) ;; * ) fail 64 ;; esac
+[ "$(/usr/bin/readlink -f -- "$0")" = "$self_path" ] || fail 77
+require_root_regular_mode "$self_path" 755
+[ "$(sha256_of "$self_path")" = "$self_sha256" ] || fail 65
+[ "$(/usr/bin/id -u)" -eq 0 ] || fail 77
+
+upload_root=/home/ubuntu/.clearra-v080-freeze-$commit_prefix-$freeze_nonce
+freeze_root=/opt/clearra/.v080-freeze-$commit_prefix-$freeze_nonce
+[ -d "$upload_root" ] && [ ! -L "$upload_root" ] || fail 77
+[ "$(/usr/bin/readlink -f -- "$upload_root")" = "$upload_root" ] || fail 77
+[ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_root")" = '1001:1001:700' ] || fail 77
+unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
+  ! -name source.tar.gz ! -name private-overlay-no-config.tar ! -name ctk3-dist.tar \
+  ! -name node_modules.tar ! -name clearra-oracle-release-deploy \
+  ! -name clearra-release-tree-digest.py ! -name clearra-oracle-freeze-v080 -print -quit) || fail 77
+[ -z "$unexpected" ] || fail 77
+[ "$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 7 ] || fail 77
+for name in source.tar.gz private-overlay-no-config.tar ctk3-dist.tar node_modules.tar clearra-oracle-release-deploy clearra-release-tree-digest.py; do
+  require_upload_regular_mode "$upload_root/$name" 600
+done
+require_upload_regular_mode "$upload_root/clearra-oracle-freeze-v080" 700
+[ "$(sha256_of "$upload_root/clearra-oracle-freeze-v080")" = "$self_sha256" ] || fail 65
+
+# Remove the deployment account's write authority before any uploaded archive
+# is validated or extracted.  The directory is closed first so its entries
+# cannot be replaced between the byte checks above and the root-owned freeze.
+/usr/bin/chown root:root -- "$upload_root"
+/usr/bin/chmod 0700 -- "$upload_root"
+for name in source.tar.gz private-overlay-no-config.tar ctk3-dist.tar node_modules.tar clearra-oracle-release-deploy clearra-release-tree-digest.py; do
+  /usr/bin/chown root:root -- "$upload_root/$name"
+  /usr/bin/chmod 0600 -- "$upload_root/$name"
+  require_root_regular_mode "$upload_root/$name" 600
+done
+/usr/bin/chown root:root -- "$upload_root/clearra-oracle-freeze-v080"
+/usr/bin/chmod 0700 -- "$upload_root/clearra-oracle-freeze-v080"
+require_root_regular_mode "$upload_root/clearra-oracle-freeze-v080" 700
+[ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_root")" = '0:0:700' ] || fail 77
+[ "$(sha256_of "$upload_root/clearra-oracle-freeze-v080")" = "$self_sha256" ] || fail 65
+
+exec 9>"$lock_path"
+/usr/bin/flock -n 9 || fail 75
+capture_baseline
+require_baseline_unchanged
+
+layer_counts=$(validate_layers) || fail 65
+old_ifs=$IFS
+IFS=:
+set -- $layer_counts
+IFS=$old_ifs
+[ "$#" -eq 12 ] || fail 65
+for count in "$@"; do case "$count" in '' | *[!0-9]* ) fail 65 ;; esac; done
+source_files=$1; source_directories=$2; source_symlinks=$3
+overlay_files=$4; overlay_directories=$5; overlay_symlinks=$6
+dist_files=$7; dist_directories=$8; dist_symlinks=$9
+shift 9
+dependencies_files=$1; dependencies_directories=$2; dependencies_symlinks=$3
+
+source_sha256=$(sha256_of "$upload_root/source.tar.gz")
+overlay_sha256=$(sha256_of "$upload_root/private-overlay-no-config.tar")
+dist_sha256=$(sha256_of "$upload_root/ctk3-dist.tar")
+dependencies_sha256=$(sha256_of "$upload_root/node_modules.tar")
+launcher_sha256=$(sha256_of "$upload_root/clearra-oracle-release-deploy")
+digester_sha256=$(sha256_of "$upload_root/clearra-release-tree-digest.py")
+for digest in "$source_sha256" "$overlay_sha256" "$dist_sha256" "$dependencies_sha256" "$launcher_sha256" "$digester_sha256"; do is_sha256 "$digest" || fail 65; done
+
+[ ! -e "$freeze_root" ] && [ ! -L "$freeze_root" ] || fail 73
+/usr/bin/mkdir -m 0700 -- "$freeze_root"
+candidate_root=$freeze_root/$release_id
+assemble_candidate "$candidate_root" "$release_id"
+require_baseline_unchanged
+
+active_tree_sha256=$(/usr/bin/python3 "$upload_root/clearra-release-tree-digest.py" "$baseline_current_resolved") || fail 65
+candidate_tree_sha256=$(/usr/bin/python3 "$upload_root/clearra-release-tree-digest.py" "$candidate_root") || fail 65
+settings_size=$(/usr/bin/stat -c '%s' -- "$settings_path")
+config_sha256=$(sha256_of "$baseline_config_path")
+config_size=$(/usr/bin/stat -c '%s' -- "$baseline_config_path")
+candidate_directories=$(/usr/bin/find "$candidate_root" -xdev -mindepth 1 -type d -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+candidate_files0644=$(/usr/bin/find "$candidate_root" -xdev -type f -perm 0644 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+candidate_files0755=$(/usr/bin/find "$candidate_root" -xdev -type f -perm 0755 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+candidate_symlinks=$(/usr/bin/find "$candidate_root" -xdev -type l -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+[ "$candidate_files0755" = 8 ] && [ "$candidate_symlinks" = 2 ] || fail 65
+prior_launcher=$(tool_authority "$canonical_launcher")
+prior_digester=$(tool_authority "$canonical_digester")
+
+manifest_path=$freeze_root/oracle-inactive-stage-v080.json
+/usr/bin/python3 - "$manifest_path" \
+  "$source_commit" "$release_id" "$baseline_current_resolved" "$active_tree_sha256" \
+  "$baseline_settings_sha256" "$settings_size" "$config_sha256" "$config_size" \
+  "$candidate_tree_sha256" "$candidate_directories" "$candidate_files0644" "$candidate_files0755" "$candidate_symlinks" \
+  "$source_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/source.tar.gz")" "$source_files" "$source_directories" "$source_symlinks" \
+  "$overlay_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/private-overlay-no-config.tar")" "$overlay_files" "$overlay_directories" "$overlay_symlinks" \
+  "$dist_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/ctk3-dist.tar")" "$dist_files" "$dist_directories" "$dist_symlinks" \
+  "$dependencies_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/node_modules.tar")" "$dependencies_files" "$dependencies_directories" "$dependencies_symlinks" \
+  "$launcher_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/clearra-oracle-release-deploy")" "$prior_launcher" \
+  "$digester_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/clearra-release-tree-digest.py")" "$prior_digester" <<'PY'
+import json
+import sys
+
+values = iter(sys.argv[2:])
+take = lambda: next(values)
+integer = lambda: int(take())
+def counts():
+    return {"files": integer(), "directories": integer(), "symlinks": integer()}
+def prior(value):
+    digest, size = value.split(":", 1)
+    return None if digest == "absent" else {"sha256": digest, "size": int(size)}
+
+source_commit, release_id, active_release, active_tree = take(), take(), take(), take()
+settings_sha, settings_size, config_sha, config_size = take(), integer(), take(), integer()
+candidate_tree = take()
+candidate = {"directories": integer(), "files0644": integer(),
+             "files0755": integer(), "symlinks": integer()}
+source_sha, source_size, source_counts = take(), integer(), counts()
+overlay_sha, overlay_size, overlay_counts = take(), integer(), counts()
+dist_sha, dist_size, dist_counts = take(), integer(), counts()
+dependencies_sha, dependencies_size, dependencies_counts = take(), integer(), counts()
+launcher_sha, launcher_size, launcher_prior = take(), integer(), prior(take())
+digester_sha, digester_size, digester_prior = take(), integer(), prior(take())
+try:
+    next(values)
+    raise SystemExit(2)
+except StopIteration:
+    pass
+manifest = {
+    "schemaVersion": "clearra.oracle.inactive-stage.v080.v1",
+    "sourceCommit": source_commit,
+    "releaseId": release_id,
+    "active": {
+        "releasePath": active_release,
+        "treeSha256": active_tree,
+        "settingsSha256": settings_sha,
+        "settingsSize": settings_size,
+        "configSha256": config_sha,
+        "configSize": config_size,
+    },
+    "candidate": {"treeSha256": candidate_tree, "counts": candidate},
+    "layers": {
+        "source": {"sha256": source_sha, "size": source_size, "counts": source_counts},
+        "overlay": {"sha256": overlay_sha, "size": overlay_size, "counts": overlay_counts},
+        "ctk3Dist": {"sha256": dist_sha, "size": dist_size, "counts": dist_counts},
+        "dependencies": {"sha256": dependencies_sha, "size": dependencies_size, "counts": dependencies_counts},
+    },
+    "tools": {
+        "launcher": {"sha256": launcher_sha, "size": launcher_size, "prior": launcher_prior},
+        "digester": {"sha256": digester_sha, "size": digester_size, "prior": digester_prior},
+    },
+}
+with open(sys.argv[1], "x", encoding="utf-8", newline="\n") as output:
+    output.write(json.dumps(manifest, indent=2) + "\n")
+PY
+
+manifest_sha256=$(sha256_of "$manifest_path")
+manifest_size=$(/usr/bin/stat -c '%s' -- "$manifest_path")
+manifest_base64=$(/usr/bin/base64 -w 0 -- "$manifest_path")
+require_baseline_unchanged
+
+case "$upload_root" in /home/ubuntu/.clearra-v080-freeze-$commit_prefix-* ) /usr/bin/rm -rf -- "$upload_root" ;; * ) fail 64 ;; esac
+require_root_regular_mode "$self_path" 755
+[ "$(sha256_of "$self_path")" = "$self_sha256" ] || fail 65
+/usr/bin/rm -f -- "$self_path"
+[ ! -e "$self_path" ] && [ ! -L "$self_path" ] || fail 77
+
+success=1
+/usr/bin/printf '%s\n' \
+  'oracle_freeze=ready' \
+  "oracle_source_commit=$source_commit" \
+  "oracle_release_id=$release_id" \
+  "oracle_candidate_sha256=$candidate_tree_sha256" \
+  "oracle_manifest_sha256=$manifest_sha256" \
+  "oracle_manifest_size=$manifest_size" \
+  "oracle_manifest_base64=$manifest_base64"
+
+trap - EXIT HUP INT TERM
+cleanup

@@ -1,4 +1,5 @@
 use crate::{GuiJobId, GuiJobProgress};
+use clearra_app::ProductPageSourceOwner;
 use clearra_host_contract::AppResponse;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +20,7 @@ pub enum GuiJobEvent {
         job_id: GuiJobId,
         response: AppResponse,
         search_report_json: Option<String>,
+        product_page_source_owner: Option<ProductPageSourceOwner>,
     },
     Failed {
         job_id: GuiJobId,

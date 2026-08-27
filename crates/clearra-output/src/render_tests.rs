@@ -1,9 +1,12 @@
 use super::*;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+use clearra_fumen::ActualFumenDocumentTransform;
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_replay::{BuildVariantOperation, BuildVariantReplayInput, ReplayEngine};
 
-use crate::model::RenderFieldValue;
+use crate::{
+    encode_ctk3_compact, model::RenderFieldValue, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece,
+};
 
 #[test]
 fn dispatches_message_to_text_writer() {
@@ -259,4 +262,75 @@ fn renderer_reports_export_limits() {
     assert_eq!(limits.max_gif_frames(), 240);
     assert_eq!(limits.max_frame_delay_ms(), 5000);
     assert_eq!(limits.renderer(), "clearra-render-exact-bitmap");
+}
+
+#[test]
+fn typed_ctk3_png_uses_one_based_pages_and_draws_pending_garbage_row() {
+    let mut first = Ctk3Page::new(1, vec![Ctk3Color::Piece(Ctk3Piece::T), Ctk3Color::Empty]);
+    first.garbage = Some(vec![Ctk3Color::Gray, Ctk3Color::Empty]);
+    let second = Ctk3Page::new(1, vec![Ctk3Color::Empty, Ctk3Color::Piece(Ctk3Piece::I)]);
+    let source =
+        encode_ctk3_compact(&Ctk3Document::new(2, vec![first, second])).expect("ctk3 document");
+
+    let rendered = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Png,
+        Some(2),
+    )
+    .expect("selected page PNG");
+
+    assert!(rendered.bytes().starts_with(b"\x89PNG"));
+    assert_eq!(
+        u32::from_be_bytes(rendered.bytes()[16..20].try_into().unwrap()),
+        32
+    );
+    assert_eq!(
+        u32::from_be_bytes(rendered.bytes()[20..24].try_into().unwrap()),
+        32,
+        "one field row plus one separate pending-garbage row"
+    );
+    assert!(matches!(
+        RenderExactOutputGate::render_field_document(
+            &source,
+            ExactFieldDocumentFormat::Ctk3,
+            ExactBitmapOutputFormat::Png,
+            Some(0),
+        ),
+        Err(FieldDocumentRenderError::PageNumberOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn real_fumen_gif_renders_document_pages_without_accepting_a_page_selector() {
+    let source =
+        ActualFumenDocumentTransform::text_to_fumen(&["first".to_owned(), "second".to_owned()])
+            .expect("real fumen");
+    let rendered = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Fumen,
+        ExactBitmapOutputFormat::Gif,
+        None,
+    )
+    .expect("document GIF");
+
+    assert!(rendered.bytes().starts_with(b"GIF89a"));
+    assert_eq!(
+        u16::from_le_bytes([rendered.bytes()[6], rendered.bytes()[7]]),
+        160
+    );
+    assert_eq!(
+        u16::from_le_bytes([rendered.bytes()[8], rendered.bytes()[9]]),
+        384
+    );
+    assert!(rendered.bytes().len() <= PUBLIC_BITMAP_ARTIFACT_MAX_BYTES);
+    assert_eq!(
+        RenderExactOutputGate::render_field_document(
+            &source,
+            ExactFieldDocumentFormat::Fumen,
+            ExactBitmapOutputFormat::Gif,
+            Some(1),
+        ),
+        Err(FieldDocumentRenderError::PageNumberNotAllowedForGif)
+    );
 }

@@ -154,10 +154,11 @@ static bool transition_has_realization_support(
 
 bool clearra_realization_domain_common_predecessors(
     const ClearraRealizationDomainPropagationInput *input,
-    uint16_t out_predecessors[16]) {
+    uint16_t out_predecessors[CLR_BUILDUP_MAX_OPERATIONS]) {
     if (input == 0 || input->domains == 0 ||
         input->active_realization_words == 0 || out_predecessors == 0 ||
-        input->operation_count == 0u || input->operation_count > 15u) {
+        input->operation_count == 0u ||
+        input->operation_count > CLR_BUILDUP_MAX_OPERATIONS) {
         return false;
     }
     for (uint8_t operation = 0u;
@@ -234,7 +235,8 @@ clearra_realization_domain_propagate(
         input->realization_word_count == 0u ||
         reachable_generations == 0 || live_generations == 0 ||
         out_result == 0 || generation == 0u ||
-        input->operation_count == 0u || input->operation_count > 15u ||
+        input->operation_count == 0u ||
+        input->operation_count > CLR_BUILDUP_MAX_OPERATIONS ||
         input->terminal_state !=
             (uint16_t)(((uint32_t)UINT16_C(1) << input->operation_count) - 1u) ||
         state_capacity <= input->terminal_state) {

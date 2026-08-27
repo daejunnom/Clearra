@@ -141,7 +141,7 @@ pub(crate) fn execute_webgpu_buildable_unique(
     let pruning_ledger = NativePruningLedger::merge_partition_reports(pruning_ledgers)
         .map_err(clearra_core_ffi::NativeCoreError::InvalidPruningLedger)
         .map_err(PackingRunnerError::Native)?;
-    Ok(PackingBackendOutcome::exact(
+    Ok(PackingBackendOutcome::buildability_prefiltered_exact(
         actual_backend,
         reduction.candidates,
         resource_report,
@@ -150,8 +150,7 @@ pub(crate) fn execute_webgpu_buildable_unique(
     .with_workers_used(reduction.worker_count)
     .with_gpu_device(gpu_device)
     .with_geometry_catalog(gpu.catalog)
-    .with_pruning_ledger(pruning_ledger)
-    .with_buildability_preverified())
+    .with_pruning_ledger(pruning_ledger))
 }
 
 #[derive(Debug)]
@@ -220,7 +219,7 @@ pub(crate) fn execute_webgpu_packing(
         gpu.adapter.vendor(),
         gpu.adapter.device(),
     );
-    Ok(PackingBackendOutcome::exact(
+    Ok(PackingBackendOutcome::raw_geometry_exact(
         actual_backend,
         candidates,
         resource_report,

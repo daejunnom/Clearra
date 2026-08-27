@@ -32,7 +32,8 @@ const bundle = await build({
       } from './src/lib/workspace/searchExecutionModel.ts';
       export {
         createDefaultForwardSearchRequest,
-        forwardSearchRequestForDesktop
+        forwardSearchRequestForDesktop,
+        spinCategoryOptions
       } from './src/lib/workspace/forwardSearchModel.ts';
       export {
         createDefaultSetupFinderRequest,
@@ -57,14 +58,21 @@ const contractRows = readFileSync(
   .filter((line) => line && !line.startsWith('#'))
   .map((line) => {
     const columns = line.split('\t');
-    assert.equal(columns.length, 9, `contract column count: ${line}`);
+    assert.equal(columns.length, 13, `contract column count: ${line}`);
     return {
       family: columns[0],
       option: columns[1],
+      kind: columns[2],
       valid: columns[3].split('|'),
-      webDefault: columns[5],
+      invalid: columns[4].split('|'),
+      discordDefault: columns[5],
       nativeDefault: columns[6],
-      constraints: columns[8]
+      disposition: columns[7],
+      discordPath: columns[8],
+      exposure: columns[9],
+      lowering: columns[10],
+      reason: columns[11],
+      dependencies: columns[12]
     };
   });
 
@@ -266,8 +274,10 @@ function assertPcTilingProjection(request, label) {
 
   const command = production.buildWorkspaceCommand(request);
   const tokens = commandTokens(command);
-  assert.ok(hasOption(tokens, '--tiling-only'), label);
+  assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', 'tiling'], label);
+  assert.equal(hasOption(tokens, '--tiling-only'), false, label);
   for (const option of [
+    '--count',
     '--rule',
     '--score',
     '--score-profile',
@@ -300,13 +310,18 @@ function applyRisk(request, risk, representative) {
   return risk.apply(request, representative);
 }
 
-test('shared fixture defaults reach the actual PC and build Web/Desktop projections', () => {
-  assert.equal(contractRow('pc', 'lines').webDefault, '4');
+test('shared fixture defaults remain explicit beside the actual Web/Desktop projections', () => {
+  assert.equal(contractRow('pc', 'lines').discordDefault, 'auto');
   assert.equal(contractRow('pc', 'lines').nativeDefault, '2');
-  assert.equal(contractRow('pc', 'backend').webDefault, 'auto');
-  assert.equal(contractRow('pc', 'fallback').webDefault, 'allow');
-  assert.equal(contractRow('build', 'backend').webDefault, 'cpu');
-  assert.equal(contractRow('build', 'fallback').webDefault, 'deny');
+  assert.equal(contractRow('pc', 'backend').discordDefault, 'auto');
+  assert.equal(contractRow('pc', 'fallback').discordDefault, 'default');
+  assert.equal(contractRow('build', 'backend').discordDefault, 'cpu');
+  assert.equal(contractRow('build', 'fallback').discordDefault, 'deny');
+  assert.equal(contractRow('build', 'aggregation').disposition, 'named');
+  assert.equal(
+    contractRow('build', 'aggregation').lowering,
+    '--aggregate|--tiling-only'
+  );
 
   const pc = {
     ...production.createDefaultWorkspaceRequest(),
@@ -416,7 +431,7 @@ test('PC scenario validation preserves odd-height fields and enforces the docume
   assert.equal(
     production.workspaceValidationCodes(oddScenario, 'web').includes('target_lines_invalid'),
     false,
-    contractRow('pc', 'lines').constraints
+    contractRow('pc', 'lines').dependencies
   );
 
   const maximum = { ...oddScenario, initialB2B: 0xffff };
@@ -486,6 +501,30 @@ test('Desktop forward projection is command-discriminated and preserves normaliz
     assert.equal(Object.hasOwn(spin, key), false, `spin-finder leaked ${key}`);
   }
 
+  const ren = JSON.parse(JSON.stringify(
+    production.forwardSearchRequestForDesktop(
+      { ...stale, tool: 'ren', queue: 'TI', holdEnabled: false },
+      'en',
+      13
+    )
+  ));
+  assert.equal(ren.command, 'ren');
+  assert.equal(ren.queue, 'TI');
+  assert.equal(ren.hold_enabled, false);
+  assert.equal(ren.spin_profile, 'disabled');
+  assert.equal(ren.preserve_b2b, false);
+  assert.equal(ren.workers, 13);
+  for (const key of [
+    'initial_combo',
+    'initial_b2b',
+    'damage_aggregation',
+    'minimum_damage',
+    'spin_lines',
+    'spin_category'
+  ]) {
+    assert.equal(Object.hasOwn(ren, key), false, `REN leaked ${key}`);
+  }
+
   for (const command of ['setup', 'build-probability']) {
     const projected = JSON.parse(JSON.stringify(production.buildDesktopAppRequest({ command })));
     for (const key of [
@@ -498,6 +537,15 @@ test('Desktop forward projection is command-discriminated and preserves normaliz
     ]) {
       assert.equal(Object.hasOwn(projected, key), false, `${command} leaked ${key}`);
     }
+  }
+});
+
+test('forward spin category choices expose non-T spins for every all-piece profile', () => {
+  for (const profile of ['all-spin', 'all-spin-plus', 'all-mini', 'all-mini-plus']) {
+    assert.deepEqual(production.spinCategoryOptions(profile), ['any', 't', 'other'], profile);
+  }
+  for (const profile of ['t-spins', 't-spins-plus']) {
+    assert.deepEqual(production.spinCategoryOptions(profile), ['any'], profile);
   }
 });
 
@@ -542,6 +590,377 @@ test('PC score mode transitions canonicalize inactive Desktop profiles', () => {
     for (const option of ['--score-profile', '--spin-profile', '--initial-b2b']) {
       assert.equal(hasOption(tokens, option), false, `${scoreMode} leaked ${option}`);
     }
+  }
+});
+
+test('PC minimum-cover and score GUI modes lower only to their canonical product commands', () => {
+  const base = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 1,
+    boardMask: 0x3fn,
+    queue: 'I',
+    holdEnabled: true,
+    tablebaseEnabled: true,
+    precomputeBuildDependencies: true
+  };
+  const minimals = { ...base, scoreMode: 'minimum-cover' };
+  const minimalsTokens = commandTokens(production.buildWorkspaceCommand(minimals));
+  assert.deepEqual(minimalsTokens.slice(0, 3), ['clearra', 'pc', 'minimals']);
+  for (const option of [
+    '--objective',
+    '--count',
+    '--score',
+    '--tablebase',
+    '--no-tablebase',
+    '--build-dependency-dag',
+    '--no-build-dependency-dag',
+    '--max-memory-mib'
+  ]) {
+    assert.equal(hasOption(minimalsTokens, option), false, `pc.minimals leaked ${option}`);
+  }
+  const minimalsDesktop = production.workspaceRequestForDesktop(minimals, 'en');
+  assert.equal(minimalsDesktop.score_mode, 'minimum-cover');
+  assert.equal(minimalsDesktop.count_policy, 'unique');
+  assert.equal(minimalsDesktop.tablebase_requested, false);
+  assert.equal(minimalsDesktop.precompute_build_dependencies, false);
+
+  const score = {
+    ...base,
+    scoreMode: 'summary',
+    scoreProfile: 'guideline',
+    spinProfile: 'all-mini-plus',
+    initialB2B: 7,
+    backend: 'hybrid',
+    gpuDevice: '2',
+    workers: 8,
+    useAllLogicalProcessors: true,
+    preserveB2B: true,
+    solutionProbabilities: true,
+    maxPatterns: 7
+  };
+  const scoreTokens = commandTokens(production.buildWorkspaceCommand(score));
+  assert.deepEqual(scoreTokens.slice(0, 3), ['clearra', 'pc', 'score']);
+  assert.equal(optionValue(scoreTokens, '--score-profile'), 'guideline');
+  assert.equal(optionValue(scoreTokens, '--spin-profile'), 'all-mini-plus');
+  assert.equal(optionValue(scoreTokens, '--initial-b2b'), '7');
+  for (const option of [
+    '--objective',
+    '--count',
+    '--score',
+    '--backend',
+    '--workers',
+    '--use-all-cpu-threads',
+    '--gpu-device',
+    '--allow-backend-fallback',
+    '--no-backend-fallback',
+    '--solution-probabilities',
+    '--preserve-b2b',
+    '--tablebase',
+    '--no-tablebase',
+    '--build-dependency-dag',
+    '--no-build-dependency-dag',
+    '--max-patterns'
+  ]) {
+    assert.equal(hasOption(scoreTokens, option), false, `pc.score leaked ${option}`);
+  }
+  const scoreDesktop = production.workspaceRequestForDesktop(score, 'en');
+  assert.equal(scoreDesktop.score_mode, 'summary');
+  assert.equal(scoreDesktop.backend, 'cpu');
+  assert.equal(scoreDesktop.workers, 1);
+  assert.equal(scoreDesktop.use_all_logical_processors, false);
+  assert.equal(scoreDesktop.allow_backend_fallback, false);
+  assert.equal(scoreDesktop.preserve_b2b, false);
+  assert.equal(scoreDesktop.solution_probabilities, false);
+});
+
+test('PC path GUI mode lowers to the complete ordinary replay-family contract', () => {
+  const request = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 1,
+    boardMask: 0x3f0n,
+    queue: 'I',
+    holdEnabled: true,
+    scoreMode: 'path',
+    queueKnowledge: 'visible-7',
+    scoreProfile: 'guideline',
+    spinProfile: 'all-mini-plus',
+    initialB2B: 7,
+    preserveB2B: true,
+    solutionProbabilities: true,
+    tablebaseEnabled: true,
+    precomputeBuildDependencies: true
+  };
+  const normalized = production.normalizeWorkspaceRequest(request);
+  assert.equal(normalized.queueKnowledge, 'oracle');
+  assert.equal(normalized.scoreProfile, 'tetrio');
+  assert.equal(normalized.spinProfile, 't-spins');
+  assert.equal(normalized.initialB2B, 0);
+  assert.equal(normalized.preserveB2B, false);
+  assert.equal(normalized.solutionProbabilities, false);
+  assert.equal(normalized.tablebaseEnabled, false);
+  assert.equal(normalized.precomputeBuildDependencies, false);
+
+  const tokens = commandTokens(production.buildWorkspaceCommand(request));
+  assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', 'path']);
+  assert.equal(optionValue(tokens, '--queue'), 'I');
+  assert.equal(optionValue(tokens, '--rule'), request.rule);
+  for (const option of [
+    '--objective',
+    '--count',
+    '--score',
+    '--score-profile',
+    '--spin-profile',
+    '--initial-b2b',
+    '--solution-probabilities',
+    '--preserve-b2b',
+    '--tablebase',
+    '--no-tablebase',
+    '--build-dependency-dag',
+    '--no-build-dependency-dag'
+  ]) {
+    assert.equal(hasOption(tokens, option), false, `pc.path leaked ${option}`);
+  }
+
+  const desktop = production.workspaceRequestForDesktop(request, 'en');
+  assert.equal(desktop.score_mode, 'path');
+  assert.equal(desktop.count_policy, 'all');
+  assert.equal(desktop.queue_knowledge, 'oracle');
+  assert.equal(desktop.score_profile, 'tetrio');
+  assert.equal(desktop.spin_profile, 't-spins');
+  assert.equal(desktop.initial_b2b, 0);
+  assert.equal(desktop.preserve_b2b, false);
+  assert.equal(desktop.solution_probabilities, false);
+  assert.equal(desktop.tablebase_requested, false);
+  assert.equal(desktop.precompute_build_dependencies, false);
+});
+
+test('PC score-finder GUI mode owns one fixed queue and its fixed score policy', () => {
+  const request = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 1,
+    boardMask: 0x3fn,
+    queue: 'I',
+    holdEnabled: true,
+    queueKnowledge: 'visible-7',
+    scoreMode: 'score-finder',
+    scoreProfile: 'guideline',
+    spinProfile: 'all-mini-plus',
+    initialB2B: 9,
+    backend: 'hybrid',
+    gpuDevice: '2',
+    workers: 8,
+    useAllLogicalProcessors: true,
+    preserveB2B: true,
+    solutionProbabilities: true,
+    tablebaseEnabled: true,
+    precomputeBuildDependencies: true,
+    maxPatterns: 7
+  };
+  assert.deepEqual(production.workspaceValidationCodes(request, 'web'), []);
+  const normalized = production.normalizeWorkspaceRequest(request);
+  assert.equal(normalized.queueKnowledge, 'oracle');
+  assert.equal(normalized.scoreProfile, 'jstris-ultra');
+  assert.equal(normalized.spinProfile, 't-spins');
+  assert.equal(normalized.initialB2B, 1);
+  assert.equal(normalized.backend, 'cpu');
+  assert.equal(normalized.gpuDevice, 'auto');
+  assert.equal(normalized.workers, 1);
+  assert.equal(normalized.useAllLogicalProcessors, false);
+  assert.equal(normalized.preserveB2B, false);
+  assert.equal(normalized.solutionProbabilities, false);
+  assert.equal(normalized.tablebaseEnabled, false);
+  assert.equal(normalized.precomputeBuildDependencies, false);
+  assert.equal(normalized.maxPatterns, undefined);
+
+  const tokens = commandTokens(production.buildWorkspaceCommand(request));
+  assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', 'score-finder']);
+  assert.equal(optionValue(tokens, '--queue'), 'I');
+  assert.equal(optionValue(tokens, '--rule'), request.rule);
+  assert.equal(optionValue(tokens, '--initial-b2b'), '1');
+  for (const option of [
+    '--patterns',
+    '--objective',
+    '--count',
+    '--score',
+    '--score-profile',
+    '--spin-profile',
+    '--backend',
+    '--workers',
+    '--use-all-cpu-threads',
+    '--gpu-device',
+    '--allow-backend-fallback',
+    '--no-backend-fallback',
+    '--solution-probabilities',
+    '--preserve-b2b',
+    '--tablebase',
+    '--no-tablebase',
+    '--build-dependency-dag',
+    '--no-build-dependency-dag',
+    '--max-patterns'
+  ]) {
+    assert.equal(hasOption(tokens, option), false, `pc.score-finder leaked ${option}`);
+  }
+
+  const desktop = production.workspaceRequestForDesktop(request, 'en');
+  assert.equal(desktop.score_mode, 'score-finder');
+  assert.equal(desktop.count_policy, 'all');
+  assert.equal(desktop.queue, 'I');
+  assert.equal(desktop.patterns, '');
+  assert.equal(desktop.queue_knowledge, 'oracle');
+  assert.equal(desktop.score_profile, 'jstris-ultra');
+  assert.equal(desktop.spin_profile, 't-spins');
+  assert.equal(desktop.initial_b2b, 1);
+  assert.equal(desktop.backend, 'cpu');
+  assert.equal(desktop.workers, 1);
+  assert.equal(desktop.use_all_logical_processors, false);
+  assert.equal(desktop.allow_backend_fallback, false);
+
+  for (const queue of ['', 'P7', '[IOSZ]p2']) {
+    const invalid = { ...request, queue };
+    assert.ok(
+      production
+        .workspaceValidationCodes(invalid, 'web')
+        .includes('pc-score-finder-fixed-queue-required'),
+      queue || 'empty'
+    );
+  }
+});
+
+test('PC score-minimals GUI mode binds score-only minimum cover without runtime overrides', () => {
+  const request = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 1,
+    boardMask: 0x3fn,
+    queue: 'I',
+    holdEnabled: true,
+    queueKnowledge: 'visible-7',
+    scoreMode: 'score-minimals',
+    scoreProfile: 'guideline',
+    spinProfile: 'all-mini-plus',
+    initialB2B: 7,
+    backend: 'hybrid',
+    gpuDevice: '2',
+    workers: 8,
+    useAllLogicalProcessors: true,
+    preserveB2B: true,
+    solutionProbabilities: true,
+    tablebaseEnabled: true,
+    precomputeBuildDependencies: true,
+    maxPatterns: 7
+  };
+  assert.deepEqual(
+    production.workspaceValidationCodes(request, 'web'),
+    ['visible-seven-minimum-cover-unsupported']
+  );
+  const normalized = production.normalizeWorkspaceRequest(request);
+  assert.equal(normalized.queueKnowledge, 'oracle');
+  assert.equal(normalized.preserveB2B, false);
+  assert.equal(normalized.solutionProbabilities, false);
+  assert.equal(normalized.backend, 'cpu');
+  assert.equal(normalized.gpuDevice, 'auto');
+  assert.equal(normalized.workers, 1);
+  assert.equal(normalized.useAllLogicalProcessors, false);
+  assert.equal(normalized.tablebaseEnabled, false);
+  assert.equal(normalized.precomputeBuildDependencies, false);
+  assert.equal(normalized.maxPatterns, undefined);
+
+  const tokens = commandTokens(production.buildWorkspaceCommand(request));
+  assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', 'score-minimals']);
+  assert.equal(optionValue(tokens, '--score-profile'), 'guideline');
+  assert.equal(optionValue(tokens, '--spin-profile'), 'all-mini-plus');
+  assert.equal(optionValue(tokens, '--initial-b2b'), '7');
+  for (const option of [
+    '--objective',
+    '--count',
+    '--score',
+    '--backend',
+    '--workers',
+    '--use-all-cpu-threads',
+    '--gpu-device',
+    '--allow-backend-fallback',
+    '--no-backend-fallback',
+    '--solution-probabilities',
+    '--preserve-b2b',
+    '--tablebase',
+    '--no-tablebase',
+    '--build-dependency-dag',
+    '--no-build-dependency-dag',
+    '--max-patterns'
+  ]) {
+    assert.equal(hasOption(tokens, option), false, `pc.score-minimals leaked ${option}`);
+  }
+
+  const desktop = production.workspaceRequestForDesktop(request, 'en');
+  assert.equal(desktop.score_mode, 'score-minimals');
+  assert.equal(desktop.count_policy, 'all');
+  assert.equal(desktop.queue_knowledge, 'oracle');
+  assert.equal(desktop.backend, 'cpu');
+  assert.equal(desktop.workers, 1);
+  assert.equal(desktop.use_all_logical_processors, false);
+  assert.equal(desktop.allow_backend_fallback, false);
+  assert.equal(desktop.preserve_b2b, false);
+  assert.equal(desktop.solution_probabilities, false);
+  assert.equal(desktop.pattern_budget, 5040);
+});
+
+test('PC save GUI modes lower to distinct canonical products without fixed-boundary overrides', () => {
+  const base = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 2,
+    boardMask: 0xf3fcfn,
+    queue: 'P7',
+    holdEnabled: false,
+    queueKnowledge: 'visible-7',
+    scoreProfile: 'guideline',
+    spinProfile: 'all-mini-plus',
+    preserveB2B: true,
+    initialB2B: 9,
+    solutionProbabilities: true,
+    tablebaseEnabled: true,
+    precomputeBuildDependencies: true
+  };
+  for (const [scoreMode, subcommand] of [
+    ['saves', 'saves'],
+    ['best-save', 'best-save']
+  ]) {
+    const request = { ...base, scoreMode };
+    const normalized = production.normalizeWorkspaceRequest(request);
+    assert.equal(normalized.queueKnowledge, 'oracle', scoreMode);
+    assert.equal(normalized.preserveB2B, false, scoreMode);
+    assert.equal(normalized.solutionProbabilities, false, scoreMode);
+    assert.equal(normalized.tablebaseEnabled, false, scoreMode);
+    assert.equal(normalized.precomputeBuildDependencies, false, scoreMode);
+
+    const tokens = commandTokens(production.buildWorkspaceCommand(request));
+    assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', subcommand], scoreMode);
+    assert.equal(optionValue(tokens, '--patterns'), 'P7', scoreMode);
+    for (const option of [
+      '--queue',
+      '--objective',
+      '--count',
+      '--solution-probabilities',
+      '--queue-knowledge',
+      '--preserve-b2b',
+      '--tablebase',
+      '--no-tablebase',
+      '--build-dependency-dag',
+      '--no-build-dependency-dag',
+      '--max-memory-mib'
+    ]) {
+      assert.equal(hasOption(tokens, option), false, `${scoreMode} leaked ${option}`);
+    }
+
+    const desktop = production.workspaceRequestForDesktop(request, 'en');
+    assert.equal(desktop.score_mode, scoreMode);
+    assert.equal(desktop.count_policy, 'all');
+    assert.equal(desktop.queue, '');
+    assert.equal(desktop.patterns, 'P7');
+    assert.equal(desktop.queue_knowledge, 'oracle');
+    assert.equal(desktop.preserve_b2b, false);
+    assert.equal(desktop.solution_probabilities, false);
+    assert.equal(desktop.memory_budget_mb, 0);
+    assert.equal(desktop.tablebase_requested, false);
+    assert.equal(desktop.precompute_build_dependencies, false);
   }
 });
 

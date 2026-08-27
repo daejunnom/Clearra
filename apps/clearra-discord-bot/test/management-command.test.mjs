@@ -147,7 +147,7 @@ test("server pause and channel disable gate slash and Modal work before executio
     ...submitted,
     locale: "en-US",
     data: {
-      custom_id: "clearra:search:v3:setup",
+      custom_id: "clearra:search:v4:pc~tiling",
       components: [
         {
           type: 18,

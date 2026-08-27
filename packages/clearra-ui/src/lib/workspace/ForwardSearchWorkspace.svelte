@@ -76,6 +76,11 @@
   $: validationCodes = forwardSearchValidationCodes(request);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: toolLabelKey = tool === 'damage'
+    ? 'maximumDamage'
+    : tool === 'spin-finder'
+      ? 'spinFinder'
+      : 'maximumRen';
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
@@ -231,8 +236,8 @@
 </script>
 
 <svelte:head>
-  <title>{label(tool === 'damage' ? 'maximumDamage' : 'spinFinder')} · Clearra</title>
-  <meta name="description" content="Exact forward damage and spin search workspace" />
+  <title>{label(toolLabelKey)} · Clearra</title>
+  <meta name="description" content="Exact forward damage, spin, and REN search workspace" />
 </svelte:head>
 
 <WorkspaceShell
@@ -240,7 +245,7 @@
     {language}
     {active}
     statusLabel={label(runtimeView.status)}
-    workspaceLabel={label(tool === 'damage' ? 'maximumDamage' : 'spinFinder')}
+    workspaceLabel={label(toolLabelKey)}
     dimensionLabel={label('fieldHeight')}
     dimensionValue={request.height}
     dimensionMin={1}

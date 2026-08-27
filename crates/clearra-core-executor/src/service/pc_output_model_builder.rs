@@ -111,6 +111,75 @@ mod opening_coverage_fields {
         ]
     }
 
+    pub(super) fn opening_tiling_coverage_fields(
+        problem: &SearchProblem,
+        _packing: &PackingRunResult,
+        observed_supply_incomplete: bool,
+    ) -> Vec<(String, String)> {
+        let query = problem.core_query();
+        let pattern_count = pattern_count(problem);
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("compiled PC problem has a materialized supply universe");
+        vec![
+            field("piece_source_id", problem.piece_source().id().get()),
+            field("pattern_universe_id", universe.pattern_universe_id().get()),
+            field(
+                "pattern_weight_model_id",
+                universe.pattern_weight_model_id().get(),
+            ),
+            field("supply_pattern_count", pattern_count),
+            field("coverage_pattern_count", pattern_count),
+            field("verified_pattern_count", 0),
+            field("materialized_pattern_count", pattern_count),
+            field(
+                "covered_pattern_count_basis",
+                covered_pattern_count_basis_for_problem(problem),
+            ),
+            field(
+                "supply_total_pattern_count",
+                universe.total_possible_pattern_count(),
+            ),
+            field("supply_covered_pattern_count", 0),
+            field("covered_pattern_count", 0),
+            field("supply_weighted_pattern_count", universe.weights().len()),
+            field(
+                "supply_materialized_probability_mass",
+                universe.materialized_probability_mass().get(),
+            ),
+            field(
+                "supply_probability_model",
+                if observed_supply_incomplete {
+                    "observed-expanded-visible-suffixes"
+                } else {
+                    "not-calculated-tiling"
+                },
+            ),
+            field("supply_probability_complete", false),
+            field("probability_complete", false),
+            field("supply_expansion_truncated", observed_supply_incomplete),
+            field(
+                "supply_boundary_candidates",
+                supply_boundary_candidate_count(query),
+            ),
+            field(
+                "partitions",
+                problem
+                    .checkpoint_schedule()
+                    .map(|schedule| schedule.partitions().len())
+                    .unwrap_or(0),
+            ),
+            field(
+                "checkpoints",
+                problem
+                    .checkpoint_schedule()
+                    .map(|schedule| schedule.checkpoint_count())
+                    .unwrap_or(0),
+            ),
+        ]
+    }
+
     fn supply_boundary_candidate_count(
         query: &clearra_pc_graph::request::PcScenarioQuery,
     ) -> usize {
@@ -197,7 +266,6 @@ mod opening_profile_fields {
         packing::PackingRunResult,
         service::{
             field,
-            pc_backend_report_adapter::solver_backend,
             pc_policy_labels::{objective_execution_name, objective_name},
         },
     };
@@ -207,6 +275,41 @@ mod opening_profile_fields {
         packing: &PackingRunResult,
         buildup: &BuildUpRunResult,
         target: PcTarget,
+    ) -> Vec<(String, String)> {
+        opening_profile_fields_for_result(
+            problem,
+            packing,
+            target,
+            buildup.solution_found(),
+            crate::service::pc_backend_report_adapter::solver_backend(packing),
+        )
+    }
+
+    pub(super) fn opening_tiling_profile_fields(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        target: PcTarget,
+        solution_found: bool,
+        packing_source_raw_geometry: bool,
+    ) -> Vec<(String, String)> {
+        opening_profile_fields_for_result(
+            problem,
+            packing,
+            target,
+            solution_found,
+            crate::service::pc_backend_report_adapter::tiling_solver_backend(
+                packing,
+                packing_source_raw_geometry,
+            ),
+        )
+    }
+
+    fn opening_profile_fields_for_result(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        target: PcTarget,
+        solution_found: bool,
+        solver_backend: &'static str,
     ) -> Vec<(String, String)> {
         let query = problem.core_query();
         let pc_query = problem
@@ -232,7 +335,7 @@ mod opening_profile_fields {
             field("objective_search_mode", objective_execution),
             field("objective_applied", "true"),
             field("route", "search-problem-core-executor"),
-            field("solver_backend", solver_backend(packing)),
+            field("solver_backend", solver_backend),
             field(
                 "state_count_available",
                 packing.backend_report().state_count_available(),
@@ -241,7 +344,7 @@ mod opening_profile_fields {
                 "multiplicity_count_available",
                 packing.backend_report().multiplicity_count_available(),
             ),
-            field("solution_found", buildup.solution_found()),
+            field("solution_found", solution_found),
         ]
     }
 }
@@ -380,7 +483,11 @@ mod opening_search_fields {
     }
 }
 mod resource_summary_fields {
-    use crate::{buildup::BuildUpRunResult, packing::PackingRunResult, service::field};
+    use crate::{
+        buildup::BuildUpRunResult,
+        packing::PackingRunResult,
+        service::{field, pc_tiling_materialization::PcTilingMaterialization},
+    };
 
     pub(super) fn resource_summary_fields(
         packing: &PackingRunResult,
@@ -431,6 +538,42 @@ mod resource_summary_fields {
                     .max(buildup.coverage_row_count()),
             ),
             field("resource_probability_complete", probability_complete),
+        ]
+    }
+
+    pub(super) fn tiling_resource_summary_fields(
+        packing: &PackingRunResult,
+        materialization: &PcTilingMaterialization,
+    ) -> Vec<(String, String)> {
+        let report = packing.resource_report();
+        let resource_truncated = report.truncated;
+        let truncation_reason = report
+            .truncation_reason
+            .map(|reason| reason.as_str())
+            .unwrap_or("none");
+        vec![
+            field("resource_truncated", resource_truncated),
+            field("resource_truncation_reason", truncation_reason),
+            field("resource_peak_frontier_states", report.peak_frontier_states),
+            field("resource_peak_candidate_rows", report.peak_candidate_rows),
+            field("resource_peak_hash_buckets", report.peak_hash_buckets),
+            field("resource_peak_gpu_bytes", report.peak_gpu_bytes),
+            field("resource_peak_cpu_bytes", report.peak_cpu_bytes),
+            field("resource_buildup_workspace_bytes", 0),
+            field(
+                "resource_buildup_workspace_accounting_basis",
+                if materialization.packing_source_raw_geometry() {
+                    "none-no-buildup"
+                } else {
+                    "embedded-in-packing-resource-peak"
+                },
+            ),
+            field(
+                "resource_build_worker_backlog_peak",
+                report.build_worker_backlog_peak,
+            ),
+            field("resource_coverage_rows_emitted", 0),
+            field("resource_probability_complete", false),
         ]
     }
 }
@@ -572,6 +715,50 @@ mod scenario_execution_fields {
                 packing.backend_report().multiplicity_count_available(),
             ),
             field("solution_found", buildup.solution_found()),
+        ]
+    }
+
+    pub(super) fn scenario_tiling_execution_fields(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        solution_found: bool,
+        packing_source_raw_geometry: bool,
+    ) -> Vec<(String, String)> {
+        let pattern_count = pattern_count(problem);
+        vec![
+            field(
+                "cleared_lines",
+                packing
+                    .candidate_at(0)
+                    .map_or(0, |candidate| candidate.cleared_lines),
+            ),
+            field("route", "search-problem-core-executor"),
+            field(
+                "solver_backend",
+                crate::service::pc_backend_report_adapter::tiling_solver_backend(
+                    packing,
+                    packing_source_raw_geometry,
+                ),
+            ),
+            field("coverage_pattern_count", pattern_count),
+            field("verified_pattern_count", 0),
+            field("materialized_pattern_count", pattern_count),
+            field(
+                "covered_pattern_count_basis",
+                covered_pattern_count_basis_for_problem(problem),
+            ),
+            field("covered_pattern_count", 0),
+            field("supply_covered_pattern_count", 0),
+            field("probability_complete", false),
+            field(
+                "state_count_available",
+                packing.backend_report().state_count_available(),
+            ),
+            field(
+                "multiplicity_count_available",
+                packing.backend_report().multiplicity_count_available(),
+            ),
+            field("solution_found", solution_found),
         ]
     }
 }
@@ -785,8 +972,237 @@ mod scenario_trace_fields {
     }
 }
 
+mod tiling_renderer {
+    use clearra_problem::{SearchProblem, SearchProblemPreset};
+
+    use crate::{
+        core_execution_result::CoreExecutionResult,
+        packing::PackingRunResult,
+        service::{
+            field,
+            pc_backend_report_adapter::tiling_backend_fields,
+            pc_output_model_builder::{
+                opening_coverage_fields::opening_tiling_coverage_fields,
+                opening_metadata_fields::opening_metadata_fields,
+                opening_profile_fields::opening_tiling_profile_fields,
+                opening_search_fields::opening_search_fields,
+                resource_summary_fields::tiling_resource_summary_fields,
+                scenario_execution_fields::scenario_tiling_execution_fields,
+                scenario_metadata_fields::scenario_metadata_fields,
+                scenario_profile_fields::scenario_profile_fields,
+            },
+            pc_pipeline_fields::tiling_core_pipeline_fields,
+            pc_summary_builder::tiling_result_count_fields,
+            pc_tiling_materialization::PcTilingMaterialization,
+        },
+    };
+
+    pub(crate) fn render_tiling_opening(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        materialization: PcTilingMaterialization,
+    ) -> CoreExecutionResult {
+        debug_assert_eq!(problem.preset(), SearchProblemPreset::OpeningPc);
+        let query = problem.core_query();
+        let target = problem
+            .scenario()
+            .exact_target_policy()
+            .expect("opening preset must preserve target label policy");
+        let mut fields = opening_metadata_fields(problem, target);
+        replace_executor_flow(&mut fields);
+        fields.extend(tiling_core_pipeline_fields(
+            &packing.compact_problem(),
+            packing,
+            &materialization,
+            target.lines(),
+            problem.objective(),
+        ));
+        fields.extend(tiling_backend_fields(
+            packing.backend_report(),
+            query.execution_policy(),
+            packing,
+            materialization.packing_source_raw_geometry(),
+        ));
+        fields.extend(opening_tiling_profile_fields(
+            problem,
+            packing,
+            target,
+            materialization.normalized_solution_count() > 0,
+            materialization.packing_source_raw_geometry(),
+        ));
+        fields.extend(opening_search_fields(problem, target));
+        fields.extend(opening_tiling_coverage_fields(
+            problem,
+            packing,
+            !problem.piece_source().complete(),
+        ));
+        fields.extend(tiling_result_count_fields(
+            problem,
+            packing,
+            &materialization,
+        ));
+        fields.extend(tiling_resource_summary_fields(packing, &materialization));
+        fields.extend(tiling_continuation_fields(false));
+        fields.extend(tiling_solution_probability_fields(problem));
+        materialized_result(fields, materialization)
+    }
+
+    pub(crate) fn render_tiling_scenario(
+        problem: &SearchProblem,
+        packing: &PackingRunResult,
+        materialization: PcTilingMaterialization,
+    ) -> CoreExecutionResult {
+        debug_assert_eq!(problem.preset(), SearchProblemPreset::ScenarioPc);
+        let query = problem.core_query();
+        let mut fields = scenario_metadata_fields(problem);
+        replace_executor_flow(&mut fields);
+        fields.extend(tiling_core_pipeline_fields(
+            &packing.compact_problem(),
+            packing,
+            &materialization,
+            0,
+            problem.objective(),
+        ));
+        fields.extend(tiling_backend_fields(
+            packing.backend_report(),
+            query.execution_policy(),
+            packing,
+            materialization.packing_source_raw_geometry(),
+        ));
+        fields.extend(scenario_profile_fields(problem));
+        fields.extend(scenario_tiling_execution_fields(
+            problem,
+            packing,
+            materialization.normalized_solution_count() > 0,
+            materialization.packing_source_raw_geometry(),
+        ));
+        fields.extend(tiling_resource_summary_fields(packing, &materialization));
+        fields.extend(tiling_result_count_fields(
+            problem,
+            packing,
+            &materialization,
+        ));
+        fields.extend(tiling_trace_fields());
+        fields.extend(tiling_continuation_fields(true));
+        fields.extend(tiling_solution_probability_fields(problem));
+        materialized_result(fields, materialization)
+    }
+
+    fn materialized_result(
+        fields: Vec<(String, String)>,
+        materialization: PcTilingMaterialization,
+    ) -> CoreExecutionResult {
+        let native_memory_evidence_authorized =
+            materialization.native_internal_memory_evidence_authorized();
+        let (initial_page_keys, page_store) = materialization.into_result_parts();
+        let result = CoreExecutionResult::new(fields, Vec::new())
+            .with_normalized_solution_keys(initial_page_keys)
+            .with_tiling_solution_page_store(page_store);
+        if native_memory_evidence_authorized {
+            result.with_pc_tiling_memory_admission_evidence(
+                crate::PcTilingMemoryAdmissionEvidence::NativeInternal,
+            )
+        } else {
+            result
+        }
+    }
+
+    fn replace_executor_flow(fields: &mut [(String, String)]) {
+        if let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == "executor_flow") {
+            *value = "SearchProblem->C PackingProblem->C PackingResult->Rust TilingMaterialization->Rust OutputModel".to_owned();
+        }
+    }
+
+    fn tiling_trace_fields() -> Vec<(String, String)> {
+        vec![
+            field("min_queue_consumed", 0),
+            field("max_queue_consumed", 0),
+            field("sample_queue_consumed", 0),
+            field("placed_piece_count", 0),
+            field("best_remaining_queue_len", 0),
+            field("trace_mode", "not-produced-tiling"),
+            field("retained_trace_key_count", 0),
+            field("retained_trace_keys", "none"),
+            field("retained_trace_key_source", "none"),
+            field("search_unsupported_reason", "none"),
+        ]
+    }
+
+    fn tiling_continuation_fields(scenario: bool) -> Vec<(String, String)> {
+        let mut fields = vec![
+            field("continuation_enough_queue_for_next_pc", false),
+            field("remaining_queue_len", 0),
+            field("remaining_queue_preview", "none"),
+            field("remaining_hold", "unknown-without-build-trace"),
+            field("next_pc_available", false),
+            field("next_pc_candidate", "none"),
+            field("continuation_token_available", false),
+            field(
+                "continuation_token_unavailable_reason",
+                "tiling-has-no-build-trace",
+            ),
+            field("continue_available", false),
+            field("continuation_available", false),
+            field("continuation_token_version", "none"),
+            field("continuation_token", "none"),
+            field("continue_hint", "none"),
+        ];
+        if scenario {
+            fields.extend([
+                field("scenario_replay_token_version", "none"),
+                field("scenario_replay_token", "none"),
+                field("replay_hint", "none"),
+                field("continuation_available_complete", true),
+                field("continuation_basis", "none-tiling"),
+                field("continuation_queue_consumed", 0),
+                field(
+                    "continuation_exact_pieces_policy",
+                    "unavailable-without-build-trace",
+                ),
+                field("continuation_exact_pieces", "none"),
+                field(
+                    "continuation_min_remaining_queue_policy",
+                    "unavailable-without-build-trace",
+                ),
+                field("continuation_min_remaining_queue", 0),
+                field("searched_nodes", 0),
+                field("search_nodes", 0),
+                field("budget_exceeded", false),
+                field("budget_exceeded_count", 0),
+            ]);
+        }
+        fields
+    }
+
+    fn tiling_solution_probability_fields(problem: &SearchProblem) -> Vec<(String, String)> {
+        let requested = problem.solution_probability_policy().requested();
+        vec![
+            field("solution_probabilities_requested", requested),
+            field("solution_probability_count", 0),
+            field("solution_probability_complete", !requested),
+            field(
+                "solution_probability_basis",
+                if requested {
+                    "not-calculated-tiling"
+                } else {
+                    "not-requested"
+                },
+            ),
+            field(
+                "solution_probability_incomplete_reason",
+                if requested {
+                    "tiling-does-not-calculate-probability"
+                } else {
+                    "none"
+                },
+            ),
+        ]
+    }
+}
+
 pub(crate) use opening_renderer::render_opening;
 pub(crate) use scenario_renderer::render_scenario;
+pub(crate) use tiling_renderer::{render_tiling_opening, render_tiling_scenario};
 
 fn solution_probability_fields(
     problem: &clearra_problem::SearchProblem,

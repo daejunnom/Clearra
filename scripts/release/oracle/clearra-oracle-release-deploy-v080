@@ -1,0 +1,498 @@
+#!/bin/sh
+
+set -eu
+umask 077
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+release_root=/opt/clearra/releases
+current_link=/opt/clearra/current
+settings_path=/etc/clearra-gateway/settings
+proof_directory=/run/clearra-deploy
+service_name=clearra-gateway.service
+tree_digest=/usr/local/libexec/clearra-release-tree-digest
+launcher_path=/usr/local/sbin/clearra-oracle-release-deploy
+node_path=/usr/bin/node
+systemctl_path=/usr/bin/systemctl
+flock_path=/usr/bin/flock
+
+fail() {
+  printf '%s\n' "oracle_deploy_wrapper=failed" >&2
+  exit "${1:-1}"
+}
+
+require_value() {
+  [ "$#" -ge 2 ] && [ -n "$2" ] || fail 64
+}
+
+is_release_id() {
+  value=$1
+  [ "${#value}" -ge 1 ] && [ "${#value}" -le 128 ] || return 1
+  case "$value" in
+    [A-Za-z0-9]* ) ;;
+    * ) return 1 ;;
+  esac
+  case "$value" in
+    *[!A-Za-z0-9._-]* ) return 1 ;;
+  esac
+}
+
+is_sha256() {
+  value=$1
+  [ "${#value}" -eq 64 ] || return 1
+  case "$value" in
+    *[!0-9a-f]* ) return 1 ;;
+  esac
+}
+
+is_commit() {
+  value=$1
+  [ "${#value}" -eq 40 ] || return 1
+  case "$value" in
+    *[!0-9a-f]* ) return 1 ;;
+  esac
+}
+
+is_runtime_authority_kind() {
+  value=$1
+  case "$value" in
+    clearra.rollback.runtime-identity.v1 | clearra.rollback.legacy-health-no-runtime.v1 ) ;;
+    * ) return 1 ;;
+  esac
+}
+
+canonical_origin() {
+  /usr/bin/python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    value = sys.argv[1]
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
+    ):
+        raise ValueError
+    canonical = f"https://{parsed.netloc}"
+    if value not in (canonical, f"{canonical}/"):
+        raise ValueError
+    print(canonical)
+except (IndexError, ValueError):
+    raise SystemExit(2)
+PY
+}
+
+canonical_job_url() {
+  /usr/bin/python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    value = sys.argv[1]
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/jobs"
+    ):
+        raise ValueError
+    canonical = f"https://{parsed.netloc}/jobs"
+    if value != canonical:
+        raise ValueError
+    print(canonical)
+except (IndexError, ValueError):
+    raise SystemExit(2)
+PY
+}
+
+canonical_timestamp() {
+  /usr/bin/python3 - "$1" <<'PY'
+import datetime
+import sys
+
+try:
+    value = sys.argv[1]
+    if not value or value != value.strip():
+        raise ValueError
+    parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError
+    canonical = parsed.astimezone(datetime.timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    print(canonical)
+except (IndexError, ValueError):
+    raise SystemExit(2)
+PY
+}
+
+require_root_regular_0755() {
+  path=$1
+  [ -f "$path" ] && [ ! -L "$path" ] || fail 77
+  metadata=$(/usr/bin/stat -c '%u:%g:%a' -- "$path") || fail 77
+  [ "$metadata" = "0:0:755" ] || fail 77
+}
+
+require_root_regular_readonly() {
+  path=$1
+  [ -f "$path" ] && [ ! -L "$path" ] || fail 77
+  metadata=$(/usr/bin/stat -c '%u:%g:%a' -- "$path") || fail 77
+  owner=${metadata%%:*}
+  remainder=${metadata#*:}
+  group=${remainder%%:*}
+  mode=${metadata##*:}
+  [ "$owner" = 0 ] && [ "$group" = 0 ] || fail 77
+  case "$mode" in
+    *[2367][0-7] | *[0-7][2367] ) fail 77 ;;
+  esac
+}
+
+validate_script_release() {
+  script_release_id=$1
+  expected_digest=$2
+  is_release_id "$script_release_id" || fail 64
+  is_sha256 "$expected_digest" || fail 64
+  script_release="$release_root/$script_release_id"
+  [ -d "$script_release" ] && [ ! -L "$script_release" ] || fail 77
+  [ "$(/usr/bin/readlink -f -- "$script_release")" = "$script_release" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g' -- "$script_release")" = "0:0" ] || fail 77
+
+  for executable in \
+    "$script_release/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
+    "$script_release/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$script_release/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
+    "$script_release/apps/clearra-discord-bot/scripts/restore-oracle-release" \
+    "$script_release/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
+    "$script_release/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
+    "$script_release/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
+  do
+    require_root_regular_0755 "$executable"
+  done
+  require_root_regular_readonly \
+    "$script_release/apps/clearra-discord-bot/src/job-service/runtime-identity.mjs"
+  require_root_regular_readonly \
+    "$script_release/apps/clearra-discord-bot/src/admin/main.mjs"
+
+  unsafe=$(/usr/bin/find "$script_release" -xdev \
+    \( -type f -o -type d \) \
+    \( ! -user root -o ! -group root -o -perm /022 \) \
+    -print -quit) || fail 77
+  [ -z "$unsafe" ] || fail 77
+  actual_digest=$("$tree_digest" "$script_release") || fail 65
+  [ "$actual_digest" = "$expected_digest" ] || fail 65
+}
+
+ensure_proof_directory() {
+  if [ ! -e "$proof_directory" ]; then
+    /usr/bin/install -d -o root -g root -m 0700 "$proof_directory"
+  fi
+  [ -d "$proof_directory" ] && [ ! -L "$proof_directory" ] || fail 77
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$proof_directory")" = "0:0:700" ] || fail 77
+}
+
+wait_for_service_release() {
+  expected_release=$1
+  attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    if "$systemctl_path" is-active --quiet "$service_name"; then
+      pid=$("$systemctl_path" show --property MainPID --value "$service_name")
+      case "$pid" in
+        '' | *[!0-9]* | 0 | 1 ) ;;
+        * )
+          cwd=$(/usr/bin/readlink -f -- "/proc/$pid/cwd" 2>/dev/null || true)
+          [ "$cwd" = "$expected_release/apps/clearra-discord-bot" ] && return 0
+          ;;
+      esac
+    fi
+    attempts=$((attempts + 1))
+    /usr/bin/sleep 2
+  done
+  fail 70
+}
+
+operation=
+script_release_id=
+script_release_sha256=
+prior_revision=
+deployment_nonce=
+proof=
+source_commit=
+candidate_url=
+candidate_revision=
+oracle_release_id=
+oracle_release_sha256=
+oracle_settings_sha256=
+verified_after=
+prior_release=
+prior_release_id=
+prior_release_sha256=
+prior_settings_backup=
+prior_settings_sha256=
+prior_runtime_authority_kind=
+prior_runtime_authority_sha256=
+prior_job_url=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --operation)
+      require_value "$@"; [ -z "$operation" ] || fail 64; operation=$2; shift 2 ;;
+    --script-release-id)
+      require_value "$@"; [ -z "$script_release_id" ] || fail 64; script_release_id=$2; shift 2 ;;
+    --script-release-sha256)
+      require_value "$@"; [ -z "$script_release_sha256" ] || fail 64; script_release_sha256=$2; shift 2 ;;
+    --prior-revision)
+      require_value "$@"; [ -z "$prior_revision" ] || fail 64; prior_revision=$2; shift 2 ;;
+    --deployment-nonce)
+      require_value "$@"; [ -z "$deployment_nonce" ] || fail 64; deployment_nonce=$2; shift 2 ;;
+    --proof)
+      require_value "$@"; [ -z "$proof" ] || fail 64; proof=$2; shift 2 ;;
+    --source-commit)
+      require_value "$@"; [ -z "$source_commit" ] || fail 64; source_commit=$2; shift 2 ;;
+    --candidate-url)
+      require_value "$@"; [ -z "$candidate_url" ] || fail 64; candidate_url=$2; shift 2 ;;
+    --candidate-revision)
+      require_value "$@"; [ -z "$candidate_revision" ] || fail 64; candidate_revision=$2; shift 2 ;;
+    --oracle-release-id)
+      require_value "$@"; [ -z "$oracle_release_id" ] || fail 64; oracle_release_id=$2; shift 2 ;;
+    --oracle-release-sha256)
+      require_value "$@"; [ -z "$oracle_release_sha256" ] || fail 64; oracle_release_sha256=$2; shift 2 ;;
+    --oracle-settings-sha256)
+      require_value "$@"; [ -z "$oracle_settings_sha256" ] || fail 64; oracle_settings_sha256=$2; shift 2 ;;
+    --verified-after)
+      require_value "$@"; [ -z "$verified_after" ] || fail 64; verified_after=$2; shift 2 ;;
+    --prior-release)
+      require_value "$@"; [ -z "$prior_release" ] || fail 64; prior_release=$2; shift 2 ;;
+    --prior-release-id)
+      require_value "$@"; [ -z "$prior_release_id" ] || fail 64; prior_release_id=$2; shift 2 ;;
+    --prior-release-sha256)
+      require_value "$@"; [ -z "$prior_release_sha256" ] || fail 64; prior_release_sha256=$2; shift 2 ;;
+    --prior-settings-backup)
+      require_value "$@"; [ -z "$prior_settings_backup" ] || fail 64; prior_settings_backup=$2; shift 2 ;;
+    --prior-settings-sha256)
+      require_value "$@"; [ -z "$prior_settings_sha256" ] || fail 64; prior_settings_sha256=$2; shift 2 ;;
+    --prior-runtime-authority-kind)
+      require_value "$@"; [ -z "$prior_runtime_authority_kind" ] || fail 64; prior_runtime_authority_kind=$2; shift 2 ;;
+    --prior-runtime-authority-sha256)
+      require_value "$@"; [ -z "$prior_runtime_authority_sha256" ] || fail 64; prior_runtime_authority_sha256=$2; shift 2 ;;
+    --prior-job-url)
+      require_value "$@"; [ -z "$prior_job_url" ] || fail 64; prior_job_url=$2; shift 2 ;;
+    *) fail 64 ;;
+  esac
+done
+
+[ "$(/usr/bin/id -u)" -eq 0 ] || fail 77
+require_root_regular_0755 "$launcher_path"
+[ "$(/usr/bin/readlink -f -- "$0")" = "$launcher_path" ] || fail 77
+require_root_regular_0755 "$tree_digest"
+[ -x "$node_path" ] && [ -x "$systemctl_path" ] && [ -x "$flock_path" ] || fail 69
+exec 9>/run/lock/clearra-oracle-release-deploy.lock
+"$flock_path" -n 9 || fail 75
+validate_script_release "$script_release_id" "$script_release_sha256"
+is_sha256 "$deployment_nonce" || fail 64
+
+capture_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs"
+producer_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs"
+candidate_verifier="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs"
+rollback_verifier="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs"
+restore_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/restore-oracle-release"
+
+case "$operation" in
+  capture-rollback-authority)
+    is_release_id "$prior_revision" || fail 64
+    is_runtime_authority_kind "$prior_runtime_authority_kind" || fail 64
+    [ -z "$proof$source_commit$candidate_url$candidate_revision$oracle_release_id$oracle_release_sha256$oracle_settings_sha256$verified_after$prior_release$prior_release_id$prior_release_sha256$prior_settings_backup$prior_settings_sha256$prior_runtime_authority_sha256$prior_job_url" ] || fail 64
+    [ ! -e "/etc/clearra-gateway/settings.pre-v0.8.0-$deployment_nonce" ] || fail 73
+    [ ! -e "/etc/clearra-gateway/settings.pre-v0.8.0-$deployment_nonce.tmp" ] || fail 73
+    exec "$node_path" "$capture_script" \
+      --prior-revision "$prior_revision" \
+      --prior-runtime-authority-kind "$prior_runtime_authority_kind" \
+      --deployment-nonce "$deployment_nonce"
+    ;;
+
+  verify-candidate)
+    [ -z "$prior_revision$prior_release$prior_release_id$prior_release_sha256$prior_settings_backup$prior_settings_sha256$prior_runtime_authority_kind$prior_runtime_authority_sha256$prior_job_url" ] || fail 64
+    is_commit "$source_commit" || fail 64
+    is_release_id "$candidate_revision" || fail 64
+    is_release_id "$oracle_release_id" || fail 64
+    is_sha256 "$oracle_release_sha256" || fail 64
+    is_sha256 "$oracle_settings_sha256" || fail 64
+    [ "$oracle_release_id" = "$script_release_id" ] || fail 64
+    [ "$oracle_release_sha256" = "$script_release_sha256" ] || fail 64
+    candidate_url=$(canonical_origin "$candidate_url") || fail 64
+    verified_after=$(canonical_timestamp "$verified_after") || fail 64
+    commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
+    [ "$oracle_release_id" = "v0.8.0-$commit_prefix" ] || fail 64
+    [ "$candidate_revision" = "clearra-current-job-v080-$commit_prefix" ] || fail 64
+    [ "$proof" = "$proof_directory/clearra-oracle-candidate-$deployment_nonce.json" ] || fail 64
+    [ ! -e "$proof" ] || fail 73
+    ensure_proof_directory
+
+    candidate_release="$release_root/$oracle_release_id"
+    temporary_directory=$(/usr/bin/mktemp -d /opt/clearra/.oracle-candidate.XXXXXX)
+    temporary_link="$temporary_directory/current"
+    temporary_settings=$(/usr/bin/mktemp /etc/clearra-gateway/.settings.candidate.XXXXXX)
+    transition_started=0
+    verification_complete=0
+    cleanup_candidate() {
+      exit_status=$?
+      trap - EXIT HUP INT TERM
+      if [ "$transition_started" -eq 1 ] && [ "$verification_complete" -ne 1 ]; then
+        "$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true
+      fi
+      /usr/bin/rm -f -- "$temporary_settings" || true
+      /usr/bin/rm -rf -- "$temporary_directory" || true
+      exit "$exit_status"
+    }
+    trap cleanup_candidate EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    /usr/bin/printf '%s\n' \
+      'NODE_ENV=production' \
+      "CLEARRA_JOB_URL=$candidate_url/jobs" \
+      "CLEARRA_EXPECTED_JOB_SOURCE_COMMIT=$source_commit" \
+      "CLEARRA_EXPECTED_ENGINE_BUILD_ID=$source_commit" \
+      'CLEARRA_EXPECTED_JOB_CONTRACT_REVISION=clearra.search.contract.v2' \
+      'CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1' \
+      'CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1' \
+      'CLEARRA_WORKER_AUTHORITY=remote' \
+      'CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1' \
+      'CLEARRA_SEARCH_TIMEOUT_MS=180000' \
+      'CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000' \
+      'CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000' \
+      'CLEARRA_INTERACTION_DEADLINE_MS=840000' > "$temporary_settings"
+    /usr/bin/chown root:root "$temporary_settings"
+    /usr/bin/chmod 0600 "$temporary_settings"
+    actual_settings_sha256=$(/usr/bin/sha256sum "$temporary_settings" | /usr/bin/cut -d ' ' -f 1)
+    [ "$actual_settings_sha256" = "$oracle_settings_sha256" ] || fail 65
+
+    /usr/bin/ln -s -- "$candidate_release" "$temporary_link"
+    transition_started=1
+    "$systemctl_path" stop "$service_name"
+    /usr/bin/mv -Tf -- "$temporary_link" "$current_link"
+    /usr/bin/mv -f -- "$temporary_settings" "$settings_path"
+    "$systemctl_path" start "$service_name"
+    wait_for_service_release "$candidate_release"
+
+    deadline=$(( $(/usr/bin/date +%s) + 900 ))
+    while :; do
+      if "$node_path" "$producer_script" candidate \
+        --proof "$proof" \
+        --source-commit "$source_commit" \
+        --candidate-url "$candidate_url" \
+        --candidate-revision "$candidate_revision" \
+        --oracle-release-id "$oracle_release_id" \
+        --oracle-release-sha256 "$oracle_release_sha256" \
+        --oracle-settings-sha256 "$oracle_settings_sha256" \
+        --deployment-nonce "$deployment_nonce" \
+        --verified-after "$verified_after" >/dev/null 2>&1
+      then
+        break
+      fi
+      [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || fail 70
+      /usr/bin/sleep 5
+    done
+    "$node_path" "$candidate_verifier" \
+      --proof "$proof" \
+      --source-commit "$source_commit" \
+      --candidate-url "$candidate_url" \
+      --candidate-revision "$candidate_revision" \
+      --oracle-release-id "$oracle_release_id" \
+      --oracle-release-sha256 "$oracle_release_sha256" \
+      --oracle-settings-sha256 "$oracle_settings_sha256" \
+      --deployment-nonce "$deployment_nonce" >/dev/null
+    verification_complete=1
+    printf '%s\n' "oracle_candidate=verified"
+    ;;
+
+  restore-prior-and-verify)
+    [ -z "$source_commit$candidate_url$candidate_revision$oracle_release_id$oracle_release_sha256$oracle_settings_sha256" ] || fail 64
+    is_release_id "$prior_revision" || fail 64
+    is_release_id "$prior_release_id" || fail 64
+    is_sha256 "$prior_release_sha256" || fail 64
+    is_sha256 "$prior_settings_sha256" || fail 64
+    is_runtime_authority_kind "$prior_runtime_authority_kind" || fail 64
+    is_sha256 "$prior_runtime_authority_sha256" || fail 64
+    [ "$prior_release" = "$release_root/$prior_release_id" ] || fail 64
+    [ "$prior_settings_backup" = "/etc/clearra-gateway/settings.pre-v0.8.0-$deployment_nonce" ] || fail 64
+    prior_job_url=$(canonical_job_url "$prior_job_url") || fail 64
+    verified_after=$(canonical_timestamp "$verified_after") || fail 64
+    [ "$proof" = "$proof_directory/clearra-oracle-rollback-$deployment_nonce.json" ] || fail 64
+    [ ! -e "$proof" ] || fail 73
+    [ -f "$prior_settings_backup" ] && [ ! -L "$prior_settings_backup" ] || fail 66
+    [ "$(/usr/bin/stat -c '%u' -- "$prior_settings_backup")" = 0 ] || fail 77
+    actual_prior_release_sha256=$("$tree_digest" "$prior_release") || fail 65
+    [ "$actual_prior_release_sha256" = "$prior_release_sha256" ] || fail 65
+    actual_prior_settings_sha256=$(/usr/bin/sha256sum "$prior_settings_backup" | /usr/bin/cut -d ' ' -f 1)
+    [ "$actual_prior_settings_sha256" = "$prior_settings_sha256" ] || fail 65
+    ensure_proof_directory
+
+    transition_started=0
+    verification_complete=0
+    cleanup_rollback() {
+      exit_status=$?
+      trap - EXIT HUP INT TERM
+      if [ "$transition_started" -eq 1 ] && [ "$verification_complete" -ne 1 ]; then
+        "$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true
+      fi
+      exit "$exit_status"
+    }
+    trap cleanup_rollback EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    "$restore_script" \
+      "$prior_release" \
+      "$prior_release_sha256" \
+      "$prior_settings_backup" \
+      "$prior_settings_sha256" >/dev/null
+    transition_started=1
+    wait_for_service_release "$prior_release"
+
+    deadline=$(( $(/usr/bin/date +%s) + 900 ))
+    while :; do
+      if "$node_path" "$producer_script" rollback \
+        --proof "$proof" \
+        --prior-revision "$prior_revision" \
+        --prior-oracle-release-id "$prior_release_id" \
+        --prior-oracle-release-sha256 "$prior_release_sha256" \
+        --prior-oracle-settings-sha256 "$prior_settings_sha256" \
+        --prior-runtime-authority-kind "$prior_runtime_authority_kind" \
+        --prior-runtime-authority-sha256 "$prior_runtime_authority_sha256" \
+        --prior-job-url "$prior_job_url" \
+        --deployment-nonce "$deployment_nonce" \
+        --verified-after "$verified_after" >/dev/null 2>&1
+      then
+        break
+      fi
+      [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || fail 70
+      /usr/bin/sleep 5
+    done
+    "$node_path" "$rollback_verifier" \
+      --proof "$proof" \
+      --prior-revision "$prior_revision" \
+      --prior-oracle-release-id "$prior_release_id" \
+      --prior-oracle-release-sha256 "$prior_release_sha256" \
+      --prior-oracle-settings-sha256 "$prior_settings_sha256" \
+      --prior-runtime-authority-kind "$prior_runtime_authority_kind" \
+      --prior-runtime-authority-sha256 "$prior_runtime_authority_sha256" \
+      --prior-job-url "$prior_job_url" \
+      --deployment-nonce "$deployment_nonce" >/dev/null
+    verification_complete=1
+    printf '%s\n' "oracle_rollback=verified"
+    ;;
+
+  *) fail 64 ;;
+esac

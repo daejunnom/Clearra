@@ -4,5 +4,10 @@
 apps/clearra-discord-bot/scripts/restore-oracle-release text eol=lf
 scripts/release/create-exact-source-archive.mjs text eol=lf
 scripts/release/exact-source-tar-contract.mjs text eol=lf
+scripts/release/oracle/*.mjs text eol=lf
+scripts/release/oracle/*.py text eol=lf
+scripts/release/oracle/*.template text eol=lf
+scripts/release/oracle/*-v080 text eol=lf
+scripts/release/oracle/*known-hosts text eol=lf
 tools/asset-import/*.svg text eol=lf
 assets/skins/**/*.json text eol=lf

@@ -21,6 +21,10 @@ pub enum RenderError {
         actual: u64,
         max: u64,
     },
+    AllocationFailed {
+        allocation: &'static str,
+        requested_bytes: u64,
+    },
     UnsupportedFrameFormat {
         frame_format: RenderFrameFormat,
         reason: RenderUnsupportedReason,

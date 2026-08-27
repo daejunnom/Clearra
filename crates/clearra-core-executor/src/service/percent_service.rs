@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     resource::{ResourceReport, ResourceTruncationReason},
@@ -12,10 +14,16 @@ use crate::{
             COVERED_PATTERN_BASIS_MATERIALIZED_PATTERN_UNIVERSE,
             OBSERVED_MATERIALIZED_PATTERN_SPECIFIC,
         },
-        BuildUpRunner, BuildUpRunnerError,
+        BuildUpRunResult, BuildUpRunner, BuildUpRunnerError,
     },
     core_execution_result::CoreExecutionResult,
-    packing::{PackingRunner, PackingRunnerError},
+    packing::{PackingRunResult, PackingRunner, PackingRunnerError},
+    pc_chance_coverage_evidence::PcChanceCoverageEvidence,
+    pc_failed_queue_evidence::{
+        PcFailedQueueEvidence, PcFailedQueueEvidenceError, PcFailedQueueEvidenceProducer,
+        PcFailedQueueExecutionAuthority, PcFailedQueueProducerAdmission,
+        PcFailedQueueSourceCompleteness,
+    },
     service::field,
 };
 
@@ -24,6 +32,7 @@ pub enum PercentServiceError {
     UnsupportedPreset,
     EmptyPatternUniverse,
     InvalidCoverageProbability,
+    InvalidPcChanceCoverageEvidence,
     Packing(PackingRunnerError),
     BuildUp(BuildUpRunnerError),
 }
@@ -42,9 +51,48 @@ impl PercentServiceError {
             Self::BuildUp(BuildUpRunnerError::UnsupportedPieceSource { reason }) => Some(reason),
             Self::EmptyPatternUniverse
             | Self::InvalidCoverageProbability
+            | Self::InvalidPcChanceCoverageEvidence
             | Self::Packing(_)
             | Self::BuildUp(_) => None,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PcFailedQueueExecution {
+    result: CoreExecutionResult,
+    evidence: PcFailedQueueEvidence,
+}
+
+impl PcFailedQueueExecution {
+    pub fn result(&self) -> &CoreExecutionResult {
+        &self.result
+    }
+
+    pub fn evidence(&self) -> &PcFailedQueueEvidence {
+        &self.evidence
+    }
+
+    pub fn into_parts(self) -> (CoreExecutionResult, PcFailedQueueEvidence) {
+        (self.result, self.evidence)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PcFailedQueueExecutionError {
+    Percent(PercentServiceError),
+    Evidence(PcFailedQueueEvidenceError),
+}
+
+impl From<PercentServiceError> for PcFailedQueueExecutionError {
+    fn from(error: PercentServiceError) -> Self {
+        Self::Percent(error)
+    }
+}
+
+impl From<PcFailedQueueEvidenceError> for PcFailedQueueExecutionError {
+    fn from(error: PcFailedQueueEvidenceError) -> Self {
+        Self::Evidence(error)
     }
 }
 
@@ -79,54 +127,182 @@ impl PercentService {
         problem: &SearchProblem,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, PercentServiceError> {
-        if !matches!(
-            problem.preset(),
-            SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc
-        ) {
-            return Err(PercentServiceError::UnsupportedPreset);
-        }
-        let universe = problem
-            .piece_source()
-            .materialized_universe()
-            .ok_or(PercentServiceError::EmptyPatternUniverse)?;
-        if universe.pattern_count() == 0 {
-            return Err(PercentServiceError::EmptyPatternUniverse);
-        }
-
-        let packing = PackingRunner::run_with_control(problem, control)
-            .map_err(PercentServiceError::Packing)?;
-        let buildup = BuildUpRunner::run_for_coverage_with_control(problem, &packing, control)
-            .map_err(PercentServiceError::BuildUp)?;
-        let probability_complete = problem.piece_source().complete()
-            && packing.count_complete()
-            && buildup.count_complete()
-            && buildup.objective_complete();
-        let truncation_reason = truncation_reason(problem, &packing, &buildup);
-        let mut resource_report = packing.resource_report().clone();
-        resource_report.coverage_rows_emitted = buildup.coverage_row_count();
-        resource_report.peak_cpu_bytes = resource_report
-            .peak_cpu_bytes
-            .saturating_add(buildup.peak_workspace_bytes());
-        resource_report.probability_complete = probability_complete;
-        if !probability_complete && !resource_report.truncated {
-            resource_report.mark_truncated(ResourceTruncationReason::ObservedUniverseTruncated);
-        }
-
+        let parts = execute_parts(problem, control)?;
         build_result(
             problem,
-            &packing,
-            &buildup,
-            resource_report,
-            probability_complete,
-            truncation_reason,
+            &parts.packing,
+            parts.buildup,
+            parts.resource_report,
+            parts.probability_complete,
+            parts.truncation_reason,
         )
     }
+
+    pub fn execute_failed_queue(
+        problem: Arc<SearchProblem>,
+        example_limit: usize,
+    ) -> Result<PcFailedQueueExecution, PcFailedQueueExecutionError> {
+        Self::execute_failed_queue_with_cancellation(
+            problem,
+            example_limit,
+            &ExecutionCancellationToken::new(),
+        )
+    }
+
+    pub fn execute_failed_queue_with_cancellation(
+        problem: Arc<SearchProblem>,
+        example_limit: usize,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<PcFailedQueueExecution, PcFailedQueueExecutionError> {
+        Self::execute_failed_queue_with_control(
+            problem,
+            example_limit,
+            &ExecutionControl::new(cancellation.clone()),
+        )
+    }
+
+    pub fn execute_failed_queue_with_control(
+        problem: Arc<SearchProblem>,
+        example_limit: usize,
+        control: &ExecutionControl,
+    ) -> Result<PcFailedQueueExecution, PcFailedQueueExecutionError> {
+        let authority = PcFailedQueueExecutionAuthority::new(problem);
+        let parts = execute_parts(authority.problem(), control)?;
+        let memory_bound = parts
+            .packing
+            .execution_memory_bound()
+            .ok_or(PcFailedQueueEvidenceError::MemoryAuthorityUnavailable)?;
+        let observed_execution_bytes =
+            checked_failed_queue_observed_bytes(&parts.packing, &parts.buildup)?;
+        let evidence = PcFailedQueueEvidenceProducer::produce(
+            authority.clone(),
+            parts.buildup.coverage_rows(),
+            example_limit,
+            PcFailedQueueSourceCompleteness::new(
+                parts.packing.count_complete(),
+                parts.buildup.count_complete(),
+                parts.buildup.materialized_coverage_complete(),
+                parts.buildup.objective_complete(),
+            ),
+            PcFailedQueueProducerAdmission::new(memory_bound, observed_execution_bytes),
+        )?;
+        let result = build_result(
+            authority.problem(),
+            &parts.packing,
+            parts.buildup,
+            parts.resource_report,
+            parts.probability_complete,
+            parts.truncation_reason,
+        )?;
+        Ok(PcFailedQueueExecution { result, evidence })
+    }
+}
+
+struct PercentExecutionParts {
+    packing: PackingRunResult,
+    buildup: BuildUpRunResult,
+    resource_report: ResourceReport,
+    probability_complete: bool,
+    truncation_reason: &'static str,
+}
+
+fn execute_parts(
+    problem: &SearchProblem,
+    control: &ExecutionControl,
+) -> Result<PercentExecutionParts, PercentServiceError> {
+    if !matches!(
+        problem.preset(),
+        SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc
+    ) {
+        return Err(PercentServiceError::UnsupportedPreset);
+    }
+    let universe = problem
+        .piece_source()
+        .materialized_universe()
+        .ok_or(PercentServiceError::EmptyPatternUniverse)?;
+    if universe.pattern_count() == 0 {
+        return Err(PercentServiceError::EmptyPatternUniverse);
+    }
+
+    let packing =
+        PackingRunner::run_with_control(problem, control).map_err(PercentServiceError::Packing)?;
+    let buildup = BuildUpRunner::run_for_coverage_with_control(problem, &packing, control)
+        .map_err(PercentServiceError::BuildUp)?;
+    let probability_complete = problem.piece_source().complete()
+        && packing.count_complete()
+        && buildup.count_complete()
+        && buildup.objective_complete();
+    let truncation_reason = truncation_reason(problem, &packing, &buildup);
+    let mut resource_report = packing.resource_report().clone();
+    resource_report.coverage_rows_emitted = buildup.coverage_row_count();
+    resource_report.peak_cpu_bytes = resource_report
+        .peak_cpu_bytes
+        .saturating_add(buildup.peak_workspace_bytes());
+    resource_report.probability_complete = probability_complete;
+    if !probability_complete && !resource_report.truncated {
+        resource_report.mark_truncated(ResourceTruncationReason::ObservedUniverseTruncated);
+    }
+
+    Ok(PercentExecutionParts {
+        packing,
+        buildup,
+        resource_report,
+        probability_complete,
+        truncation_reason,
+    })
+}
+
+fn checked_failed_queue_observed_bytes(
+    packing: &PackingRunResult,
+    buildup: &BuildUpRunResult,
+) -> Result<u128, PcFailedQueueEvidenceError> {
+    let mut bytes = packing
+        .checked_retained_execution_bytes()
+        .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?;
+    bytes = bytes
+        .checked_add(buildup.peak_workspace_bytes() as u128)
+        .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?;
+
+    let coverage_row_capacity_upper_bound = buildup
+        .pattern_verified_execution_count()
+        .max(buildup.coverage_row_count());
+    bytes = bytes
+        .checked_add(
+            (coverage_row_capacity_upper_bound as u128)
+                .checked_mul(
+                    core::mem::size_of::<clearra_coverage::row::coverage_row::CoverageRow>()
+                        as u128,
+                )
+                .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?,
+        )
+        .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?;
+    for row in buildup.coverage_rows() {
+        bytes = bytes
+            .checked_add(
+                row.coverage_bits()
+                    .checked_storage_retained_bytes()
+                    .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?,
+            )
+            .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?;
+    }
+    if let Some(objective) = buildup.objective_result() {
+        bytes = bytes
+            .checked_add(
+                objective
+                    .coverage()
+                    .covered_patterns()
+                    .checked_storage_retained_bytes()
+                    .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?,
+            )
+            .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?;
+    }
+    Ok(bytes)
 }
 
 fn build_result(
     problem: &SearchProblem,
     packing: &crate::packing::PackingRunResult,
-    buildup: &crate::buildup::BuildUpRunResult,
+    buildup: crate::buildup::BuildUpRunResult,
     resource_report: ResourceReport,
     probability_complete: bool,
     truncation_reason: &'static str,
@@ -245,9 +421,33 @@ fn build_result(
     if let Some(observed) = source.observed_window_descriptor() {
         fields.push(field("observed_pattern_budget", observed.budget()));
     }
-    let coverage_pattern_words = coverage_pattern_words(buildup, universe.pattern_count());
+    let coverage_pattern_words = coverage_pattern_words(&buildup, universe.pattern_count());
+    if !problem
+        .pc_chance_evidence_policy()
+        .retains_pc_coverage_evidence()
+    {
+        return Ok(CoreExecutionResult::new(fields, Vec::new())
+            .with_coverage_pattern_words(coverage_pattern_words));
+    }
+
+    let coverage_evidence_complete = buildup.materialized_coverage_complete()
+        && buildup.count_complete()
+        && buildup.objective_complete();
+    let coverage_rows = buildup.into_coverage_rows();
+    let mut coverage_evidence = PcChanceCoverageEvidence::from_problem_rows(
+        problem,
+        coverage_rows,
+        coverage_evidence_complete,
+    )
+    .map_err(|_| PercentServiceError::InvalidPcChanceCoverageEvidence)?;
+    if coverage_evidence.complete()
+        && coverage_evidence.coverage_union().words() != coverage_pattern_words
+    {
+        coverage_evidence = coverage_evidence.into_incomplete();
+    }
     Ok(CoreExecutionResult::new(fields, Vec::new())
-        .with_coverage_pattern_words(coverage_pattern_words))
+        .with_coverage_pattern_words(coverage_pattern_words)
+        .with_pc_chance_coverage_evidence(coverage_evidence))
 }
 
 fn coverage_pattern_words(

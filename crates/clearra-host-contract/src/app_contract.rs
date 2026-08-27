@@ -1,7 +1,7 @@
 use crate::{
     AppCommandKind, AppResult, BackendPolicy, BackendReport, CapabilityReport, ContinuationReport,
-    DiagnosticsPolicy, LocalePolicy, OutputPolicy, ProductBuildIdentity, QueryEnvelope,
-    ResourceBudget, ResourceReport,
+    DiagnosticsPolicy, LocalePolicy, OutputPolicy, ProductBuildIdentity, ProductResultPayload,
+    QueryEnvelope, ResourceBudget, ResourceReport, SolutionSetArtifactPayload,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +49,14 @@ impl Diagnostic {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Returns the heap payload retained by all diagnostic strings, measured
+    /// from their actual allocator capacities.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        (self.code.capacity() as u128)
+            .checked_add(self.severity.capacity() as u128)?
+            .checked_add(self.message.capacity() as u128)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,6 +78,21 @@ impl DiagnosticReport {
 impl DiagnosticReport {
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub fn into_diagnostics(self) -> Vec<Diagnostic> {
+        self.diagnostics
+    }
+
+    /// Returns the outer diagnostic buffer and every nested diagnostic string
+    /// using actual allocator capacities.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.diagnostics.capacity() as u128)
+            .checked_mul(core::mem::size_of::<Diagnostic>() as u128)?;
+        for diagnostic in &self.diagnostics {
+            bytes = bytes.checked_add(diagnostic.checked_retained_capacity_bytes()?)?;
+        }
+        Some(bytes)
     }
 }
 
@@ -176,6 +199,16 @@ pub struct AppResponse {
     resource_report: ResourceReport,
     capability_report: CapabilityReport,
     continuation: Option<ContinuationReport>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    product_result_payload: Option<ProductResultPayload>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    solution_set_artifact: Option<SolutionSetArtifactPayload>,
 }
 
 impl AppResponse {
@@ -190,6 +223,39 @@ impl AppResponse {
             resource_report: ResourceReport::default(),
             capability_report: CapabilityReport::default(),
             continuation: None,
+            product_result_payload: None,
+            solution_set_artifact: None,
+        }
+    }
+
+    /// Allocation-free owned-parts seam for a boundary that has already
+    /// authorized every retained component. This intentionally bypasses the
+    /// default constructors, which allocate product identity and report
+    /// strings for the compatibility API.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_owned_memory_authorized_parts(
+        runtime_identity: ProductBuildIdentity,
+        command: Option<AppCommandKind>,
+        status: AppStatus,
+        result: Option<AppResult>,
+        diagnostics: Vec<Diagnostic>,
+        backend_report: BackendReport,
+        resource_report: ResourceReport,
+        capability_report: CapabilityReport,
+        continuation: Option<ContinuationReport>,
+    ) -> Self {
+        Self {
+            runtime_identity,
+            command,
+            status,
+            result,
+            diagnostics,
+            backend_report,
+            resource_report,
+            capability_report,
+            continuation,
+            product_result_payload: None,
+            solution_set_artifact: None,
         }
     }
 }
@@ -231,6 +297,23 @@ impl AppResponse {
 impl AppResponse {
     pub fn with_continuation(mut self, continuation: Option<ContinuationReport>) -> Self {
         self.continuation = continuation;
+        self
+    }
+}
+impl AppResponse {
+    pub fn with_product_result_payload(
+        mut self,
+        product_result_payload: Option<ProductResultPayload>,
+    ) -> Self {
+        self.product_result_payload = product_result_payload;
+        self
+    }
+
+    pub fn with_solution_set_artifact(
+        mut self,
+        solution_set_artifact: Option<SolutionSetArtifactPayload>,
+    ) -> Self {
+        self.solution_set_artifact = solution_set_artifact;
         self
     }
 }
@@ -277,5 +360,109 @@ impl AppResponse {
 impl AppResponse {
     pub fn continuation(&self) -> Option<&ContinuationReport> {
         self.continuation.as_ref()
+    }
+
+    pub fn product_result_payload(&self) -> Option<&ProductResultPayload> {
+        self.product_result_payload.as_ref()
+    }
+
+    pub fn solution_set_artifact(&self) -> Option<&SolutionSetArtifactPayload> {
+        self.solution_set_artifact.as_ref()
+    }
+
+    /// Returns the complete response-owned heap graph, field by field, using
+    /// actual capacities. Inline owners and enum discriminants are excluded.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = self.runtime_identity.checked_retained_capacity_bytes()?;
+        if let Some(result) = &self.result {
+            bytes = bytes.checked_add(result.checked_retained_capacity_bytes()?)?;
+        }
+        bytes = bytes.checked_add(
+            (self.diagnostics.capacity() as u128)
+                .checked_mul(core::mem::size_of::<Diagnostic>() as u128)?,
+        )?;
+        for diagnostic in &self.diagnostics {
+            bytes = bytes.checked_add(diagnostic.checked_retained_capacity_bytes()?)?;
+        }
+        bytes = bytes.checked_add(self.backend_report.checked_retained_capacity_bytes()?)?;
+        bytes = bytes.checked_add(self.resource_report.checked_retained_capacity_bytes()?)?;
+        bytes = bytes.checked_add(self.capability_report.checked_retained_capacity_bytes()?)?;
+        if let Some(continuation) = &self.continuation {
+            bytes = bytes.checked_add(continuation.checked_retained_capacity_bytes()?)?;
+        }
+        if let Some(payload) = &self.product_result_payload {
+            bytes = bytes.checked_add(payload.checked_retained_capacity_bytes()?)?;
+        }
+        if let Some(artifact) = &self.solution_set_artifact {
+            bytes = bytes.checked_add(artifact.checked_retained_capacity_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg(test)]
+mod retained_capacity_tests {
+    use super::{AppResponse, AppStatus, Diagnostic, DiagnosticReport};
+    use crate::{
+        AppResult, BackendReport, CapabilityReport, ContinuationReport, ProductBuildIdentity,
+        ResourceReport,
+    };
+
+    fn allocated(capacity: usize, value: &str) -> String {
+        let mut output = String::with_capacity(capacity);
+        output.push_str(value);
+        output
+    }
+
+    #[test]
+    fn diagnostic_report_counts_outer_slots_and_nested_string_slack() {
+        let mut diagnostics = Vec::with_capacity(5);
+        diagnostics.push(Diagnostic::new(
+            allocated(32, "E_TEST"),
+            allocated(48, "error"),
+            allocated(96, "message"),
+        ));
+        let report = DiagnosticReport::new(diagnostics);
+        let diagnostic = &report.diagnostics()[0];
+        let expected = (report.diagnostics.capacity() as u128)
+            .checked_mul(core::mem::size_of::<Diagnostic>() as u128)
+            .and_then(|bytes| bytes.checked_add(diagnostic.checked_retained_capacity_bytes()?));
+
+        assert_eq!(report.checked_retained_capacity_bytes(), expected);
+    }
+
+    #[test]
+    fn app_response_counts_actual_nested_capacities_and_exact_boundary() {
+        let mut diagnostics = Vec::with_capacity(3);
+        diagnostics.push(Diagnostic::new(
+            allocated(32, "E_TEST"),
+            allocated(48, "error"),
+            allocated(96, "message"),
+        ));
+        let response = AppResponse::from_owned_memory_authorized_parts(
+            ProductBuildIdentity::from_owned_memory_authorized_parts(
+                allocated(40, "engine"),
+                allocated(48, "source"),
+                allocated(56, "contract"),
+                allocated(64, "supply"),
+                allocated(72, "artifact"),
+            ),
+            None,
+            AppStatus::Success,
+            Some(AppResult::new(allocated(80, "kind"))),
+            diagnostics,
+            BackendReport::new(allocated(88, "cpu"), allocated(96, "cpu"), None::<String>),
+            ResourceReport::new(true, allocated(104, "reported")),
+            CapabilityReport::new(allocated(112, "app"), allocated(120, "executor")),
+            Some(ContinuationReport::new(true, Some(allocated(128, "next")))),
+        );
+        let actual = response
+            .checked_retained_capacity_bytes()
+            .expect("response capacity fits u128");
+        let admits = |limit: u128| actual <= limit;
+
+        assert!(admits(actual));
+        assert!(actual > 0);
+        assert!(!admits(actual - 1));
     }
 }

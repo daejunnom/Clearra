@@ -1,5 +1,6 @@
 pub mod area_pruner;
 pub mod compile_error;
+mod finite_scenario_pc_compiler;
 pub mod packing_problem_compiler;
 pub mod problem_compiler;
 pub mod setup_condition_compiler;
@@ -9,6 +10,10 @@ pub use area_pruner::{
     AreaPrunerDecision, AreaPrunerError, CompileAreaPruneInput, CompileAreaPruner,
 };
 pub use compile_error::ProblemCompileError;
+pub use finite_scenario_pc_compiler::{
+    FiniteScenarioPcCompilation, FiniteScenarioPcCompileBudget, FiniteScenarioPcCompileError,
+    FiniteScenarioPcCompileProjection,
+};
 pub use packing_problem_compiler::{
     PackingProblemCompiler, PackingProblemKind, PackingProblemSpec,
 };

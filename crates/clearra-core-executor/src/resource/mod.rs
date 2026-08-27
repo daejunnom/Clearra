@@ -1,5 +1,32 @@
 use clearra_core_domain::resource::{ResourceBudget, ResourceReport, ResourceTruncationReason};
 
+mod dense_pattern_preflight;
+mod durable_delegation_journal;
+mod execution_admission;
+mod shared_execution_resource_authority;
+
+pub(crate) use dense_pattern_preflight::{
+    preflight_dense_pattern_execution, DensePatternExecutionSurface, DensePatternPreflight,
+};
+pub use durable_delegation_journal::{
+    default_native_delegation_journal_root, DelegationBudget, DelegationEvent,
+    DelegationEventDraft, DelegationIdentity, DelegationJournal, DelegationJournalError,
+    DelegationPhase, DelegationToken, DurableDelegationAuthority, DurableDelegationError,
+    ExecutableDelegationPermit, MemoryDelegationJournal, NativeJsonlDelegationJournal,
+    ResultApplicationDecision, ACTIVE_LEASE_EXPIRY_MS, OFFER_ACCEPT_TIMEOUT_MS,
+    PERSISTED_RENEWAL_INTERVAL_MS, TERMINAL_TOMBSTONE_RETENTION_MS, WORKER_HEARTBEAT_INTERVAL_MS,
+};
+pub(crate) use execution_admission::{
+    admit_budget_bound_search_execution,
+    admit_budget_bound_search_execution_under_terminal_authority, admit_search_execution,
+    ExecutionAdmission, ExecutionAdmissionPlan, ExecutionMemoryBound,
+};
+pub use shared_execution_resource_authority::WasmCpuTerminalResourceAuthority;
+pub(crate) use shared_execution_resource_authority::{
+    acquire_shared_execution_resources, next_execution_resource_owner,
+    shared_execution_resource_capacity,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchResourceTracker {
     budget: ResourceBudget,

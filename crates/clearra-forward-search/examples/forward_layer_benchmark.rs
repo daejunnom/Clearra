@@ -504,6 +504,9 @@ fn hash_outcome(outcome: &ForwardSearchOutcome) -> u64 {
     hash.byte(u8::from(outcome.spin_mini()));
     hash.byte(outcome.spin_lines());
     hash.u32(outcome.total_damage());
+    hash.bytes(outcome.evidence_path_count().as_bytes());
+    hash.byte(0);
+    hash.byte(u8::from(outcome.evidence_complete()));
     hash.u64(outcome.path().len() as u64);
     for step in outcome.path() {
         hash.byte(step.piece().as_ascii() as u8);

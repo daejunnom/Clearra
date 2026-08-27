@@ -11,9 +11,11 @@ bitmap-render = ["dep:clearra-render"]
 
 [dependencies]
 clearra-core-domain = { path = "../clearra-core-domain" }
+clearra-ctk3 = { path = "../clearra-ctk3" }
 clearra-coverage = { path = "../clearra-coverage" }
 clearra-fumen = { path = "../clearra-fumen" }
 clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
+clearra-platform-fs = { path = "../clearra-platform-fs" }
 clearra-render = { path = "../clearra-render", optional = true }
 clearra-replay = { path = "../clearra-replay" }
 

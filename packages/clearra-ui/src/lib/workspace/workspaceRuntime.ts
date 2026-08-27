@@ -69,7 +69,7 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
     searchReport: state.searchReport,
     webgpuReport: state.webgpuBackend,
     backendReport: state.response?.backend_report ?? null,
-    resourceReport: state.response?.resource_report ?? null,
+    resourceReport: state.resourceReport,
     renderCapability: state.response?.capability_report.render_capability ?? null,
     error: state.error
   };

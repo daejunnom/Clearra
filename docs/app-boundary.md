@@ -29,14 +29,24 @@ command set:
 - `Path`
 - `Percent`
 - `Setup`
+- `BuildProbability`
+- `Damage`
+- `SpinFinder`
+- `Ren`
+- `SpinStructure`
 - `Cover`
 - `Continue`
 - `Rules`
 - `Scoring`
 - `Convert`
 - `InspectUnsupported`
-- `Verify`
-- `VerifyKicks`
+- `UtilitySequence`
+- `UtilitySequenceDependencies`
+- `UtilityParity`
+- `UtilityFumen`
+- `UtilityRender`
+- `UtilityToGray`
+- `UtilityMirror`
 
 `pc-scenario` is a `Pc` command kind with a `PcScenario` query envelope.
 

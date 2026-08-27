@@ -306,7 +306,7 @@ function bindRawAbi(exports) {
     verifierConsume: 'clearra_wasm_distributed_verifier_consume', verifierFinish: 'clearra_wasm_distributed_verifier_finish',
     startJob: 'clearra_wasm_start_job', advanceJob: 'clearra_wasm_advance_job',
     drainJobEvents: 'clearra_wasm_drain_job_events', outputPtr: 'clearra_wasm_output_ptr',
-    outputLen: 'clearra_wasm_output_len',
+    outputLen: 'clearra_wasm_output_len', outputRelease: 'clearra_wasm_output_release',
   };
   const api = {};
   for (const [alias, exportName] of Object.entries(names)) {
@@ -329,14 +329,26 @@ function writeTransfer(api, bytes) {
 }
 
 function readOutput(api) {
-  return new TextDecoder().decode(new Uint8Array(api.memory.buffer, api.outputPtr(), api.outputLen()));
+  try {
+    return new TextDecoder().decode(new Uint8Array(api.memory.buffer, api.outputPtr(), api.outputLen()));
+  } finally {
+    api.outputRelease();
+  }
 }
 
 function readOutputBytes(api) {
-  return new Uint8Array(api.memory.buffer, api.outputPtr(), api.outputLen()).slice();
+  try {
+    return new Uint8Array(api.memory.buffer, api.outputPtr(), api.outputLen()).slice();
+  } finally {
+    api.outputRelease();
+  }
 }
 
 function requireStatus(api, status) {
+  if (status === -2) {
+    api.outputRelease();
+    throw new Error('E_WASM_OUTPUT_NOT_RELEASED: prior ABI output was not released');
+  }
   if (status < 0) throw new Error(readOutput(api));
 }
 

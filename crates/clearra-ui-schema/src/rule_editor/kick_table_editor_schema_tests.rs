@@ -48,7 +48,7 @@ fn kick_table_editor_schema_exposes_registry_preview_and_import_export() {
 }
 
 #[test]
-fn unsupported_kick_profiles_carry_diagnostic_disabled_reason() {
+fn exact_and_unsupported_kick_profiles_expose_current_backend_capabilities() {
     let schema = KickTableEditorSchema::mvp2();
     let srs_x = schema
         .previews()
@@ -56,16 +56,35 @@ fn unsupported_kick_profiles_carry_diagnostic_disabled_reason() {
         .find(|preview| preview.profile_id() == KickTableProfileId::SrsX.as_str())
         .expect("srs-x preview");
 
-    assert!(!srs_x.search_backend_supported());
-    assert!(!srs_x.c_compact_descriptor_ready());
-    assert_eq!(srs_x.transition_count(), 84);
+    assert!(srs_x.search_backend_supported());
+    assert!(srs_x.c_compact_descriptor_ready());
+    assert_eq!(srs_x.transition_count(), 80);
     assert!(srs_x.first_success_order_preserved());
-    assert_eq!(
-        srs_x.unsupported_backend_reason(),
-        "srs_x_profile_requires_imported_kick_table"
-    );
-    assert_eq!(
-        srs_x.disabled_reason().map(|reason| reason.code()),
-        Some(DiagnosticCode::ERuleUnsupportedMvp)
-    );
+    assert!(srs_x.supports_exact_180());
+    assert_eq!(srs_x.unsupported_backend_reason(), "none");
+    assert!(srs_x.disabled_reason().is_none());
+
+    for (profile_id, unsupported_reason) in [
+        (
+            KickTableProfileId::Asc,
+            "asc_profile_requires_spawn_reachability",
+        ),
+        (
+            KickTableProfileId::Ars,
+            "ars_profile_requires_spawn_reachability",
+        ),
+    ] {
+        let preview = schema
+            .previews()
+            .iter()
+            .find(|preview| preview.profile_id() == profile_id.as_str())
+            .expect("unsupported kick profile preview");
+        assert!(!preview.search_backend_supported());
+        assert!(!preview.c_compact_descriptor_ready());
+        assert_eq!(preview.unsupported_backend_reason(), unsupported_reason);
+        assert_eq!(
+            preview.disabled_reason().map(|reason| reason.code()),
+            Some(DiagnosticCode::ERuleUnsupportedMvp)
+        );
+    }
 }

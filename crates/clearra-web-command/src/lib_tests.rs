@@ -1,12 +1,72 @@
-use clearra_app::AppCommand;
-use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_forward_search::{ForwardSearchMode, ForwardSpinCategory};
-use clearra_pc_graph::request::SupplyWindowSize;
+use clearra_app::{
+    AppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
+    PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
+    PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, ProductCapabilityContract,
+    SpinStructureProductMode, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
+    PC_SCORE_MAX_SOURCE_PIECES,
+};
+use clearra_core_domain::{
+    objective::{objective_kind::ObjectiveKind, tie_policy::TiePolicy, trace_policy::TracePolicy},
+    piece::{piece_kind::PieceKind, rotation::RotationState},
+    solution::StandardBoard64ColoredTilingIdentity,
+};
+use clearra_forward_search::{ForwardSearchMode, ForwardSpinCategory, MAX_REN_QUEUE_PIECES};
+use clearra_objectives::policy::{
+    objective_policy::ObjectivePolicy,
+    score_objective_policy::{ScoreObjectiveMode, ScoreProfileSelection, SpinProfileSelection},
+};
+use clearra_pc_graph::request::{
+    PcCountPolicy, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
+};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildSolutionProbabilityPolicy, FinessePlacement,
+    FinesseScoreRequest,
+};
 use clearra_scoring::profile::SpinProfileId;
 use clearra_spin_structure_search::{MinimalityPolicy, SpinLineRequirement, SpinStructureMode};
 use clearra_supply::QueueObservationPolicy;
 
 use super::*;
+use crate::web_command_parser::{PC_SCORE_MAX_ARGUMENT_BYTES, PC_SCORE_MAX_ARGUMENT_TOKENS};
+
+#[test]
+fn request_structural_profiles_are_request_local_and_canonical() {
+    let parsed = WebCommandParser::parse(
+        "clearra pc --lines 2 --backend cpu --board-profile standard-10 --piece-profile standard-tetrominoes --bag-profile standard-7-bag",
+    )
+    .expect("canonical structural profiles");
+    let profiles = parsed.request_structural_profiles();
+    assert_eq!(profiles.board().as_str(), "standard-10");
+    assert_eq!(profiles.piece_set().as_str(), "standard-tetrominoes");
+    assert_eq!(profiles.bag().as_str(), "standard-7-bag");
+    let app_request = parsed.to_app_request().expect("typed AppRequest");
+    assert_eq!(app_request.request_profiles().structural(), profiles);
+}
+
+#[test]
+fn request_structural_profiles_reject_unknown_or_duplicate_values_without_fallback() {
+    for command in [
+        "clearra pc --lines 2 --board-profile wide-10",
+        "clearra pc --lines 2 --piece-profile pentominoes",
+        "clearra pc --lines 2 --bag-profile history-6-rolls",
+        "clearra pc --lines 2 --bag-profile standard-7-bag --bag-profile standard-7-bag",
+    ] {
+        let error = WebCommandParser::parse(command).expect_err("profile must fail closed");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+#[test]
+fn request_semantic_profiles_reject_unverified_or_unknown_values_without_fallback() {
+    for command in [
+        "clearra pc --lines 2 --rule custom",
+        "clearra pc --lines 2 --spin-profile unverified-spin",
+        "clearra pc --lines 2 --score-profile classic-score",
+    ] {
+        let result = WebCommandParser::parse(command).and_then(|request| request.to_app_request());
+        assert!(result.is_err(), "{command} must fail closed");
+    }
+}
 
 #[test]
 fn wasm_command_compiles_to_app_request() {
@@ -21,6 +81,157 @@ fn wasm_command_compiles_to_app_request() {
             assert_eq!(command.query().execution_policy().backend().as_str(), "cpu");
         }
         _ => panic!("expected AppCommand::Pc"),
+    }
+}
+
+#[test]
+fn pc_minimals_canonical_and_internal_alias_bind_one_typed_v2_contract() {
+    let canonical = WebCommandParser::parse(
+        "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus",
+    )
+    .expect("canonical pc minimals")
+    .to_app_request()
+    .expect("typed pc minimals AppRequest");
+    assert_eq!(
+        canonical.product_capability_contract(),
+        Some(ProductCapabilityContract::PcMinimals)
+    );
+    let AppCommand::Scenario(command) = canonical.command() else {
+        panic!("expected typed pc minimals scenario");
+    };
+    assert_eq!(
+        command.result_projection(),
+        PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+    );
+    assert_eq!(
+        command.query().objective().kind(),
+        ObjectiveKind::MinimumCover
+    );
+    assert!(!command.query().objective().score().requested());
+    assert_eq!(
+        command.query().queue_observation_policy(),
+        QueueObservationPolicy::FullQueueOracle
+    );
+
+    let alias_tokens =
+        "clearra sfinder minimals --field-mask-v1 000000000000003f --queue I --lines 1"
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+    let alias = WebCommandParser::parse_tokens_internal_typed_candidate(&alias_tokens)
+        .expect("internal minimals alias")
+        .to_app_request()
+        .expect("typed alias AppRequest");
+    assert_eq!(alias, canonical);
+
+    let generic = WebCommandParser::parse(
+        "clearra pc --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --objective minimum-cover",
+    )
+    .expect("generic advanced minimum-cover")
+    .to_app_request()
+    .expect("generic PC AppRequest");
+    assert_eq!(generic.product_capability_contract(), None);
+}
+
+#[test]
+fn pc_minimals_rejects_semantic_overrides_and_unaccounted_memory_caps() {
+    for suffix in [
+        "--objective minimum-cover",
+        "--count all",
+        "--score",
+        "--tiling-only",
+        "--queue-knowledge visible-7",
+        "--max-memory-mib 64",
+        "--tablebase",
+        "--precompute-build-dependencies",
+    ] {
+        let command = format!(
+            "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty {suffix}"
+        );
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+#[test]
+fn pc_path_binds_the_complete_replay_family_contract_without_score_or_ties() {
+    let source = concat!(
+        "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 ",
+        "--pieces 1 --queue I --hold empty --rule srs-plus"
+    );
+    let parsed = WebCommandParser::parse(source).expect(source);
+    assert_eq!(
+        parsed.product_capability_contract(),
+        Some(ProductCapabilityContract::PcPath)
+    );
+    assert_eq!(
+        parsed.pc_result_projection(),
+        PcResultProjection::PathFamilyV2(PcPathIngressOrigin::CanonicalPcPath)
+    );
+
+    let request = parsed.to_app_request().expect("typed pc.path AppRequest");
+    assert_eq!(
+        request.product_capability_contract(),
+        Some(ProductCapabilityContract::PcPath)
+    );
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected scenario-backed pc.path command");
+    };
+    assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+    assert_eq!(command.query().objective(), ObjectivePolicy::all());
+    assert!(!command.query().objective().score().requested());
+    assert_eq!(command.query().retained_trace_limit(), 1);
+
+    let generic = WebCommandParser::parse(
+        "clearra pc --lines 1 --board-mask 0x3f0 --height 1 --pieces 1 --queue I --hold empty --objective all --count all",
+    )
+    .expect("generic all-path-capable request");
+    assert_eq!(generic.product_capability_contract(), None);
+    assert_eq!(generic.pc_result_projection(), PcResultProjection::Standard);
+}
+
+#[test]
+fn pc_path_rejects_semantic_and_resource_overrides() {
+    for suffix in [
+        "--objective all",
+        "--count all",
+        "--score",
+        "--tiling-only",
+        "--solution-probabilities",
+        "--queue-knowledge visible-7",
+        "--max-memory-mib 64",
+        "--tablebase",
+        "--precompute-build-dependencies",
+    ] {
+        let source = format!(
+            "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 --pieces 1 --queue I --hold empty {suffix}"
+        );
+        assert_eq!(
+            WebCommandParser::parse(&source).expect_err(&source).code(),
+            WebCommandErrorCode::InvalidValue,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn web_build_queue_shapes_have_measurable_typed_request_memory() {
+    for command in [
+        "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --max-memory-mib 1",
+        "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --patterns I --no-hold --no-mirror --max-memory-mib 1",
+        "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --no-hold --no-mirror --max-memory-mib 1",
+    ] {
+        let request = WebCommandParser::parse(command)
+            .expect("Web Build command")
+            .to_app_request()
+            .expect("typed Build AppRequest");
+
+        assert!(
+            request
+                .checked_build_probability_retained_capacity_bytes()
+                .is_some(),
+            "Web Build ingress must remain within the measured queue contract: {command}"
+        );
     }
 }
 
@@ -125,6 +336,100 @@ fn failed_queue_command_reuses_the_reverse_scenario_contract() {
         clearra_core_domain::objective::objective_kind::ObjectiveKind::All
     );
     assert!(!query.objective().score().requested());
+}
+
+#[test]
+fn public_failed_queue_spellings_remain_whole_request_equivalent_and_generic() {
+    let suffix = "--lines 2 --patterns P5 --backend cpu --failed-count 4";
+    let hyphen = WebCommandParser::parse(&format!("clearra failed-queue {suffix}"))
+        .expect("public failed-queue")
+        .to_app_request()
+        .expect("public failed-queue AppRequest");
+    let underscore = WebCommandParser::parse(&format!("clearra failed_queue {suffix}"))
+        .expect("public failed_queue")
+        .to_app_request()
+        .expect("public failed_queue AppRequest");
+    let internal_hyphen =
+        WebCommandParser::parse_internal_typed_candidate(&format!("clearra failed-queue {suffix}"))
+            .expect("internal hyphen remains legacy")
+            .to_app_request()
+            .expect("internal hyphen legacy AppRequest");
+
+    assert_eq!(hyphen, underscore);
+    assert_eq!(hyphen, internal_hyphen);
+    assert_eq!(hyphen.product_capability_contract(), None);
+    let AppCommand::Percent(command) = hyphen.command() else {
+        panic!("legacy failed-queue lowers to Percent");
+    };
+    assert!(command.is_failed_queue());
+    assert_eq!(command.pc_failed_queue_origin(), None);
+}
+
+#[test]
+fn canonical_and_internal_underscore_failed_queue_preserve_closed_typed_origins() {
+    let suffix = "--lines 2 --patterns P5 --backend cpu --failed-count 4";
+    for (source, internal, expected_origin) in [
+        (
+            format!("clearra pc failed-queue {suffix}"),
+            false,
+            PcFailedQueueIngressOrigin::CanonicalFailedQueue,
+        ),
+        (
+            format!("clearra failed_queue {suffix}"),
+            true,
+            PcFailedQueueIngressOrigin::CompatibilityFailedQueueUnderscore,
+        ),
+    ] {
+        let parsed = if internal {
+            WebCommandParser::parse_internal_typed_candidate(&source).expect(&source)
+        } else {
+            WebCommandParser::parse(&source).expect(&source)
+        };
+        assert_eq!(parsed.command_kind(), "failed-queue", "{source}");
+        assert_eq!(
+            parsed.pc_failed_queue_origin(),
+            Some(expected_origin),
+            "{source}"
+        );
+        assert_eq!(
+            parsed.product_capability_contract(),
+            Some(ProductCapabilityContract::PcFailedQueue),
+            "{source}"
+        );
+
+        let request = parsed.to_app_request().expect(&source);
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcFailedQueue),
+            "{source}"
+        );
+        let AppCommand::Percent(command) = request.command() else {
+            panic!("typed failed-queue lowers to Percent: {source}");
+        };
+        assert_eq!(command.pc_failed_queue_origin(), Some(expected_origin));
+        assert_eq!(command.failed_pattern_limit(), 4);
+    }
+}
+
+#[test]
+fn pc_failed_queue_rejects_underscore_and_unbound_typed_state() {
+    let error = WebCommandParser::parse("clearra pc failed_queue --lines 2 --patterns P5")
+        .expect_err("pc failed_queue is not canonical");
+    assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+    assert!(error
+        .message()
+        .contains("not an authorized canonical spelling"));
+
+    let unbound = WebCommandParser::parse("clearra failed-queue --lines 2 --patterns P5")
+        .expect("legacy failed-queue")
+        .with_product_capability_contract_for_test(ProductCapabilityContract::PcFailedQueue);
+    let error = unbound
+        .to_app_request()
+        .expect_err("unbound failed-queue product claim");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(error
+        .message()
+        .contains("requires a closed failed-queue origin"));
 }
 
 #[test]
@@ -502,6 +807,121 @@ fn setup_command_preserves_candidate_priority() {
             panic!("expected AppCommand::Setup");
         };
         assert_eq!(command.query().candidate_priority(), expected);
+    }
+}
+
+#[test]
+fn canonical_setup_ranked_family_paths_fix_their_typed_priority() {
+    for (family, expected) in [
+        ("joint", clearra_problem::SetupCandidatePriority::All),
+        (
+            "build",
+            clearra_problem::SetupCandidatePriority::BuildProbabilityFirst,
+        ),
+        (
+            "pc",
+            clearra_problem::SetupCandidatePriority::PcProbabilityFirst,
+        ),
+    ] {
+        let request = WebCommandParser::parse(&format!(
+            "clearra setup {family} --remaining IOTS --priority {}",
+            expected.keyword()
+        ))
+        .expect("canonical setup ranked family")
+        .to_app_request()
+        .expect("typed Setup AppRequest");
+        let AppCommand::Setup(command) = request.command() else {
+            panic!("expected AppCommand::Setup");
+        };
+        assert_eq!(command.query().candidate_priority(), expected);
+        assert!(command.query().path_detail().is_none());
+    }
+}
+
+#[test]
+fn canonical_setup_ranked_family_paths_reject_cross_family_and_path_detail_options() {
+    for command in [
+        "clearra setup joint --remaining IOTS --priority build",
+        "clearra setup build --remaining IOTS --priority pc",
+        "clearra setup pc --remaining IOTS --priority all",
+        "clearra setup joint --remaining IOTS --paths-for 0x1 --condition hold-empty",
+    ] {
+        let error = WebCommandParser::parse(command).expect_err("closed family must reject drift");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+fn setup_score_ctk3_document() -> String {
+    let mut cells = vec![clearra_app::Ctk3Color::Empty; 20];
+    cells[0..4].fill(clearra_app::Ctk3Color::Piece(clearra_app::Ctk3Piece::I));
+    clearra_app::encode_ctk3_compact(&clearra_app::Ctk3Document::new(
+        10,
+        vec![clearra_app::Ctk3Page::new(2, cells)],
+    ))
+    .expect("canonical Setup score CTK3 fixture")
+}
+
+#[test]
+fn canonical_setup_score_lowers_to_the_nominal_app_command() {
+    let document = setup_score_ctk3_document();
+    let request = WebCommandParser::parse_with_worker_limit(
+        &format!(
+            "clearra setup score --document-format ctk3 --document {document} --setup-queue I --solution-queue OTSJ --clear 2 --no-hold --score-profile guideline --initial-b2b 2 --rule srs --max-patterns 64 --workers 2 --backend cpu --no-backend-fallback"
+        ),
+        4,
+    )
+    .expect("canonical Setup score command")
+    .to_app_request()
+    .expect("typed Setup score AppRequest");
+
+    let AppCommand::SetupScore(command) = request.command() else {
+        panic!("expected AppCommand::SetupScore");
+    };
+    assert_eq!(
+        command.document_format(),
+        clearra_app::FieldDocumentFormat::Ctk3
+    );
+    assert_eq!(command.source_page_count(), 1);
+    assert_eq!(command.score_profile(), ScoreProfileSelection::Guideline);
+    assert_eq!(command.initial_b2b(), 2);
+    assert_eq!(request.resource_budget().workers(), 2);
+}
+
+#[test]
+fn canonical_setup_score_accepts_the_two_independent_pattern_sources() {
+    let document = setup_score_ctk3_document();
+    let request = WebCommandParser::parse(&format!(
+        "clearra setup score --document-format ctk3 --document {document} --setup-patterns P1 --solution-patterns P4 --clear-height 2 --hold"
+    ))
+    .expect("pattern Setup score command")
+    .to_app_request()
+    .expect("typed Setup score AppRequest");
+    assert!(matches!(request.command(), AppCommand::SetupScore(_)));
+}
+
+#[test]
+fn canonical_setup_score_rejects_cross_family_and_ungoverned_options() {
+    let document = setup_score_ctk3_document();
+    let base = format!(
+        "clearra setup score --document-format ctk3 --document {document} --setup-queue I --solution-queue OTSJ --clear 2"
+    );
+    for suffix in [
+        "--setup-patterns P1",
+        "--solution-patterns P4",
+        "--queue I",
+        "--patterns P4",
+        "--objective score",
+        "--queue-knowledge oracle",
+        "--source-pieces 4",
+        "--max-memory-mib 64",
+        "--backend gpu",
+        "--allow-backend-fallback",
+        "--gpu-device 0",
+        "--hold --no-hold",
+    ] {
+        let command = format!("{base} {suffix}");
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -931,6 +1351,74 @@ fn build_probability_back_to_back_preservation_reaches_the_core_query() {
 }
 
 #[test]
+fn build_queue_knowledge_is_closed_and_reaches_the_actual_build_query() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    for (suffix, expected) in [
+        ("", QueueObservationPolicy::FullQueueOracle),
+        (
+            " --queue-knowledge oracle",
+            QueueObservationPolicy::FullQueueOracle,
+        ),
+        (
+            " --queue-knowledge visible-7",
+            QueueObservationPolicy::VisibleSeven,
+        ),
+    ] {
+        let request = WebCommandParser::parse(&format!("{base}{suffix}"))
+            .expect("Build queue-knowledge command")
+            .to_app_request()
+            .expect("Build AppRequest");
+        let AppCommand::BuildProbability(command) = request.command() else {
+            panic!("expected AppCommand::BuildProbability");
+        };
+        assert_eq!(command.query().queue_observation_policy(), expected);
+        assert_eq!(
+            command.query().core_query().queue_observation_policy(),
+            expected
+        );
+    }
+
+    for rejected in ["full-future", "seven-visible", "online", "visible-seven"] {
+        let error = WebCommandParser::parse(&format!("{base} --queue-knowledge {rejected}"))
+            .expect_err(rejected);
+        assert_eq!(
+            error.code(),
+            WebCommandErrorCode::InvalidValue,
+            "{rejected}"
+        );
+    }
+    let duplicate = WebCommandParser::parse(&format!(
+        "{base} --queue-knowledge oracle --queue-knowledge oracle"
+    ))
+    .expect_err("duplicate Build queue knowledge");
+    assert_eq!(duplicate.code(), WebCommandErrorCode::InvalidValue);
+}
+
+#[test]
+fn build_visible_seven_rejects_tiling_before_app_execution() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    for command in [
+        format!("{base} --tiling-only --queue-knowledge visible-7"),
+        format!("{base} --queue-knowledge visible-7 --tiling-only"),
+    ] {
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        assert!(error.message().contains("tiling-only"));
+    }
+
+    let error = WebCommandRequest::build_probability(
+        WebBuildProbabilityInput::new(0, 0xf, 4)
+            .with_aggregation(BuildProbabilityAggregation::TilingOnly),
+    )
+    .with_queue("I")
+    .with_hold_enabled(false)
+    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+    .to_app_request()
+    .expect_err("programmatic visible-seven tiling");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+}
+
+#[test]
 fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
     let enabled = WebCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --build-dependency-dag",
@@ -961,6 +1449,161 @@ fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
         .core_query()
         .execution_policy()
         .precompute_build_dependencies());
+}
+
+#[test]
+fn build_probability_memory_limit_is_one_exact_query_and_app_request_authority() {
+    let finite = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+         --queue I --no-hold --no-mirror --workers 2 --max-memory-mib 64",
+    )
+    .expect("finite Build web command")
+    .to_app_request()
+    .expect("finite Build AppRequest");
+    let AppCommand::BuildProbability(command) = finite.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert_eq!(
+        command
+            .query()
+            .core_query()
+            .execution_policy()
+            .max_memory_mib(),
+        Some(64)
+    );
+    assert_eq!(finite.resource_budget().max_memory_mib(), Some(64));
+    assert_eq!(finite.resource_budget().memory_mib(), Some(64));
+
+    let unlimited = WebCommandParser::parse(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+         --queue I --no-hold --no-mirror",
+    )
+    .expect("unlimited Build web command")
+    .to_app_request()
+    .expect("unlimited Build AppRequest");
+    let AppCommand::BuildProbability(command) = unlimited.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert_eq!(
+        command
+            .query()
+            .core_query()
+            .execution_policy()
+            .max_memory_mib(),
+        None
+    );
+    assert_eq!(unlimited.resource_budget().max_memory_mib(), None);
+    assert_eq!(unlimited.resource_budget().memory_mib(), None);
+}
+
+#[test]
+fn build_probability_memory_limit_rejects_lossy_app_authority_projection() {
+    let command = format!(
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
+         --queue I --no-hold --no-mirror --max-memory-mib {}",
+        u64::from(u32::MAX) + 1
+    );
+    let error = WebCommandParser::parse(&command)
+        .expect("the Web parser accepts the u64 option domain")
+        .to_app_request()
+        .expect_err("the App request authority must not truncate the memory limit");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(error.message().contains("authority range"));
+}
+
+#[test]
+fn build_probability_solution_probabilities_are_opt_in_and_reach_the_typed_query() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    let included = WebCommandParser::parse(&format!("{base} --solution-probabilities"))
+        .expect("web command")
+        .to_app_request()
+        .expect("AppRequest");
+    let AppCommand::BuildProbability(included) = included.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert_eq!(
+        included.query().solution_probability_policy(),
+        BuildSolutionProbabilityPolicy::Include
+    );
+
+    let omitted = WebCommandParser::parse(base)
+        .expect("web command")
+        .to_app_request()
+        .expect("AppRequest");
+    let AppCommand::BuildProbability(omitted) = omitted.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert_eq!(
+        omitted.query().solution_probability_policy(),
+        BuildSolutionProbabilityPolicy::Omit
+    );
+}
+
+#[test]
+fn build_probability_solution_probabilities_reject_duplicates_and_tiling() {
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
+    let duplicate = WebCommandParser::parse(&format!(
+        "{base} --solution-probabilities --solution-probabilities"
+    ))
+    .expect_err("duplicate solution probability request");
+    assert_eq!(duplicate.code(), WebCommandErrorCode::InvalidValue);
+
+    for command in [
+        format!("{base} --tiling-only --solution-probabilities"),
+        format!("{base} --solution-probabilities --tiling-only"),
+        format!("{base} --aggregate tiling --solution-probabilities"),
+        format!("{base} --solution-probabilities --aggregate tiling"),
+    ] {
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+
+    let finesse =
+        WebCommandParser::parse(&format!("{base} --finesse inputs --solution-probabilities"))
+            .expect("ordinary finesse plus solution probabilities")
+            .to_app_request()
+            .expect("AppRequest");
+    let AppCommand::BuildProbability(finesse) = finesse.command() else {
+        panic!("expected AppCommand::BuildProbability");
+    };
+    assert!(finesse.query().finesse_metric().requested());
+    assert_eq!(
+        finesse.query().solution_probability_policy(),
+        BuildSolutionProbabilityPolicy::Include
+    );
+}
+
+#[test]
+fn programmatic_build_probability_rejects_solution_probabilities_with_finesse_score() {
+    let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+        PieceKind::I,
+        RotationState::Zero,
+        0,
+        0,
+    )])
+    .expect("one placement score request");
+    let error = WebCommandRequest::build_probability(WebBuildProbabilityInput::new(0, 0xf, 4))
+        .with_queue("I")
+        .with_hold_enabled(false)
+        .with_finesse_score(score)
+        .with_solution_probabilities(true)
+        .to_app_request()
+        .expect_err("solution probabilities plus finesse score");
+
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(error.message().contains("finesse score"));
+
+    let error = WebCommandRequest::build_probability(
+        WebBuildProbabilityInput::new(0, 0xf, 4)
+            .with_aggregation(BuildProbabilityAggregation::TilingOnly),
+    )
+    .with_queue("I")
+    .with_hold_enabled(false)
+    .with_solution_probabilities(true)
+    .to_app_request()
+    .expect_err("programmatic tiling plus solution probabilities");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(error.message().contains("tiling aggregation"));
 }
 
 #[test]
@@ -1359,6 +2002,7 @@ fn build_probability_tiling_only_rejects_buildup_only_options() {
         "--spin-profile t-spins",
         "--preserve-b2b",
         "--build-dependency-dag",
+        "--solution-probabilities",
     ] {
         let command = format!(
             "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --tiling-only {option}"
@@ -1496,7 +2140,7 @@ fn web_command_preserves_cpu_pool_options_in_the_typed_request() {
 }
 
 #[test]
-fn sfinder_percent_preserves_adaptive_workers_without_forcing_parallel_search() {
+fn public_sfinder_percent_preserves_adaptive_workers_without_a_product_claim() {
     let request = WebCommandParser::parse_with_worker_limit(
         "clearra sfinder percent v115@vhAAgH P7P3 4 --auto-workers 3",
         8,
@@ -1511,19 +2155,797 @@ fn sfinder_percent_preserves_adaptive_workers_without_forcing_parallel_search() 
     let policy = command.query().execution_policy();
     assert_eq!(policy.workers(), 3);
     assert_eq!(policy.workers_requested(), None);
+    assert_eq!(request.product_capability_contract(), None);
+    assert_eq!(command.result_projection(), PcResultProjection::Standard);
 }
 
 #[test]
-fn sfinder_forward_and_setup_commands_reach_the_shared_worker_budget() {
-    let spin = WebCommandParser::parse_with_worker_limit(
-        "clearra sfinder spin-cover v115@vhAAgH TI TSS --auto-workers 2",
-        8,
+fn public_chance_compatibility_spellings_remain_generic() {
+    for source in [
+        "clearra chance v115@vhAAgH P7P3 4",
+        "clearra sfinder chance v115@vhAAgH P7P3 4",
+        "clearra sfinder percent v115@vhAAgH P7P3 4",
+    ] {
+        let parsed = WebCommandParser::parse(source).expect(source);
+        assert_eq!(
+            parsed.pc_result_projection(),
+            PcResultProjection::Standard,
+            "{source}"
+        );
+        assert_eq!(parsed.product_capability_contract(), None, "{source}");
+
+        let request = parsed.to_app_request().expect(source);
+        assert_eq!(request.product_capability_contract(), None, "{source}");
+        let objective = match request.command() {
+            AppCommand::Pc(command) => {
+                assert_eq!(command.result_projection(), PcResultProjection::Standard);
+                command.query().objective()
+            }
+            AppCommand::Scenario(command) => {
+                assert_eq!(command.result_projection(), PcResultProjection::Standard);
+                command.query().objective()
+            }
+            command => panic!("expected PC command for {source}, got {command:?}"),
+        };
+        assert_eq!(objective.kind(), ObjectiveKind::Unique, "{source}");
+    }
+
+    let canonical = WebCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]!")
+        .expect("canonical pc chance");
+    assert_eq!(
+        canonical.pc_result_projection(),
+        PcResultProjection::ChanceProbabilityV2(PcChanceIngressOrigin::CanonicalPcChance)
+    );
+    assert_eq!(
+        canonical.product_capability_contract(),
+        Some(ProductCapabilityContract::PcChance)
+    );
+}
+
+#[test]
+fn pc_saves_and_best_save_bind_distinct_typed_contracts_across_native_and_compatibility_ingress() {
+    for (source, expected_projection, expected_contract) in [
+        (
+            "clearra pc saves --lines 2 --patterns P7 --no-hold",
+            PcResultProjection::SaveGroupsV2(PcSaveIngressOrigin::CanonicalPcSaves),
+            ProductCapabilityContract::PcSaves,
+        ),
+        (
+            "clearra pc best-save --lines 2 --patterns P7 --no-hold",
+            PcResultProjection::BestSaveV2(PcSaveIngressOrigin::CanonicalPcBestSave),
+            ProductCapabilityContract::PcBestSave,
+        ),
+        (
+            "clearra sfinder saves v115@vhAAgH P7P3 4",
+            PcResultProjection::SaveGroupsV2(PcSaveIngressOrigin::CompatibilitySaves),
+            ProductCapabilityContract::PcSaves,
+        ),
+        (
+            "clearra sfinder best-save v115@vhAAgH P7P3 4",
+            PcResultProjection::BestSaveV2(PcSaveIngressOrigin::CompatibilityBestSave),
+            ProductCapabilityContract::PcBestSave,
+        ),
+    ] {
+        let parsed = WebCommandParser::parse(source).expect(source);
+        assert_eq!(
+            parsed.pc_result_projection(),
+            expected_projection,
+            "{source}"
+        );
+        assert_eq!(
+            parsed.product_capability_contract(),
+            Some(expected_contract),
+            "{source}"
+        );
+
+        let request = parsed.to_app_request().expect(source);
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(expected_contract),
+            "{source}"
+        );
+        match request.command() {
+            AppCommand::Pc(command) => {
+                assert_eq!(command.result_projection(), expected_projection, "{source}");
+                assert_eq!(
+                    command.query().objective().kind(),
+                    ObjectiveKind::All,
+                    "{source}"
+                );
+            }
+            AppCommand::Scenario(command) => {
+                assert_eq!(command.result_projection(), expected_projection, "{source}");
+                assert_eq!(
+                    command.query().objective().kind(),
+                    ObjectiveKind::All,
+                    "{source}"
+                );
+                assert_eq!(
+                    command.query().count_policy(),
+                    PcCountPolicy::CountAll,
+                    "{source}"
+                );
+            }
+            command => panic!("expected PC command for {source}, got {command:?}"),
+        }
+    }
+}
+
+#[test]
+fn pc_save_ingress_fails_closed_without_fixed_bag_boundary_authority() {
+    for source in [
+        "clearra pc saves --lines 2 --queue IOTSZ --no-hold",
+        "clearra pc best-save --lines 2 --queue IOTSZ --no-hold",
+        "clearra sfinder saves --fumen v115@vhAAgH --queue IOTSZJLIOTS --lines 4",
+        "clearra sfinder best-save --fumen v115@vhAAgH --queue IOTSZJLIOTS --lines 4",
+    ] {
+        let error = WebCommandParser::parse(source).expect_err(source);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+        assert!(
+            error.message().contains("bag-boundary")
+                || error
+                    .message()
+                    .contains("does not accept an explicit --queue"),
+            "{source}: {}",
+            error.message()
+        );
+    }
+
+    for forbidden in [
+        "--objective all",
+        "--count all",
+        "--solution-probabilities",
+        "--max-memory-mib 64",
+        "--visible-seven",
+        "--tablebase",
+        "--build-dependency-dag",
+    ] {
+        let source = format!("clearra pc saves --lines 2 --patterns P7 {forbidden}");
+        let error = WebCommandParser::parse(&source).expect_err(&source);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+    }
+}
+
+#[test]
+fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not() {
+    let canonical = WebCommandParser::parse(
+        "clearra pc tiling --lines 2 --queue IIOOO --no-hold --backend cpu --workers 2 --max-memory-mib 64",
     )
-    .expect("Sfinder spin-cover command")
+    .expect("canonical pc tiling")
     .to_app_request()
-    .expect("spin AppRequest");
-    assert!(matches!(spin.command(), AppCommand::SpinFinder(_)));
-    assert_eq!(spin.resource_budget().workers(), 2);
+    .expect("canonical pc tiling AppRequest");
+    assert_eq!(
+        canonical.product_capability_contract(),
+        Some(ProductCapabilityContract::PcTiling)
+    );
+    let AppCommand::Pc(command) = canonical.command() else {
+        panic!("expected opening PC command");
+    };
+    assert_eq!(
+        command.result_projection(),
+        PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
+    );
+    assert_eq!(command.query().objective(), ObjectivePolicy::tiling());
+    assert_eq!(
+        command.query().execution_policy().max_memory_mib(),
+        Some(64)
+    );
+
+    for source in [
+        "clearra pc --lines 2 --queue IIOOO --no-hold --objective tiling",
+        "clearra pc --lines 2 --queue IIOOO --no-hold --tiling-only",
+    ] {
+        let generic = WebCommandParser::parse(source)
+            .expect(source)
+            .to_app_request()
+            .expect(source);
+        assert_eq!(generic.product_capability_contract(), None, "{source}");
+        let AppCommand::Pc(command) = generic.command() else {
+            panic!("expected generic PC command for {source}");
+        };
+        assert_eq!(command.result_projection(), PcResultProjection::Standard);
+    }
+}
+
+#[test]
+fn canonical_scenario_pc_tiling_preserves_unique_family_counting() {
+    let request = WebCommandParser::parse(
+        "clearra pc tiling --board-mask 0 --height 2 --pieces 5 --lines 2 --queue IIOOO --no-hold",
+    )
+    .expect("canonical scenario pc tiling")
+    .to_app_request()
+    .expect("canonical scenario pc tiling AppRequest");
+    assert_eq!(
+        request.product_capability_contract(),
+        Some(ProductCapabilityContract::PcTiling)
+    );
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected scenario PC command");
+    };
+    assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
+    assert_eq!(
+        command.result_projection(),
+        PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
+    );
+}
+
+#[test]
+fn internal_pc_chance_candidates_preserve_all_closed_origins_and_typed_contract() {
+    for (source, expected_origin) in [
+        (
+            "clearra pc chance --lines 2 --patterns [TI]!",
+            PcChanceIngressOrigin::CanonicalPcChance,
+        ),
+        (
+            "clearra chance v115@vhAAgH P7P3 4",
+            PcChanceIngressOrigin::CompatibilityChance,
+        ),
+        (
+            "clearra sfinder chance v115@vhAAgH P7P3 4",
+            PcChanceIngressOrigin::CompatibilityChance,
+        ),
+        (
+            "clearra sfinder percent v115@vhAAgH P7P3 4",
+            PcChanceIngressOrigin::CompatibilityPercent,
+        ),
+    ] {
+        let parsed = WebCommandParser::parse_internal_typed_candidate(source).expect(source);
+        assert_eq!(
+            parsed.pc_result_projection(),
+            PcResultProjection::ChanceProbabilityV2(expected_origin),
+            "{source}"
+        );
+        assert_eq!(
+            parsed.product_capability_contract(),
+            Some(ProductCapabilityContract::PcChance),
+            "{source}"
+        );
+
+        let request = parsed.to_app_request().expect(source);
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcChance),
+            "{source}"
+        );
+        let projection = match request.command() {
+            AppCommand::Pc(command) => command.result_projection(),
+            AppCommand::Scenario(command) => command.result_projection(),
+            command => panic!("expected PC command for {source}, got {command:?}"),
+        };
+        assert_eq!(
+            projection,
+            PcResultProjection::ChanceProbabilityV2(expected_origin),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn native_percent_and_ordinary_unique_do_not_inherit_pc_chance() {
+    let percent = WebCommandParser::parse("clearra percent I --fixed --min-len 1")
+        .expect("native percent")
+        .to_app_request()
+        .expect("native percent AppRequest");
+    assert!(matches!(percent.command(), AppCommand::Percent(_)));
+    assert_eq!(percent.product_capability_contract(), None);
+
+    let unique =
+        WebCommandParser::parse("clearra pc --lines 2 --patterns [TI]! --objective unique")
+            .expect("ordinary unique PC");
+    assert_eq!(unique.pc_result_projection(), PcResultProjection::Standard);
+    assert_eq!(unique.product_capability_contract(), None);
+    let unique = unique.to_app_request().expect("ordinary unique AppRequest");
+    assert_eq!(unique.product_capability_contract(), None);
+}
+
+#[test]
+fn pc_chance_rejects_conflicting_objective_but_accepts_its_matching_fixed_value() {
+    let conflicting =
+        WebCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]! --objective all")
+            .expect("syntactically valid conflicting objective")
+            .to_app_request()
+            .expect_err("pc chance owns its fixed probability semantics");
+    assert_eq!(conflicting.code(), WebCommandErrorCode::InvalidValue);
+
+    let matching =
+        WebCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]! --objective unique")
+            .expect("matching fixed objective")
+            .to_app_request()
+            .expect("matching fixed objective AppRequest");
+    assert_eq!(
+        matching.product_capability_contract(),
+        Some(ProductCapabilityContract::PcChance)
+    );
+}
+
+#[test]
+fn public_score_compatibility_spellings_keep_fixed_jstris_semantics_without_a_product_claim() {
+    for source in [
+        "clearra score v115@vhAAgH P7P3 4",
+        "clearra sfinder score v115@vhAAgH P7P3 4",
+    ] {
+        let parsed = WebCommandParser::parse(source).expect(source);
+        assert_eq!(
+            parsed.pc_result_projection(),
+            PcResultProjection::Standard,
+            "{source}"
+        );
+        assert_eq!(parsed.product_capability_contract(), None, "{source}");
+
+        let request = parsed.to_app_request().expect(source);
+        assert_eq!(request.product_capability_contract(), None, "{source}");
+        let objective = match request.command() {
+            AppCommand::Pc(command) => {
+                assert_eq!(command.result_projection(), PcResultProjection::Standard);
+                command.query().objective()
+            }
+            AppCommand::Scenario(command) => {
+                assert_eq!(command.result_projection(), PcResultProjection::Standard);
+                command.query().objective()
+            }
+            command => panic!("expected PC command for {source}, got {command:?}"),
+        };
+        assert_eq!(objective.kind(), ObjectiveKind::All, "{source}");
+        assert_eq!(
+            objective.score().mode(),
+            ScoreObjectiveMode::Summary,
+            "{source}"
+        );
+        assert_eq!(
+            objective.score().profile(),
+            ScoreProfileSelection::JstrisUltra,
+            "{source}"
+        );
+        assert!(!objective.execution_constraints().requested(), "{source}");
+    }
+
+    let canonical = WebCommandParser::parse("clearra pc score --lines 2 --patterns [TIOSZ]!")
+        .expect("canonical pc score");
+    assert_eq!(
+        canonical.pc_result_projection(),
+        PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScore)
+    );
+    assert_eq!(
+        canonical.product_capability_contract(),
+        Some(ProductCapabilityContract::PcScore)
+    );
+}
+
+#[test]
+fn internal_pc_score_candidates_preserve_closed_origin_profile_and_typed_contract() {
+    for (source, expected_origin, expected_profile) in [
+        (
+            "clearra pc score --lines 2 --patterns [TIOSZ]!",
+            PcScoreIngressOrigin::CanonicalPcScore,
+            ScoreProfileSelection::Tetrio,
+        ),
+        (
+            "clearra score v115@vhAAgH P7P3 4",
+            PcScoreIngressOrigin::CompatibilityScore,
+            ScoreProfileSelection::JstrisUltra,
+        ),
+        (
+            "clearra sfinder score v115@vhAAgH P7P3 4",
+            PcScoreIngressOrigin::CompatibilityScore,
+            ScoreProfileSelection::JstrisUltra,
+        ),
+    ] {
+        let parsed = WebCommandParser::parse_internal_typed_candidate(source).expect(source);
+        assert_eq!(
+            parsed.pc_result_projection(),
+            PcResultProjection::ScoreSummaryV2(expected_origin),
+            "{source}"
+        );
+        assert_eq!(
+            parsed.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScore),
+            "{source}"
+        );
+
+        let request = parsed.to_app_request().expect(source);
+        assert_eq!(
+            request.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScore),
+            "{source}"
+        );
+        let objective = match request.command() {
+            AppCommand::Pc(command) => {
+                assert_eq!(command.result_projection(), parsed.pc_result_projection());
+                let policy = command.query().execution_policy();
+                assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+                assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+                assert!(!policy.allow_backend_fallback());
+                assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+                command.query().objective()
+            }
+            AppCommand::Scenario(command) => {
+                assert_eq!(command.result_projection(), parsed.pc_result_projection());
+                let policy = command.query().execution_policy();
+                assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+                assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+                assert!(!policy.allow_backend_fallback());
+                assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+                command.query().objective()
+            }
+            command => panic!("expected PC command for {source}, got {command:?}"),
+        };
+        assert_eq!(objective.kind(), ObjectiveKind::All, "{source}");
+        assert_eq!(
+            objective.score().mode(),
+            ScoreObjectiveMode::Summary,
+            "{source}"
+        );
+        assert_eq!(objective.score().profile(), expected_profile, "{source}");
+        assert!(!objective.execution_constraints().requested(), "{source}");
+    }
+}
+
+#[test]
+fn canonical_pc_score_minimals_binds_the_score_only_exact_portfolio_contract() {
+    let source = concat!(
+        "clearra pc score-minimals --board-mask 0x3f0 --height 1 --pieces 1 ",
+        "--lines 1 --queue I --hold empty --rule srs-plus"
+    );
+    let parsed = WebCommandParser::parse(source).expect(source);
+    assert_eq!(
+        parsed.pc_result_projection(),
+        PcResultProjection::ScorePortfolioV2(
+            PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals,
+        )
+    );
+    assert_eq!(
+        parsed.product_capability_contract(),
+        Some(ProductCapabilityContract::PcScoreMinimals)
+    );
+
+    let request = parsed.to_app_request().expect(source);
+    assert_eq!(
+        request.product_capability_contract(),
+        Some(ProductCapabilityContract::PcScoreMinimals)
+    );
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected scenario-backed pc score-minimals command");
+    };
+    assert_eq!(command.result_projection(), parsed.pc_result_projection());
+    let query = command.query();
+    assert_eq!(query.count_policy(), PcCountPolicy::CountAll);
+    assert_eq!(query.objective().kind(), ObjectiveKind::MinimumCover);
+    assert_eq!(
+        query.objective().score().mode(),
+        ScoreObjectiveMode::Summary
+    );
+    assert_eq!(
+        query.objective().score().profile(),
+        ScoreProfileSelection::Tetrio
+    );
+    let policy = query.execution_policy();
+    assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+    assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+    assert!(!policy.allow_backend_fallback());
+    assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+
+    for suffix in [
+        "--objective minimum-cover",
+        "--score",
+        "--count all",
+        "--solution-probabilities",
+        "--backend cpu",
+        "--workers 1",
+        "--max-memory-mib 64",
+    ] {
+        let command = format!("{source} {suffix}");
+        assert_eq!(
+            WebCommandParser::parse(&command)
+                .expect_err(&command)
+                .code(),
+            WebCommandErrorCode::InvalidValue,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn generic_score_flags_and_neighboring_compatibility_commands_do_not_inherit_pc_score() {
+    for source in [
+        "clearra pc --lines 2 --patterns [TIOSZ]! --objective all --score",
+        "clearra sfinder score-minimals v115@vhAAgH P7P3 4",
+    ] {
+        let parsed = WebCommandParser::parse(source).expect(source);
+        assert_eq!(
+            parsed.pc_result_projection(),
+            PcResultProjection::Standard,
+            "{source}"
+        );
+        assert_eq!(parsed.product_capability_contract(), None, "{source}");
+        let request = parsed.to_app_request().expect(source);
+        assert_eq!(request.product_capability_contract(), None, "{source}");
+    }
+}
+
+#[test]
+fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
+    for source in [
+        "clearra pc score --lines 2 --patterns [TIOSZ]! --objective all",
+        "clearra pc score --lines 2 --patterns [TIOSZ]! --score",
+        "clearra pc score --lines 2 --patterns [TIOSZ]! --count unique",
+    ] {
+        let error = WebCommandParser::parse(source).expect_err(source);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+    }
+
+    for suffix in [
+        "--backend cpu",
+        "--workers 1",
+        "--auto-workers 1",
+        "--use-all-cpu-threads",
+        "--gpu-device auto",
+        "--gpu-warmup",
+        "--cpu-warmup",
+        "--allow-backend-fallback",
+        "--no-backend-fallback",
+        "--tablebase",
+        "--no-tablebase",
+        "--build-dependency-dag",
+        "--no-build-dependency-dag",
+        "--retained-traces 1",
+        "--max-patterns 1066867200",
+        "--max-nodes 1",
+        "--max-frontier-states 1",
+        "--max-candidates 1",
+        "--max-memory-mib 64",
+    ] {
+        let source = format!("clearra pc score --lines 2 --patterns [TIOSZ]! {suffix}");
+        let error = WebCommandParser::parse(&source).expect_err(&source);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+        assert!(error.message().contains("execution override"), "{source}");
+    }
+}
+
+#[test]
+fn pc_score_bounds_canonical_tokens_before_compatibility_translation() {
+    let mut too_many = vec!["clearra".to_owned(), "pc".to_owned(), "score".to_owned()];
+    too_many.extend((0..=PC_SCORE_MAX_ARGUMENT_TOKENS).map(|index| format!("argument-{index}")));
+    let token_error = WebCommandParser::parse_tokens(&too_many)
+        .expect_err("score argument count must fail before compatibility translation");
+    assert_eq!(token_error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(token_error.message().contains("argument tokens"));
+
+    let too_large = vec![
+        "clearra".to_owned(),
+        "pc".to_owned(),
+        "score".to_owned(),
+        "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + 1),
+    ];
+    let byte_error = WebCommandParser::parse_tokens(&too_large)
+        .expect_err("score argument bytes must fail before compatibility translation");
+    assert_eq!(byte_error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(byte_error.message().contains("argument bytes"));
+
+    let oversized_raw = format!(
+        "clearra pc score {}",
+        "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS + 1)
+    );
+    let raw_error = WebCommandParser::parse(&oversized_raw)
+        .expect_err("oversized raw score text must fail before tokenization");
+    assert_eq!(raw_error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(raw_error.message().contains("command text"));
+}
+
+#[test]
+fn pc_score_bounds_internal_compatibility_before_translation_clones() {
+    let mut exact_token_limit = vec!["score".to_owned()];
+    exact_token_limit.extend((0..PC_SCORE_MAX_ARGUMENT_TOKENS).map(|_| "x".to_owned()));
+    crate::web_command_parser::validate_pretranslation_pc_score_tokens(
+        &exact_token_limit,
+        WebCompatibilityAuthority::InternalTypedCandidate,
+    )
+    .expect("exactly 64 internal score arguments remain inside the clone boundary");
+
+    let exact_byte_limit = vec![
+        "sfinder".to_owned(),
+        "score".to_owned(),
+        "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES),
+    ];
+    crate::web_command_parser::validate_pretranslation_pc_score_tokens(
+        &exact_byte_limit,
+        WebCompatibilityAuthority::InternalTypedCandidate,
+    )
+    .expect("exactly 2048 internal score argument bytes remain inside the clone boundary");
+
+    for prefix in [["score"].as_slice(), ["sfinder", "score"].as_slice()] {
+        let mut too_many = prefix
+            .iter()
+            .map(|token| (*token).to_owned())
+            .collect::<Vec<_>>();
+        too_many
+            .extend((0..=PC_SCORE_MAX_ARGUMENT_TOKENS).map(|index| format!("argument-{index}")));
+        let error = WebCommandParser::parse_tokens_internal_typed_candidate(&too_many)
+            .expect_err("compatibility score token count must fail before translation clones");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert!(error.message().contains("argument tokens"));
+
+        let mut too_large = prefix
+            .iter()
+            .map(|token| (*token).to_owned())
+            .collect::<Vec<_>>();
+        too_large.push("x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + 1));
+        let error = WebCommandParser::parse_tokens_internal_typed_candidate(&too_large)
+            .expect_err("compatibility score bytes must fail before translation clones");
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert!(error.message().contains("argument bytes"));
+    }
+
+    let oversized_raw = format!(
+        "clearra sfinder score {}",
+        "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS + 1)
+    );
+    let error = WebCommandParser::parse_internal_typed_candidate(&oversized_raw)
+        .expect_err("compatibility score raw text must fail before tokenization");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(error.message().contains("command text"));
+
+    let oversized_direct_raw = format!(
+        "clearra score {}",
+        "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS + 1)
+    );
+    let error = WebCommandParser::parse_internal_typed_candidate(&oversized_direct_raw)
+        .expect_err("direct compatibility score raw text must fail before tokenization");
+    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(error.message().contains("command text"));
+}
+
+#[test]
+fn pc_score_bounds_pattern_and_fixed_queue_sources() {
+    let pattern_at_limit = format!("P1{}", ",".repeat(PC_SCORE_MAX_PATTERN_BYTES - 2));
+    assert_eq!(pattern_at_limit.len(), PC_SCORE_MAX_PATTERN_BYTES);
+    WebCommandParser::parse(&format!(
+        "clearra pc score --lines 2 --patterns {pattern_at_limit}"
+    ))
+    .expect("128-byte single factorized expression");
+
+    let pattern_over_limit = format!("{pattern_at_limit},");
+    let pattern_error = WebCommandParser::parse(&format!(
+        "clearra pc score --lines 2 --patterns {pattern_over_limit}"
+    ))
+    .expect_err("129-byte pattern must be rejected");
+    assert_eq!(pattern_error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(pattern_error.message().contains("128 UTF-8 bytes"));
+
+    let alternatives = WebCommandParser::parse("clearra pc score --lines 2 --patterns P7;P7")
+        .expect_err("score accepts one factorized expression");
+    assert_eq!(alternatives.code(), WebCommandErrorCode::InvalidValue);
+    assert!(alternatives.message().contains("without alternatives"));
+
+    let queue_at_limit = "IOTSZJLIOTSZJLIO";
+    assert_eq!(queue_at_limit.len(), PC_SCORE_MAX_SOURCE_PIECES);
+    WebCommandParser::parse(&format!(
+        "clearra pc score --lines 2 --queue {queue_at_limit}"
+    ))
+    .expect("16-piece fixed source");
+    let queue_error = WebCommandParser::parse(&format!(
+        "clearra pc score --lines 2 --queue {queue_at_limit}T"
+    ))
+    .expect_err("17-piece fixed source must be rejected");
+    assert_eq!(queue_error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(queue_error.message().contains("16 source pieces"));
+
+    let window_error =
+        WebCommandParser::parse("clearra pc score --lines 2 --patterns P7 --source-pieces 17")
+            .expect_err("17-piece source window must be rejected");
+    assert_eq!(window_error.code(), WebCommandErrorCode::InvalidValue);
+    assert!(window_error.message().contains("16 source pieces"));
+}
+
+#[test]
+fn pc_score_accepts_six_line_factorized_source_with_fixed_product_policy() {
+    let request = WebCommandParser::parse("clearra pc score --lines 6 --patterns P7P7P2")
+        .expect("bounded six-line factorized score source")
+        .to_app_request()
+        .expect("typed score AppRequest");
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected typed opening PC score command");
+    };
+    let query = command.query();
+    assert_eq!(query.queue().mode(), "standard-7-bag");
+    assert_eq!(
+        query.supply_window_size(),
+        Some(SupplyWindowSize::new(PC_SCORE_MAX_SOURCE_PIECES))
+    );
+    let policy = query.execution_policy();
+    assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+    assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+    assert!(!policy.allow_backend_fallback());
+    assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+}
+
+#[test]
+fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation_overrides() {
+    let selected_identity = StandardBoard64ColoredTilingIdentity::from_piece_masks(0, [0; 7])
+        .expect("empty colored identity");
+    let base = || {
+        WebCommandRequest::pc(1, RequestedSearchBackend::Cpu)
+            .with_patterns("[I]!")
+            .with_scenario(WebPcScenarioInput::new(0x3f0, 1, 1).with_allow_hold(false))
+            .with_hold_enabled(false)
+            .with_pc_chance_product_capability(PcChanceIngressOrigin::CanonicalPcChance)
+    };
+
+    let colored = base()
+        .with_scenario(
+            WebPcScenarioInput::new(0x3f0, 1, 1)
+                .with_allow_hold(false)
+                .with_allowed_colored_solution_identities([selected_identity]),
+        )
+        .to_app_request()
+        .expect_err("pc chance must reject supplied colored solutions at Web ingress");
+    assert_eq!(colored.code(), WebCommandErrorCode::InvalidValue);
+    assert!(colored.message().contains("supplied colored solution"));
+
+    let count = base()
+        .with_scenario(
+            WebPcScenarioInput::new(0x3f0, 1, 1)
+                .with_allow_hold(false)
+                .with_count_policy(PcCountPolicy::CountAll),
+        )
+        .to_app_request()
+        .expect_err("pc chance must reject an inner scenario count override");
+    assert_eq!(count.code(), WebCommandErrorCode::InvalidValue);
+    assert!(count.message().contains("unique solution counting"));
+
+    let scenario_memory = base()
+        .with_max_memory_mib(64)
+        .to_app_request()
+        .expect_err("scenario pc chance must reject unaccounted transient proof memory");
+    assert_eq!(scenario_memory.code(), WebCommandErrorCode::InvalidValue);
+    assert!(scenario_memory
+        .message()
+        .contains("transient proof memory is accounted"));
+
+    let opening_memory = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_patterns("[TIOSZ]!")
+        .with_max_memory_mib(64)
+        .with_pc_chance_product_capability(PcChanceIngressOrigin::CanonicalPcChance)
+        .to_app_request()
+        .expect_err("opening pc chance must reject unaccounted transient proof memory");
+    assert_eq!(opening_memory.code(), WebCommandErrorCode::InvalidValue);
+    assert!(opening_memory
+        .message()
+        .contains("transient proof memory is accounted"));
+
+    let scenario_observation = base()
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .to_app_request()
+        .expect_err("scenario pc chance must reject visible-seven semantics");
+    assert_eq!(
+        scenario_observation.code(),
+        WebCommandErrorCode::InvalidValue
+    );
+    assert!(scenario_observation.message().contains("full-queue oracle"));
+
+    let opening_observation = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_patterns("[TIOSZ]!")
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .with_pc_chance_product_capability(PcChanceIngressOrigin::CanonicalPcChance)
+        .to_app_request()
+        .expect_err("opening pc chance must reject visible-seven semantics");
+    assert_eq!(
+        opening_observation.code(),
+        WebCommandErrorCode::InvalidValue
+    );
+    assert!(opening_observation.message().contains("full-queue oracle"));
+}
+
+#[test]
+fn sfinder_structural_spin_fails_closed_while_setup_reaches_the_worker_budget() {
+    for command in ["spin", "spin-cover", "spincover"] {
+        let error = WebCommandParser::parse_with_worker_limit(
+            &format!("clearra sfinder {command} v115@vhAAgH TI TSS --auto-workers 2"),
+            8,
+        )
+        .expect_err("structural Sfinder spin must not become ordered forward spin");
+        assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+        assert!(error.message().contains("distinct result contract"));
+    }
 
     let setup = WebCommandParser::parse_with_worker_limit(
         "clearra sfinder pc-setup IOTS --auto-workers 2",
@@ -1762,6 +3184,60 @@ fn damage_command_compiles_to_typed_forward_search() {
 }
 
 #[test]
+fn ren_command_compiles_to_its_isolated_typed_forward_search() {
+    let request = WebCommandParser::parse(
+        "clearra ren --board-mask 0x3f --height 4 --queue TI --no-hold --rule srs-plus",
+    )
+    .expect("REN command")
+    .to_app_request()
+    .expect("AppRequest");
+
+    let AppCommand::Ren(command) = request.command() else {
+        panic!("expected AppCommand::Ren");
+    };
+    assert_eq!(
+        command.query().piece_source().fixed_sequence(),
+        Some(&[PieceKind::T, PieceKind::I][..])
+    );
+    assert!(!command.query().hold_enabled());
+    assert_eq!(command.query().spin_profile(), SpinProfileId::Disabled);
+    assert_eq!(command.query().initial_combo(), None);
+    assert_eq!(command.query().initial_back_to_back(), None);
+    assert_eq!(command.query().mode(), ForwardSearchMode::MaximumRen);
+}
+
+#[test]
+fn ren_command_enforces_the_fixed_queue_and_twenty_two_piece_boundary() {
+    let maximum_queue = "I".repeat(MAX_REN_QUEUE_PIECES);
+    WebCommandParser::parse(&format!(
+        "clearra ren --board-mask 0 --height 4 --queue {maximum_queue}"
+    ))
+    .expect("22-piece REN queue");
+
+    let overlong_queue = "I".repeat(MAX_REN_QUEUE_PIECES + 1);
+    let overlong = WebCommandParser::parse(&format!(
+        "clearra ren --board-mask 0 --height 4 --queue {overlong_queue}"
+    ))
+    .expect_err("23-piece REN queue");
+    assert_eq!(overlong.code(), WebCommandErrorCode::InvalidValue);
+
+    for unsupported in [
+        "--patterns [TI]",
+        "--spin-profile t-spins",
+        "--minimum-damage 1",
+        "--initial-combo 1",
+        "--initial-b2b 1",
+        "--preserve-b2b",
+    ] {
+        let error = WebCommandParser::parse(&format!(
+            "clearra ren --board-mask 0 --height 4 --queue TI {unsupported}"
+        ))
+        .expect_err("REN must reject damage and spin semantics");
+        assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+    }
+}
+
+#[test]
 fn damage_command_preserves_minimum_damage_enumeration_policy() {
     let request = WebCommandParser::parse(
         "clearra damage --board-mask 0x0 --height 4 --queue TI --minimum-damage 6",
@@ -1774,6 +3250,20 @@ fn damage_command_preserves_minimum_damage_enumeration_policy() {
         panic!("expected AppCommand::Damage");
     };
     assert_eq!(command.query().mode(), ForwardSearchMode::DamageAtLeast(6));
+}
+
+#[test]
+fn damage_command_default_spin_profile_matches_the_gui_contract() {
+    let request = WebCommandParser::parse("clearra damage --board-mask 0 --queue T")
+        .expect("default damage command")
+        .to_app_request()
+        .expect("default damage AppRequest");
+    let AppCommand::Damage(command) = request.command() else {
+        panic!("expected AppCommand::Damage");
+    };
+
+    assert_eq!(command.query().spin_profile(), SpinProfileId::AllMiniPlus);
+    assert_eq!(command.query().mode(), ForwardSearchMode::MaximumDamage);
 }
 
 #[test]
@@ -1893,6 +3383,7 @@ struct ForwardContractSelection {
 }
 
 fn forward_contract_values(family: &str, option: &str) -> Vec<&'static str> {
+    let family = fixture_family(family);
     let row = SEARCH_OPTION_CONTRACT
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -1909,6 +3400,7 @@ fn forward_contract_values(family: &str, option: &str) -> Vec<&'static str> {
 }
 
 fn forward_contract_invalid_values(family: &str, option: &str) -> Vec<&'static str> {
+    let family = fixture_family(family);
     let row = SEARCH_OPTION_CONTRACT
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -1924,6 +3416,14 @@ fn forward_contract_invalid_values(family: &str, option: &str) -> Vec<&'static s
     {
         "-" => Vec::new(),
         values => values.split('|').collect(),
+    }
+}
+
+fn fixture_family(family: &str) -> &str {
+    match family {
+        "damage" => "forward-damage",
+        "spin-finder" => "forward-spin",
+        family => family,
     }
 }
 
@@ -2075,6 +3575,7 @@ fn damage_fixture_exposed_options_reach_every_single_and_ordered_pair_cartesian_
         panic!("expected AppCommand::Damage");
     };
     assert_eq!(command.query().mode(), ForwardSearchMode::MaximumDamage);
+    assert_eq!(command.query().spin_profile(), SpinProfileId::AllMiniPlus);
 
     let options = [
         "height",
@@ -2145,7 +3646,13 @@ fn damage_fixture_exposed_options_reach_every_single_and_ordered_pair_cartesian_
             }
         }
     }
-    assert_eq!(cases, 1_107, "exact damage production parser cases");
+    let expected = contract_matrix_case_count(&values)
+        - 2 * forward_contract_values("damage", "damage-mode")
+            .into_iter()
+            .filter(|value| *value == "maximum")
+            .count()
+            * forward_contract_values("damage", "minimum-damage").len();
+    assert_eq!(cases, expected, "exact damage production parser cases");
 }
 
 #[test]
@@ -2217,7 +3724,11 @@ fn spin_finder_fixture_exposed_options_reach_every_single_and_ordered_pair_carte
             }
         }
     }
-    assert_eq!(cases, 1_661, "exact spin-finder production parser cases");
+    assert_eq!(
+        cases,
+        contract_matrix_case_count(&values),
+        "exact spin-finder production parser cases"
+    );
 }
 
 #[test]
@@ -2285,6 +3796,16 @@ fn forward_fixture_invalid_representatives_fail_at_the_authoritative_parser_boun
         ("spin-finder", "initial-b2b"),
         ("spin-finder", "workers"),
     ];
+    let expected_damage_cases = relevant
+        .iter()
+        .filter(|(family, _)| *family == "damage")
+        .map(|(family, option)| forward_contract_invalid_values(family, option).len())
+        .sum::<usize>();
+    let expected_spin_cases = relevant
+        .iter()
+        .filter(|(family, _)| *family == "spin-finder")
+        .map(|(family, option)| forward_contract_invalid_values(family, option).len())
+        .sum::<usize>();
     let mut cases = 0_usize;
     let mut damage_cases = 0_usize;
     let mut spin_cases = 0_usize;
@@ -2347,9 +3868,19 @@ fn forward_fixture_invalid_representatives_fail_at_the_authoritative_parser_boun
             }
         }
     }
-    assert_eq!(damage_cases, 8, "damage invalid fixture representatives");
-    assert_eq!(spin_cases, 12, "spin invalid fixture representatives");
-    assert_eq!(cases, 20, "all forward invalid fixture representatives");
+    assert_eq!(
+        damage_cases, expected_damage_cases,
+        "damage invalid fixture representatives"
+    );
+    assert_eq!(
+        spin_cases, expected_spin_cases,
+        "spin invalid fixture representatives"
+    );
+    assert_eq!(
+        cases,
+        expected_damage_cases + expected_spin_cases,
+        "all forward invalid fixture representatives"
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2413,6 +3944,28 @@ fn pc_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
         "clearra".to_owned(),
         if failed_queue { "failed-queue" } else { "pc" }.to_owned(),
     ];
+    let scenario_height = selection_value(selections, "lines")
+        .filter(|lines| *lines == "1")
+        .or_else(|| {
+            selection_value(selections, "hold")
+                .filter(|hold| matches!(*hold, "empty" | "I"))
+                .map(|_| "4")
+        });
+    if let Some(height) = scenario_height {
+        let (board_mask, pieces) = if height == "1" {
+            ("0x387", "1")
+        } else {
+            ("0", "10")
+        };
+        tokens.extend([
+            "--board-mask".to_owned(),
+            board_mask.to_owned(),
+            "--height".to_owned(),
+            height.to_owned(),
+            "--pieces".to_owned(),
+            pieces.to_owned(),
+        ]);
+    }
     if !selections
         .iter()
         .any(|selection| selection.option == "lines")
@@ -2435,14 +3988,16 @@ fn pc_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
                 tokens.extend(["--patterns".to_owned(), "P7P7P7".to_owned()]);
             }
             ("source", "empty") => {}
-            // Opening PC represents an empty enabled hold by omission; the
-            // valued `--hold empty` spelling belongs to scenario PC input.
-            ("hold", "on") => {}
-            ("hold", "off") => tokens.push("--no-hold".to_owned()),
+            ("hold", "disabled") => tokens.push("--no-hold".to_owned()),
+            ("hold", "empty") => {
+                tokens.extend(["--hold".to_owned(), "empty".to_owned()]);
+            }
+            ("hold", "I") => tokens.extend(["--hold".to_owned(), "I".to_owned()]),
             ("queue-knowledge", value) => {
                 tokens.extend(["--queue-knowledge".to_owned(), value.to_owned()]);
             }
             ("score-mode", "off" | "failed-queue") => {}
+            ("score-mode", "score") => tokens.push("--score".to_owned()),
             ("score-mode", "minimum-cover") => {
                 tokens.extend(["--objective".to_owned(), "minimum-cover".to_owned()]);
             }
@@ -2511,11 +4066,18 @@ fn build_contract_command(selections: &[SearchContractSelection<'_>]) -> String 
                 tokens.extend(["--patterns".to_owned(), "P1".to_owned()]);
             }
             ("source", "empty") => {}
-            ("hold", "on") => tokens.extend(["--hold".to_owned(), "empty".to_owned()]),
-            ("hold", "off") => tokens.push("--no-hold".to_owned()),
+            ("hold", "disabled") => tokens.push("--no-hold".to_owned()),
+            ("hold", "empty") => {
+                tokens.extend(["--hold".to_owned(), "empty".to_owned()]);
+            }
+            ("hold", "I") => tokens.extend(["--hold".to_owned(), "I".to_owned()]),
             ("aggregation", value) => {
                 tokens.extend(["--aggregate".to_owned(), value.to_owned()]);
             }
+            ("solution-probabilities", "on") => {
+                tokens.push("--solution-probabilities".to_owned());
+            }
+            ("solution-probabilities", "off") => {}
             ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
             ("spin-profile", value) => {
                 tokens.extend(["--spin-profile".to_owned(), value.to_owned()]);
@@ -2528,8 +4090,9 @@ fn build_contract_command(selections: &[SearchContractSelection<'_>]) -> String 
             ("pattern-knowledge", value) => {
                 tokens.extend(["--pattern-knowledge".to_owned(), value.to_owned()]);
             }
-            ("mirror", "on") => tokens.push("--include-mirror".to_owned()),
-            ("mirror", "off") => tokens.push("--no-mirror".to_owned()),
+            ("mirror", "auto") => {}
+            ("mirror", "include") => tokens.push("--include-mirror".to_owned()),
+            ("mirror", "exclude") => tokens.push("--no-mirror".to_owned()),
             ("backend", value) => tokens.extend(["--backend".to_owned(), value.to_owned()]),
             ("fallback", "default") => {}
             ("fallback", "allow") => tokens.push("--allow-backend-fallback".to_owned()),
@@ -2767,6 +4330,30 @@ fn assert_complete_contract_matrix(
     cases
 }
 
+fn contract_matrix_case_count(values: &[Vec<&str>]) -> usize {
+    let singles = values.iter().map(Vec::len).sum::<usize>();
+    let ordered_pairs = (0..values.len())
+        .flat_map(|left| ((left + 1)..values.len()).map(move |right| (left, right)))
+        .map(|(left, right)| 2 * values[left].len() * values[right].len())
+        .sum::<usize>();
+    singles + ordered_pairs
+}
+
+fn fixture_contract_matrix_case_count(family: &str, options: &[&str]) -> usize {
+    let values = options
+        .iter()
+        .map(|option| forward_contract_values(family, option))
+        .collect::<Vec<_>>();
+    contract_matrix_case_count(&values)
+}
+
+fn invalid_fixture_case_count(family: &str, options: &[&str]) -> usize {
+    options
+        .iter()
+        .map(|option| forward_contract_invalid_values(family, option).len())
+        .sum()
+}
+
 fn selection_value<'a>(
     selections: &'a [SearchContractSelection<'a>],
     option: &str,
@@ -2804,10 +4391,10 @@ fn pc_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> bool
     {
         return false;
     }
-    if has_spin_profile && mode != "summary" && !preserves_b2b {
+    if has_spin_profile && mode != "score" && !preserves_b2b {
         return false;
     }
-    if has_initial_b2b && mode != "summary" {
+    if has_initial_b2b && mode != "score" {
         return false;
     }
     true
@@ -2826,7 +4413,8 @@ fn build_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> b
             && !preserves_b2b
             && selection_value(selections, "dependency-dag").is_none()
             && finesse.is_none()
-            && !has_pattern_knowledge;
+            && !has_pattern_knowledge
+            && !selection_enabled(selections, "solution-probabilities");
     }
     if has_spin_profile && aggregation != "spin" && !preserves_b2b {
         return false;
@@ -2886,6 +4474,7 @@ fn pc_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_pair
         "dependency-dag",
         "gpu-device",
     ];
+    let expected = fixture_contract_matrix_case_count("pc", &options);
     assert_eq!(
         assert_complete_contract_matrix(
             "pc",
@@ -2893,7 +4482,7 @@ fn pc_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_pair
             pc_contract_command,
             pc_contract_case_is_valid,
         ),
-        2_279
+        expected
     );
 }
 
@@ -2904,6 +4493,7 @@ fn build_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_p
         "source",
         "hold",
         "aggregation",
+        "solution-probabilities",
         "rule",
         "spin-profile",
         "preserve-b2b",
@@ -2915,6 +4505,7 @@ fn build_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_p
         "fallback",
         "workers",
     ];
+    let expected = fixture_contract_matrix_case_count("build", &options);
     assert_eq!(
         assert_complete_contract_matrix(
             "build",
@@ -2922,7 +4513,7 @@ fn build_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_p
             build_contract_command,
             build_contract_case_is_valid,
         ),
-        1_664
+        expected
     );
 }
 
@@ -2942,6 +4533,7 @@ fn setup_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_p
         "tablebase",
         "workers",
     ];
+    let expected = fixture_contract_matrix_case_count("setup", &options);
     assert_eq!(
         assert_complete_contract_matrix(
             "setup",
@@ -2949,7 +4541,7 @@ fn setup_fixture_reaches_the_actual_parser_for_every_single_and_ordered_option_p
             setup_contract_command,
             setup_contract_case_is_valid,
         ),
-        1_216
+        expected
     );
 }
 
@@ -2966,21 +4558,21 @@ fn spin_structure_fixture_reaches_the_actual_parser_for_every_single_and_ordered
         "lines",
         "workers",
     ];
+    let expected = fixture_contract_matrix_case_count("spin-structure", &options);
     assert_eq!(
         assert_complete_contract_matrix(
-            "spin-finder",
+            "spin-structure",
             &options,
             spin_structure_contract_command,
             spin_structure_contract_case_is_valid,
         ),
-        1_337
+        expected
     );
 }
 
 #[test]
 fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_parser() {
-    let mut pc_cases = 0_usize;
-    for option in [
+    let pc_options = [
         "lines",
         "source",
         "queue-knowledge",
@@ -2989,7 +4581,9 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
         "fallback",
         "workers",
         "gpu-device",
-    ] {
+    ];
+    let mut pc_cases = 0_usize;
+    for option in pc_options {
         for value in forward_contract_invalid_values("pc", option) {
             let command = match (option, value) {
                 ("lines", value) => format!("clearra pc --lines {value}"),
@@ -3022,21 +4616,26 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
         }
     }
 
-    let mut build_cases = 0_usize;
-    for option in [
+    let build_options = [
         "height",
         "source",
+        "solution-probabilities",
         "spin-profile",
         "finesse",
         "pattern-knowledge",
         "workers",
-    ] {
+    ];
+    let mut build_cases = 0_usize;
+    for option in build_options {
         for value in forward_contract_invalid_values("build", option) {
             let base = "clearra build-probability --base-mask 0 --target-mask 15";
             let command = match (option, value) {
                 ("height", value) => format!("{base} --height {value} --queue I"),
                 ("source", "both") => {
                     format!("{base} --height 8 --queue I --patterns P1")
+                }
+                ("solution-probabilities", value) => {
+                    format!("{base} --height 8 --queue I --solution-probabilities {value}")
                 }
                 ("spin-profile", value) => {
                     format!("{base} --height 8 --queue I --aggregate spin --spin-profile {value}")
@@ -3058,8 +4657,7 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
         }
     }
 
-    let mut structure_cases = 0_usize;
-    for option in [
+    let structure_options = [
         "inventory",
         "fill-bottom",
         "fill-top",
@@ -3068,8 +4666,10 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
         "spin-profile",
         "lines",
         "workers",
-    ] {
-        for value in forward_contract_invalid_values("spin-finder", option) {
+    ];
+    let mut structure_cases = 0_usize;
+    for option in structure_options {
+        for value in forward_contract_invalid_values("spin-structure", option) {
             let command = match option {
                 "inventory" => format!("clearra spin-structure --pieces {value}"),
                 "fill-bottom" => format!(
@@ -3101,9 +4701,15 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
         }
     }
 
-    assert_eq!(pc_cases, 10);
-    assert_eq!(build_cases, 7);
-    assert_eq!(structure_cases, 12);
+    assert_eq!(pc_cases, invalid_fixture_case_count("pc", &pc_options));
+    assert_eq!(
+        build_cases,
+        invalid_fixture_case_count("build", &build_options)
+    );
+    assert_eq!(
+        structure_cases,
+        invalid_fixture_case_count("spin-structure", &structure_options)
+    );
 }
 
 #[test]
@@ -3166,6 +4772,83 @@ fn spin_structure_compiles_to_an_independent_typed_command() {
 }
 
 #[test]
+fn canonical_spin_structure_search_path_lowers_to_the_existing_typed_search_command() {
+    let canonical =
+        WebCommandParser::parse("clearra spin-structure search --pieces IOT --height 7 --lines 1+")
+            .expect("canonical structure search")
+            .to_app_request()
+            .expect("canonical AppRequest");
+    let legacy =
+        WebCommandParser::parse("clearra spin-structure --pieces IOT --height 7 --lines 1+")
+            .expect("legacy structure search")
+            .to_app_request()
+            .expect("legacy AppRequest");
+
+    assert_eq!(canonical.command(), legacy.command());
+    assert_eq!(canonical.resource_budget(), legacy.resource_budget());
+    let AppCommand::SpinStructure(command) = canonical.command() else {
+        panic!("expected canonical SpinStructure command");
+    };
+    assert_eq!(command.product_mode(), SpinStructureProductMode::Search);
+}
+
+#[test]
+fn canonical_spin_structure_cover_and_guaranteed_lower_to_distinct_typed_modes() {
+    let cover = WebCommandParser::parse(
+        "clearra spin-structure cover --pieces IOT --height 7 --lines 1+ --objective min-cover --max-patterns 42",
+    )
+    .expect("canonical structure cover")
+    .to_app_request()
+    .expect("cover AppRequest");
+    let AppCommand::SpinStructure(cover) = cover.command() else {
+        panic!("expected SpinStructure cover command");
+    };
+    assert_eq!(
+        cover.product_mode(),
+        SpinStructureProductMode::Cover { max_patterns: 42 }
+    );
+
+    let guaranteed = WebCommandParser::parse(
+        "clearra spin-structure guaranteed --pieces IOT --height 7 --lines 1+ --final-piece T --max-patterns 43 --dependency-report",
+    )
+    .expect("canonical structure guaranteed")
+    .to_app_request()
+    .expect("guaranteed AppRequest");
+    let AppCommand::SpinStructure(guaranteed) = guaranteed.command() else {
+        panic!("expected SpinStructure guaranteed command");
+    };
+    assert_eq!(
+        guaranteed.product_mode(),
+        SpinStructureProductMode::Guaranteed {
+            final_piece: PieceKind::T,
+            max_patterns: 43,
+            dependency_report: true,
+        }
+    );
+}
+
+#[test]
+fn spin_structure_product_routes_reject_cross_route_and_ungoverned_options() {
+    for command in [
+        "clearra spin-structure search --pieces T --max-patterns 2",
+        "clearra spin-structure search --pieces T --final-piece T",
+        "clearra spin-structure search --pieces T --dependency-report",
+        "clearra spin-structure cover --pieces T --final-piece T",
+        "clearra spin-structure cover --pieces T --dependency-report",
+        "clearra spin-structure cover --pieces T --objective score",
+        "clearra spin-structure cover --pieces T --max-patterns 0",
+        "clearra spin-structure cover --pieces T --max-patterns 100001",
+        "clearra spin-structure guaranteed --pieces T --objective min-cover",
+        "clearra spin-structure guaranteed --pieces I --final-piece T",
+        "clearra spin-structure guaranteed --pieces IO --spin-profile t-spins --final-piece I",
+        "clearra spin-structure guaranteed --pieces T --dependency-report --no-dependency-report",
+    ] {
+        let error = WebCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+#[test]
 fn spin_structure_accepts_all_six_profiles_without_using_forward_mode() {
     for mode in SpinStructureMode::ALL {
         let parsed = WebCommandParser::parse(&format!(
@@ -3205,6 +4888,758 @@ fn spin_structure_preserves_a_canonical_wide_board_and_rejects_conflicts() {
     ))
     .expect_err("conflicting board options");
     assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+}
+
+#[test]
+fn pc_allspin_exact_queue_lowers_to_typed_existential_b2b_without_scoring() {
+    let parsed = WebCommandParser::parse_with_worker_limit(
+        "clearra pc allspin-sol --lines 2 --queue IOTSZ --spin-profile all-spin-plus --no-hold --rule srs --workers 3",
+        8,
+    )
+    .expect("PC All-Spin exact queue");
+    assert_eq!(parsed.command_kind(), "pc");
+    assert_eq!(
+        parsed.pc_result_projection(),
+        PcResultProjection::AllSpinSolution(SpinProfileSelection::AllSpinPlus)
+    );
+
+    let request = parsed.to_app_request().expect("typed PC AppRequest");
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected PC command");
+    };
+    let query = command.query();
+    assert_eq!(query.target().lines(), 2);
+    assert_eq!(query.queue().mode(), "fixed");
+    assert_eq!(
+        query.queue_observation_policy(),
+        QueueObservationPolicy::FullQueueOracle
+    );
+    assert_eq!(
+        query.objective().execution_constraints().spin_profile(),
+        SpinProfileSelection::AllSpinPlus
+    );
+    assert!(query
+        .objective()
+        .execution_constraints()
+        .preserves_back_to_back());
+    assert!(!query.objective().score().requested());
+    assert_eq!(command.result_projection(), parsed.pc_result_projection());
+    assert_eq!(query.execution_policy().workers(), 3);
+}
+
+#[test]
+fn pc_allspin_pattern_chance_preserves_pattern_universe_projection() {
+    let parsed = WebCommandParser::parse(
+        "clearra pc allspin-pres-chance --lines 4 --patterns [TI]! --spin-profile all-mini-plus --max-patterns 5040",
+    )
+    .expect("PC All-Spin preservation chance");
+    assert_eq!(
+        parsed.pc_result_projection(),
+        PcResultProjection::AllSpinPreservationChance(SpinProfileSelection::AllMiniPlus)
+    );
+
+    let request = parsed.to_app_request().expect("typed PC AppRequest");
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected PC command");
+    };
+    assert_eq!(
+        command.query().queue().mode(),
+        "materialized-pattern-expression"
+    );
+    assert_eq!(
+        command
+            .query()
+            .objective()
+            .execution_constraints()
+            .spin_profile(),
+        SpinProfileSelection::AllMiniPlus
+    );
+    assert!(!command.query().objective().score().requested());
+}
+
+#[test]
+fn pc_allspin_forms_require_their_distinct_input_and_explicit_profile() {
+    for command in [
+        "clearra pc allspin-sol --queue IOTSZ",
+        "clearra pc allspin-sol --spin-profile all-spin-plus",
+        "clearra pc allspin-pres-chance --patterns P7",
+        "clearra pc allspin-pres-chance --spin-profile all-spin-plus",
+    ] {
+        let error = WebCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), WebCommandErrorCode::MissingValue, "{command}");
+    }
+
+    for command in [
+        "clearra pc allspin-sol --queue IOTS --queue SZJ --spin-profile all-spin-plus",
+        "clearra pc allspin-pres-chance --patterns P7 --pattern P4 --spin-profile all-spin-plus",
+        "clearra pc allspin-sol --queue IOTS --spin-profile all-spin --spin-profile all-spin-plus",
+        "clearra pc allspin-sol --patterns P7 --spin-profile all-spin-plus",
+        "clearra pc allspin-pres-chance --queue IOTS --spin-profile all-spin-plus",
+        "clearra pc allspin-sol --queue IOTS --spin-profile all-spins",
+    ] {
+        let error = WebCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+#[test]
+fn pc_allspin_forms_accept_each_explicit_clearra_spin_profile() {
+    for profile in [
+        "t-spins",
+        "t-spins-plus",
+        "all-spin",
+        "all-spin-plus",
+        "all-mini",
+        "all-mini-plus",
+    ] {
+        let parsed = WebCommandParser::parse(&format!(
+            "clearra pc allspin-sol --queue IOTS --spin-profile {profile}"
+        ))
+        .expect(profile);
+        assert_eq!(
+            parsed.pc_result_projection().spin_profile(),
+            SpinProfileSelection::parse(profile)
+        );
+    }
+}
+
+#[test]
+fn pc_allspin_exact_and_pattern_forms_preserve_a_nonempty_initial_field() {
+    let exact = WebCommandParser::parse(
+        "clearra pc allspin-sol --lines 2 --board-mask 1 --height 2 --pieces 5 --queue IOTSZ --spin-profile all-spin-plus --no-hold",
+    )
+    .expect("exact initial-field All-Spin")
+    .to_app_request()
+    .expect("exact initial-field AppRequest");
+    let AppCommand::Scenario(exact) = exact.command() else {
+        panic!("expected scenario PC command");
+    };
+    assert_eq!(
+        exact.result_projection(),
+        PcResultProjection::AllSpinSolution(SpinProfileSelection::AllSpinPlus)
+    );
+    assert_eq!(exact.query().initial_board().occupied_mask(), 1);
+    assert_eq!(exact.query().initial_board().visible_height(), 2);
+    assert_eq!(exact.query().piece_window().max_pieces(), 5);
+    assert_eq!(exact.query().exact_pieces(), Some(5));
+    assert!(!exact.query().allow_hold());
+    assert_eq!(exact.query().completion_goal().as_str(), "clear-to-empty");
+
+    let chance = WebCommandParser::parse(
+        "clearra pc allspin-pres-chance --board-mask 1 --height 1 --pieces 1 --patterns [TI]! --spin-profile all-mini-plus",
+    )
+    .expect("pattern initial-field All-Spin")
+    .to_app_request()
+    .expect("pattern initial-field AppRequest");
+    let AppCommand::Scenario(chance) = chance.command() else {
+        panic!("expected scenario PC command");
+    };
+    assert_eq!(
+        chance.result_projection(),
+        PcResultProjection::AllSpinPreservationChance(SpinProfileSelection::AllMiniPlus)
+    );
+    assert_eq!(chance.query().initial_board().occupied_mask(), 1);
+    assert_eq!(chance.query().initial_board().visible_height(), 1);
+    assert_eq!(chance.query().piece_window().max_pieces(), 1);
+    assert_eq!(chance.query().completion_goal().as_str(), "clear-to-empty");
+}
+
+#[test]
+fn pc_allspin_parser_preserves_typed_product_identity_into_app_request() {
+    let exact = WebCommandParser::parse(
+        "clearra pc allspin-sol --lines 2 --queue IOTSZ --spin-profile all-spin-plus",
+    )
+    .expect("exact All-Spin web request");
+    assert_eq!(
+        exact.product_capability_contract(),
+        Some(ProductCapabilityContract::PcAllSpinSolution)
+    );
+    let exact = exact.to_app_request().expect("exact All-Spin AppRequest");
+    assert_eq!(
+        exact.product_capability_contract(),
+        Some(ProductCapabilityContract::PcAllSpinSolution)
+    );
+
+    let chance = WebCommandParser::parse(
+        "clearra pc allspin-pres-chance --lines 2 --patterns [TI]! --spin-profile all-mini-plus",
+    )
+    .expect("chance All-Spin web request");
+    assert_eq!(
+        chance.product_capability_contract(),
+        Some(ProductCapabilityContract::PcAllSpinPreservationChance)
+    );
+    let chance = chance.to_app_request().expect("chance All-Spin AppRequest");
+    assert_eq!(
+        chance.product_capability_contract(),
+        Some(ProductCapabilityContract::PcAllSpinPreservationChance)
+    );
+}
+
+#[test]
+fn web_typed_identity_mismatch_is_rejected_and_ordinary_pc_cannot_inherit_it() {
+    let profile = SpinProfileSelection::AllSpinPlus;
+    let mismatch = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_patterns("[TI]!")
+        .with_objective(ObjectivePolicy::unique().with_back_to_back_preservation(profile))
+        .with_pc_result_projection(PcResultProjection::AllSpinPreservationChance(profile))
+        .with_product_capability_contract_for_test(ProductCapabilityContract::PcAllSpinSolution)
+        .to_app_request()
+        .expect_err("typed identity cannot bypass its projection validator");
+    assert_eq!(mismatch.code(), WebCommandErrorCode::InvalidValue);
+
+    let standard_with_identity = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_product_capability_contract_for_test(ProductCapabilityContract::PcAllSpinSolution)
+        .to_app_request()
+        .expect_err("standard projection cannot inherit a typed target identity");
+    assert_eq!(
+        standard_with_identity.code(),
+        WebCommandErrorCode::InvalidValue
+    );
+
+    let ordinary = WebCommandParser::parse("clearra pc --lines 2 --backend cpu")
+        .expect("ordinary PC web request");
+    assert_eq!(ordinary.product_capability_contract(), None);
+    assert_eq!(
+        ordinary
+            .to_app_request()
+            .expect("ordinary PC AppRequest")
+            .product_capability_contract(),
+        None
+    );
+}
+
+#[test]
+fn pc_allspin_initial_field_is_atomic_unique_and_line_height_consistent() {
+    for suffix in [
+        "--board-mask 1",
+        "--height 2",
+        "--pieces 5",
+        "--board-mask 1 --height 2",
+        "--board-mask 1 --pieces 5",
+        "--height 2 --pieces 5",
+        "--board-mask 1 --board-mask 2 --height 2 --pieces 5",
+        "--board-mask 1 --height 2 --height 2 --pieces 5",
+        "--board-mask 1 --height 2 --pieces 5 --pieces 5",
+        "--lines 4 --board-mask 1 --height 2 --pieces 5",
+        "--board-mask 1 --height 7 --pieces 5",
+    ] {
+        let command =
+            format!("clearra pc allspin-sol --queue IOTSZ --spin-profile all-spin-plus {suffix}");
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+
+    let target = WebCommandParser::parse(
+        "clearra pc allspin-sol --queue IOTSZ --spin-profile all-spin-plus --target-mask 1",
+    )
+    .expect_err("target fields are not accepted");
+    assert_eq!(target.code(), WebCommandErrorCode::UnsupportedCommand);
+}
+
+#[test]
+fn pc_allspin_forms_reject_target_file_score_multiplicity_and_observation_overrides() {
+    for forbidden in [
+        "--hold empty",
+        "--source-pieces 10",
+        "--count all",
+        "--objective minimum-cover",
+        "--tiling-only",
+        "--score",
+        "--score-profile tetrio",
+        "--initial-b2b 1",
+        "--retained-traces 2",
+        "--solution-probabilities",
+        "--queue-knowledge visible-7",
+        "--queue-knowledge oracle",
+        "--preserve-b2b",
+        "--solution-fumen v115@test",
+        "--input local.json",
+        "--file local.json",
+        "--fixture local.json",
+        "--output local.json",
+    ] {
+        let command =
+            format!("clearra pc allspin-sol --queue IOTS --spin-profile all-spin-plus {forbidden}");
+        let error = WebCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+    }
+}
+
+#[test]
+fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
+    let profile = SpinProfileSelection::AllSpinPlus;
+    let chance = PcResultProjection::AllSpinPreservationChance(profile);
+    let b2b = || ObjectivePolicy::unique().with_back_to_back_preservation(profile);
+    let exact_request = || {
+        WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+            .with_queue("IOTSZ")
+            .with_objective(b2b())
+            .with_pc_allspin_product_capability(
+                ProductCapabilityContract::PcAllSpinSolution,
+                profile,
+            )
+    };
+    let chance_request = || {
+        WebCommandRequest::pc(4, RequestedSearchBackend::Cpu)
+            .with_patterns("[TI]!")
+            .with_objective(b2b())
+            .with_pc_allspin_product_capability(
+                ProductCapabilityContract::PcAllSpinPreservationChance,
+                profile,
+            )
+    };
+
+    assert!(exact_request().to_app_request().is_ok());
+    assert!(chance_request().to_app_request().is_ok());
+    assert!(WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_patterns("P7")
+        .with_objective(b2b())
+        .with_pc_allspin_product_capability(
+            ProductCapabilityContract::PcAllSpinPreservationChance,
+            profile,
+        )
+        .to_app_request()
+        .is_ok());
+    assert!(WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_queue("IOTSZ")
+        .with_scenario(WebPcScenarioInput::new(1, 2, 5))
+        .with_objective(b2b())
+        .with_pc_allspin_product_capability(ProductCapabilityContract::PcAllSpinSolution, profile,)
+        .to_app_request()
+        .is_ok());
+    assert!(WebCommandRequest::pc(1, RequestedSearchBackend::Cpu)
+        .with_patterns("[TI]!")
+        .with_scenario(WebPcScenarioInput::new(1, 1, 1).with_allow_hold(false))
+        .with_hold_enabled(false)
+        .with_objective(b2b())
+        .with_pc_allspin_product_capability(
+            ProductCapabilityContract::PcAllSpinPreservationChance,
+            profile,
+        )
+        .to_app_request()
+        .is_ok());
+
+    let missing_contract = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        .with_patterns("[TI]!")
+        .with_objective(b2b())
+        .with_pc_result_projection(chance)
+        .to_app_request()
+        .expect_err("public projection-only builder cannot bypass typed identity");
+    assert_eq!(missing_contract.code(), WebCommandErrorCode::InvalidValue);
+
+    let selected_identity = StandardBoard64ColoredTilingIdentity::from_piece_masks(0, [0; 7])
+        .expect("empty colored identity");
+    let virtual_file = WebVirtualFileHandle::new("input", "input.json", "application/json", 1)
+        .expect("browser virtual file");
+    let invalid = vec![
+        (
+            "exact-pattern-supply",
+            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+                .with_patterns("[TI]!")
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinSolution,
+                    profile,
+                ),
+        ),
+        (
+            "chance-fixed-supply",
+            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+                .with_queue("IOTSZ")
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinPreservationChance,
+                    profile,
+                ),
+        ),
+        (
+            "duplicate-supply-kinds",
+            chance_request().with_queue("IOTSZ"),
+        ),
+        (
+            "missing-supply",
+            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinSolution,
+                    profile,
+                ),
+        ),
+        (
+            "opening-line-domain",
+            WebCommandRequest::pc(8, RequestedSearchBackend::Cpu)
+                .with_queue("IOTSZ")
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinSolution,
+                    profile,
+                ),
+        ),
+        ("source-window", exact_request().with_source_piece_count(5)),
+        (
+            "build-base-target-payload",
+            exact_request().with_build_probability(WebBuildProbabilityInput::new(0, 1, 2)),
+        ),
+        (
+            "count-policy",
+            exact_request().with_count_policy(PcCountPolicy::CountAll),
+        ),
+        (
+            "objective-kind",
+            exact_request()
+                .with_objective(ObjectivePolicy::all().with_back_to_back_preservation(profile)),
+        ),
+        (
+            "score-selection",
+            exact_request().with_objective(
+                ObjectivePolicy::unique()
+                    .with_score_summary()
+                    .with_back_to_back_preservation(profile),
+            ),
+        ),
+        (
+            "missing-preservation",
+            exact_request().with_objective(ObjectivePolicy::unique()),
+        ),
+        (
+            "profile-mismatch",
+            exact_request().with_objective(
+                ObjectivePolicy::unique()
+                    .with_back_to_back_preservation(SpinProfileSelection::AllMiniPlus),
+            ),
+        ),
+        (
+            "objective-tie-override",
+            exact_request().with_objective(
+                ObjectivePolicy::new(
+                    ObjectiveKind::Unique,
+                    TiePolicy::LowestCandidateId,
+                    TracePolicy::Keep,
+                )
+                .with_back_to_back_preservation(profile),
+            ),
+        ),
+        (
+            "solution-probabilities",
+            exact_request().with_solution_probabilities(true),
+        ),
+        (
+            "visible-seven",
+            exact_request().with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
+        ),
+        (
+            "virtual-file",
+            exact_request().with_virtual_file(virtual_file),
+        ),
+        (
+            "empty-initial-field",
+            exact_request().with_scenario(WebPcScenarioInput::new(0, 2, 5)),
+        ),
+        (
+            "initial-height-domain",
+            exact_request().with_scenario(WebPcScenarioInput::new(1, 7, 5)),
+        ),
+        (
+            "exact-scenario-lines-height-mismatch",
+            WebCommandRequest::pc(4, RequestedSearchBackend::Cpu)
+                .with_queue("IOTSZ")
+                .with_scenario(WebPcScenarioInput::new(1, 2, 5))
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinSolution,
+                    profile,
+                ),
+        ),
+        (
+            "chance-scenario-lines-height-mismatch",
+            WebCommandRequest::pc(4, RequestedSearchBackend::Cpu)
+                .with_patterns("[TI]!")
+                .with_scenario(WebPcScenarioInput::new(1, 1, 1).with_allow_hold(false))
+                .with_hold_enabled(false)
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinPreservationChance,
+                    profile,
+                ),
+        ),
+        (
+            "outer-no-hold-inner-hold",
+            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+                .with_queue("IOTSZ")
+                .with_scenario(WebPcScenarioInput::new(1, 2, 5))
+                .with_hold_enabled(false)
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinSolution,
+                    profile,
+                ),
+        ),
+        (
+            "outer-hold-inner-no-hold",
+            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+                .with_queue("IOTSZ")
+                .with_scenario(WebPcScenarioInput::new(1, 2, 5).with_allow_hold(false))
+                .with_objective(b2b())
+                .with_pc_allspin_product_capability(
+                    ProductCapabilityContract::PcAllSpinSolution,
+                    profile,
+                ),
+        ),
+        (
+            "occupied-scenario-hold",
+            exact_request().with_scenario(
+                WebPcScenarioInput::new(1, 2, 5).with_hold_piece(Some(PieceKind::T)),
+            ),
+        ),
+        (
+            "scenario-source-window",
+            exact_request()
+                .with_scenario(WebPcScenarioInput::new(1, 2, 5).with_source_piece_count(5)),
+        ),
+        (
+            "scenario-count-policy",
+            exact_request().with_scenario(
+                WebPcScenarioInput::new(1, 2, 5).with_count_policy(PcCountPolicy::CountAll),
+            ),
+        ),
+        (
+            "scenario-target-identities",
+            exact_request().with_scenario(
+                WebPcScenarioInput::new(1, 2, 5)
+                    .with_allowed_colored_solution_identities([selected_identity]),
+            ),
+        ),
+        (
+            "non-pc-command",
+            WebCommandRequest::setup(vec![PieceKind::I], false).with_pc_allspin_product_capability(
+                ProductCapabilityContract::PcAllSpinSolution,
+                profile,
+            ),
+        ),
+    ];
+    for (name, request) in invalid {
+        let error = request.to_app_request().expect_err(name);
+        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{name}");
+    }
+}
+#[test]
+fn legacy_alias_fixture_parses_30_surface_pairs_to_identical_public_app_requests() {
+    const FIXTURE: &str =
+        include_str!("../../../tests/fixtures/contracts/legacy_alias_equivalence.v1.json");
+
+    let fixture = FIXTURE.replace("\r\n", "\n");
+    let mut checked = 0usize;
+    for remainder in fixture.split("\n    {\n      \"id\": \"").skip(1) {
+        let block = remainder
+            .split("\n    },\n    {")
+            .next()
+            .expect("fixture case block");
+        if !block.contains("\"canonical_web_command\"") {
+            continue;
+        }
+        let id = block.split('"').next().expect("fixture case id");
+        let capability_id = fixture_string(block, "capability_id");
+        let problem_contract_id = fixture_string(block, "problem_contract_id");
+        let result_contract_id = fixture_string(block, "result_contract_id");
+        let (expected_problem, expected_result) = expected_alias_families(capability_id);
+        assert_eq!(
+            problem_contract_id, expected_problem,
+            "{id}: input family drift"
+        );
+        assert_eq!(
+            result_contract_id, expected_result,
+            "{id}: result family drift"
+        );
+
+        for (surface, canonical_field, alias_field) in [
+            (
+                "discord-slash",
+                "canonical_web_command",
+                "alias_web_command",
+            ),
+            (
+                "discord-text",
+                "canonical_text_web_command",
+                "alias_text_web_command",
+            ),
+        ] {
+            let canonical_source = fixture_string(block, canonical_field);
+            let alias_source = fixture_string(block, alias_field);
+            let canonical = parse_fixture_app_request(id, surface, "canonical", canonical_source);
+            let alias = parse_fixture_app_request(id, surface, "alias", alias_source);
+
+            assert_eq!(
+                canonical.command_kind(),
+                alias.command_kind(),
+                "{id}/{surface}: typed AppCommand family drift"
+            );
+            assert_eq!(
+                canonical.query(),
+                alias.query(),
+                "{id}/{surface}: typed query/problem envelope drift"
+            );
+            assert_eq!(
+                canonical.command(),
+                alias.command(),
+                "{id}/{surface}: normalized AppCommand fields drift"
+            );
+            assert_eq!(
+                canonical, alias,
+                "{id}/{surface}: normalized AppRequest policy fields drift"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked, 30,
+        "legacy alias fixture must cover 15 logical cases on both ingress surfaces"
+    );
+}
+
+fn parse_fixture_app_request(
+    id: &str,
+    surface: &str,
+    variant: &str,
+    source: &str,
+) -> clearra_app::app_request::AppRequest {
+    // Discord text owns the representation-only `--format text` suffix.  The
+    // web parser owns the semantic argv which precedes it, so remove exactly
+    // that frozen terminal transport option before constructing AppRequest.
+    let semantic_source = if surface == "discord-text" {
+        source.strip_suffix(" --format text").unwrap_or_else(|| {
+            panic!("{id}/{surface}/{variant}: text argv lacks frozen format suffix")
+        })
+    } else {
+        assert!(
+            !source.contains(" --format "),
+            "{id}/{surface}/{variant}: slash argv contains a text-only format option"
+        );
+        source
+    };
+    WebCommandParser::parse(semantic_source)
+        .unwrap_or_else(|error| {
+            panic!("{id}/{surface}/{variant}: WebCommandParser rejected fixture: {error}")
+        })
+        .to_app_request()
+        .unwrap_or_else(|error| {
+            panic!("{id}/{surface}/{variant}: AppRequest construction failed: {error}")
+        })
+}
+
+fn fixture_string<'a>(block: &'a str, field: &str) -> &'a str {
+    let marker = format!("      \"{field}\": \"");
+    let value = block
+        .split_once(marker.as_str())
+        .unwrap_or_else(|| panic!("fixture case lacks string field '{field}'"))
+        .1
+        .split_once('"')
+        .expect("fixture string terminator")
+        .0;
+    assert!(
+        !value.contains('\\'),
+        "fixture command strings must not require ad-hoc JSON unescaping"
+    );
+    value
+}
+
+fn expected_alias_families(capability_id: &str) -> (&'static str, &'static str) {
+    match capability_id {
+        "pc.path" | "pc.minimals" | "pc.score-minimals" | "pc.score-finder" => {
+            ("pc-clear-to-empty", "pc-scenario")
+        }
+        "pc.allspin-sol" => ("pc-b2b-preservation.v1", "pc-b2b-preserving-witness.v1"),
+        "pc.allspin-pres-chance" => (
+            "pc-b2b-preservation.v1",
+            "pc-b2b-preservation-probability.v1",
+        ),
+        "build.cover" => ("build-base-target", "build-probability"),
+        "build.finesse-score" => ("fixed-placement-finesse-score.v2", "finesse-input-score.v2"),
+        "setup.joint" => ("setup-ranking-joint", "setup-ranking"),
+        "setup.build" => ("setup-ranking-build", "setup-ranking"),
+        "setup.pc" => ("setup-ranking-pc", "setup-ranking"),
+        "forward.spin" => ("ordered-forward-spin-search", "forward-spin"),
+        "forward.damage" => ("ordered-forward-damage-search", "forward-damage"),
+        "forward.ren" => ("ordered-forward-ren-search", "forward-ren"),
+        _ => panic!("fixture contains an ungoverned capability family: {capability_id}"),
+    }
+}
+
+#[test]
+fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_commands() {
+    let document = clearra_app::encode_ctk3_compact(&clearra_app::Ctk3Document::new(
+        2,
+        vec![clearra_app::Ctk3Page::new(
+            1,
+            vec![clearra_app::Ctk3Color::Gray, clearra_app::Ctk3Color::Empty],
+        )],
+    ))
+    .unwrap();
+    let parity = WebCommandParser::parse(&format!(
+        "clearra utility parity --format ctk3 --document {document}"
+    ))
+    .unwrap();
+    assert!(matches!(
+        parity.to_app_request().unwrap().command(),
+        clearra_app::AppCommand::UtilityParity(_)
+    ));
+    let render = WebCommandParser::parse(&format!(
+        "clearra utility render --format ctk3 --document {document} --artifact-format png --page 1"
+    ))
+    .unwrap();
+    assert!(matches!(
+        render.to_app_request().unwrap().command(),
+        clearra_app::AppCommand::UtilityRender(_)
+    ));
+    let to_gray = WebCommandParser::parse(&format!(
+        "clearra utility to-gray --format ctk3 --document {document}"
+    ))
+    .unwrap();
+    assert_eq!(to_gray.command_kind(), "utility-to-gray");
+    assert!(matches!(
+        to_gray.to_app_request().unwrap().command(),
+        clearra_app::AppCommand::UtilityToGray(_)
+    ));
+    let mirror = WebCommandParser::parse(&format!(
+        "clearra utility mirror --format ctk3 --document {document}"
+    ))
+    .unwrap();
+    assert_eq!(mirror.command_kind(), "utility-mirror");
+    assert!(matches!(
+        mirror.to_app_request().unwrap().command(),
+        clearra_app::AppCommand::UtilityMirror(_)
+    ));
+    assert!(
+        WebCommandParser::parse(&format!("clearra utility parity --document {document}")).is_err()
+    );
+    assert!(WebCommandParser::parse(&format!(
+        "clearra utility parity --format ctk3 --document {document} --workers 2"
+    ))
+    .is_err());
+    assert!(
+        WebCommandParser::parse(&format!("clearra utility to-gray --document {document}")).is_err()
+    );
+    assert!(WebCommandParser::parse(&format!(
+        "clearra utility mirror --format ctk3 --document {document} --queue T"
+    ))
+    .is_err());
+}
+
+#[test]
+fn typed_document_text_comments_preserve_quoted_spaces_without_shell_semantics() {
+    let request = WebCommandParser::parse(
+        "clearra utility fumen text-to-fumen --format fumen --comment \"first comment\" --comment second",
+    )
+    .unwrap()
+    .to_app_request()
+    .unwrap();
+    let clearra_app::AppCommand::UtilityFumen(command) = request.command() else {
+        panic!("expected utility fumen command")
+    };
+    assert_eq!(command.comments(), ["first comment", "second"]);
+    assert!(WebCommandParser::parse(
+        "clearra utility fumen text-to-fumen --format fumen --comment \"unterminated",
+    )
+    .is_err());
 }
 // SRP rationale: this module has one behavior-level change reason: verifying the complete public
 // web command grammar reaches the intended typed Clearra request contracts.

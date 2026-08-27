@@ -15,11 +15,19 @@ import type {
   ClearraWasmHostCapabilities,
   ClearraWasmModule
 } from './clearraWasmRuntime';
+import {
+  authorityForVerifierPool,
+  browserExecutionResourceCapacity,
+  SharedExecutionAvailabilityError,
+  type SharedExecutionResourceAuthority,
+  type SharedExecutionResourceLease
+} from './SharedExecutionResourceAuthority';
 
 const PRODUCER_WORK_BUDGET = 32768;
 const CANDIDATE_BATCH_SIZE = 256;
 const HOST_YIELD_BUDGET_MS = 8;
 const PROGRESS_REFRESH_MS = 50;
+const SHARED_RESOURCE_WAIT_TIMEOUT_MS = 5_000;
 const yieldToWorkerHost = createWorkerHostYield();
 const sharedVerifierPool = new ClearraVerifierPool();
 
@@ -44,20 +52,105 @@ export function disposeDistributedWorkers() {
 export class DistributedWasmJobRunner {
   private cancelled = false;
   private released = false;
+  private coordinatorOwned = false;
+  private poolOwned = false;
+  private acquireGeneration = 0;
+  private acquireController: AbortController | null = null;
+  private resourceLease: SharedExecutionResourceLease | null = null;
   private readonly pool: ClearraVerifierPool;
+  private readonly resourceAuthority: SharedExecutionResourceAuthority;
 
   constructor(
     private readonly wasm: ClearraWasmModule,
     private readonly jobId: number,
     private readonly lifecycleOwnerId: string,
     private readonly hostCapabilities: ClearraWasmHostCapabilities,
-    pool: ClearraVerifierPool = sharedVerifierPool
+    pool: ClearraVerifierPool = sharedVerifierPool,
+    resourceAuthority?: SharedExecutionResourceAuthority,
+    private readonly resourceWaitTimeoutMs = SHARED_RESOURCE_WAIT_TIMEOUT_MS
   ) {
     this.pool = pool;
+    this.resourceAuthority = resourceAuthority ?? authorityForVerifierPool(
+      pool,
+      browserExecutionResourceCapacity(
+        hostCapabilities.logicalProcessorCount,
+        hostCapabilities.transferByteCap
+      )
+    );
+  }
+
+  async acquire(): Promise<void> {
+    if (this.resourceLease && !this.resourceLease.isReleased()) return;
+    const generation = ++this.acquireGeneration;
+    this.cancelled = false;
+    this.released = false;
+    this.coordinatorOwned = false;
+    this.poolOwned = false;
+    const controller = new AbortController();
+    this.acquireController = controller;
+    let lease: SharedExecutionResourceLease;
+    try {
+      lease = await this.resourceAuthority.acquireBounded(
+        `${this.lifecycleOwnerId || 'anonymous'}:${this.jobId}`,
+        this.resourceAuthority.capacity(),
+        {
+          timeoutMs: this.resourceWaitTimeoutMs,
+          signal: controller.signal
+        }
+      );
+    } catch (error) {
+      if (generation === this.acquireGeneration) {
+        this.acquireController = null;
+        this.released = true;
+      }
+      throw error;
+    }
+    if (
+      generation !== this.acquireGeneration ||
+      controller.signal.aborted ||
+      this.cancelled ||
+      this.released
+    ) {
+      if (!lease.isReleased()) lease.release();
+      if (generation === this.acquireGeneration) this.acquireController = null;
+      const capacity = this.resourceAuthority.capacity();
+      throw new SharedExecutionAvailabilityError(
+        Object.freeze({
+          state: 'cancelled',
+          reason: 'cancelled-by-caller',
+          surface: 'browser-wasm32',
+          descriptor_pattern_count: null,
+          dense_pattern_count: null,
+          required_dense_bytes: null,
+          required_memory_bytes: null
+        }),
+        capacity,
+        this.resourceAuthority.snapshot().available
+      );
+    }
+    this.resourceLease = lease;
+    this.acquireController = null;
   }
 
   prepare(commandText: string): ClearraDistributedPlan {
+    if (!this.resourceLease || this.resourceLease.isReleased()) {
+      throw new Error('distributed coordinator preparation requires an execution lease');
+    }
+    // distributed_prepare may mutate coordinator state before throwing. Mark
+    // ownership first because the shared lease has already been acquired.
+    this.coordinatorOwned = true;
     return this.wasm.distributed_prepare(commandText);
+  }
+
+  /**
+   * Clears preparation-only coordinator state while retaining the shared
+   * execution lease for a serial fallback owned by the same product run.
+   */
+  resetPreparedCoordinatorForSerial(): void {
+    if (!this.resourceLease || this.resourceLease.isReleased()) {
+      throw new Error('serial handoff requires an execution lease');
+    }
+    this.resetOwnedCoordinator();
   }
 
   async run(
@@ -65,13 +158,21 @@ export class DistributedWasmJobRunner {
     plan: ClearraDistributedPlan,
     onEvent: (event: ClearraWasmWorkerEvent) => void
   ): Promise<ClearraWasmWorkerEvent> {
-    this.cancelled = false;
-    this.released = false;
+    await this.acquire();
+    // A directly supplied plan is a compatibility path for hosts that prepared
+    // the same coordinator immediately before run(). The lease makes taking
+    // ownership safe; no coordinator state is touched before acquisition.
+    this.coordinatorOwned = true;
     let profilingActive = false;
     let searchProfile: unknown = null;
     if (this.wasm.profile_start) {
-      this.wasm.profile_start();
-      profilingActive = true;
+      try {
+        this.wasm.profile_start();
+        profilingActive = true;
+      } catch (error) {
+        this.releaseFailedRun();
+        throw error;
+      }
     }
     const verifierCount = plan.verificationRequired
       ? Math.max(1, plan.workerCount - 1)
@@ -150,6 +251,7 @@ export class DistributedWasmJobRunner {
       emitProgress();
       let verifierInitialization: Promise<void> | null = null;
       if (plan.verificationRequired && !plan.deferredInitialization) {
+        this.poolOwned = true;
         verifierInitialization = this.pool.initialize(
           plan.workerInitialization ?? commandText,
           verifierCount,
@@ -184,6 +286,7 @@ export class DistributedWasmJobRunner {
                 this.wasm.distributed_progress().candidateFamilyCount
               )
             : verifierCount;
+          this.poolOwned = true;
           verifierInitialization = this.pool.initialize(
             produced.initialization,
             effectiveVerifierCount,
@@ -283,18 +386,22 @@ export class DistributedWasmJobRunner {
         }
       }
       clearInterval(progressTimer);
-      this.resetCoordinator();
+      this.releaseCompletedRun();
     }
   }
 
   cancel() {
     if (this.cancelled && this.released) return;
     this.cancelled = true;
+    this.acquireGeneration += 1;
+    this.acquireController?.abort();
     this.releaseFailedRun();
   }
 
   dispose() {
     this.cancelled = true;
+    this.acquireGeneration += 1;
+    this.acquireController?.abort();
     this.releaseFailedRun();
   }
 
@@ -305,16 +412,37 @@ export class DistributedWasmJobRunner {
   private releaseFailedRun() {
     if (this.released) return;
     this.released = true;
-    try {
-      this.wasm.distributed_cancel();
-    } catch {
-      // Reset and worker termination below are the fail-closed fallback.
+    if (this.poolOwned) {
+      try {
+        this.wasm.distributed_cancel();
+      } catch {
+        // Reset and worker termination below are the fail-closed fallback.
+      }
+      this.pool.cancel();
     }
-    this.pool.cancel();
-    this.resetCoordinator();
+    this.resetOwnedCoordinator();
+    this.releaseExecutionLease();
   }
 
-  private resetCoordinator() {
+  private releaseCompletedRun() {
+    if (this.released) return;
+    this.released = true;
+    this.resetOwnedCoordinator();
+    this.releaseExecutionLease();
+  }
+
+  private releaseExecutionLease() {
+    this.acquireController = null;
+    this.poolOwned = false;
+    const lease = this.resourceLease;
+    this.resourceLease = null;
+    if (!lease || lease.isReleased()) return;
+    lease.release();
+  }
+
+  private resetOwnedCoordinator() {
+    if (!this.coordinatorOwned) return;
+    this.coordinatorOwned = false;
     try {
       this.wasm.distributed_reset();
     } catch {

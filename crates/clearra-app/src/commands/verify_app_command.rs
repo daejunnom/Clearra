@@ -55,11 +55,15 @@ impl VerifyAppCommand {
 impl RunnableAppCommand for VerifyAppCommand {
     fn run(self, context: &AppExecutionContext<'_>) -> AppResponse {
         match self.scope.as_deref() {
-            Some("pc") => PcAppCommand::new(default_pc_query()).run(context),
-            Some("setup") => SetupAppCommand::new(default_setup_query()).run(context),
-            Some("cover") | Some("build") => {
-                CoverAppCommand::new(default_cover_query()).run(context)
-            }
+            Some("pc") => scoped_verify("pc", PcAppCommand::new(default_pc_query()).run(context)),
+            Some("setup") => scoped_verify(
+                "setup",
+                SetupAppCommand::new(default_setup_query()).run(context),
+            ),
+            Some("cover") | Some("build") => scoped_verify(
+                "build",
+                CoverAppCommand::new(default_cover_query()).run(context),
+            ),
             Some("kicks") => verify_kicks(),
             Some(target) => AppResponse::failed(
                 AppStatus::ExecutionFailed,
@@ -71,6 +75,35 @@ impl RunnableAppCommand for VerifyAppCommand {
             None => run_default_verify(context),
         }
     }
+}
+
+fn scoped_verify(scope: &str, probe: AppResponse) -> AppResponse {
+    if probe.status() != AppStatus::Success {
+        return probe;
+    }
+    let Some(result_kind) = probe.render_model().map(AppRenderModel::kind) else {
+        return AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(
+                AppErrorCode::ExecutionFailed,
+                format!("verify probe '{scope}' returned no result"),
+            ),
+        );
+    };
+    verify_success(
+        AppResultKind::Verify,
+        vec![
+            ("scope".to_owned(), scope.to_owned()),
+            ("status".to_owned(), "verified".to_owned()),
+            (
+                "probe_result_kind".to_owned(),
+                result_kind.as_str().to_owned(),
+            ),
+            ("probes_attempted".to_owned(), "1".to_owned()),
+            ("probes_passed".to_owned(), "1".to_owned()),
+            ("probes_failed".to_owned(), "0".to_owned()),
+        ],
+    )
 }
 
 fn run_default_verify(context: &AppExecutionContext<'_>) -> AppResponse {
@@ -242,4 +275,53 @@ fn kick_contract_fields(report: &KickContractReport) -> Vec<(String, String)> {
         fields.push(("srs_plus_extension_reason".to_owned(), reason.to_owned()));
     }
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_probe_success_is_wrapped_in_the_verify_result_contract() {
+        let probe = AppResponse::success(AppRenderModel::Path(AppMessage::new(
+            AppResultKind::Path,
+            Vec::new(),
+        )));
+
+        let response = scoped_verify("pc", probe);
+
+        assert_eq!(response.status(), AppStatus::Success);
+        let model = response.render_model().expect("verify render model");
+        assert_eq!(model.kind(), AppResultKind::Verify);
+        let fields = model.message().expect("verify message").fields();
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find(|field| field.key() == key)
+                .map(|field| field.value().as_text())
+        };
+        assert_eq!(field("scope").as_deref(), Some("pc"));
+        assert_eq!(field("status").as_deref(), Some("verified"));
+        assert_eq!(field("probe_result_kind").as_deref(), Some("path"));
+        assert_eq!(field("probes_attempted").as_deref(), Some("1"));
+        assert_eq!(field("probes_passed").as_deref(), Some("1"));
+        assert_eq!(field("probes_failed").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn scoped_probe_failure_preserves_the_underlying_failure() {
+        let probe = AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(AppErrorCode::NoSolution, "fixture failure"),
+        );
+
+        let response = scoped_verify("pc", probe);
+
+        assert_eq!(response.status(), AppStatus::ExecutionFailed);
+        assert_eq!(
+            response.error().map(AppError::code),
+            Some(AppErrorCode::NoSolution)
+        );
+        assert!(response.render_model().is_none());
+    }
 }

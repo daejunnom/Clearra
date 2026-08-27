@@ -91,6 +91,95 @@ const REACHABILITY_CACHE_WAYS: usize = 4;
 const SMALL_SEARCH_EXHAUSTIVE_OBSERVATIONS: u8 = 32;
 const LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS: u8 = 16;
 
+/// Conservative retained-storage ceiling for every reachability allocation
+/// that exact scoring can make for one connected Board64 catalog.  The bound
+/// is derived from the actual built-in kick profile: each compiled rotation
+/// transition can emit no more targets than its kick-offset sequence, and all
+/// other template tables are linear in the catalog's finite pose state count.
+pub(super) fn checked_reachability_retained_upper_bound(
+    width: u8,
+    height: u8,
+    profile_id: KickTableProfileId,
+) -> Option<u128> {
+    const STANDARD_PIECES: [PieceKind; 7] = [
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::S,
+        PieceKind::Z,
+        PieceKind::J,
+        PieceKind::L,
+    ];
+    let profile = builtin_kick_profile(profile_id)?;
+    let mut bytes = 0_u128;
+    let mut maximum_scratch_states = 0_u128;
+    for piece in STANDARD_PIECES {
+        let ceiling = source_ceiling(height, piece, profile.supports_180(), profile);
+        let vertical_states = u128::from(u8::try_from(ceiling).ok()?).checked_add(1)?;
+        let state_count = 4_u128
+            .checked_mul(vertical_states)?
+            .checked_mul(u128::from(width))?;
+        maximum_scratch_states = maximum_scratch_states.max(state_count);
+        let mut maximum_rotation_targets_per_state = 0_u128;
+        for from in RotationState::ALL {
+            let mut from_targets = 0_u128;
+            for (slot, to) in [
+                from.clockwise(),
+                from.counter_clockwise(),
+                from.rotated_180(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if slot == 2 && !profile.supports_180() {
+                    continue;
+                }
+                from_targets = from_targets.checked_add(
+                    profile
+                        .sequence_for(KickTransition::new(piece, from, to))
+                        .map_or(0_u128, |sequence| sequence.offsets().len() as u128),
+                )?;
+            }
+            maximum_rotation_targets_per_state =
+                maximum_rotation_targets_per_state.max(from_targets);
+        }
+        let rotation_target_count = state_count.checked_mul(maximum_rotation_targets_per_state)?;
+        let state_linear_bytes = state_count.checked_mul(
+            (core::mem::size_of::<u64>()
+                + core::mem::size_of::<[u16; 3]>() * 2
+                + core::mem::size_of::<u16>()) as u128,
+        )?;
+        let state_word_bytes = state_count
+            .checked_add(63)?
+            .checked_div(64)?
+            .checked_mul(core::mem::size_of::<u64>() as u128)?;
+        let offset_bytes = state_count
+            .checked_add(1)?
+            .checked_mul((core::mem::size_of::<u32>() * 2) as u128)?;
+        let rotation_bytes = rotation_target_count.checked_mul(
+            (core::mem::size_of::<u16>()
+                + core::mem::size_of::<u8>()
+                + core::mem::size_of::<ReverseRotationSource>()) as u128,
+        )?;
+        bytes = bytes
+            .checked_add(state_linear_bytes)?
+            .checked_add(state_word_bytes)?
+            .checked_add(offset_bytes)?
+            .checked_add(rotation_bytes)?;
+    }
+
+    let cache_entry_bytes = (core::mem::size_of::<ReachabilityCacheKey>()
+        + core::mem::size_of::<ReachableLocks>() * 2
+        + core::mem::size_of::<ReachabilityObservation>()) as u128;
+    bytes =
+        bytes.checked_add((REACHABILITY_CACHE_CAPACITY as u128).checked_mul(cache_entry_bytes)?)?;
+
+    // Scratch is shared across templates and only needs the largest pose
+    // state count. The queue and generation table each retain one u16.
+    bytes
+        .checked_add(maximum_scratch_states.checked_mul((core::mem::size_of::<u16>() * 2) as u128)?)
+}
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct ReachabilityCacheKey {
@@ -946,6 +1035,89 @@ fn best_scoring_lock_evidence(
         }
     }
     best.map(|(_, evidence)| evidence)
+}
+
+/// Query-local exact movement authority used by operation-document analysis.
+pub(crate) struct DocumentReachabilityEngine {
+    width: u8,
+    height: u8,
+    profile_id: KickTableProfileId,
+    templates: [Option<ReachabilityTemplate>; 7],
+    scratch: ReachabilityScratch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DocumentLockReachability {
+    pub valid_target: bool,
+    pub reachable: bool,
+    pub lock_mask: u64,
+    pub visited_state_count: usize,
+    pub first_success_kick_evidence: bool,
+}
+
+impl DocumentReachabilityEngine {
+    pub(crate) fn new(width: u8, height: u8, profile_id: KickTableProfileId) -> Option<Self> {
+        builtin_kick_profile(profile_id)?;
+        if width == 0 || height == 0 || usize::from(width) * usize::from(height) > 64 {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            profile_id,
+            templates: std::array::from_fn(|_| None),
+            scratch: ReachabilityScratch::default(),
+        })
+    }
+
+    pub(crate) fn analyze_lock(
+        &mut self,
+        board: u64,
+        piece: PieceKind,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+    ) -> DocumentLockReachability {
+        let piece_slot = piece_index(piece);
+        let template = self.templates[piece_slot].get_or_insert_with(|| {
+            ReachabilityTemplate::compile(self.width, self.height, piece, self.profile_id)
+        });
+        let Some(target_index) =
+            state_index(template.width, template.ceiling, State { rotation, x, y })
+        else {
+            return DocumentLockReachability {
+                valid_target: false,
+                reachable: false,
+                lock_mask: 0,
+                visited_state_count: 0,
+                first_success_kick_evidence: false,
+            };
+        };
+        let lock_mask = template.state_masks[target_index];
+        if lock_mask == INVALID_STATE_MASK
+            || board & lock_mask != 0
+            || !grounded_index(template, board, target_index)
+        {
+            return DocumentLockReachability {
+                valid_target: lock_mask != INVALID_STATE_MASK,
+                reachable: false,
+                lock_mask: lock_mask.min(INVALID_STATE_MASK - 1),
+                visited_state_count: 0,
+                first_success_kick_evidence: false,
+            };
+        }
+        let result = reverse_lock_reachable(template, board, rotation, x, y, &mut self.scratch);
+        let kick = result.reachable
+            && best_scoring_lock_evidence(template, board, rotation, x, y, &mut self.scratch)
+                .is_some();
+        DocumentLockReachability {
+            valid_target: true,
+            reachable: result.reachable,
+            lock_mask,
+            visited_state_count: result.visited_state_count,
+            first_success_kick_evidence: kick,
+        }
+    }
 }
 
 fn scoring_lock_is_immobile(

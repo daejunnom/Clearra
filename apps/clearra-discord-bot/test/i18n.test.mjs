@@ -212,11 +212,12 @@ test("Discord registration localizes names without redundant values or collision
   assert.match(pathField?.description ?? "", /1–6 rows/);
   assert.match(pathField?.description_localizations?.ko ?? "", /1–6줄/u);
 
-  const setupField = globalCommands
-    .find(({ name }) => name === "setup")
+  const forwardSpinField = globalCommands
+    .find(({ name }) => name === "forward")
+    ?.options.find(({ name }) => name === "spin")
     ?.options.find(({ name }) => name === "field");
-  assert.match(setupField?.description ?? "", /1–24 rows/);
-  assert.match(setupField?.description_localizations?.ko ?? "", /1–24줄/u);
+  assert.match(forwardSpinField?.description ?? "", /1–24 rows/);
+  assert.match(forwardSpinField?.description_localizations?.ko ?? "", /1–24줄/u);
 
   const cover = globalCommands.find(({ name }) => name === "cover");
   for (const optionName of ["base", "target"]) {
@@ -228,16 +229,31 @@ test("Discord registration localizes names without redundant values or collision
   assert.equal(damage?.name_localizations?.ko, "대미지");
   assert.match(damage?.description_localizations?.ko ?? "", /최대 대미지/u);
 
-  const verifyScope = globalCommands
-    .find(({ name }) => name === "verify")
-    ?.options.find(({ name }) => name === "scope");
-  assert.equal(
-    verifyScope?.description_localizations?.ko,
-    "실행할 검증 그룹이며 생략하면 모든 검증을 실행합니다",
-  );
+  const allspinExact = globalCommands
+    .find(({ name }) => name === "pc")
+    ?.options.find(({ name }) => name === "allspin-sol");
+  const allspinChance = globalCommands
+    .find(({ name }) => name === "pc")
+    ?.options.find(({ name }) => name === "allspin-pres-chance");
+  assert.equal(allspinExact?.name_localizations?.ko, "올스핀-해법");
+  assert.equal(allspinChance?.name_localizations?.ko, "올스핀-보존-확률");
+  assert.match(allspinExact?.description_localizations?.ko ?? "", /B2B.*증거/u);
+  assert.match(allspinChance?.description_localizations?.ko ?? "", /B2B.*확률/u);
   assert.deepEqual(
-    verifyScope?.choices.map(effectiveKoreanChoiceName),
-    ["퍼펙트 클리어", "셋업", "커버", "빌드", "킥"],
+    allspinExact?.options.map(({ name }) => name),
+    [
+      "next", "field", "lines", "hold", "kicktable", "spin-profile",
+      "max-patterns", "max-nodes", "max-frontier-states", "max-candidates",
+      "max-memory-mib",
+    ],
+  );
+  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /명령 의도만 보장/u);
+  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에 제거/u);
+
+  assert.equal(
+    globalCommands.some(({ name }) => name === "verify"),
+    false,
+    "the hidden text diagnostic must not receive slash localization metadata",
   );
 
   const setupRanking = globalCommands.find(({ name }) => name === "pc-setup");

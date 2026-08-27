@@ -1,11 +1,17 @@
 import type {
+  ClearraProductPageWorkerEvent,
+  ClearraProductPageWorkerPayload,
   ClearraSolutionPageWorkerEvent,
   ClearraWasmWorkerEvent
 } from './wasmCommandClient';
 import {
+  isProductPageWorkerEvent,
   isSolutionPageWorkerEvent,
+  postLoadNextProductPage,
+  postLoadProductMemberPage,
   postLoadSolutionPage,
-  postPrewarmRuntime
+  postPrewarmRuntime,
+  postReleaseProductPages
 } from './wasmCommandClient';
 import {
   DEFAULT_RUNTIME_WARMUP_POLICY,
@@ -51,6 +57,7 @@ export class WasmTerminalWorkerController {
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
   private cancellingJobId: number | null = null;
   private nextSolutionPageRequestId = 1;
+  private nextProductPageRequestId = 1;
   private solutionPageRequests = new Map<
     number,
     {
@@ -58,6 +65,13 @@ export class WasmTerminalWorkerController {
       reject: (reason: Error) => void;
       offset: number;
       limit: number;
+    }
+  >();
+  private productPageRequests = new Map<
+    number,
+    {
+      resolve: (value: ClearraProductPageWorkerPayload) => void;
+      reject: (reason: Error) => void;
     }
   >();
 
@@ -122,6 +136,10 @@ export class WasmTerminalWorkerController {
       return false;
     }
     this.rejectSolutionPages(new Error('a new search replaced the previous solution pages'));
+    this.rejectProductPages(new Error('a new search replaced the previous product pages'));
+    try {
+      postReleaseProductPages(worker);
+    } catch {}
     if (this.worker && this.prewarmingWorker === this.worker) {
       // Foreground execution interrupts incomplete optional warmup inside the
       // worker; the compiled module itself remains reusable.
@@ -182,6 +200,10 @@ export class WasmTerminalWorkerController {
   cancel() {
     const worker = this.worker;
     if (!worker || this.cancelFallback !== null) return;
+    this.rejectProductPages(new Error('product page runtime was cancelled'));
+    try {
+      postReleaseProductPages(worker);
+    } catch {}
     let jobId: number | null | undefined;
     try {
       jobId = cancelWasmCommand(worker);
@@ -238,6 +260,79 @@ export class WasmTerminalWorkerController {
     });
   }
 
+  loadNextProductPage(
+    signal?: AbortSignal,
+    maximumWorkSteps = 10_000
+  ): Promise<ClearraProductPageWorkerPayload> {
+    return this.requestProductPage(
+      (worker, requestId) =>
+        postLoadNextProductPage(worker, requestId, maximumWorkSteps),
+      signal
+    );
+  }
+
+  loadProductMemberPage(
+    outerPageNumber: number,
+    memberPageNumber: number,
+    signal?: AbortSignal
+  ): Promise<ClearraProductPageWorkerPayload> {
+    return this.requestProductPage(
+      (worker, requestId) =>
+        postLoadProductMemberPage(
+          worker,
+          requestId,
+          outerPageNumber,
+          memberPageNumber
+        ),
+      signal
+    );
+  }
+
+  releaseProductPages() {
+    this.rejectProductPages(new Error('product page runtime was released'));
+    const worker = this.worker;
+    if (!worker) return;
+    postReleaseProductPages(worker);
+  }
+
+  private requestProductPage(
+    post: (worker: Worker, requestId: number) => void,
+    signal?: AbortSignal
+  ): Promise<ClearraProductPageWorkerPayload> {
+    const worker = this.worker;
+    if (!worker || this.runInFlight || this.cancellingWorker !== null) {
+      return Promise.reject(new Error('product page runtime is not available'));
+    }
+    if (signal?.aborted) return Promise.reject(productPageAbortError(signal));
+    const requestId = this.nextProductPageRequestId++;
+    return new Promise((resolve, reject) => {
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      const onAbort = () => {
+        if (!this.productPageRequests.delete(requestId)) return;
+        cleanup();
+        reject(productPageAbortError(signal));
+      };
+      this.productPageRequests.set(requestId, {
+        resolve: (value) => {
+          cleanup();
+          resolve(value);
+        },
+        reject: (reason) => {
+          cleanup();
+          reject(reason);
+        }
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        post(worker, requestId);
+      } catch (error) {
+        this.productPageRequests.delete(requestId);
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
   takeIdleWorker(): Worker | null {
     if (
       !this.worker ||
@@ -245,7 +340,8 @@ export class WasmTerminalWorkerController {
       this.prewarmingWorker !== null ||
       this.runInFlight ||
       this.cancelFallback !== null ||
-      this.solutionPageRequests.size > 0
+      this.solutionPageRequests.size > 0 ||
+      this.productPageRequests.size > 0
     ) {
       return null;
     }
@@ -292,11 +388,16 @@ export class WasmTerminalWorkerController {
           | RuntimePrewarmWorkerEvent
           | TablebaseWarmupWorkerEvent
           | ClearraSolutionPageWorkerEvent
+          | ClearraProductPageWorkerEvent
         >
       ) => {
         if (this.worker !== worker) return;
         if (isSolutionPageWorkerEvent(message.data)) {
           this.resolveSolutionPage(message.data);
+          return;
+        }
+        if (isProductPageWorkerEvent(message.data)) {
+          this.resolveProductPage(message.data);
           return;
         }
         if (isRuntimePrewarmWorkerEvent(message.data)) {
@@ -448,6 +549,7 @@ export class WasmTerminalWorkerController {
 
   private releaseWorker(worker: Worker, reason: ClearraWasmForcedTerminationReason) {
     this.rejectSolutionPages(new Error('solution page runtime was released'));
+    this.rejectProductPages(new Error('product page runtime was released'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
@@ -460,6 +562,7 @@ export class WasmTerminalWorkerController {
 
   private disposeOwnedWorker(worker: Worker) {
     this.rejectSolutionPages(new Error('solution page runtime was disposed'));
+    this.rejectProductPages(new Error('product page runtime was disposed'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
@@ -503,6 +606,22 @@ export class WasmTerminalWorkerController {
     this.solutionPageRequests.clear();
   }
 
+  private resolveProductPage(event: ClearraProductPageWorkerEvent) {
+    const pending = this.productPageRequests.get(event.request_id);
+    if (!pending) return;
+    this.productPageRequests.delete(event.request_id);
+    if (event.type === 'product_page_failed') {
+      pending.reject(new Error(event.message));
+    } else {
+      pending.resolve(event.payload);
+    }
+  }
+
+  private rejectProductPages(error: Error) {
+    for (const pending of this.productPageRequests.values()) pending.reject(error);
+    this.productPageRequests.clear();
+  }
+
   private clearCancelFallback() {
     if (this.cancelFallback !== null) clearTimeout(this.cancelFallback);
     this.cancelFallback = null;
@@ -514,6 +633,13 @@ export class WasmTerminalWorkerController {
 function solutionPageAbortError(signal: AbortSignal | undefined): Error {
   if (signal?.reason instanceof Error) return signal.reason;
   const error = new Error('Solution page load was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function productPageAbortError(signal: AbortSignal | undefined): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error('Product page load was aborted.');
   error.name = 'AbortError';
   return error;
 }

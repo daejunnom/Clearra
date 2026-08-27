@@ -5,7 +5,7 @@ use crate::{
     bitmap::{
         gif_encoder::GifEncoder, png_encoder::PngEncoder, render_board::RenderBoard, RenderCell,
     },
-    export::RenderExportLimits,
+    export::{render_allocation_authority::RenderAllocationAuthority, RenderExportLimits},
     RenderError, RenderScene, RenderSceneFrame, RenderTile, SkinAtlas,
 };
 
@@ -18,10 +18,11 @@ impl ExactBitmapRenderer {
         cell_size: u32,
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
+        let plan = board_frame_plan(board, cell_size, limits)?;
         let atlas = SkinAtlas::builtin_default()?;
-        let (width, height, rgba) = render_board_pixels(board, &atlas, cell_size)?;
-        limits.validate_frame(width, height)?;
-        PngEncoder::encode_rgba(width, height, &rgba)
+        let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
+        let rgba = render_board_pixels(board, &atlas, cell_size, plan, &mut authority)?;
+        PngEncoder::encode_rgba(plan.width, plan.height, &rgba)
     }
 
     pub fn render_minos_crop_png(
@@ -29,6 +30,8 @@ impl ExactBitmapRenderer {
         cell_size: u32,
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
+        let (crop_width, crop_height) = cropped_board_dimensions(board);
+        let _ = limits.validated_scaled_frame(crop_width, crop_height, cell_size)?;
         Self::render_board_png(&crop_board(board), cell_size, limits)
     }
 
@@ -55,24 +58,29 @@ impl ExactBitmapRenderer {
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
         let first = frames.first().ok_or(RenderError::EmptyTimeline)?;
-        let width = u32::try_from(first.width()).unwrap_or(u32::MAX) * cell_size;
-        let height = u32::try_from(first.height()).unwrap_or(u32::MAX) * cell_size;
-        limits.validate_timeline(frames.len(), width, height, delay_ms)?;
+        let first_plan = board_frame_plan(first, cell_size, limits)?;
+        limits.validate_timeline(frames.len(), first_plan.width, first_plan.height, delay_ms)?;
+        validate_board_timeline_shapes(frames, cell_size, limits, first_plan)?;
+
         let atlas = SkinAtlas::builtin_default()?;
-        let rgba_frames = frames
-            .iter()
-            .map(|frame| {
-                let (frame_width, frame_height, rgba) =
-                    render_board_pixels(frame, &atlas, cell_size)?;
-                if frame_width != width || frame_height != height {
-                    return Err(RenderError::InvalidBoardRows);
-                }
-                Ok(rgba)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
+        let mut rgba_frames =
+            authority.try_vec_with_capacity::<Vec<u8>>(frames.len(), "rgba_frame_carriers")?;
+        for frame in frames {
+            let plan = board_frame_plan(frame, cell_size, limits)?;
+            rgba_frames.push(render_board_pixels(
+                frame,
+                &atlas,
+                cell_size,
+                plan,
+                &mut authority,
+            )?);
+        }
         GifEncoder::encode_rgba_frames(
-            u16::try_from(width).map_err(|_| frame_dimension_error("gif_width", width))?,
-            u16::try_from(height).map_err(|_| frame_dimension_error("gif_height", height))?,
+            u16::try_from(first_plan.width)
+                .map_err(|_| frame_dimension_error("gif_width", first_plan.width))?,
+            u16::try_from(first_plan.height)
+                .map_err(|_| frame_dimension_error("gif_height", first_plan.height))?,
             &rgba_frames,
             delay_ms,
         )
@@ -111,21 +119,35 @@ impl ExactBitmapRenderer {
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
         let scene = RenderScene::from_replay_trace(trace)?;
-        let atlas = SkinAtlas::builtin_default()?;
         let first = scene.frames().first().ok_or(RenderError::EmptyTimeline)?;
-        let width = u32::from(first.width()) * cell_size;
-        let height = u32::from(first.height()) * cell_size;
-        limits.validate_timeline(scene.frames().len(), width, height, delay_ms)?;
-        let frames = scene
-            .frames()
-            .iter()
-            .map(|frame| {
-                render_scene_frame_pixels(frame, &atlas, cell_size).map(|(_, _, rgba)| rgba)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let first_plan = scene_frame_plan(first, cell_size, limits)?;
+        limits.validate_timeline(
+            scene.frames().len(),
+            first_plan.width,
+            first_plan.height,
+            delay_ms,
+        )?;
+        validate_scene_timeline_shapes(scene.frames(), cell_size, limits, first_plan)?;
+
+        let atlas = SkinAtlas::builtin_default()?;
+        let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
+        let mut frames = authority
+            .try_vec_with_capacity::<Vec<u8>>(scene.frames().len(), "rgba_frame_carriers")?;
+        for frame in scene.frames() {
+            let plan = scene_frame_plan(frame, cell_size, limits)?;
+            frames.push(render_scene_frame_pixels(
+                frame,
+                &atlas,
+                cell_size,
+                plan,
+                &mut authority,
+            )?);
+        }
         GifEncoder::encode_rgba_frames(
-            u16::try_from(width).map_err(|_| frame_dimension_error("gif_width", width))?,
-            u16::try_from(height).map_err(|_| frame_dimension_error("gif_height", height))?,
+            u16::try_from(first_plan.width)
+                .map_err(|_| frame_dimension_error("gif_width", first_plan.width))?,
+            u16::try_from(first_plan.height)
+                .map_err(|_| frame_dimension_error("gif_height", first_plan.height))?,
             &frames,
             delay_ms,
         )
@@ -137,49 +159,117 @@ impl ExactBitmapRenderer {
         cell_size: u32,
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
-        let (width, height, rgba) = render_scene_frame_pixels(frame, atlas, cell_size)?;
-        limits.validate_frame(width, height)?;
-        PngEncoder::encode_rgba(width, height, &rgba)
+        let plan = scene_frame_plan(frame, cell_size, limits)?;
+        let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
+        let rgba = render_scene_frame_pixels(frame, atlas, cell_size, plan, &mut authority)?;
+        PngEncoder::encode_rgba(plan.width, plan.height, &rgba)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RgbaFramePlan {
+    width: u32,
+    height: u32,
+    capacity: usize,
+}
+
+fn board_frame_plan(
+    board: &RenderBoard,
+    cell_size: u32,
+    limits: RenderExportLimits,
+) -> Result<RgbaFramePlan, RenderError> {
+    frame_plan(board.width(), board.height(), cell_size, limits)
+}
+
+fn scene_frame_plan(
+    frame: &RenderSceneFrame,
+    cell_size: u32,
+    limits: RenderExportLimits,
+) -> Result<RgbaFramePlan, RenderError> {
+    frame_plan(
+        usize::from(frame.width()),
+        usize::from(frame.height()),
+        cell_size,
+        limits,
+    )
+}
+
+fn frame_plan(
+    cell_width: usize,
+    cell_height: usize,
+    cell_size: u32,
+    limits: RenderExportLimits,
+) -> Result<RgbaFramePlan, RenderError> {
+    let (width, height, capacity) =
+        limits.validated_scaled_frame(cell_width, cell_height, cell_size)?;
+    Ok(RgbaFramePlan {
+        width,
+        height,
+        capacity,
+    })
+}
+
+fn validate_board_timeline_shapes(
+    frames: &[RenderBoard],
+    cell_size: u32,
+    limits: RenderExportLimits,
+    expected: RgbaFramePlan,
+) -> Result<(), RenderError> {
+    for frame in frames {
+        let actual = board_frame_plan(frame, cell_size, limits)?;
+        if actual != expected {
+            return Err(RenderError::InvalidBoardRows);
+        }
+    }
+    Ok(())
+}
+
+fn validate_scene_timeline_shapes(
+    frames: &[RenderSceneFrame],
+    cell_size: u32,
+    limits: RenderExportLimits,
+    expected: RgbaFramePlan,
+) -> Result<(), RenderError> {
+    for frame in frames {
+        let actual = scene_frame_plan(frame, cell_size, limits)?;
+        if actual != expected {
+            return Err(RenderError::ReplayLayoutMismatch);
+        }
+    }
+    Ok(())
 }
 
 fn render_board_pixels(
     board: &RenderBoard,
     atlas: &SkinAtlas,
     cell_size: u32,
-) -> Result<(u32, u32, Vec<u8>), RenderError> {
-    if cell_size == 0 {
-        return Err(frame_dimension_error("cell_size", 0));
-    }
-    let width = u32::try_from(board.width()).unwrap_or(u32::MAX) * cell_size;
-    let height = u32::try_from(board.height()).unwrap_or(u32::MAX) * cell_size;
-    let mut rgba = allocate_rgba(width, height)?;
+    plan: RgbaFramePlan,
+    authority: &mut RenderAllocationAuthority,
+) -> Result<Vec<u8>, RenderError> {
+    let mut rgba = allocate_rgba(plan.capacity, authority)?;
     for y in 0..board.height() {
         for x in 0..board.width() {
             atlas.paint_tile(
                 render_cell_tile(board.cell(x, y)),
                 &mut rgba,
-                width,
-                u32::try_from(x).unwrap_or(u32::MAX) * cell_size,
-                u32::try_from(y).unwrap_or(u32::MAX) * cell_size,
+                plan.width,
+                cell_origin(x, cell_size, "pixel_x")?,
+                cell_origin(y, cell_size, "pixel_y")?,
                 cell_size,
             )?;
         }
     }
-    Ok((width, height, rgba))
+    Ok(rgba)
 }
 
 fn render_scene_frame_pixels(
     frame: &RenderSceneFrame,
     atlas: &SkinAtlas,
     cell_size: u32,
-) -> Result<(u32, u32, Vec<u8>), RenderError> {
-    if cell_size == 0 {
-        return Err(frame_dimension_error("cell_size", 0));
-    }
-    let width = u32::from(frame.width()) * cell_size;
-    let height = u32::from(frame.height()) * cell_size;
-    let mut rgba = allocate_rgba(width, height)?;
+    plan: RgbaFramePlan,
+    authority: &mut RenderAllocationAuthority,
+) -> Result<Vec<u8>, RenderError> {
+    let mut rgba = allocate_rgba(plan.capacity, authority)?;
     for y in 0..frame.height() {
         for x in 0..frame.width() {
             let tile = frame
@@ -188,23 +278,38 @@ fn render_scene_frame_pixels(
             atlas.paint_tile(
                 tile,
                 &mut rgba,
-                width,
-                u32::from(x) * cell_size,
-                u32::from(y) * cell_size,
+                plan.width,
+                u32::from(x)
+                    .checked_mul(cell_size)
+                    .ok_or_else(|| frame_dimension_error("pixel_x", u32::MAX))?,
+                u32::from(y)
+                    .checked_mul(cell_size)
+                    .ok_or_else(|| frame_dimension_error("pixel_y", u32::MAX))?,
                 cell_size,
             )?;
         }
     }
-    Ok((width, height, rgba))
+    Ok(rgba)
 }
 
-fn allocate_rgba(width: u32, height: u32) -> Result<Vec<u8>, RenderError> {
-    let length = u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|pixels| pixels.checked_mul(4))
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .ok_or_else(|| frame_dimension_error("rgba_bytes", u32::MAX))?;
-    Ok(vec![0; length])
+fn allocate_rgba(
+    capacity: usize,
+    authority: &mut RenderAllocationAuthority,
+) -> Result<Vec<u8>, RenderError> {
+    let mut rgba = authority.try_vec_with_capacity::<u8>(capacity, "rgba_frame")?;
+    rgba.resize(capacity, 0);
+    Ok(rgba)
+}
+
+fn cell_origin(index: usize, cell_size: u32, limit: &'static str) -> Result<u32, RenderError> {
+    let actual = (index as u128)
+        .checked_mul(u128::from(cell_size))
+        .unwrap_or(u128::MAX);
+    u32::try_from(actual).map_err(|_| RenderError::ExportLimitExceeded {
+        limit,
+        actual: u64::try_from(actual).unwrap_or(u64::MAX),
+        max: u64::from(u32::MAX),
+    })
 }
 
 fn render_cell_tile(cell: RenderCell) -> RenderTile {
@@ -219,6 +324,13 @@ fn render_cell_tile(cell: RenderCell) -> RenderTile {
         RenderCell::L => RenderTile::Piece(PieceKind::L),
         RenderCell::Garbage => RenderTile::InitialGray,
     }
+}
+
+fn cropped_board_dimensions(board: &RenderBoard) -> (usize, usize) {
+    board
+        .occupied_bounds()
+        .map(|(min_x, min_y, max_x, max_y)| (max_x - min_x + 1, max_y - min_y + 1))
+        .unwrap_or((board.width(), board.height()))
 }
 
 fn crop_board(board: &RenderBoard) -> RenderBoard {

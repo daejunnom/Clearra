@@ -11,8 +11,8 @@ use crate::{
     core_execution_result::CoreExecutionResult,
     packing::PackingRunnerError,
     service::{
-        CoverService, CoverServiceError, PcService, PcServiceError, PercentService,
-        PercentServiceError,
+        CoverService, CoverServiceError, PcService, PcServiceError, PcTilingMaterializationError,
+        PercentService, PercentServiceError,
     },
 };
 
@@ -141,7 +141,10 @@ fn core_error_from_pc(error: PcServiceError) -> CoreExecutionError {
         | PcServiceError::BuildUp(BuildUpRunnerError::ExecutionCancelled)
         | PcServiceError::BuildUp(BuildUpRunnerError::Native(
             NativeCoreError::ExecutionCancelled,
-        )) => CoreExecutionError::Cancelled,
+        ))
+        | PcServiceError::TilingMaterialization(PcTilingMaterializationError::ExecutionCancelled) => {
+            CoreExecutionError::Cancelled
+        }
         PcServiceError::Packing(PackingRunnerError::Native(NativeCoreError::Unavailable)) => {
             CoreExecutionError::RuntimeUnavailable {
                 component: "core_c_packing_runtime_unavailable",
@@ -168,6 +171,28 @@ fn core_error_from_pc(error: PcServiceError) -> CoreExecutionError {
         }
         PcServiceError::BuildUp(BuildUpRunnerError::UnsupportedPieceSource { reason }) => {
             CoreExecutionError::RuntimeUnavailable { component: reason }
+        }
+        PcServiceError::TilingMaterialization(PcTilingMaterializationError::AllocationFailed) => {
+            CoreExecutionError::Pc("tiling_materialization_allocation_failed".to_owned())
+        }
+        PcServiceError::TilingMaterialization(
+            PcTilingMaterializationError::MemoryAccountingUnavailable,
+        ) => CoreExecutionError::Pc(
+            "tiling_materialization_memory_accounting_unavailable".to_owned(),
+        ),
+        PcServiceError::TilingMaterialization(
+            PcTilingMaterializationError::ResourceIncomplete(resource_report),
+        ) => CoreExecutionError::resource_incomplete("tiling-materialization", 0, resource_report),
+        PcServiceError::TilingMaterialization(PcTilingMaterializationError::PageStore(reason)) => {
+            CoreExecutionError::Pc(reason.to_owned())
+        }
+        PcServiceError::TilingMaterialization(
+            PcTilingMaterializationError::CandidateUnavailable { .. },
+        ) => CoreExecutionError::Pc("tiling_materialization_candidate_unavailable".to_owned()),
+        PcServiceError::TilingMaterialization(PcTilingMaterializationError::CandidateIdentity(
+            _,
+        )) => {
+            CoreExecutionError::Pc("tiling_materialization_candidate_identity_invalid".to_owned())
         }
         other => CoreExecutionError::Pc(format!("{other:?}")),
     }
@@ -256,6 +281,51 @@ fn core_error_from_cover(error: CoverServiceError) -> CoreExecutionError {
             CoreExecutionError::RuntimeUnavailable { component: reason }
         }
         other => CoreExecutionError::Cover(format!("{other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod pc_tiling_materialization_error_tests {
+    use clearra_core_ffi::PackingCandidateIdentityError;
+
+    use super::{core_error_from_pc, CoreExecutionError};
+    use crate::service::{PcServiceError, PcTilingMaterializationError};
+
+    #[test]
+    fn cancellation_is_preserved_as_core_cancelled() {
+        assert_eq!(
+            core_error_from_pc(PcServiceError::TilingMaterialization(
+                PcTilingMaterializationError::ExecutionCancelled,
+            )),
+            CoreExecutionError::Cancelled
+        );
+    }
+
+    #[test]
+    fn non_cancellation_materialization_failures_keep_distinct_stable_reasons() {
+        let cases = [
+            (
+                PcTilingMaterializationError::AllocationFailed,
+                "tiling_materialization_allocation_failed",
+            ),
+            (
+                PcTilingMaterializationError::CandidateUnavailable { candidate_index: 7 },
+                "tiling_materialization_candidate_unavailable",
+            ),
+            (
+                PcTilingMaterializationError::CandidateIdentity(
+                    PackingCandidateIdentityError::UnknownPieceCode(0),
+                ),
+                "tiling_materialization_candidate_identity_invalid",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                core_error_from_pc(PcServiceError::TilingMaterialization(error)),
+                CoreExecutionError::Pc(expected.to_owned())
+            );
+        }
     }
 }
 

@@ -1,54 +1,71 @@
 import { canonicalClearraOperationalCommand } from "./clearra/command.mjs";
+import {
+  messageCommandCatalog,
+  slashCommandCatalog,
+} from "./discord/slash-command-catalog.mjs";
+import {
+  discordGenericCompatibilityRoutes,
+  productCapabilityRegistry,
+} from "./discord/capability-registry.mjs";
 
 const SCOPES = new Set(["gateway", "interaction", "job"]);
 const KINDS = new Set(["slash", "text", "render", "search"]);
 const STATUSES = new Set(["succeeded", "failed", "cancelled", "delegated"]);
+const TIMEOUT_CLASSES = new Set([
+  "pc_reverse",
+  "build_long",
+  "setup_long",
+  "forward_long",
+  "structure_long",
+  "utility_bounded",
+  "diagnostic",
+  "default",
+]);
 const DISCORD_ROOT_COMMANDS = new Set([
-  "best-save",
-  "best-setup",
-  "chance",
-  "channel-settings",
-  "congruent",
-  "congruent-cover",
-  "cover",
-  "cover-percent",
-  "damage",
-  "dpc-finder",
-  "get-original-gif",
-  "help",
-  "finesse",
-  "minimals",
-  "path",
-  "pc-setup",
-  "percent",
-  "render-file",
-  "saves",
-  "score",
-  "score-finder",
-  "score-minimals",
-  "server-settings",
-  "setup",
-  "setup-cover",
-  "special-cover",
-  "spin",
-  "spin-cover",
-  "verify",
+  ...slashCommandCatalog.map(({ name }) => name),
+  ...messageCommandCatalog.map(({ name }) => name),
 ]);
-const DISCORD_COMMAND_PATHS = new Set([
-  ...DISCORD_ROOT_COMMANDS,
-  "channel-settings.disable",
-  "channel-settings.enable",
-  "channel-settings.language-reset",
-  "channel-settings.language-set",
-  "channel-settings.language-show",
-  "server-settings.language-reset",
-  "server-settings.language-set",
-  "server-settings.language-show",
-  "server-settings.pause",
-  "server-settings.resume",
-  "finesse.search",
-  "finesse.score",
-]);
+const DISCORD_COMMAND_PATHS = collectDiscordCommandPaths();
+const CAPABILITY_TELEMETRY_BY_COMMAND = collectCapabilityTelemetryIdentities();
+const CAPABILITY_TELEMETRY_IDENTITIES = new Set(
+  CAPABILITY_TELEMETRY_BY_COMMAND.values(),
+);
+
+function collectDiscordCommandPaths() {
+  const paths = new Set(DISCORD_ROOT_COMMANDS);
+  for (const command of slashCommandCatalog) {
+    for (const option of command.registration?.options ?? []) {
+      if (option?.type === 1 || option?.type === 2) {
+        paths.add(`${command.name}.${option.name}`);
+      }
+    }
+  }
+  return paths;
+}
+
+function collectCapabilityTelemetryIdentities() {
+  const identities = new Map();
+  for (const capability of productCapabilityRegistry) {
+    if (
+      capability.status === "planned" &&
+      capability.discordSurfaceStatus !== "ready"
+    ) continue;
+    const routes = [capability.canonical, ...capability.aliases];
+    for (const route of routes) {
+      if (!route.slash && !route.text) continue;
+      const command = [route.root, route.subcommand].filter(Boolean).join(".");
+      if (capability.status === "hidden") {
+        identities.set(`sfinder.${command}`, capability.telemetryIdentity);
+      } else {
+        identities.set(command, capability.telemetryIdentity);
+      }
+    }
+  }
+  for (const route of discordGenericCompatibilityRoutes) {
+    identities.set(route.root, route.telemetryIdentity);
+  }
+  return identities;
+}
 /**
  * Emits one allow-listed, metadata-only terminal record. Arbitrary fields and
  * error messages are intentionally not accepted, so command input, Discord
@@ -63,6 +80,15 @@ export function writeOperationalLog(logger, value) {
   const durationMs = Number.isFinite(value.durationMs)
     ? Math.max(0, Math.round(value.durationMs))
     : null;
+  const hasTimeoutPolicy =
+    value.timeoutClass !== undefined || value.timeoutMs !== undefined;
+  const timeoutClass = TIMEOUT_CLASSES.has(value.timeoutClass)
+    ? value.timeoutClass
+    : null;
+  const timeoutMs = Number.isSafeInteger(value.timeoutMs) && value.timeoutMs > 0
+    ? value.timeoutMs
+    : null;
+  if (hasTimeoutPolicy && (!timeoutClass || !timeoutMs)) return false;
   const timestamp = new Date(value.at ?? Date.now());
   const record = {
     event: "clearra.operation",
@@ -74,6 +100,7 @@ export function writeOperationalLog(logger, value) {
     command,
     status,
     durationMs,
+    ...(hasTimeoutPolicy ? { timeoutClass, timeoutMs } : {}),
   };
   try {
     const method = status === "failed" ? "error" : "info";
@@ -95,6 +122,12 @@ export function canonicalOperationalCommand(value) {
   if (!candidate) return null;
 
   const [root, ...suffix] = candidate.split(".");
+  // Stable capability IDs are already canonical. Accepting them here keeps
+  // normalization idempotent when a catalog path is resolved before it enters
+  // another privacy or persistence boundary (for example help -> meta.help).
+  if (CAPABILITY_TELEMETRY_IDENTITIES.has(candidate)) return candidate;
+  const capabilityIdentity = CAPABILITY_TELEMETRY_BY_COMMAND.get(candidate);
+  if (capabilityIdentity) return capabilityIdentity;
   if (DISCORD_ROOT_COMMANDS.has(root)) {
     const canonical = [root, ...suffix].join(".");
     if (DISCORD_COMMAND_PATHS.has(canonical)) return canonical;
@@ -105,7 +138,9 @@ export function canonicalOperationalCommand(value) {
   // never split into transport-specific rows.
   if (candidate.startsWith("sfinder.")) {
     const publicCommand = candidate.slice("sfinder.".length);
-    if (DISCORD_ROOT_COMMANDS.has(publicCommand)) return publicCommand;
+    if (DISCORD_ROOT_COMMANDS.has(publicCommand)) {
+      return CAPABILITY_TELEMETRY_BY_COMMAND.get(publicCommand) ?? publicCommand;
+    }
   }
   return canonicalClearraOperationalCommand(candidate);
 }

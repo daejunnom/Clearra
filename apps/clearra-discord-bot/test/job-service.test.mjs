@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -287,22 +290,50 @@ test("job service uses every Cloud Run logical processor by default", () => {
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(config.maxConcurrentJobs, 1);
   assert.equal(config.port, 8787);
-  assert.equal(config.searchTimeoutMs, 170_000);
+  assert.equal(config.searchTimeoutMs, 180_000);
+  assert.equal(config.diagnosticTimeoutMs, 180_000);
+  assert.equal(config.pcSearchTimeoutMs, 300_000);
   assert.equal(config.reverseSearchTimeoutMs, 300_000);
+  assert.equal(config.buildSearchTimeoutMs, 900_000);
+  assert.equal(config.setupSearchTimeoutMs, 900_000);
   assert.equal(config.forwardSearchTimeoutMs, 900_000);
+  assert.equal(config.structureSearchTimeoutMs, 900_000);
 
   const timeoutOverrides = loadClearraJobServiceConfig(
     {
       CLEARRA_JOB_TOKEN: "job-token",
       CLEARRA_SEARCH_TIMEOUT_MS: "1000",
-      CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "2000",
-      CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "3000",
+      CLEARRA_PC_SEARCH_TIMEOUT_MS: "2000",
+      CLEARRA_BUILD_SEARCH_TIMEOUT_MS: "3000",
+      CLEARRA_SETUP_SEARCH_TIMEOUT_MS: "4000",
+      CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "5000",
+      CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS: "6000",
+      CLEARRA_DIAGNOSTIC_TIMEOUT_MS: "7000",
     },
     { availableParallelism: () => 6 },
   );
   assert.equal(timeoutOverrides.searchTimeoutMs, 1_000);
+  assert.equal(timeoutOverrides.diagnosticTimeoutMs, 7_000);
+  assert.equal(timeoutOverrides.pcSearchTimeoutMs, 2_000);
   assert.equal(timeoutOverrides.reverseSearchTimeoutMs, 2_000);
-  assert.equal(timeoutOverrides.forwardSearchTimeoutMs, 3_000);
+  assert.equal(timeoutOverrides.buildSearchTimeoutMs, 3_000);
+  assert.equal(timeoutOverrides.setupSearchTimeoutMs, 4_000);
+  assert.equal(timeoutOverrides.forwardSearchTimeoutMs, 5_000);
+  assert.equal(timeoutOverrides.structureSearchTimeoutMs, 6_000);
+
+  const legacyTimeouts = loadClearraJobServiceConfig(
+    {
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "2100",
+      CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "9100",
+    },
+    { availableParallelism: () => 6 },
+  );
+  assert.equal(legacyTimeouts.pcSearchTimeoutMs, 2_100);
+  assert.equal(legacyTimeouts.buildSearchTimeoutMs, 9_100);
+  assert.equal(legacyTimeouts.setupSearchTimeoutMs, 9_100);
+  assert.equal(legacyTimeouts.forwardSearchTimeoutMs, 9_100);
+  assert.equal(legacyTimeouts.structureSearchTimeoutMs, 9_100);
 
   const reserveCore = loadClearraJobServiceConfig(
     {
@@ -444,7 +475,158 @@ test("job runner sends curated sfinder argv without shell interpretation", async
   ]);
 });
 
-test("job runner clamps execution timers by search direction and absolute deadline", async () => {
+test("job runner transports one exact bounded render artifact and cleans its private path", async () => {
+  const bytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from("runner-artifact"),
+  ]);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  let outputPath;
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra",
+      processLogicalProcessors: 1,
+      searchWorkersPerSession: 1,
+      useAllLogicalProcessors: false,
+      utilitySearchTimeoutMs: 5_000,
+      maxOutputBytes: 1024 * 1024,
+      maxArtifactBytes: 4096,
+      terminationGraceMs: 100,
+    },
+    {
+      spawn: (_executable, arguments_) => {
+        outputPath = arguments_[arguments_.indexOf("--output") + 1];
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.kill = () => true;
+        queueMicrotask(() => {
+          void writeFile(outputPath, bytes).then(() => {
+            child.stdout.end(JSON.stringify({
+              kind: "render-artifact.v1",
+              contract_id: "render-artifact.v1",
+              result_kind: "render",
+              payload_kind: "render-artifact",
+              payload: {
+                document_format: "ctk3",
+                artifact_format: "png",
+                selected_page_number: 1,
+                document_page_count: 1,
+                media_type: "image/png",
+                filename: "clearra-render-page-0001.png",
+                byte_length: bytes.length,
+                sha256,
+                render_exact: true,
+                skin_id: "clearra-exact-v1",
+                product_max_bytes: 4096,
+                transport_max_bytes: 4096,
+              },
+              generated_files: [{
+                target: outputPath,
+                bytes: bytes.length,
+                sha256,
+                target_owned: true,
+              }],
+            }));
+            child.exitCode = 0;
+            child.emit("close", 0, null);
+          });
+        });
+        return child;
+      },
+    },
+  );
+
+  const result = await runner.execute({
+    arguments: [
+      "utility",
+      "render",
+      "--format",
+      "ctk3",
+      "--document",
+      "ctk3b_test",
+      "--artifact-format",
+      "png",
+      "--page",
+      "1",
+    ],
+    timeoutClass: "utility_bounded",
+    deadlineUnixMs: Date.now() + 5_000,
+    maxOutputBytes: 1024 * 1024,
+    maxArtifactBytes: 4096,
+  });
+
+  assert.equal(result.artifact.mediaType, "image/png");
+  assert.equal(result.artifact.sha256, sha256);
+  assert.equal(Buffer.from(result.artifact.bytesBase64, "base64").equals(bytes), true);
+  assert.equal(JSON.parse(result.stdout).generated_files, undefined);
+  assert.equal(result.stdout.includes(outputPath), false);
+  assert.equal(existsSync(outputPath), false);
+  assert.equal(existsSync(dirname(outputPath)), false);
+});
+
+test("render runner cleans its private output on start failure, timeout, and cancellation", async () => {
+  for (const mode of ["start-failure", "timeout", "cancel"]) {
+    let outputPath;
+    const controller = new AbortController();
+    const runner = new ClearraCommandRunner(
+      {
+        executable: "clearra",
+        processLogicalProcessors: 1,
+        searchWorkersPerSession: 1,
+        useAllLogicalProcessors: false,
+        utilitySearchTimeoutMs: mode === "timeout" ? 5 : 5_000,
+        maxOutputBytes: 1024 * 1024,
+        maxArtifactBytes: 4096,
+        terminationGraceMs: 100,
+      },
+      {
+        spawn: (_executable, arguments_) => {
+          outputPath = arguments_[arguments_.indexOf("--output") + 1];
+          if (mode === "start-failure") throw new Error("fixture start failure");
+          const child = new EventEmitter();
+          child.stdout = new PassThrough();
+          child.stderr = new PassThrough();
+          child.exitCode = null;
+          child.signalCode = null;
+          child.kill = (signal) => {
+            queueMicrotask(() => {
+              child.signalCode = signal;
+              child.emit("close", null, signal);
+            });
+            return true;
+          };
+          return child;
+        },
+      },
+    );
+    const pending = runner.execute(
+      {
+        arguments: [
+          "utility", "render",
+          "--format", "ctk3",
+          "--document", "ctk3b_test",
+          "--artifact-format", "png",
+          "--page", "1",
+        ],
+        timeoutClass: "utility_bounded",
+        deadlineUnixMs: Date.now() + 5_000,
+        maxOutputBytes: 1024 * 1024,
+        maxArtifactBytes: 4096,
+      },
+      { signal: controller.signal },
+    );
+    if (mode === "cancel") controller.abort();
+    await assert.rejects(pending, mode === "start-failure" ? /start/u : /cancelled|deadline/u);
+    assert.equal(typeof outputPath, "string");
+    assert.equal(existsSync(outputPath), false, `${mode} artifact residue`);
+    assert.equal(existsSync(dirname(outputPath)), false, `${mode} directory residue`);
+  }
+});
+
+test("job runner clamps every canonical timeout family and preserves legacy inference", async () => {
   const observedTimeouts = [];
   const runner = new ClearraCommandRunner(
     {
@@ -453,8 +635,12 @@ test("job runner clamps execution timers by search direction and absolute deadli
       searchWorkersPerSession: 1,
       useAllLogicalProcessors: false,
       searchTimeoutMs: 2_000,
-      reverseSearchTimeoutMs: 5_000,
-      forwardSearchTimeoutMs: 15_000,
+      pcSearchTimeoutMs: 5_000,
+      buildSearchTimeoutMs: 6_000,
+      setupSearchTimeoutMs: 7_000,
+      forwardSearchTimeoutMs: 8_000,
+      structureSearchTimeoutMs: 9_000,
+      diagnosticTimeoutMs: 3_000,
       maxOutputBytes: 1024 * 1024,
       terminationGraceMs: 100,
     },
@@ -480,19 +666,27 @@ test("job runner clamps execution timers by search direction and absolute deadli
       },
     },
   );
-  const execute = (arguments_, deadlineUnixMs = 99_000) => runner.execute({
+  const execute = (arguments_, deadlineUnixMs = 99_000, timeoutClass) => runner.execute({
     arguments: arguments_,
+    ...(timeoutClass ? { timeoutClass } : {}),
     deadlineUnixMs,
     maxOutputBytes: 1024 * 1024,
   });
 
+  // Omitted timeoutClass is the compatibility path for older job requests.
   await execute(["pc"]);
-  await execute(["damage"]);
-  await execute(["setup-finder", "--remaining", "TI"]);
-  await execute(["sfinder", "verify", "pc"]);
-  await execute(["damage"], 10_750);
+  await execute(["build-probability"], 99_000, "build_long");
+  await execute(["setup-finder", "--remaining", "TI"], 99_000, "setup_long");
+  await execute(["damage"], 99_000, "forward_long");
+  await execute(["spin-structure"], 99_000, "structure_long");
+  await execute(["sfinder", "verify", "pc"], 99_000, "diagnostic");
+  await execute(["damage"], 10_750, "forward_long");
 
-  assert.deepEqual(observedTimeouts, [5_000, 15_000, 15_000, 2_000, 750]);
+  assert.deepEqual(observedTimeouts, [5_000, 6_000, 7_000, 8_000, 9_000, 3_000, 750]);
+  await assert.rejects(
+    execute(["damage"], 99_000, "pc_reverse"),
+    /does not match/,
+  );
 });
 
 test("job runner retains its slot until a cancelled process closes", async () => {
@@ -547,6 +741,8 @@ test("job runner retains its slot until a cancelled process closes", async () =>
 
 test("job service executes an authenticated synchronous idempotent job", async (t) => {
   let executions = 0;
+  const acceptedJobs = [];
+  const operationalLines = [];
   const config = {
     host: "127.0.0.1",
     port: 0,
@@ -566,6 +762,7 @@ test("job service executes an authenticated synchronous idempotent job", async (
   const runner = {
     async execute(job) {
       executions += 1;
+      acceptedJobs.push(job);
       return {
         exitCode: 0,
         signal: null,
@@ -574,7 +771,13 @@ test("job service executes an authenticated synchronous idempotent job", async (
       };
     },
   };
-  const service = new ClearraJobService(config, runner);
+  const service = new ClearraJobService(config, runner, {
+    operationalScope: "job",
+    logger: {
+      info(value) { operationalLines.push(value); },
+      error(value) { operationalLines.push(value); },
+    },
+  });
   const address = await service.listen();
   t.after(() => service.close());
   const endpoint = `http://127.0.0.1:${address.port}/jobs`;
@@ -585,17 +788,20 @@ test("job service executes an authenticated synchronous idempotent job", async (
     arguments: ["pc", "--lines", "4", "--format", "text"],
     deadlineUnixMs: Date.now() + 5_000,
     maxOutputBytes: 1024 * 1024,
+    maxArtifactBytes: 1024 * 1024,
   };
-  const request = (overrides = {}) =>
-    fetch(endpoint, {
+  const request = (overrides = {}) => {
+    const payload = { ...body, ...overrides };
+    return fetch(endpoint, {
       method: "POST",
       headers: {
         authorization: "Bearer job-token",
         "content-type": "application/json",
-        "idempotency-key": body.id,
+        "idempotency-key": payload.id,
       },
-      body: JSON.stringify({ ...body, ...overrides }),
+      body: JSON.stringify(payload),
     });
+  };
 
   const first = await request();
   assert.equal(first.status, 200);
@@ -603,6 +809,9 @@ test("job service executes an authenticated synchronous idempotent job", async (
   assert.equal(firstJob.state, "completed");
   assert.equal(firstJob.result.exitCode, 0);
   assert.match(firstJob.result.stdout, /pc --lines 4/);
+  assert.equal(acceptedJobs[0].timeoutClass, "pc_reverse");
+  assert.ok(acceptedJobs[0].timeoutLimitMs > 0);
+  assert.ok(acceptedJobs[0].timeoutLimitMs <= 5_000);
 
   const second = await request({
     deadlineUnixMs: body.deadlineUnixMs + 1_000,
@@ -614,6 +823,32 @@ test("job service executes an authenticated synchronous idempotent job", async (
   const conflicting = await request({ arguments: ["pc", "--lines", "2"] });
   assert.equal(conflicting.status, 409);
   assert.equal(executions, 1);
+
+  const mismatchedClass = await request({
+    id: "discord-timeout-mismatch",
+    arguments: ["damage"],
+    timeoutClass: "pc_reverse",
+  });
+  assert.equal(mismatchedClass.status, 400);
+  assert.equal(executions, 1);
+
+  const explicitClass = await request({
+    id: "discord-forward",
+    arguments: ["damage"],
+    timeoutClass: "forward_long",
+    deadlineUnixMs: Date.now() + 5_000,
+  });
+  assert.equal(explicitClass.status, 200);
+  assert.equal(executions, 2);
+  assert.equal(acceptedJobs[1].timeoutClass, "forward_long");
+  assert.ok(acceptedJobs[1].timeoutLimitMs > 0);
+  assert.ok(acceptedJobs[1].timeoutLimitMs <= 5_000);
+
+  assert.equal(operationalLines.length, 2);
+  const forwardRecord = JSON.parse(operationalLines[1]);
+  assert.equal(forwardRecord.timeoutClass, "forward_long");
+  assert.equal(forwardRecord.timeoutMs, acceptedJobs[1].timeoutLimitMs);
+  assert.doesNotMatch(operationalLines[1], /arguments|--lines|discord-forward/i);
 });
 
 test("job service exposes and enforces the exact runtime identity before execution", async (t) => {
@@ -655,6 +890,7 @@ test("job service exposes and enforces the exact runtime identity before executi
     arguments: ["pc", "--lines", "4"],
     deadlineUnixMs: Date.now() + 5_000,
     maxOutputBytes: 1024 * 1024,
+    maxArtifactBytes: 1024 * 1024,
   };
   const submit = (expectedRuntime) => fetch(`${base}/jobs`, {
     method: "POST",

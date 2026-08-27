@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    fmt::Write as _,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -15,29 +16,40 @@ use clearra_core_domain::{
     },
 };
 use clearra_coverage::{
-    cover::exact_minimum_cover::exact_minimum_cover, pattern::pattern_bitset::PatternBitSet,
+    cover::exact_minimum_cover::exact_minimum_cover,
+    pattern::pattern_bitset::PatternBitSet,
+    row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind},
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_pc_graph::request::RequestedSearchBackend;
-use clearra_problem::SearchProblem;
+use clearra_problem::{SearchOutputPolicy, SearchProblem};
 use clearra_replay::ExactScoringExecutionBatch;
 use clearra_rules::profile::rule_capability::RuleCapability;
 use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 
 use crate::{
+    pc_chance_coverage_evidence::{PcChanceCoverageEvidence, PcScoreProblemEvidence},
     performance::{ExecutorSearchStage, SearchStageSpan},
+    resource::{
+        admit_budget_bound_search_execution,
+        admit_budget_bound_search_execution_under_terminal_authority, admit_search_execution,
+        DensePatternPreflight, ExecutionAdmission, ExecutionAdmissionPlan,
+        WasmCpuTerminalResourceAuthority,
+    },
     tiling_solution_store::{
         canonicalize_catalog_rows, pack_canonical_tiling_row_ids, read_packed_tiling_row,
         PackedTilingRows, TilingSolutionPageStore, PACKED_TILING_MAX_ROW_ID,
     },
-    CoreExecutionResult, CorePathStep,
+    CoreExecutionResult, CorePathStep, PcTilingMemoryAdmissionEvidence,
 };
 
 #[cfg(feature = "parallel")]
 use super::parallel_search::{self, ParallelSearchDecision, ParallelSearchOutcome};
 use super::{
     buildup::{
-        exact_scoring_execution_graph, verify_candidate, BuildUpWorkspace, CandidateWitnessMode,
+        checked_candidate_verification_peak_upper_bound, exact_scoring_execution_graph,
+        exact_scoring_execution_graph_memory_projection, verify_candidate, BuildUpWorkspace,
+        CandidateWitnessMode,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
@@ -45,7 +57,11 @@ use super::{
         WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     },
     exact_collections::{ExactHashMap, ExactHashSet},
-    geometry::{compile_target_groups, GeometryAdvance, GeometryCandidate, GeometrySearch},
+    geometry::{
+        checked_target_group_build_peak_additional_bytes, compile_target_groups,
+        compile_target_groups_with_memory_limit, GeometryAdvance, GeometryCandidate,
+        GeometrySearch,
+    },
     kick_profiles::replay_profile_ids,
     mix_digest,
     pc4_tablebase::{loaded_pc4_compact_tablebase, pc4_tablebase_profile_identity},
@@ -62,6 +78,20 @@ use crate::solution_probability::{
 // round trip after every tiny candidate batch.
 const MAX_BUILDUP_CANDIDATES_PER_ADVANCE: usize = 512;
 const TILING_SOLUTION_INITIAL_PAGE_SIZE: usize = 100;
+
+fn try_empty_pattern_bitset(
+    pattern_count: usize,
+    unavailable_reason: &'static str,
+) -> Result<PatternBitSet, WasmExactSearchError> {
+    let word_count = pattern_count.div_ceil(u64::BITS as usize);
+    let mut words = Vec::new();
+    words
+        .try_reserve_exact(word_count)
+        .map_err(|_| WasmExactSearchError::InvalidProblem(unavailable_reason))?;
+    words.resize(word_count, 0_u64);
+    PatternBitSet::from_words(pattern_count, words)
+        .map_err(|_| WasmExactSearchError::InvalidProblem(unavailable_reason))
+}
 
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 #[inline]
@@ -127,6 +157,7 @@ impl DistributedTilingRootRun {
     fn absorb_chunk(
         &mut self,
         chunk: &super::tiling_parallel::WasmTilingRootChunk,
+        exact_reservation: bool,
     ) -> Result<bool, WasmExactSearchError> {
         let sequence = usize::try_from(chunk.chunk_sequence()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_tiling_root_chunk_sequence_invalid")
@@ -183,14 +214,20 @@ impl DistributedTilingRootRun {
             previous = Some(packed_rows);
         }
 
-        self.identities
-            .try_reserve(chunk.identities().len())
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_compact_tiling_identity_storage_unavailable",
-                )
-            })?;
-        self.committed_chunks.try_reserve(1).map_err(|_| {
+        let identity_reservation = if exact_reservation {
+            self.identities.try_reserve_exact(chunk.identities().len())
+        } else {
+            self.identities.try_reserve(chunk.identities().len())
+        };
+        identity_reservation.map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_compact_tiling_identity_storage_unavailable")
+        })?;
+        let commit_reservation = if exact_reservation {
+            self.committed_chunks.try_reserve_exact(1)
+        } else {
+            self.committed_chunks.try_reserve(1)
+        };
+        commit_reservation.map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_tiling_root_commit_storage_unavailable")
         })?;
         self.identities.extend(
@@ -311,6 +348,52 @@ fn canonical_multiset_order(left: [u8; 7], right: [u8; 7]) -> Ordering {
     Ordering::Equal
 }
 
+fn preflight_and_acquire_execution_resources(
+    problem: &SearchProblem,
+) -> Result<ExecutionAdmission, WasmExactSearchError> {
+    let admission = if problem.objective().score().requested() {
+        // Exact score preparation and App-side score reduction are one live
+        // execution. Reserve the request's complete configured cap (or the
+        // complete host cap for an unbounded request) so the terminal authority
+        // can retain this lease through post-processing.
+        admit_budget_bound_search_execution(problem, 1)
+    } else {
+        // Generic exact search keeps its established small projection.
+        admit_search_execution(problem, ExecutionAdmissionPlan::exact_search())
+    };
+    admission.map_err(WasmExactSearchError::ResourceAdmission)
+}
+
+fn checked_typed_problem_evidence_upper_bound(
+    problem: &SearchProblem,
+    external_retained_upper_bound_bytes: u128,
+) -> Option<u128> {
+    let evidence_owner_count = if problem
+        .pc_chance_evidence_policy()
+        .retains_pc_score_portfolio_v2_evidence()
+    {
+        2
+    } else {
+        1
+    };
+    external_retained_upper_bound_bytes.checked_mul(evidence_owner_count)
+}
+
+/// Conservative heap-layout bound for the hashbrown table behind std
+/// HashMap/HashSet. Reported capacity is the usable load-limited capacity, so
+/// two raw buckets per usable slot (plus one) cover the bucket array, control
+/// bytes, group tail, and alignment padding without describing that
+/// implementation-dependent allocation as exact.
+fn checked_hash_table_retained_upper_bound(capacity: usize, entry_size: usize) -> Option<u128> {
+    if capacity == 0 {
+        return Some(0);
+    }
+    let raw_bucket_upper_bound = (capacity as u128).checked_add(1)?.checked_mul(2)?;
+    raw_bucket_upper_bound
+        .checked_mul((entry_size as u128).checked_add(1)?)?
+        .checked_add(64)
+}
+
 pub(crate) enum ExactSearchAdvance {
     Pending,
     Completed(CoreExecutionResult),
@@ -328,13 +411,35 @@ pub(super) enum DistributedGeometryAdvance {
     ResourceIncomplete(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchProblemRetention {
+    /// The compatibility constructors cloned the caller's problem into a new
+    /// Arc allocation. SearchProblem does not expose exact nested retained
+    /// storage, so this ownership form cannot back terminal public-memory
+    /// authority.
+    SessionOwnedCloneUnaccounted,
+    /// The caller shared an Arc without the request-level parent authority and
+    /// conservative external retained bound required for public-memory proof.
+    CallerOwnedSharedInputWithoutParentAuthority,
+    /// A request-level parent owns the full physical surface from before query
+    /// compilation through post-processing. This bound includes the shared
+    /// SearchProblem plus all other caller-retained request/proof storage.
+    ParentAuthorizedSharedInput {
+        checked_external_retained_upper_bound_bytes: u128,
+    },
+}
+
 pub(crate) struct WasmExactSearchSession {
     problem: Arc<SearchProblem>,
+    problem_retention: SearchProblemRetention,
     catalog: Arc<GeometryCatalog>,
     geometry: GeometrySearch,
     buildup_workspace: BuildUpWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
+    coverage_rows: Vec<CoverageRow>,
+    coverage_rows_complete: bool,
+    pc_chance_coverage_evidence_available: bool,
     buildable_identities: ExactHashSet<TilingIdentityEntry>,
     compact_tiling_identities: Option<Vec<PackedTilingRows>>,
     distributed_tiling_root_runs: Option<Vec<DistributedTilingRootRun>>,
@@ -404,6 +509,8 @@ pub(crate) struct WasmExactSearchSession {
     tablebase_retained_bytes: usize,
     tablebase_payload_sha256: Option<String>,
     truncated_reason: Option<&'static str>,
+    dense_pattern_preflight: DensePatternPreflight,
+    _execution_admission: ExecutionAdmission,
     execution_control: ExecutionControl,
     finished: bool,
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
@@ -411,8 +518,75 @@ pub(crate) struct WasmExactSearchSession {
 }
 
 impl WasmExactSearchSession {
+    fn initialization_memory_projection_unavailable(
+        execution_admission: &ExecutionAdmission,
+    ) -> WasmExactSearchError {
+        WasmExactSearchError::ResourceAdmission(
+            execution_admission
+                .ensure_memory_bound(u128::MAX, 1)
+                .expect_err("checked initialization memory projection is unavailable"),
+        )
+    }
+
+    fn checked_initialization_retained_bytes(
+        problem_retention: SearchProblemRetention,
+        catalog: &GeometryCatalog,
+        tablebase_retained_bytes: usize,
+    ) -> Option<u128> {
+        let external = match problem_retention {
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes,
+            } => checked_external_retained_upper_bound_bytes,
+            SearchProblemRetention::SessionOwnedCloneUnaccounted
+            | SearchProblemRetention::CallerOwnedSharedInputWithoutParentAuthority => 0,
+        };
+        external
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(core::mem::size_of::<GeometryCatalog>() as u128)?
+            .checked_add(catalog.retained_bytes() as u128)?
+            .checked_add(tablebase_retained_bytes as u128)
+    }
+
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
         Self::new_with_external_geometry(problem, false)
+    }
+
+    pub(crate) fn new_shared(problem: Arc<SearchProblem>) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_problem(
+            problem,
+            false,
+            SearchProblemRetention::CallerOwnedSharedInputWithoutParentAuthority,
+        )
+    }
+
+    pub(crate) fn new_shared_under_authority(
+        problem: Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::validate_tiling_session_problem(problem.as_ref())?;
+        if !problem.objective().score().requested()
+            && !(problem.output_policy() == SearchOutputPolicy::TilingOnly
+                && problem.objective().kind() == ObjectiveKind::Tiling)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_terminal_authority_requires_typed_score_or_tiling",
+            ));
+        }
+        let execution_admission = admit_budget_bound_search_execution_under_terminal_authority(
+            problem.as_ref(),
+            checked_external_retained_upper_bound_bytes,
+            authority,
+        )
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_with_preacquired_execution_admission(
+            problem,
+            false,
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes,
+            },
+            execution_admission,
+        )
     }
 
     pub fn new_external_geometry(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
@@ -425,6 +599,8 @@ impl WasmExactSearchSession {
         required_cells: u64,
     ) -> Result<Self, WasmExactSearchError> {
         Self::validate_tiling_session_problem(problem)?;
+        let execution_admission = preflight_and_acquire_execution_resources(problem)?;
+        let dense_pattern_preflight = execution_admission.dense_preflight;
         let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
         let catalog = Arc::new(GeometryCatalog::compile_for_required_cells_on_board(
             problem,
@@ -432,7 +608,14 @@ impl WasmExactSearchSession {
             required_cells,
         )?);
         catalog_span.finish(catalog.skeleton_count() as u64);
-        Self::new_with_external_geometry_catalog(problem, true, catalog)
+        Self::new_with_external_geometry_catalog(
+            Arc::new(problem.clone()),
+            SearchProblemRetention::SessionOwnedCloneUnaccounted,
+            true,
+            catalog,
+            dense_pattern_preflight,
+            execution_admission,
+        )
     }
 
     pub(super) fn geometry_expanded_nodes(&self) -> usize {
@@ -455,11 +638,66 @@ impl WasmExactSearchSession {
         problem: &SearchProblem,
         external_geometry: bool,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::validate_tiling_session_problem(problem)?;
+        Self::new_with_problem(
+            Arc::new(problem.clone()),
+            external_geometry,
+            SearchProblemRetention::SessionOwnedCloneUnaccounted,
+        )
+    }
+
+    fn new_with_problem(
+        problem: Arc<SearchProblem>,
+        external_geometry: bool,
+        problem_retention: SearchProblemRetention,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::validate_tiling_session_problem(problem.as_ref())?;
+        let execution_admission = preflight_and_acquire_execution_resources(problem.as_ref())?;
+        Self::new_with_preacquired_execution_admission(
+            problem,
+            external_geometry,
+            problem_retention,
+            execution_admission,
+        )
+    }
+
+    fn new_with_preacquired_execution_admission(
+        problem: Arc<SearchProblem>,
+        external_geometry: bool,
+        problem_retention: SearchProblemRetention,
+        execution_admission: ExecutionAdmission,
+    ) -> Result<Self, WasmExactSearchError> {
+        let dense_pattern_preflight = execution_admission.dense_preflight;
+        if let SearchProblemRetention::ParentAuthorizedSharedInput {
+            checked_external_retained_upper_bound_bytes,
+        } = problem_retention
+        {
+            let catalog_peak = GeometryCatalog::checked_compile_peak_upper_bound(problem.as_ref())
+                .ok_or_else(|| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?;
+            let retained_before_catalog = checked_external_retained_upper_bound_bytes
+                .checked_add(core::mem::size_of::<Self>() as u128)
+                .and_then(|bytes| {
+                    bytes.checked_add(core::mem::size_of::<GeometryCatalog>() as u128)
+                })
+                .ok_or_else(|| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?;
+            execution_admission
+                .ensure_memory_bound(retained_before_catalog, catalog_peak)
+                .map_err(WasmExactSearchError::ResourceAdmission)?;
+        }
         let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
-        let catalog = Arc::new(GeometryCatalog::compile(problem)?);
+        let catalog = Arc::new(GeometryCatalog::compile(problem.as_ref())?);
         catalog_span.finish(catalog.skeleton_count() as u64);
-        Self::new_with_external_geometry_catalog(problem, external_geometry, catalog)
+        Self::new_with_external_geometry_catalog(
+            problem,
+            problem_retention,
+            external_geometry,
+            catalog,
+            dense_pattern_preflight,
+            execution_admission,
+        )
     }
 
     fn validate_tiling_session_problem(
@@ -485,9 +723,12 @@ impl WasmExactSearchSession {
     }
 
     fn new_with_external_geometry_catalog(
-        problem: &SearchProblem,
+        problem: Arc<SearchProblem>,
+        problem_retention: SearchProblemRetention,
         external_geometry: bool,
         catalog: Arc<GeometryCatalog>,
+        dense_pattern_preflight: DensePatternPreflight,
+        execution_admission: ExecutionAdmission,
     ) -> Result<Self, WasmExactSearchError> {
         let tablebase_requested = problem.backend_policy().tablebase_requested();
         let loaded_tablebase = tablebase_requested
@@ -520,19 +761,44 @@ impl WasmExactSearchSession {
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let multiset_family = universe.packing_multiset_family_for_execution(
-            target_piece_count,
-            problem.initial_hold(),
-            problem.supply().hold_enabled(),
-            super::packing_hold_projection(problem),
-        );
+        let retained_before_family = Self::checked_initialization_retained_bytes(
+            problem_retention,
+            catalog.as_ref(),
+            tablebase_retained_bytes,
+        )
+        .ok_or_else(|| Self::initialization_memory_projection_unavailable(&execution_admission))?;
+        let multiset_family = if matches!(
+            problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            universe
+                .packing_multiset_family_for_execution_with_workers_and_memory_limit(
+                    target_piece_count,
+                    problem.initial_hold(),
+                    problem.supply().hold_enabled(),
+                    super::packing_hold_projection(problem.as_ref()),
+                    1,
+                    retained_before_family,
+                    execution_admission.memory_cap_bytes(),
+                )
+                .map_err(|_| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?
+        } else {
+            universe.packing_multiset_family_for_execution(
+                target_piece_count,
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                super::packing_hold_projection(problem.as_ref()),
+            )
+        };
         if multiset_family.is_empty() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_supply_has_no_reachable_piece_multiset",
             ));
         }
         let expected_tablebase_profile =
-            pc4_tablebase_profile_identity(problem, catalog.identity_digest());
+            pc4_tablebase_profile_identity(problem.as_ref(), catalog.identity_digest());
         let (tablebase, tablebase_status) = match loaded_tablebase.as_ref() {
             None if tablebase_requested => (None, "unavailable"),
             None => (None, "disabled"),
@@ -554,30 +820,121 @@ impl WasmExactSearchSession {
             Some(loaded) => (Some(Arc::clone(loaded)), "connected-exact-dead-index"),
         };
         supply_span.finish(universe.pattern_count() as u64);
-        let covered_patterns = PatternBitSet::new(universe.pattern_count());
+        let family_retained_bytes = multiset_family.checked_retained_bytes().ok_or_else(|| {
+            Self::initialization_memory_projection_unavailable(&execution_admission)
+        })?;
+        let retained_before_covered_patterns = retained_before_family
+            .checked_add(family_retained_bytes)
+            .ok_or_else(|| {
+                Self::initialization_memory_projection_unavailable(&execution_admission)
+            })?;
+        if matches!(
+            problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            let bitset_peak = PatternBitSet::checked_all_projection(universe.pattern_count())
+                .map(|projection| projection.constructor_peak_bytes)
+                .ok_or_else(|| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?;
+            execution_admission
+                .ensure_memory_bound(retained_before_covered_patterns, bitset_peak)
+                .map_err(WasmExactSearchError::ResourceAdmission)?;
+        }
+        let covered_patterns = if matches!(
+            problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            try_empty_pattern_bitset(
+                universe.pattern_count(),
+                "wasm_covered_pattern_storage_unavailable",
+            )?
+        } else {
+            PatternBitSet::new(universe.pattern_count())
+        };
+        let retained_before_geometry = retained_before_covered_patterns
+            .checked_add(
+                covered_patterns
+                    .checked_storage_retained_bytes()
+                    .ok_or_else(|| {
+                        Self::initialization_memory_projection_unavailable(&execution_admission)
+                    })?,
+            )
+            .ok_or_else(|| {
+                Self::initialization_memory_projection_unavailable(&execution_admission)
+            })?;
         let omits_geometry_pattern_indices = problem.objective().kind() == ObjectiveKind::Tiling
             || (problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
                 && StandardBagCoverage::supports(universe, problem.initial_hold()));
         let geometry_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionGeometryPrepare);
+        let parent_authorized = matches!(
+            problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        );
+        if parent_authorized {
+            let target_peak = checked_target_group_build_peak_additional_bytes(
+                universe,
+                &multiset_family,
+                !omits_geometry_pattern_indices,
+            )
+            .ok_or_else(|| {
+                Self::initialization_memory_projection_unavailable(&execution_admission)
+            })?;
+            execution_admission
+                .ensure_memory_bound(retained_before_geometry, target_peak)
+                .map_err(WasmExactSearchError::ResourceAdmission)?;
+        }
         let geometry = if external_geometry {
-            let (targets, pattern_index_bytes) =
-                compile_target_groups(universe, &multiset_family, !omits_geometry_pattern_indices)?;
+            let (targets, pattern_index_bytes) = if parent_authorized {
+                compile_target_groups_with_memory_limit(
+                    universe,
+                    &multiset_family,
+                    !omits_geometry_pattern_indices,
+                    retained_before_geometry,
+                    execution_admission.memory_cap_bytes(),
+                )?
+            } else {
+                compile_target_groups(universe, &multiset_family, !omits_geometry_pattern_indices)?
+            };
             GeometrySearch::external(targets, pattern_index_bytes)
         } else if let Some(tablebase) = tablebase {
-            GeometrySearch::new_with_tablebase(
-                universe,
-                &multiset_family,
-                catalog.required_cells(),
-                !omits_geometry_pattern_indices,
-                tablebase,
-            )?
+            if parent_authorized {
+                GeometrySearch::new_with_tablebase_and_memory_limit(
+                    universe,
+                    &multiset_family,
+                    catalog.required_cells(),
+                    !omits_geometry_pattern_indices,
+                    tablebase,
+                    retained_before_geometry,
+                    execution_admission.memory_cap_bytes(),
+                )?
+            } else {
+                GeometrySearch::new_with_tablebase(
+                    universe,
+                    &multiset_family,
+                    catalog.required_cells(),
+                    !omits_geometry_pattern_indices,
+                    tablebase,
+                )?
+            }
         } else {
-            GeometrySearch::new(
-                universe,
-                &multiset_family,
-                catalog.required_cells(),
-                !omits_geometry_pattern_indices,
-            )?
+            if parent_authorized {
+                GeometrySearch::new_with_memory_limit(
+                    universe,
+                    &multiset_family,
+                    catalog.required_cells(),
+                    !omits_geometry_pattern_indices,
+                    retained_before_geometry,
+                    execution_admission.memory_cap_bytes(),
+                )?
+            } else {
+                GeometrySearch::new(
+                    universe,
+                    &multiset_family,
+                    catalog.required_cells(),
+                    !omits_geometry_pattern_indices,
+                )?
+            }
         };
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
         let peak_cpu_bytes = catalog
@@ -586,6 +943,32 @@ impl WasmExactSearchSession {
             .saturating_add(tablebase_retained_bytes);
         let compact_tiling_identity_supported = problem.objective().kind() == ObjectiveKind::Tiling
             && catalog.skeleton_count() <= PACKED_TILING_MAX_ROW_ID as usize + 1;
+        if problem.output_policy() == SearchOutputPolicy::TilingOnly
+            && !compact_tiling_identity_supported
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_pc_tiling_compact_identity_unavailable",
+            ));
+        }
+        if parent_authorized && problem.output_policy() == SearchOutputPolicy::TilingOnly {
+            let retained_before_rank = retained_before_geometry
+                .checked_add(geometry.retained_bytes() as u128)
+                .ok_or_else(|| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?;
+            let rank_peak =
+                TilingSolutionPageStore::checked_canonical_construction_peak_upper_bound(
+                    catalog.skeleton_count(),
+                    0,
+                    0,
+                )
+                .ok_or_else(|| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?;
+            execution_admission
+                .ensure_memory_bound(retained_before_rank, rank_peak)
+                .map_err(WasmExactSearchError::ResourceAdmission)?;
+        }
         let tiling_canonical_rank_by_source = compact_tiling_identity_supported
             .then(|| canonical_tiling_rank_by_source(&catalog))
             .transpose()?
@@ -593,13 +976,23 @@ impl WasmExactSearchSession {
         let tiling_supply_projection_complete = universe.complete()
             || multiset_family.membership_kind()
                 == PackingPatternMembershipKind::ExactSymbolicStandardBag;
-        Ok(Self {
-            problem: Arc::new(problem.clone()),
+        let retain_pc_chance_coverage_evidence = problem
+            .pc_chance_evidence_policy()
+            .retains_pc_coverage_evidence();
+        let session = Self {
+            problem: Arc::clone(&problem),
+            problem_retention,
             catalog,
             geometry,
             buildup_workspace: BuildUpWorkspace::default(),
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
+            coverage_rows: Vec::new(),
+            coverage_rows_complete: retain_pc_chance_coverage_evidence
+                && !problem
+                    .queue_observation_policy()
+                    .requires_observation_policy(),
+            pc_chance_coverage_evidence_available: retain_pc_chance_coverage_evidence,
             buildable_identities: ExactHashSet::default(),
             compact_tiling_identities: compact_tiling_identity_supported.then(Vec::new),
             distributed_tiling_root_runs: None,
@@ -680,11 +1073,23 @@ impl WasmExactSearchSession {
             tablebase_retained_bytes,
             tablebase_payload_sha256,
             truncated_reason: None,
+            dense_pattern_preflight,
+            _execution_admission: execution_admission,
             execution_control: ExecutionControl::default(),
             finished: false,
             #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
             profile_geometry_advance_calls: 0,
-        })
+        };
+        if matches!(
+            session.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            // The external bound was checked before catalog construction; now
+            // include the actual retained catalog/geometry/session stores
+            // before exposing the successfully constructed child session.
+            session.ensure_session_memory_bound(0)?;
+        }
+        Ok(session)
     }
 
     #[cfg(feature = "webgpu-search")]
@@ -799,6 +1204,9 @@ impl WasmExactSearchSession {
             .map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_parallel_coverage_universe_mismatch")
             })?;
+        if self.problem.objective().kind() != ObjectiveKind::Tiling {
+            self.coverage_rows_complete = false;
+        }
         for identity in outcome.buildable_identities {
             if self.problem.objective().kind() == ObjectiveKind::Tiling {
                 self.insert_tiling_result_identity(identity)?;
@@ -904,7 +1312,35 @@ impl WasmExactSearchSession {
                 ExecutorSearchStage::WasmGeometryAdvance,
                 geometry_profile_scale,
             );
-            let geometry_advance = self.geometry.advance(&self.catalog);
+            let geometry_advance = if matches!(
+                self.problem_retention,
+                SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+            ) {
+                // Geometry may return one owned row-id vector. Keep that live
+                // candidate inside the same request surface while the compiler
+                // or traversal frontier grows.
+                let checked_candidate_bytes = (core::mem::size_of::<GeometryCandidate>() as u128)
+                    .checked_add(
+                        (MAX_BOARD64_PIECES as u128)
+                            .checked_mul(core::mem::size_of::<u32>() as u128)
+                            .ok_or_else(|| {
+                                self.memory_projection_unavailable(
+                                    "geometry candidate projection overflow",
+                                )
+                            })?,
+                    )
+                    .ok_or_else(|| {
+                        self.memory_projection_unavailable("geometry candidate projection overflow")
+                    })?;
+                self.ensure_session_memory_bound(checked_candidate_bytes)?;
+                let limit = self
+                    .checked_geometry_retained_limit(checked_candidate_bytes)?
+                    .expect("parent-authorized geometry has a retained limit");
+                self.geometry
+                    .advance_with_retained_limit(&self.catalog, limit)
+            } else {
+                self.geometry.advance(&self.catalog)
+            };
             geometry_span.finish(1);
             match geometry_advance {
                 GeometryAdvance::Pending => {}
@@ -1015,6 +1451,7 @@ impl WasmExactSearchSession {
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_tiling_root_targets_unavailable",
             ))?;
+        self.preadmit_canonical_tiling_vec_growth::<u32>(0, 0, targets.len())?;
         let mut roots = Vec::new();
         roots.try_reserve_exact(targets.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_tiling_root_order_storage_unavailable")
@@ -1030,6 +1467,7 @@ impl WasmExactSearchSession {
                 targets[*right as usize].key.counts(),
             )
         });
+        self.validate_canonical_tiling_allocation()?;
         Ok(roots)
     }
 
@@ -1048,12 +1486,14 @@ impl WasmExactSearchSession {
                 "wasm_tiling_root_merge_already_started",
             ));
         }
+        self.preadmit_canonical_tiling_vec_growth::<DistributedTilingRootRun>(0, 0, root_count)?;
         let mut runs = Vec::new();
         runs.try_reserve_exact(root_count).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_tiling_root_runs_storage_unavailable")
         })?;
         runs.resize_with(root_count, DistributedTilingRootRun::default);
         self.distributed_tiling_root_runs = Some(runs);
+        self.validate_canonical_tiling_allocation()?;
         Ok(())
     }
 
@@ -1069,34 +1509,296 @@ impl WasmExactSearchSession {
     }
 
     fn solution_identity_retained_bytes(&self) -> usize {
-        self.buildable_identities
-            .capacity()
-            .saturating_mul(core::mem::size_of::<TilingIdentityEntry>())
-            .saturating_add(
-                self.compact_tiling_identities
-                    .as_ref()
-                    .map_or(0, |identities| {
-                        identities
-                            .capacity()
-                            .saturating_mul(core::mem::size_of::<PackedTilingRows>())
-                    }),
+        self.checked_solution_identity_retained_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(usize::MAX)
+    }
+
+    fn checked_solution_identity_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = checked_hash_table_retained_upper_bound(
+            self.buildable_identities.capacity(),
+            core::mem::size_of::<TilingIdentityEntry>(),
+        )?;
+        if let Some(identities) = &self.compact_tiling_identities {
+            bytes = bytes.checked_add(
+                (identities.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<PackedTilingRows>() as u128)?,
+            )?;
+        }
+        if let Some(runs) = &self.distributed_tiling_root_runs {
+            bytes = bytes.checked_add(
+                (runs.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<DistributedTilingRootRun>() as u128)?,
+            )?;
+            for run in runs {
+                bytes = bytes.checked_add(
+                    (run.identities.capacity() as u128)
+                        .checked_mul(core::mem::size_of::<PackedTilingRows>() as u128)?,
+                )?;
+                bytes = bytes
+                    .checked_add((run.committed_chunks.capacity() as u128).checked_mul(
+                        core::mem::size_of::<DistributedTilingChunkCommit>() as u128,
+                    )?)?;
+            }
+        }
+        Some(bytes)
+    }
+
+    fn coverage_rows_retained_bytes(&self) -> usize {
+        self.checked_coverage_rows_retained_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(usize::MAX)
+    }
+
+    fn checked_coverage_rows_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.coverage_rows.capacity() as u128)
+            .checked_mul(core::mem::size_of::<CoverageRow>() as u128)?;
+        for row in &self.coverage_rows {
+            bytes = bytes.checked_add(row.coverage_bits().retained_bytes() as u128)?;
+        }
+        Some(bytes)
+    }
+
+    /// Checked executor-owned retained storage. Inline fields are counted once
+    /// by `size_of::<Self>()`; every executor-owned heap store is then added
+    /// from its owning capacity. Caller-retained request storage, including a
+    /// shared SearchProblem pointee, is added separately only when a parent
+    /// resource authority supplied its conservative checked upper bound.
+    /// Peak-only worker metrics are deliberately not counted because their
+    /// workers have already been joined and dropped.
+    fn checked_executor_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = core::mem::size_of::<Self>() as u128;
+        // GeometryCatalog is an executor-owned Arc pointee and therefore is
+        // not part of the session's inline size.
+        bytes = bytes.checked_add(core::mem::size_of::<GeometryCatalog>() as u128)?;
+        for retained in [
+            self.catalog.retained_bytes(),
+            self.geometry.retained_bytes(),
+            self.buildup_workspace.retained_bytes(),
+            self.coverage_evaluator.retained_bytes(),
+            self.covered_patterns.retained_bytes(),
+            self.tablebase_retained_bytes,
+        ] {
+            bytes = bytes.checked_add(retained as u128)?;
+        }
+        bytes = bytes.checked_add(self.checked_solution_identity_retained_bytes()?)?;
+        bytes = bytes.checked_add(self.checked_coverage_rows_retained_bytes()?)?;
+        if let Some(rank) = &self.tiling_canonical_rank_by_source {
+            bytes = bytes.checked_add(
+                (rank.len() as u128).checked_mul(core::mem::size_of::<u32>() as u128)?,
+            )?;
+        }
+        if let Some(coverage) = &self.solution_coverage {
+            bytes = bytes.checked_add(checked_hash_table_retained_upper_bound(
+                coverage.capacity(),
+                core::mem::size_of::<StandardBoard64TilingIdentity>()
+                    + core::mem::size_of::<PatternBitSet>(),
+            )?)?;
+            bytes = bytes.checked_add(self.solution_coverage_bytes as u128)?;
+        }
+        bytes = bytes.checked_add(
+            (self.representative_path.capacity() as u128)
+                .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+        )?;
+        for value in [
+            self.gpu_adapter_name.as_ref(),
+            self.gpu_adapter_backend.as_ref(),
+            self.gpu_shader_hash.as_ref(),
+            self.tablebase_payload_sha256.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
+        }
+        Some(bytes)
+    }
+
+    fn checked_external_retained_upper_bound_bytes(&self) -> Option<u128> {
+        match self.problem_retention {
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes,
+            } => Some(checked_external_retained_upper_bound_bytes),
+            SearchProblemRetention::SessionOwnedCloneUnaccounted
+            | SearchProblemRetention::CallerOwnedSharedInputWithoutParentAuthority => None,
+        }
+    }
+
+    /// Terminal public-memory authority requires the request-level parent
+    /// lease and the caller's checked conservative retained upper bound.
+    /// Clone-owned and unparented shared compatibility paths both return None
+    /// and therefore fail closed when asked to validate a public result.
+    fn checked_session_retained_bytes(&self) -> Option<u128> {
+        self.checked_executor_retained_bytes()?
+            .checked_add(self.checked_external_retained_upper_bound_bytes()?)
+    }
+
+    fn checked_allocation_guard_retained_bytes(&self) -> Option<u128> {
+        let executor = self.checked_executor_retained_bytes()?;
+        match self.checked_external_retained_upper_bound_bytes() {
+            Some(external) => executor.checked_add(external),
+            None => Some(executor),
+        }
+    }
+
+    fn memory_projection_unavailable(&self, message: &'static str) -> WasmExactSearchError {
+        WasmExactSearchError::ResourceAdmission(
+            self._execution_admission
+                .ensure_memory_bound(u128::MAX, 1)
+                .expect_err(message),
+        )
+    }
+
+    fn ensure_session_memory_bound(
+        &self,
+        checked_future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        let retained = self
+            .checked_allocation_guard_retained_bytes()
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "checked executor retained-byte overflow is unavailable",
+                )
+            })?;
+        self._execution_admission
+            .ensure_memory_bound(retained, checked_future_bytes)
+            .map_err(WasmExactSearchError::ResourceAdmission)
+    }
+
+    fn ensure_score_session_memory_bound(
+        &self,
+        checked_future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.problem.objective().score().requested() {
+            // Exact execution-constraint evidence shares the scoring graph
+            // builder, but generic exact admission deliberately retains its
+            // historical one-bitset projection. Only a score request owns the
+            // complete configured/host-cap lease against which these checked
+            // allocation projections are authoritative.
+            return Ok(());
+        }
+        self.ensure_session_memory_bound(checked_future_bytes)
+    }
+
+    fn canonical_tiling_terminal_authorized(&self) -> bool {
+        self.problem.output_policy() == SearchOutputPolicy::TilingOnly
+            && self.problem.objective().kind() == ObjectiveKind::Tiling
+            && matches!(
+                self.problem_retention,
+                SearchProblemRetention::ParentAuthorizedSharedInput { .. }
             )
-            .saturating_add(
-                self.distributed_tiling_root_runs
-                    .as_ref()
-                    .map_or(0, |runs| {
-                        runs.iter()
-                            .map(|run| {
-                                run.identities
-                                    .capacity()
-                                    .saturating_mul(core::mem::size_of::<PackedTilingRows>())
-                                    .saturating_add(run.committed_chunks.capacity().saturating_mul(
-                                        core::mem::size_of::<DistributedTilingChunkCommit>(),
-                                    ))
-                            })
-                            .sum()
-                    }),
+    }
+
+    fn preadmit_canonical_tiling_vec_growth<T>(
+        &self,
+        len: usize,
+        capacity: usize,
+        additional: usize,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.canonical_tiling_terminal_authorized() {
+            return Ok(());
+        }
+        let required = len.checked_add(additional).ok_or_else(|| {
+            self.memory_projection_unavailable("pc tiling vector growth projection overflow")
+        })?;
+        if required <= capacity {
+            return Ok(());
+        }
+        let future = (required as u128)
+            .checked_mul(core::mem::size_of::<T>() as u128)
+            .ok_or_else(|| {
+                self.memory_projection_unavailable("pc tiling vector growth projection overflow")
+            })?;
+        self.ensure_session_memory_bound(future)
+    }
+
+    fn validate_canonical_tiling_allocation(&self) -> Result<(), WasmExactSearchError> {
+        if self.canonical_tiling_terminal_authorized() {
+            self.ensure_session_memory_bound(0)?;
+        }
+        Ok(())
+    }
+
+    fn checked_geometry_retained_limit(
+        &self,
+        checked_candidate_bytes: u128,
+    ) -> Result<Option<u128>, WasmExactSearchError> {
+        if !matches!(
+            self.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            return Ok(None);
+        }
+        let retained = self
+            .checked_allocation_guard_retained_bytes()
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "checked geometry retained-byte projection is unavailable",
+                )
+            })?;
+        let geometry = self.geometry.retained_bytes() as u128;
+        let base = retained.checked_sub(geometry).ok_or_else(|| {
+            self.memory_projection_unavailable(
+                "checked geometry retained-byte projection is inconsistent",
             )
+        })?;
+        let limit = self
+            ._execution_admission
+            .memory_cap_bytes()
+            .checked_sub(base)
+            .and_then(|bytes| bytes.checked_sub(checked_candidate_bytes))
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "geometry candidate exceeds the admitted memory surface",
+                )
+            })?;
+        Ok(Some(limit))
+    }
+
+    pub(crate) fn validate_public_result_memory_with_future(
+        &self,
+        result: &CoreExecutionResult,
+        checked_future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        let retained = self.checked_session_retained_bytes().ok_or_else(|| {
+            self.memory_projection_unavailable(
+                "terminal authority requires a parent lease and checked external retained bound",
+            )
+        })?;
+        let result_bytes = result.checked_resource_retained_bytes().ok_or_else(|| {
+            self.memory_projection_unavailable(
+                "checked public-result retained-byte overflow is unavailable",
+            )
+        })?;
+        let future = result_bytes
+            .checked_add(checked_future_bytes)
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "checked terminal memory projection overflow is unavailable",
+                )
+            })?;
+        self._execution_admission
+            .ensure_memory_bound(retained, future)
+            .map_err(WasmExactSearchError::ResourceAdmission)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn admitted_memory_cap_bytes(&self) -> u128 {
+        self._execution_admission.memory_cap_bytes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_problem_arc(&self, problem: &Arc<SearchProblem>) -> bool {
+        Arc::ptr_eq(&self.problem, problem)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checked_terminal_retained_bytes(
+        &self,
+        result: &CoreExecutionResult,
+    ) -> Option<u128> {
+        self.checked_session_retained_bytes()?
+            .checked_add(result.checked_resource_retained_bytes()?)
     }
 
     fn insert_tiling_candidate_identity(
@@ -1112,16 +1814,29 @@ impl WasmExactSearchSession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_compact_tiling_identity_invalid",
                     ))?;
+            let (len, capacity) = self
+                .compact_tiling_identities
+                .as_ref()
+                .map(|identities| (identities.len(), identities.capacity()))
+                .expect("compact tiling identity storage was checked");
+            self.preadmit_canonical_tiling_vec_growth::<PackedTilingRows>(len, capacity, 1)?;
+            let terminal_authorized = self.canonical_tiling_terminal_authorized();
             let identities = self
                 .compact_tiling_identities
                 .as_mut()
                 .expect("compact tiling identity storage was checked");
-            identities.try_reserve(1).map_err(|_| {
+            let reservation = if terminal_authorized {
+                identities.try_reserve_exact(1)
+            } else {
+                identities.try_reserve(1)
+            };
+            reservation.map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
                     "wasm_compact_tiling_identity_storage_unavailable",
                 )
             })?;
             identities.push(packed_rows);
+            self.validate_canonical_tiling_allocation()?;
             return Ok(());
         }
         self.insert_standard_solution_identity(candidate.identity)
@@ -1140,16 +1855,29 @@ impl WasmExactSearchSession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_compact_tiling_result_identity_invalid",
                     ))?;
+            let (len, capacity) = self
+                .compact_tiling_identities
+                .as_ref()
+                .map(|identities| (identities.len(), identities.capacity()))
+                .expect("compact tiling identity storage was checked");
+            self.preadmit_canonical_tiling_vec_growth::<PackedTilingRows>(len, capacity, 1)?;
+            let terminal_authorized = self.canonical_tiling_terminal_authorized();
             let identities = self
                 .compact_tiling_identities
                 .as_mut()
                 .expect("compact tiling identity storage was checked");
-            identities.try_reserve(1).map_err(|_| {
+            let reservation = if terminal_authorized {
+                identities.try_reserve_exact(1)
+            } else {
+                identities.try_reserve(1)
+            };
+            reservation.map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
                     "wasm_compact_tiling_identity_storage_unavailable",
                 )
             })?;
             identities.push(packed_rows);
+            self.validate_canonical_tiling_allocation()?;
             return Ok(());
         }
         self.insert_standard_solution_identity(identity)
@@ -1164,18 +1892,44 @@ impl WasmExactSearchSession {
                 "wasm_packed_tiling_chunk_requires_tiling_objective",
             ));
         }
-        if let Some(runs) = self.distributed_tiling_root_runs.as_mut() {
+        if self.distributed_tiling_root_runs.is_some() {
             let root_ordinal = chunk
                 .root_ordinal()
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "wasm_tiling_root_chunk_ordinal_missing",
                 ))?;
-            let run =
-                runs.get_mut(root_ordinal as usize)
-                    .ok_or(WasmExactSearchError::InvalidProblem(
-                        "wasm_tiling_root_chunk_ordinal_invalid",
-                    ))?;
-            if !run.absorb_chunk(chunk)? {
+            let root_index = root_ordinal as usize;
+            let run = self
+                .distributed_tiling_root_runs
+                .as_ref()
+                .and_then(|runs| runs.get(root_index))
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_chunk_ordinal_invalid",
+                ))?;
+            let sequence = usize::try_from(chunk.chunk_sequence()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_tiling_root_chunk_sequence_invalid")
+            })?;
+            if sequence >= run.committed_chunks.len() {
+                self.preadmit_canonical_tiling_vec_growth::<PackedTilingRows>(
+                    run.identities.len(),
+                    run.identities.capacity(),
+                    chunk.identities().len(),
+                )?;
+                self.preadmit_canonical_tiling_vec_growth::<DistributedTilingChunkCommit>(
+                    run.committed_chunks.len(),
+                    run.committed_chunks.capacity(),
+                    1,
+                )?;
+            }
+            let terminal_authorized = self.canonical_tiling_terminal_authorized();
+            let run = self
+                .distributed_tiling_root_runs
+                .as_mut()
+                .and_then(|runs| runs.get_mut(root_index))
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_tiling_root_chunk_ordinal_invalid",
+                ))?;
+            if !run.absorb_chunk(chunk, terminal_authorized)? {
                 return Ok(false);
             }
         } else {
@@ -1184,16 +1938,32 @@ impl WasmExactSearchSession {
                     "wasm_tiling_root_chunk_unexpected",
                 ));
             }
+            let (len, capacity) = self
+                .compact_tiling_identities
+                .as_ref()
+                .map(|identities| (identities.len(), identities.capacity()))
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_tiling_identity_unavailable",
+                ))?;
+            self.preadmit_canonical_tiling_vec_growth::<PackedTilingRows>(
+                len,
+                capacity,
+                chunk.identities().len(),
+            )?;
+            let terminal_authorized = self.canonical_tiling_terminal_authorized();
             let identities = self.compact_tiling_identities.as_mut().ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_compact_tiling_identity_unavailable"),
             )?;
-            identities
-                .try_reserve(chunk.identities().len())
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_compact_tiling_identity_storage_unavailable",
-                    )
-                })?;
+            let reservation = if terminal_authorized {
+                identities.try_reserve_exact(chunk.identities().len())
+            } else {
+                identities.try_reserve(chunk.identities().len())
+            };
+            reservation.map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_tiling_identity_storage_unavailable",
+                )
+            })?;
             for packed in chunk.identities().iter().copied() {
                 let packed_rows = packed.packed_rows();
                 if !packed_rows_are_valid(&packed_rows) {
@@ -1204,6 +1974,7 @@ impl WasmExactSearchSession {
                 identities.push(packed_rows);
             }
         }
+        self.validate_canonical_tiling_allocation()?;
         for packed in chunk.identities().iter().copied() {
             self.packing_candidate_count = self.packing_candidate_count.saturating_add(1);
             self.packing_candidate_digest =
@@ -1390,6 +2161,24 @@ impl WasmExactSearchSession {
             coverage_already_known,
             solution_coverage_required,
         );
+        if matches!(
+            self.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            let future = checked_candidate_verification_peak_upper_bound(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                self.problem.output_policy().retains_representative_trace()
+                    && self.representative_path.is_empty(),
+            )
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "candidate verification memory projection is unavailable",
+                )
+            })?;
+            self.ensure_session_memory_bound(future)?;
+        }
         let result = match verify_candidate(
             &self.problem,
             &self.catalog,
@@ -1409,6 +2198,71 @@ impl WasmExactSearchSession {
             }
             Err(error) => return Err(error),
         };
+        if matches!(
+            self.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            let universe = self.problem.piece_source().materialized_universe().ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+            )?;
+            let bitset_peak = PatternBitSet::checked_all_projection(universe.pattern_count())
+                .map(|projection| projection.constructor_peak_bytes)
+                .ok_or_else(|| {
+                    self.memory_projection_unavailable(
+                        "candidate reduction bitset projection is unavailable",
+                    )
+                })?;
+            let row_capacity = self
+                .coverage_rows
+                .capacity()
+                .saturating_mul(2)
+                .max(self.coverage_rows.len().saturating_add(1));
+            let identity_capacity = self
+                .buildable_identities
+                .capacity()
+                .saturating_mul(2)
+                .max(self.buildable_identities.len().saturating_add(1));
+            let coverage_capacity = self.solution_coverage.as_ref().map_or(0, |coverage| {
+                coverage
+                    .capacity()
+                    .saturating_mul(2)
+                    .max(coverage.len().saturating_add(1))
+            });
+            let reduction_future = bitset_peak
+                .checked_mul(4)
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        (row_capacity as u128)
+                            .checked_mul(core::mem::size_of::<CoverageRow>() as u128)?,
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_hash_table_retained_upper_bound(
+                        identity_capacity,
+                        core::mem::size_of::<TilingIdentityEntry>(),
+                    )?)
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_hash_table_retained_upper_bound(
+                        coverage_capacity,
+                        core::mem::size_of::<StandardBoard64TilingIdentity>()
+                            + core::mem::size_of::<PatternBitSet>(),
+                    )?)
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        (result.representative_path.len() as u128)
+                            .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+                    )
+                })
+                .and_then(|bytes| bytes.checked_add(result.retained_bytes as u128))
+                .ok_or_else(|| {
+                    self.memory_projection_unavailable(
+                        "candidate reduction memory projection is unavailable",
+                    )
+                })?;
+            self.ensure_session_memory_bound(reduction_future)?;
+        }
         if let Some(root) = result.observation_language_root {
             self.buildup_workspace.merge_observation_language(root)?;
         }
@@ -1446,6 +2300,7 @@ impl WasmExactSearchSession {
                 + self.coverage_evaluator.retained_bytes()
                 + self.buildup_workspace.retained_bytes()
                 + self.solution_identity_retained_bytes()
+                + self.coverage_rows_retained_bytes()
                 + self.solution_coverage.as_ref().map_or(0, |coverage| {
                     coverage.capacity()
                         * (core::mem::size_of::<StandardBoard64TilingIdentity>()
@@ -1461,31 +2316,65 @@ impl WasmExactSearchSession {
         if let Some(candidate_coverage) = result.covered_patterns.as_ref() {
             self.coverage_row_count += 1;
             self.pattern_verified_execution_count += candidate_coverage.count_ones() as usize;
-            self.covered_patterns
-                .union_with(candidate_coverage)
-                .expect("all rows use the materialized source universe");
             if solution_coverage_required {
                 solution_coverage = Some(candidate_coverage.clone());
             }
+            self.record_build_coverage_row(
+                candidate.identity.bucket_hash(),
+                candidate_coverage.clone(),
+            )?;
         }
         if let Some(root) = result.symbolic_coverage_root {
+            let materialized = (solution_coverage_required
+                || self.pc_chance_coverage_evidence_available)
+                .then(|| self.buildup_workspace.materialize_standard_bag_root(root))
+                .transpose()?;
             if solution_coverage_required {
-                let materialized = self.buildup_workspace.materialize_standard_bag_root(root)?;
+                let materialized = materialized
+                    .as_ref()
+                    .expect("solution coverage requested symbolic materialization");
                 if let Some(solution_coverage) = solution_coverage.as_mut() {
-                    solution_coverage.union_with(&materialized).map_err(|_| {
+                    solution_coverage.union_with(materialized).map_err(|_| {
                         WasmExactSearchError::InvalidProblem(
                             "wasm_solution_coverage_universe_mismatch",
                         )
                     })?;
                 } else {
-                    solution_coverage = Some(materialized);
+                    solution_coverage = Some(materialized.clone());
                 }
+            }
+            if self.pc_chance_coverage_evidence_available {
+                self.record_build_coverage_row(
+                    candidate.identity.bucket_hash(),
+                    materialized.expect("chance evidence requested symbolic materialization"),
+                )?;
             }
             self.buildup_workspace.merge_standard_bag_coverage(root)?;
             self.coverage_row_count = self.coverage_row_count.saturating_add(1);
             self.pattern_verified_execution_count = self
                 .pattern_verified_execution_count
                 .saturating_add(result.symbolic_covered_pattern_count);
+        }
+        self.peak_cpu_bytes = self.peak_cpu_bytes.max(
+            self.catalog
+                .retained_bytes()
+                .saturating_add(self.geometry.retained_bytes())
+                .saturating_add(self.tablebase_retained_bytes)
+                .saturating_add(self.coverage_evaluator.retained_bytes())
+                .saturating_add(self.buildup_workspace.retained_bytes())
+                .saturating_add(self.solution_identity_retained_bytes())
+                .saturating_add(self.coverage_rows_retained_bytes())
+                .saturating_add(result.retained_bytes)
+                .saturating_add(self.solution_coverage.as_ref().map_or(0, |coverage| {
+                    coverage.capacity()
+                        * (core::mem::size_of::<StandardBoard64TilingIdentity>()
+                            + core::mem::size_of::<PatternBitSet>())
+                }))
+                .saturating_add(self.solution_coverage_bytes),
+        );
+        if self.memory_budget_exceeded() {
+            self.mark_truncated("memory_budget_exceeded");
+            return self.complete().map(Some);
         }
         if result.buildable {
             if let Some(solution_coverage) = solution_coverage {
@@ -1533,7 +2422,10 @@ impl WasmExactSearchSession {
         candidate: GeometryCandidate,
         candidate_ordinal: u64,
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
-        if self.insert_tiling_candidate_identity(&candidate).is_err() {
+        if let Err(error) = self.insert_tiling_candidate_identity(&candidate) {
+            if self.canonical_tiling_terminal_authorized() {
+                return Err(error);
+            }
             self.mark_truncated("solution_identity_storage_unavailable");
             return self.complete().map(Some);
         }
@@ -1564,20 +2456,67 @@ impl WasmExactSearchSession {
         identity: StandardBoard64TilingIdentity,
         coverage: &PatternBitSet,
     ) -> Result<(), WasmExactSearchError> {
+        let parent_authorized = matches!(
+            self.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        );
+        let needs_entry = !self
+            .solution_coverage
+            .as_ref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_solution_coverage_not_requested",
+            ))?
+            .contains_key(&identity);
+        if needs_entry && parent_authorized {
+            let map = self
+                .solution_coverage
+                .as_ref()
+                .expect("coverage map exists");
+            let projected_capacity = map
+                .capacity()
+                .saturating_mul(2)
+                .max(map.len().saturating_add(1));
+            let future = checked_hash_table_retained_upper_bound(
+                projected_capacity,
+                core::mem::size_of::<StandardBoard64TilingIdentity>()
+                    + core::mem::size_of::<PatternBitSet>(),
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    PatternBitSet::checked_all_projection(coverage.pattern_count())?
+                        .constructor_peak_bytes,
+                )
+            })
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "solution coverage growth projection is unavailable",
+                )
+            })?;
+            self.ensure_session_memory_bound(future)?;
+        }
         let map = self
             .solution_coverage
             .as_mut()
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_solution_coverage_not_requested",
             ))?;
-        if !map.contains_key(&identity) {
+        if needs_entry {
             map.try_reserve(1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_solution_coverage_storage_unavailable")
             })?;
+            let empty = if parent_authorized {
+                try_empty_pattern_bitset(
+                    coverage.pattern_count(),
+                    "wasm_solution_coverage_storage_unavailable",
+                )?
+            } else {
+                PatternBitSet::new(coverage.pattern_count())
+            };
+            map.insert(identity, empty);
         }
         let entry = map
-            .entry(identity)
-            .or_insert_with(|| PatternBitSet::new(coverage.pattern_count()));
+            .get_mut(&identity)
+            .expect("solution coverage entry exists");
         let before = entry.retained_bytes();
         entry.union_with(coverage).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_solution_coverage_universe_mismatch")
@@ -1588,10 +2527,45 @@ impl WasmExactSearchSession {
         Ok(())
     }
 
+    fn record_build_coverage_row(
+        &mut self,
+        candidate_id: u64,
+        coverage: PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        self.covered_patterns.union_with(&coverage).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pc_chance_coverage_universe_mismatch")
+        })?;
+        if !self.pc_chance_coverage_evidence_available {
+            return Ok(());
+        }
+        self.coverage_rows.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pc_chance_coverage_row_storage_unavailable")
+        })?;
+        let source = self.problem.piece_source();
+        let universe =
+            source
+                .materialized_universe()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_source_not_materialized",
+                ))?;
+        self.coverage_rows.push(CoverageRow::new_with_piece_source(
+            candidate_id,
+            CoverageRowKind::Build,
+            source.id().get(),
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            coverage,
+        ));
+        Ok(())
+    }
+
     pub(super) fn absorb_distributed_result(
         &mut self,
         result: &CoreExecutionResult,
     ) -> Result<(), WasmExactSearchError> {
+        self.pc_chance_coverage_evidence_available = false;
+        self.coverage_rows_complete = false;
+        self.coverage_rows = Vec::new();
         let pattern_count = result.usize_field("coverage_pattern_count").ok_or(
             WasmExactSearchError::InvalidProblem("wasm_distributed_result_pattern_count_missing"),
         )?;
@@ -1934,6 +2908,7 @@ impl WasmExactSearchSession {
                 .queue_observation_policy()
                 .requires_observation_policy()
             {
+                self.coverage_rows_complete = false;
                 let control = self.execution_control.clone();
                 match self
                     .buildup_workspace
@@ -1953,6 +2928,7 @@ impl WasmExactSearchSession {
                                 .saturating_add(self.coverage_evaluator.retained_bytes())
                                 .saturating_add(self.buildup_workspace.retained_bytes())
                                 .saturating_add(self.solution_identity_retained_bytes())
+                                .saturating_add(self.coverage_rows_retained_bytes())
                                 .saturating_add(self.solution_coverage.as_ref().map_or(
                                     0,
                                     |solution_coverage| {
@@ -1971,7 +2947,17 @@ impl WasmExactSearchSession {
                             .piece_source()
                             .materialized_universe()
                             .map_or(0, |universe| universe.pattern_count());
-                        self.covered_patterns = PatternBitSet::new(pattern_count);
+                        self.covered_patterns = if matches!(
+                            self.problem_retention,
+                            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+                        ) {
+                            try_empty_pattern_bitset(
+                                pattern_count,
+                                "wasm_observation_coverage_storage_unavailable",
+                            )?
+                        } else {
+                            PatternBitSet::new(pattern_count)
+                        };
                     }
                     Err(WasmExactSearchError::Cancelled) => {
                         return Ok(ExactSearchAdvance::Cancelled);
@@ -1985,7 +2971,18 @@ impl WasmExactSearchSession {
         let result_span = SearchStageSpan::begin(ExecutorSearchStage::WasmResultCanonicalize);
         let scoring_requested = self.problem.objective().score().requested();
         let execution_constraints = self.problem.objective().execution_constraints();
-        let execution_evidence_requested = scoring_requested || execution_constraints.requested();
+        let save_execution_requested = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_save_groups_v2_evidence();
+        let path_execution_requested = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence();
+        let execution_evidence_requested = scoring_requested
+            || execution_constraints.requested()
+            || save_execution_requested
+            || path_execution_requested;
         let scoring_batch = if execution_evidence_requested {
             Some(self.prepare_exact_scoring_execution_batch()?)
         } else {
@@ -1993,6 +2990,14 @@ impl WasmExactSearchSession {
         };
         let solution_identity_count = self.solution_identity_count();
         let result = self.build_result(include_normalized_keys, scoring_batch)?;
+        if (scoring_requested || self.canonical_tiling_terminal_authorized())
+            && matches!(
+                self.problem_retention,
+                SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+            )
+        {
+            self.validate_public_result_memory_with_future(&result, 0)?;
+        }
         result_span.finish(solution_identity_count as u64);
         Ok(ExactSearchAdvance::Completed(result))
     }
@@ -2000,21 +3005,52 @@ impl WasmExactSearchSession {
     fn prepare_exact_scoring_execution_batch(
         &mut self,
     ) -> Result<ExactScoringExecutionBatch, WasmExactSearchError> {
-        let mut identities = self
-            .buildable_identities
-            .iter()
-            .map(|entry| entry.identity)
-            .collect::<Vec<_>>();
+        let identity_count = self.buildable_identities.len();
+        let identity_bytes = (identity_count as u128)
+            .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        let graph_slot_bytes = (identity_count as u128)
+            .checked_mul(core::mem::size_of::<clearra_replay::ExactScoringExecutionGraph>() as u128)
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        self.ensure_score_session_memory_bound(
+            identity_bytes
+                .checked_add(graph_slot_bytes)
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+        )?;
+
+        let mut identities = Vec::new();
+        identities.try_reserve_exact(identity_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_scoring_identity_storage_unavailable")
+        })?;
+        identities.extend(self.buildable_identities.iter().map(|entry| entry.identity));
         identities.sort_unstable();
         let mut graphs = Vec::new();
         graphs.try_reserve_exact(identities.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_scoring_graph_storage_unavailable")
         })?;
         let mut complete = true;
+        let identity_live_bytes = (identities.capacity() as u128)
+            .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        let graph_outer_bytes = (graphs.capacity() as u128)
+            .checked_mul(core::mem::size_of::<clearra_replay::ExactScoringExecutionGraph>() as u128)
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        let mut retained_graph_nested_bytes = 0_u128;
         for (index, identity) in identities.into_iter().enumerate() {
             let candidate_id = u64::try_from(index + 1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_scoring_candidate_id_overflow")
             })?;
+            let projection = exact_scoring_execution_graph_memory_projection(
+                &self.problem,
+                &self.catalog,
+                identity,
+            )?;
+            let candidate_future_bytes = identity_live_bytes
+                .checked_add(graph_outer_bytes)
+                .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+                .and_then(|bytes| bytes.checked_add(projection.peak_additional_bytes))
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+            self.ensure_score_session_memory_bound(candidate_future_bytes)?;
             match exact_scoring_execution_graph(
                 &self.problem,
                 &self.catalog,
@@ -2022,8 +3058,31 @@ impl WasmExactSearchSession {
                 candidate_id,
                 &mut self.buildup_workspace,
             )? {
-                Some(graph) => graphs.push(graph),
-                None => complete = false,
+                Some(graph) => {
+                    let retained = graph
+                        .checked_nested_retained_bytes()
+                        .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+                    debug_assert!(retained <= projection.retained_graph_nested_bytes);
+                    retained_graph_nested_bytes = retained_graph_nested_bytes
+                        .checked_add(retained)
+                        .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+                    self.ensure_score_session_memory_bound(
+                        identity_live_bytes
+                            .checked_add(graph_outer_bytes)
+                            .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+                            .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+                    )?;
+                    graphs.push(graph);
+                }
+                None => {
+                    complete = false;
+                    self.ensure_score_session_memory_bound(
+                        identity_live_bytes
+                            .checked_add(graph_outer_bytes)
+                            .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+                            .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+                    )?;
+                }
             }
         }
         let board_size = BoardSize::new(
@@ -2036,11 +3095,96 @@ impl WasmExactSearchSession {
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let patterns = (0..universe.pattern_count())
-            .map(|pattern| universe.sequence_at(pattern).into_owned())
-            .collect();
+        let pattern_outer_bytes = (universe.pattern_count() as u128)
+            .checked_mul(
+                core::mem::size_of::<Vec<clearra_core_domain::piece::piece_kind::PieceKind>>()
+                    as u128,
+            )
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        let mut pattern_nested_bytes = 0_u128;
+        for pattern_index in 0..universe.pattern_count() {
+            pattern_nested_bytes = pattern_nested_bytes
+                .checked_add(
+                    (universe.sequence_len_at(pattern_index) as u128)
+                        .checked_mul(core::mem::size_of::<
+                            clearra_core_domain::piece::piece_kind::PieceKind,
+                        >() as u128)
+                        .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+                )
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        }
+        let graph_bytes = graph_outer_bytes
+            .checked_add(retained_graph_nested_bytes)
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        self.ensure_score_session_memory_bound(
+            graph_bytes
+                .checked_add(pattern_outer_bytes)
+                .and_then(|bytes| bytes.checked_add(pattern_nested_bytes))
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+        )?;
+        let mut patterns = Vec::new();
+        patterns
+            .try_reserve_exact(universe.pattern_count())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_scoring_pattern_storage_unavailable")
+            })?;
+        let pattern_outer_live_bytes = (patterns.capacity() as u128)
+            .checked_mul(
+                core::mem::size_of::<Vec<clearra_core_domain::piece::piece_kind::PieceKind>>()
+                    as u128,
+            )
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        self.ensure_score_session_memory_bound(
+            graph_bytes
+                .checked_add(pattern_outer_live_bytes)
+                .and_then(|bytes| bytes.checked_add(pattern_nested_bytes))
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+        )?;
+        let mut pattern_nested_live_bytes = 0_u128;
+        for pattern_index in 0..universe.pattern_count() {
+            let sequence_len = universe.sequence_len_at(pattern_index);
+            let requested_pattern_bytes = (sequence_len as u128)
+                .checked_mul(
+                    core::mem::size_of::<clearra_core_domain::piece::piece_kind::PieceKind>()
+                        as u128,
+                )
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+            self.ensure_score_session_memory_bound(
+                graph_bytes
+                    .checked_add(pattern_outer_live_bytes)
+                    .and_then(|bytes| bytes.checked_add(pattern_nested_live_bytes))
+                    .and_then(|bytes| bytes.checked_add(requested_pattern_bytes))
+                    .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+            )?;
+            let mut pattern = Vec::new();
+            pattern.try_reserve_exact(sequence_len).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_scoring_pattern_storage_unavailable")
+            })?;
+            let actual_pattern_bytes = (pattern.capacity() as u128)
+                .checked_mul(
+                    core::mem::size_of::<clearra_core_domain::piece::piece_kind::PieceKind>()
+                        as u128,
+                )
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+            pattern_nested_live_bytes = pattern_nested_live_bytes
+                .checked_add(actual_pattern_bytes)
+                .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+            self.ensure_score_session_memory_bound(
+                graph_bytes
+                    .checked_add(pattern_outer_live_bytes)
+                    .and_then(|bytes| bytes.checked_add(pattern_nested_live_bytes))
+                    .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+            )?;
+            universe.write_sequence_at(pattern_index, &mut pattern);
+            if pattern.len() != sequence_len {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_scoring_pattern_length_mismatch",
+                ));
+            }
+            patterns.push(pattern);
+        }
         let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
-        Ok(ExactScoringExecutionBatch::new(
+        let batch = ExactScoringExecutionBatch::new(
             layout,
             self.catalog.initial_board(),
             patterns,
@@ -2053,7 +3197,126 @@ impl WasmExactSearchSession {
             rule_profile_id,
             graphs,
             complete,
-        ))
+        );
+        let batch_bytes = (core::mem::size_of::<ExactScoringExecutionBatch>() as u128)
+            .checked_add(
+                batch
+                    .checked_nested_retained_bytes()
+                    .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+            )
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        self.ensure_score_session_memory_bound(batch_bytes)?;
+        Ok(batch)
+    }
+
+    fn scoring_memory_projection_overflow(&self) -> WasmExactSearchError {
+        WasmExactSearchError::ResourceAdmission(
+            self._execution_admission
+                .ensure_memory_bound(u128::MAX, 1)
+                .expect_err("checked scoring memory projection overflow is unavailable"),
+        )
+    }
+
+    fn checked_terminal_result_build_peak_upper_bound(
+        &self,
+        scoring_batch: Option<&ExactScoringExecutionBatch>,
+    ) -> Option<u128> {
+        const FIELD_COUNT_UPPER_BOUND: u128 = 256;
+        const FIELD_BACKING_BYTES_UPPER_BOUND: u128 = 192;
+        const NORMALIZED_KEY_BACKING_BYTES_UPPER_BOUND: u128 = 512;
+        const DECIMAL_U128_BACKING_BYTES: u128 = 39;
+
+        let universe = self.problem.piece_source().materialized_universe()?;
+        let pattern_count = universe.pattern_count() as u128;
+        let identity_count_usize = self.solution_identity_count();
+        let identity_count = identity_count_usize as u128;
+        let coverage_count = self
+            .solution_coverage
+            .as_ref()
+            .map_or(0_u128, |coverage| coverage.len() as u128);
+        let bitset_peak =
+            PatternBitSet::checked_all_projection(universe.pattern_count())?.constructor_peak_bytes;
+        let pattern_word_bytes = pattern_count
+            .checked_add(63)?
+            .checked_div(64)?
+            .checked_mul(core::mem::size_of::<u64>() as u128)?;
+
+        let field_copy_bytes = FIELD_COUNT_UPPER_BOUND
+            .checked_mul(
+                (core::mem::size_of::<(String, String)>() as u128)
+                    .checked_add(FIELD_BACKING_BYTES_UPPER_BOUND.checked_mul(2)?)?,
+            )?
+            // fields, SearchExecutionReport, and fail-closed summary rebuild
+            .checked_mul(3)?;
+        let identity_bytes = identity_count
+            .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?;
+        let normalized_key_bytes = identity_count.checked_mul(
+            (core::mem::size_of::<String>() as u128)
+                .checked_add(NORMALIZED_KEY_BACKING_BYTES_UPPER_BOUND)?,
+        )?;
+        let coverage_outer_bytes = coverage_count.checked_mul(
+            (core::mem::size_of::<SolutionCoverage>()
+                + core::mem::size_of::<NormalizedSolutionCoverage>()) as u128,
+        )?;
+        let coverage_clone_count = coverage_count
+            .checked_mul(3)?
+            .checked_add(identity_count)?
+            .checked_add(2)?;
+        let coverage_bytes = coverage_clone_count.checked_mul(bitset_peak)?;
+        let probability_bytes =
+            identity_count.checked_mul(core::mem::size_of::<SolutionProbabilityReport>() as u128)?;
+        let pattern_weight_bytes = pattern_count.checked_mul(
+            (core::mem::size_of::<String>() as u128).checked_add(DECIMAL_U128_BACKING_BYTES)?,
+        )?;
+        let trace_bytes = (self.representative_path.len() as u128)
+            .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?;
+        let scoring_batch_bytes = scoring_batch.map_or(Some(0_u128), |batch| {
+            (core::mem::size_of::<ExactScoringExecutionBatch>() as u128)
+                .checked_add(batch.checked_nested_retained_bytes()?)
+        })?;
+        // Each typed problem-evidence owner is a normalized clone of the
+        // executed problem. Reusing one request external upper bound per clone
+        // is conservative and avoids constructing evidence merely to learn its
+        // size. Score portfolios retain two independent snapshots: one for the
+        // coverage proof and one for the score replay proof.
+        let evidence_bytes = checked_typed_problem_evidence_upper_bound(
+            &self.problem,
+            self.checked_external_retained_upper_bound_bytes()?,
+        )?;
+        let (tiling_store_build_bytes, tiling_initial_page_bytes) =
+            if self.problem.output_policy() == SearchOutputPolicy::TilingOnly {
+                let run_count = self
+                    .distributed_tiling_root_runs
+                    .as_ref()
+                    .map_or(usize::from(identity_count_usize != 0), Vec::len);
+                (
+                    TilingSolutionPageStore::checked_canonical_construction_peak_upper_bound(
+                        self.catalog.skeleton_count(),
+                        identity_count_usize,
+                        run_count,
+                    )?,
+                    TilingSolutionPageStore::checked_initial_page_build_peak_upper_bound(
+                        identity_count_usize.min(TILING_SOLUTION_INITIAL_PAGE_SIZE),
+                    )?,
+                )
+            } else {
+                (0, 0)
+            };
+
+        (core::mem::size_of::<CoreExecutionResult>() as u128)
+            .checked_add(field_copy_bytes)?
+            .checked_add(identity_bytes.checked_mul(2)?)?
+            .checked_add(normalized_key_bytes)?
+            .checked_add(coverage_outer_bytes)?
+            .checked_add(coverage_bytes)?
+            .checked_add(probability_bytes)?
+            .checked_add(pattern_weight_bytes)?
+            .checked_add(pattern_word_bytes.checked_mul(2)?)?
+            .checked_add(trace_bytes)?
+            .checked_add(scoring_batch_bytes)?
+            .checked_add(evidence_bytes)?
+            .checked_add(tiling_store_build_bytes)?
+            .checked_add(tiling_initial_page_bytes)
     }
 
     fn mark_truncated(&mut self, reason: &'static str) {
@@ -2074,7 +3337,21 @@ impl WasmExactSearchSession {
         include_normalized_keys: bool,
         scoring_batch: Option<ExactScoringExecutionBatch>,
     ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        if matches!(
+            self.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            let future = self
+                .checked_terminal_result_build_peak_upper_bound(scoring_batch.as_ref())
+                .ok_or_else(|| {
+                    self.memory_projection_unavailable(
+                        "terminal result build memory projection is unavailable",
+                    )
+                })?;
+            self.ensure_session_memory_bound(future)?;
+        }
         let tiling_only = self.problem.objective().kind() == ObjectiveKind::Tiling;
+        let canonical_tiling = self.problem.output_policy() == SearchOutputPolicy::TilingOnly;
         let solution_set_materialized = self.problem.output_policy().retains_solution_set();
         let tiling_solution_store = if tiling_only {
             self.take_tiling_solution_page_store()?
@@ -2118,30 +3395,37 @@ impl WasmExactSearchSession {
         let source_solution_count = tiling_solution_store
             .as_ref()
             .map_or(identities.len(), |store| store.len());
-        let mut solution_coverages = self
-            .solution_coverage
-            .as_ref()
-            .map(|coverage| {
-                let mut entries = coverage
-                    .iter()
-                    .map(|(identity, bits)| SolutionCoverage::new(*identity, bits.clone()))
-                    .collect::<Vec<_>>();
-                entries.sort_unstable_by_key(SolutionCoverage::identity);
-                entries
-            })
-            .unwrap_or_default();
-        let normalized_solution_coverages = solution_coverages
-            .iter()
-            .map(|coverage| {
-                NormalizedSolutionCoverage::new(
-                    NormalizedTilingSolutionKey::from_standard_board64_identity(
-                        coverage.identity(),
+        let mut solution_coverages = Vec::new();
+        if let Some(coverage) = self.solution_coverage.as_ref() {
+            solution_coverages
+                .try_reserve_exact(coverage.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_result_solution_coverage_storage_unavailable",
                     )
-                    .as_str(),
-                    coverage.covered_patterns().clone(),
+                })?;
+            solution_coverages.extend(
+                coverage
+                    .iter()
+                    .map(|(identity, bits)| SolutionCoverage::new(*identity, bits.clone())),
+            );
+            solution_coverages.sort_unstable_by_key(SolutionCoverage::identity);
+        }
+        let mut normalized_solution_coverages = Vec::new();
+        normalized_solution_coverages
+            .try_reserve_exact(solution_coverages.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_result_normalized_coverage_storage_unavailable",
                 )
-            })
-            .collect();
+            })?;
+        normalized_solution_coverages.extend(solution_coverages.iter().map(|coverage| {
+            NormalizedSolutionCoverage::new(
+                NormalizedTilingSolutionKey::from_standard_board64_identity(coverage.identity())
+                    .as_str(),
+                coverage.covered_patterns().clone(),
+            )
+        }));
         let observation_policy = self.problem.queue_observation_policy();
         let visible_seven_policy = observation_policy.requires_observation_policy();
         let minimum_cover_requested =
@@ -2210,12 +3494,20 @@ impl WasmExactSearchSession {
             )
         };
         let normalized_keys = if solution_set_materialized && include_normalized_keys {
-            identities
-                .iter()
-                .copied()
-                .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
-                .map(|key| key.as_str().to_owned())
-                .collect::<Vec<_>>()
+            let mut keys = Vec::new();
+            keys.try_reserve_exact(identities.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_result_normalized_key_storage_unavailable",
+                )
+            })?;
+            keys.extend(
+                identities
+                    .iter()
+                    .copied()
+                    .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
+                    .map(|key| key.as_str().to_owned()),
+            );
+            keys
         } else {
             Vec::new()
         };
@@ -2249,6 +3541,14 @@ impl WasmExactSearchSession {
         let score_policy = self.problem.objective().score();
         let execution_constraints = self.problem.objective().execution_constraints();
         let execution_constraint_requested = execution_constraints.requested();
+        let save_execution_requested = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_save_groups_v2_evidence();
+        let path_execution_requested = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence();
         let scoring_execution_complete = scoring_batch
             .as_ref()
             .is_some_and(ExactScoringExecutionBatch::complete);
@@ -2321,7 +3621,7 @@ impl WasmExactSearchSession {
         let rule = self.problem.rule_profile_value();
         let kick_profile = self.problem.kick_profile();
         let rule_capability = RuleCapability::from_rule(rule);
-        let fields = vec![
+        let field_values = [
             field(
                 "backend_requested",
                 self.problem.backend_policy().requested_backend().as_str(),
@@ -2508,6 +3808,30 @@ impl WasmExactSearchSession {
             field(
                 "total_possible_pattern_count",
                 universe.total_possible_pattern_count(),
+            ),
+            field(
+                "execution_availability_state",
+                self.dense_pattern_preflight.availability.state().as_str(),
+            ),
+            field("execution_availability_reason", "none"),
+            field(
+                "execution_descriptor_pattern_count",
+                self.dense_pattern_preflight.descriptor_pattern_count,
+            ),
+            field(
+                "execution_dense_pattern_count",
+                self.dense_pattern_preflight.dense_pattern_count,
+            ),
+            field(
+                "execution_required_dense_bytes",
+                self.dense_pattern_preflight.required_dense_bytes,
+            ),
+            field(
+                "execution_required_memory_bytes",
+                self.dense_pattern_preflight
+                    .availability
+                    .required_memory_bytes()
+                    .unwrap_or(self.dense_pattern_preflight.required_dense_bytes),
             ),
             field(
                 "geometry_catalog_digest",
@@ -2804,6 +4128,8 @@ impl WasmExactSearchSession {
                 },
             ),
             field("postprocess_scoring_requested", score_policy.requested()),
+            field("postprocess_pc_save_requested", save_execution_requested),
+            field("postprocess_pc_path_requested", path_execution_requested),
             field("score_objective_mode", score_policy.mode().as_str()),
             field("score_profile_requested", score_policy.profile().as_str()),
             field(
@@ -2854,18 +4180,161 @@ impl WasmExactSearchSession {
                     .unwrap_or_default(),
             ),
         ];
-        let pattern_weights = if score_policy.requested() || execution_constraint_requested {
-            (0..universe.pattern_count())
-                .map(|pattern| universe.weight_at(pattern).get().to_string())
-                .collect()
+        let mut fields = Vec::new();
+        fields.try_reserve_exact(field_values.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
+        })?;
+        fields.extend(field_values);
+        if save_execution_requested {
+            fields.try_reserve_exact(4).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_pc_save_identity_field_storage_unavailable",
+                )
+            })?;
+            fields.extend([
+                field("problem_preset", self.problem.preset().as_str()),
+                field("piece_source_id", self.problem.piece_source().id().get()),
+                field("pattern_universe_id", universe.pattern_universe_id().get()),
+                field(
+                    "pattern_weight_model_id",
+                    universe.pattern_weight_model_id().get(),
+                ),
+            ]);
+        }
+        if canonical_tiling {
+            let incomplete_reason = self
+                .truncated_reason
+                .or_else(|| {
+                    (!self.tiling_supply_projection_complete)
+                        .then_some("supply_universe_incomplete")
+                })
+                .unwrap_or("none");
+            let replacements =
+                crate::service::pc_summary_builder::canonical_tiling_family_result_fields(
+                    &self.problem,
+                    solution_count,
+                    &normalized_hash,
+                    normalized_keys.len(),
+                    count_complete,
+                    incomplete_reason,
+                    self.canonical_tiling_terminal_authorized(),
+                );
+            fields.retain(|(key, _)| {
+                !replacements
+                    .iter()
+                    .any(|(replacement, _)| replacement == key)
+            });
+            fields.try_reserve_exact(replacements.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
+            })?;
+            fields.extend(replacements);
+        }
+        let pattern_weights = if score_policy.requested()
+            || execution_constraint_requested
+            || save_execution_requested
+        {
+            let mut weights = Vec::new();
+            weights
+                .try_reserve_exact(universe.pattern_count())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_pattern_weight_storage_unavailable")
+                })?;
+            for pattern in 0..universe.pattern_count() {
+                let mut weight = String::new();
+                weight.try_reserve_exact(39).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_pattern_weight_storage_unavailable")
+                })?;
+                write!(&mut weight, "{}", universe.weight_at(pattern).get()).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_pattern_weight_format_unavailable")
+                })?;
+                weights.push(weight);
+            }
+            weights
         } else {
             Vec::new()
         };
-        let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
+        let pc_score_problem_evidence = if score_objective_requested && scoring_batch.is_some() {
+            let evidence = if self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_score_portfolio_v2_evidence()
+            {
+                PcScoreProblemEvidence::from_executed_score_portfolio_problem(&self.problem)
+            } else {
+                PcScoreProblemEvidence::from_executed_problem(&self.problem)
+            };
+            Some(evidence.map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_pc_score_problem_evidence_identity_mismatch",
+                )
+            })?)
+        } else {
+            None
+        };
+        let pc_chance_coverage_evidence =
+            if tiling_only || !self.pc_chance_coverage_evidence_available {
+                None
+            } else {
+                let mut row_union = if matches!(
+                    self.problem_retention,
+                    SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+                ) {
+                    try_empty_pattern_bitset(
+                        universe.pattern_count(),
+                        "wasm_pc_chance_coverage_row_union_storage_unavailable",
+                    )?
+                } else {
+                    PatternBitSet::new(universe.pattern_count())
+                };
+                for row in &self.coverage_rows {
+                    row_union.union_with(row.coverage_bits()).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_pc_chance_coverage_row_union_mismatch",
+                        )
+                    })?;
+                }
+                let complete = self.coverage_rows_complete
+                    && probability_complete
+                    && count_complete
+                    && non_score_objective_complete
+                    && self.coverage_rows.len() == self.coverage_row_count
+                    && row_union == self.covered_patterns;
+                Some(
+                    PcChanceCoverageEvidence::from_problem_rows(
+                        &self.problem,
+                        core::mem::take(&mut self.coverage_rows),
+                        complete,
+                    )
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_pc_chance_coverage_evidence_identity_mismatch",
+                        )
+                    })?,
+                )
+            };
+        let mut coverage_pattern_words = Vec::new();
+        coverage_pattern_words
+            .try_reserve_exact(self.covered_patterns.words().len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_result_coverage_word_storage_unavailable",
+                )
+            })?;
+        coverage_pattern_words.extend_from_slice(self.covered_patterns.words());
+        let mut representative_path = Vec::new();
+        representative_path
+            .try_reserve_exact(self.representative_path.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_result_representative_path_storage_unavailable",
+                )
+            })?;
+        representative_path.extend_from_slice(&self.representative_path);
+        let mut result = CoreExecutionResult::new(fields, representative_path)
             .with_normalized_solution_keys(normalized_keys)
             .with_normalized_solution_identities(identities)
             .with_representative_solution_identity(self.representative_identity)
-            .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
+            .with_coverage_pattern_words(coverage_pattern_words)
             .with_solution_coverages(solution_coverages)
             .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_solution_probabilities(solution_probabilities)
@@ -2874,9 +4343,18 @@ impl WasmExactSearchSession {
                 scoring_execution_complete,
                 pattern_weights,
             )
-            .with_exact_scoring_execution_batch(scoring_batch);
+            .with_exact_scoring_execution_batch(scoring_batch)
+            .with_pc_score_problem_evidence(pc_score_problem_evidence);
+        if let Some(evidence) = pc_chance_coverage_evidence {
+            result = result.with_pc_chance_coverage_evidence(evidence);
+        }
         if let Some(store) = tiling_solution_store {
             result = result.with_tiling_solution_page_store(store);
+        }
+        if self.canonical_tiling_terminal_authorized() {
+            result = result.with_pc_tiling_memory_admission_evidence(
+                PcTilingMemoryAdmissionEvidence::WasmTerminalAuthority,
+            );
         }
         Ok(result)
     }
@@ -2912,7 +4390,10 @@ fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityM
 
 #[cfg(test)]
 mod tests {
-    use super::{packed_rows_are_valid, DistributedTilingRootRun, MAX_BOARD64_PIECES};
+    use super::{
+        checked_typed_problem_evidence_upper_bound, packed_rows_are_valid,
+        DistributedTilingRootRun, ExactSearchAdvance, WasmExactSearchSession, MAX_BOARD64_PIECES,
+    };
     use crate::backend::wasm_cpu::tiling_parallel::{
         WasmPackedTilingIdentity, WasmTilingRootChunk,
     };
@@ -2930,6 +4411,7 @@ mod tests {
     };
     use clearra_core_domain::{
         execution_cancellation::ExecutionControl,
+        pc::pc_target::PcTarget,
         piece::piece_kind::PieceKind,
         solution::normalized_tiling_solution::{
             normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
@@ -2940,12 +4422,53 @@ mod tests {
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
     };
     use clearra_pc_graph::request::{
-        PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+        OpeningPcSearchQuery, PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PieceWindow,
     };
     use clearra_problem::ProblemCompiler;
-    use clearra_supply::queue::{
-        fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
+    use clearra_supply::{
+        queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
+        QueueObservationPolicy,
     };
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn exact_six_line_session_fails_dense_preflight_before_catalog_allocation() {
+        let problem =
+            ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::six_lines()))
+                .expect("lazy six-line descriptor");
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("materialized descriptor");
+        assert_eq!(universe.pattern_count() as u128, 35_384_428_800);
+
+        let error = match WasmExactSearchSession::new(&problem) {
+            Ok(_) => panic!("dense preflight must reject exact six-line allocation"),
+            Err(error) => error,
+        };
+        let super::WasmExactSearchError::ResourceAdmission(report) = error else {
+            panic!("expected typed resource admission evidence, got {error:?}");
+        };
+        assert!(!report.execution_started());
+        assert!(!report.result_complete());
+        assert_eq!(
+            report.execution_availability().descriptor_pattern_count(),
+            Some(35_384_428_800)
+        );
+        assert_eq!(
+            report.execution_availability().dense_pattern_count(),
+            Some(35_384_428_800)
+        );
+        assert_eq!(
+            report.execution_availability().required_dense_bytes(),
+            Some(4_423_053_600)
+        );
+        assert_eq!(
+            report.execution_availability().required_memory_bytes(),
+            Some(4_423_053_600)
+        );
+    }
 
     #[test]
     fn compact_tiling_rows_round_trip_across_word_boundaries() {
@@ -2984,7 +4507,9 @@ mod tests {
         .with_objective(
             ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
         );
-        let problem = ProblemCompiler::compile_scenario_percent(&query).expect("problem");
+        let problem = ProblemCompiler::compile_scenario_percent(&query)
+            .expect("problem")
+            .with_pc_chance_probability_v2_evidence();
 
         let result =
             WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
@@ -2995,6 +4520,18 @@ mod tests {
             Some("coverage-summary")
         );
         assert_eq!(result.coverage_pattern_words(), &[1]);
+        let chance_evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("local cooperative typed Build coverage evidence");
+        assert!(chance_evidence.complete());
+        assert!(chance_evidence.problem().matches_search_problem(&problem));
+        assert_eq!(chance_evidence.row_count(), 1);
+        assert_eq!(
+            chance_evidence.coverage_union().words(),
+            result.coverage_pattern_words()
+        );
+        assert!(chance_evidence.rows().iter().all(|row| row.row_kind()
+            == &clearra_coverage::row::coverage_row_kind::CoverageRowKind::Build));
         assert_eq!(result.solution_coverages().len(), 1);
         assert_eq!(result.normalized_solution_coverages().len(), 1);
         let batch = result
@@ -3014,6 +4551,181 @@ mod tests {
         );
         assert!(result.normalized_solution_identities().is_empty());
         assert!(result.path_steps().is_empty());
+    }
+
+    #[test]
+    fn score_portfolio_policy_produces_simultaneous_coverage_and_score_evidence() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("score-portfolio problem")
+            .with_pc_score_portfolio_v2_evidence();
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("score-portfolio producer");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(true));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(true)
+        );
+        let coverage = result
+            .pc_chance_coverage_evidence()
+            .expect("score-portfolio coverage evidence");
+        assert!(coverage.complete());
+        assert!(coverage.problem().matches_search_problem(&problem));
+        assert_eq!(coverage.row_count(), 1);
+        let score = result
+            .pc_score_problem_evidence()
+            .expect("score-portfolio problem evidence");
+        assert!(score.matches_search_problem(&problem));
+        assert!(result
+            .exact_scoring_execution_batch()
+            .is_some_and(|batch| batch.complete()));
+    }
+
+    #[test]
+    fn score_portfolio_terminal_projection_counts_both_problem_evidence_owners() {
+        let base_query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll);
+        let score_problem = ProblemCompiler::compile_scenario_pc(
+            &base_query
+                .clone()
+                .with_objective(ObjectivePolicy::all().with_score_summary()),
+        )
+        .expect("score-only problem");
+        let portfolio_problem = ProblemCompiler::compile_scenario_pc(
+            &base_query.with_objective(ObjectivePolicy::minimum_cover().with_score_summary()),
+        )
+        .expect("score-portfolio problem")
+        .with_pc_score_portfolio_v2_evidence();
+
+        assert_eq!(
+            checked_typed_problem_evidence_upper_bound(&score_problem, 4096),
+            Some(4096)
+        );
+        assert_eq!(
+            checked_typed_problem_evidence_upper_bound(&portfolio_problem, 4096),
+            Some(8192)
+        );
+        assert_eq!(
+            checked_typed_problem_evidence_upper_bound(&portfolio_problem, u128::MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn generic_coverage_summary_never_retains_private_chance_rows() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique);
+        let problem =
+            ProblemCompiler::compile_scenario_percent(&query).expect("generic percent problem");
+        let session = WasmExactSearchSession::new(&problem).expect("generic percent session");
+        assert!(!session.pc_chance_coverage_evidence_available);
+        assert!(!session.coverage_rows_complete);
+        assert_eq!(session.coverage_rows.capacity(), 0);
+        drop(session);
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("generic percent result");
+        assert!(result.pc_chance_coverage_evidence().is_none());
+    }
+
+    #[test]
+    fn distributed_aggregate_never_synthesizes_missing_typed_chance_rows() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique);
+        let problem = ProblemCompiler::compile_scenario_percent(&query)
+            .expect("problem")
+            .with_pc_chance_probability_v2_evidence();
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+        let worker = CoreExecutionResult::new(
+            vec![
+                ("coverage_pattern_count".to_owned(), "1".to_owned()),
+                ("coverage_row_count".to_owned(), "1".to_owned()),
+                ("packing_candidate_count".to_owned(), "1".to_owned()),
+                ("build_variant_count".to_owned(), "1".to_owned()),
+                ("count_complete".to_owned(), "true".to_owned()),
+                ("resource_truncated".to_owned(), "false".to_owned()),
+            ],
+            Vec::new(),
+        )
+        .with_coverage_pattern_words(vec![1]);
+
+        coordinator
+            .absorb_distributed_result(&worker)
+            .expect("aggregate public worker result");
+        let result = match coordinator
+            .complete_external_geometry(0, 0)
+            .expect("complete coordinator")
+        {
+            ExactSearchAdvance::Completed(result) => result,
+            ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
+                panic!("coordinator must complete")
+            }
+        };
+
+        assert_eq!(result.coverage_pattern_words(), &[1]);
+        assert!(result.pc_chance_coverage_evidence().is_none());
+    }
+
+    #[test]
+    fn observation_policy_marks_candidate_rows_incomplete_before_execution() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+        let problem = ProblemCompiler::compile_scenario_percent(&query)
+            .expect("problem")
+            .with_pc_chance_probability_v2_evidence();
+
+        let session = WasmExactSearchSession::new(&problem).expect("observation session");
+
+        assert!(!session.coverage_rows_complete);
+        assert!(session.pc_chance_coverage_evidence_available);
+        drop(session);
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("observation result");
+        let evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("observation retains only incomplete candidate rows");
+        assert!(!evidence.complete());
+        assert!(evidence.problem().matches_search_problem(&problem));
     }
 
     #[test]
@@ -3043,6 +4755,13 @@ mod tests {
             result.bool_field("resource_probability_complete"),
             Some(false)
         );
+        assert!(result.field("actual_solution_set_contract").is_none());
+        assert!(result.field("packing_source_raw_geometry").is_none());
+        assert!(result
+            .field("tiling_materialization_memory_admission_accounted")
+            .is_none());
+        assert!(result.pc_tiling_memory_admission_evidence().is_none());
+        assert!(result.pc_chance_coverage_evidence().is_none());
     }
 
     #[test]
@@ -3251,18 +4970,38 @@ mod tests {
         let mut run = DistributedTilingRootRun::default();
         let first = chunk(3, 0, false);
         let last = chunk(4, 1, true);
-        assert_eq!(run.absorb_chunk(&first).expect("first chunk"), true);
-        assert_eq!(run.absorb_chunk(&first).expect("first replay"), false);
-        assert_eq!(run.absorb_chunk(&last).expect("last chunk"), true);
+        let exact_reservation = false;
         assert_eq!(
-            run.absorb_chunk(&first).expect("replay after completion"),
+            run.absorb_chunk(&first, exact_reservation)
+                .expect("first chunk"),
+            true
+        );
+        assert_eq!(
+            run.absorb_chunk(&first, exact_reservation)
+                .expect("first replay"),
             false
         );
-        assert_eq!(run.absorb_chunk(&last).expect("last replay"), false);
+        assert_eq!(
+            run.absorb_chunk(&last, exact_reservation)
+                .expect("last chunk"),
+            true
+        );
+        assert_eq!(
+            run.absorb_chunk(&first, exact_reservation)
+                .expect("replay after completion"),
+            false
+        );
+        assert_eq!(
+            run.absorb_chunk(&last, exact_reservation)
+                .expect("last replay"),
+            false
+        );
         assert_eq!(run.identities.len(), 2);
 
         let mismatched_replay = chunk(5, 0, false);
-        assert!(run.absorb_chunk(&mismatched_replay).is_err());
+        assert!(run
+            .absorb_chunk(&mismatched_replay, exact_reservation)
+            .is_err());
         assert_eq!(run.identities.len(), 2);
     }
 }

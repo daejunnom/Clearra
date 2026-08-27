@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-clearra-app = { path = "../clearra-app", default-features = false }
+clearra-app = { path = "../clearra-app", default-features = false, features = ["bitmap-render"] }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-forward-search = { path = "../clearra-forward-search" }
 clearra-fumen = { path = "../clearra-fumen" }

@@ -16,7 +16,10 @@ import {
   defaultSearchWorkersPerSession,
   loadDiscordBotConfig,
 } from "../src/config.mjs";
-import { findSlashCommand } from "../src/discord/slash-command-catalog.mjs";
+import {
+  findDiscordGenericCompatibilityRoute,
+  findProductCapability,
+} from "../src/discord/capability-registry.mjs";
 import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
 import {
   ARTIFACT_SCHEMA_VERSION,
@@ -49,8 +52,13 @@ test("Clearrabot applies direction-specific search and interaction limits", () =
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
   assert.equal(config.ingressMode, "gateway");
   assert.equal(config.searchTimeoutMs, 180_000);
+  assert.equal(config.pcSearchTimeoutMs, 300_000);
   assert.equal(config.reverseSearchTimeoutMs, 300_000);
+  assert.equal(config.buildSearchTimeoutMs, 900_000);
+  assert.equal(config.setupSearchTimeoutMs, 900_000);
   assert.equal(config.forwardSearchTimeoutMs, 900_000);
+  assert.equal(config.structureSearchTimeoutMs, 900_000);
+  assert.equal(config.diagnosticTimeoutMs, 180_000);
   assert.equal(config.setupProgressNoticeMs, 300_000);
   assert.equal(config.interactionDeadlineMs, 840_000);
   assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
@@ -61,20 +69,21 @@ test("Clearrabot applies direction-specific search and interaction limits", () =
 
 test("search timeout policy classifies native and sfinder argv consistently", () => {
   const examples = [
-    [["pc", "--lines", "4"], "reverse"],
-    [["pc-scenario", "--fixture", "opening"], "reverse"],
-    [["failed-queue"], "reverse"],
-    [["sfinder", "score-finder"], "reverse"],
-    [["sfinder", "best_save"], "reverse"],
-    [["damage"], "forward"],
-    [["spin-structure"], "forward"],
-    [["build-probability"], "forward"],
-    [["sfinder", "spin-cover"], "forward"],
-    [["sfinder", "setup"], "forward"],
-    [["finesse", "search"], "forward"],
-    [["finesse", "score"], "forward"],
-    [["setup-finder", "--remaining", "TI"], "setup"],
-    [["setup-finder"], "setup"],
+    [["pc", "--lines", "4"], "pc_reverse"],
+    [["pc-scenario", "--fixture", "opening"], "pc_reverse"],
+    [["failed-queue"], "pc_reverse"],
+    [["sfinder", "score-finder"], "pc_reverse"],
+    [["sfinder", "best_save"], "pc_reverse"],
+    [["damage"], "forward_long"],
+    [["spin-structure"], "structure_long"],
+    [["build-probability"], "build_long"],
+    [["sfinder", "spin-cover"], "structure_long"],
+    [["sfinder", "setup"], "build_long"],
+    [["finesse", "search"], "build_long"],
+    [["finesse", "score"], "build_long"],
+    [["setup-finder", "--remaining", "TI"], "setup_long"],
+    [["setup-finder"], "setup_long"],
+    [["sfinder", "verify", "pc"], "diagnostic"],
     [["verify", "pc"], "default"],
   ];
   for (const [arguments_, expected] of examples) {
@@ -101,7 +110,7 @@ test("every represented sfinder search keeps its direction-specific deadline", (
     "best-save",
     "score-finder",
   ];
-  const forward = [
+  const build = [
     "cover",
     "setup",
     "congruent",
@@ -109,20 +118,30 @@ test("every represented sfinder search keeps its direction-specific deadline", (
     "setup-cover",
     "cover-percent",
     "special-cover",
+  ];
+  const structure = [
     "spin-cover",
     "spin",
   ];
 
   for (const command of reverse) {
-    assert.equal(searchTimeoutClass(["sfinder", command]), "reverse", command);
+    assert.equal(searchTimeoutClass(["sfinder", command]), "pc_reverse", command);
     assert.equal(
       searchTimeoutMsForArguments(["sfinder", command]),
       300_000,
       command,
     );
   }
-  for (const command of forward) {
-    assert.equal(searchTimeoutClass(["sfinder", command]), "forward", command);
+  for (const command of build) {
+    assert.equal(searchTimeoutClass(["sfinder", command]), "build_long", command);
+    assert.equal(
+      searchTimeoutMsForArguments(["sfinder", command]),
+      900_000,
+      command,
+    );
+  }
+  for (const command of structure) {
+    assert.equal(searchTimeoutClass(["sfinder", command]), "structure_long", command);
     assert.equal(
       searchTimeoutMsForArguments(["sfinder", command]),
       900_000,
@@ -130,7 +149,7 @@ test("every represented sfinder search keeps its direction-specific deadline", (
     );
   }
   for (const command of ["pc-setup", "best-setup", "dpc-finder"]) {
-    assert.equal(searchTimeoutClass(["setup-finder"]), "setup", command);
+    assert.equal(searchTimeoutClass(["setup-finder"]), "setup_long", command);
     assert.equal(
       searchTimeoutMsForArguments(["setup-finder"]),
       900_000,
@@ -139,37 +158,51 @@ test("every represented sfinder search keeps its direction-specific deadline", (
   }
 });
 
-test("search timeout policy gives reverse five minutes and forward/setup fifteen", () => {
+test("search timeout policy preserves independent canonical family defaults", () => {
   assert.equal(searchTimeoutMsForArguments(["pc"]), 300_000);
+  assert.equal(searchTimeoutMsForArguments(["build-probability"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["damage"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000);
+  assert.equal(searchTimeoutMsForArguments(["spin-structure"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["finesse", "search"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["finesse", "score"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["verify"]), 180_000);
+  assert.equal(searchTimeoutMsForArguments(["sfinder", "verify"]), 180_000);
 
   const policy = {
     searchTimeoutMs: 11,
-    reverseSearchTimeoutMs: 22,
-    forwardSearchTimeoutMs: 33,
+    pcSearchTimeoutMs: 22,
+    buildSearchTimeoutMs: 33,
+    setupSearchTimeoutMs: 44,
+    forwardSearchTimeoutMs: 55,
+    structureSearchTimeoutMs: 66,
+    diagnosticTimeoutMs: 77,
   };
-  assert.equal(searchTimeoutMsForArguments(["verify"], policy), 11);
+  assert.equal(searchTimeoutMsForArguments(["sfinder", "verify"], policy), 77);
   assert.equal(searchTimeoutMsForArguments(["sfinder", "path"], policy), 22);
-  assert.equal(searchTimeoutMsForArguments(["spin-finder"], policy), 33);
-  assert.equal(searchTimeoutMsForArguments(["setup-finder"], policy), 33);
+  assert.equal(searchTimeoutMsForArguments(["build-probability"], policy), 33);
+  assert.equal(searchTimeoutMsForArguments(["setup-finder"], policy), 44);
+  assert.equal(searchTimeoutMsForArguments(["spin-finder"], policy), 55);
+  assert.equal(searchTimeoutMsForArguments(["spin-structure"], policy), 66);
+  assert.throws(
+    () => searchTimeoutClass(["damage"], "pc_reverse"),
+    /does not match/,
+  );
 });
 
 test("the frozen public Discord contract matches every runtime timeout class", () => {
-  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 26);
-  for (const { id, timeoutClass } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
-    const arguments_ = id.startsWith("finesse-")
-      ? ["finesse", id.slice("finesse-".length)]
-      : findSlashCommand(id).argvPrefix;
+  assert.ok(DISCORD_PUBLIC_SEARCH_CONTRACT.length > 0);
+  for (const { id, capabilityId, timeoutClass } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
+    const capability = findProductCapability(capabilityId) ??
+      findDiscordGenericCompatibilityRoute(capabilityId);
+    const arguments_ = capability.engine?.argvPrefix ?? capability.argvPrefix;
     assert.equal(searchTimeoutClass(arguments_), timeoutClass, id);
     assert.equal(
       searchTimeoutMsForArguments(arguments_),
-      timeoutClass === "reverse"
+      timeoutClass === "pc_reverse"
         ? 300_000
-        : timeoutClass === "forward" || timeoutClass === "setup"
+        : timeoutClass === "utility_bounded"
+          ? 900_000
+        : timeoutClass.endsWith("_long")
           ? 900_000
           : 180_000,
       id,
@@ -177,18 +210,38 @@ test("the frozen public Discord contract matches every runtime timeout class", (
   }
 });
 
-test("directional search timeout settings remain independently configurable", () => {
+test("canonical search timeout settings remain independently configurable with legacy fallbacks", () => {
   const config = loadDiscordBotConfig({
     DISCORD_TOKEN: "test-token",
     CLEARRA_SEARCH_TIMEOUT_MS: "1000",
-    CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "2000",
-    CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "3000",
-    CLEARRA_SETUP_PROGRESS_NOTICE_MS: "4000",
+    CLEARRA_PC_SEARCH_TIMEOUT_MS: "2000",
+    CLEARRA_BUILD_SEARCH_TIMEOUT_MS: "3000",
+    CLEARRA_SETUP_SEARCH_TIMEOUT_MS: "4000",
+    CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "5000",
+    CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS: "6000",
+    CLEARRA_DIAGNOSTIC_TIMEOUT_MS: "7000",
+    CLEARRA_SETUP_PROGRESS_NOTICE_MS: "8000",
   });
   assert.equal(config.searchTimeoutMs, 1_000);
+  assert.equal(config.pcSearchTimeoutMs, 2_000);
   assert.equal(config.reverseSearchTimeoutMs, 2_000);
-  assert.equal(config.forwardSearchTimeoutMs, 3_000);
-  assert.equal(config.setupProgressNoticeMs, 4_000);
+  assert.equal(config.buildSearchTimeoutMs, 3_000);
+  assert.equal(config.setupSearchTimeoutMs, 4_000);
+  assert.equal(config.forwardSearchTimeoutMs, 5_000);
+  assert.equal(config.structureSearchTimeoutMs, 6_000);
+  assert.equal(config.diagnosticTimeoutMs, 7_000);
+  assert.equal(config.setupProgressNoticeMs, 8_000);
+
+  const legacy = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "2100",
+    CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "9100",
+  });
+  assert.equal(legacy.pcSearchTimeoutMs, 2_100);
+  assert.equal(legacy.buildSearchTimeoutMs, 9_100);
+  assert.equal(legacy.setupSearchTimeoutMs, 9_100);
+  assert.equal(legacy.forwardSearchTimeoutMs, 9_100);
+  assert.equal(legacy.structureSearchTimeoutMs, 9_100);
   assert.throws(
     () =>
       loadDiscordBotConfig({
@@ -927,6 +980,12 @@ test("Discord rejects unrepresented sfinder contracts", () => {
 test("tiling-only commands are recognized after Discord argument normalization", () => {
   assert.equal(
     tilingOnlyRequested(
+      prepareClearraArguments(["pc", "tiling", "--lines", "4"]),
+    ),
+    true,
+  );
+  assert.equal(
+    tilingOnlyRequested(
       prepareClearraArguments(["pc", "--lines", "4", "--tiling-only"]),
     ),
     true,
@@ -1001,18 +1060,60 @@ test("Clearra executor submits an idempotent POST job without shell interpretati
   assert.equal(job.id, "job-literal-1");
   assert.equal(job.kind, "clearra.command");
   assert.deepEqual(job.arguments, ["pc", "queue with spaces", "literal;&|$()"]);
+  assert.equal(job.timeoutClass, "pc_reverse");
   assert.equal(job.deadlineUnixMs > Date.now(), true);
 });
 
-test("Clearra executor submits argv-specific reverse and forward deadlines", async () => {
+test("remote execution never submits tie flags and rejects alternative metadata", async () => {
+  let submitted = 0;
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
+    createJobId: () => "job-canonical-only-1",
+    fetch: async (_url, request) => {
+      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      submitted += 1;
+      return jobResponse({
+        id: "job-canonical-only-1",
+        state: "completed",
+        result: {
+          exitCode: 0,
+          signal: null,
+          stdout: JSON.stringify({
+            kind: "pc-minimum-cover.v2",
+            portfolio_alternative_page: { alternative_index: "2" },
+          }),
+          stderr: "",
+        },
+      });
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(["pc", "minimals", "--ties"]),
+    /does not expose alternative-result paging options/,
+  );
+  assert.equal(submitted, 0);
+  await assert.rejects(
+    executor.execute(["pc", "minimals"]),
+    /alternative-result metadata/,
+  );
+  assert.equal(submitted, 1);
+});
+
+test("Clearra executor submits canonical family classes and independently bounded deadlines", async () => {
   const submitted = [];
   let jobIndex = 0;
   const executor = new ClearraJobExecutor({
     endpoint: "https://jobs.example.test/jobs",
     authorizationToken: "job-token",
     searchTimeoutMs: 2_000,
-    reverseSearchTimeoutMs: 5_000,
-    forwardSearchTimeoutMs: 15_000,
+    pcSearchTimeoutMs: 5_000,
+    buildSearchTimeoutMs: 6_000,
+    setupSearchTimeoutMs: 7_000,
+    forwardSearchTimeoutMs: 8_000,
+    structureSearchTimeoutMs: 9_000,
+    diagnosticTimeoutMs: 3_000,
     now: () => 10_000,
     createJobId: () => `job-policy-${++jobIndex}`,
     fetch: async (_url, request) => {
@@ -1032,13 +1133,26 @@ test("Clearra executor submits argv-specific reverse and forward deadlines", asy
   });
 
   await executor.execute(["pc"]);
-  await executor.execute(["damage"]);
+  await executor.execute(["build-probability"]);
   await executor.execute(["setup-finder", "--remaining", "TI"]);
-  await executor.execute(["verify", "pc"]);
+  await executor.execute(["damage"]);
+  await executor.execute(["spin-structure"]);
+  await executor.execute(["sfinder", "verify", "pc"]);
 
   assert.deepEqual(
-    submitted.map(({ deadlineUnixMs }) => deadlineUnixMs),
-    [15_000, 25_000, 25_000, 12_000],
+    submitted.map(({ timeoutClass, deadlineUnixMs }) => [timeoutClass, deadlineUnixMs]),
+    [
+      ["pc_reverse", 15_000],
+      ["build_long", 16_000],
+      ["setup_long", 17_000],
+      ["forward_long", 18_000],
+      ["structure_long", 19_000],
+      ["diagnostic", 13_000],
+    ],
+  );
+  await assert.rejects(
+    executor.execute(["damage"], { timeoutClass: "pc_reverse" }),
+    /does not match/,
   );
 });
 

@@ -11,8 +11,8 @@ use super::{
     WasmExactSearchError,
 };
 
-const HOLD_STATE_COUNT: usize = 8;
-const EXTRA_DRAW_STATE_COUNT: usize = 2;
+pub(super) const HOLD_STATE_COUNT: usize = 8;
+pub(super) const EXTRA_DRAW_STATE_COUNT: usize = 2;
 const PATTERNS_PER_WORD: usize = u64::BITS as usize;
 const CANCELLATION_POLL_MASK: u32 = 0xff;
 

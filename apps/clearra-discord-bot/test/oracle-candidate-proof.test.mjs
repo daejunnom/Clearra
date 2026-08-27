@@ -10,8 +10,8 @@ import { currentRuntimeIdentityForCommit } from "../src/job-service/runtime-iden
 const expected = Object.freeze({
   sourceCommit: "7".repeat(40),
   candidateUrl: "https://candidate-clearra.example.run.app",
-  candidateRevision: "clearra-current-job-v075-701454b",
-  oracleReleaseId: "v0.7.5-701454b-private-v6",
+  candidateRevision: "clearra-current-job-v080-701454b",
+  oracleReleaseId: "v0.8.0-701454b",
   oracleReleaseSha256: "a".repeat(64),
   oracleSettingsSha256: "8".repeat(64),
   deploymentNonce: "9".repeat(64),
@@ -45,7 +45,7 @@ test("Oracle candidate proof rejects every stale deployment authority", () => {
   for (const [field, replacement] of [
     ["sourceCommit", "6".repeat(40)],
     ["candidateUrl", "https://stale-clearra.example.run.app"],
-    ["candidateRevision", "clearra-current-job-v075-stale"],
+    ["candidateRevision", "clearra-current-job-v080-stale"],
     ["oracleReleaseId", "v0.7.5-stale"],
     ["oracleReleaseSha256", "3".repeat(64)],
     ["oracleSettingsSha256", "6".repeat(64)],

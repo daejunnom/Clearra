@@ -1,4 +1,4 @@
-//! Exact forward search for fixed-queue damage and fixed/pattern spin outcomes.
+//! Exact forward search for fixed-queue damage/REN and fixed/pattern spin outcomes.
 
 mod board;
 mod parallel;
@@ -18,3 +18,6 @@ pub use query::{
 };
 pub use result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup};
 pub use search::{ForwardSearchAdvance, ForwardSearchError, ForwardSearchSession};
+
+/// The public fixed-queue REN boundary. Larger inputs fail closed before search starts.
+pub const MAX_REN_QUEUE_PIECES: usize = 22;

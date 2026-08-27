@@ -10,6 +10,9 @@ use clearra_coverage::{
 
 use super::{
     materialized_score_matrix::{MaterializedScoreCell, MaterializedScoreMatrix},
+    max_score_portfolio_enumerator::{
+        MaxScoreCoverPortfolioEnumerator, MaxScoreCoverPortfolioRestart,
+    },
     max_score_selection::{
         MaxScoreCoverError, MaxScoreCoverPolicy, MaxScoreCoverResult, PatternScoreContribution,
     },
@@ -21,11 +24,46 @@ use super::{
 pub struct MaxScoreCover;
 
 impl MaxScoreCover {
+    /// Prepares lazy enumeration of every minimum-cardinality portfolio over
+    /// the per-pattern score-optimal candidate rows. Attack is retained only
+    /// as informational evidence and never influences row eligibility.
+    pub fn portfolio_enumerator(
+        candidates: &[ScoredCoverageCandidate],
+        required_patterns: &PatternBitSet,
+        weights: &WeightedPatternSet,
+        _policy: MaxScoreCoverPolicy,
+    ) -> Result<MaxScoreCoverPortfolioEnumerator, MaxScoreCoverError> {
+        Self::validate_universes(candidates, required_patterns, weights)?;
+        let (candidate_ids, coverage) =
+            score_only_candidate_coverage_rows(candidates, required_patterns)?;
+        MaxScoreCoverPortfolioEnumerator::new(candidate_ids, &coverage, required_patterns)
+            .map_err(MaxScoreCoverError::Portfolio)
+    }
+
+    pub fn resume_portfolio_enumerator(
+        candidates: &[ScoredCoverageCandidate],
+        required_patterns: &PatternBitSet,
+        weights: &WeightedPatternSet,
+        _policy: MaxScoreCoverPolicy,
+        restart: MaxScoreCoverPortfolioRestart,
+    ) -> Result<MaxScoreCoverPortfolioEnumerator, MaxScoreCoverError> {
+        Self::validate_universes(candidates, required_patterns, weights)?;
+        let (candidate_ids, coverage) =
+            score_only_candidate_coverage_rows(candidates, required_patterns)?;
+        MaxScoreCoverPortfolioEnumerator::resume(
+            candidate_ids,
+            &coverage,
+            required_patterns,
+            restart,
+        )
+        .map_err(MaxScoreCoverError::Portfolio)
+    }
+
     pub fn select(
         candidates: &[ScoredCoverageCandidate],
         required_patterns: &PatternBitSet,
         weights: &WeightedPatternSet,
-        policy: MaxScoreCoverPolicy,
+        _policy: MaxScoreCoverPolicy,
     ) -> Result<MaxScoreCoverResult, MaxScoreCoverError> {
         Self::validate_universes(candidates, required_patterns, weights)?;
         let pattern_count = required_patterns.pattern_count();
@@ -34,17 +72,13 @@ impl MaxScoreCover {
             let best_value = candidates
                 .iter()
                 .filter(|candidate| candidate.patterns().contains(pattern))
-                .map(|candidate| policy.candidate_value(candidate.score(), candidate.attack()))
-                .max_by(f64::total_cmp);
+                .map(ScoredCoverageCandidate::score)
+                .max();
             let Some(best_value) = best_value else {
                 continue;
             };
             for candidate in candidates.iter().filter(|candidate| {
-                candidate.patterns().contains(pattern)
-                    && policy
-                        .candidate_value(candidate.score(), candidate.attack())
-                        .total_cmp(&best_value)
-                        .is_eq()
+                candidate.patterns().contains(pattern) && candidate.score() == best_value
             }) {
                 optimal_rows
                     .entry(candidate.candidate_id())
@@ -78,7 +112,6 @@ impl MaxScoreCover {
                     candidate_id: candidate.candidate_id(),
                     score: candidate.score(),
                     attack: candidate.attack(),
-                    objective_value: policy.candidate_value(candidate.score(), candidate.attack()),
                 })
                 .max_by(best_contribution_order)
             else {
@@ -105,37 +138,43 @@ impl MaxScoreCover {
 }
 
 impl MaxScoreCover {
+    pub fn portfolio_enumerator_matrix(
+        matrix: &MaterializedScoreMatrix,
+        required_patterns: &PatternBitSet,
+        weights: &WeightedPatternSet,
+        _policy: MaxScoreCoverPolicy,
+    ) -> Result<MaxScoreCoverPortfolioEnumerator, MaxScoreCoverError> {
+        validate_score_matrix(matrix, required_patterns, weights)?;
+        let (candidate_ids, coverage) = score_only_matrix_coverage_rows(matrix, required_patterns)?;
+        MaxScoreCoverPortfolioEnumerator::new(candidate_ids, &coverage, required_patterns)
+            .map_err(MaxScoreCoverError::Portfolio)
+    }
+
+    pub fn resume_portfolio_enumerator_matrix(
+        matrix: &MaterializedScoreMatrix,
+        required_patterns: &PatternBitSet,
+        weights: &WeightedPatternSet,
+        _policy: MaxScoreCoverPolicy,
+        restart: MaxScoreCoverPortfolioRestart,
+    ) -> Result<MaxScoreCoverPortfolioEnumerator, MaxScoreCoverError> {
+        validate_score_matrix(matrix, required_patterns, weights)?;
+        let (candidate_ids, coverage) = score_only_matrix_coverage_rows(matrix, required_patterns)?;
+        MaxScoreCoverPortfolioEnumerator::resume(
+            candidate_ids,
+            &coverage,
+            required_patterns,
+            restart,
+        )
+        .map_err(MaxScoreCoverError::Portfolio)
+    }
+
     pub fn select_matrix(
         matrix: &MaterializedScoreMatrix,
         required_patterns: &PatternBitSet,
         weights: &WeightedPatternSet,
-        policy: MaxScoreCoverPolicy,
+        _policy: MaxScoreCoverPolicy,
     ) -> Result<MaxScoreCoverResult, MaxScoreCoverError> {
-        if !matrix.complete() {
-            return Err(MaxScoreCoverError::ScoreMatrixIncomplete);
-        }
-        if matrix.pattern_count() != required_patterns.pattern_count() {
-            return Err(MaxScoreCoverError::ScoreMatrixPatternUniverseMismatch {
-                expected: required_patterns.pattern_count(),
-                actual: matrix.pattern_count(),
-            });
-        }
-        if weights.len() != required_patterns.pattern_count() {
-            return Err(MaxScoreCoverError::RequiredPatternUniverseMismatch {
-                expected: required_patterns.pattern_count(),
-                actual: weights.len(),
-            });
-        }
-        if let Some(cell) = matrix
-            .cells()
-            .iter()
-            .find(|cell| cell.pattern_id().index() >= matrix.pattern_count())
-        {
-            return Err(MaxScoreCoverError::ScoreCellPatternOutOfRange {
-                pattern_index: cell.pattern_id().index(),
-                pattern_count: matrix.pattern_count(),
-            });
-        }
+        validate_score_matrix(matrix, required_patterns, weights)?;
 
         let mut best_candidate_pattern = BTreeMap::<(usize, usize), &MaterializedScoreCell>::new();
         for cell in matrix
@@ -146,19 +185,19 @@ impl MaxScoreCover {
             best_candidate_pattern
                 .entry((cell.candidate_id(), cell.pattern_id().index()))
                 .and_modify(|current| {
-                    if materialized_cell_order(cell, current, policy).is_gt() {
+                    if materialized_cell_order(cell, current).is_gt() {
                         *current = cell;
                     }
                 })
                 .or_insert(cell);
         }
-        let mut best_value_by_pattern = BTreeMap::<usize, f64>::new();
+        let mut best_value_by_pattern = BTreeMap::<usize, u64>::new();
         for cell in best_candidate_pattern.values().copied() {
-            let value = policy.candidate_value(cell.score(), cell.attack());
+            let value = cell.score();
             best_value_by_pattern
                 .entry(cell.pattern_id().index())
                 .and_modify(|current| {
-                    if value.total_cmp(current).is_gt() {
+                    if value > *current {
                         *current = value;
                     }
                 })
@@ -167,11 +206,7 @@ impl MaxScoreCover {
         let mut optimal_rows = BTreeMap::<usize, PatternBitSet>::new();
         for cell in best_candidate_pattern.values().copied() {
             let best_value = best_value_by_pattern[&cell.pattern_id().index()];
-            if policy
-                .candidate_value(cell.score(), cell.attack())
-                .total_cmp(&best_value)
-                .is_eq()
-            {
+            if cell.score() == best_value {
                 optimal_rows
                     .entry(cell.candidate_id())
                     .or_insert_with(|| PatternBitSet::new(matrix.pattern_count()))
@@ -200,12 +235,9 @@ impl MaxScoreCover {
                 .filter(|cell| {
                     cell.pattern_id() == pattern
                         && selected.contains(&cell.candidate_id())
-                        && policy
-                            .candidate_value(cell.score(), cell.attack())
-                            .total_cmp(&best_value_by_pattern[&pattern.index()])
-                            .is_eq()
+                        && cell.score() == best_value_by_pattern[&pattern.index()]
                 })
-                .max_by(|left, right| materialized_cell_order(left, right, policy))
+                .max_by(|left, right| materialized_cell_order(left, right))
             else {
                 continue;
             };
@@ -231,6 +263,110 @@ impl MaxScoreCover {
     }
 }
 
+fn score_only_candidate_coverage_rows(
+    candidates: &[ScoredCoverageCandidate],
+    required_patterns: &PatternBitSet,
+) -> Result<(Vec<usize>, Vec<PatternBitSet>), MaxScoreCoverError> {
+    let pattern_count = required_patterns.pattern_count();
+    let mut optimal_rows = BTreeMap::<usize, PatternBitSet>::new();
+    for pattern in required_patterns.covered_patterns() {
+        let Some(best_score) = candidates
+            .iter()
+            .filter(|candidate| candidate.patterns().contains(pattern))
+            .map(ScoredCoverageCandidate::score)
+            .max()
+        else {
+            continue;
+        };
+        for candidate in candidates.iter().filter(|candidate| {
+            candidate.patterns().contains(pattern) && candidate.score() == best_score
+        }) {
+            optimal_rows
+                .entry(candidate.candidate_id())
+                .or_insert_with(|| PatternBitSet::new(pattern_count))
+                .insert(pattern)?;
+        }
+    }
+    Ok(optimal_rows
+        .into_iter()
+        .map(|(candidate_id, coverage)| (candidate_id, coverage))
+        .unzip())
+}
+
+fn score_only_matrix_coverage_rows(
+    matrix: &MaterializedScoreMatrix,
+    required_patterns: &PatternBitSet,
+) -> Result<(Vec<usize>, Vec<PatternBitSet>), MaxScoreCoverError> {
+    let mut best_candidate_pattern = BTreeMap::<(usize, usize), &MaterializedScoreCell>::new();
+    for cell in matrix
+        .cells()
+        .iter()
+        .filter(|cell| required_patterns.contains(cell.pattern_id()))
+    {
+        best_candidate_pattern
+            .entry((cell.candidate_id(), cell.pattern_id().index()))
+            .and_modify(|current| {
+                if materialized_cell_order(cell, current).is_gt() {
+                    *current = cell;
+                }
+            })
+            .or_insert(cell);
+    }
+    let mut best_score_by_pattern = BTreeMap::<usize, u64>::new();
+    for cell in best_candidate_pattern.values().copied() {
+        best_score_by_pattern
+            .entry(cell.pattern_id().index())
+            .and_modify(|current| *current = (*current).max(cell.score()))
+            .or_insert(cell.score());
+    }
+    let mut optimal_rows = BTreeMap::<usize, PatternBitSet>::new();
+    for cell in best_candidate_pattern.values().copied() {
+        if cell.score() == best_score_by_pattern[&cell.pattern_id().index()] {
+            optimal_rows
+                .entry(cell.candidate_id())
+                .or_insert_with(|| PatternBitSet::new(matrix.pattern_count()))
+                .insert(cell.pattern_id())?;
+        }
+    }
+    Ok(optimal_rows
+        .into_iter()
+        .map(|(candidate_id, coverage)| (candidate_id, coverage))
+        .unzip())
+}
+
+fn validate_score_matrix(
+    matrix: &MaterializedScoreMatrix,
+    required_patterns: &PatternBitSet,
+    weights: &WeightedPatternSet,
+) -> Result<(), MaxScoreCoverError> {
+    if !matrix.complete() {
+        return Err(MaxScoreCoverError::ScoreMatrixIncomplete);
+    }
+    if matrix.pattern_count() != required_patterns.pattern_count() {
+        return Err(MaxScoreCoverError::ScoreMatrixPatternUniverseMismatch {
+            expected: required_patterns.pattern_count(),
+            actual: matrix.pattern_count(),
+        });
+    }
+    if weights.len() != required_patterns.pattern_count() {
+        return Err(MaxScoreCoverError::RequiredPatternUniverseMismatch {
+            expected: required_patterns.pattern_count(),
+            actual: weights.len(),
+        });
+    }
+    if let Some(cell) = matrix
+        .cells()
+        .iter()
+        .find(|cell| cell.pattern_id().index() >= matrix.pattern_count())
+    {
+        return Err(MaxScoreCoverError::ScoreCellPatternOutOfRange {
+            pattern_index: cell.pattern_id().index(),
+            pattern_count: matrix.pattern_count(),
+        });
+    }
+    Ok(())
+}
+
 fn pattern_weight(
     weights: &WeightedPatternSet,
     pattern: clearra_coverage::pattern::pattern_id::PatternId,
@@ -248,11 +384,9 @@ fn pattern_weight(
 fn materialized_cell_order(
     left: &MaterializedScoreCell,
     right: &MaterializedScoreCell,
-    policy: MaxScoreCoverPolicy,
 ) -> std::cmp::Ordering {
-    policy
-        .candidate_value(left.score(), left.attack())
-        .total_cmp(&policy.candidate_value(right.score(), right.attack()))
+    left.score()
+        .cmp(&right.score())
         .then_with(|| right.candidate_id().cmp(&left.candidate_id()))
         .then_with(|| right.trace_identity().cmp(left.trace_identity()))
 }
@@ -287,15 +421,14 @@ struct CandidateContribution {
     candidate_id: usize,
     score: u64,
     attack: u32,
-    objective_value: f64,
 }
 
 fn best_contribution_order(
     left: &CandidateContribution,
     right: &CandidateContribution,
 ) -> std::cmp::Ordering {
-    left.objective_value
-        .total_cmp(&right.objective_value)
+    left.score
+        .cmp(&right.score)
         .then_with(|| right.candidate_id.cmp(&left.candidate_id))
 }
 

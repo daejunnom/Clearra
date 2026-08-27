@@ -1,4 +1,4 @@
-use clearra_scoring::{builtin::jstris_ultra, profile::ScoreProfileRegistry};
+use clearra_scoring::profile::ScoreProfileRegistry;
 
 use super::ScoreProfileEditorSchema;
 
@@ -8,8 +8,18 @@ fn score_profile_editor_uses_canonical_registry_profiles() {
     let registry = ScoreProfileRegistry::builtins();
 
     assert!(schema.enabled());
-    assert_eq!(schema.profiles().len(), registry.profiles().len());
-    assert_eq!(schema.profiles()[0].value(), jstris_ultra().id());
+    assert_eq!(
+        schema
+            .profiles()
+            .iter()
+            .map(|profile| profile.value())
+            .collect::<Vec<_>>(),
+        registry
+            .profiles()
+            .iter()
+            .map(|profile| profile.id())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -88,6 +98,10 @@ fn score_profile_editor_exposes_profile_attack_spin_combo_b2b_fields() {
         .iter()
         .any(|field| field == "score_evaluation_scope"));
     assert!(schema
+        .result_contract_fields()
+        .iter()
+        .any(|field| field == "score_pattern_optimal_count"));
+    assert!(!schema
         .result_contract_fields()
         .iter()
         .any(|field| field == "objective_best_score_by_pattern_count"));

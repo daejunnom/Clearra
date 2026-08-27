@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use super::{catalog::SkeletonRow, mix_digest};
 
 pub(super) const APDP_ARM: u8 = 1;
@@ -26,7 +24,17 @@ pub(super) struct ExactArmPairIndex {
 
 impl ExactArmPairIndex {
     pub fn compile(width: u8, rows: &[SkeletonRow]) -> Option<Self> {
-        let mut parents_by_partial = BTreeMap::<u64, Vec<u32>>::new();
+        // One tetromino has four three-cell partials and at most six unordered
+        // partial pairs. Every accepted pair records both parents, so twelve
+        // `(partial, row)` records per source row are a conservative bound.
+        // Keeping the build flat makes the complete allocation shape checked
+        // and fallible; it also avoids opaque per-node BTreeMap allocations in
+        // the score-terminal memory surface.
+        let association_capacity = rows.len().checked_mul(12)?;
+        let mut parent_associations = Vec::<(u64, u32)>::new();
+        parent_associations
+            .try_reserve_exact(association_capacity)
+            .ok()?;
         let mut row_support_flags = Vec::new();
         row_support_flags.try_reserve_exact(rows.len()).ok()?;
 
@@ -59,29 +67,34 @@ impl ExactArmPairIndex {
                         _ => APDP_ARM_ELBOW,
                     };
                     let row_id = u32::try_from(row_id).ok()?;
-                    parents_by_partial
-                        .entry(partials[left])
-                        .or_default()
-                        .push(row_id);
-                    parents_by_partial
-                        .entry(partials[right])
-                        .or_default()
-                        .push(row_id);
+                    parent_associations.push((partials[left], row_id));
+                    parent_associations.push((partials[right], row_id));
                 }
             }
             row_support_flags.push(flags);
         }
 
+        parent_associations.sort_unstable();
+        parent_associations.dedup();
+
         let mut ranges = Vec::new();
         let mut parent_rows = Vec::new();
-        ranges.try_reserve_exact(parents_by_partial.len()).ok()?;
-        for (partial_cells, mut parents) in parents_by_partial {
-            parents.sort_unstable();
-            parents.dedup();
+        ranges.try_reserve_exact(parent_associations.len()).ok()?;
+        parent_rows
+            .try_reserve_exact(parent_associations.len())
+            .ok()?;
+        let mut cursor = 0;
+        while cursor < parent_associations.len() {
+            let partial_cells = parent_associations[cursor].0;
             let parent_start = u32::try_from(parent_rows.len()).ok()?;
-            let parent_count = u16::try_from(parents.len()).ok()?;
-            parent_rows.try_reserve(parents.len()).ok()?;
-            parent_rows.extend_from_slice(&parents);
+            let begin = cursor;
+            while cursor < parent_associations.len()
+                && parent_associations[cursor].0 == partial_cells
+            {
+                parent_rows.push(parent_associations[cursor].1);
+                cursor += 1;
+            }
+            let parent_count = u16::try_from(cursor.checked_sub(begin)?).ok()?;
             ranges.push(ExactParentRange {
                 partial_cells,
                 parent_start,
@@ -138,6 +151,21 @@ impl ExactArmPairIndex {
         self.ranges.capacity() * core::mem::size_of::<ExactParentRange>()
             + self.parent_rows.capacity() * core::mem::size_of::<u32>()
             + self.row_support_flags.capacity() * core::mem::size_of::<u8>()
+    }
+
+    /// Conservative peak for compiling the flat APDP association table and
+    /// the retained range/row/flag arrays. This deliberately describes an
+    /// upper bound, not the exact post-dedup allocation.
+    pub fn checked_compile_peak_upper_bound(row_count: usize) -> Option<u128> {
+        let row_count = row_count as u128;
+        let association_count = row_count.checked_mul(12)?;
+        association_count
+            .checked_mul(core::mem::size_of::<(u64, u32)>() as u128)?
+            .checked_add(
+                association_count.checked_mul(core::mem::size_of::<ExactParentRange>() as u128)?,
+            )?
+            .checked_add(association_count.checked_mul(core::mem::size_of::<u32>() as u128)?)?
+            .checked_add(row_count.checked_mul(core::mem::size_of::<u8>() as u128)?)
     }
 }
 

@@ -124,11 +124,15 @@ pub(crate) fn c_buildup_results(
     )?;
     let pattern_indices =
         compile_pattern_group_indices(universe, packing, coverage_pattern_selection)?;
-    let materialized_variant_limit = if score_matrix_requested(problem) {
-        problem.resource_budget().max_results()
-    } else {
-        problem.trace_policy().retained_trace_limit()
-    };
+    // The typed save producer needs the complete private execution batch in
+    // order to derive exact, query-bound terminal evidence. Ordinary Trace
+    // output remains governed by `retained_trace_limit`.
+    let materialized_variant_limit =
+        if score_matrix_requested(problem) || complete_trace_batch_requested(problem) {
+            problem.resource_budget().max_results()
+        } else {
+            problem.trace_policy().retained_trace_limit()
+        };
     let candidate_batch = execute_candidates(
         problem,
         packing,
@@ -494,27 +498,36 @@ fn execute_candidate(
             )
         }
     };
-    if let Some(execution) = buildup_geometry_language_execution::try_execute_candidate(
-        problem,
-        packing,
-        candidate_index,
-        candidate,
-        buildup_template,
-        buildup_scratch,
-        coverage_pattern_selection,
-        materialized_variant_limit,
-        cancellation,
-        native_workspace,
-        language_evaluator,
-        pattern_index,
-    )? {
-        return Ok(candidate_from_geometry_language(
+    // The geometry-language product proves per-pattern coverage but deliberately
+    // does not retain every concrete BuildVariant.  A complete CountAll+Trace
+    // consumer needs those variants as query-bound replay evidence, so it must
+    // use the exhaustive per-binding path below.
+    if !complete_trace_batch_requested(problem) {
+        if let Some(execution) = buildup_geometry_language_execution::try_execute_candidate(
+            problem,
+            packing,
             candidate_index,
             candidate,
-            execution,
-        ));
+            buildup_template,
+            buildup_scratch,
+            coverage_pattern_selection,
+            materialized_variant_limit,
+            cancellation,
+            native_workspace,
+            language_evaluator,
+            pattern_index,
+        )? {
+            return Ok(candidate_from_geometry_language(
+                candidate_index,
+                candidate,
+                execution,
+            ));
+        }
     }
-    if binding_count > 1 && !score_matrix_requested(problem) {
+    if binding_count > 1
+        && !score_matrix_requested(problem)
+        && !complete_trace_batch_requested(problem)
+    {
         return Err(BuildUpRunnerError::ExactGeometryLanguageRequired {
             candidate_id: candidate.candidate_id(),
             binding_count,
@@ -742,7 +755,8 @@ pub(crate) fn buildup_enumeration_limits(
         // Coverage needs only one witness plus the exhaustive count. A score
         // matrix needs every legal execution that the bounded native view can
         // materialize; if that view truncates, postprocess remains incomplete.
-        max_variants: if score_matrix_requested(problem) {
+        max_variants: if score_matrix_requested(problem) || complete_trace_batch_requested(problem)
+        {
             0
         } else {
             1
@@ -755,6 +769,12 @@ pub(crate) fn buildup_enumeration_limits(
 
 fn score_matrix_requested(problem: &SearchProblem) -> bool {
     problem.objective().score().requested()
+}
+
+fn complete_trace_batch_requested(problem: &SearchProblem) -> bool {
+    problem
+        .pc_chance_evidence_policy()
+        .retains_pc_save_groups_v2_evidence()
 }
 
 pub(crate) fn buildup_witness_from_c_results<I>(

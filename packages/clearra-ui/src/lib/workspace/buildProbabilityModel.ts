@@ -29,10 +29,12 @@ export type BuildProbabilityRequest = {
   targetMask: bigint;
   queue: string;
   holdEnabled: boolean;
+  sourcePieces: number | null;
   aggregation: 'buildability' | 'tiling' | 'spin';
   rule: RuleProfile;
   spinProfile: SpinProfile;
   preserveB2B: boolean;
+  solutionProbabilities: boolean;
   precomputeBuildDependencies: boolean;
   finesse: BuildProbabilityFinesseMetric;
   patternKnowledge: BuildProbabilityPatternKnowledge;
@@ -46,7 +48,13 @@ export type BuildProbabilityValidationCode =
   | 'build_target_empty'
   | 'build_target_not_tileable'
   | 'build_target_overlap'
+  | 'source_pieces_invalid'
   | 'worker_count_invalid';
+
+// The native option is a positive usize. Browser commands execute in wasm32,
+// so the shared Web/Desktop surface uses the complete portable native range.
+export const BUILD_SOURCE_PIECES_MIN = 1;
+export const BUILD_SOURCE_PIECES_MAX = 0xffff_ffff;
 
 export const BUILD_PROBABILITY_PRIMARY_METRIC = Object.freeze({
   id: 'full-future-oracle-build-probability',
@@ -62,10 +70,12 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     targetMask: 0n,
     queue: '',
     holdEnabled: true,
+    sourcePieces: null,
     aggregation: 'buildability',
     rule: 'srs-plus',
     spinProfile: 't-spins',
     preserveB2B: false,
+    solutionProbabilities: false,
     precomputeBuildDependencies: false,
     finesse: DEFAULT_BUILD_PROBABILITY_FINESSE,
     patternKnowledge: DEFAULT_BUILD_PROBABILITY_PATTERN_KNOWLEDGE,
@@ -91,6 +101,7 @@ export function normalizeBuildProbabilityRequest(
       rule: 'srs-plus',
       spinProfile: 't-spins',
       preserveB2B: false,
+      solutionProbabilities: false,
       precomputeBuildDependencies: false,
       finesse: 'off',
       patternKnowledge: 'both'
@@ -127,6 +138,14 @@ export function buildProbabilityValidationCodes(
   if (targetCellCount === 0) errors.push('build_target_empty');
   else if (targetCellCount % 4 !== 0) errors.push('build_target_not_tileable');
   if ((existing & target) !== 0n) errors.push('build_target_overlap');
+  if (
+    request.sourcePieces != null &&
+    (!Number.isInteger(request.sourcePieces) ||
+      request.sourcePieces < BUILD_SOURCE_PIECES_MIN ||
+      request.sourcePieces > BUILD_SOURCE_PIECES_MAX)
+  ) {
+    errors.push('source_pieces_invalid');
+  }
   if (!Number.isInteger(request.workers) || request.workers < 1) {
     errors.push('worker_count_invalid');
   }
@@ -150,6 +169,9 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
   ];
   if (request.holdEnabled) tokens.push('--hold', 'empty');
   else tokens.push('--no-hold');
+  if (request.sourcePieces != null) {
+    tokens.push('--source-pieces', String(request.sourcePieces));
+  }
   if (request.queue) {
     tokens.push(
       parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
@@ -165,6 +187,7 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
       tokens.push('--spin-profile', request.spinProfile);
     }
     if (request.preserveB2B) tokens.push('--preserve-b2b');
+    if (request.solutionProbabilities) tokens.push('--solution-probabilities');
     tokens.push(
       request.precomputeBuildDependencies
         ? '--build-dependency-dag'
@@ -196,10 +219,12 @@ export function buildProbabilityRequestForDesktop(
     queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
     patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
     hold_enabled: request.holdEnabled,
+    ...(request.sourcePieces == null ? {} : { source_piece_count: request.sourcePieces }),
     build_aggregation: request.aggregation,
     rule: request.rule,
     spin_profile: request.spinProfile,
     preserve_b2b: request.preserveB2B,
+    solution_probabilities: request.solutionProbabilities,
     precompute_build_dependencies: request.precomputeBuildDependencies,
     ...buildProbabilityFinesseDesktopFields(request.finesse, request.patternKnowledge),
     include_horizontal_mirror: mirrorBoardMask(existing, request.height) === existing,

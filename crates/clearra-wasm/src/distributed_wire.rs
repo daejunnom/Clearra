@@ -1,13 +1,18 @@
 use clearra_core_domain::{
     piece::piece_kind::PieceKind,
-    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+    solution::normalized_tiling_solution::{
+        PiecePlacementMask, StandardBoard64TilingIdentity, STANDARD_BOARD64_TILING_MAX_PLACEMENTS,
+    },
 };
 use clearra_core_executor::{
-    tiling_solution_store::PackedTilingRows, CoreExecutionResult, CorePathStep,
-    CorePostProcessScoreCell, CorePostProcessSpinCoverage, NormalizedSolutionCoverage,
-    SolutionCoverage, WasmCandidatePacket, WasmPackedTilingIdentity, WasmTilingRootChunk,
+    core_execution_result::CoreResultFieldReplacementError,
+    encode_canonical_wasm_candidate_packet_batch, tiling_solution_store::PackedTilingRows,
+    CoreExecutionResult, CorePathStep, CorePostProcessScoreCell, CorePostProcessSpinCoverage,
+    NormalizedSolutionCoverage, SolutionCoverage, WasmCandidatePacket, WasmPackedTilingIdentity,
+    WasmTilingRootChunk,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use std::sync::Arc;
 
 const CANDIDATE_MAGIC: u32 = 0x4342_4131;
 const PARTIAL_MAGIC: u32 = 0x5052_5431;
@@ -23,27 +28,139 @@ impl DistributedWireError {
     pub const fn reason(self) -> &'static str {
         self.0
     }
+
+    pub(crate) const fn decode_memory_projection_overflow() -> Self {
+        Self("partial_decode_memory_projection_overflow")
+    }
+
+    pub(crate) const fn candidate_decode_memory_projection_overflow() -> Self {
+        Self("candidate_decode_memory_projection_overflow")
+    }
+}
+
+#[derive(Debug)]
+pub enum GuardedDistributedWireError<E> {
+    Wire(DistributedWireError),
+    MemoryGuard(E),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PartialResultDecodeProjection {
+    nested_retained_bytes: u128,
+    constructor_extra_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PartialBatchDecodeProjection {
+    result_count: usize,
+    nested_retained_bytes: u128,
+    constructor_extra_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CandidateBatchDecodeProjection {
+    candidate_count: usize,
+    row_ids_requested_bytes: u128,
 }
 
 pub fn encode_candidate_batch(candidates: &[WasmCandidatePacket]) -> Vec<u8> {
-    let row_count = candidates
-        .iter()
-        .map(|candidate| candidate.row_ids().len())
-        .sum::<usize>();
-    let mut output = Vec::with_capacity(12 + candidates.len() * 24 + row_count * 4);
-    put_u32(&mut output, CANDIDATE_MAGIC);
-    put_u32(&mut output, WIRE_VERSION);
-    put_u32(&mut output, candidates.len() as u32);
+    encode_canonical_wasm_candidate_packet_batch(candidates)
+}
+
+pub fn encode_candidate_batch_with_memory_guard<E>(
+    candidates: &[WasmCandidatePacket],
+    mut memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<u8>, GuardedDistributedWireError<E>> {
+    let required_len =
+        checked_candidate_batch_len(candidates).map_err(GuardedDistributedWireError::Wire)?;
+    memory_guard(required_len as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(required_len).map_err(|_| {
+        GuardedDistributedWireError::Wire(DistributedWireError("candidate_batch_allocation_failed"))
+    })?;
+    memory_guard(output.capacity() as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    let mut sink = CheckedWireOutput::new(&mut output);
+    checked_put_u32(&mut sink, CANDIDATE_MAGIC).map_err(GuardedDistributedWireError::Wire)?;
+    checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
+    checked_put_u32(
+        &mut sink,
+        u32::try_from(candidates.len()).map_err(|_| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "candidate_batch_count_overflow",
+            ))
+        })?,
+    )
+    .map_err(GuardedDistributedWireError::Wire)?;
     for candidate in candidates {
-        put_u64(&mut output, candidate.ordinal());
-        put_u32(&mut output, u32::from(candidate.pass_index()));
-        put_u32(&mut output, candidate.target_index());
-        put_u32(&mut output, candidate.row_ids().len() as u32);
+        checked_put_u64(&mut sink, candidate.ordinal())
+            .map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(&mut sink, u32::from(candidate.pass_index()))
+            .map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(&mut sink, candidate.target_index())
+            .map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(
+            &mut sink,
+            u32::try_from(candidate.row_ids().len()).map_err(|_| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "candidate_row_count_overflow",
+                ))
+            })?,
+        )
+        .map_err(GuardedDistributedWireError::Wire)?;
         for row_id in candidate.row_ids() {
-            put_u32(&mut output, *row_id);
+            checked_put_u32(&mut sink, *row_id).map_err(GuardedDistributedWireError::Wire)?;
         }
     }
-    output
+    drop(sink);
+    if output.len() != required_len {
+        return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+            "candidate_batch_length_mismatch",
+        )));
+    }
+    Ok(output)
+}
+
+fn checked_candidate_batch_len(
+    candidates: &[WasmCandidatePacket],
+) -> Result<usize, DistributedWireError> {
+    if candidates.len() > MAX_WIRE_ITEMS {
+        return Err(DistributedWireError("candidate_batch_count_exceeded"));
+    }
+    let mut required_len = 12_usize;
+    for candidate in candidates {
+        if candidate.row_ids().len() > MAX_WIRE_ITEMS {
+            return Err(DistributedWireError("candidate_row_count_exceeded"));
+        }
+        u32::try_from(candidate.row_ids().len())
+            .map_err(|_| DistributedWireError("candidate_row_count_overflow"))?;
+        required_len = required_len
+            .checked_add(20)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    candidate
+                        .row_ids()
+                        .len()
+                        .checked_mul(core::mem::size_of::<u32>())?,
+                )
+            })
+            .ok_or(DistributedWireError("candidate_batch_length_overflow"))?;
+    }
+    Ok(required_len)
+}
+
+pub(crate) fn checked_candidate_batch_outer_requested_bytes(
+    candidate_count: usize,
+) -> Result<u128, DistributedWireError> {
+    if candidate_count > MAX_WIRE_ITEMS {
+        return Err(DistributedWireError("candidate_batch_count_exceeded"));
+    }
+    (candidate_count as u128)
+        .checked_mul(core::mem::size_of::<WasmCandidatePacket>() as u128)
+        .ok_or(DistributedWireError(
+            "candidate_decode_memory_projection_overflow",
+        ))
 }
 
 pub fn decode_candidate_batch(
@@ -78,6 +195,194 @@ pub fn decode_candidate_batch(
     }
     reader.finish()?;
     Ok(candidates)
+}
+
+pub fn decode_build_probability_candidate_batch_with_memory_guard<E>(
+    input: &[u8],
+    mut memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<WasmCandidatePacket>, GuardedDistributedWireError<E>> {
+    let projection = checked_candidate_batch_decode_projection(input)
+        .map_err(GuardedDistributedWireError::Wire)?;
+    let requested_outer_bytes =
+        checked_candidate_batch_outer_requested_bytes(projection.candidate_count)
+            .map_err(GuardedDistributedWireError::Wire)?;
+    let requested_batch_bytes = requested_outer_bytes
+        .checked_add(projection.row_ids_requested_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::candidate_decode_memory_projection_overflow(),
+            )
+        })?;
+    memory_guard(requested_batch_bytes).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    let mut reader = Reader::new(input);
+    reader
+        .require_header(CANDIDATE_MAGIC)
+        .map_err(GuardedDistributedWireError::Wire)?;
+    let count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    debug_assert_eq!(count, projection.candidate_count);
+    let mut candidates = Vec::new();
+    candidates.try_reserve_exact(count).map_err(|_| {
+        GuardedDistributedWireError::Wire(DistributedWireError("candidate_batch_allocation_failed"))
+    })?;
+    let mut remaining_requested_row_bytes = projection.row_ids_requested_bytes;
+    let outer_actual_bytes = (candidates.capacity() as u128)
+        .checked_mul(core::mem::size_of::<WasmCandidatePacket>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::candidate_decode_memory_projection_overflow(),
+            )
+        })?;
+    memory_guard(
+        outer_actual_bytes
+            .checked_add(remaining_requested_row_bytes)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::candidate_decode_memory_projection_overflow(),
+                )
+            })?,
+    )
+    .map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    for _ in 0..count {
+        let ordinal = reader.u64().map_err(GuardedDistributedWireError::Wire)?;
+        let pass_index = u8::try_from(reader.u32().map_err(GuardedDistributedWireError::Wire)?)
+            .map_err(|_| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "candidate_pass_index_invalid",
+                ))
+            })?;
+        let target_index = reader.u32().map_err(GuardedDistributedWireError::Wire)?;
+        let row_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let requested_row_bytes = (row_count as u128)
+            .checked_mul(core::mem::size_of::<u32>() as u128)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::candidate_decode_memory_projection_overflow(),
+                )
+            })?;
+        let remaining_after = remaining_requested_row_bytes
+            .checked_sub(requested_row_bytes)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::candidate_decode_memory_projection_overflow(),
+                )
+            })?;
+        let decoded_before_bytes =
+            checked_candidate_vec_retained_bytes(&candidates).ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::candidate_decode_memory_projection_overflow(),
+                )
+            })?;
+        memory_guard(
+            decoded_before_bytes
+                .checked_add(remaining_requested_row_bytes)
+                .ok_or_else(|| {
+                    GuardedDistributedWireError::Wire(
+                        DistributedWireError::candidate_decode_memory_projection_overflow(),
+                    )
+                })?,
+        )
+        .map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+        let mut row_ids = Vec::new();
+        row_ids.try_reserve_exact(row_count).map_err(|_| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "candidate_rows_allocation_failed",
+            ))
+        })?;
+        let actual_row_bytes = (row_ids.capacity() as u128)
+            .checked_mul(core::mem::size_of::<u32>() as u128)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::candidate_decode_memory_projection_overflow(),
+                )
+            })?;
+        memory_guard(
+            decoded_before_bytes
+                .checked_add(actual_row_bytes)
+                .and_then(|bytes| bytes.checked_add(remaining_after))
+                .ok_or_else(|| {
+                    GuardedDistributedWireError::Wire(
+                        DistributedWireError::candidate_decode_memory_projection_overflow(),
+                    )
+                })?,
+        )
+        .map_err(GuardedDistributedWireError::MemoryGuard)?;
+        for _ in 0..row_count {
+            row_ids.push(reader.u32().map_err(GuardedDistributedWireError::Wire)?);
+        }
+        candidates.push(WasmCandidatePacket::for_pass(
+            ordinal,
+            pass_index,
+            target_index,
+            row_ids,
+        ));
+        remaining_requested_row_bytes = remaining_after;
+        let decoded_after_bytes =
+            checked_candidate_vec_retained_bytes(&candidates).ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::candidate_decode_memory_projection_overflow(),
+                )
+            })?;
+        memory_guard(
+            decoded_after_bytes
+                .checked_add(remaining_requested_row_bytes)
+                .ok_or_else(|| {
+                    GuardedDistributedWireError::Wire(
+                        DistributedWireError::candidate_decode_memory_projection_overflow(),
+                    )
+                })?,
+        )
+        .map_err(GuardedDistributedWireError::MemoryGuard)?;
+    }
+    reader.finish().map_err(GuardedDistributedWireError::Wire)?;
+    debug_assert_eq!(remaining_requested_row_bytes, 0);
+    Ok(candidates)
+}
+
+fn checked_candidate_batch_decode_projection(
+    input: &[u8],
+) -> Result<CandidateBatchDecodeProjection, DistributedWireError> {
+    let mut reader = Reader::new(input);
+    reader.require_header(CANDIDATE_MAGIC)?;
+    let candidate_count = reader.count()?;
+    let mut row_ids_requested_bytes = 0_u128;
+    for _ in 0..candidate_count {
+        reader.u64()?;
+        u8::try_from(reader.u32()?)
+            .map_err(|_| DistributedWireError("candidate_pass_index_invalid"))?;
+        reader.u32()?;
+        let row_count = reader.count()?;
+        row_ids_requested_bytes = row_ids_requested_bytes
+            .checked_add(
+                (row_count as u128)
+                    .checked_mul(core::mem::size_of::<u32>() as u128)
+                    .ok_or_else(
+                        DistributedWireError::candidate_decode_memory_projection_overflow,
+                    )?,
+            )
+            .ok_or_else(DistributedWireError::candidate_decode_memory_projection_overflow)?;
+        for _ in 0..row_count {
+            reader.u32()?;
+        }
+    }
+    reader.finish()?;
+    Ok(CandidateBatchDecodeProjection {
+        candidate_count,
+        row_ids_requested_bytes,
+    })
+}
+
+pub(crate) fn checked_candidate_vec_retained_bytes(
+    candidates: &Vec<WasmCandidatePacket>,
+) -> Option<u128> {
+    let mut retained = (candidates.capacity() as u128)
+        .checked_mul(core::mem::size_of::<WasmCandidatePacket>() as u128)?;
+    for candidate in candidates {
+        retained = retained.checked_add(candidate.checked_nested_retained_bytes()?)?;
+    }
+    Some(retained)
 }
 
 pub fn encode_tiling_root_chunk(chunk: &WasmTilingRootChunk) -> Vec<u8> {
@@ -183,8 +488,164 @@ pub fn is_tiling_root_chunk(input: &[u8]) -> bool {
         .is_some_and(|bytes| u32::from_le_bytes(bytes) == TILING_ROOT_CHUNK_MAGIC)
 }
 
-pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
-    let fields = result.summary_fields();
+trait CheckedWireSink {
+    fn extend_checked(&mut self, value: &[u8]) -> Result<(), DistributedWireError>;
+    fn len(&self) -> usize;
+}
+
+#[derive(Default)]
+struct CheckedWireLength {
+    len: usize,
+}
+
+impl CheckedWireSink for CheckedWireLength {
+    fn extend_checked(&mut self, value: &[u8]) -> Result<(), DistributedWireError> {
+        self.len = self
+            .len
+            .checked_add(value.len())
+            .ok_or(DistributedWireError("partial_result_length_overflow"))?;
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+struct CheckedWireOutput<'a> {
+    output: &'a mut Vec<u8>,
+}
+
+impl<'a> CheckedWireOutput<'a> {
+    fn new(output: &'a mut Vec<u8>) -> Self {
+        Self { output }
+    }
+}
+
+impl CheckedWireSink for CheckedWireOutput<'_> {
+    fn extend_checked(&mut self, value: &[u8]) -> Result<(), DistributedWireError> {
+        let target_len = self
+            .output
+            .len()
+            .checked_add(value.len())
+            .ok_or(DistributedWireError("partial_result_length_overflow"))?;
+        if target_len > self.output.capacity() {
+            return Err(DistributedWireError(
+                "partial_result_guarded_capacity_exceeded",
+            ));
+        }
+        self.output.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.output.len()
+    }
+}
+
+fn checked_put_u8(
+    output: &mut impl CheckedWireSink,
+    value: u8,
+) -> Result<(), DistributedWireError> {
+    output.extend_checked(&[value])
+}
+
+fn checked_put_u32(
+    output: &mut impl CheckedWireSink,
+    value: u32,
+) -> Result<(), DistributedWireError> {
+    output.extend_checked(&value.to_le_bytes())
+}
+
+fn checked_put_i32(
+    output: &mut impl CheckedWireSink,
+    value: i32,
+) -> Result<(), DistributedWireError> {
+    output.extend_checked(&value.to_le_bytes())
+}
+
+fn checked_put_u64(
+    output: &mut impl CheckedWireSink,
+    value: u64,
+) -> Result<(), DistributedWireError> {
+    output.extend_checked(&value.to_le_bytes())
+}
+
+fn checked_put_u128(
+    output: &mut impl CheckedWireSink,
+    value: u128,
+) -> Result<(), DistributedWireError> {
+    output.extend_checked(&value.to_le_bytes())
+}
+
+fn checked_put_count(
+    output: &mut impl CheckedWireSink,
+    value: usize,
+) -> Result<(), DistributedWireError> {
+    if value > MAX_WIRE_ITEMS {
+        return Err(DistributedWireError("partial_result_item_count_exceeded"));
+    }
+    let value = u32::try_from(value)
+        .map_err(|_| DistributedWireError("partial_result_item_count_overflow"))?;
+    checked_put_u32(output, value)
+}
+
+fn checked_put_bytes(
+    output: &mut impl CheckedWireSink,
+    value: &[u8],
+) -> Result<(), DistributedWireError> {
+    let length = u32::try_from(value.len())
+        .map_err(|_| DistributedWireError("partial_result_byte_length_overflow"))?;
+    checked_put_u32(output, length)?;
+    output.extend_checked(value)
+}
+
+fn checked_encode_identity(
+    output: &mut impl CheckedWireSink,
+    identity: StandardBoard64TilingIdentity,
+) -> Result<(), DistributedWireError> {
+    if identity.placement_count() > 16 {
+        return Err(DistributedWireError(
+            "partial_identity_placement_count_invalid",
+        ));
+    }
+    let placement_count = u8::try_from(identity.placement_count())
+        .map_err(|_| DistributedWireError("partial_identity_placement_count_overflow"))?;
+    checked_put_u64(output, identity.initial_board_mask())?;
+    checked_put_u64(output, identity.packed_piece_codes())?;
+    checked_put_u8(output, placement_count)?;
+    for mask in identity.placement_masks() {
+        checked_put_u64(output, *mask)?;
+    }
+    Ok(())
+}
+
+pub fn encode_partial_result(
+    result: &CoreExecutionResult,
+) -> Result<Vec<u8>, DistributedWireError> {
+    let required_len = checked_partial_result_len(result)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(required_len)
+        .map_err(|_| DistributedWireError("partial_result_allocation_failed"))?;
+    emit_partial_result(&mut CheckedWireOutput::new(&mut output), result)?;
+    if output.len() != required_len {
+        return Err(DistributedWireError("partial_result_length_mismatch"));
+    }
+    Ok(output)
+}
+
+fn checked_partial_result_len(result: &CoreExecutionResult) -> Result<usize, DistributedWireError> {
+    let mut length = CheckedWireLength::default();
+    emit_partial_result(&mut length, result)?;
+    Ok(length.len())
+}
+
+fn emit_partial_result(
+    output: &mut impl CheckedWireSink,
+    result: &CoreExecutionResult,
+) -> Result<(), DistributedWireError> {
+    let fields = result.summary_field_entries();
     let path = result.path_steps();
     let identities = result.normalized_solution_identities();
     // The PC merger rebuilds canonical keys from exact identities. Tiling-only
@@ -208,171 +669,1176 @@ pub fn encode_partial_result(result: &CoreExecutionResult) -> Vec<u8> {
     };
     let score_cells = result.postprocess_score_cells();
     let spin_coverages = result.postprocess_spin_coverages();
-    let estimated = fields
-        .iter()
-        .map(|(key, value)| key.len() + value.len() + 8)
-        .sum::<usize>()
-        .saturating_add(path.len() * 20)
-        .saturating_add(
-            identities
-                .iter()
-                .map(|identity| 17 + identity.placement_count() * 8)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            normalized_keys
-                .iter()
-                .map(|key| key.len().saturating_add(4))
-                .sum::<usize>(),
-        )
-        .saturating_add(coverage.len() * 8)
-        .saturating_add(
-            solution_coverage
-                .iter()
-                .map(|entry| 160 + entry.covered_patterns().word_count() * 8)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            normalized_solution_coverage
-                .iter()
-                .map(|entry| {
-                    16usize
-                        .saturating_add(entry.solution_key().len())
-                        .saturating_add(entry.covered_patterns().word_count() * 8)
-                })
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            spin_coverages
-                .iter()
-                .map(|coverage| {
-                    48usize
-                        .saturating_add(coverage.target_id().len())
-                        .saturating_add(coverage.covered_pattern_words().len() * 8)
-                        .saturating_add(
-                            coverage
-                                .candidate_keys()
-                                .iter()
-                                .map(|key| key.len().saturating_add(4))
-                                .sum::<usize>(),
-                        )
-                })
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            score_cells
-                .iter()
-                .map(|cell| 181usize.saturating_add(cell.trace_identity().len()))
-                .sum::<usize>(),
-        )
-        .saturating_add(64);
-    let mut output = Vec::with_capacity(estimated);
-    put_u32(&mut output, PARTIAL_MAGIC);
-    put_u32(&mut output, WIRE_VERSION);
-    put_u32(&mut output, fields.len() as u32);
+    checked_put_u32(output, PARTIAL_MAGIC)?;
+    checked_put_u32(output, WIRE_VERSION)?;
+    checked_put_count(output, fields.len())?;
     for (key, value) in fields {
-        put_bytes(&mut output, key.as_bytes());
-        put_bytes(&mut output, value.as_bytes());
+        checked_put_bytes(output, key.as_bytes())?;
+        checked_put_bytes(output, value.as_bytes())?;
     }
-    put_u32(&mut output, path.len() as u32);
+    checked_put_count(output, path.len())?;
     for step in path {
-        output.push(piece_code(step.piece()));
-        output.push(step.rotation());
-        output.push(step.cleared_lines());
-        output.push(hold_code(step.hold()));
-        put_i32(&mut output, step.x());
-        put_i32(&mut output, step.y());
+        let hold = hold_code(step.hold());
+        if hold == u8::MAX {
+            return Err(DistributedWireError("partial_hold_code_invalid"));
+        }
+        checked_put_u8(output, piece_code(step.piece()))?;
+        checked_put_u8(output, step.rotation())?;
+        checked_put_u8(output, step.cleared_lines())?;
+        checked_put_u8(output, hold)?;
+        checked_put_i32(output, step.x())?;
+        checked_put_i32(output, step.y())?;
     }
-    put_u32(&mut output, identities.len() as u32);
+    checked_put_count(output, identities.len())?;
     for identity in identities {
-        encode_identity(&mut output, *identity);
+        checked_encode_identity(output, *identity)?;
     }
-    put_u32(&mut output, normalized_keys.len() as u32);
+    checked_put_count(output, normalized_keys.len())?;
     for key in normalized_keys {
-        put_bytes(&mut output, key.as_bytes());
+        checked_put_bytes(output, key.as_bytes())?;
     }
     match result.representative_solution_identity() {
         Some(identity) => {
-            output.push(1);
-            encode_identity(&mut output, identity);
+            checked_put_u8(output, 1)?;
+            checked_encode_identity(output, identity)?;
         }
-        None => output.push(0),
+        None => checked_put_u8(output, 0)?,
     }
-    put_u32(&mut output, coverage.len() as u32);
+    checked_put_count(output, coverage.len())?;
     for word in coverage {
-        put_u64(&mut output, *word);
+        checked_put_u64(output, *word)?;
     }
-    put_u32(&mut output, solution_coverage.len() as u32);
+    checked_put_count(output, solution_coverage.len())?;
     for entry in solution_coverage {
-        encode_identity(&mut output, entry.identity());
-        put_u32(&mut output, entry.covered_patterns().pattern_count() as u32);
-        put_u32(&mut output, entry.covered_patterns().word_count() as u32);
-        for word in entry.covered_patterns().words() {
-            put_u64(&mut output, *word);
+        checked_encode_identity(output, entry.identity())?;
+        checked_put_count(output, entry.covered_patterns().pattern_count())?;
+        checked_put_count(output, entry.covered_patterns().word_count())?;
+        for word_index in 0..entry.covered_patterns().word_count() {
+            checked_put_u64(output, entry.covered_patterns().word_at(word_index))?;
         }
     }
-    put_u32(&mut output, normalized_solution_coverage.len() as u32);
+    checked_put_count(output, normalized_solution_coverage.len())?;
     for entry in normalized_solution_coverage {
-        put_bytes(&mut output, entry.solution_key().as_bytes());
-        put_u32(&mut output, entry.covered_patterns().pattern_count() as u32);
-        put_u32(&mut output, entry.covered_patterns().word_count() as u32);
-        for word in entry.covered_patterns().words() {
-            put_u64(&mut output, *word);
+        checked_put_bytes(output, entry.solution_key().as_bytes())?;
+        checked_put_count(output, entry.covered_patterns().pattern_count())?;
+        checked_put_count(output, entry.covered_patterns().word_count())?;
+        for word_index in 0..entry.covered_patterns().word_count() {
+            checked_put_u64(output, entry.covered_patterns().word_at(word_index))?;
         }
     }
     match result.postprocess_score_profile_id() {
         Some(profile_id) => {
-            output.push(1);
-            put_bytes(&mut output, profile_id.as_bytes());
-            output.push(u8::from(result.postprocess_score_cells_complete()));
-            put_u32(&mut output, score_cells.len() as u32);
+            checked_put_u8(output, 1)?;
+            checked_put_bytes(output, profile_id.as_bytes())?;
+            checked_put_u8(output, u8::from(result.postprocess_score_cells_complete()))?;
+            checked_put_count(output, score_cells.len())?;
             for cell in score_cells {
-                encode_identity(&mut output, cell.candidate_identity());
-                put_u32(&mut output, cell.pattern_id() as u32);
-                put_bytes(&mut output, cell.trace_identity().as_bytes());
-                put_u64(&mut output, cell.score());
-                put_u32(&mut output, cell.attack());
+                checked_encode_identity(output, cell.candidate_identity())?;
+                checked_put_count(output, cell.pattern_id())?;
+                checked_put_bytes(output, cell.trace_identity().as_bytes())?;
+                checked_put_u64(output, cell.score())?;
+                checked_put_u32(output, cell.attack())?;
             }
         }
-        None => output.push(0),
+        None => checked_put_u8(output, 0)?,
     }
-    put_u32(&mut output, spin_coverages.len() as u32);
+    checked_put_count(output, spin_coverages.len())?;
     for coverage in spin_coverages {
-        put_bytes(&mut output, coverage.target_id().as_bytes());
-        put_u32(&mut output, coverage.pass_index() as u32);
-        put_u32(&mut output, coverage.pattern_count() as u32);
-        put_u32(&mut output, coverage.covered_pattern_words().len() as u32);
+        checked_put_bytes(output, coverage.target_id().as_bytes())?;
+        checked_put_count(output, coverage.pass_index())?;
+        checked_put_count(output, coverage.pattern_count())?;
+        checked_put_count(output, coverage.covered_pattern_words().len())?;
         for word in coverage.covered_pattern_words() {
-            put_u64(&mut output, *word);
+            checked_put_u64(output, *word)?;
         }
-        put_u32(&mut output, coverage.candidate_keys().len() as u32);
+        checked_put_count(output, coverage.candidate_keys().len())?;
         for key in coverage.candidate_keys() {
-            put_bytes(&mut output, key.as_bytes());
+            checked_put_bytes(output, key.as_bytes())?;
         }
-        put_u128(&mut output, coverage.witnessed_pattern_count());
-        output.push(u8::from(coverage.complete()));
+        checked_put_u128(output, coverage.witnessed_pattern_count())?;
+        checked_put_u8(output, u8::from(coverage.complete()))?;
     }
-    output
+    Ok(())
 }
 
-pub fn encode_partial_results(results: &[CoreExecutionResult]) -> Vec<u8> {
-    let encoded = results
-        .iter()
-        .map(encode_partial_result)
-        .collect::<Vec<_>>();
-    let capacity = encoded
-        .iter()
-        .map(|result| result.len().saturating_add(4))
-        .sum::<usize>()
-        .saturating_add(12);
-    let mut output = Vec::with_capacity(capacity);
-    put_u32(&mut output, PARTIAL_BATCH_MAGIC);
-    put_u32(&mut output, WIRE_VERSION);
-    put_u32(&mut output, encoded.len() as u32);
-    for result in encoded {
-        put_bytes(&mut output, &result);
+pub fn encode_partial_results(
+    results: &[CoreExecutionResult],
+) -> Result<Vec<u8>, DistributedWireError> {
+    match encode_partial_results_with_memory_guard(results, |_| {
+        Ok::<(), core::convert::Infallible>(())
+    }) {
+        Ok(output) => Ok(output),
+        Err(GuardedDistributedWireError::Wire(error)) => Err(error),
+        Err(GuardedDistributedWireError::MemoryGuard(never)) => match never {},
     }
-    output
+}
+
+pub fn encode_partial_results_with_memory_guard<E>(
+    results: &[CoreExecutionResult],
+    mut memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<u8>, GuardedDistributedWireError<E>> {
+    if results.len() > MAX_WIRE_ITEMS {
+        return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+            "partial_batch_result_count_exceeded",
+        )));
+    }
+    let result_count = u32::try_from(results.len()).map_err(|_| {
+        GuardedDistributedWireError::Wire(DistributedWireError(
+            "partial_batch_result_count_overflow",
+        ))
+    })?;
+    let mut required_len = 12usize;
+    for result in results {
+        let encoded_len =
+            checked_partial_result_len(result).map_err(GuardedDistributedWireError::Wire)?;
+        u32::try_from(encoded_len).map_err(|_| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_batch_result_length_overflow",
+            ))
+        })?;
+        required_len = required_len
+            .checked_add(4)
+            .and_then(|length| length.checked_add(encoded_len))
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_batch_length_overflow",
+                ))
+            })?;
+    }
+
+    memory_guard(required_len as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(required_len).map_err(|_| {
+        GuardedDistributedWireError::Wire(DistributedWireError("partial_batch_allocation_failed"))
+    })?;
+    memory_guard(output.capacity() as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    let mut sink = CheckedWireOutput::new(&mut output);
+    checked_put_u32(&mut sink, PARTIAL_BATCH_MAGIC).map_err(GuardedDistributedWireError::Wire)?;
+    checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
+    checked_put_u32(&mut sink, result_count).map_err(GuardedDistributedWireError::Wire)?;
+    for result in results {
+        let encoded_len =
+            checked_partial_result_len(result).map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(
+            &mut sink,
+            u32::try_from(encoded_len).expect("encoded length was checked above"),
+        )
+        .map_err(GuardedDistributedWireError::Wire)?;
+        emit_partial_result(&mut sink, result).map_err(GuardedDistributedWireError::Wire)?;
+    }
+    drop(sink);
+    if output.len() != required_len {
+        return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+            "partial_batch_length_mismatch",
+        )));
+    }
+    Ok(output)
+}
+
+fn checked_partial_batch_decode_projection(
+    input: &[u8],
+) -> Result<PartialBatchDecodeProjection, DistributedWireError> {
+    let mut reader = Reader::new(input);
+    reader.require_header(PARTIAL_BATCH_MAGIC)?;
+    let result_count = reader.count()?;
+    let mut nested_retained_bytes = 0_u128;
+    let mut constructor_extra_bytes = 0_u128;
+    for _ in 0..result_count {
+        let length = reader.byte_length()?;
+        let result_input = reader.take(length)?;
+        let projection = checked_partial_result_decode_projection(result_input)?;
+        nested_retained_bytes = nested_retained_bytes
+            .checked_add(projection.nested_retained_bytes)
+            .ok_or(DistributedWireError(
+                "partial_decode_memory_projection_overflow",
+            ))?;
+        constructor_extra_bytes = constructor_extra_bytes.max(projection.constructor_extra_bytes);
+    }
+    reader.finish()?;
+    Ok(PartialBatchDecodeProjection {
+        result_count,
+        nested_retained_bytes,
+        constructor_extra_bytes,
+    })
+}
+
+fn checked_partial_result_decode_projection(
+    input: &[u8],
+) -> Result<PartialResultDecodeProjection, DistributedWireError> {
+    let mut reader = Reader::new(input);
+    reader.require_header(PARTIAL_MAGIC)?;
+    let mut nested_retained_bytes = 0_u128;
+    let mut constructor_extra_bytes = 0_u128;
+
+    let field_count = reader.count()?;
+    checked_add_slots::<(String, String)>(&mut nested_retained_bytes, field_count)?;
+    let mut backend_requested = None;
+    let mut requested_backend = None;
+    let mut backend_selected = None;
+    let mut selected_backend = None;
+    let mut backend_fallback_reason = None;
+    let mut coverage_probability = None;
+    let mut trace_retention_reason = None;
+    for _ in 0..field_count {
+        let key = reader.borrowed_string()?;
+        let value = reader.borrowed_string()?;
+        checked_add_usize(&mut nested_retained_bytes, key.len())?;
+        checked_add_usize(&mut nested_retained_bytes, value.len())?;
+        match key {
+            "backend_requested" if backend_requested.is_none() => backend_requested = Some(value),
+            "requested_backend" if requested_backend.is_none() => requested_backend = Some(value),
+            "backend_selected" if backend_selected.is_none() => backend_selected = Some(value),
+            "selected_backend" if selected_backend.is_none() => selected_backend = Some(value),
+            "backend_fallback_reason" if backend_fallback_reason.is_none() => {
+                backend_fallback_reason = Some(value)
+            }
+            "coverage_probability" if coverage_probability.is_none() => {
+                coverage_probability = Some(value)
+            }
+            "trace_retention_reason" if trace_retention_reason.is_none() => {
+                trace_retention_reason = Some(value)
+            }
+            _ => {}
+        }
+    }
+    let field_slot_bytes = (field_count as u128)
+        .checked_mul(core::mem::size_of::<(String, String)>() as u128)
+        .ok_or(DistributedWireError(
+            "partial_decode_memory_projection_overflow",
+        ))?;
+    constructor_extra_bytes = constructor_extra_bytes.max(field_slot_bytes);
+
+    let path_count = reader.count()?;
+    if path_count != 0 {
+        return Err(DistributedWireError(
+            "build_probability_partial_path_invalid",
+        ));
+    }
+    checked_add_slots::<CorePathStep>(&mut nested_retained_bytes, path_count)?;
+    for _ in 0..path_count {
+        piece_from_code(reader.u8()?)?;
+        reader.u8()?;
+        reader.u8()?;
+        hold_from_code(reader.u8()?)?;
+        reader.i32()?;
+        reader.i32()?;
+    }
+    for value in [
+        backend_requested.or(requested_backend).unwrap_or("none"),
+        backend_selected.or(selected_backend).unwrap_or("none"),
+        backend_fallback_reason.unwrap_or("none"),
+        coverage_probability.unwrap_or("0.0"),
+        trace_retention_reason.unwrap_or("none"),
+        trace_retention_reason.unwrap_or("none"),
+    ] {
+        checked_add_usize(&mut nested_retained_bytes, value.len())?;
+    }
+
+    let identity_count = reader.count()?;
+    checked_add_slots::<StandardBoard64TilingIdentity>(&mut nested_retained_bytes, identity_count)?;
+    for _ in 0..identity_count {
+        decode_identity(&mut reader)?;
+    }
+
+    let normalized_key_count = reader.count()?;
+    checked_add_slots::<String>(&mut nested_retained_bytes, normalized_key_count)?;
+    for _ in 0..normalized_key_count {
+        let key = reader.borrowed_string()?;
+        checked_add_usize(&mut nested_retained_bytes, key.len())?;
+    }
+
+    match reader.u8()? {
+        0 => {}
+        1 => {
+            decode_identity(&mut reader)?;
+        }
+        _ => return Err(DistributedWireError("partial_representative_flag_invalid")),
+    }
+
+    let coverage_count = reader.count()?;
+    checked_add_slots::<u64>(&mut nested_retained_bytes, coverage_count)?;
+    for _ in 0..coverage_count {
+        reader.u64()?;
+    }
+
+    let solution_coverage_count = reader.count()?;
+    checked_add_slots::<SolutionCoverage>(&mut nested_retained_bytes, solution_coverage_count)?;
+    for _ in 0..solution_coverage_count {
+        decode_identity(&mut reader)?;
+        let pattern_count = reader.count()?;
+        let word_count = reader.count()?;
+        let (storage_bytes, extra_bytes) = checked_pattern_decode_projection(
+            &mut reader,
+            pattern_count,
+            word_count,
+            "partial_solution_coverage_shape_invalid",
+        )?;
+        checked_add_u128(&mut nested_retained_bytes, storage_bytes)?;
+        constructor_extra_bytes = constructor_extra_bytes.max(extra_bytes);
+    }
+
+    let normalized_solution_coverage_count = reader.count()?;
+    checked_add_slots::<NormalizedSolutionCoverage>(
+        &mut nested_retained_bytes,
+        normalized_solution_coverage_count,
+    )?;
+    for _ in 0..normalized_solution_coverage_count {
+        let solution_key = reader.borrowed_string()?;
+        checked_add_usize(&mut nested_retained_bytes, solution_key.len())?;
+        let pattern_count = reader.count()?;
+        let word_count = reader.count()?;
+        let (storage_bytes, extra_bytes) = checked_pattern_decode_projection(
+            &mut reader,
+            pattern_count,
+            word_count,
+            "partial_normalized_solution_coverage_shape_invalid",
+        )?;
+        checked_add_u128(&mut nested_retained_bytes, storage_bytes)?;
+        constructor_extra_bytes = constructor_extra_bytes.max(extra_bytes);
+    }
+
+    match reader.u8()? {
+        0 => {}
+        1 => {
+            let profile_id = reader.borrowed_string()?;
+            checked_add_usize(&mut nested_retained_bytes, profile_id.len())?;
+            match reader.u8()? {
+                0 | 1 => {}
+                _ => return Err(DistributedWireError("partial_score_complete_flag_invalid")),
+            }
+            let cell_count = reader.count()?;
+            checked_add_slots::<CorePostProcessScoreCell>(&mut nested_retained_bytes, cell_count)?;
+            for _ in 0..cell_count {
+                decode_identity(&mut reader)?;
+                reader.count()?;
+                let trace_identity = reader.borrowed_string()?;
+                checked_add_usize(&mut nested_retained_bytes, trace_identity.len())?;
+                reader.u64()?;
+                reader.u32()?;
+            }
+        }
+        _ => return Err(DistributedWireError("partial_score_shard_flag_invalid")),
+    }
+
+    let spin_coverage_count = reader.count()?;
+    checked_add_slots::<CorePostProcessSpinCoverage>(
+        &mut nested_retained_bytes,
+        spin_coverage_count,
+    )?;
+    for _ in 0..spin_coverage_count {
+        let target_id = reader.borrowed_string()?;
+        checked_add_usize(&mut nested_retained_bytes, target_id.len())?;
+        reader.count()?;
+        let pattern_count = reader.count()?;
+        let word_count = reader.count()?;
+        if word_count != pattern_count.div_ceil(u64::BITS as usize) {
+            return Err(DistributedWireError("partial_spin_coverage_shape_invalid"));
+        }
+        checked_add_slots::<u64>(&mut nested_retained_bytes, word_count)?;
+        for word_index in 0..word_count {
+            let word = reader.u64()?;
+            validate_pattern_tail_word(
+                pattern_count,
+                word_index,
+                word_count,
+                word,
+                "partial_spin_coverage_shape_invalid",
+            )?;
+        }
+        let key_count = reader.count()?;
+        checked_add_slots::<String>(&mut nested_retained_bytes, key_count)?;
+        let mut previous_key = None;
+        for _ in 0..key_count {
+            let key = reader.borrowed_string()?;
+            if previous_key.is_some_and(|previous| previous >= key) {
+                return Err(DistributedWireError(
+                    "partial_spin_candidate_keys_noncanonical",
+                ));
+            }
+            checked_add_usize(&mut nested_retained_bytes, key.len())?;
+            previous_key = Some(key);
+        }
+        reader.u128()?;
+        match reader.u8()? {
+            0 | 1 => {}
+            _ => return Err(DistributedWireError("partial_spin_complete_flag_invalid")),
+        }
+    }
+    reader.finish()?;
+    Ok(PartialResultDecodeProjection {
+        nested_retained_bytes,
+        constructor_extra_bytes,
+    })
+}
+
+fn checked_pattern_decode_projection(
+    reader: &mut Reader<'_>,
+    pattern_count: usize,
+    word_count: usize,
+    shape_error: &'static str,
+) -> Result<(u128, u128), DistributedWireError> {
+    if word_count != pattern_count.div_ceil(u64::BITS as usize) {
+        return Err(DistributedWireError(shape_error));
+    }
+    for word_index in 0..word_count {
+        let word = reader.u64()?;
+        validate_pattern_tail_word(pattern_count, word_index, word_count, word, shape_error)?;
+    }
+    let dense_bytes = (word_count as u128)
+        .checked_mul(core::mem::size_of::<u64>() as u128)
+        .ok_or(DistributedWireError(
+            "partial_decode_memory_projection_overflow",
+        ))?;
+    // BuildProbability ingress deliberately preserves the canonical wire
+    // words as dense shared storage. During Vec -> Arc conversion both dense
+    // payloads can coexist, so the final Arc is retained storage and the
+    // temporary Vec is the constructor-only addition.
+    Ok((dense_bytes, dense_bytes))
+}
+
+fn validate_pattern_tail_word(
+    pattern_count: usize,
+    word_index: usize,
+    word_count: usize,
+    word: u64,
+    shape_error: &'static str,
+) -> Result<(), DistributedWireError> {
+    if word_index + 1 == word_count {
+        let remainder = pattern_count % u64::BITS as usize;
+        if remainder != 0 && word & !((1_u64 << remainder) - 1) != 0 {
+            return Err(DistributedWireError(shape_error));
+        }
+    }
+    Ok(())
+}
+
+fn checked_add_slots<T>(total: &mut u128, count: usize) -> Result<(), DistributedWireError> {
+    let bytes = (count as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or(DistributedWireError(
+            "partial_decode_memory_projection_overflow",
+        ))?;
+    checked_add_u128(total, bytes)
+}
+
+fn checked_add_usize(total: &mut u128, bytes: usize) -> Result<(), DistributedWireError> {
+    checked_add_u128(total, bytes as u128)
+}
+
+fn checked_add_u128(total: &mut u128, bytes: u128) -> Result<(), DistributedWireError> {
+    *total = total.checked_add(bytes).ok_or(DistributedWireError(
+        "partial_decode_memory_projection_overflow",
+    ))?;
+    Ok(())
+}
+
+fn authorize_decode_memory<E>(
+    base_bytes: u128,
+    local_bytes: u128,
+    checked_future_bytes: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+) -> Result<(), GuardedDistributedWireError<E>> {
+    let observed = base_bytes
+        .checked_add(local_bytes)
+        .and_then(|bytes| bytes.checked_add(checked_future_bytes))
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    memory_guard(observed).map_err(GuardedDistributedWireError::MemoryGuard)
+}
+
+fn guarded_reserve_exact<T, E>(
+    values: &mut Vec<T>,
+    count: usize,
+    allocation_error: &'static str,
+    base_bytes: u128,
+    local_bytes: &mut u128,
+    remaining_requested_bytes: &mut u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+) -> Result<(), GuardedDistributedWireError<E>> {
+    let requested_bytes = (count as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    let remaining_after = remaining_requested_bytes
+        .checked_sub(requested_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )?;
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| GuardedDistributedWireError::Wire(DistributedWireError(allocation_error)))?;
+    let actual_bytes = (values.capacity() as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    *remaining_requested_bytes = remaining_after;
+    *local_bytes = local_bytes.checked_add(actual_bytes).ok_or_else(|| {
+        GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
+    })?;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )
+}
+
+fn guarded_reserve_exact_temporary<T, E>(
+    values: &mut Vec<T>,
+    count: usize,
+    allocation_error: &'static str,
+    base_bytes: u128,
+    local_bytes: &mut u128,
+    remaining_requested_bytes: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+) -> Result<(), GuardedDistributedWireError<E>> {
+    let requested_bytes = (count as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    let requested_future_bytes = remaining_requested_bytes
+        .checked_add(requested_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        requested_future_bytes,
+        memory_guard,
+    )?;
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| GuardedDistributedWireError::Wire(DistributedWireError(allocation_error)))?;
+    let actual_bytes = (values.capacity() as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    *local_bytes = local_bytes.checked_add(actual_bytes).ok_or_else(|| {
+        GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
+    })?;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        remaining_requested_bytes,
+        memory_guard,
+    )
+}
+
+fn guarded_decode_string<E>(
+    reader: &mut Reader<'_>,
+    base_bytes: u128,
+    local_bytes: &mut u128,
+    remaining_requested_bytes: &mut u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+) -> Result<String, GuardedDistributedWireError<E>> {
+    let value = reader
+        .borrowed_string()
+        .map_err(GuardedDistributedWireError::Wire)?;
+    let remaining_after = remaining_requested_bytes
+        .checked_sub(value.len() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )?;
+    let mut owned = String::new();
+    owned.try_reserve_exact(value.len()).map_err(|_| {
+        GuardedDistributedWireError::Wire(DistributedWireError(
+            "distributed_wire_string_allocation_failed",
+        ))
+    })?;
+    *local_bytes = local_bytes
+        .checked_add(owned.capacity() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    *remaining_requested_bytes = remaining_after;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+fn guarded_decode_pattern_bitset<E>(
+    reader: &mut Reader<'_>,
+    pattern_count: usize,
+    word_count: usize,
+    shape_error: &'static str,
+    allocation_error: &'static str,
+    base_bytes: u128,
+    local_bytes: &mut u128,
+    remaining_requested_bytes: &mut u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+) -> Result<PatternBitSet, GuardedDistributedWireError<E>> {
+    if word_count != pattern_count.div_ceil(u64::BITS as usize) {
+        return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+            shape_error,
+        )));
+    }
+    let mut words = Vec::new();
+    guarded_reserve_exact_temporary(
+        &mut words,
+        word_count,
+        allocation_error,
+        base_bytes,
+        local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..word_count {
+        words.push(reader.u64().map_err(GuardedDistributedWireError::Wire)?);
+    }
+    for (word_index, source_word) in words.iter().copied().enumerate() {
+        if word_index + 1 == word_count {
+            let remainder = pattern_count % u64::BITS as usize;
+            if remainder != 0 && source_word & !((1_u64 << remainder) - 1) != 0 {
+                return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                    shape_error,
+                )));
+            }
+        }
+    }
+    let dense_storage_bytes = (word_count as u128)
+        .checked_mul(core::mem::size_of::<u64>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    let remaining_after = remaining_requested_bytes
+        .checked_sub(dense_storage_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    // The actual Vec backing is already live. The final dense Arc payload is
+    // still in `remaining_requested_bytes`, giving the exact coexistence
+    // checkpoint immediately before Vec -> Arc conversion.
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )?;
+    let word_storage_bytes = (words.capacity() as u128)
+        .checked_mul(core::mem::size_of::<u64>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    let shared_words: Arc<[u64]> = words.into();
+    let covered_patterns = PatternBitSet::from_shared_words(pattern_count, shared_words)
+        .map_err(|_| GuardedDistributedWireError::Wire(DistributedWireError(shape_error)))?;
+    let actual_storage_bytes = covered_patterns
+        .checked_storage_retained_bytes()
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    if actual_storage_bytes != dense_storage_bytes {
+        return Err(GuardedDistributedWireError::Wire(
+            DistributedWireError::decode_memory_projection_overflow(),
+        ));
+    }
+    *remaining_requested_bytes = remaining_after;
+    *local_bytes = local_bytes
+        .checked_sub(word_storage_bytes)
+        .and_then(|bytes| bytes.checked_add(actual_storage_bytes))
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    authorize_decode_memory(
+        base_bytes,
+        *local_bytes,
+        *remaining_requested_bytes,
+        memory_guard,
+    )?;
+    Ok(covered_patterns)
+}
+
+fn checked_owned_field_storage_bytes(fields: &Vec<(String, String)>) -> Option<u128> {
+    let mut bytes =
+        (fields.capacity() as u128).checked_mul(core::mem::size_of::<(String, String)>() as u128)?;
+    for (key, value) in fields {
+        bytes = bytes
+            .checked_add(key.capacity() as u128)?
+            .checked_add(value.capacity() as u128)?;
+    }
+    Some(bytes)
+}
+
+fn decode_build_probability_partial_result_with_memory_guard<E>(
+    input: &[u8],
+    base_bytes: u128,
+    requested_nested_bytes: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+) -> Result<CoreExecutionResult, GuardedDistributedWireError<E>> {
+    let mut reader = Reader::new(input);
+    reader
+        .require_header(PARTIAL_MAGIC)
+        .map_err(GuardedDistributedWireError::Wire)?;
+    let mut local_bytes = 0_u128;
+    let mut remaining_requested_bytes = requested_nested_bytes;
+
+    let field_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut fields = Vec::new();
+    guarded_reserve_exact(
+        &mut fields,
+        field_count,
+        "partial_fields_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..field_count {
+        let key = guarded_decode_string(
+            &mut reader,
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        let value = guarded_decode_string(
+            &mut reader,
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        fields.push((key, value));
+    }
+
+    let path_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    if path_count != 0 {
+        return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+            "build_probability_partial_path_invalid",
+        )));
+    }
+
+    let identity_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut identities = Vec::new();
+    guarded_reserve_exact(
+        &mut identities,
+        identity_count,
+        "partial_identities_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..identity_count {
+        identities.push(decode_identity(&mut reader).map_err(GuardedDistributedWireError::Wire)?);
+    }
+
+    let normalized_key_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut normalized_keys = Vec::new();
+    guarded_reserve_exact(
+        &mut normalized_keys,
+        normalized_key_count,
+        "partial_solution_keys_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..normalized_key_count {
+        normalized_keys.push(guarded_decode_string(
+            &mut reader,
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?);
+    }
+
+    let representative = match reader.u8().map_err(GuardedDistributedWireError::Wire)? {
+        0 => None,
+        1 => Some(decode_identity(&mut reader).map_err(GuardedDistributedWireError::Wire)?),
+        _ => {
+            return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_representative_flag_invalid",
+            )))
+        }
+    };
+
+    let coverage_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut coverage = Vec::new();
+    guarded_reserve_exact(
+        &mut coverage,
+        coverage_count,
+        "partial_coverage_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..coverage_count {
+        coverage.push(reader.u64().map_err(GuardedDistributedWireError::Wire)?);
+    }
+
+    let solution_coverage_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut solution_coverage = Vec::new();
+    guarded_reserve_exact(
+        &mut solution_coverage,
+        solution_coverage_count,
+        "partial_solution_coverage_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..solution_coverage_count {
+        let identity = decode_identity(&mut reader).map_err(GuardedDistributedWireError::Wire)?;
+        let pattern_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let word_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let covered_patterns = guarded_decode_pattern_bitset(
+            &mut reader,
+            pattern_count,
+            word_count,
+            "partial_solution_coverage_shape_invalid",
+            "partial_solution_coverage_allocation_failed",
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        solution_coverage.push(SolutionCoverage::new(identity, covered_patterns));
+    }
+
+    let normalized_solution_coverage_count =
+        reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut normalized_solution_coverage = Vec::new();
+    guarded_reserve_exact(
+        &mut normalized_solution_coverage,
+        normalized_solution_coverage_count,
+        "partial_normalized_solution_coverage_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..normalized_solution_coverage_count {
+        let solution_key = guarded_decode_string(
+            &mut reader,
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        let pattern_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let word_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let covered_patterns = guarded_decode_pattern_bitset(
+            &mut reader,
+            pattern_count,
+            word_count,
+            "partial_normalized_solution_coverage_shape_invalid",
+            "partial_normalized_solution_coverage_allocation_failed",
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        normalized_solution_coverage.push(NormalizedSolutionCoverage::new(
+            solution_key,
+            covered_patterns,
+        ));
+    }
+
+    let score_shard = match reader.u8().map_err(GuardedDistributedWireError::Wire)? {
+        0 => None,
+        1 => {
+            let profile_id = guarded_decode_string(
+                &mut reader,
+                base_bytes,
+                &mut local_bytes,
+                &mut remaining_requested_bytes,
+                memory_guard,
+            )?;
+            let complete = match reader.u8().map_err(GuardedDistributedWireError::Wire)? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                        "partial_score_complete_flag_invalid",
+                    )))
+                }
+            };
+            let cell_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+            let mut cells = Vec::new();
+            guarded_reserve_exact(
+                &mut cells,
+                cell_count,
+                "partial_score_cells_allocation_failed",
+                base_bytes,
+                &mut local_bytes,
+                &mut remaining_requested_bytes,
+                memory_guard,
+            )?;
+            for _ in 0..cell_count {
+                let candidate_identity =
+                    decode_identity(&mut reader).map_err(GuardedDistributedWireError::Wire)?;
+                let pattern_id = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+                let trace_identity = guarded_decode_string(
+                    &mut reader,
+                    base_bytes,
+                    &mut local_bytes,
+                    &mut remaining_requested_bytes,
+                    memory_guard,
+                )?;
+                let score = reader.u64().map_err(GuardedDistributedWireError::Wire)?;
+                let attack = reader.u32().map_err(GuardedDistributedWireError::Wire)?;
+                cells.push(CorePostProcessScoreCell::new(
+                    candidate_identity,
+                    pattern_id,
+                    trace_identity,
+                    score,
+                    attack,
+                ));
+            }
+            Some((profile_id, complete, cells))
+        }
+        _ => {
+            return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_score_shard_flag_invalid",
+            )))
+        }
+    };
+
+    let spin_coverage_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    let mut spin_coverages = Vec::new();
+    guarded_reserve_exact(
+        &mut spin_coverages,
+        spin_coverage_count,
+        "partial_spin_coverage_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..spin_coverage_count {
+        let target_id = guarded_decode_string(
+            &mut reader,
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        let pass_index = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let pattern_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let word_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        if word_count != pattern_count.div_ceil(u64::BITS as usize) {
+            return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_spin_coverage_shape_invalid",
+            )));
+        }
+        let mut words = Vec::new();
+        guarded_reserve_exact(
+            &mut words,
+            word_count,
+            "partial_spin_coverage_allocation_failed",
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        for word_index in 0..word_count {
+            let word = reader.u64().map_err(GuardedDistributedWireError::Wire)?;
+            validate_pattern_tail_word(
+                pattern_count,
+                word_index,
+                word_count,
+                word,
+                "partial_spin_coverage_shape_invalid",
+            )
+            .map_err(GuardedDistributedWireError::Wire)?;
+            words.push(word);
+        }
+        let key_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+        let mut candidate_keys = Vec::new();
+        guarded_reserve_exact(
+            &mut candidate_keys,
+            key_count,
+            "partial_spin_key_allocation_failed",
+            base_bytes,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        for _ in 0..key_count {
+            let key = guarded_decode_string(
+                &mut reader,
+                base_bytes,
+                &mut local_bytes,
+                &mut remaining_requested_bytes,
+                memory_guard,
+            )?;
+            if candidate_keys
+                .last()
+                .is_some_and(|previous: &String| previous.as_str() >= key.as_str())
+            {
+                return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_spin_candidate_keys_noncanonical",
+                )));
+            }
+            candidate_keys.push(key);
+        }
+        let witnessed_pattern_count = reader.u128().map_err(GuardedDistributedWireError::Wire)?;
+        let complete = match reader.u8().map_err(GuardedDistributedWireError::Wire)? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_spin_complete_flag_invalid",
+                )))
+            }
+        };
+        spin_coverages.push(CorePostProcessSpinCoverage::new(
+            target_id,
+            pass_index,
+            pattern_count,
+            words,
+            candidate_keys,
+            witnessed_pattern_count,
+            complete,
+        ));
+    }
+    reader.finish().map_err(GuardedDistributedWireError::Wire)?;
+
+    let field_bytes = checked_owned_field_storage_bytes(&fields).ok_or_else(|| {
+        GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
+    })?;
+    let other_local_bytes = local_bytes.checked_sub(field_bytes).ok_or_else(|| {
+        GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
+    })?;
+    let empty_result = CoreExecutionResult::default();
+    let rebuilt_report_requested_bytes = empty_result
+        .checked_field_replacement_projection(&fields)
+        .map(|projection| projection.rebuilt_report_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    if remaining_requested_bytes != rebuilt_report_requested_bytes {
+        return Err(GuardedDistributedWireError::Wire(
+            DistributedWireError::decode_memory_projection_overflow(),
+        ));
+    }
+    let result = empty_result
+        .try_with_replaced_fields_with_memory_guard(fields, |live, checked_future_bytes| {
+            let live_nested_bytes = live
+                .checked_resource_retained_bytes()
+                .and_then(|bytes| {
+                    bytes.checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128)
+                })
+                .ok_or_else(|| {
+                    GuardedDistributedWireError::Wire(
+                        DistributedWireError::decode_memory_projection_overflow(),
+                    )
+                })?;
+            let construction_bytes = other_local_bytes
+                .checked_add(live_nested_bytes)
+                .ok_or_else(|| {
+                    GuardedDistributedWireError::Wire(
+                        DistributedWireError::decode_memory_projection_overflow(),
+                    )
+                })?;
+            authorize_decode_memory(
+                base_bytes,
+                construction_bytes,
+                checked_future_bytes,
+                memory_guard,
+            )
+        })
+        .map_err(|error| match error {
+            CoreResultFieldReplacementError::ProjectionOverflow => {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::decode_memory_projection_overflow(),
+                )
+            }
+            CoreResultFieldReplacementError::AllocationFailed { .. } => {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_report_allocation_failed",
+                ))
+            }
+            CoreResultFieldReplacementError::MemoryGuard(error) => error,
+        })?
+        .with_normalized_solution_keys(normalized_keys)
+        .with_normalized_solution_identities(identities)
+        .with_representative_solution_identity(representative)
+        .with_coverage_pattern_words(coverage)
+        .with_solution_coverages(solution_coverage)
+        .with_normalized_solution_coverages(normalized_solution_coverage)
+        .with_postprocess_spin_coverages(spin_coverages);
+    let result = match score_shard {
+        Some((profile_id, complete, cells)) => {
+            result.with_postprocess_score_cells(cells, complete, profile_id)
+        }
+        None => result,
+    };
+    remaining_requested_bytes = remaining_requested_bytes
+        .checked_sub(rebuilt_report_requested_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    debug_assert_eq!(remaining_requested_bytes, 0);
+    let result_nested_bytes = result
+        .checked_resource_retained_bytes()
+        .and_then(|bytes| bytes.checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128))
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    authorize_decode_memory(base_bytes, result_nested_bytes, 0, memory_guard)?;
+    Ok(result)
 }
 
 pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, DistributedWireError> {
@@ -453,8 +1919,16 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
         words
             .try_reserve_exact(word_count)
             .map_err(|_| DistributedWireError("partial_solution_coverage_allocation_failed"))?;
-        for _ in 0..word_count {
-            words.push(reader.u64()?);
+        for word_index in 0..word_count {
+            let word = reader.u64()?;
+            validate_pattern_tail_word(
+                pattern_count,
+                word_index,
+                word_count,
+                word,
+                "partial_solution_coverage_shape_invalid",
+            )?;
+            words.push(word);
         }
         let covered_patterns = PatternBitSet::from_words(pattern_count, words)
             .map_err(|_| DistributedWireError("partial_solution_coverage_invalid"))?;
@@ -480,8 +1954,16 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
         words.try_reserve_exact(word_count).map_err(|_| {
             DistributedWireError("partial_normalized_solution_coverage_allocation_failed")
         })?;
-        for _ in 0..word_count {
-            words.push(reader.u64()?);
+        for word_index in 0..word_count {
+            let word = reader.u64()?;
+            validate_pattern_tail_word(
+                pattern_count,
+                word_index,
+                word_count,
+                word,
+                "partial_normalized_solution_coverage_shape_invalid",
+            )?;
+            words.push(word);
         }
         let covered_patterns = PatternBitSet::from_words(pattern_count, words)
             .map_err(|_| DistributedWireError("partial_normalized_solution_coverage_invalid"))?;
@@ -539,8 +2021,16 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
         words
             .try_reserve_exact(word_count)
             .map_err(|_| DistributedWireError("partial_spin_coverage_allocation_failed"))?;
-        for _ in 0..word_count {
-            words.push(reader.u64()?);
+        for word_index in 0..word_count {
+            let word = reader.u64()?;
+            validate_pattern_tail_word(
+                pattern_count,
+                word_index,
+                word_count,
+                word,
+                "partial_spin_coverage_shape_invalid",
+            )?;
+            words.push(word);
         }
         let key_count = reader.count()?;
         let mut candidate_keys = Vec::new();
@@ -548,7 +2038,16 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
             .try_reserve_exact(key_count)
             .map_err(|_| DistributedWireError("partial_spin_key_allocation_failed"))?;
         for _ in 0..key_count {
-            candidate_keys.push(reader.string()?);
+            let key = reader.string()?;
+            if candidate_keys
+                .last()
+                .is_some_and(|previous: &String| previous.as_str() >= key.as_str())
+            {
+                return Err(DistributedWireError(
+                    "partial_spin_candidate_keys_noncanonical",
+                ));
+            }
+            candidate_keys.push(key);
         }
         let witnessed_pattern_count = reader.u128()?;
         let complete = match reader.u8()? {
@@ -601,6 +2100,144 @@ pub fn decode_partial_results(
     Ok(results)
 }
 
+/// Decodes one BuildProbability partial-result batch only after an
+/// allocation-free validation/projection pass proves the requested
+/// construction peak. Build worker partitions never own public path steps, so
+/// a non-empty path fails closed rather than entering an unguarded report
+/// reconstruction. The guard is called before and after every owned reserve,
+/// through Core's guarded field/report constructor, and after every
+/// materialized result while all decoded siblings remain live.
+pub fn decode_build_probability_partial_results_with_memory_guard<E>(
+    input: &[u8],
+    mut memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<CoreExecutionResult>, GuardedDistributedWireError<E>> {
+    let projection = checked_partial_batch_decode_projection(input)
+        .map_err(GuardedDistributedWireError::Wire)?;
+    let requested_outer_bytes = (projection.result_count as u128)
+        .checked_mul(core::mem::size_of::<CoreExecutionResult>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_decode_memory_projection_overflow",
+            ))
+        })?;
+    let requested_peak = requested_outer_bytes
+        .checked_add(projection.nested_retained_bytes)
+        .and_then(|bytes| bytes.checked_add(projection.constructor_extra_bytes))
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_decode_memory_projection_overflow",
+            ))
+        })?;
+    memory_guard(requested_peak).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    let mut reader = Reader::new(input);
+    reader
+        .require_header(PARTIAL_BATCH_MAGIC)
+        .map_err(GuardedDistributedWireError::Wire)?;
+    let count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+    debug_assert_eq!(count, projection.result_count);
+    let mut results = Vec::new();
+    results.try_reserve_exact(count).map_err(|_| {
+        GuardedDistributedWireError::Wire(DistributedWireError("partial_batch_allocation_failed"))
+    })?;
+    let allocated_outer_bytes = (results.capacity() as u128)
+        .checked_mul(core::mem::size_of::<CoreExecutionResult>() as u128)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_decode_memory_projection_overflow",
+            ))
+        })?;
+    let allocated_outer_peak = allocated_outer_bytes
+        .checked_add(projection.nested_retained_bytes)
+        .and_then(|bytes| bytes.checked_add(projection.constructor_extra_bytes))
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_decode_memory_projection_overflow",
+            ))
+        })?;
+    memory_guard(allocated_outer_peak).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+    let mut remaining_requested_nested_bytes = projection.nested_retained_bytes;
+    for _ in 0..count {
+        let length = reader
+            .byte_length()
+            .map_err(GuardedDistributedWireError::Wire)?;
+        let result_input = reader
+            .take(length)
+            .map_err(GuardedDistributedWireError::Wire)?;
+        let result_projection = checked_partial_result_decode_projection(result_input)
+            .map_err(GuardedDistributedWireError::Wire)?;
+        let decoded_before =
+            checked_decoded_result_vec_retained_bytes(&results).ok_or_else(|| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_decode_memory_projection_overflow",
+                ))
+            })?;
+        let construction_peak = decoded_before
+            .checked_add(remaining_requested_nested_bytes)
+            .and_then(|bytes| bytes.checked_add(result_projection.constructor_extra_bytes))
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_decode_memory_projection_overflow",
+                ))
+            })?;
+        memory_guard(construction_peak).map_err(GuardedDistributedWireError::MemoryGuard)?;
+
+        let remaining_after_result = remaining_requested_nested_bytes
+            .checked_sub(result_projection.nested_retained_bytes)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::decode_memory_projection_overflow(),
+                )
+            })?;
+        let result_base_bytes = decoded_before
+            .checked_add(remaining_after_result)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(
+                    DistributedWireError::decode_memory_projection_overflow(),
+                )
+            })?;
+        let result = decode_build_probability_partial_result_with_memory_guard(
+            result_input,
+            result_base_bytes,
+            result_projection.nested_retained_bytes,
+            &mut memory_guard,
+        )?;
+        remaining_requested_nested_bytes = remaining_after_result;
+        results.push(result);
+        let decoded_after =
+            checked_decoded_result_vec_retained_bytes(&results).ok_or_else(|| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_decode_memory_projection_overflow",
+                ))
+            })?;
+        let actual_with_remaining = decoded_after
+            .checked_add(remaining_requested_nested_bytes)
+            .ok_or_else(|| {
+                GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_decode_memory_projection_overflow",
+                ))
+            })?;
+        memory_guard(actual_with_remaining).map_err(GuardedDistributedWireError::MemoryGuard)?;
+    }
+    reader.finish().map_err(GuardedDistributedWireError::Wire)?;
+    debug_assert_eq!(remaining_requested_nested_bytes, 0);
+    Ok(results)
+}
+
+fn checked_decoded_result_vec_retained_bytes(results: &Vec<CoreExecutionResult>) -> Option<u128> {
+    let result_inline = core::mem::size_of::<CoreExecutionResult>() as u128;
+    let mut retained = (results.capacity() as u128).checked_mul(result_inline)?;
+    for result in results {
+        retained = retained.checked_add(
+            result
+                .checked_resource_retained_bytes()?
+                .checked_sub(result_inline)?,
+        )?;
+    }
+    Some(retained)
+}
+
 fn encode_identity(output: &mut Vec<u8>, identity: StandardBoard64TilingIdentity) {
     put_u64(output, identity.initial_board_mask());
     put_u64(output, identity.packed_piece_codes());
@@ -614,19 +2251,30 @@ fn decode_identity(
     reader: &mut Reader<'_>,
 ) -> Result<StandardBoard64TilingIdentity, DistributedWireError> {
     let initial_board = reader.u64()?;
-    let pieces = reader.u64()?;
+    let packed_piece_codes = reader.u64()?;
     let placement_count = usize::from(reader.u8()?);
-    if placement_count > 16 {
+    if placement_count > STANDARD_BOARD64_TILING_MAX_PLACEMENTS {
         return Err(DistributedWireError(
             "partial_identity_placement_count_invalid",
         ));
     }
-    let mut masks = Vec::with_capacity(placement_count);
-    for _ in 0..placement_count {
-        masks.push(reader.u64()?);
+    let mut placements =
+        [PiecePlacementMask::new(PieceKind::I, 0); STANDARD_BOARD64_TILING_MAX_PLACEMENTS];
+    for (index, placement) in placements.iter_mut().take(placement_count).enumerate() {
+        let piece_code = ((packed_piece_codes >> (index * 3)) & 0x7) as u8;
+        let piece = piece_from_code(piece_code)
+            .map_err(|_| DistributedWireError("partial_identity_invalid"))?;
+        *placement = PiecePlacementMask::new(piece, reader.u64()?);
     }
-    StandardBoard64TilingIdentity::from_compact_parts(initial_board, pieces, &masks)
-        .map_err(|_| DistributedWireError("partial_identity_invalid"))
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        initial_board,
+        placements[..placement_count].iter().copied(),
+    )
+    .map_err(|_| DistributedWireError("partial_identity_invalid"))?;
+    if identity.packed_piece_codes() != packed_piece_codes {
+        return Err(DistributedWireError("partial_identity_invalid"));
+    }
+    Ok(identity)
 }
 
 fn piece_code(piece: PieceKind) -> u8 {
@@ -774,10 +2422,19 @@ impl<'a> Reader<'a> {
     }
 
     fn string(&mut self) -> Result<String, DistributedWireError> {
+        let value = self.borrowed_string()?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| DistributedWireError("distributed_wire_string_allocation_failed"))?;
+        owned.push_str(value);
+        Ok(owned)
+    }
+
+    fn borrowed_string(&mut self) -> Result<&'a str, DistributedWireError> {
         let length = self.byte_length()?;
         let bytes = self.take(length)?;
         std::str::from_utf8(bytes)
-            .map(str::to_owned)
             .map_err(|_| DistributedWireError("distributed_wire_utf8_invalid"))
     }
 
@@ -806,6 +2463,155 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use clearra_core_executor::{
+        canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
+        WasmBuildProbabilityCandidateProducer, WasmCandidateProducerAdvance,
+    };
+    use clearra_pc_graph::request::{
+        PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow,
+    };
+    use clearra_problem::{
+        BuildProbabilityAggregation, BuildProbabilityField, FinesseMetric, FinessePatternKnowledge,
+        ProblemCompiler,
+    };
+    #[test]
+    fn browser_wire_uses_the_actual_producer_packet_stream_kat() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("KAT problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("compact one-I field");
+        let mut producer =
+            WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                FinesseMetric::Inputs,
+                FinessePatternKnowledge::Both,
+                1,
+                0,
+            )
+            .expect("actual producer");
+        let control = ExecutionControl::default();
+        let mut packets = Vec::new();
+        loop {
+            match producer.advance(&control).expect("producer advance") {
+                WasmCandidateProducerAdvance::Pending => {}
+                WasmCandidateProducerAdvance::Candidate(packet) => packets.push(packet),
+                WasmCandidateProducerAdvance::Completed(_) => break,
+                WasmCandidateProducerAdvance::Cancelled => panic!("producer cancelled"),
+            }
+        }
+        assert!(!packets.is_empty());
+        let browser_wire = encode_candidate_batch(&packets);
+        assert_eq!(
+            browser_wire,
+            encode_canonical_wasm_candidate_packet_batch(&packets)
+        );
+        assert_eq!(
+            canonical_wasm_candidate_packet_batch_sha256(&packets),
+            "71cc5dd0ab1d2188d562ab1bddd88ca0e94155e765f07b4d7576fe5a90fb3d9f"
+        );
+        assert_eq!(
+            decode_candidate_batch(&browser_wire).expect("decode browser wire"),
+            packets
+        );
+    }
+
+    fn assert_decode_checkpoint_exact_and_peak_minus_one(
+        encoded: &[u8],
+        target_call: usize,
+        expected_bytes: u128,
+        label: &str,
+    ) {
+        let mut exact_calls = 0_usize;
+        let exact =
+            decode_build_probability_partial_results_with_memory_guard(encoded, |observed_bytes| {
+                let call = exact_calls;
+                exact_calls += 1;
+                if call == target_call {
+                    assert_eq!(observed_bytes, expected_bytes, "{label} exact checkpoint");
+                    return (observed_bytes <= expected_bytes)
+                        .then_some(())
+                        .ok_or(target_call);
+                }
+                Ok(())
+            });
+        assert!(exact.is_ok(), "{label} exact checkpoint must succeed");
+        assert!(
+            exact_calls > target_call,
+            "{label} exact checkpoint was not reached"
+        );
+
+        let below_cap = expected_bytes
+            .checked_sub(1)
+            .expect("guarded decode checkpoint is nonzero");
+        let mut below_calls = 0_usize;
+        let below =
+            decode_build_probability_partial_results_with_memory_guard(encoded, |observed_bytes| {
+                let call = below_calls;
+                below_calls += 1;
+                if call == target_call {
+                    assert_eq!(observed_bytes, expected_bytes, "{label} below checkpoint");
+                    return (observed_bytes <= below_cap)
+                        .then_some(())
+                        .ok_or(target_call);
+                }
+                // Earlier checkpoints are deliberately admitted so this
+                // regression isolates the named stage instead of merely
+                // rediscovering the batch-global maximum.
+                Ok(())
+            });
+        assert!(
+            matches!(
+                below,
+                Err(GuardedDistributedWireError::MemoryGuard(call))
+                    if call == target_call
+            ),
+            "{label} peak-1 checkpoint must fail at the named stage"
+        );
+        assert_eq!(
+            below_calls,
+            target_call + 1,
+            "{label} must fail before a later allocation checkpoint"
+        );
+    }
+
+    fn decode_dense_pattern_for_test<E>(
+        encoded_words: &[u8],
+        memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
+    ) -> Result<PatternBitSet, GuardedDistributedWireError<E>> {
+        const PATTERN_COUNT: usize = 4_096;
+        const WORD_COUNT: usize = PATTERN_COUNT.div_ceil(u64::BITS as usize);
+        const BASE_BYTES: u128 = 101;
+        const PREEXISTING_LOCAL_BYTES: u128 = 13;
+
+        let mut reader = Reader::new(encoded_words);
+        let mut local_bytes = PREEXISTING_LOCAL_BYTES;
+        let mut remaining_requested_bytes =
+            (WORD_COUNT as u128) * core::mem::size_of::<u64>() as u128;
+        let covered_patterns = guarded_decode_pattern_bitset(
+            &mut reader,
+            PATTERN_COUNT,
+            WORD_COUNT,
+            "test_dense_pattern_shape_invalid",
+            "test_dense_pattern_allocation_failed",
+            BASE_BYTES,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            memory_guard,
+        )?;
+        reader.finish().map_err(GuardedDistributedWireError::Wire)?;
+        assert_eq!(remaining_requested_bytes, 0);
+        Ok(covered_patterns)
+    }
 
     #[test]
     fn byte_lengths_are_bounded_by_the_input_instead_of_the_item_count_limit() {
@@ -835,8 +2641,8 @@ mod tests {
         )
         .with_normalized_solution_keys(vec!["reconstructed-at-merge".to_owned()]);
 
-        let decoded =
-            decode_partial_result(&encode_partial_result(&result)).expect("tiling partial result");
+        let encoded = encode_partial_result(&result).expect("encode tiling partial result");
+        let decoded = decode_partial_result(&encoded).expect("tiling partial result");
 
         assert!(decoded.normalized_solution_keys().is_empty());
     }
@@ -850,8 +2656,8 @@ mod tests {
         let result = CoreExecutionResult::new(Vec::new(), Vec::new())
             .with_normalized_solution_coverages(vec![coverage.clone()]);
 
-        let decoded =
-            decode_partial_result(&encode_partial_result(&result)).expect("partial result");
+        let encoded = encode_partial_result(&result).expect("encode partial result");
+        let decoded = decode_partial_result(&encoded).expect("partial result");
 
         assert_eq!(decoded.normalized_solution_coverages(), &[coverage]);
         assert!(decoded.solution_coverages().is_empty());
@@ -869,11 +2675,536 @@ mod tests {
                 patterns,
             )]);
 
-        let decoded =
-            decode_partial_result(&encode_partial_result(&result)).expect("partial result");
+        let encoded = encode_partial_result(&result).expect("encode partial result");
+        let decoded = decode_partial_result(&encoded).expect("partial result");
 
         assert_eq!(decoded.solution_coverages(), result.solution_coverages());
         assert!(decoded.normalized_solution_coverages().is_empty());
+    }
+
+    #[test]
+    fn guarded_partial_batch_encoder_rejects_peak_minus_one_and_round_trips_at_the_peak() {
+        let sparse = PatternBitSet::from_pattern_indices(4_096, vec![1, 2_001])
+            .expect("sparse coverage bitset");
+        let sparse_cache_probe = sparse.clone();
+        assert_eq!(sparse_cache_probe.storage_component_count(), 2);
+        let results = vec![CoreExecutionResult::new(
+            vec![("search_kind".to_owned(), "build-probability".to_owned())],
+            Vec::new(),
+        )
+        .with_normalized_solution_coverages(vec![NormalizedSolutionCoverage::new(
+            "sparse-candidate",
+            sparse,
+        )])];
+        let mut observed = [0_u128; 2];
+        let mut observed_count = 0usize;
+        let encoded = encode_partial_results_with_memory_guard(&results, |future| {
+            if observed_count < observed.len() {
+                observed[observed_count] = future;
+            }
+            observed_count += 1;
+            Ok::<(), ()>(())
+        })
+        .expect("guarded partial batch");
+        assert_eq!(
+            sparse_cache_probe.storage_component_count(),
+            2,
+            "wire sizing and emission must not populate a sparse dense-word cache"
+        );
+        assert_eq!(
+            observed_count, 2,
+            "requested and actual capacity are guarded"
+        );
+        let peak = observed.into_iter().max().expect("guard observations");
+        let decoded = decode_partial_results(&encoded).expect("decode guarded batch");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].field("search_kind"), Some("build-probability"));
+        assert_eq!(
+            decoded[0].normalized_solution_coverages()[0]
+                .covered_patterns()
+                .word_at(31),
+            1_u64 << 17
+        );
+
+        let exact = encode_partial_results_with_memory_guard(&results, |future| {
+            (future <= peak)
+                .then_some(())
+                .ok_or("memory-budget-exceeded")
+        });
+        assert!(
+            exact.is_ok(),
+            "the observed exact peak must remain admissible"
+        );
+
+        let below = encode_partial_results_with_memory_guard(&results, |future| {
+            (future < peak)
+                .then_some(())
+                .ok_or("memory-budget-exceeded")
+        });
+        assert!(matches!(
+            below,
+            Err(GuardedDistributedWireError::MemoryGuard(
+                "memory-budget-exceeded"
+            ))
+        ));
+    }
+
+    #[test]
+    fn guarded_dense_pattern_conversion_authorizes_vec_arc_coexistence_at_its_own_boundary() {
+        const PATTERN_COUNT: usize = 4_096;
+        const WORD_COUNT: usize = PATTERN_COUNT.div_ceil(u64::BITS as usize);
+        let mut encoded_words = Vec::new();
+        for word_index in 0..WORD_COUNT {
+            let word = match word_index {
+                0 => 1_u64 << 3,
+                32 => 1_u64 << 1,
+                _ => 0,
+            };
+            put_u64(&mut encoded_words, word);
+        }
+
+        let mut observations = Vec::new();
+        let covered_patterns = decode_dense_pattern_for_test(&encoded_words, &mut |future| {
+            observations.push(future);
+            Ok::<(), ()>(())
+        })
+        .expect("guarded dense pattern");
+        assert_eq!(
+            observations.len(),
+            4,
+            "temporary requested/actual, pre-Arc coexistence, and final dense storage are distinct checkpoints"
+        );
+        let pre_arc_call = 2_usize;
+        let pre_arc_bytes = observations[pre_arc_call];
+        assert_eq!(
+            observations[1], pre_arc_bytes,
+            "allocator-actual Vec backing remains live at Arc conversion"
+        );
+        assert!(
+            pre_arc_bytes > observations[3],
+            "the conversion checkpoint must include both dense payloads"
+        );
+        assert_eq!(covered_patterns.storage_component_count(), 1);
+        assert_eq!(
+            covered_patterns.checked_storage_retained_bytes(),
+            Some((WORD_COUNT * core::mem::size_of::<u64>()) as u128)
+        );
+        assert_eq!(covered_patterns.word_at(0), 1_u64 << 3);
+        assert_eq!(covered_patterns.word_at(32), 1_u64 << 1);
+
+        let mut exact_calls = 0_usize;
+        let exact = decode_dense_pattern_for_test(&encoded_words, &mut |future| {
+            let call = exact_calls;
+            exact_calls += 1;
+            if call == pre_arc_call {
+                assert_eq!(future, pre_arc_bytes);
+                return (future <= pre_arc_bytes).then_some(()).ok_or(pre_arc_call);
+            }
+            Ok(())
+        });
+        assert!(exact.is_ok(), "exact Vec-to-Arc coexistence must fit");
+
+        let below_cap = pre_arc_bytes - 1;
+        let mut below_calls = 0_usize;
+        let below = decode_dense_pattern_for_test(&encoded_words, &mut |future| {
+            let call = below_calls;
+            below_calls += 1;
+            if call == pre_arc_call {
+                assert_eq!(future, pre_arc_bytes);
+                return (future <= below_cap).then_some(()).ok_or(pre_arc_call);
+            }
+            Ok(())
+        });
+        assert!(matches!(
+            below,
+            Err(GuardedDistributedWireError::MemoryGuard(call)) if call == pre_arc_call
+        ));
+        assert_eq!(below_calls, pre_arc_call + 1);
+    }
+
+    #[test]
+    fn guarded_partial_batch_decoder_guards_each_nested_stage_and_both_siblings() {
+        let result = CoreExecutionResult::new(
+            vec![
+                ("search_kind".to_owned(), "build-probability".to_owned()),
+                ("backend_requested".to_owned(), "wasm-cpu".to_owned()),
+                ("backend_selected".to_owned(), "wasm-cpu".to_owned()),
+                ("backend_fallback_reason".to_owned(), "none".to_owned()),
+                ("coverage_probability".to_owned(), "0.500".to_owned()),
+                (
+                    "trace_retention_reason".to_owned(),
+                    "distributed".to_owned(),
+                ),
+            ],
+            Vec::new(),
+        )
+        .with_normalized_solution_coverages(vec![NormalizedSolutionCoverage::new(
+            "wire-dense-candidate",
+            PatternBitSet::from_pattern_indices(4_096, vec![3, 2_049])
+                .expect("sparse source coverage"),
+        )]);
+        let results = vec![result.clone(), result];
+        let encoded = encode_partial_results(&results).expect("encode sibling batch");
+        let batch_projection =
+            checked_partial_batch_decode_projection(&encoded).expect("batch projection");
+        let (first_projection, second_projection) = {
+            let mut reader = Reader::new(&encoded);
+            reader
+                .require_header(PARTIAL_BATCH_MAGIC)
+                .expect("batch header");
+            assert_eq!(reader.count().expect("batch count"), 2);
+            let first_length = reader.byte_length().expect("first length");
+            let first = reader.take(first_length).expect("first partial");
+            let first_projection =
+                checked_partial_result_decode_projection(first).expect("first projection");
+            let second_length = reader.byte_length().expect("second length");
+            let second = reader.take(second_length).expect("second partial");
+            let second_projection =
+                checked_partial_result_decode_projection(second).expect("second projection");
+            reader.finish().expect("complete batch");
+            (first_projection, second_projection)
+        };
+        assert_eq!(first_projection, second_projection);
+
+        let mut observations = Vec::new();
+        let decoded =
+            decode_build_probability_partial_results_with_memory_guard(&encoded, |future| {
+                observations.push(future);
+                Ok::<(), ()>(())
+            })
+            .expect("guarded sibling decode");
+        let actual = checked_decoded_result_vec_retained_bytes(&decoded)
+            .expect("checked decoded sibling storage");
+        assert_eq!(decoded.len(), 2);
+        assert!(
+            observations.len() >= 40,
+            "Strings, Vec capacities, dense conversion, and rebuilt report strings must each re-enter the guard"
+        );
+        assert_eq!(observations.last(), Some(&actual));
+        assert_eq!(
+            encode_partial_results(&decoded).expect("re-encode dense sibling batch"),
+            encoded,
+            "guarded dense decoding must preserve the wire format exactly"
+        );
+        assert!(
+            actual
+                > decoded[0]
+                    .checked_resource_retained_bytes()
+                    .expect("first result storage"),
+            "the guarded batch retains its outer Vec and the second decoded sibling"
+        );
+        for result in &decoded {
+            assert_eq!(
+                result.normalized_solution_coverages()[0]
+                    .covered_patterns()
+                    .storage_component_count(),
+                1,
+                "guarded wire coverage remains dense even when the producer was sparse"
+            );
+        }
+        assert_eq!(
+            decoded[0].normalized_solution_coverages()[0]
+                .covered_patterns()
+                .word_at(32),
+            1_u64 << 1
+        );
+        assert_eq!(
+            decoded[1].normalized_solution_coverages()[0]
+                .covered_patterns()
+                .word_at(32),
+            1_u64 << 1
+        );
+
+        let outer_actual_bytes =
+            (decoded.capacity() as u128) * core::mem::size_of::<CoreExecutionResult>() as u128;
+        let expected_outer_actual = outer_actual_bytes
+            + batch_projection.nested_retained_bytes
+            + batch_projection.constructor_extra_bytes;
+        assert_eq!(observations[1], expected_outer_actual);
+        assert_decode_checkpoint_exact_and_peak_minus_one(
+            &encoded,
+            1,
+            expected_outer_actual,
+            "outer Vec allocator-actual",
+        );
+
+        let result_segments = observations
+            .len()
+            .checked_sub(2)
+            .expect("batch request/outer checkpoints");
+        assert_eq!(
+            result_segments % 2,
+            0,
+            "identical siblings must emit identical checkpoint counts"
+        );
+        let calls_per_result = result_segments / 2;
+        assert!(calls_per_result > 4, "each sibling has nested checkpoints");
+        let first_segment_start = 2_usize;
+        let first_segment_end = first_segment_start + calls_per_result;
+        let second_segment_start = first_segment_end;
+        let second_segment_end = second_segment_start + calls_per_result;
+        assert_eq!(second_segment_end, observations.len());
+
+        let first_nested_call = first_segment_start + 1;
+        let second_nested_call = second_segment_start + 1;
+        let first_actual_nested = decoded[0]
+            .checked_resource_retained_bytes()
+            .and_then(|bytes| {
+                bytes.checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128)
+            })
+            .expect("first actual nested bytes");
+        assert_eq!(
+            observations[first_nested_call],
+            outer_actual_bytes
+                + first_projection.nested_retained_bytes
+                + second_projection.nested_retained_bytes,
+            "the first sibling's first nested allocation includes the remaining sibling projection"
+        );
+        assert_eq!(
+            observations[second_nested_call],
+            outer_actual_bytes + first_actual_nested + second_projection.nested_retained_bytes,
+            "the second sibling's first nested allocation includes the first sibling's allocator-actual storage"
+        );
+
+        // Isolate every callback inside both partial builders. This includes
+        // requested/actual String reserves, every incremental Core report
+        // String callback, Vec capacities, and the dense Vec-to-Arc stages.
+        // Construction and post-result checkpoints bound each open range.
+        for target_call in (first_segment_start + 1)..(first_segment_end - 1) {
+            assert_decode_checkpoint_exact_and_peak_minus_one(
+                &encoded,
+                target_call,
+                observations[target_call],
+                &format!("first sibling nested checkpoint {target_call}"),
+            );
+        }
+        for target_call in (second_segment_start + 1)..(second_segment_end - 1) {
+            assert_decode_checkpoint_exact_and_peak_minus_one(
+                &encoded,
+                target_call,
+                observations[target_call],
+                &format!("second sibling nested checkpoint {target_call}"),
+            );
+        }
+    }
+
+    #[test]
+    fn guarded_partial_batch_decoder_rejects_malformed_and_oversized_counts_before_guarding() {
+        let mut oversized = Vec::new();
+        put_u32(&mut oversized, PARTIAL_BATCH_MAGIC);
+        put_u32(&mut oversized, WIRE_VERSION);
+        put_u32(&mut oversized, 1);
+        put_u32(&mut oversized, 12);
+        put_u32(&mut oversized, PARTIAL_MAGIC);
+        put_u32(&mut oversized, WIRE_VERSION);
+        put_u32(
+            &mut oversized,
+            u32::try_from(MAX_WIRE_ITEMS + 1).expect("oversized count fits the wire"),
+        );
+        let mut guard_calls = 0_usize;
+        let error = decode_build_probability_partial_results_with_memory_guard(&oversized, |_| {
+            guard_calls += 1;
+            Ok::<(), ()>(())
+        })
+        .expect_err("oversized inner count must fail closed");
+        assert_eq!(guard_calls, 0, "malformed input must allocate nothing");
+        assert!(matches!(
+            error,
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "distributed_wire_count_exceeded"
+            ))
+        ));
+
+        let mut truncated = Vec::new();
+        put_u32(&mut truncated, PARTIAL_BATCH_MAGIC);
+        put_u32(&mut truncated, WIRE_VERSION);
+        put_u32(&mut truncated, 1);
+        put_u32(&mut truncated, u32::MAX);
+        let mut guard_calls = 0_usize;
+        let error = decode_build_probability_partial_results_with_memory_guard(&truncated, |_| {
+            guard_calls += 1;
+            Ok::<(), ()>(())
+        })
+        .expect_err("truncated batch must fail closed");
+        assert_eq!(guard_calls, 0, "truncated input must allocate nothing");
+        assert!(matches!(
+            error,
+            GuardedDistributedWireError::Wire(DistributedWireError("distributed_wire_truncated"))
+        ));
+
+        let canonical_tail = CoreExecutionResult::new(Vec::new(), Vec::new())
+            .with_normalized_solution_coverages(vec![NormalizedSolutionCoverage::new(
+                "tail-candidate",
+                PatternBitSet::from_words(65, vec![0x5, 0x1]).expect("canonical tail bitset"),
+            )]);
+        let mut dirty_tail =
+            encode_partial_results(&[canonical_tail]).expect("encode canonical tail batch");
+        let (result_start, tail_word_offset) = {
+            let mut batch_reader = Reader::new(&dirty_tail);
+            batch_reader
+                .require_header(PARTIAL_BATCH_MAGIC)
+                .expect("batch header");
+            assert_eq!(batch_reader.count().expect("batch count"), 1);
+            let result_length = batch_reader.byte_length().expect("partial length");
+            let result_start = batch_reader.cursor;
+            let result_input = batch_reader.take(result_length).expect("partial input");
+            batch_reader.finish().expect("complete batch");
+
+            let mut result_reader = Reader::new(result_input);
+            result_reader
+                .require_header(PARTIAL_MAGIC)
+                .expect("partial header");
+            assert_eq!(result_reader.count().expect("field count"), 0);
+            assert_eq!(result_reader.count().expect("path count"), 0);
+            assert_eq!(result_reader.count().expect("identity count"), 0);
+            assert_eq!(result_reader.count().expect("key count"), 0);
+            assert_eq!(result_reader.u8().expect("representative flag"), 0);
+            assert_eq!(result_reader.count().expect("coverage count"), 0);
+            assert_eq!(result_reader.count().expect("solution coverage count"), 0);
+            assert_eq!(result_reader.count().expect("normalized coverage count"), 1);
+            assert_eq!(
+                result_reader
+                    .borrowed_string()
+                    .expect("normalized solution key"),
+                "tail-candidate"
+            );
+            assert_eq!(result_reader.count().expect("pattern count"), 65);
+            assert_eq!(result_reader.count().expect("word count"), 2);
+            result_reader.u64().expect("first word");
+            (result_start, result_reader.cursor)
+        };
+        dirty_tail[result_start + tail_word_offset] |= 0b10;
+        let mut guard_calls = 0_usize;
+        let error = decode_build_probability_partial_results_with_memory_guard(&dirty_tail, |_| {
+            guard_calls += 1;
+            Ok::<(), ()>(())
+        })
+        .expect_err("noncanonical tail bits must fail before dense conversion");
+        assert_eq!(
+            guard_calls, 0,
+            "the allocation-free prepass rejects dirty tail bits"
+        );
+        assert!(matches!(
+            error,
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_normalized_solution_coverage_shape_invalid"
+            ))
+        ));
+    }
+
+    #[test]
+    fn guarded_partial_spin_decoder_rejects_dirty_tail_and_noncanonical_candidate_keys_in_prepass()
+    {
+        let canonical = CoreExecutionResult::new(Vec::new(), Vec::new())
+            .with_postprocess_spin_coverages(vec![CorePostProcessSpinCoverage::new(
+                "spin-target",
+                0,
+                65,
+                vec![0x5, 0x1],
+                vec!["bravo".to_owned(), "alpha".to_owned()],
+                2,
+                true,
+            )]);
+        let encoded = encode_partial_results(&[canonical]).expect("encode canonical spin batch");
+        let (result_start, tail_word_offset, second_key_offset, second_key_len) = {
+            let mut batch_reader = Reader::new(&encoded);
+            batch_reader
+                .require_header(PARTIAL_BATCH_MAGIC)
+                .expect("batch header");
+            assert_eq!(batch_reader.count().expect("batch count"), 1);
+            let result_length = batch_reader.byte_length().expect("partial length");
+            let result_start = batch_reader.cursor;
+            let result_input = batch_reader.take(result_length).expect("partial input");
+            batch_reader.finish().expect("complete batch");
+
+            let mut result_reader = Reader::new(result_input);
+            result_reader
+                .require_header(PARTIAL_MAGIC)
+                .expect("partial header");
+            assert_eq!(result_reader.count().expect("field count"), 0);
+            assert_eq!(result_reader.count().expect("path count"), 0);
+            assert_eq!(result_reader.count().expect("identity count"), 0);
+            assert_eq!(result_reader.count().expect("key count"), 0);
+            assert_eq!(result_reader.u8().expect("representative flag"), 0);
+            assert_eq!(result_reader.count().expect("coverage count"), 0);
+            assert_eq!(result_reader.count().expect("solution coverage count"), 0);
+            assert_eq!(result_reader.count().expect("normalized coverage count"), 0);
+            assert_eq!(result_reader.u8().expect("score shard flag"), 0);
+            assert_eq!(result_reader.count().expect("spin coverage count"), 1);
+            assert_eq!(
+                result_reader.borrowed_string().expect("spin target"),
+                "spin-target"
+            );
+            assert_eq!(result_reader.count().expect("pass index"), 0);
+            assert_eq!(result_reader.count().expect("pattern count"), 65);
+            assert_eq!(result_reader.count().expect("word count"), 2);
+            result_reader.u64().expect("first word");
+            let tail_word_offset = result_reader.cursor;
+            assert_eq!(result_reader.u64().expect("tail word"), 1);
+            assert_eq!(result_reader.count().expect("candidate key count"), 2);
+            assert_eq!(
+                result_reader
+                    .borrowed_string()
+                    .expect("first candidate key"),
+                "alpha"
+            );
+            let second_key_len = result_reader.byte_length().expect("second key length");
+            let second_key_offset = result_reader.cursor;
+            assert_eq!(
+                std::str::from_utf8(
+                    result_reader
+                        .take(second_key_len)
+                        .expect("second candidate key bytes")
+                )
+                .expect("candidate key utf8"),
+                "bravo"
+            );
+            (
+                result_start,
+                tail_word_offset,
+                second_key_offset,
+                second_key_len,
+            )
+        };
+
+        let mut dirty_tail = encoded.clone();
+        dirty_tail[result_start + tail_word_offset] |= 0b10;
+        let mut guard_calls = 0_usize;
+        let error = decode_build_probability_partial_results_with_memory_guard(&dirty_tail, |_| {
+            guard_calls += 1;
+            Ok::<(), ()>(())
+        })
+        .expect_err("dirty spin tail must fail closed");
+        assert_eq!(guard_calls, 0, "the prepass rejects dirty spin tail bits");
+        assert!(matches!(
+            error,
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_spin_coverage_shape_invalid"
+            ))
+        ));
+
+        let mut duplicate_key = encoded;
+        assert_eq!(second_key_len, "alpha".len());
+        duplicate_key
+            [result_start + second_key_offset..result_start + second_key_offset + second_key_len]
+            .copy_from_slice(b"alpha");
+        let mut guard_calls = 0_usize;
+        let error =
+            decode_build_probability_partial_results_with_memory_guard(&duplicate_key, |_| {
+                guard_calls += 1;
+                Ok::<(), ()>(())
+            })
+            .expect_err("duplicate spin candidate key must fail closed");
+        assert_eq!(
+            guard_calls, 0,
+            "the prepass rejects noncanonical spin candidate keys"
+        );
+        assert!(matches!(
+            error,
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_spin_candidate_keys_noncanonical"
+            ))
+        ));
     }
 
     #[test]

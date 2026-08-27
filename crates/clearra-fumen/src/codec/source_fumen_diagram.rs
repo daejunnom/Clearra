@@ -276,7 +276,7 @@ fn fumen_payload(source: &str) -> Result<String, SourceFumenDiagramError> {
     Err(SourceFumenDiagramError::MissingV115Payload)
 }
 
-pub(super) fn decode_document(source: &str) -> Result<fumen::Fumen, SourceFumenDiagramError> {
+pub(crate) fn decode_document(source: &str) -> Result<fumen::Fumen, SourceFumenDiagramError> {
     let payload = fumen_payload(source)?;
     fumen::Fumen::decode(&payload).map_err(|_| SourceFumenDiagramError::InvalidFumenPayload)
 }
@@ -329,6 +329,9 @@ pub enum SourceFumenDiagramError {
         page_index: usize,
         expected: u64,
         actual: u64,
+    },
+    PendingGarbageUnsupported {
+        page_index: usize,
     },
     InvalidTiling {
         page_index: usize,

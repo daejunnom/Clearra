@@ -4,6 +4,7 @@ use clearra_coverage::universe::{
 };
 
 use crate::{
+    finite_allocation::{FiniteSupplyAllocationError, FiniteSupplyAllocationTransaction},
     normalize::observed_queue_expansion::{ObservedQueueExpansion, ObservedQueueExpansionError},
     piece_source::SupplyTruncationReason,
     queue::{
@@ -12,8 +13,12 @@ use crate::{
     },
 };
 
+use super::flat_pattern_sequences::FlatPatternSequences;
 use super::materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseError,
+};
+use super::observed_standard_7_bag_sequence_space::{
+    ObservedStandard7BagSequenceSpace, ObservedStandard7BagSequenceSpaceError,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -125,17 +130,154 @@ impl PatternUniverseMaterializer {
         .map_err(PatternUniverseMaterializationError::Universe)
     }
 
+    pub(crate) fn validate_queue_pattern_expression_finite(
+        expression: &QueuePatternExpression,
+        visible_sequence_len: usize,
+    ) -> Result<(), PatternUniverseMaterializationError> {
+        if visible_sequence_len > expression.sequence_len() {
+            return Err(PatternUniverseMaterializationError::SequenceStorageOverflow);
+        }
+        let pattern_count = expression.pattern_count();
+        if pattern_count == 0 {
+            return Err(PatternUniverseMaterializationError::NoPatterns);
+        }
+        ProbabilityValue::new(1.0 / pattern_count as f64)
+            .map_err(PatternUniverseMaterializationError::Probability)?;
+        if expression.is_factorized() {
+            u16::try_from(visible_sequence_len)
+                .map_err(|_| PatternUniverseMaterializationError::SequenceStorageOverflow)?;
+        } else {
+            let sequences = expression
+                .explicit_sequences()
+                .ok_or(PatternUniverseMaterializationError::SequenceStorageOverflow)?;
+            sequences
+                .len()
+                .checked_add(1)
+                .ok_or(PatternUniverseMaterializationError::SequenceStorageOverflow)?;
+            sequences
+                .iter()
+                .try_fold(0usize, |total, sequence| {
+                    total.checked_add(visible_sequence_len.min(sequence.len()))
+                })
+                .ok_or(PatternUniverseMaterializationError::SequenceStorageOverflow)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fixed_sequence_finite(
+        sequence: &[clearra_core_domain::piece::piece_kind::PieceKind],
+        provenance_id: u64,
+        transaction: &mut FiniteSupplyAllocationTransaction<'_>,
+    ) -> Result<MaterializedPatternUniverse, FinitePatternUniverseMaterializationError> {
+        let identities = uniform_pattern_identities(
+            "fixed",
+            provenance_id,
+            core::iter::once(sequence),
+            ProbabilityValue::ONE,
+            1,
+            1,
+        );
+        let sequences = FlatPatternSequences::from_single_slice_finite(sequence, transaction)
+            .map_err(FinitePatternUniverseMaterializationError::Allocation)?;
+        MaterializedPatternUniverse::from_flat_sequences_uniform(
+            identities.0,
+            identities.1,
+            sequences,
+            ProbabilityValue::ONE,
+            1,
+            true,
+            None,
+        )
+        .map_err(|error| {
+            FinitePatternUniverseMaterializationError::Materialization(
+                PatternUniverseMaterializationError::Universe(error),
+            )
+        })
+    }
+
+    pub(crate) fn queue_pattern_expression_finite(
+        expression: &QueuePatternExpression,
+        visible_sequence_len: usize,
+        provenance_id: u64,
+        transaction: &mut FiniteSupplyAllocationTransaction<'_>,
+    ) -> Result<MaterializedPatternUniverse, FinitePatternUniverseMaterializationError> {
+        Self::validate_queue_pattern_expression_finite(expression, visible_sequence_len)
+            .map_err(FinitePatternUniverseMaterializationError::Materialization)?;
+        let pattern_count = expression.pattern_count();
+        let probability = ProbabilityValue::new(1.0 / pattern_count as f64)
+            .map_err(PatternUniverseMaterializationError::Probability)
+            .map_err(FinitePatternUniverseMaterializationError::Materialization)?;
+
+        if expression.is_factorized() {
+            let identities = factorized_expression_identities(
+                provenance_id,
+                expression.source(),
+                visible_sequence_len,
+                pattern_count,
+                probability,
+            );
+            let expression = expression
+                .duplicate_finite(visible_sequence_len, transaction)
+                .map_err(FinitePatternUniverseMaterializationError::Allocation)?;
+            return MaterializedPatternUniverse::from_factorized_queue_expression(
+                identities.0,
+                identities.1,
+                expression,
+                probability,
+                pattern_count as u128,
+            )
+            .map_err(|error| {
+                FinitePatternUniverseMaterializationError::Materialization(
+                    PatternUniverseMaterializationError::Universe(error),
+                )
+            });
+        }
+
+        let explicit_sequences = expression
+            .explicit_sequences()
+            .expect("validated explicit expression storage");
+        let identities = uniform_pattern_identities(
+            "queue-pattern-expression",
+            provenance_id,
+            explicit_sequences
+                .iter()
+                .map(|sequence| &sequence[..visible_sequence_len.min(sequence.len())]),
+            probability,
+            pattern_count,
+            pattern_count as u128,
+        );
+        let sequences = FlatPatternSequences::from_nested_prefix_finite(
+            explicit_sequences,
+            visible_sequence_len,
+            transaction,
+        )
+        .map_err(FinitePatternUniverseMaterializationError::Allocation)?;
+        MaterializedPatternUniverse::from_flat_sequences_uniform(
+            identities.0,
+            identities.1,
+            sequences,
+            probability,
+            pattern_count as u128,
+            true,
+            None,
+        )
+        .map_err(|error| {
+            FinitePatternUniverseMaterializationError::Materialization(
+                PatternUniverseMaterializationError::Universe(error),
+            )
+        })
+    }
+
     pub fn observed(
         queue: &ObservedQueue,
         minimum_len: usize,
         max_patterns: usize,
         provenance_id: u64,
     ) -> Result<MaterializedPatternUniverse, PatternUniverseMaterializationError> {
-        let materialization_limit = if max_patterns == 0 {
-            usize::MAX
-        } else {
-            max_patterns
-        };
+        if max_patterns == 0 {
+            return lazy_observed_standard_7_bag(queue, minimum_len, provenance_id);
+        }
+        let materialization_limit = max_patterns;
         let expansion = ObservedQueueExpansion::expand(queue, minimum_len, materialization_limit)
             .map_err(PatternUniverseMaterializationError::Observed)?;
         let sequences = expansion
@@ -148,13 +290,28 @@ impl PatternUniverseMaterializer {
             .iter()
             .map(|pattern| pattern.probability().value())
             .collect::<Vec<_>>();
-        let identities = pattern_identities(
-            "observed",
-            provenance_id,
-            sequences.iter().map(Vec::as_slice),
-            &weights,
-            expansion.total_pattern_count(),
-        );
+        let identities = if expansion.probability_complete() {
+            let sequence_len = u16::try_from(minimum_len.max(queue.len()))
+                .map_err(|_| PatternUniverseMaterializationError::SequenceStorageOverflow)?;
+            let probability = ProbabilityValue::new(1.0 / expansion.total_pattern_count() as f64)
+                .map_err(PatternUniverseMaterializationError::Probability)?;
+            lazy_observed_standard_7_bag_identities(
+                provenance_id,
+                queue.pieces(),
+                sequence_len,
+                sequences.len(),
+                expansion.total_pattern_count(),
+                probability,
+            )
+        } else {
+            pattern_identities(
+                "observed",
+                provenance_id,
+                sequences.iter().map(Vec::as_slice),
+                &weights,
+                expansion.total_pattern_count(),
+            )
+        };
         MaterializedPatternUniverse::from_sequences(
             identities.0,
             identities.1,
@@ -167,6 +324,109 @@ impl PatternUniverseMaterializer {
                 .then_some(SupplyTruncationReason::ObservedWindowBudgetExceeded),
         )
         .map_err(PatternUniverseMaterializationError::Universe)
+    }
+}
+
+fn uniform_pattern_identities<'a>(
+    label: &str,
+    provenance_id: u64,
+    sequences: impl IntoIterator<Item = &'a [clearra_core_domain::piece::piece_kind::PieceKind]>,
+    weight: ProbabilityValue,
+    pattern_count: usize,
+    total_possible_pattern_count: u128,
+) -> (PatternUniverseId, PatternWeightModelId) {
+    let mut universe_hash = stable_hash(&["clearra-pattern-universe-v1", label]);
+    universe_hash = mix_decimal_terminated(universe_hash, provenance_id as u128);
+    universe_hash = mix_decimal_terminated(universe_hash, total_possible_pattern_count);
+    for sequence in sequences {
+        for piece in sequence {
+            universe_hash = mix(universe_hash, piece.as_ascii() as u8);
+        }
+        universe_hash = mix(universe_hash, 0xff);
+    }
+
+    let mut weight_hash = stable_hash(&["clearra-pattern-weight-model-v1", label]);
+    weight_hash = mix_decimal_terminated(weight_hash, provenance_id as u128);
+    for _ in 0..pattern_count {
+        for byte in weight.get().to_bits().to_le_bytes() {
+            weight_hash = mix(weight_hash, byte);
+        }
+    }
+    (
+        PatternUniverseId::new(universe_hash.max(1)),
+        PatternWeightModelId::new(weight_hash.max(1)),
+    )
+}
+
+fn mix_decimal_terminated(mut hash: u64, mut value: u128) -> u64 {
+    let mut digits = [0_u8; 39];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    for digit in &digits[start..] {
+        hash = mix(hash, *digit);
+    }
+    mix(hash, 0)
+}
+
+fn lazy_observed_standard_7_bag(
+    queue: &ObservedQueue,
+    minimum_len: usize,
+    provenance_id: u64,
+) -> Result<MaterializedPatternUniverse, PatternUniverseMaterializationError> {
+    let sequence_len = minimum_len.max(queue.len());
+    let sequence_len = u16::try_from(sequence_len)
+        .map_err(|_| PatternUniverseMaterializationError::SequenceStorageOverflow)?;
+    let sequences = ObservedStandard7BagSequenceSpace::new(queue.pieces(), sequence_len)
+        .map_err(map_lazy_observed_error)?;
+    let total_pattern_count = sequences.total_pattern_count();
+    let probability = ProbabilityValue::new(1.0 / total_pattern_count as f64)
+        .map_err(PatternUniverseMaterializationError::Probability)?;
+    let identities = lazy_observed_standard_7_bag_identities(
+        provenance_id,
+        queue.pieces(),
+        sequence_len,
+        sequences.len(),
+        total_pattern_count,
+        probability,
+    );
+    MaterializedPatternUniverse::from_observed_standard_7_bag_lexicographic(
+        identities.0,
+        identities.1,
+        sequences,
+        probability,
+        total_pattern_count,
+    )
+    .map_err(PatternUniverseMaterializationError::Universe)
+}
+
+fn map_lazy_observed_error(
+    error: ObservedStandard7BagSequenceSpaceError,
+) -> PatternUniverseMaterializationError {
+    match error {
+        ObservedStandard7BagSequenceSpaceError::IncompatibleBoundary => {
+            PatternUniverseMaterializationError::Observed(
+                ObservedQueueExpansionError::IncompatibleBoundary,
+            )
+        }
+        ObservedStandard7BagSequenceSpaceError::NoPatterns => {
+            PatternUniverseMaterializationError::Observed(ObservedQueueExpansionError::NoPatterns)
+        }
+        ObservedStandard7BagSequenceSpaceError::PatternCountOverflow => {
+            PatternUniverseMaterializationError::PatternCountOverflow
+        }
+        ObservedStandard7BagSequenceSpaceError::SequenceTooShort
+        | ObservedStandard7BagSequenceSpaceError::InvalidBoundaryOffset
+        | ObservedStandard7BagSequenceSpaceError::PatternIndexOutOfRange
+        | ObservedStandard7BagSequenceSpaceError::RankInvariantViolated => {
+            PatternUniverseMaterializationError::SequenceStorageOverflow
+        }
     }
 }
 
@@ -199,6 +459,51 @@ fn factorized_expression_identities(
         .to_le_bytes()
         .into_iter()
         .chain((pattern_count as u64).to_le_bytes())
+        .chain(probability.get().to_bits().to_le_bytes())
+    {
+        weight_hash = mix(weight_hash, byte);
+    }
+    (
+        PatternUniverseId::new(universe_hash.max(1)),
+        PatternWeightModelId::new(weight_hash.max(1)),
+    )
+}
+
+fn lazy_observed_standard_7_bag_identities(
+    provenance_id: u64,
+    observed: &[clearra_core_domain::piece::piece_kind::PieceKind],
+    sequence_len: u16,
+    pattern_count: usize,
+    total_possible_pattern_count: u128,
+    probability: ProbabilityValue,
+) -> (PatternUniverseId, PatternWeightModelId) {
+    let mut universe_hash = stable_hash(&[
+        "clearra-pattern-universe-v2",
+        "lazy-observed-standard-7-bag-lexicographic",
+    ]);
+    for byte in provenance_id
+        .to_le_bytes()
+        .into_iter()
+        .chain(sequence_len.to_le_bytes())
+        .chain((observed.len() as u64).to_le_bytes())
+        .chain((pattern_count as u64).to_le_bytes())
+        .chain(total_possible_pattern_count.to_le_bytes())
+    {
+        universe_hash = mix(universe_hash, byte);
+    }
+    for piece in observed.iter().copied() {
+        universe_hash = mix(universe_hash, piece.as_ascii() as u8);
+    }
+
+    let mut weight_hash = stable_hash(&[
+        "clearra-pattern-weight-model-v2",
+        "lazy-observed-standard-7-bag-terminal-remainder",
+    ]);
+    for byte in provenance_id
+        .to_le_bytes()
+        .into_iter()
+        .chain((pattern_count as u64).to_le_bytes())
+        .chain(total_possible_pattern_count.to_le_bytes())
         .chain(probability.get().to_bits().to_le_bytes())
     {
         weight_hash = mix(weight_hash, byte);
@@ -354,4 +659,10 @@ pub enum PatternUniverseMaterializationError {
     Probability(clearra_core_domain::probability::probability_value::ProbabilityValueError),
     Observed(ObservedQueueExpansionError),
     Universe(MaterializedPatternUniverseError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FinitePatternUniverseMaterializationError {
+    Allocation(FiniteSupplyAllocationError),
+    Materialization(PatternUniverseMaterializationError),
 }

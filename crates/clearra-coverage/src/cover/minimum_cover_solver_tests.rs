@@ -2,7 +2,11 @@ use crate::{
     cover::cover_selection::{
         CoverSelectionLimit, CoverSelectionOptimality, CoverSelectionStrategy,
     },
-    matrix::coverage_matrix::TypedCoverageMatrix,
+    cover::exact_minimum_cover::exact_minimum_cover,
+    matrix::{
+        coverage_matrix::{CoverageMatrix, TypedCoverageMatrix},
+        coverage_row::CoverageRow as MatrixCoverageRow,
+    },
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
     row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind},
     universe::{
@@ -148,4 +152,100 @@ fn greedy_fallback_reports_approximate_budget_limited_result() {
             limit: EXACT_MIN_COVER_ROW_LIMIT
         }
     );
+}
+
+#[test]
+fn unbounded_exact_matrix_solver_is_fieldwise_equal_to_the_existing_exact_authority() {
+    let required =
+        PatternBitSet::from_patterns(4, (0..4).map(PatternId::new)).expect("required patterns");
+    let rows = vec![
+        PatternBitSet::from_patterns(4, [PatternId::new(0), PatternId::new(1)]).expect("first row"),
+        PatternBitSet::from_patterns(4, [PatternId::new(2), PatternId::new(3)])
+            .expect("second row"),
+        PatternBitSet::from_patterns(4, [PatternId::new(0), PatternId::new(2)]).expect("third row"),
+        PatternBitSet::from_patterns(4, [PatternId::new(1), PatternId::new(3)])
+            .expect("fourth row"),
+    ];
+    let matrix = CoverageMatrix::from_rows(
+        4,
+        rows.iter()
+            .cloned()
+            .enumerate()
+            .map(|(candidate_id, patterns)| MatrixCoverageRow::new(candidate_id, patterns))
+            .collect(),
+    )
+    .expect("coverage matrix");
+
+    let expected = exact_minimum_cover(&required, &rows).expect("existing exact authority");
+    let actual =
+        MinimumCoverSolver::solve_exact(&matrix, &required).expect("matrix exact authority");
+
+    assert_eq!(actual.row_indices(), expected.row_indices());
+    assert_eq!(actual.covered_patterns(), expected.covered_patterns());
+    assert_eq!(actual.is_complete(), expected.complete());
+    assert_eq!(actual.strategy(), CoverSelectionStrategy::ExactSearch);
+    assert_eq!(actual.optimality(), CoverSelectionOptimality::ProvenMinimum);
+    assert_eq!(actual.limit(), CoverSelectionLimit::None);
+}
+
+#[test]
+fn unbounded_exact_matrix_solver_preserves_partial_authority_when_no_full_cover_exists() {
+    let required =
+        PatternBitSet::from_patterns(2, [PatternId::new(0), PatternId::new(1)]).expect("required");
+    let row = PatternBitSet::from_patterns(2, [PatternId::new(0)]).expect("partial row");
+    let matrix = CoverageMatrix::from_rows(2, vec![MatrixCoverageRow::new(7, row.clone())])
+        .expect("coverage matrix");
+    let expected = exact_minimum_cover(&required, &[row]).expect("existing exact authority");
+
+    let actual =
+        MinimumCoverSolver::solve_exact(&matrix, &required).expect("matrix exact authority");
+
+    assert_eq!(actual.row_indices(), expected.row_indices());
+    assert_eq!(actual.covered_patterns(), expected.covered_patterns());
+    assert!(!actual.is_complete());
+    assert_eq!(actual.strategy(), CoverSelectionStrategy::ExactSearch);
+    assert_eq!(
+        actual.optimality(),
+        CoverSelectionOptimality::NoCompleteCover
+    );
+    assert_eq!(actual.limit(), CoverSelectionLimit::None);
+}
+
+#[test]
+fn typed_portfolio_adapter_preserves_equal_original_rows() {
+    let required = PatternBitSet::from_patterns(1, [PatternId::new(0)]).expect("required pattern");
+    let rows = [7_u64, 3_u64]
+        .into_iter()
+        .map(|candidate_id| {
+            CoverageRow::new_with_piece_source(
+                candidate_id,
+                CoverageRowKind::Pc,
+                11,
+                PatternUniverseId::new(1),
+                PatternWeightModelId::new(7),
+                required.clone(),
+            )
+        })
+        .collect();
+    let matrix = TypedCoverageMatrix::from_rows(
+        CoverageRowKind::Pc,
+        PatternUniverseId::new(1),
+        PatternWeightModelId::new(7),
+        1,
+        rows,
+    )
+    .expect("matrix");
+    let mut portfolios =
+        MinimumCoverSolver::exact_typed_portfolios(&matrix, &required).expect("portfolios");
+
+    let page = portfolios.next_page(10, 10).expect("all portfolios");
+
+    assert_eq!(
+        page.portfolios()
+            .iter()
+            .map(|portfolio| portfolio.row_indices().to_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![0], vec![1]]
+    );
+    assert_eq!(page.total_alternative_count_decimal(), Some("2"));
 }

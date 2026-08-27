@@ -93,6 +93,22 @@ impl NativeForwardExecutionError {
             Self::Search(ForwardSearchError::PatternRequiresSpinFinder) => {
                 "forward_search_pattern_requires_spin_finder"
             }
+            Self::Search(ForwardSearchError::RenRequiresFixedQueue) => {
+                "forward_ren_requires_fixed_queue"
+            }
+            Self::Search(ForwardSearchError::RenQueueTooLong) => "forward_ren_queue_too_long",
+            Self::Search(ForwardSearchError::RenInitialComboUnsupported) => {
+                "forward_ren_initial_combo_unsupported"
+            }
+            Self::Search(ForwardSearchError::RenInitialBackToBackUnsupported) => {
+                "forward_ren_initial_back_to_back_unsupported"
+            }
+            Self::Search(ForwardSearchError::RenLineClearPolicyUnsupported) => {
+                "forward_ren_line_clear_policy_unsupported"
+            }
+            Self::Search(ForwardSearchError::RenSpinProfileMustBeDisabled) => {
+                "forward_ren_spin_profile_must_be_disabled"
+            }
             Self::Search(ForwardSearchError::SpinProfileDisabled) => {
                 "forward_search_spin_profile_disabled"
             }
@@ -418,6 +434,8 @@ mod tests {
         bool,
         u8,
         u32,
+        String,
+        bool,
         Vec<ForwardPathStep>,
     )> {
         let mut outcomes = report
@@ -433,6 +451,8 @@ mod tests {
                     outcome.spin_mini(),
                     outcome.spin_lines(),
                     outcome.total_damage(),
+                    outcome.evidence_path_count().to_owned(),
+                    outcome.evidence_complete(),
                     outcome.path().to_vec(),
                 )
             })

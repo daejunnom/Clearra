@@ -45,4 +45,53 @@ impl CorePostProcessScoreCell {
     pub const fn attack(&self) -> u32 {
         self.attack
     }
+
+    /// Heap storage retained by this score cell, excluding its inline value.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        Some(self.trace_identity.capacity() as u128)
+    }
+
+    /// Heap storage requested by cloning this score cell's nested owner.
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        Some(self.trace_identity.len() as u128)
+    }
+
+    pub fn checked_clone_peak_bytes(&self) -> Option<u128> {
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(self.checked_nested_retained_bytes()?)?
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(self.checked_clone_nested_bytes()?)
+    }
+}
+
+#[cfg(test)]
+mod retained_memory_projection_tests {
+    use super::*;
+
+    #[test]
+    fn score_cell_projection_distinguishes_capacity_from_clone_length() {
+        let mut trace_identity = String::with_capacity(29);
+        trace_identity.push_str("trace");
+        let retained_identity_bytes = trace_identity.capacity() as u128;
+        let cell = CorePostProcessScoreCell::new(
+            StandardBoard64TilingIdentity::from_placements(0, []).expect("empty tiling identity"),
+            0,
+            trace_identity,
+            0,
+            0,
+        );
+        assert_eq!(
+            cell.checked_nested_retained_bytes(),
+            Some(retained_identity_bytes)
+        );
+        assert_eq!(cell.checked_clone_nested_bytes(), Some(5));
+        assert_eq!(
+            cell.checked_clone_peak_bytes(),
+            Some(
+                2_u128 * core::mem::size_of::<CorePostProcessScoreCell>() as u128
+                    + retained_identity_bytes
+                    + 5
+            )
+        );
+    }
 }

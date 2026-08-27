@@ -4,26 +4,30 @@ use std::sync::{
 };
 
 use clearra_core_domain::{
-    execution_cancellation::ExecutionCancellationToken, pruning::PruningEvidencePolicy,
+    execution_cancellation::ExecutionCancellationToken,
+    pruning::PruningEvidencePolicy,
+    resource::{ExecutionAvailability, ExecutionAvailabilityReason, ResourceReport},
 };
 use clearra_core_ffi::{
     CBuildUpProblem, CBuildUpProblemTemplate, CPackingCandidate, CPackingProblem,
     NativeBuildUpWorkspace, NativeCandidateReducer, NativeCoreError, NativeGeometryCatalog,
     NativeGeometrySolutionGraph, NativeGeometrySolutionTask, NativePackingCandidateConsumer,
     NativePackingCandidateContext, NativePackingCandidateSinkError, NativePruningLedger,
-    C_BUILDUP_STATUS_OK,
+    PackingCandidateBatch, C_BUILDUP_STATUS_OK,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SearchProblem;
 
 use crate::{
     buildup::buildup_native_bridge::uses_standard_bag_automaton, packing::PackingRunnerError,
+    resource::ExecutionMemoryBound,
 };
 
 const PACKING_OK: i32 = 0;
 const PACKING_CAPACITY_EXCEEDED: i32 = 6;
 const TRUNCATION_CANDIDATE_BUDGET_EXCEEDED: u16 = 2;
 const TRUNCATION_MEMORY_EXCEEDED: u16 = 10;
+const BUILDABLE_WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 pub(crate) struct BuildableGeometryReduction {
     pub(crate) candidates: clearra_core_ffi::PackingCandidateBatch,
@@ -48,9 +52,88 @@ enum BuildabilitySourceSelection {
     ConcretePatterns(Arc<[u32]>),
 }
 
+impl BuildabilitySourceSelection {
+    fn checked_retained_bytes(&self) -> Option<u128> {
+        match self {
+            Self::StandardBagAutomaton => Some(0),
+            Self::ConcretePatterns(pattern_ids) => {
+                let arc_header_bytes = (2 * core::mem::size_of::<usize>()) as u128;
+                arc_header_bytes.checked_add(
+                    (pattern_ids.len() as u128).checked_mul(core::mem::size_of::<u32>() as u128)?,
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BuildableGeometryAllocationPlan {
+    template_bytes: u128,
+    source_ids_bytes: u128,
+    worker_owner_bytes: u128,
+    worker_stack_bytes: u128,
+}
+
+impl BuildableGeometryAllocationPlan {
+    fn checked(
+        problem: &SearchProblem,
+        standard_bag_automaton: bool,
+        source_pattern_count: usize,
+        worker_count: usize,
+        shared_reducer: bool,
+    ) -> Option<Self> {
+        let template_bytes = CBuildUpProblemTemplate::checked_compile_retained_bytes(
+            problem,
+            standard_bag_automaton,
+        )?;
+        let source_ids_bytes = if standard_bag_automaton {
+            0
+        } else {
+            ((2 * core::mem::size_of::<usize>()) as u128).checked_add(
+                (source_pattern_count as u128).checked_mul(core::mem::size_of::<u32>() as u128)?,
+            )?
+        };
+        let per_worker_owner_bytes = (core::mem::size_of::<NativeBuildUpWorkspace>() as u128)
+            .checked_add(core::mem::size_of::<WorkerGeometryReduction>() as u128)?
+            .checked_add(core::mem::size_of::<NativeCandidateReducer>() as u128)?
+            .checked_add(core::mem::size_of::<PackingCandidateBatch>() as u128)?
+            .checked_add(core::mem::size_of::<AtomicUsize>() as u128)?
+            .checked_add(core::mem::size_of::<
+                std::thread::ScopedJoinHandle<
+                    'static,
+                    Result<WorkerGeometryReduction, PackingRunnerError>,
+                >,
+            >() as u128)?;
+        let shared_owner_bytes = if shared_reducer {
+            (core::mem::size_of::<Mutex<NativeCandidateReducer>>() as u128)
+                .checked_add(core::mem::size_of::<Vec<AtomicUsize>>() as u128)?
+                .checked_add((4 * core::mem::size_of::<usize>()) as u128)?
+        } else {
+            0
+        };
+        let workers = worker_count as u128;
+        Some(Self {
+            template_bytes,
+            source_ids_bytes,
+            worker_owner_bytes: per_worker_owner_bytes
+                .checked_mul(workers)?
+                .checked_add(shared_owner_bytes)?,
+            worker_stack_bytes: (BUILDABLE_WORKER_STACK_BYTES as u128).checked_mul(workers)?,
+        })
+    }
+
+    fn checked_retained_before_workspace_bytes(self) -> Option<u128> {
+        self.template_bytes
+            .checked_add(self.source_ids_bytes)?
+            .checked_add(self.worker_owner_bytes)?
+            .checked_add(self.worker_stack_bytes)
+    }
+}
+
 fn buildability_template_and_source(
     search_problem: &SearchProblem,
     source_pattern_bits: Option<&PatternBitSet>,
+    max_memory_bytes: u128,
 ) -> Result<(Arc<CBuildUpProblemTemplate>, BuildabilitySourceSelection), PackingRunnerError> {
     if uses_standard_bag_automaton(search_problem) {
         return Ok((
@@ -63,7 +146,12 @@ fn buildability_template_and_source(
     }
 
     let pattern_bits = source_pattern_bits.ok_or(PackingRunnerError::NoReachablePieceMultiset)?;
-    let mut pattern_ids = Vec::with_capacity(pattern_bits.count_ones() as usize);
+    let pattern_count = usize::try_from(pattern_bits.count_ones())
+        .map_err(|_| buildable_projection_overflow(search_problem))?;
+    let mut pattern_ids = Vec::new();
+    pattern_ids
+        .try_reserve_exact(pattern_count)
+        .map_err(|_| buildable_memory_exhausted(search_problem, max_memory_bytes))?;
     for pattern_id in pattern_bits.covered_patterns() {
         pattern_ids.push(
             u32::try_from(pattern_id.index())
@@ -97,10 +185,93 @@ where
         + Sync,
 {
     let worker_count = requested_worker_count.max(1);
-    let (template, source_selection) =
-        buildability_template_and_source(search_problem, source_pattern_bits)?;
+    let standard_bag_automaton = uses_standard_bag_automaton(search_problem);
+    let source_pattern_count = if standard_bag_automaton {
+        0
+    } else {
+        usize::try_from(
+            source_pattern_bits
+                .ok_or(PackingRunnerError::NoReachablePieceMultiset)?
+                .count_ones(),
+        )
+        .map_err(|_| buildable_projection_overflow(search_problem))?
+    };
     let use_shared_reducer =
         problem.budget.max_results != 0 || problem.budget.has_max_memory_mib != 0;
+    let max_memory_bytes = configured_memory_limit_bytes(problem);
+    let memory_bound = ExecutionMemoryBound::unbounded_for_problem(search_problem)
+        .and_then(|bound| bound.with_cap(max_memory_bytes))
+        .map_err(buildable_resource_error)?;
+    let allocation_plan = BuildableGeometryAllocationPlan::checked(
+        search_problem,
+        standard_bag_automaton,
+        source_pattern_count,
+        worker_count,
+        use_shared_reducer,
+    )
+    .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    let planned_before_workspace = allocation_plan
+        .checked_retained_before_workspace_bytes()
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(base_resident_bytes as u128, planned_before_workspace)
+        .map_err(buildable_resource_error)?;
+
+    let (template, source_selection) =
+        buildability_template_and_source(search_problem, source_pattern_bits, max_memory_bytes)?;
+    let actual_template_bytes = template
+        .checked_retained_bytes()
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    let actual_source_bytes = source_selection
+        .checked_retained_bytes()
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    debug_assert!(allocation_plan.template_bytes >= actual_template_bytes);
+    debug_assert!(allocation_plan.source_ids_bytes >= actual_source_bytes);
+    let retained_before_workspace = actual_template_bytes
+        .checked_add(actual_source_bytes)
+        .and_then(|bytes| bytes.checked_add(allocation_plan.worker_owner_bytes))
+        .and_then(|bytes| bytes.checked_add(allocation_plan.worker_stack_bytes))
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(base_resident_bytes as u128, retained_before_workspace)
+        .map_err(buildable_resource_error)?;
+
+    let mut workspaces = Vec::new();
+    workspaces
+        .try_reserve_exact(worker_count)
+        .map_err(|_| buildable_memory_exhausted(search_problem, max_memory_bytes))?;
+    let mut workspace_retained_total = 0u128;
+    for _ in 0..worker_count {
+        let already_retained = (base_resident_bytes as u128)
+            .checked_add(retained_before_workspace)
+            .and_then(|bytes| bytes.checked_add(workspace_retained_total))
+            .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+        let workspace =
+            NativeBuildUpWorkspace::try_new_with_memory_limit(already_retained, max_memory_bytes)
+                .map_err(|error| enrich_native_memory_error(search_problem, error))?;
+        let retained = workspace
+            .checked_retained_bytes()
+            .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+        workspace_retained_total = workspace_retained_total
+            .checked_add(retained)
+            .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+        workspaces.push(workspace);
+    }
+    memory_bound
+        .ensure(
+            (base_resident_bytes as u128)
+                .checked_add(retained_before_workspace)
+                .ok_or_else(|| buildable_projection_overflow(search_problem))?,
+            workspace_retained_total,
+        )
+        .map_err(buildable_resource_error)?;
+    let execution_base_resident_bytes = usize::try_from(
+        (base_resident_bytes as u128)
+            .checked_add(retained_before_workspace)
+            .ok_or_else(|| buildable_projection_overflow(search_problem))?,
+    )
+    .map_err(|_| buildable_projection_overflow(search_problem))?;
+
     let shared_reducer = use_shared_reducer
         .then(|| {
             NativeCandidateReducer::new(problem)
@@ -113,15 +284,28 @@ where
     let stop = AtomicBool::new(false);
     let shared_workspace_bytes = use_shared_reducer.then(|| {
         Arc::new(
-            (0..worker_count)
-                .map(|_| AtomicUsize::new(0))
+            workspaces
+                .iter()
+                .map(|workspace| {
+                    AtomicUsize::new(
+                        usize::try_from(
+                            workspace
+                                .checked_retained_bytes()
+                                .expect("workspace bytes were checked above"),
+                        )
+                        .expect("native workspace retained bytes fit usize"),
+                    )
+                })
                 .collect::<Vec<_>>(),
         )
     });
 
     let mut worker_reducers = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(worker_count);
-        for worker_index in 0..worker_count {
+        let mut handles = Vec::new();
+        handles
+            .try_reserve_exact(worker_count)
+            .map_err(|_| buildable_memory_exhausted(search_problem, max_memory_bytes))?;
+        for (worker_index, workspace) in workspaces.into_iter().enumerate() {
             let template = Arc::clone(&template);
             let source_selection = source_selection.clone();
             let reducer = match &shared_reducer {
@@ -135,54 +319,63 @@ where
             let truncation = &truncation;
             let stop = &stop;
             let producer = &producer;
-            handles.push(scope.spawn(move || {
-                let mut scratch = match &source_selection {
-                    BuildabilitySourceSelection::StandardBagAutomaton => template
-                        .new_standard_bag_automaton_scratch()
-                        .map_err(PackingRunnerError::Ffi)?,
-                    BuildabilitySourceSelection::ConcretePatterns(_) => template.new_scratch(),
-                };
-                template.attach_geometry_catalog(&mut scratch, catalog);
-                let workspace = NativeBuildUpWorkspace::new();
-                let host_workspace_bytes = workspace.host_buffer_bytes();
-                let initial_workspace_bytes = workspace.retained_bytes();
-                if let Some(workspace_bytes) = &shared_workspace_bytes {
-                    workspace_bytes[worker_index].store(initial_workspace_bytes, Ordering::Release);
-                }
-                let sink = BuildableCandidateConsumer {
-                    reducer,
-                    shared_workspace_bytes,
-                    worker_index,
-                    base_resident_bytes,
-                    catalog_bytes: catalog.resident_bytes(),
-                    host_workspace_bytes,
-                    workspace_peak_bytes: initial_workspace_bytes,
-                };
-                let mut consumer = BuildableGeometryPathConsumer {
-                    problem,
-                    catalog,
-                    cancellation,
-                    template,
-                    source_selection,
-                    scratch,
-                    workspace,
-                    sink,
-                    generated_count: 0,
-                    buildable_count: 0,
-                    truncation,
-                    stop,
-                    failure: None,
-                    pruning_ledger: None,
-                };
-                producer(worker_index, worker_count, &mut consumer)?;
-                if let Some(error) = consumer.failure.take() {
-                    return Err(error);
-                }
-                consumer.finish();
-                Ok::<WorkerGeometryReduction, PackingRunnerError>(consumer.into_worker_reduction())
-            }));
+            let handle = std::thread::Builder::new()
+                .stack_size(BUILDABLE_WORKER_STACK_BYTES)
+                .spawn_scoped(scope, move || {
+                    let mut scratch = match &source_selection {
+                        BuildabilitySourceSelection::StandardBagAutomaton => template
+                            .new_standard_bag_automaton_scratch()
+                            .map_err(PackingRunnerError::Ffi)?,
+                        BuildabilitySourceSelection::ConcretePatterns(_) => template.new_scratch(),
+                    };
+                    template.attach_geometry_catalog(&mut scratch, catalog);
+                    let host_workspace_bytes = workspace.host_buffer_bytes();
+                    let initial_workspace_bytes = workspace.retained_bytes();
+                    if let Some(workspace_bytes) = &shared_workspace_bytes {
+                        workspace_bytes[worker_index]
+                            .store(initial_workspace_bytes, Ordering::Release);
+                    }
+                    let sink = BuildableCandidateConsumer {
+                        reducer,
+                        shared_workspace_bytes,
+                        worker_index,
+                        base_resident_bytes: execution_base_resident_bytes,
+                        catalog_bytes: catalog.resident_bytes(),
+                        host_workspace_bytes,
+                        workspace_peak_bytes: initial_workspace_bytes,
+                    };
+                    let mut consumer = BuildableGeometryPathConsumer {
+                        problem,
+                        catalog,
+                        cancellation,
+                        template,
+                        source_selection,
+                        scratch,
+                        workspace,
+                        sink,
+                        generated_count: 0,
+                        buildable_count: 0,
+                        truncation,
+                        stop,
+                        failure: None,
+                        pruning_ledger: None,
+                    };
+                    producer(worker_index, worker_count, &mut consumer)?;
+                    if let Some(error) = consumer.failure.take() {
+                        return Err(error);
+                    }
+                    consumer.finish();
+                    Ok::<WorkerGeometryReduction, PackingRunnerError>(
+                        consumer.into_worker_reduction(),
+                    )
+                })
+                .map_err(|_| PackingRunnerError::ParallelWorkerPanicked)?;
+            handles.push(handle);
         }
-        let mut worker_reductions = Vec::with_capacity(worker_count);
+        let mut worker_reductions = Vec::new();
+        worker_reductions
+            .try_reserve_exact(worker_count)
+            .map_err(|_| buildable_memory_exhausted(search_problem, max_memory_bytes))?;
         for handle in handles {
             worker_reductions.push(
                 handle
@@ -207,10 +400,22 @@ where
     let retained_workspace_bytes = worker_reducers
         .iter()
         .map(|worker| worker.workspace_peak_bytes)
-        .fold(0usize, usize::saturating_add);
+        .try_fold(0usize, usize::checked_add)
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    let retained_without_reducer = (base_resident_bytes as u128)
+        .checked_add(retained_before_workspace)
+        .and_then(|bytes| bytes.checked_add(retained_workspace_bytes as u128))
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
     let pruning_ledger = merge_worker_pruning_ledgers(&mut worker_reducers)?;
     let (candidates, reducer_bytes) = match shared_reducer {
         Some(reducer) => {
+            let observed_reducer_bytes = reducer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .resident_bytes() as u128;
+            memory_bound
+                .ensure(retained_without_reducer, observed_reducer_bytes)
+                .map_err(buildable_resource_error)?;
             let reducer = Arc::try_unwrap(reducer)
                 .map_err(|_| PackingRunnerError::ParallelWorkerPanicked)?
                 .into_inner()
@@ -219,23 +424,127 @@ where
             (reducer.into_candidates(), reducer_bytes)
         }
         None => merge_worker_reducers(
+            search_problem,
             problem,
             worker_reducers
                 .into_iter()
                 .filter_map(|worker| worker.reducer)
                 .collect(),
+            memory_bound,
+            retained_without_reducer,
         )?,
     };
     Ok(BuildableGeometryReduction {
         candidates,
         generated_count,
         buildable_count,
-        workspace_bytes: retained_workspace_bytes,
+        workspace_bytes: usize::try_from(
+            retained_before_workspace
+                .checked_add(retained_workspace_bytes as u128)
+                .ok_or_else(|| buildable_projection_overflow(search_problem))?,
+        )
+        .map_err(|_| buildable_projection_overflow(search_problem))?,
         reducer_bytes,
         truncation: truncation.load(Ordering::Acquire),
         worker_count,
         pruning_ledger,
     })
+}
+
+fn configured_memory_limit_bytes(problem: &CPackingProblem) -> u128 {
+    if problem.budget.has_max_memory_mib == 0 {
+        u128::MAX
+    } else {
+        u128::from(problem.budget.max_memory_mib) * 1024 * 1024
+    }
+}
+
+fn buildable_resource_error(resource_report: ResourceReport) -> PackingRunnerError {
+    PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+        status: PACKING_CAPACITY_EXCEEDED,
+        resource_report,
+    })
+}
+
+fn buildable_resource_report(
+    search_problem: &SearchProblem,
+    reason: ExecutionAvailabilityReason,
+    required_memory_bytes: u128,
+) -> ResourceReport {
+    let Some(universe) = search_problem.piece_source().materialized_universe() else {
+        return ResourceReport::admission_failure(ExecutionAvailability::unavailable(
+            ExecutionAvailabilityReason::CapabilityUnavailable,
+        ));
+    };
+    let descriptor_pattern_count = universe.total_possible_pattern_count();
+    let dense_pattern_count = universe.pattern_count() as u128;
+    let required_dense_bytes = dense_pattern_count
+        .checked_add(63)
+        .and_then(|count| count.checked_div(64))
+        .and_then(|words| words.checked_mul(core::mem::size_of::<u64>() as u128))
+        .unwrap_or(u128::MAX);
+    let availability = match reason {
+        ExecutionAvailabilityReason::MemoryBudgetExceeded => {
+            ExecutionAvailability::exhausted(reason)
+        }
+        _ => ExecutionAvailability::unavailable(reason),
+    }
+    .with_pattern_evidence(
+        descriptor_pattern_count,
+        dense_pattern_count,
+        required_dense_bytes,
+    )
+    .with_required_memory_bytes(required_memory_bytes);
+    ResourceReport::admission_failure(availability)
+}
+
+fn buildable_projection_overflow(search_problem: &SearchProblem) -> PackingRunnerError {
+    buildable_resource_error(buildable_resource_report(
+        search_problem,
+        ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
+        u128::MAX,
+    ))
+}
+
+fn buildable_memory_exhausted(
+    search_problem: &SearchProblem,
+    max_memory_bytes: u128,
+) -> PackingRunnerError {
+    buildable_resource_error(buildable_resource_report(
+        search_problem,
+        ExecutionAvailabilityReason::MemoryBudgetExceeded,
+        max_memory_bytes.checked_add(1).unwrap_or(u128::MAX),
+    ))
+}
+
+fn enrich_native_memory_error(
+    search_problem: &SearchProblem,
+    error: NativeCoreError,
+) -> PackingRunnerError {
+    if let NativeCoreError::PackingIncomplete {
+        status,
+        resource_report,
+    } = error
+    {
+        let availability = resource_report.execution_availability();
+        if availability.reason() == Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+            && availability.descriptor_pattern_count().is_none()
+        {
+            return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+                status,
+                resource_report: buildable_resource_report(
+                    search_problem,
+                    ExecutionAvailabilityReason::MemoryBudgetExceeded,
+                    availability.required_memory_bytes().unwrap_or(u128::MAX),
+                ),
+            });
+        }
+        return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+            status,
+            resource_report,
+        });
+    }
+    PackingRunnerError::Native(error)
 }
 
 pub(crate) struct BuildableGeometryPathConsumer<'a> {
@@ -541,8 +850,9 @@ impl NativePackingCandidateConsumer for BuildableCandidateConsumer {
     ) -> Result<bool, NativePackingCandidateSinkError> {
         let current_workspace_bytes = context
             .engine_resident_bytes
-            .saturating_sub(self.catalog_bytes)
-            .saturating_add(self.host_workspace_bytes);
+            .checked_sub(self.catalog_bytes)
+            .and_then(|bytes| bytes.checked_add(self.host_workspace_bytes))
+            .ok_or(NativePackingCandidateSinkError::MemoryExceeded)?;
         self.observe_workspace_bytes(current_workspace_bytes);
         let other_workspace_bytes = match &self.shared_workspace_bytes {
             Some(workspace_bytes) => workspace_bytes
@@ -550,13 +860,15 @@ impl NativePackingCandidateConsumer for BuildableCandidateConsumer {
                 .enumerate()
                 .filter(|(index, _)| *index != self.worker_index)
                 .map(|(_, bytes)| bytes.load(Ordering::Acquire))
-                .fold(0usize, usize::saturating_add),
+                .try_fold(0usize, usize::checked_add)
+                .ok_or(NativePackingCandidateSinkError::MemoryExceeded)?,
             None => 0,
         };
         let engine_resident_bytes = self
             .base_resident_bytes
-            .saturating_add(current_workspace_bytes)
-            .saturating_add(other_workspace_bytes);
+            .checked_add(current_workspace_bytes)
+            .and_then(|bytes| bytes.checked_add(other_workspace_bytes))
+            .ok_or(NativePackingCandidateSinkError::MemoryExceeded)?;
         let candidate_context = |accepted_candidate_count| NativePackingCandidateContext {
             accepted_candidate_count,
             engine_resident_bytes,
@@ -584,17 +896,31 @@ impl NativePackingCandidateConsumer for BuildableCandidateConsumer {
 }
 
 fn merge_worker_reducers(
+    search_problem: &SearchProblem,
     problem: &CPackingProblem,
     reducers: Vec<NativeCandidateReducer>,
+    memory_bound: ExecutionMemoryBound,
+    retained_without_reducer: u128,
 ) -> Result<(clearra_core_ffi::PackingCandidateBatch, usize), PackingRunnerError> {
     let source_reducer_bytes = reducers
         .iter()
         .map(NativeCandidateReducer::resident_bytes)
-        .fold(0usize, usize::saturating_add);
+        .try_fold(0usize, usize::checked_add)
+        .ok_or_else(|| {
+            PackingRunnerError::CandidateReducer(NativePackingCandidateSinkError::MemoryExceeded)
+        })?;
+    memory_bound
+        .ensure(retained_without_reducer, source_reducer_bytes as u128)
+        .map_err(buildable_resource_error)?;
     let batches = reducers
         .into_iter()
         .map(NativeCandidateReducer::into_uncanonicalized_candidates)
-        .collect();
+        .collect::<Vec<_>>();
+    let merge_peak_bytes = PackingCandidateBatch::checked_merge_batches_transient_bytes(&batches)
+        .ok_or_else(|| buildable_projection_overflow(search_problem))?;
+    memory_bound
+        .ensure(retained_without_reducer, merge_peak_bytes)
+        .map_err(buildable_resource_error)?;
     let board_height = if problem.board.search_height == 0 {
         problem.board.visible_height
     } else {
@@ -607,11 +933,57 @@ fn merge_worker_reducers(
     )
     .map_err(PackingRunnerError::CandidateBatch)?;
     merged.canonicalize_identities();
+    memory_bound
+        .ensure(
+            retained_without_reducer,
+            merged
+                .checked_retained_bytes()
+                .ok_or_else(|| buildable_projection_overflow(search_problem))?,
+        )
+        .map_err(buildable_resource_error)?;
     // During the ownership transfer, payload allocations are not duplicated.
     // Account conservatively for the one compact global index allocation that
     // may coexist with worker-local reducer hash tables.
     let reducer_bytes = source_reducer_bytes
-        .saturating_add(merged.merge_index_resident_bytes())
+        .checked_add(merged.merge_index_resident_bytes())
+        .ok_or_else(|| {
+            PackingRunnerError::CandidateReducer(NativePackingCandidateSinkError::MemoryExceeded)
+        })?
         .max(merged.resident_bytes());
     Ok((merged, reducer_bytes))
+}
+
+#[cfg(test)]
+mod resource_projection_tests {
+    use super::*;
+
+    #[test]
+    fn buildable_owner_components_are_added_once() {
+        let plan = BuildableGeometryAllocationPlan {
+            template_bytes: 11,
+            source_ids_bytes: 13,
+            worker_owner_bytes: 17,
+            worker_stack_bytes: 19,
+        };
+        assert_eq!(plan.checked_retained_before_workspace_bytes(), Some(60));
+    }
+
+    #[test]
+    fn explicit_worker_stack_projection_matches_the_builder_stack_size() {
+        let workers = 4u128;
+        assert_eq!(
+            (BUILDABLE_WORKER_STACK_BYTES as u128).checked_mul(workers),
+            Some(8 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn concrete_source_projection_separates_arc_header_from_piece_ids() {
+        let ids: Arc<[u32]> = Arc::from([1u32, 2, 3]);
+        let selection = BuildabilitySourceSelection::ConcretePatterns(ids);
+        assert_eq!(
+            selection.checked_retained_bytes(),
+            Some((2 * core::mem::size_of::<usize>() + 3 * core::mem::size_of::<u32>()) as u128)
+        );
+    }
 }

@@ -14,17 +14,18 @@ use clearra_coverage::pattern::{
     pattern_bitset::PatternBitSet, pattern_id::PatternId, weighted_pattern_set::WeightedPatternSet,
 };
 use clearra_finesse::{
-    aggregate_unique_queue_costs, union_costed_geometry_languages, CostedGeometryEdge,
-    CostedGeometryLanguage, FinesseError, FinesseRouteWitnessError, GeometryLanguageError,
-    GeometryLanguageNode, GeometryNodeId, QueueClassProductEvaluator, QueueClassSet,
-    QueueCostAggregation, QueueCostTable, QueuePattern,
+    aggregate_unique_queue_costs, union_costed_geometry_languages, ClassicInputAction,
+    CostedGeometryEdge, CostedGeometryLanguage, FinesseError, FinesseRouteWitnessError,
+    FinesseSequenceInput, FinesseTarget, GeometryActionKey, GeometryLanguageError,
+    GeometryLanguageNode, GeometryNodeId, PiecePose, QueueClass, QueueClassProductEvaluator,
+    QueueClassSet, QueueCostAggregation, QueueCostTable, QueuePattern,
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
     FinesseMetric, FinessePatternKnowledge, FinesseScoreRequest, SearchProblem,
 };
-use clearra_replay::ExactScoringExecutionBatch;
+use clearra_replay::{ExactScoringExecutionBatch, ExactScoringExecutionGraph};
 use clearra_rules::{kicks::KickTableProfile, spawn::SpawnProfile};
 use clearra_supply::{
     hold_automaton::HoldAutomatonState,
@@ -33,6 +34,11 @@ use clearra_supply::{
 
 use crate::{
     performance::{ExecutorSearchStage, SearchStageSpan},
+    resource::{
+        admit_budget_bound_search_execution, ExecutionAdmission, ExecutionAdmissionPlan,
+        ExecutionMemoryBound,
+    },
+    solution_probability::normalized_solution_probability_reports,
     CoreExecutionResult, CorePathStep, FinessePolicyResult, FinesseReport, FinesseReportInput,
     FinesseRepresentativeWitness, FinesseSolutionAverage, NormalizedSolutionCoverage,
     SolutionCoverage, TilingSolutionPageStore,
@@ -40,7 +46,8 @@ use crate::{
 
 use super::{
     buildup::{
-        exact_scoring_execution_graph_for_completion, verify_candidate_for_completion,
+        exact_scoring_execution_graph_for_completion,
+        exact_scoring_execution_graph_memory_projection, verify_candidate_for_completion,
         verify_candidate_for_completion_with_finesse, BuildCompletion, BuildUpWorkspace,
         CandidateBuildResult, CandidateWitnessMode, PreparedFinesseLanguage,
     },
@@ -63,6 +70,60 @@ pub(crate) enum BuildProbabilityAdvance {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildProbabilityCallerMemory {
+    Compatibility,
+    Finite {
+        external_retained_owner_bytes: u128,
+        returned_carrier_bytes: u128,
+    },
+}
+
+impl BuildProbabilityCallerMemory {
+    fn finite(
+        external_retained_owner_bytes: u128,
+        returned_carrier_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        external_retained_owner_bytes
+            .checked_add(returned_carrier_delta_bytes(returned_carrier_bytes))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_caller_memory_projection_overflow",
+            ))?;
+        Ok(Self::Finite {
+            external_retained_owner_bytes,
+            returned_carrier_bytes,
+        })
+    }
+
+    const fn is_finite(self) -> bool {
+        matches!(self, Self::Finite { .. })
+    }
+
+    const fn external_retained_owner_bytes(self) -> u128 {
+        match self {
+            Self::Compatibility => 0,
+            Self::Finite {
+                external_retained_owner_bytes,
+                ..
+            } => external_retained_owner_bytes,
+        }
+    }
+
+    const fn returned_carrier_delta_bytes(self) -> u128 {
+        match self {
+            Self::Compatibility => 0,
+            Self::Finite {
+                returned_carrier_bytes,
+                ..
+            } => returned_carrier_delta_bytes(returned_carrier_bytes),
+        }
+    }
+}
+
+const fn returned_carrier_delta_bytes(returned_carrier_bytes: u128) -> u128 {
+    returned_carrier_bytes.saturating_sub(core::mem::size_of::<CoreExecutionResult>() as u128)
+}
+
 pub(crate) struct WasmBuildProbabilitySession {
     pending: VecDeque<BuildProbabilitySessionKind>,
     completed: Vec<CoreExecutionResult>,
@@ -75,6 +136,8 @@ pub(crate) struct WasmBuildProbabilitySession {
     mirror_included: bool,
     mirror_distinct: bool,
     execution_constraints_requested: bool,
+    _execution_admission: ExecutionAdmission,
+    caller_memory: BuildProbabilityCallerMemory,
     finished: bool,
 }
 
@@ -84,9 +147,52 @@ struct PendingFinesseScore {
     request: FinesseScoreRequest,
 }
 
+impl PendingFinesseScore {
+    fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        // `PendingFinesseScore`, its `SearchProblem`, and the request's `Vec`
+        // owner are inline in the outer session. Count only the problem's
+        // nested heap plus the placement backing allocation.
+        checked_build_probability_problem_nested_retained_bytes(&self.problem)?
+            .checked_add(self.request.checked_retained_capacity_bytes()?)
+    }
+}
+
+/// Returns only the problem's nested heap. A Compact or Extended session's
+/// outer/backing allocation already contains its inline `SearchProblem`.
+pub(super) fn checked_build_probability_problem_nested_retained_bytes(
+    problem: &SearchProblem,
+) -> Option<u128> {
+    problem
+        .checked_build_probability_pointee_retained_bytes()?
+        .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
+}
+
 enum BuildProbabilitySessionKind {
     Compact(CompactBuildProbabilitySession),
     Extended(super::extended_build_probability::ExtendedBuildProbabilitySession),
+}
+
+impl BuildProbabilitySessionKind {
+    fn checked_retained_bytes(&self) -> Option<u128> {
+        match self {
+            Self::Compact(session) => session.checked_retained_bytes(),
+            Self::Extended(session) => session.checked_retained_bytes(),
+        }
+    }
+
+    fn set_coexisting_retained_bytes(&mut self, bytes: u128) {
+        match self {
+            Self::Compact(session) => session.set_coexisting_retained_bytes(bytes),
+            Self::Extended(session) => session.set_coexisting_retained_bytes(bytes),
+        }
+    }
+
+    fn checked_finesse_search_material_future_bytes(&self) -> Option<u128> {
+        match self {
+            Self::Compact(session) => session.checked_finesse_search_material_future_bytes(),
+            Self::Extended(session) => session.checked_finesse_search_material_future_bytes(),
+        }
+    }
 }
 
 impl WasmBuildProbabilitySession {
@@ -96,32 +202,108 @@ impl WasmBuildProbabilitySession {
         aggregation: BuildProbabilityAggregation,
         finesse: BuildProbabilityFinesseRequest,
     ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_caller_memory(
+            problem,
+            field,
+            aggregation,
+            finesse,
+            BuildProbabilityCallerMemory::Compatibility,
+        )
+    }
+
+    pub(crate) fn new_finite(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
+        external_retained_owner_bytes: u128,
+        returned_carrier_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_caller_memory(
+            problem,
+            field,
+            aggregation,
+            finesse,
+            BuildProbabilityCallerMemory::finite(
+                external_retained_owner_bytes,
+                returned_carrier_bytes,
+            )?,
+        )
+    }
+
+    fn new_with_caller_memory(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse: BuildProbabilityFinesseRequest,
+        caller_memory: BuildProbabilityCallerMemory,
+    ) -> Result<Self, WasmExactSearchError> {
         let finesse_metric = finesse.metric();
         let finesse_pattern_knowledge = finesse.pattern_knowledge();
         let finesse_score = finesse.score().cloned();
         let score_requested = finesse_score.is_some();
+        if caller_memory.is_finite() && score_requested {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finite_build_probability_finesse_score_memory_authority_unavailable",
+            ));
+        }
+        if problem.solution_probability_policy().requested() {
+            if aggregation.is_tiling_only() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_solution_probabilities_unavailable_with_tiling",
+                ));
+            }
+            if score_requested {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_solution_probabilities_unavailable_with_finesse_score",
+                ));
+            }
+        }
         let mirror_included = !score_requested && field.includes_applicable_horizontal_mirror();
         let original = field.original_only();
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
         let mirror_distinct = mirrored.is_some_and(|candidate| candidate != original);
+        let execution_admission = admit_budget_bound_search_execution(problem, 1)
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+        let pass_count = usize::from(mirror_distinct) + 1;
+        let allocation_plan = if score_requested {
+            ExecutionAdmissionPlan::finesse_score(problem)
+        } else {
+            ExecutionAdmissionPlan::build_probability(problem, pass_count)
+        };
+        execution_admission
+            .ensure_plan(
+                allocation_plan,
+                caller_memory.external_retained_owner_bytes(),
+            )
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+        let memory_bound = execution_admission.memory_bound();
         let mut pending = VecDeque::with_capacity(usize::from(mirror_distinct) + 1);
         if !score_requested {
+            let initial_coexisting_retained_bytes =
+                checked_initial_session_coexisting_retained_bytes(&pending, caller_memory)?;
             pending.push_back(build_probability_session_for_field(
                 problem,
                 original,
                 aggregation,
                 finesse_metric,
+                memory_bound,
+                initial_coexisting_retained_bytes,
             )?);
             if let Some(mirrored) = mirrored.filter(|candidate| *candidate != original) {
+                let initial_coexisting_retained_bytes =
+                    checked_initial_session_coexisting_retained_bytes(&pending, caller_memory)?;
                 pending.push_back(build_probability_session_for_field(
                     problem,
                     mirrored,
                     aggregation,
                     finesse_metric,
+                    memory_bound,
+                    initial_coexisting_retained_bytes,
                 )?);
             }
         }
-        Ok(Self {
+        let session = Self {
             pending,
             completed: Vec::with_capacity(usize::from(mirror_distinct) + 1),
             pattern_weights: problem
@@ -146,11 +328,68 @@ impl WasmBuildProbabilitySession {
                 .objective()
                 .execution_constraints()
                 .requested(),
+            _execution_admission: execution_admission,
+            caller_memory,
             finished: false,
-        })
+        };
+        if session.caller_memory.is_finite() {
+            session.ensure_memory_bound(0)?;
+        }
+        Ok(session)
     }
 
     pub(crate) fn advance(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
+        if self.caller_memory.is_finite() {
+            self.validate_finite_noncompleted_return_memory()?;
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_finite_build_probability_advance_requires_caller_memory",
+            ));
+        }
+        self.advance_with_current_caller_memory(work_budget, control)
+    }
+
+    pub(crate) fn advance_finite(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+        external_retained_owner_bytes: u128,
+        returned_carrier_bytes: u128,
+    ) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
+        if !self.caller_memory.is_finite() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_compatibility_session_rejects_finite_advance",
+            ));
+        }
+        let caller_memory = BuildProbabilityCallerMemory::finite(
+            external_retained_owner_bytes,
+            returned_carrier_bytes,
+        )?;
+        // A Pending, Cancelled, or error return must coexist with the complete
+        // outer carrier. Admit that carrier against the still-unmodified
+        // session before any cooperative work can mutate or grow it.
+        self.validate_finite_noncompleted_return_memory_with_caller_memory(caller_memory)?;
+        let previous_caller_memory = self.caller_memory;
+        self.caller_memory = caller_memory;
+        let advance = self.advance_with_current_caller_memory(work_budget, control);
+        if !matches!(&advance, Ok(BuildProbabilityAdvance::Completed(_))) {
+            if let Err(error) = self.validate_finite_noncompleted_return_memory() {
+                if matches!(&advance, Ok(BuildProbabilityAdvance::Cancelled)) {
+                    self.caller_memory = previous_caller_memory;
+                }
+                return Err(error);
+            }
+        }
+        if matches!(&advance, Ok(BuildProbabilityAdvance::Cancelled)) {
+            self.caller_memory = previous_caller_memory;
+        }
+        advance
+    }
+
+    fn advance_with_current_caller_memory(
         &mut self,
         work_budget: usize,
         control: &ExecutionControl,
@@ -160,6 +399,7 @@ impl WasmBuildProbabilitySession {
                 "wasm_build_probability_session_already_finished",
             ));
         }
+        self.ensure_memory_bound(0)?;
         if control.is_cancelled() {
             return Ok(BuildProbabilityAdvance::Cancelled);
         }
@@ -170,26 +410,95 @@ impl WasmBuildProbabilitySession {
                 &score.request,
                 self.finesse_pattern_knowledge,
                 control,
+                self._execution_admission.memory_bound(),
             )?;
             self.finesse_score = None;
             self.finished = true;
             return Ok(BuildProbabilityAdvance::Completed(result));
         }
         let collect_search_finesse = self.finesse_metric.requested();
-        let Some(session) = self.pending.front_mut() else {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_build_probability_pass_missing",
-            ));
+        let coexisting_retained_bytes = self.checked_front_coexisting_retained_bytes().ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ),
+        )?;
+        let advance = {
+            let Some(session) = self.pending.front_mut() else {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_pass_missing",
+                ));
+            };
+            session.set_coexisting_retained_bytes(coexisting_retained_bytes);
+            match session {
+                BuildProbabilitySessionKind::Compact(session) => {
+                    session.advance(work_budget, control)
+                }
+                BuildProbabilitySessionKind::Extended(session) => {
+                    session.advance(work_budget, control)
+                }
+            }?
         };
-        let advance = match session {
-            BuildProbabilitySessionKind::Compact(session) => session.advance(work_budget, control),
-            BuildProbabilitySessionKind::Extended(session) => session.advance(work_budget, control),
-        }?;
         match advance {
-            BuildProbabilityAdvance::Pending => Ok(BuildProbabilityAdvance::Pending),
+            BuildProbabilityAdvance::Pending => {
+                self.ensure_memory_bound(0)?;
+                Ok(BuildProbabilityAdvance::Pending)
+            }
             BuildProbabilityAdvance::Cancelled => Ok(BuildProbabilityAdvance::Cancelled),
             BuildProbabilityAdvance::Completed(result) => {
+                let result_bytes = checked_public_result_bytes(&result).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_aggregate_memory_projection_overflow",
+                    ),
+                )?;
+                self.ensure_memory_bound(result_bytes)?;
                 if collect_search_finesse {
+                    let session =
+                        self.pending
+                            .front()
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_build_probability_pass_missing",
+                            ))?;
+                    let material_future = session
+                        .checked_finesse_search_material_future_bytes()
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "wasm_finesse_search_material_projection_overflow",
+                        ))?;
+                    let material_slot_future = if self.finesse_search_materials.len()
+                        == self.finesse_search_materials.capacity()
+                    {
+                        (self.finesse_search_materials.len() as u128)
+                            .checked_add(1)
+                            .and_then(|slots| {
+                                slots.checked_mul(
+                                    core::mem::size_of::<FinesseSearchMaterial>() as u128
+                                )
+                            })
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_finesse_search_material_projection_overflow",
+                            ))?
+                    } else {
+                        0
+                    };
+                    self.ensure_memory_bound(
+                        result_bytes
+                            .checked_add(material_future)
+                            .and_then(|bytes| bytes.checked_add(material_slot_future))
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_finesse_search_material_projection_overflow",
+                            ))?,
+                    )?;
+                    if material_slot_future != 0 {
+                        // A plain `push` may geometrically over-allocate. Force
+                        // the checked `len + 1` buffer after its old and new
+                        // payload coexistence has been admitted above.
+                        self.finesse_search_materials
+                            .try_reserve_exact(1)
+                            .map_err(|_| {
+                                WasmExactSearchError::InvalidProblem(
+                                    "wasm_finesse_search_material_storage_unavailable",
+                                )
+                            })?;
+                    }
                     let material = match session {
                         BuildProbabilitySessionKind::Compact(session) => {
                             session.finesse_search_material()?
@@ -202,39 +511,345 @@ impl WasmBuildProbabilitySession {
                 }
                 self.completed.push(result);
                 self.pending.pop_front();
+                self.ensure_memory_bound(0)?;
                 if !self.pending.is_empty() {
                     return Ok(BuildProbabilityAdvance::Pending);
                 }
                 self.finished = true;
-                let mut result = merge_symmetry_results(
+                let mut result = merge_symmetry_results_with_memory_guard(
                     core::mem::take(&mut self.completed),
                     self.mirror_included,
                     self.mirror_distinct,
                     &self.pattern_weights,
                     self.aggregation.requests_spin_coverage()
                         || self.execution_constraints_requested,
+                    |source_bytes, future_bytes| {
+                        let checked_future = source_bytes.checked_add(future_bytes).ok_or(
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_build_probability_symmetry_memory_projection_overflow",
+                            ),
+                        )?;
+                        self.ensure_memory_bound(checked_future)
+                    },
                 )?;
                 if collect_search_finesse {
-                    result = result.with_additional_fields(vec![
-                        (
-                            "finesse_metric_requested".to_owned(),
-                            self.finesse_metric.as_str().to_owned(),
-                        ),
-                        (
-                            "finesse_pattern_knowledge_requested".to_owned(),
-                            self.finesse_pattern_knowledge.as_str().to_owned(),
-                        ),
-                    ]);
-                    result = result.with_finesse_report(build_finesse_report(
+                    result = attach_finesse_report_with_memory_guard(
+                        result,
                         core::mem::take(&mut self.finesse_search_materials),
+                        self.finesse_metric,
                         self.finesse_pattern_knowledge,
                         control,
-                    )?);
+                        |live, future| self.validate_public_result_memory_with_future(live, future),
+                    )?;
                 }
+                let result_bytes = checked_public_result_bytes(&result).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_aggregate_memory_projection_overflow",
+                    ),
+                )?;
+                self.ensure_completion_memory_bound(result_bytes)?;
                 Ok(BuildProbabilityAdvance::Completed(result))
             }
         }
     }
+
+    pub(crate) fn validate_public_result_memory_with_future(
+        &self,
+        result: &CoreExecutionResult,
+        checked_future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        let retained =
+            checked_public_result_bytes(result).ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ))?;
+        let future = retained
+            .checked_add(checked_future_bytes)
+            .and_then(|bytes| bytes.checked_add(self.caller_memory.returned_carrier_delta_bytes()))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ))?;
+        self.ensure_memory_bound(future)
+    }
+
+    pub(crate) fn validate_public_result_memory_with_finite_caller_memory(
+        &self,
+        result: &CoreExecutionResult,
+        checked_future_bytes: u128,
+        external_retained_owner_bytes: u128,
+        returned_carrier_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.caller_memory.is_finite() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_compatibility_session_rejects_finite_validation",
+            ));
+        }
+        let caller_memory = BuildProbabilityCallerMemory::finite(
+            external_retained_owner_bytes,
+            returned_carrier_bytes,
+        )?;
+        let retained = self
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(caller_memory.external_retained_owner_bytes()))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ))?;
+        let future = checked_public_result_bytes(result)
+            .and_then(|bytes| bytes.checked_add(checked_future_bytes))
+            .and_then(|bytes| bytes.checked_add(caller_memory.returned_carrier_delta_bytes()))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ))?;
+        self._execution_admission
+            .ensure_memory_bound(retained, future)
+            .map_err(WasmExactSearchError::ResourceAdmission)
+    }
+
+    fn ensure_completion_memory_bound(
+        &self,
+        checked_public_result_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        let future = checked_public_result_bytes
+            .checked_add(self.caller_memory.returned_carrier_delta_bytes())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ))?;
+        self.ensure_memory_bound(future)
+    }
+
+    pub(crate) fn validate_finite_noncompleted_return_memory(
+        &self,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.caller_memory.is_finite() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_compatibility_session_rejects_finite_validation",
+            ));
+        }
+        self.validate_finite_noncompleted_return_memory_with_caller_memory(self.caller_memory)
+    }
+
+    pub(crate) fn validate_finite_noncompleted_return_memory_with_replacement(
+        &self,
+        external_retained_owner_bytes: u128,
+        returned_carrier_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.caller_memory.is_finite() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_compatibility_session_rejects_finite_validation",
+            ));
+        }
+        let caller_memory = BuildProbabilityCallerMemory::finite(
+            external_retained_owner_bytes,
+            returned_carrier_bytes,
+        )?;
+        self.validate_finite_noncompleted_return_memory_with_caller_memory(caller_memory)
+    }
+
+    fn validate_finite_noncompleted_return_memory_with_caller_memory(
+        &self,
+        caller_memory: BuildProbabilityCallerMemory,
+    ) -> Result<(), WasmExactSearchError> {
+        let returned_carrier_bytes = match caller_memory {
+            BuildProbabilityCallerMemory::Compatibility => {
+                unreachable!("compatibility session was rejected before finite carrier validation")
+            }
+            BuildProbabilityCallerMemory::Finite {
+                returned_carrier_bytes,
+                ..
+            } => returned_carrier_bytes,
+        };
+        self.ensure_memory_bound_with_caller_memory(returned_carrier_bytes, caller_memory)
+    }
+
+    fn ensure_memory_bound(&self, checked_future_bytes: u128) -> Result<(), WasmExactSearchError> {
+        self.ensure_memory_bound_with_caller_memory(checked_future_bytes, self.caller_memory)
+    }
+
+    fn ensure_memory_bound_with_caller_memory(
+        &self,
+        checked_future_bytes: u128,
+        caller_memory: BuildProbabilityCallerMemory,
+    ) -> Result<(), WasmExactSearchError> {
+        let retained = self
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(caller_memory.external_retained_owner_bytes()))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_aggregate_memory_projection_overflow",
+            ))?;
+        self._execution_admission
+            .ensure_memory_bound(retained, checked_future_bytes)
+            .map_err(WasmExactSearchError::ResourceAdmission)
+    }
+
+    fn checked_retained_bytes(&self) -> Option<u128> {
+        let mut retained = (self.pending.capacity() as u128)
+            .checked_mul(core::mem::size_of::<BuildProbabilitySessionKind>() as u128)?
+            .checked_add(
+                (self.completed.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<CoreExecutionResult>() as u128)?,
+            )?
+            .checked_add(
+                (self.finesse_search_materials.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<FinesseSearchMaterial>() as u128)?,
+            )?
+            .checked_add(self.pattern_weights.checked_storage_retained_bytes()?)?;
+        for session in &self.pending {
+            retained = retained.checked_add(session.checked_retained_bytes()?)?;
+        }
+        let result_inline = core::mem::size_of::<CoreExecutionResult>() as u128;
+        for result in &self.completed {
+            retained = retained.checked_add(
+                result
+                    .checked_resource_retained_bytes()?
+                    .checked_sub(result_inline)?,
+            )?;
+        }
+        for material in &self.finesse_search_materials {
+            retained = retained.checked_add(material.checked_nested_retained_bytes()?)?;
+        }
+        if let Some(score) = &self.finesse_score {
+            retained = retained.checked_add(score.checked_nested_retained_bytes()?)?;
+        }
+        Some(retained)
+    }
+
+    fn checked_front_coexisting_retained_bytes(&self) -> Option<u128> {
+        let mut retained = self
+            .caller_memory
+            .external_retained_owner_bytes()
+            .checked_add(
+                (self.pending.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<BuildProbabilitySessionKind>() as u128)?,
+            )?
+            .checked_add(
+                (self.completed.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<CoreExecutionResult>() as u128)?,
+            )?
+            .checked_add(
+                (self.finesse_search_materials.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<FinesseSearchMaterial>() as u128)?,
+            )?
+            .checked_add(self.pattern_weights.checked_storage_retained_bytes()?)?;
+        for session in self.pending.iter().skip(1) {
+            retained = retained.checked_add(session.checked_retained_bytes()?)?;
+        }
+        let result_inline = core::mem::size_of::<CoreExecutionResult>() as u128;
+        for result in &self.completed {
+            retained = retained.checked_add(
+                result
+                    .checked_resource_retained_bytes()?
+                    .checked_sub(result_inline)?,
+            )?;
+        }
+        for material in &self.finesse_search_materials {
+            retained = retained.checked_add(material.checked_nested_retained_bytes()?)?;
+        }
+        if let Some(score) = &self.finesse_score {
+            retained = retained.checked_add(score.checked_nested_retained_bytes()?)?;
+        }
+        Some(retained)
+    }
+}
+
+fn checked_initial_session_coexisting_retained_bytes(
+    pending: &VecDeque<BuildProbabilitySessionKind>,
+    caller_memory: BuildProbabilityCallerMemory,
+) -> Result<u128, WasmExactSearchError> {
+    if !caller_memory.is_finite() {
+        return Ok(0);
+    }
+    let mut retained = caller_memory
+        .external_retained_owner_bytes()
+        .checked_add(
+            (pending.capacity() as u128)
+                .checked_mul(core::mem::size_of::<BuildProbabilitySessionKind>() as u128)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_initial_memory_projection_overflow",
+                ))?,
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_initial_memory_projection_overflow",
+        ))?;
+    for session in pending {
+        retained = retained
+            .checked_add(session.checked_retained_bytes().ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_initial_memory_projection_unavailable",
+                ),
+            )?)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_initial_memory_projection_overflow",
+            ))?;
+    }
+    Ok(retained)
+}
+
+pub(super) fn checked_public_result_bytes(result: &CoreExecutionResult) -> Option<u128> {
+    let bytes = result.checked_resource_retained_bytes()?;
+    Some(bytes.max(result.usize_field("resource_peak_cpu_bytes").unwrap_or(0) as u128))
+}
+
+pub(super) fn checked_core_result_vec_retained_bytes(
+    results: &Vec<CoreExecutionResult>,
+) -> Option<u128> {
+    let result_inline = core::mem::size_of::<CoreExecutionResult>() as u128;
+    let mut retained = (results.capacity() as u128).checked_mul(result_inline)?;
+    for result in results {
+        retained = retained.checked_add(
+            result
+                .checked_resource_retained_bytes()?
+                .checked_sub(result_inline)?,
+        )?;
+    }
+    Some(retained)
+}
+
+// A finite binary64 in [0, 1] has decimal exponent no smaller than -324 and
+// needs at most 17 significant decimal digits for round-trip text. Rust's
+// canonical `Display` may choose fixed notation, so reserve `0.`, every
+// leading fractional position, and all significant digits.
+pub(super) const MAX_CANONICAL_PROBABILITY_TEXT_BYTES: u128 = 2 + 324 + 17;
+
+fn checked_symmetry_merge_future_bytes(
+    results: &Vec<CoreExecutionResult>,
+    pattern_weights: &WeightedPatternSet,
+    materialize_postprocess_pattern_weights: bool,
+    solution_probabilities_requested: bool,
+) -> Option<u128> {
+    // Two source-sized owners cover the sorted merge scratch and the final
+    // cloned/derived solution surface while all raw pass results remain live.
+    // Report and serialized-weight strings have no raw-pass counterpart and
+    // are projected separately below.
+    let source_bytes = checked_core_result_vec_retained_bytes(results)?;
+    let mut future = source_bytes
+        .checked_mul(2)?
+        .checked_add(checked_build_probability_fixed_result_surface_bytes()?)?;
+    if solution_probabilities_requested {
+        let solution_count = results.iter().try_fold(0_usize, |count, result| {
+            count.checked_add(result.normalized_solution_keys().len())
+        })?;
+        let solution_key_bytes = results
+            .iter()
+            .flat_map(|result| result.normalized_solution_keys())
+            .try_fold(0_u128, |bytes, key| bytes.checked_add(key.len() as u128))?;
+        future = future
+            .checked_add(
+                (solution_count as u128)
+                    .checked_mul(core::mem::size_of::<crate::SolutionProbabilityReport>() as u128)?,
+            )?
+            .checked_add(solution_key_bytes)?
+            .checked_add(
+                (solution_count as u128).checked_mul(MAX_CANONICAL_PROBABILITY_TEXT_BYTES)?,
+            )?;
+    }
+    if materialize_postprocess_pattern_weights || solution_probabilities_requested {
+        future = future.checked_add(
+            (pattern_weights.len() as u128).checked_mul(
+                (core::mem::size_of::<String>() as u128)
+                    .checked_add(MAX_CANONICAL_PROBABILITY_TEXT_BYTES)?,
+            )?,
+        )?;
+    }
+    Some(future)
 }
 
 fn build_probability_session_for_field(
@@ -242,51 +857,113 @@ fn build_probability_session_for_field(
     field: BuildProbabilityField,
     aggregation: BuildProbabilityAggregation,
     finesse_metric: FinesseMetric,
+    memory_bound: ExecutionMemoryBound,
+    coexisting_retained_bytes: u128,
 ) -> Result<BuildProbabilitySessionKind, WasmExactSearchError> {
     if field.is_compact() {
-        Ok(BuildProbabilitySessionKind::Compact(
-            CompactBuildProbabilitySession::new_with_finesse(
-                problem,
-                field,
-                aggregation,
-                finesse_metric.requested(),
-            )?,
-        ))
+        let session = CompactBuildProbabilitySession::new_with_external_geometry(
+            problem,
+            field,
+            aggregation,
+            false,
+            None,
+            finesse_metric.requested(),
+            memory_bound,
+            coexisting_retained_bytes,
+        )?;
+        Ok(BuildProbabilitySessionKind::Compact(session))
     } else {
-        let session = if finesse_metric.requested() {
-            super::extended_build_probability::ExtendedBuildProbabilitySession::new_with_finesse(
-                problem,
-                field,
-                aggregation,
-            )?
-        } else {
-            super::extended_build_probability::ExtendedBuildProbabilitySession::new(
-                problem,
-                field,
-                aggregation,
-            )?
-        };
+        let session = super::extended_build_probability::ExtendedBuildProbabilitySession::new_with_memory_bound_and_coexisting_retained_bytes(
+            problem,
+            field,
+            aggregation,
+            finesse_metric.requested(),
+            memory_bound,
+            coexisting_retained_bytes,
+        )?;
         Ok(BuildProbabilitySessionKind::Extended(session))
     }
 }
 
 pub(super) fn merge_symmetry_results(
+    results: Vec<CoreExecutionResult>,
+    mirror_included: bool,
+    mirror_distinct: bool,
+    pattern_weights: &WeightedPatternSet,
+    materialize_postprocess_pattern_weights: bool,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    merge_symmetry_results_with_memory_guard(
+        results,
+        mirror_included,
+        mirror_distinct,
+        pattern_weights,
+        materialize_postprocess_pattern_weights,
+        |_, _| Ok(()),
+    )
+}
+
+pub(super) fn merge_symmetry_results_with_memory_guard(
     mut results: Vec<CoreExecutionResult>,
     mirror_included: bool,
     mirror_distinct: bool,
     pattern_weights: &WeightedPatternSet,
     materialize_postprocess_pattern_weights: bool,
+    mut memory_guard: impl FnMut(u128, u128) -> Result<(), WasmExactSearchError>,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
     if results.is_empty() || results.len() != usize::from(mirror_distinct) + 1 {
         return Err(WasmExactSearchError::InvalidProblem(
             "wasm_build_probability_symmetry_pass_mismatch",
         ));
     }
-    let mut primary = results.remove(0);
-    let tiling_only = primary.field("build_probability_aggregation") == Some("tiling");
-    let pattern_count = primary.usize_field("coverage_pattern_count").ok_or(
-        WasmExactSearchError::InvalidProblem("wasm_build_probability_pattern_count_missing"),
+    let primary_source = &results[0];
+    let tiling_only = primary_source.field("build_probability_aggregation") == Some("tiling");
+    let solution_probabilities_requested = exact_solution_probabilities_requested(primary_source)?;
+    for result in &results[1..] {
+        if exact_solution_probabilities_requested(result)? != solution_probabilities_requested {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_solution_probability_policy_mismatch",
+            ));
+        }
+    }
+    if tiling_only && solution_probabilities_requested {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_solution_probabilities_unavailable_with_tiling",
+        ));
+    }
+    let pattern_count = exact_usize_field(
+        primary_source,
+        "coverage_pattern_count",
+        "wasm_build_probability_symmetry_pattern_count_invalid",
     )?;
+    for result in &results[1..] {
+        if exact_usize_field(
+            result,
+            "coverage_pattern_count",
+            "wasm_build_probability_symmetry_pattern_count_invalid",
+        )? != pattern_count
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_symmetry_pattern_count_mismatch",
+            ));
+        }
+    }
+    let source_retained_bytes = checked_core_result_vec_retained_bytes(&results).ok_or(
+        WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_symmetry_memory_projection_overflow",
+        ),
+    )?;
+    let merge_future_bytes = checked_symmetry_merge_future_bytes(
+        &results,
+        pattern_weights,
+        materialize_postprocess_pattern_weights,
+        solution_probabilities_requested,
+    )
+    .ok_or(WasmExactSearchError::InvalidProblem(
+        "wasm_build_probability_symmetry_memory_projection_overflow",
+    ))?;
+    memory_guard(source_retained_bytes, merge_future_bytes)?;
+
+    let mut primary = results.remove(0);
     let original_words = primary.coverage_pattern_words().to_vec();
     let mut union_words = original_words.clone();
     for result in &results {
@@ -325,18 +1002,61 @@ pub(super) fn merge_symmetry_results(
         0.0
     };
 
-    let probability_complete = primary.bool_field("probability_complete").unwrap_or(false)
-        && results
-            .iter()
-            .all(|result| result.bool_field("probability_complete").unwrap_or(false));
-    let count_complete = primary.bool_field("count_complete").unwrap_or(false)
-        && results
-            .iter()
-            .all(|result| result.bool_field("count_complete").unwrap_or(false));
-    let resource_truncated = primary.bool_field("resource_truncated").unwrap_or(false)
-        || results
-            .iter()
-            .any(|result| result.bool_field("resource_truncated").unwrap_or(false));
+    let probability_complete = exact_bool_field(
+        &primary,
+        "probability_complete",
+        "wasm_build_probability_symmetry_probability_complete_invalid",
+    )? && results.iter().all(|result| {
+        exact_bool_field(
+            result,
+            "probability_complete",
+            "wasm_build_probability_symmetry_probability_complete_invalid",
+        )
+        .unwrap_or(false)
+    });
+    let count_complete = exact_bool_field(
+        &primary,
+        "count_complete",
+        "wasm_build_probability_symmetry_count_complete_invalid",
+    )? && results.iter().all(|result| {
+        exact_bool_field(
+            result,
+            "count_complete",
+            "wasm_build_probability_symmetry_count_complete_invalid",
+        )
+        .unwrap_or(false)
+    });
+    for result in &results {
+        exact_bool_field(
+            result,
+            "probability_complete",
+            "wasm_build_probability_symmetry_probability_complete_invalid",
+        )?;
+        exact_bool_field(
+            result,
+            "count_complete",
+            "wasm_build_probability_symmetry_count_complete_invalid",
+        )?;
+    }
+    let resource_truncated = exact_bool_field(
+        &primary,
+        "resource_truncated",
+        "wasm_build_probability_symmetry_resource_truncated_invalid",
+    )? || results.iter().any(|result| {
+        exact_bool_field(
+            result,
+            "resource_truncated",
+            "wasm_build_probability_symmetry_resource_truncated_invalid",
+        )
+        .unwrap_or(true)
+    });
+    for result in &results {
+        exact_bool_field(
+            result,
+            "resource_truncated",
+            "wasm_build_probability_symmetry_resource_truncated_invalid",
+        )?;
+    }
     let resource_reason = if resource_truncated {
         primary
             .field("resource_truncation_reason")
@@ -401,7 +1121,14 @@ pub(super) fn merge_symmetry_results(
     });
     let merged_identities = if let Some(store) = &merged_page_store {
         store
-            .page_identities(0, 100)
+            .page_identities(
+                0,
+                if solution_probabilities_requested {
+                    store.len()
+                } else {
+                    100
+                },
+            )
             .map_err(WasmExactSearchError::InvalidProblem)?
     } else {
         let mut identities = all_results
@@ -432,6 +1159,28 @@ pub(super) fn merge_symmetry_results(
     merged_solution_keys.dedup();
     let normalized_solutions_complete =
         merged_page_store.is_some() || normalized_identities_complete || normalized_keys_complete;
+    let solution_probability_keys_complete = merged_page_store
+        .as_ref()
+        .map_or(normalized_solutions_complete, |store| {
+            merged_solution_keys.len() == store.len()
+        });
+    let solution_probability_complete = !solution_probabilities_requested
+        || (probability_complete
+            && count_complete
+            && !resource_truncated
+            && solution_probability_keys_complete);
+    let solution_probabilities =
+        if solution_probabilities_requested && solution_probability_keys_complete {
+            normalized_solution_probability_reports(
+                &merged_solution_keys,
+                &merged_normalized_solution_coverages,
+                pattern_weights,
+                solution_probability_complete,
+            )
+            .map_err(|error| WasmExactSearchError::InvalidProblem(error.reason()))?
+        } else {
+            Vec::new()
+        };
     let search_output_policy = primary
         .field("search_output_policy")
         .filter(|policy| matches!(*policy, "summary" | "trace" | "coverage-rows"))
@@ -515,6 +1264,37 @@ pub(super) fn merge_symmetry_results(
         ),
         field("probability_complete", probability_complete),
         field("count_complete", count_complete),
+        field(
+            "solution_probabilities_requested",
+            solution_probabilities_requested,
+        ),
+        field("solution_probability_count", solution_probabilities.len()),
+        field(
+            "solution_probability_complete",
+            solution_probability_complete,
+        ),
+        field(
+            "solution_probability_basis",
+            if solution_probabilities_requested {
+                "normalized-solution-pattern-bitset-or-union"
+            } else {
+                "not-requested"
+            },
+        ),
+        field(
+            "solution_probability_incomplete_reason",
+            if !solution_probabilities_requested || solution_probability_complete {
+                "none"
+            } else if resource_truncated {
+                "resource-truncated"
+            } else if !count_complete {
+                "solution-count-incomplete"
+            } else if !solution_probability_keys_complete {
+                "normalized-solution-set-incomplete"
+            } else {
+                "pattern-specific-coverage-incomplete"
+            },
+        ),
         field("resource_truncated", resource_truncated),
         field("resource_truncation_reason", resource_reason),
         field(
@@ -617,10 +1397,11 @@ pub(super) fn merge_symmetry_results(
         .with_coverage_pattern_words(union_words)
         .with_solution_coverages(merged_solution_coverages)
         .with_normalized_solution_coverages(merged_normalized_solution_coverages)
+        .with_solution_probabilities(solution_probabilities)
         .with_exact_scoring_execution_batches(scoring_batches)
         .with_spin_coverage_execution_batches(spin_coverage_batches)
         .with_replaced_fields(replacements);
-    let merged = if materialize_postprocess_pattern_weights {
+    let merged = if materialize_postprocess_pattern_weights || solution_probabilities_requested {
         let pattern_weight_strings = (0..pattern_weights.len())
             .map(|pattern| {
                 pattern_weights
@@ -703,6 +1484,112 @@ fn probability_text(probability: f64) -> String {
     }
 }
 
+pub(super) fn exact_solution_probabilities_requested(
+    result: &CoreExecutionResult,
+) -> Result<bool, WasmExactSearchError> {
+    match result.field_occurrence_count("solution_probabilities_requested") {
+        0 => Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_solution_probability_policy_missing",
+        )),
+        1 => match result.unique_field("solution_probabilities_requested") {
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            _ => Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_solution_probability_policy_invalid",
+            )),
+        },
+        _ => Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_solution_probability_policy_duplicate",
+        )),
+    }
+}
+
+pub(super) fn exact_bool_field(
+    result: &CoreExecutionResult,
+    key: &str,
+    invalid_reason: &'static str,
+) -> Result<bool, WasmExactSearchError> {
+    if result.field_occurrence_count(key) != 1 {
+        return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
+    }
+    match result.unique_field(key) {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        _ => Err(WasmExactSearchError::InvalidProblem(invalid_reason)),
+    }
+}
+
+pub(super) fn exact_usize_field(
+    result: &CoreExecutionResult,
+    key: &str,
+    invalid_reason: &'static str,
+) -> Result<usize, WasmExactSearchError> {
+    if result.field_occurrence_count(key) != 1 {
+        return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
+    }
+    let value = result
+        .unique_field(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or(WasmExactSearchError::InvalidProblem(invalid_reason))?;
+    if result.unique_field(key) != Some(value.to_string().as_str()) {
+        return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
+    }
+    Ok(value)
+}
+
+pub(super) fn exact_u128_field(
+    result: &CoreExecutionResult,
+    key: &str,
+    invalid_reason: &'static str,
+) -> Result<u128, WasmExactSearchError> {
+    if result.field_occurrence_count(key) != 1 {
+        return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
+    }
+    let value = result
+        .unique_field(key)
+        .and_then(|value| value.parse::<u128>().ok())
+        .ok_or(WasmExactSearchError::InvalidProblem(invalid_reason))?;
+    if result.unique_field(key) != Some(value.to_string().as_str()) {
+        return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
+    }
+    Ok(value)
+}
+
+pub(super) fn solution_coverage_union_matches_global<T>(
+    pattern_count: usize,
+    global_words: &[u64],
+    coverages: &[T],
+    covered_patterns: impl Fn(&T) -> &PatternBitSet,
+) -> bool {
+    let word_count = pattern_count.div_ceil(u64::BITS as usize);
+    global_words.len() == word_count
+        && (0..word_count).all(|word_index| {
+            coverages.iter().fold(0_u64, |union, coverage| {
+                union | covered_patterns(coverage).word_at(word_index)
+            }) == global_words[word_index]
+        })
+}
+
+pub(super) fn validate_worker_partial_probability_surface(
+    result: &CoreExecutionResult,
+) -> Result<(), WasmExactSearchError> {
+    if !result.solution_probabilities().is_empty()
+        || [
+            "solution_probability_count",
+            "solution_probability_complete",
+            "solution_probability_basis",
+            "solution_probability_incomplete_reason",
+        ]
+        .into_iter()
+        .any(|key| result.field_occurrence_count(key) != 0)
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_final_probability_surface_forbidden",
+        ));
+    }
+    Ok(())
+}
+
 fn sum_usize_field(results: &[&CoreExecutionResult], key: &str) -> usize {
     results
         .iter()
@@ -721,8 +1608,9 @@ fn max_usize_field(results: &[&CoreExecutionResult], key: &str) -> usize {
 pub(super) struct CompactBuildProbabilitySession {
     problem: SearchProblem,
     aggregation: BuildProbabilityAggregation,
+    board_height: u8,
     target_cells: u64,
-    target_board: u64,
+    final_board: u64,
     shared_supply_catalog: CompactBuildProbabilitySharedCatalog,
     catalog: GeometryCatalog,
     geometry: GeometrySearch,
@@ -735,6 +1623,7 @@ pub(super) struct CompactBuildProbabilitySession {
     candidate_digest: u64,
     build_variant_count: u128,
     count_complete: bool,
+    distributed_probability_complete: bool,
     representative_path: Vec<CorePathStep>,
     representative_pattern_id: Option<u32>,
     representative_rank: Option<u64>,
@@ -755,7 +1644,17 @@ pub(super) struct CompactBuildProbabilitySession {
     distributed_execution_constraint_materialized: bool,
     finesse_requested: bool,
     finesse_languages: Vec<(StandardBoard64TilingIdentity, PreparedFinesseLanguage)>,
+    memory_bound: ExecutionMemoryBound,
+    coexisting_retained_bytes: u128,
     finished: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompactDistributedPartial {
+    count_complete: bool,
+    probability_complete: bool,
+    resource_truncated: bool,
+    build_variant_count: u128,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -783,7 +1682,36 @@ impl CompactBuildProbabilitySession {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::new_with_external_geometry(problem, field, aggregation, false, None, false)
+        let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_with_external_geometry(
+            problem,
+            field,
+            aggregation,
+            false,
+            None,
+            false,
+            memory_bound,
+            0,
+        )
+    }
+
+    pub(super) fn new_with_memory_bound(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        memory_bound: ExecutionMemoryBound,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_external_geometry(
+            problem,
+            field,
+            aggregation,
+            false,
+            None,
+            false,
+            memory_bound,
+            0,
+        )
     }
 
     pub(super) fn new_with_finesse(
@@ -792,6 +1720,24 @@ impl CompactBuildProbabilitySession {
         aggregation: BuildProbabilityAggregation,
         finesse_requested: bool,
     ) -> Result<Self, WasmExactSearchError> {
+        let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_with_finesse_and_memory_bound(
+            problem,
+            field,
+            aggregation,
+            finesse_requested,
+            memory_bound,
+        )
+    }
+
+    pub(super) fn new_with_finesse_and_memory_bound(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_requested: bool,
+        memory_bound: ExecutionMemoryBound,
+    ) -> Result<Self, WasmExactSearchError> {
         Self::new_with_external_geometry(
             problem,
             field,
@@ -799,6 +1745,8 @@ impl CompactBuildProbabilitySession {
             false,
             None,
             finesse_requested,
+            memory_bound,
+            0,
         )
     }
 
@@ -807,7 +1755,43 @@ impl CompactBuildProbabilitySession {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::new_with_external_geometry(problem, field, aggregation, true, None, false)
+        let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_external_geometry_with_memory_bound(problem, field, aggregation, memory_bound)
+    }
+
+    pub(super) fn new_external_geometry_with_memory_bound(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        memory_bound: ExecutionMemoryBound,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_external_geometry_with_memory_bound_and_coexisting_retained_bytes(
+            problem,
+            field,
+            aggregation,
+            memory_bound,
+            0,
+        )
+    }
+
+    pub(super) fn new_external_geometry_with_memory_bound_and_coexisting_retained_bytes(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        memory_bound: ExecutionMemoryBound,
+        coexisting_retained_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_external_geometry(
+            problem,
+            field,
+            aggregation,
+            true,
+            None,
+            false,
+            memory_bound,
+            coexisting_retained_bytes,
+        )
     }
 
     pub(super) fn new_with_shared_supply_catalog(
@@ -817,6 +1801,46 @@ impl CompactBuildProbabilitySession {
         external_geometry: bool,
         shared_supply_catalog: &CompactBuildProbabilitySharedCatalog,
     ) -> Result<Self, WasmExactSearchError> {
+        let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
+            .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_with_shared_supply_catalog_and_memory_bound(
+            problem,
+            field,
+            aggregation,
+            external_geometry,
+            shared_supply_catalog,
+            memory_bound,
+        )
+    }
+
+    pub(super) fn new_with_shared_supply_catalog_and_memory_bound(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        external_geometry: bool,
+        shared_supply_catalog: &CompactBuildProbabilitySharedCatalog,
+        memory_bound: ExecutionMemoryBound,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_shared_supply_catalog_and_memory_bound_and_coexisting_retained_bytes(
+            problem,
+            field,
+            aggregation,
+            external_geometry,
+            shared_supply_catalog,
+            memory_bound,
+            0,
+        )
+    }
+
+    pub(super) fn new_with_shared_supply_catalog_and_memory_bound_and_coexisting_retained_bytes(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        external_geometry: bool,
+        shared_supply_catalog: &CompactBuildProbabilitySharedCatalog,
+        memory_bound: ExecutionMemoryBound,
+        coexisting_retained_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
         Self::new_with_external_geometry(
             problem,
             field,
@@ -824,6 +1848,8 @@ impl CompactBuildProbabilitySession {
             external_geometry,
             Some(shared_supply_catalog),
             false,
+            memory_bound,
+            coexisting_retained_bytes,
         )
     }
 
@@ -850,8 +1876,15 @@ impl CompactBuildProbabilitySession {
         external_geometry: bool,
         shared_supply_catalog: Option<&CompactBuildProbabilitySharedCatalog>,
         finesse_requested: bool,
+        memory_bound: ExecutionMemoryBound,
+        coexisting_retained_bytes: u128,
     ) -> Result<Self, WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
+        if aggregation.is_tiling_only() && problem.solution_probability_policy().requested() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_solution_probabilities_unavailable_with_tiling",
+            ));
+        }
         let target_cells =
             field
                 .compact_target_mask()
@@ -943,11 +1976,12 @@ impl CompactBuildProbabilitySession {
         } else {
             PatternBitSet::new(universe.pattern_count())
         };
-        Ok(Self {
+        let session = Self {
             problem: problem.clone(),
             aggregation,
+            board_height: field.height(),
             target_cells,
-            target_board: super::buildup::place_and_clear(
+            final_board: super::buildup::place_and_clear(
                 catalog.width(),
                 catalog.height(),
                 catalog.initial_board() | target_cells,
@@ -960,15 +1994,14 @@ impl CompactBuildProbabilitySession {
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             buildable_tilings: ExactHashSet::default(),
-            solution_coverage: problem
-                .objective()
-                .execution_constraints()
-                .requested()
-                .then(ExactHashMap::default),
+            solution_coverage: (problem.solution_probability_policy().requested()
+                || problem.objective().execution_constraints().requested())
+            .then(ExactHashMap::default),
             candidate_count: 0,
             candidate_digest: 0,
             build_variant_count: 0,
             count_complete: true,
+            distributed_probability_complete: true,
             representative_path: Vec::new(),
             representative_pattern_id: None,
             representative_rank: None,
@@ -989,8 +2022,12 @@ impl CompactBuildProbabilitySession {
             distributed_execution_constraint_materialized: false,
             finesse_requested,
             finesse_languages: Vec::new(),
+            memory_bound,
+            coexisting_retained_bytes,
             finished: false,
-        })
+        };
+        session.ensure_memory_bound(0)?;
+        Ok(session)
     }
 
     fn advance(
@@ -1006,6 +2043,7 @@ impl CompactBuildProbabilitySession {
         if control.is_cancelled() {
             return Ok(BuildProbabilityAdvance::Cancelled);
         }
+        self.ensure_memory_bound(0)?;
         if self.trivial_target {
             return self.complete();
         }
@@ -1020,6 +2058,7 @@ impl CompactBuildProbabilitySession {
                 GeometryAdvance::Candidate(candidate) => {
                     let ordinal = self.candidate_count as u64;
                     self.process_candidate(candidate, Some(ordinal), true, control)?;
+                    self.ensure_memory_bound(0)?;
                     completed_work += 1;
                     if self.truncated_reason.is_some() {
                         return self.complete();
@@ -1090,7 +2129,7 @@ impl CompactBuildProbabilitySession {
                 witness_mode,
                 self.representative_path.is_empty(),
                 0,
-                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                BuildCompletion::ExactBoardAfterLineClears(self.final_board),
                 self.aggregation.requests_spin_coverage(),
                 control,
             )?
@@ -1105,7 +2144,7 @@ impl CompactBuildProbabilitySession {
                 witness_mode,
                 self.representative_path.is_empty(),
                 0,
-                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                BuildCompletion::ExactBoardAfterLineClears(self.final_board),
                 control,
             )?
         };
@@ -1241,8 +2280,44 @@ impl CompactBuildProbabilitySession {
         pass_index: u8,
         control: &ExecutionControl,
     ) -> Result<WasmCandidateProducerAdvance, WasmExactSearchError> {
+        let memory_bound = self.memory_bound;
+        let coexisting_retained_bytes = self.coexisting_retained_bytes;
+        self.advance_distributed_geometry_with_candidate_memory_guard(
+            pass_index,
+            control,
+            move |session, local_retained_bytes, checked_future_bytes| {
+                let observed = session
+                    .checked_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(local_retained_bytes))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_candidate_row_storage_projection_overflow",
+                    ))?;
+                let future = coexisting_retained_bytes
+                    .checked_add(checked_future_bytes)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_candidate_row_storage_projection_overflow",
+                    ))?;
+                memory_bound
+                    .ensure(observed, future)
+                    .map_err(WasmExactSearchError::ResourceAdmission)
+            },
+        )
+    }
+
+    pub(super) fn advance_distributed_geometry_with_candidate_memory_guard(
+        &mut self,
+        pass_index: u8,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&Self, u128, u128) -> Result<(), WasmExactSearchError>,
+    ) -> Result<WasmCandidateProducerAdvance, WasmExactSearchError> {
+        self.ensure_memory_bound(0)?;
         if control.is_cancelled() {
             return Ok(WasmCandidateProducerAdvance::Cancelled);
+        }
+        if self.trivial_target {
+            return Ok(WasmCandidateProducerAdvance::Completed(
+                self.distributed_geometry_summary(None),
+            ));
         }
         let max_candidates = self.problem.backend_request().max_candidates();
         if max_candidates != 0 && self.candidate_count >= max_candidates {
@@ -1255,6 +2330,10 @@ impl CompactBuildProbabilitySession {
         match self.geometry.advance(&self.catalog) {
             GeometryAdvance::Pending => Ok(WasmCandidateProducerAdvance::Pending),
             GeometryAdvance::Candidate(candidate) => {
+                let row_ids = self.try_copy_distributed_candidate_row_ids_with_memory_guard(
+                    candidate.row_ids(),
+                    &mut memory_guard,
+                )?;
                 let ordinal = self.candidate_count as u64;
                 self.candidate_count = self.candidate_count.saturating_add(1);
                 self.candidate_digest =
@@ -1264,7 +2343,7 @@ impl CompactBuildProbabilitySession {
                         ordinal,
                         pass_index,
                         candidate.target_index,
-                        candidate.row_ids().to_vec(),
+                        row_ids,
                     ),
                 ))
             }
@@ -1279,6 +2358,61 @@ impl CompactBuildProbabilitySession {
                 ))
             }
         }
+    }
+
+    fn try_copy_distributed_candidate_row_ids(
+        &self,
+        source: &[u32],
+    ) -> Result<Vec<u32>, WasmExactSearchError> {
+        let memory_bound = self.memory_bound;
+        let coexisting_retained_bytes = self.coexisting_retained_bytes;
+        self.try_copy_distributed_candidate_row_ids_with_memory_guard(
+            source,
+            move |session, local_retained_bytes, checked_future_bytes| {
+                let observed = session
+                    .checked_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(local_retained_bytes))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_candidate_row_storage_projection_overflow",
+                    ))?;
+                let future = coexisting_retained_bytes
+                    .checked_add(checked_future_bytes)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_candidate_row_storage_projection_overflow",
+                    ))?;
+                memory_bound
+                    .ensure(observed, future)
+                    .map_err(WasmExactSearchError::ResourceAdmission)
+            },
+        )
+    }
+
+    fn try_copy_distributed_candidate_row_ids_with_memory_guard(
+        &self,
+        source: &[u32],
+        mut memory_guard: impl FnMut(&Self, u128, u128) -> Result<(), WasmExactSearchError>,
+    ) -> Result<Vec<u32>, WasmExactSearchError> {
+        let requested_bytes = (source.len() as u128)
+            .checked_mul(core::mem::size_of::<u32>() as u128)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_candidate_row_storage_projection_overflow",
+            ))?;
+        memory_guard(self, 0, requested_bytes)?;
+
+        let mut row_ids = Vec::new();
+        row_ids.try_reserve_exact(source.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_candidate_row_storage_unavailable",
+            )
+        })?;
+        let actual_bytes = (row_ids.capacity() as u128)
+            .checked_mul(core::mem::size_of::<u32>() as u128)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_candidate_row_storage_projection_overflow",
+            ))?;
+        memory_guard(self, actual_bytes, 0)?;
+        row_ids.extend_from_slice(source);
+        Ok(row_ids)
     }
 
     fn distributed_geometry_summary(
@@ -1314,6 +2448,7 @@ impl CompactBuildProbabilitySession {
         candidate: &WasmCandidatePacket,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        self.ensure_memory_bound(0)?;
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_verifier_already_finished",
@@ -1327,18 +2462,21 @@ impl CompactBuildProbabilitySession {
         .ok_or(WasmExactSearchError::InvalidProblem(
             "wasm_build_probability_distributed_candidate_invalid",
         ))?;
-        self.process_candidate(geometry, Some(candidate.ordinal()), false, control)
+        self.process_candidate(geometry, Some(candidate.ordinal()), false, control)?;
+        self.ensure_memory_bound(0)
     }
 
     pub(super) fn complete_distributed_worker(
         &mut self,
     ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        self.ensure_memory_bound(0)?;
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_verifier_already_finished",
             ));
         }
         if !self.aggregation.is_tiling_only() {
+            self.ensure_symbolic_coverage_finalization_bound()?;
             if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
                 self.covered_patterns.union_with(&symbolic).map_err(|_| {
                     WasmExactSearchError::InvalidProblem(
@@ -1347,38 +2485,119 @@ impl CompactBuildProbabilitySession {
                 })?;
             }
         }
+        self.ensure_result_materialization_bound()?;
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
-            || self.problem.objective().execution_constraints().requested();
+            || self.problem.objective().execution_constraints().requested()
+            || self.problem.objective().score().requested();
         let scoring_batch = if execution_evidence_requested {
             Some(self.prepare_exact_spin_execution_batch()?)
         } else {
             None
         };
         self.finished = true;
-        self.build_result(scoring_batch)
+        let result = self.build_result(scoring_batch)?;
+        self.ensure_materialized_result_bound(&result)?;
+        Ok(result)
     }
 
     pub(super) fn absorb_distributed_result(
         &mut self,
         result: &CoreExecutionResult,
     ) -> Result<(), WasmExactSearchError> {
-        let pattern_count = result.usize_field("coverage_pattern_count").ok_or(
+        let memory_bound = self.memory_bound;
+        let coexisting_retained_bytes = self.coexisting_retained_bytes;
+        self.absorb_distributed_result_with_memory_guard(
+            result,
+            move |session, local_retained_bytes, checked_future_bytes| {
+                let observed = session
+                    .checked_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(local_retained_bytes))
+                    .ok_or_else(|| {
+                        WasmExactSearchError::ResourceAdmission(
+                            memory_bound.ensure(u128::MAX, 1).expect_err(
+                                "checked compact absorb storage overflow is unavailable",
+                            ),
+                        )
+                    })?;
+                let future = coexisting_retained_bytes
+                    .checked_add(checked_future_bytes)
+                    .ok_or_else(|| {
+                        WasmExactSearchError::ResourceAdmission(
+                            memory_bound.ensure(u128::MAX, 1).expect_err(
+                                "checked compact absorb future overflow is unavailable",
+                            ),
+                        )
+                    })?;
+                memory_bound
+                    .ensure(observed, future)
+                    .map_err(WasmExactSearchError::ResourceAdmission)
+            },
+        )
+    }
+
+    pub(super) fn absorb_distributed_result_with_memory_guard(
+        &mut self,
+        result: &CoreExecutionResult,
+        mut memory_guard: impl FnMut(&Self, u128, u128) -> Result<(), WasmExactSearchError>,
+    ) -> Result<(), WasmExactSearchError> {
+        memory_guard(self, 0, 0)?;
+        let pattern_count = exact_usize_field(
+            result,
+            "coverage_pattern_count",
+            "wasm_build_probability_distributed_pattern_count_invalid",
+        )?;
+        let partial = self.validate_distributed_solution_surface(result, pattern_count)?;
+        let coverage_future =
+            PatternBitSet::checked_external_words_materialize_union_future_bytes(pattern_count)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_distributed_coverage_projection_overflow",
+                ))?;
+        memory_guard(self, 0, coverage_future)?;
+        let mut coverage_words = Vec::new();
+        coverage_words
+            .try_reserve_exact(result.coverage_pattern_words().len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_distributed_coverage_storage_unavailable",
+                )
+            })?;
+        let coverage_word_bytes = (coverage_words.capacity() as u128)
+            .checked_mul(core::mem::size_of::<u64>() as u128)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_coverage_projection_overflow",
+            ))?;
+        memory_guard(self, coverage_word_bytes, coverage_future)?;
+        coverage_words.extend_from_slice(result.coverage_pattern_words());
+        let coverage = PatternBitSet::from_words(pattern_count, coverage_words).map_err(|_| {
             WasmExactSearchError::InvalidProblem(
-                "wasm_build_probability_distributed_pattern_count_missing",
+                "wasm_build_probability_distributed_coverage_invalid",
+            )
+        })?;
+        let coverage_retained_bytes = coverage.checked_storage_retained_bytes().ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_coverage_projection_overflow",
             ),
         )?;
-        let coverage =
-            PatternBitSet::from_words(pattern_count, result.coverage_pattern_words().to_vec())
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_build_probability_distributed_coverage_invalid",
-                    )
-                })?;
+        memory_guard(self, coverage_retained_bytes, coverage_future)?;
+        if result
+            .coverage_pattern_words()
+            .iter()
+            .copied()
+            .enumerate()
+            .any(|(word_index, word)| coverage.word_at(word_index) != word)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_coverage_invalid",
+            ));
+        }
         self.covered_patterns.union_with(&coverage).map_err(|_| {
             WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_distributed_coverage_mismatch",
             )
         })?;
+        memory_guard(self, coverage_retained_bytes, 0)?;
+        drop(coverage);
+        memory_guard(self, 0, 0)?;
         self.distributed_spin_materialized |= !result.postprocess_spin_coverages().is_empty();
         if self.problem.objective().execution_constraints().requested() {
             self.distributed_execution_constraint_materialized &= result
@@ -1388,17 +2607,28 @@ impl CompactBuildProbabilitySession {
 
         for identity in result.normalized_solution_identities() {
             if !self.buildable_tilings.contains(identity) {
+                memory_guard(
+                    self,
+                    0,
+                    core::mem::size_of::<StandardBoard64TilingIdentity>() as u128,
+                )?;
                 self.buildable_tilings.try_reserve(1).map_err(|_| {
                     WasmExactSearchError::InvalidProblem(
                         "wasm_build_probability_distributed_solution_storage_unavailable",
                     )
                 })?;
+                memory_guard(self, 0, 0)?;
                 self.buildable_tilings.insert(*identity);
+                memory_guard(self, 0, 0)?;
             }
         }
         if self.solution_coverage.is_some() {
             for coverage in result.solution_coverages() {
-                self.merge_solution_coverage(coverage.identity(), coverage.covered_patterns())?;
+                self.merge_solution_coverage_with_memory_guard(
+                    coverage.identity(),
+                    coverage.covered_patterns(),
+                    &mut memory_guard,
+                )?;
             }
         }
         let worker_candidates = result.usize_field("packing_candidate_count").unwrap_or(0);
@@ -1411,13 +2641,12 @@ impl CompactBuildProbabilitySession {
                 .parallel_maximum_worker_candidates
                 .max(worker_candidates);
         }
-        let next_variants = result
-            .field("build_variant_count")
-            .and_then(|value| value.parse::<u128>().ok())
-            .and_then(|value| self.build_variant_count.checked_add(value));
+        let next_variants = self
+            .build_variant_count
+            .checked_add(partial.build_variant_count);
         self.build_variant_count = next_variants.unwrap_or(u128::MAX);
-        self.count_complete &=
-            next_variants.is_some() && result.bool_field("count_complete").unwrap_or(false);
+        self.count_complete &= next_variants.is_some() && partial.count_complete;
+        self.distributed_probability_complete &= partial.probability_complete;
         self.peak_build_nodes = self
             .peak_build_nodes
             .max(result.usize_field("peak_build_order_nodes").unwrap_or(0));
@@ -1451,12 +2680,335 @@ impl CompactBuildProbabilitySession {
                 self.representative_pattern_id = result
                     .field("representative_pattern_id")
                     .and_then(|value| value.parse::<u32>().ok());
-                self.representative_path = result.path_steps().to_vec();
+                let requested_path_bytes = (result.path_steps().len() as u128)
+                    .checked_mul(core::mem::size_of::<CorePathStep>() as u128)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_distributed_path_projection_overflow",
+                    ))?;
+                memory_guard(self, 0, requested_path_bytes)?;
+                let mut representative_path = Vec::new();
+                representative_path
+                    .try_reserve_exact(result.path_steps().len())
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_build_probability_distributed_path_storage_unavailable",
+                        )
+                    })?;
+                let actual_path_bytes = (representative_path.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<CorePathStep>() as u128)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_distributed_path_projection_overflow",
+                    ))?;
+                memory_guard(self, actual_path_bytes, 0)?;
+                representative_path.extend_from_slice(result.path_steps());
+                memory_guard(self, actual_path_bytes, 0)?;
+                self.representative_path = representative_path;
+                memory_guard(self, 0, 0)?;
             }
         }
-        if result.bool_field("resource_truncated").unwrap_or(true) {
+        if partial.resource_truncated {
             self.truncated_reason = Some("distributed_worker_incomplete");
             self.count_complete = false;
+            self.distributed_probability_complete = false;
+        }
+        memory_guard(self, 0, 0)
+    }
+
+    fn merge_solution_coverage_with_memory_guard(
+        &mut self,
+        identity: StandardBoard64TilingIdentity,
+        coverage: &PatternBitSet,
+        memory_guard: &mut impl FnMut(&Self, u128, u128) -> Result<(), WasmExactSearchError>,
+    ) -> Result<(), WasmExactSearchError> {
+        let is_new = !self
+            .solution_coverage
+            .as_ref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_solution_coverage_not_requested",
+            ))?
+            .contains_key(&identity);
+        let union_future = PatternBitSet::checked_external_words_materialize_union_future_bytes(
+            coverage.pattern_count(),
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_solution_coverage_projection_overflow",
+        ))?;
+        let mut requested_future = union_future;
+        if is_new {
+            requested_future = requested_future
+                .checked_add(
+                    (core::mem::size_of::<StandardBoard64TilingIdentity>()
+                        + core::mem::size_of::<PatternBitSet>()) as u128,
+                )
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_coverage_projection_overflow",
+                ))?;
+        }
+        memory_guard(self, 0, requested_future)?;
+        if is_new {
+            self.solution_coverage
+                .as_mut()
+                .expect("the requested solution coverage map exists")
+                .try_reserve(1)
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_solution_coverage_storage_unavailable",
+                    )
+                })?;
+            memory_guard(self, 0, union_future)?;
+            self.solution_coverage
+                .as_mut()
+                .expect("the requested solution coverage map exists")
+                .insert(identity, PatternBitSet::new(coverage.pattern_count()));
+            memory_guard(self, 0, union_future)?;
+        }
+        self.solution_coverage
+            .as_mut()
+            .expect("the requested solution coverage map exists")
+            .get_mut(&identity)
+            .expect("the requested solution coverage entry exists")
+            .union_with(coverage)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_coverage_universe_mismatch",
+                )
+            })?;
+        memory_guard(self, 0, 0)
+    }
+
+    fn validate_distributed_solution_surface(
+        &self,
+        result: &CoreExecutionResult,
+        pattern_count: usize,
+    ) -> Result<CompactDistributedPartial, WasmExactSearchError> {
+        if pattern_count != self.covered_patterns.pattern_count() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_pattern_count_mismatch",
+            ));
+        }
+        let board_height = exact_usize_field(
+            result,
+            "board_height",
+            "wasm_build_probability_distributed_board_height_invalid",
+        )?;
+        if board_height != usize::from(self.board_height) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_board_height_mismatch",
+            ));
+        }
+        let requested = exact_solution_probabilities_requested(result)?;
+        if requested != self.problem.solution_probability_policy().requested() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_solution_probability_policy_mismatch",
+            ));
+        }
+        let count_complete = exact_bool_field(
+            result,
+            "count_complete",
+            "wasm_build_probability_distributed_count_complete_invalid",
+        )?;
+        let probability_complete = exact_bool_field(
+            result,
+            "probability_complete",
+            "wasm_build_probability_distributed_probability_complete_invalid",
+        )?;
+        let resource_truncated = exact_bool_field(
+            result,
+            "resource_truncated",
+            "wasm_build_probability_distributed_resource_truncated_invalid",
+        )?;
+        let worker_solution_count = exact_usize_field(
+            result,
+            "unique_solution_count",
+            "wasm_build_probability_distributed_solution_count_invalid",
+        )?;
+        let build_variant_count = exact_u128_field(
+            result,
+            "build_variant_count",
+            "wasm_build_probability_distributed_variant_count_invalid",
+        )?;
+
+        let identities = result.normalized_solution_identities();
+        let keys = result.normalized_solution_keys();
+        if worker_solution_count != identities.len() || worker_solution_count != keys.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_solution_surface_incomplete",
+            ));
+        }
+        if !identities.windows(2).all(|pair| pair[0] < pair[1])
+            || keys.iter().any(String::is_empty)
+            || !keys.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_solution_surface_not_canonical",
+            ));
+        }
+        for (identity, key) in identities.iter().copied().zip(keys) {
+            self.validate_distributed_identity(identity, key)?;
+        }
+
+        let coverages = result.solution_coverages();
+        let normalized_coverages = result.normalized_solution_coverages();
+        let solution_coverage_required = self.solution_coverage.is_some();
+        if !coverages
+            .windows(2)
+            .all(|pair| pair[0].identity() < pair[1].identity())
+            || !normalized_coverages
+                .windows(2)
+                .all(|pair| pair[0].solution_key() < pair[1].solution_key())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_solution_coverage_not_canonical",
+            ));
+        }
+        if solution_coverage_required && coverages.len() != worker_solution_count {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_board64_solution_coverage_incomplete",
+            ));
+        }
+        if !solution_coverage_required
+            && (!coverages.is_empty() || !normalized_coverages.is_empty())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_unexpected_solution_coverage",
+            ));
+        }
+        if solution_coverage_required
+            && !normalized_coverages.is_empty()
+            && normalized_coverages.len() != worker_solution_count
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_normalized_solution_coverage_incomplete",
+            ));
+        }
+        if !normalized_coverages.is_empty() && coverages.len() != normalized_coverages.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_solution_coverage_surface_mismatch",
+            ));
+        }
+        for coverage in coverages {
+            let position = identities
+                .binary_search(&coverage.identity())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_distributed_solution_coverage_foreign_identity",
+                    )
+                })?;
+            if coverage.covered_patterns().pattern_count() != pattern_count {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_distributed_solution_coverage_mismatch",
+                ));
+            }
+            if !normalized_coverages.is_empty() {
+                let normalized = normalized_coverages.get(position).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_distributed_solution_coverage_mismatch",
+                    ),
+                )?;
+                if normalized.solution_key() != keys[position]
+                    || normalized.covered_patterns() != coverage.covered_patterns()
+                {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_distributed_solution_coverage_mismatch",
+                    ));
+                }
+            }
+        }
+        if solution_coverage_required
+            && !solution_coverage_union_matches_global(
+                pattern_count,
+                result.coverage_pattern_words(),
+                coverages,
+                SolutionCoverage::covered_patterns,
+            )
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_solution_coverage_union_mismatch",
+            ));
+        }
+        validate_worker_partial_probability_surface(result)?;
+
+        Ok(CompactDistributedPartial {
+            count_complete,
+            probability_complete,
+            resource_truncated,
+            build_variant_count,
+        })
+    }
+
+    fn validate_distributed_identity(
+        &self,
+        identity: StandardBoard64TilingIdentity,
+        key: &str,
+    ) -> Result<(), WasmExactSearchError> {
+        if identity.initial_board_mask() != self.catalog.initial_board()
+            || identity.placement_count() != self.target_cells.count_ones() as usize / 4
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_domain_mismatch",
+            ));
+        }
+        let canonical = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+        if canonical.as_str() != key {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_solution_key_mismatch",
+            ));
+        }
+        if self.target_cells == 0 {
+            return Ok(());
+        }
+
+        let mut row_ids = [0_u32; MAX_BOARD64_PIECES];
+        let mut covered = 0_u64;
+        for index in 0..identity.placement_count() {
+            let placement =
+                identity
+                    .placement(index)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_distributed_identity_placement_missing",
+                    ))?;
+            let row_id = self
+                .catalog
+                .skeleton_id(placement.piece(), placement.cells_mask())
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_distributed_identity_not_in_catalog",
+                ))?;
+            covered |= placement.cells_mask();
+            row_ids[index] = row_id;
+        }
+        if covered != self.target_cells {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_target_mismatch",
+            ));
+        }
+        let multiset =
+            PieceMultisetKey::from_pieces((0..identity.placement_count()).map(|index| {
+                identity
+                    .placement(index)
+                    .expect("the identity placement count was validated")
+                    .piece()
+            }));
+        let target = self
+            .shared_supply_catalog
+            .targets
+            .targets()
+            .iter()
+            .find(|target| target.key == multiset)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_supply_mismatch",
+            ))?;
+        let reconstructed = GeometryCandidate::from_rows(
+            &self.catalog,
+            target.pattern_index_id,
+            &row_ids[..identity.placement_count()],
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_identity_reconstruction_failed",
+        ))?;
+        if reconstructed.identity != identity {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_reconstruction_mismatch",
+            ));
         }
         Ok(())
     }
@@ -1559,7 +3111,7 @@ impl CompactBuildProbabilitySession {
                 witness_mode,
                 self.representative_path.is_empty(),
                 0,
-                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                BuildCompletion::ExactBoardAfterLineClears(self.final_board),
                 self.aggregation.requests_spin_coverage(),
                 control,
             )?;
@@ -1582,6 +3134,7 @@ impl CompactBuildProbabilitySession {
         self.finesse_languages.clear();
         self.build_variant_count = 0;
         self.count_complete = self.truncated_reason.is_none();
+        self.distributed_probability_complete = true;
         self.representative_path.clear();
         self.representative_pattern_id = None;
         self.representative_rank = None;
@@ -1597,6 +3150,7 @@ impl CompactBuildProbabilitySession {
 
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
         if !self.aggregation.is_tiling_only() {
+            self.ensure_symbolic_coverage_finalization_bound()?;
             if let Some(symbolic) = self.buildup.materialize_standard_bag_coverage()? {
                 self.covered_patterns.union_with(&symbolic).map_err(|_| {
                     WasmExactSearchError::InvalidProblem(
@@ -1605,9 +3159,11 @@ impl CompactBuildProbabilitySession {
                 })?;
             }
         }
+        self.ensure_result_materialization_bound()?;
         self.finished = true;
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
-            || self.problem.objective().execution_constraints().requested();
+            || self.problem.objective().execution_constraints().requested()
+            || self.problem.objective().score().requested();
         let evidence_materialized = self.distributed_spin_materialized
             || (self.problem.objective().execution_constraints().requested()
                 && self.distributed_execution_constraint_materialized);
@@ -1619,9 +3175,9 @@ impl CompactBuildProbabilitySession {
         } else {
             None
         };
-        Ok(BuildProbabilityAdvance::Completed(
-            self.build_result(scoring_batch)?,
-        ))
+        let result = self.build_result(scoring_batch)?;
+        self.ensure_materialized_result_bound(&result)?;
+        Ok(BuildProbabilityAdvance::Completed(result))
     }
 
     fn prepare_exact_spin_execution_batch(
@@ -1644,7 +3200,7 @@ impl CompactBuildProbabilitySession {
                 identity,
                 candidate_id,
                 &mut self.buildup,
-                BuildCompletion::ExactBoardAfterLineClears(self.target_board),
+                BuildCompletion::ExactBoardAfterLineClears(self.final_board),
             )? {
                 Some(graph) => graphs.push(graph),
                 None => complete = false,
@@ -1701,20 +3257,35 @@ impl CompactBuildProbabilitySession {
                 .get()
                 .to_string()
         };
-        let probability_complete =
-            !tiling_only && universe.complete() && self.truncated_reason.is_none();
+        let probability_complete = !tiling_only
+            && universe.complete()
+            && self.distributed_probability_complete
+            && self.truncated_reason.is_none();
         let count_complete = self.count_complete
             && self.truncated_reason.is_none()
             && (!tiling_only || self.shared_supply_catalog.supply_projection_complete);
         let build_variant_count_exact = !tiling_only
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
             && count_complete;
-        let execution_constraints = self.problem.objective().execution_constraints();
+        let objective_policy = self.problem.objective();
+        let execution_constraints = objective_policy.execution_constraints();
+        let score_policy = objective_policy.score();
+        let score_requested = score_policy.requested();
         let execution_constraint_complete = !execution_constraints.requested()
             || self.distributed_execution_constraint_materialized;
         let solution_found = self.trivial_target || !self.buildable_tilings.is_empty();
         let mut identities = self.buildable_tilings.iter().copied().collect::<Vec<_>>();
+        if self.trivial_target {
+            identities.push(
+                StandardBoard64TilingIdentity::from_placements(
+                    self.catalog.initial_board(),
+                    core::iter::empty(),
+                )
+                .expect("the canonical empty compact tiling is valid"),
+            );
+        }
         identities.sort_unstable();
+        identities.dedup();
         let normalized_hash =
             normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
                 &identities,
@@ -1725,7 +3296,7 @@ impl CompactBuildProbabilitySession {
             .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
             .map(|key| key.as_str().to_owned())
             .collect::<Vec<_>>();
-        let solution_coverages = self
+        let mut solution_coverages = self
             .solution_coverage
             .as_ref()
             .map(|coverage| {
@@ -1737,6 +3308,19 @@ impl CompactBuildProbabilitySession {
                 entries
             })
             .unwrap_or_default();
+        if self.trivial_target && self.solution_coverage.is_some() {
+            let empty = identities[0];
+            if !solution_coverages
+                .iter()
+                .any(|coverage| coverage.identity() == empty)
+            {
+                solution_coverages.push(SolutionCoverage::new(
+                    empty,
+                    PatternBitSet::all(universe.pattern_count()),
+                ));
+                solution_coverages.sort_unstable_by_key(SolutionCoverage::identity);
+            }
+        }
         let normalized_solution_coverages = solution_coverages
             .iter()
             .map(|coverage| {
@@ -1837,14 +3421,18 @@ impl CompactBuildProbabilitySession {
                 universe.total_possible_pattern_count(),
             ),
             field("search_kind", "build-probability"),
+            field("board_height", self.board_height),
             field(
                 "build_probability_completion",
                 "exact-board-with-inverse-lock-clear",
             ),
             field("build_base_mask", self.catalog.initial_board()),
             field("build_target_cells_mask", self.target_cells),
-            field("build_target_board_mask", self.target_board),
-            field("build_final_board_mask", self.target_board),
+            field(
+                "build_target_board_mask",
+                self.catalog.initial_board() | self.target_cells,
+            ),
+            field("build_final_board_mask", self.final_board),
             field("target_piece_count", self.target_cells.count_ones() / 4),
             field("solution_found", solution_found),
             field("packing_candidate_count", self.candidate_count),
@@ -1859,10 +3447,7 @@ impl CompactBuildProbabilitySession {
                 "packing_candidate_set_digest",
                 format!("{:016x}", self.candidate_digest),
             ),
-            field(
-                "unique_solution_count",
-                self.buildable_tilings.len() + usize::from(self.trivial_target),
-            ),
+            field("unique_solution_count", identities.len()),
             field("normalized_solution_set_hash", normalized_hash),
             field("build_variant_count", self.build_variant_count),
             field("build_variant_count_exact", build_variant_count_exact),
@@ -1888,6 +3473,10 @@ impl CompactBuildProbabilitySession {
             field("coverage_probability", probability),
             field("probability_complete", probability_complete),
             field("count_complete", count_complete),
+            field(
+                "solution_probabilities_requested",
+                self.problem.solution_probability_policy().requested(),
+            ),
             field("searched_nodes", self.geometry.expanded_nodes()),
             field(
                 "geometry_domain_pruned_states",
@@ -1936,6 +3525,22 @@ impl CompactBuildProbabilitySession {
                     .spin_profile()
                     .map_or("none", |profile| profile.as_str()),
             ),
+            field("postprocess_scoring_requested", score_requested),
+            field("score_objective_mode", score_policy.mode().as_str()),
+            field("score_profile_requested", score_policy.profile().as_str()),
+            field(
+                "score_spin_profile_requested",
+                score_policy.spin_profile().as_str(),
+            ),
+            field("score_initial_b2b", score_policy.initial_b2b()),
+            field(
+                "postprocess_execution_owner",
+                "clearra-app->clearra-postprocess",
+            ),
+            field(
+                "postprocess_replay_seed_available",
+                !self.representative_path.is_empty(),
+            ),
             field(
                 "postprocess_build_spin_requested",
                 self.aggregation.requests_spin_coverage(),
@@ -1960,11 +3565,14 @@ impl CompactBuildProbabilitySession {
                 "objective_complete",
                 count_complete
                     && (tiling_only || probability_complete)
+                    && !score_requested
                     && execution_constraint_complete,
             ),
             field(
                 "objective_incomplete_reason",
-                if !count_complete || (!tiling_only && !probability_complete) {
+                if score_requested {
+                    "score_matrix_not_materialized"
+                } else if !count_complete || (!tiling_only && !probability_complete) {
                     self.truncated_reason
                         .unwrap_or("pattern_universe_incomplete")
                 } else if !execution_constraint_complete {
@@ -1987,11 +3595,11 @@ impl CompactBuildProbabilitySession {
         let result = CoreExecutionResult::new(fields, self.representative_path.clone())
             .with_normalized_solution_keys(normalized_keys)
             .with_normalized_solution_identities(identities)
-            .with_coverage_pattern_words(self.covered_patterns.words().to_vec())
+            .with_coverage_pattern_words(self.covered_patterns.to_owned_words())
             .with_solution_coverages(solution_coverages)
             .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_exact_scoring_execution_batch(scoring_batch);
-        let result = if execution_constraints.requested() {
+        let result = if execution_constraints.requested() || score_requested {
             let pattern_weights = (0..universe.pattern_count())
                 .map(|pattern| universe.weight_at(pattern).get().to_string())
                 .collect();
@@ -2060,36 +3668,323 @@ impl CompactBuildProbabilitySession {
         )
     }
 
-    fn retained_bytes(&self) -> usize {
-        self.catalog.retained_bytes()
-            + self.geometry.retained_bytes()
-            + self.buildup.retained_bytes()
-            + self.coverage_evaluator.retained_bytes()
-            + self.covered_patterns.retained_bytes()
-            + self.buildable_tilings.capacity()
-                * core::mem::size_of::<StandardBoard64TilingIdentity>()
-            + self.solution_coverage.as_ref().map_or(0, |coverage| {
-                coverage.capacity()
-                    * (core::mem::size_of::<StandardBoard64TilingIdentity>()
-                        + core::mem::size_of::<PatternBitSet>())
-                    + coverage
-                        .values()
-                        .map(PatternBitSet::retained_bytes)
-                        .sum::<usize>()
-            })
-            + self.finesse_languages.capacity()
-                * core::mem::size_of::<(StandardBoard64TilingIdentity, PreparedFinesseLanguage)>()
-            + self
-                .finesse_languages
-                .iter()
-                .map(|(_, language)| {
-                    language.nodes.capacity()
-                        * core::mem::size_of::<super::buildup::PreparedFinesseNode>()
-                        + language.edges.capacity()
-                            * core::mem::size_of::<super::buildup::PreparedFinesseEdge>()
-                })
-                .sum::<usize>()
+    pub(super) fn checked_finesse_search_material_future_bytes(&self) -> Option<u128> {
+        let language_count = self
+            .finesse_languages
+            .len()
+            .checked_add(usize::from(self.trivial_target))?;
+        let mut bytes = (language_count as u128)
+            .checked_mul(core::mem::size_of::<(String, CostedGeometryLanguage)>() as u128)?;
+        for (identity, prepared) in &self.finesse_languages {
+            bytes = bytes
+                .checked_add(checked_board64_canonical_key_len(*identity)?)?
+                .checked_add(
+                    (prepared.nodes.len() as u128)
+                        .checked_mul(core::mem::size_of::<GeometryLanguageNode>() as u128)?,
+                )?
+                .checked_add(
+                    (prepared.edges.len() as u128)
+                        .checked_mul(core::mem::size_of::<CostedGeometryEdge>() as u128)?,
+                )?;
+        }
+        if self.trivial_target {
+            let identity = StandardBoard64TilingIdentity::from_placements(
+                self.catalog.initial_board(),
+                std::iter::empty(),
+            )
+            .ok()?;
+            bytes = bytes
+                .checked_add(checked_board64_canonical_key_len(identity)?)?
+                .checked_add(core::mem::size_of::<GeometryLanguageNode>() as u128)?;
+        }
+        bytes.checked_add(FinesseSearchMaterial::checked_fixed_creation_future_bytes(
+            &self.problem,
+        )?)
     }
+
+    fn retained_bytes(&self) -> usize {
+        self.checked_retained_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(usize::MAX)
+    }
+
+    pub(super) fn checked_retained_bytes(&self) -> Option<u128> {
+        checked_build_probability_problem_nested_retained_bytes(&self.problem)?
+            .checked_add(self.checked_non_problem_retained_bytes()?)
+    }
+
+    fn checked_non_problem_retained_bytes(&self) -> Option<u128> {
+        let mut total = 0_u128;
+        for bytes in [
+            self.catalog.retained_bytes(),
+            self.geometry.retained_bytes(),
+            self.buildup.retained_bytes(),
+            self.coverage_evaluator.retained_bytes(),
+            self.covered_patterns.retained_bytes(),
+        ] {
+            total = total.checked_add(bytes as u128)?;
+        }
+        total = total.checked_add(
+            (self.buildable_tilings.capacity() as u128)
+                .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?,
+        )?;
+        if let Some(coverage) = self.solution_coverage.as_ref() {
+            total = total.checked_add((coverage.capacity() as u128).checked_mul(
+                (core::mem::size_of::<StandardBoard64TilingIdentity>()
+                    + core::mem::size_of::<PatternBitSet>()) as u128,
+            )?)?;
+            for patterns in coverage.values() {
+                total = total.checked_add(patterns.retained_bytes() as u128)?;
+            }
+        }
+        total = total.checked_add(
+            (self.representative_path.capacity() as u128)
+                .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+        )?;
+        total = total.checked_add((self.finesse_languages.capacity() as u128).checked_mul(
+            core::mem::size_of::<(StandardBoard64TilingIdentity, PreparedFinesseLanguage)>()
+                as u128,
+        )?)?;
+        for (_, language) in &self.finesse_languages {
+            total = total.checked_add((language.nodes.capacity() as u128).checked_mul(
+                core::mem::size_of::<super::buildup::PreparedFinesseNode>() as u128,
+            )?)?;
+            total = total.checked_add((language.edges.capacity() as u128).checked_mul(
+                core::mem::size_of::<super::buildup::PreparedFinesseEdge>() as u128,
+            )?)?;
+        }
+        Some(total)
+    }
+
+    pub(super) fn set_coexisting_retained_bytes(&mut self, bytes: u128) {
+        self.coexisting_retained_bytes = bytes;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_memory_bound_for_test(&mut self, memory_bound: ExecutionMemoryBound) {
+        self.memory_bound = memory_bound;
+    }
+
+    fn ensure_result_materialization_bound(&self) -> Result<(), WasmExactSearchError> {
+        let future = self.checked_result_materialization_future_bytes().ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_result_materialization_projection_overflow",
+            ),
+        )?;
+        self.ensure_memory_bound(future)
+    }
+
+    fn ensure_symbolic_coverage_finalization_bound(&self) -> Result<(), WasmExactSearchError> {
+        let Some(universe) = self.problem.piece_source().materialized_universe() else {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_symbolic_coverage_projection_unavailable",
+            ));
+        };
+        if self.candidate_count == 0
+            || !StandardBagCoverage::supports(universe, self.problem.initial_hold())
+        {
+            return Ok(());
+        }
+        let future = PatternBitSet::checked_external_words_materialize_union_future_bytes(
+            universe.pattern_count(),
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_symbolic_coverage_projection_overflow",
+        ))?;
+        self.ensure_memory_bound(future)
+    }
+
+    fn ensure_materialized_result_bound(
+        &self,
+        result: &CoreExecutionResult,
+    ) -> Result<(), WasmExactSearchError> {
+        let result_bytes =
+            checked_public_result_bytes(result).ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_result_materialization_projection_overflow",
+            ))?;
+        self.ensure_memory_bound(result_bytes)
+    }
+
+    fn checked_result_materialization_future_bytes(&self) -> Option<u128> {
+        let trivial_identity = self.trivial_target.then(|| {
+            StandardBoard64TilingIdentity::from_placements(
+                self.catalog.initial_board(),
+                core::iter::empty(),
+            )
+            .expect("the canonical empty compact tiling is valid")
+        });
+        let identity_count = self
+            .buildable_tilings
+            .len()
+            .checked_add(usize::from(trivial_identity.is_some()))?;
+        let mut key_bytes = 0_u128;
+        let mut peak_temporary_key_bytes = 0_u128;
+        for identity in self
+            .buildable_tilings
+            .iter()
+            .copied()
+            .chain(trivial_identity)
+        {
+            let key_len = checked_board64_canonical_key_len(identity)?;
+            key_bytes = key_bytes.checked_add(key_len)?;
+            peak_temporary_key_bytes = peak_temporary_key_bytes
+                .max((42_u128).checked_add((identity.placement_count() as u128).checked_mul(20)?)?);
+        }
+        let coverage_count = self.solution_coverage.as_ref().map_or(0, |coverage| {
+            coverage.len() + usize::from(self.trivial_target && coverage.is_empty())
+        });
+        let mut coverage_key_bytes = 0_u128;
+        if let Some(coverage) = self.solution_coverage.as_ref() {
+            for identity in coverage.keys().copied() {
+                coverage_key_bytes =
+                    coverage_key_bytes.checked_add(checked_board64_canonical_key_len(identity)?)?;
+            }
+            if self.trivial_target && coverage.is_empty() {
+                coverage_key_bytes =
+                    coverage_key_bytes.checked_add(checked_board64_canonical_key_len(
+                        trivial_identity.expect("trivial identity is available"),
+                    )?)?;
+            }
+        }
+
+        let mut future = (identity_count as u128)
+            .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?
+            .checked_add(
+                (identity_count as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?
+            .checked_add(key_bytes)?
+            .checked_add(
+                (coverage_count as u128)
+                    .checked_mul(core::mem::size_of::<SolutionCoverage>() as u128)?,
+            )?
+            .checked_add(
+                (coverage_count as u128)
+                    .checked_mul(core::mem::size_of::<NormalizedSolutionCoverage>() as u128)?,
+            )?
+            .checked_add(coverage_key_bytes)?
+            .checked_add(peak_temporary_key_bytes)?
+            .checked_add(
+                (self.covered_patterns.word_count() as u128)
+                    .checked_mul(core::mem::size_of::<u64>() as u128)?,
+            )?
+            .checked_add(
+                (self.representative_path.len() as u128)
+                    .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
+            )?;
+        future = future.checked_add(checked_build_probability_fixed_result_surface_bytes()?)?;
+        if self.trivial_target && self.solution_coverage.is_some() {
+            future = future.checked_add(
+                PatternBitSet::checked_all_projection(self.covered_patterns.pattern_count())?
+                    .constructor_peak_bytes,
+            )?;
+        }
+        if self.problem.objective().execution_constraints().requested()
+            || self.problem.objective().score().requested()
+        {
+            future = future.checked_add(
+                (self.covered_patterns.pattern_count() as u128).checked_mul(
+                    (core::mem::size_of::<String>() as u128)
+                        .checked_add(MAX_CANONICAL_PROBABILITY_TEXT_BYTES)?,
+                )?,
+            )?;
+        }
+        let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || self.problem.objective().execution_constraints().requested()
+            || self.problem.objective().score().requested();
+        let evidence_materialized = self.distributed_spin_materialized
+            || (self.problem.objective().execution_constraints().requested()
+                && self.distributed_execution_constraint_materialized);
+        if execution_evidence_requested && !evidence_materialized {
+            let identity_storage_bytes = (self.buildable_tilings.len() as u128)
+                .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?;
+            let mut retained_graph_bytes = (self.buildable_tilings.len() as u128)
+                .checked_mul(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)?;
+            let mut scoring_peak_bytes =
+                identity_storage_bytes.checked_add(retained_graph_bytes)?;
+            for identity in self.buildable_tilings.iter().copied() {
+                let projection = exact_scoring_execution_graph_memory_projection(
+                    &self.problem,
+                    &self.catalog,
+                    identity,
+                )
+                .ok()?;
+                scoring_peak_bytes = scoring_peak_bytes.max(
+                    identity_storage_bytes
+                        .checked_add(retained_graph_bytes)?
+                        .checked_add(projection.peak_additional_bytes)?,
+                );
+                retained_graph_bytes =
+                    retained_graph_bytes.checked_add(projection.retained_graph_nested_bytes)?;
+            }
+            let universe = self.problem.piece_source().materialized_universe()?;
+            let mut pattern_bytes = (universe.pattern_count() as u128)
+                .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
+            for pattern in 0..universe.pattern_count() {
+                pattern_bytes = pattern_bytes.checked_add(
+                    (universe.sequence_at(pattern).len() as u128)
+                        .checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+                )?;
+            }
+            future = future
+                .checked_add(retained_graph_bytes)?
+                .checked_add(pattern_bytes)?;
+            future = future.max(scoring_peak_bytes);
+        }
+        Some(future)
+    }
+
+    fn ensure_memory_bound(&self, checked_future_bytes: u128) -> Result<(), WasmExactSearchError> {
+        let observed = self.checked_retained_bytes().ok_or_else(|| {
+            WasmExactSearchError::ResourceAdmission(
+                self.memory_bound
+                    .ensure(u128::MAX, 1)
+                    .expect_err("checked retained-byte overflow is unavailable"),
+            )
+        })?;
+        let future = self
+            .coexisting_retained_bytes
+            .checked_add(checked_future_bytes)
+            .ok_or_else(|| {
+                WasmExactSearchError::ResourceAdmission(
+                    self.memory_bound
+                        .ensure(u128::MAX, 1)
+                        .expect_err("checked coexisting retained-byte overflow is unavailable"),
+                )
+            })?;
+        self.memory_bound
+            .ensure(observed, future)
+            .map_err(WasmExactSearchError::ResourceAdmission)
+    }
+}
+
+fn checked_board64_canonical_key_len(identity: StandardBoard64TilingIdentity) -> Option<u128> {
+    let placements = identity.placement_count() as u128;
+    let separators = placements.saturating_sub(1);
+    ("ctk1|initial=".len() as u128)
+        .checked_add(16)?
+        .checked_add("|placements=".len() as u128)?
+        .checked_add(placements.checked_mul(18)?)?
+        .checked_add(separators)
+}
+
+pub(super) fn checked_build_probability_fixed_result_surface_bytes() -> Option<u128> {
+    const FIELD_COUNT_UPPER_BOUND: u128 = 128;
+    const KEY_AND_VALUE_BYTES_PER_FIELD_UPPER_BOUND: u128 = 512;
+    const EXECUTION_REPORT_STRING_BYTES_UPPER_BOUND: u128 = 4_096;
+
+    // Build-probability summary keys are internal literals. Their dynamic
+    // values are booleans, bounded integer/hex encodings, canonical
+    // probabilities, or internal reason/profile identifiers. This fixed
+    // checked envelope covers the result owner, every field slot, all field
+    // string backing, and the six strings cloned by SearchExecutionReport.
+    (core::mem::size_of::<CoreExecutionResult>() as u128)
+        .checked_add(
+            FIELD_COUNT_UPPER_BOUND.checked_mul(core::mem::size_of::<(String, String)>() as u128)?,
+        )?
+        .checked_add(
+            FIELD_COUNT_UPPER_BOUND.checked_mul(KEY_AND_VALUE_BYTES_PER_FIELD_UPPER_BOUND)?,
+        )?
+        .checked_add(EXECUTION_REPORT_STRING_BYTES_UPPER_BOUND)
 }
 
 pub(super) struct FinesseSearchMaterial {
@@ -2129,6 +4024,449 @@ impl FinesseSearchMaterial {
             .clone(),
         })
     }
+
+    pub(super) fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = core::mem::size_of_val(self.classes.classes()) as u128;
+        for class in self.classes.classes() {
+            bytes = bytes
+                .checked_add(core::mem::size_of_val(class.queue()) as u128)?
+                .checked_add(core::mem::size_of_val(class.pattern_ids()) as u128)?;
+        }
+        bytes =
+            bytes
+                .checked_add((self.languages.capacity() as u128).checked_mul(
+                    core::mem::size_of::<(String, CostedGeometryLanguage)>() as u128,
+                )?)?;
+        for (key, language) in &self.languages {
+            bytes = bytes
+                .checked_add(key.capacity() as u128)?
+                .checked_add(core::mem::size_of_val(language.nodes()) as u128)?;
+            for node in language.nodes() {
+                bytes = bytes.checked_add(core::mem::size_of_val(node.edges()) as u128)?;
+            }
+        }
+        bytes = bytes.checked_add(core::mem::size_of_val(self.kick_profile.entries()) as u128)?;
+        for entry in self.kick_profile.entries() {
+            bytes = bytes
+                .checked_add(core::mem::size_of_val(entry.sequence().offsets()) as u128)?
+                .checked_add(entry.unsupported_reason().map_or(0, str::len) as u128)?;
+        }
+        Some(bytes)
+    }
+
+    pub(super) fn checked_fixed_creation_future_bytes(problem: &SearchProblem) -> Option<u128> {
+        const GROUPING_ENTRY_OVERHEAD_UPPER_BOUND: u128 = 256;
+
+        let universe = problem.piece_source().materialized_universe()?;
+        let pattern_count = universe.pattern_count() as u128;
+        let queue_len = (problem.exact_pieces().unwrap_or(0) as u128).checked_add(u128::from(
+            problem.supply().projects_standard_bag_lookahead(),
+        ))?;
+        // QueueClassSet::group temporarily retains the source QueuePattern
+        // owners, two queue-key owners, class-id staging, and the final class
+        // owner. Count every one before finesse materialization starts.
+        let queue_and_grouping = pattern_count.checked_mul(
+            (core::mem::size_of::<QueuePattern>() as u128)
+                .checked_add(core::mem::size_of::<QueueClass>() as u128)?
+                .checked_add(core::mem::size_of::<PatternId>() as u128)?
+                .checked_add(
+                    queue_len
+                        .checked_mul((core::mem::size_of::<PieceKind>() as u128).checked_mul(4)?)?,
+                )?
+                .checked_add(GROUPING_ENTRY_OVERHEAD_UPPER_BOUND)?,
+        )?;
+
+        let kick_profile =
+            super::kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())?;
+        let mut kick_bytes = core::mem::size_of_val(kick_profile.entries()) as u128;
+        for entry in kick_profile.entries() {
+            kick_bytes = kick_bytes
+                .checked_add(core::mem::size_of_val(entry.sequence().offsets()) as u128)?
+                .checked_add(entry.unsupported_reason().map_or(0, str::len) as u128)?;
+        }
+        queue_and_grouping.checked_add(kick_bytes)
+    }
+}
+
+pub(super) fn attach_finesse_report_with_memory_guard(
+    result: CoreExecutionResult,
+    materials: Vec<FinesseSearchMaterial>,
+    metric: FinesseMetric,
+    pattern_knowledge: FinessePatternKnowledge,
+    control: &ExecutionControl,
+    mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), WasmExactSearchError>,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    let material_bytes = checked_finesse_material_vec_retained_bytes(&materials).ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_finesse_report_memory_projection_overflow"),
+    )?;
+    let report_build_future =
+        checked_finesse_report_build_future_upper_bound(&materials, pattern_knowledge).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_finesse_report_memory_projection_overflow"),
+        )?;
+    let borrowed_fields = [
+        ("finesse_metric_requested", metric.as_str()),
+        (
+            "finesse_pattern_knowledge_requested",
+            pattern_knowledge.as_str(),
+        ),
+    ];
+    let field_projection = result
+        .checked_borrowed_field_replacement_projection(&borrowed_fields)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_report_memory_projection_overflow",
+        ))?;
+    let initial_future = material_bytes
+        .checked_add(report_build_future)
+        .and_then(|bytes| bytes.checked_add(field_projection.required_future_bytes))
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_report_memory_projection_overflow",
+        ))?;
+    memory_guard(&result, initial_future)?;
+
+    let report = build_finesse_report(materials, pattern_knowledge, control)?;
+    let report_bytes =
+        report
+            .checked_nested_retained_bytes()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_finesse_report_memory_projection_overflow",
+            ))?;
+    if report_bytes > report_build_future {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_finesse_report_memory_projection_underestimated",
+        ));
+    }
+    let fields = vec![
+        (
+            "finesse_metric_requested".to_owned(),
+            metric.as_str().to_owned(),
+        ),
+        (
+            "finesse_pattern_knowledge_requested".to_owned(),
+            pattern_knowledge.as_str().to_owned(),
+        ),
+    ];
+    let projection_error =
+        WasmExactSearchError::InvalidProblem("wasm_finesse_report_memory_projection_overflow");
+    let result = result
+        .try_with_replaced_fields_with_memory_guard(fields, |live, future| {
+            memory_guard(
+                live,
+                future
+                    .checked_add(report_bytes)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_report_memory_projection_overflow",
+                    ))?,
+            )
+        })
+        .map_err(|error| match error {
+            crate::core_execution_result::CoreResultFieldReplacementError::ProjectionOverflow
+            | crate::core_execution_result::CoreResultFieldReplacementError::AllocationFailed {
+                ..
+            } => projection_error,
+            crate::core_execution_result::CoreResultFieldReplacementError::MemoryGuard(error) => {
+                error
+            }
+        })?;
+    Ok(result.with_finesse_report(report))
+}
+
+pub(super) fn checked_finesse_material_vec_retained_bytes(
+    materials: &Vec<FinesseSearchMaterial>,
+) -> Option<u128> {
+    let mut bytes = (materials.capacity() as u128)
+        .checked_mul(core::mem::size_of::<FinesseSearchMaterial>() as u128)?;
+    for material in materials {
+        bytes = bytes.checked_add(material.checked_nested_retained_bytes()?)?;
+    }
+    Some(bytes)
+}
+
+fn checked_finesse_report_build_future_upper_bound(
+    materials: &[FinesseSearchMaterial],
+    pattern_knowledge: FinessePatternKnowledge,
+) -> Option<u128> {
+    const TREE_ENTRY_OVERHEAD_UPPER_BOUND: u128 = 256;
+    const PRODUCT_STATE_BYTES_UPPER_BOUND: u128 = 1_024;
+    let first = materials.first()?;
+    let mut language_count = 0_u128;
+    let mut key_bytes = 0_u128;
+    let mut max_key_bytes = 0_u128;
+    let mut node_count = 0_u128;
+    let mut edge_count = 0_u128;
+    let mut max_depth = 0_u128;
+    let mut max_edge_cost = 0_u128;
+    let mut class_count = first.classes.classes().len() as u128;
+    let mut pattern_count = first.classes.metadata().pattern_count as u128;
+    let mut max_queue_len = first
+        .classes
+        .classes()
+        .iter()
+        .map(|class| class.queue().len() as u128)
+        .max()
+        .unwrap_or(0);
+    for material in materials {
+        class_count = class_count.max(material.classes.classes().len() as u128);
+        pattern_count = pattern_count.max(material.classes.metadata().pattern_count as u128);
+        max_queue_len = max_queue_len.max(
+            material
+                .classes
+                .classes()
+                .iter()
+                .map(|class| class.queue().len() as u128)
+                .max()
+                .unwrap_or(0),
+        );
+        for (key, language) in &material.languages {
+            language_count = language_count.checked_add(1)?;
+            key_bytes = key_bytes.checked_add(key.len() as u128)?;
+            max_key_bytes = max_key_bytes.max(key.len() as u128);
+            node_count = node_count.checked_add(language.nodes().len() as u128)?;
+            for node in language.nodes() {
+                max_depth = max_depth.max(u128::from(node.depth()));
+                edge_count = edge_count.checked_add(node.edges().len() as u128)?;
+                for edge in node.edges() {
+                    max_edge_cost = max_edge_cost.max(u128::from(edge.input_cost()));
+                }
+            }
+        }
+    }
+    let effective_solution_count = language_count;
+    let output_policy_count = match pattern_knowledge {
+        FinessePatternKnowledge::Both => 2_u128,
+        FinessePatternKnowledge::Oracle | FinessePatternKnowledge::VisibleSeven => 1_u128,
+    };
+    let evaluated_policy_count = if matches!(pattern_knowledge, FinessePatternKnowledge::Oracle) {
+        1_u128
+    } else {
+        2_u128
+    };
+
+    let solution_average_bytes = effective_solution_count.checked_mul(
+        (core::mem::size_of::<FinesseSolutionAverage>() as u128)
+            .checked_add(MAX_CANONICAL_PROBABILITY_TEXT_BYTES)?,
+    )?;
+    let mut report_bytes = (core::mem::size_of::<FinessePolicyResult>() as u128)
+        .checked_mul(output_policy_count)?
+        .checked_add(solution_average_bytes.checked_mul(output_policy_count)?)?
+        .checked_add(key_bytes.checked_mul(output_policy_count)?)?
+        .checked_add(
+            MAX_CANONICAL_PROBABILITY_TEXT_BYTES
+                .checked_mul(8)?
+                .checked_mul(output_policy_count)?,
+        )?
+        .checked_add(128)?;
+    let route_inputs = max_depth.checked_mul(max_edge_cost.checked_add(1)?)?;
+    report_bytes = report_bytes
+        .checked_add(max_key_bytes)?
+        .checked_add(pattern_count.checked_mul(core::mem::size_of::<usize>() as u128)?)?
+        .checked_add(max_queue_len.checked_mul(core::mem::size_of::<PieceKind>() as u128)?)?
+        .checked_add(route_inputs.checked_mul(core::mem::size_of::<FinesseReportInput>() as u128)?)?
+        .checked_add(
+            max_depth.checked_mul(core::mem::size_of::<crate::FinesseReportPlacement>() as u128)?,
+        )?;
+
+    let grouping_bytes = language_count.checked_mul(
+        (core::mem::size_of::<(String, CostedGeometryLanguage)>() as u128)
+            .checked_add(core::mem::size_of::<Vec<CostedGeometryLanguage>>() as u128)?
+            .checked_add(TREE_ENTRY_OVERHEAD_UPPER_BOUND)?,
+    )?;
+    // `build_finesse_report` first unions alternatives that share one exact
+    // solution key. Policy evaluation then unions the distinct solution
+    // languages to calculate the overall adaptive cost. Any second source
+    // language can therefore participate in one of those union stages.
+    let language_union_required = language_count > 1;
+    let (effective_node_count, union_peak) = if !language_union_required {
+        (node_count, 0_u128)
+    } else {
+        let shift = u32::try_from(node_count).ok()?;
+        let union_state_count = 1_u128.checked_shl(shift)?.checked_sub(1)?;
+        let pair_bytes = node_count.checked_mul(
+            (core::mem::size_of::<usize>() + core::mem::size_of::<GeometryNodeId>()) as u128,
+        )?;
+        let per_state = pair_bytes
+            .checked_mul(3)?
+            .checked_add(core::mem::size_of::<GeometryLanguageNode>() as u128)?
+            .checked_add(
+                edge_count.checked_mul(core::mem::size_of::<CostedGeometryEdge>() as u128)?,
+            )?
+            .checked_add(TREE_ENTRY_OVERHEAD_UPPER_BOUND.checked_mul(2)?)?;
+        let retained = union_state_count.checked_mul(per_state)?;
+        let current_group_scratch = edge_count.checked_mul(
+            pair_bytes
+                .checked_add(core::mem::size_of::<CostedGeometryEdge>() as u128)?
+                .checked_add(TREE_ENTRY_OVERHEAD_UPPER_BOUND)?,
+        )?;
+        (
+            union_state_count,
+            retained.checked_add(current_group_scratch)?,
+        )
+    };
+
+    let scalar_state_count = effective_node_count
+        .checked_mul(max_queue_len.checked_add(1)?)?
+        .checked_mul(8)?;
+    let cost_vector_bytes = class_count
+        .checked_mul(core::mem::size_of::<Option<u32>>() as u128)?
+        .checked_add(core::mem::size_of::<QueueCostTable>() as u128)?;
+    // An empty solution catalog never constructs a product evaluator:
+    // `evaluate_finesse_policy` materializes only the one unreachable cost
+    // table counted below. In particular, a large Visible-7 class set must not
+    // be projected as `2^class_count` when there is no language to evaluate.
+    let (oracle_product_peak, visible_product_peak) = if language_count == 0 {
+        (0, 0)
+    } else {
+        let oracle = scalar_state_count
+            .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?;
+        let visible =
+            if first.fixed_queue || matches!(pattern_knowledge, FinessePatternKnowledge::Oracle) {
+                0
+            } else {
+                let shift = u32::try_from(class_count).ok()?;
+                scalar_state_count
+                    .checked_mul(1_u128.checked_shl(shift)?)?
+                    .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?
+            };
+        (oracle, visible)
+    };
+    let retained_cost_tables = effective_solution_count
+        .checked_add(1)?
+        .checked_mul(cost_vector_bytes)?
+        .checked_mul(evaluated_policy_count)?;
+    let movement_peak =
+        checked_finesse_movement_witness_peak_bytes(materials, route_inputs, max_depth)?;
+
+    grouping_bytes
+        .checked_add(union_peak)?
+        .checked_add(oracle_product_peak.max(visible_product_peak))?
+        .checked_add(retained_cost_tables)?
+        .checked_add(report_bytes.checked_mul(2)?)?
+        .checked_add(movement_peak)
+}
+
+fn checked_finesse_movement_witness_peak_bytes(
+    materials: &[FinesseSearchMaterial],
+    route_input_count: u128,
+    placement_count: u128,
+) -> Option<u128> {
+    // `FrozenFinesseQuery` clones one kick profile and one target before each
+    // selected movement replay. Count that clone from the concrete profile;
+    // all placements are replayed sequentially, so only the largest BFS state
+    // space coexists with the accumulated route output.
+    let mut kick_clone_bytes = 0_u128;
+    let mut max_state_count = 0_u128;
+    for material in materials {
+        let entries = material.kick_profile.entries();
+        let mut material_kick_bytes = (entries.len() as u128)
+            .checked_mul(core::mem::size_of::<clearra_rules::kicks::KickTableEntry>() as u128)?;
+        for entry in entries {
+            material_kick_bytes = material_kick_bytes
+                .checked_add((entry.sequence().offsets().len() as u128).checked_mul(
+                    core::mem::size_of::<clearra_rules::kicks::KickOffset>() as u128,
+                )?)?
+                .checked_add(entry.unsupported_reason().map_or(0, str::len) as u128)?;
+        }
+        kick_clone_bytes = kick_clone_bytes.max(material_kick_bytes);
+
+        for (_, language) in &material.languages {
+            for node in language.nodes() {
+                let Some(board) = node.source_board() else {
+                    continue;
+                };
+                for edge in node.edges().iter().copied() {
+                    max_state_count = max_state_count.max(checked_finesse_movement_state_count(
+                        board,
+                        edge.piece(),
+                        material.spawn_profile,
+                        &material.kick_profile,
+                    )?);
+                }
+            }
+        }
+    }
+
+    let word = core::mem::size_of::<usize>() as u128;
+    let rotation_arrival_field_bytes =
+        (core::mem::size_of::<clearra_core_domain::piece::rotation::RotationState>() as u128)
+            .checked_mul(2)?
+            .checked_add(core::mem::size_of::<ClassicInputAction>() as u128)?
+            .checked_add(core::mem::size_of::<u8>() as u128)?
+            .checked_add((core::mem::size_of::<i8>() as u128).checked_mul(2)?)?
+            .checked_add(core::mem::size_of::<PiecePose>() as u128)?;
+    // Rust-layout padding and both Option discriminants are bounded by sixteen
+    // pointer-alignment quanta for the concrete Parent field graph above.
+    let option_parent_layout_upper_bound = rotation_arrival_field_bytes
+        .checked_add(core::mem::size_of::<usize>() as u128)?
+        .checked_add(core::mem::size_of::<ClassicInputAction>() as u128)?
+        .checked_add(word.checked_mul(16)?)?;
+
+    let bfs_arrays = max_state_count
+        .checked_mul(core::mem::size_of::<u32>() as u128)?
+        .checked_add(max_state_count.checked_mul(option_parent_layout_upper_bound)?)?
+        // FIFO capacity grows geometrically and never needs more than the next
+        // power of two above the number of reachable states.
+        .checked_add(
+            max_state_count
+                .checked_mul(2)?
+                .checked_mul(core::mem::size_of::<PiecePose>() as u128)?,
+        )?;
+    // `reconstruct_actions` may retain its geometrically grown Vec while
+    // `into_boxed_slice` installs an exact-sized owner. Three state-sized
+    // action arrays therefore bound that handoff peak.
+    let reconstructed_actions = max_state_count
+        .checked_mul(3)?
+        .checked_mul(core::mem::size_of::<ClassicInputAction>() as u128)?;
+    let accumulated_replay = route_input_count
+        .checked_mul(2)?
+        .checked_mul(core::mem::size_of::<FinesseSequenceInput>() as u128)?
+        .checked_add(
+            placement_count.checked_mul(core::mem::size_of::<GeometryActionKey>() as u128)?,
+        )?
+        .checked_add(
+            route_input_count.checked_mul(core::mem::size_of::<FinesseReportInput>() as u128)?,
+        )?
+        .checked_add(
+            placement_count
+                .checked_mul(core::mem::size_of::<crate::FinesseReportPlacement>() as u128)?,
+        )?;
+
+    kick_clone_bytes
+        // `FrozenFinesseQuery::new` copies the one-target input into a Vec and
+        // converts it to boxed storage; both payloads can coexist in that
+        // handoff under the allocation accounting contract.
+        .checked_add((core::mem::size_of::<FinesseTarget>() as u128).checked_mul(2)?)?
+        .checked_add(bfs_arrays)?
+        .checked_add(reconstructed_actions)?
+        .checked_add(accumulated_replay)
+}
+
+fn checked_finesse_movement_state_count(
+    board: clearra_finesse::FinesseBoard,
+    piece: PieceKind,
+    spawn: SpawnProfile,
+    kicks: &KickTableProfile,
+) -> Option<u128> {
+    // The movement crate normalizes I/JLSTZ rotation centers by at most four
+    // rows. Adding that exact family-wide delta to the concrete i8 kick
+    // offsets gives a conservative vertical margin without allocating a
+    // normalized kick table.
+    let vertical_margin = kicks
+        .entries()
+        .iter()
+        .filter(|entry| entry.transition().piece() == piece)
+        .flat_map(|entry| entry.sequence().offsets())
+        .map(|offset| u16::from(offset.dy().unsigned_abs()).saturating_add(4))
+        .max()
+        .unwrap_or(0);
+    let height = i16::try_from(board.height()).ok()?;
+    let ceiling = spawn
+        .y()
+        .max(height)
+        .saturating_add(i16::try_from(vertical_margin).ok()?)
+        .saturating_add(4);
+    let non_negative_ceiling = u16::try_from(ceiling).ok()?;
+    4_u128
+        .checked_mul(u128::from(non_negative_ceiling).checked_add(1)?)?
+        .checked_mul(u128::from(board.width()))
 }
 
 fn sort_finesse_language_alternatives(languages: &mut [(String, CostedGeometryLanguage)]) {
@@ -2731,14 +5069,20 @@ fn evaluate_finesse_policy(
         })?
     } else {
         ensure_finesse_not_cancelled(control)?;
-        let references = languages
-            .iter()
-            .map(|(_, language)| language)
-            .collect::<Vec<_>>();
-        let union = union_costed_geometry_languages(&references).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_finesse_overall_union_failed")
-        })?;
-        let evaluator = QueueClassProductEvaluator::new(&union)
+        let union;
+        let language = if let [(_, language)] = languages {
+            language
+        } else {
+            let references = languages
+                .iter()
+                .map(|(_, language)| language)
+                .collect::<Vec<_>>();
+            union = union_costed_geometry_languages(&references).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_finesse_overall_union_failed")
+            })?;
+            &union
+        };
+        let evaluator = QueueClassProductEvaluator::new(language)
             .with_spawn_profile(spawn_profile)
             .with_hold_enabled(hold_enabled)
             .with_terminal_hold_release_enabled(terminal_hold_release);
@@ -2975,46 +5319,147 @@ fn merge_board64_solution_coverages(
     results: &[&CoreExecutionResult],
     pattern_count: usize,
 ) -> Result<Vec<SolutionCoverage>, WasmExactSearchError> {
-    let mut merged = BTreeMap::<StandardBoard64TilingIdentity, PatternBitSet>::new();
+    let mut merged = Vec::<SolutionCoverage>::new();
     for result in results {
-        for coverage in result.solution_coverages() {
-            let entry = merged
-                .entry(coverage.identity())
-                .or_insert_with(|| PatternBitSet::new(pattern_count));
-            entry.union_with(coverage.covered_patterns()).map_err(|_| {
+        let incoming = result.solution_coverages();
+        if merged.is_empty() {
+            merged.try_reserve_exact(incoming.len()).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
-                    "wasm_build_probability_solution_coverage_merge_mismatch",
+                    "wasm_build_probability_solution_coverage_merge_storage_unavailable",
                 )
             })?;
+            merged.extend(incoming.iter().cloned());
+            continue;
         }
+        let current = core::mem::take(&mut merged);
+        let mut next = Vec::new();
+        next.try_reserve_exact(current.len().saturating_add(incoming.len()))
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_solution_coverage_merge_storage_unavailable",
+                )
+            })?;
+        let (mut left, mut right) = (0_usize, 0_usize);
+        while left < current.len() || right < incoming.len() {
+            match (current.get(left), incoming.get(right)) {
+                (Some(existing), Some(candidate))
+                    if existing.identity() == candidate.identity() =>
+                {
+                    let mut coverage = existing.covered_patterns().clone();
+                    coverage
+                        .union_with(candidate.covered_patterns())
+                        .map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_build_probability_solution_coverage_merge_mismatch",
+                            )
+                        })?;
+                    if coverage.pattern_count() != pattern_count {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "wasm_build_probability_solution_coverage_merge_mismatch",
+                        ));
+                    }
+                    next.push(SolutionCoverage::new(existing.identity(), coverage));
+                    left += 1;
+                    right += 1;
+                }
+                (Some(existing), Some(candidate)) if existing.identity() < candidate.identity() => {
+                    next.push(existing.clone());
+                    left += 1;
+                }
+                (Some(_), Some(candidate)) => {
+                    next.push(candidate.clone());
+                    right += 1;
+                }
+                (Some(existing), None) => {
+                    next.push(existing.clone());
+                    left += 1;
+                }
+                (None, Some(candidate)) => {
+                    next.push(candidate.clone());
+                    right += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        merged = next;
     }
-    Ok(merged
-        .into_iter()
-        .map(|(identity, coverage)| SolutionCoverage::new(identity, coverage))
-        .collect())
+    Ok(merged)
 }
 
 fn merge_normalized_solution_coverages(
     results: &[&CoreExecutionResult],
     pattern_count: usize,
 ) -> Result<Vec<NormalizedSolutionCoverage>, WasmExactSearchError> {
-    let mut merged = BTreeMap::<String, PatternBitSet>::new();
+    let mut merged = Vec::<NormalizedSolutionCoverage>::new();
     for result in results {
-        for coverage in result.normalized_solution_coverages() {
-            let entry = merged
-                .entry(coverage.solution_key().to_owned())
-                .or_insert_with(|| PatternBitSet::new(pattern_count));
-            entry.union_with(coverage.covered_patterns()).map_err(|_| {
+        let incoming = result.normalized_solution_coverages();
+        if merged.is_empty() {
+            merged.try_reserve_exact(incoming.len()).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
-                    "wasm_build_probability_normalized_coverage_merge_mismatch",
+                    "wasm_build_probability_normalized_coverage_merge_storage_unavailable",
                 )
             })?;
+            merged.extend(incoming.iter().cloned());
+            continue;
         }
+        let current = core::mem::take(&mut merged);
+        let mut next = Vec::new();
+        next.try_reserve_exact(current.len().saturating_add(incoming.len()))
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_normalized_coverage_merge_storage_unavailable",
+                )
+            })?;
+        let (mut left, mut right) = (0_usize, 0_usize);
+        while left < current.len() || right < incoming.len() {
+            match (current.get(left), incoming.get(right)) {
+                (Some(existing), Some(candidate))
+                    if existing.solution_key() == candidate.solution_key() =>
+                {
+                    let mut coverage = existing.covered_patterns().clone();
+                    coverage
+                        .union_with(candidate.covered_patterns())
+                        .map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_build_probability_normalized_coverage_merge_mismatch",
+                            )
+                        })?;
+                    if coverage.pattern_count() != pattern_count {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "wasm_build_probability_normalized_coverage_merge_mismatch",
+                        ));
+                    }
+                    next.push(NormalizedSolutionCoverage::new(
+                        existing.solution_key(),
+                        coverage,
+                    ));
+                    left += 1;
+                    right += 1;
+                }
+                (Some(existing), Some(candidate))
+                    if existing.solution_key() < candidate.solution_key() =>
+                {
+                    next.push(existing.clone());
+                    left += 1;
+                }
+                (Some(_), Some(candidate)) => {
+                    next.push(candidate.clone());
+                    right += 1;
+                }
+                (Some(existing), None) => {
+                    next.push(existing.clone());
+                    left += 1;
+                }
+                (None, Some(candidate)) => {
+                    next.push(candidate.clone());
+                    right += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        merged = next;
     }
-    Ok(merged
-        .into_iter()
-        .map(|(key, coverage)| NormalizedSolutionCoverage::new(key, coverage))
-        .collect())
+    Ok(merged)
 }
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
@@ -3023,13 +5468,23 @@ fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
 
 #[cfg(test)]
 mod finesse_integration_tests {
+    use std::sync::Arc;
+
     use clearra_core_domain::{
         execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+        pc::pc_target::PcTarget,
         piece::rotation::RotationState,
         probability::probability_value::ProbabilityValue,
+        solution::normalized_tiling_solution::PiecePlacementMask,
     };
     use clearra_finesse::FinesseBoard;
-    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{
+        OpeningPcSearchQuery, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PcSolutionProbabilityPolicy, PieceWindow,
+    };
     use clearra_problem::{BuildProbabilityQuery, FinessePlacement, ProblemCompiler};
     use clearra_supply::queue::{
         fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
@@ -3038,26 +5493,276 @@ mod finesse_integration_tests {
     use super::*;
     use crate::backend::wasm_cpu::buildup::{PreparedFinesseEdge, PreparedFinesseNode};
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn build_probability_six_line_descriptor_fails_before_compact_or_extended_allocation() {
+        let problem =
+            ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::six_lines()))
+                .expect("lazy six-line descriptor");
+        let compact =
+            BuildProbabilityField::from_words_preserving_height(6, [0; 4], [0; 4]).unwrap();
+        let extended =
+            BuildProbabilityField::from_words_preserving_height(8, [0; 4], [0, 1, 0, 0]).unwrap();
+        assert!(compact.is_compact());
+        assert!(!extended.is_compact());
+
+        for field in [compact, extended] {
+            let error = match WasmBuildProbabilitySession::new(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                BuildProbabilityFinesseRequest::Off,
+            ) {
+                Ok(_) => panic!("admission must precede catalog and dense bitset allocation"),
+                Err(error) => error,
+            };
+
+            let WasmExactSearchError::ResourceAdmission(report) = error else {
+                panic!("expected typed admission evidence, got {error:?}");
+            };
+            assert!(!report.execution_started());
+            assert_eq!(
+                report.execution_availability().descriptor_pattern_count(),
+                Some(35_384_428_800)
+            );
+            assert_eq!(
+                report.execution_availability().required_dense_bytes(),
+                Some(4_423_053_600)
+            );
+            assert_eq!(
+                report.execution_availability().required_memory_bytes(),
+                Some(4_423_053_600)
+            );
+            assert_eq!(
+                report.execution_availability().reason(),
+                Some(
+                    clearra_core_domain::resource::ExecutionAvailabilityReason::DensePatternRepresentationUnavailable,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn finesse_score_tiny_budget_fails_before_queue_class_vector_materialization() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_memory_mib(Some(0)));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4]).unwrap();
+        let score = FinesseScoreRequest::new(vec![FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        )])
+        .unwrap();
+        let error = match WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge: FinessePatternKnowledge::Both,
+                request: score,
+            },
+        ) {
+            Ok(_) => panic!("zero-byte request budget must fail before score allocation"),
+            Err(error) => error,
+        };
+        let WasmExactSearchError::ResourceAdmission(report) = error else {
+            panic!("expected typed admission evidence, got {error:?}");
+        };
+        assert_eq!(
+            report.execution_availability().reason(),
+            Some(clearra_core_domain::resource::ExecutionAvailabilityReason::MemoryBudgetExceeded)
+        );
+        assert!(!report.execution_started());
+    }
+
+    #[test]
+    fn compact_distributed_candidate_rows_have_an_exact_allocator_capacity_boundary() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("compact test problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("compact one-I field");
+        let unbounded = ExecutionMemoryBound::unbounded_for_problem(&problem)
+            .expect("unbounded test authority");
+        let mut session = CompactBuildProbabilitySession::new_external_geometry_with_memory_bound(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            unbounded,
+        )
+        .expect("compact external session");
+        let coexisting = 257_u128;
+        session.set_coexisting_retained_bytes(coexisting);
+        let source = [3_u32, 7, 11, 19, 23];
+        let rows = session
+            .try_copy_distributed_candidate_row_ids(&source)
+            .expect("unbounded candidate row copy");
+        let actual_row_bytes = (rows.capacity() as u128)
+            .checked_mul(core::mem::size_of::<u32>() as u128)
+            .expect("checked candidate row capacity");
+        let required = session
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(coexisting))
+            .and_then(|bytes| bytes.checked_add(actual_row_bytes))
+            .expect("checked candidate row peak");
+        drop(rows);
+
+        session.set_memory_bound_for_test(unbounded.with_cap(required).expect("exact bound"));
+        assert_eq!(
+            session
+                .try_copy_distributed_candidate_row_ids(&source)
+                .expect("the exact candidate row peak must fit"),
+            source
+        );
+        session.set_memory_bound_for_test(
+            unbounded
+                .with_cap(required - 1)
+                .expect("one-byte-short bound"),
+        );
+        assert!(matches!(
+            session.try_copy_distributed_candidate_row_ids(&source),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+    }
+
+    #[test]
+    fn compact_retained_bytes_count_owned_problem_nested_heap_once() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(0),
+        )
+        .with_exact_pieces(Some(0));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("compact problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .expect("compact field");
+        let session = CompactBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+        )
+        .expect("compact session");
+        let source_pointee = problem
+            .checked_build_probability_pointee_retained_bytes()
+            .expect("typed BuildProbability problem");
+        let source_nested = source_pointee
+            .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
+            .expect("pointee includes its inline owner");
+        let owned_pointee = session
+            .problem
+            .checked_build_probability_pointee_retained_bytes()
+            .expect("owned typed BuildProbability problem");
+        let owned_nested = owned_pointee
+            .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
+            .expect("owned pointee includes its inline owner");
+
+        assert!(source_nested > 0);
+        assert!(owned_nested > 0);
+        assert_eq!(
+            session.checked_retained_bytes(),
+            session
+                .checked_non_problem_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(owned_nested))
+        );
+        assert_eq!(
+            checked_build_probability_problem_nested_retained_bytes(&session.problem),
+            Some(owned_nested)
+        );
+        assert_eq!(
+            checked_build_probability_problem_nested_retained_bytes(&problem),
+            Some(source_nested)
+        );
+    }
+
+    #[test]
+    fn pending_finesse_score_retained_bytes_count_problem_and_placements_once() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("score problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .expect("score field");
+        let mut placements = Vec::with_capacity(12);
+        placements.push(FinessePlacement::new(
+            PieceKind::O,
+            RotationState::Zero,
+            4,
+            0,
+        ));
+        let request = FinesseScoreRequest::new(placements).expect("score request");
+        let session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Score {
+                pattern_knowledge: FinessePatternKnowledge::Both,
+                request,
+            },
+        )
+        .expect("score session");
+        let pending_score = session.finesse_score.as_ref().expect("pending score owner");
+        let problem_nested = pending_score
+            .problem
+            .checked_build_probability_pointee_retained_bytes()
+            .and_then(|bytes| bytes.checked_sub(core::mem::size_of::<SearchProblem>() as u128))
+            .expect("pending problem pointee includes its inline owner");
+        let placement_backing = pending_score
+            .request
+            .checked_retained_capacity_bytes()
+            .expect("placement backing fits u128");
+        let pending_nested = problem_nested
+            .checked_add(placement_backing)
+            .expect("pending nested owners fit u128");
+        let expected = (session.pending.capacity() as u128)
+            .checked_mul(core::mem::size_of::<BuildProbabilitySessionKind>() as u128)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (session.completed.capacity() as u128)
+                        .checked_mul(core::mem::size_of::<CoreExecutionResult>() as u128)?,
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (session.finesse_search_materials.capacity() as u128)
+                        .checked_mul(core::mem::size_of::<FinesseSearchMaterial>() as u128)?,
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(session.pattern_weights.checked_storage_retained_bytes()?)
+            })
+            .and_then(|bytes| bytes.checked_add(problem_nested))
+            .and_then(|bytes| bytes.checked_add(placement_backing));
+
+        assert!(session.pending.is_empty());
+        assert!(session.completed.is_empty());
+        assert!(session.finesse_search_materials.is_empty());
+        assert!(problem_nested > 0);
+        assert!(placement_backing > 0);
+        assert_eq!(
+            pending_score.checked_nested_retained_bytes(),
+            Some(pending_nested)
+        );
+        assert_eq!(session.checked_retained_bytes(), expected);
+        assert_eq!(session.checked_front_coexisting_retained_bytes(), expected);
+    }
+
     #[test]
     fn symmetry_merge_emits_a_complete_explicit_solution_contract() {
-        let input = CoreExecutionResult::new(
-            vec![
-                ("coverage_pattern_count".to_owned(), "1".to_owned()),
-                (
-                    "build_probability_aggregation".to_owned(),
-                    "buildability".to_owned(),
-                ),
-                ("unique_solution_count".to_owned(), "1".to_owned()),
-                ("probability_complete".to_owned(), "true".to_owned()),
-                ("count_complete".to_owned(), "true".to_owned()),
-                ("resource_truncated".to_owned(), "false".to_owned()),
-                ("resource_truncation_reason".to_owned(), "none".to_owned()),
-                ("board_storage".to_owned(), "board256-canonical".to_owned()),
-            ],
-            Vec::new(),
-        )
-        .with_coverage_pattern_words(vec![1])
-        .with_normalized_solution_keys(vec!["solution".to_owned()]);
+        let input = symmetry_input(Some("false"), false);
 
         let merged = merge_symmetry_results(
             vec![input],
@@ -3074,6 +5779,820 @@ mod finesse_integration_tests {
         assert!(availability.solution_set_materialized());
         assert!(
             availability.materialized_key_count_matches(merged.normalized_solution_keys().len())
+        );
+    }
+
+    fn symmetry_input(
+        solution_probabilities_requested: Option<&str>,
+        resource_truncated: bool,
+    ) -> CoreExecutionResult {
+        let mut fields = vec![
+            ("coverage_pattern_count".to_owned(), "1".to_owned()),
+            (
+                "build_probability_aggregation".to_owned(),
+                "buildability".to_owned(),
+            ),
+            ("unique_solution_count".to_owned(), "1".to_owned()),
+            ("probability_complete".to_owned(), "true".to_owned()),
+            ("count_complete".to_owned(), "true".to_owned()),
+            (
+                "resource_truncated".to_owned(),
+                resource_truncated.to_string(),
+            ),
+            (
+                "resource_truncation_reason".to_owned(),
+                if resource_truncated {
+                    "test-truncation"
+                } else {
+                    "none"
+                }
+                .to_owned(),
+            ),
+            ("board_storage".to_owned(), "board256-canonical".to_owned()),
+        ];
+        if let Some(requested) = solution_probabilities_requested {
+            fields.push((
+                "solution_probabilities_requested".to_owned(),
+                requested.to_owned(),
+            ));
+        }
+        CoreExecutionResult::new(fields, Vec::new())
+            .with_coverage_pattern_words(vec![1])
+            .with_normalized_solution_keys(vec!["solution".to_owned()])
+            .with_normalized_solution_coverages(vec![NormalizedSolutionCoverage::new(
+                "solution",
+                PatternBitSet::all(1),
+            )])
+    }
+
+    fn invalid_problem_reason(error: WasmExactSearchError) -> &'static str {
+        match error {
+            WasmExactSearchError::InvalidProblem(reason) => reason,
+            other => panic!("expected invalid problem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn symmetry_merge_rejects_missing_duplicate_non_bool_and_mismatched_probability_policy() {
+        let weights = WeightedPatternSet::uniform(1).expect("uniform weights");
+
+        let missing = merge_symmetry_results(
+            vec![symmetry_input(None, false)],
+            false,
+            false,
+            &weights,
+            false,
+        )
+        .expect_err("missing request policy must fail closed");
+        assert_eq!(
+            invalid_problem_reason(missing),
+            "wasm_build_solution_probability_policy_missing"
+        );
+
+        let duplicate = symmetry_input(Some("false"), false).with_additional_fields(vec![(
+            "solution_probabilities_requested".to_owned(),
+            "false".to_owned(),
+        )]);
+        let duplicate = merge_symmetry_results(vec![duplicate], false, false, &weights, false)
+            .expect_err("duplicate request policy must fail closed");
+        assert_eq!(
+            invalid_problem_reason(duplicate),
+            "wasm_build_solution_probability_policy_duplicate"
+        );
+
+        let non_bool = merge_symmetry_results(
+            vec![symmetry_input(Some("include"), false)],
+            false,
+            false,
+            &weights,
+            false,
+        )
+        .expect_err("non-boolean request policy must fail closed");
+        assert_eq!(
+            invalid_problem_reason(non_bool),
+            "wasm_build_solution_probability_policy_invalid"
+        );
+
+        let mismatch = merge_symmetry_results(
+            vec![
+                symmetry_input(Some("false"), false),
+                symmetry_input(Some("true"), false),
+            ],
+            true,
+            true,
+            &weights,
+            false,
+        )
+        .expect_err("symmetry passes with different policies must fail closed");
+        assert_eq!(
+            invalid_problem_reason(mismatch),
+            "wasm_build_solution_probability_policy_mismatch"
+        );
+    }
+
+    #[test]
+    fn symmetry_merge_requires_one_canonical_equal_pattern_count_per_pass() {
+        let weights = WeightedPatternSet::uniform(2).expect("uniform weights");
+        for results in [
+            vec![
+                symmetry_input(Some("false"), false).with_additional_fields(vec![(
+                    "coverage_pattern_count".to_owned(),
+                    "1".to_owned(),
+                )]),
+            ],
+            vec![
+                symmetry_input(Some("false"), false),
+                symmetry_input(Some("false"), false).with_additional_fields(vec![(
+                    "coverage_pattern_count".to_owned(),
+                    "1".to_owned(),
+                )]),
+            ],
+            vec![
+                symmetry_input(Some("false"), false).with_replaced_fields(vec![(
+                    "coverage_pattern_count".to_owned(),
+                    "01".to_owned(),
+                )]),
+            ],
+        ] {
+            let mirror = results.len() == 2;
+            let error = merge_symmetry_results(results, mirror, mirror, &weights, false)
+                .expect_err("duplicate and noncanonical counts must fail closed");
+            assert_eq!(
+                invalid_problem_reason(error),
+                "wasm_build_probability_symmetry_pattern_count_invalid"
+            );
+        }
+
+        let mismatch = merge_symmetry_results(
+            vec![
+                symmetry_input(Some("false"), false),
+                symmetry_input(Some("false"), false).with_replaced_fields(vec![(
+                    "coverage_pattern_count".to_owned(),
+                    "2".to_owned(),
+                )]),
+            ],
+            true,
+            true,
+            &weights,
+            false,
+        )
+        .expect_err("different canonical counts must fail closed");
+        assert_eq!(
+            invalid_problem_reason(mismatch),
+            "wasm_build_probability_symmetry_pattern_count_mismatch"
+        );
+    }
+
+    #[test]
+    fn symmetry_merge_memory_guard_rejects_oversized_solution_surface_before_merge() {
+        let oversized_key = "solution".repeat(32_768);
+        let input = symmetry_input(Some("true"), false)
+            .with_normalized_solution_keys(vec![oversized_key.clone()])
+            .with_normalized_solution_coverages(vec![NormalizedSolutionCoverage::new(
+                oversized_key,
+                PatternBitSet::all(1),
+            )]);
+        let mut guard_called = false;
+        let error = merge_symmetry_results_with_memory_guard(
+            vec![input],
+            false,
+            false,
+            &WeightedPatternSet::uniform(1).expect("uniform weights"),
+            false,
+            |source_bytes, future_bytes| {
+                guard_called = true;
+                assert!(source_bytes > 32_768);
+                assert!(future_bytes > 32_768);
+                Err(WasmExactSearchError::InvalidProblem(
+                    "test_symmetry_memory_cap",
+                ))
+            },
+        )
+        .expect_err("oversized merge must stop at the preallocation guard");
+        assert!(guard_called);
+        assert_eq!(invalid_problem_reason(error), "test_symmetry_memory_cap");
+    }
+
+    #[test]
+    fn canonical_probability_text_projection_covers_the_binary64_domain() {
+        let smallest_positive_text = f64::from_bits(1).to_string();
+        assert!(smallest_positive_text.len() > 32);
+        assert!((smallest_positive_text.len() as u128) <= MAX_CANONICAL_PROBABILITY_TEXT_BYTES);
+    }
+
+    #[test]
+    fn worker_coverage_equality_does_not_materialize_sparse_dense_caches() {
+        let mut dense = PatternBitSet::new(1_024);
+        dense
+            .insert(PatternId::new(7))
+            .expect("the test pattern belongs to the dense set");
+        let sparse = PatternBitSet::from_pattern_indices(1_024, vec![7])
+            .expect("the test pattern belongs to the sparse set");
+        let sparse_component_count = sparse.storage_component_count();
+        let sparse_retained_bytes = sparse
+            .checked_storage_retained_bytes()
+            .expect("checked sparse storage");
+        assert_eq!(sparse_component_count, 2);
+
+        assert!(dense == sparse);
+        assert!(sparse == dense);
+        assert_eq!(sparse.storage_component_count(), sparse_component_count);
+        assert_eq!(
+            sparse.checked_storage_retained_bytes(),
+            Some(sparse_retained_bytes)
+        );
+    }
+
+    #[test]
+    fn compact_result_materialization_projection_has_an_exact_one_byte_boundary() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(0),
+        )
+        .with_exact_pieces(Some(0))
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("empty-target problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .expect("empty compact field");
+        let unbounded = ExecutionMemoryBound::unbounded_for_problem(&problem)
+            .expect("unbounded test authority");
+        let mut session = CompactBuildProbabilitySession::new_with_memory_bound(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            unbounded,
+        )
+        .expect("compact session");
+        let required = session
+            .checked_retained_bytes()
+            .and_then(|retained| {
+                session
+                    .checked_result_materialization_future_bytes()
+                    .and_then(|future| retained.checked_add(future))
+            })
+            .expect("checked materialization projection");
+        session.memory_bound = unbounded
+            .with_cap(required - 1)
+            .expect("one-byte-short bound");
+        assert!(matches!(
+            session.ensure_result_materialization_bound(),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        session.memory_bound = unbounded.with_cap(required).expect("exact bound");
+        session
+            .ensure_result_materialization_bound()
+            .expect("exact projection fits");
+    }
+
+    #[test]
+    fn compact_scoring_projection_counts_identity_and_graph_owners_at_the_exact_cap() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("one-I scoring problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("one-I field");
+        let unbounded = ExecutionMemoryBound::unbounded_for_problem(&problem)
+            .expect("unbounded test authority");
+        let mut session = CompactBuildProbabilitySession::new_with_memory_bound(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            unbounded,
+        )
+        .expect("compact session");
+        let identity = StandardBoard64TilingIdentity::from_placements(
+            0,
+            [PiecePlacementMask::new(PieceKind::I, 0xf)],
+        )
+        .expect("canonical one-I identity");
+        session.buildable_tilings.insert(identity);
+
+        let identity_bytes = core::mem::size_of::<StandardBoard64TilingIdentity>() as u128;
+        let graph_slots = core::mem::size_of::<ExactScoringExecutionGraph>() as u128;
+        let graph_peak =
+            exact_scoring_execution_graph_memory_projection(&problem, &session.catalog, identity)
+                .expect("checked scoring projection")
+                .peak_additional_bytes;
+        let future = session
+            .checked_result_materialization_future_bytes()
+            .expect("checked result projection");
+        assert!(future >= identity_bytes + graph_slots + graph_peak);
+
+        let required = session
+            .checked_retained_bytes()
+            .and_then(|retained| retained.checked_add(future))
+            .expect("checked exact cap");
+        session.memory_bound = unbounded
+            .with_cap(required - 1)
+            .expect("one-byte-short bound");
+        assert!(matches!(
+            session.ensure_result_materialization_bound(),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        session.memory_bound = unbounded.with_cap(required).expect("exact bound");
+        session
+            .ensure_result_materialization_bound()
+            .expect("exact projection fits");
+    }
+
+    #[test]
+    fn serial_public_result_guard_counts_aggregate_storage_at_the_exact_cap() {
+        fn session() -> WasmBuildProbabilitySession {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(Vec::new())),
+                PieceWindow::new(0),
+            )
+            .with_exact_pieces(Some(0));
+            let problem = ProblemCompiler::compile_scenario_pc(&query).expect("empty problem");
+            let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+                .expect("empty compact field");
+            WasmBuildProbabilitySession::new(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                BuildProbabilityFinesseRequest::Off,
+            )
+            .expect("serial aggregate")
+        }
+
+        fn required(
+            session: &WasmBuildProbabilitySession,
+            result: &CoreExecutionResult,
+            future: u128,
+        ) -> u128 {
+            session
+                .checked_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(checked_public_result_bytes(result)?))
+                .and_then(|bytes| bytes.checked_add(future))
+                .expect("checked aggregate/public-result coexistence")
+        }
+
+        let result = symmetry_input(Some("true"), false);
+        let future = 17_u128;
+        let mut one_byte_short = session();
+        let short_cap = required(&one_byte_short, &result, future) - 1;
+        one_byte_short._execution_admission = one_byte_short
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(short_cap)
+            .expect("one-byte-short delegated authority");
+        assert!(matches!(
+            one_byte_short.validate_public_result_memory_with_future(&result, future),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        drop(one_byte_short);
+
+        let mut exact = session();
+        let exact_cap = required(&exact, &result, future);
+        exact._execution_admission = exact
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(exact_cap)
+            .expect("exact delegated authority");
+        exact
+            .validate_public_result_memory_with_future(&result, future)
+            .expect("aggregate plus result and future fit the exact cap");
+    }
+
+    #[test]
+    fn finite_public_result_guard_counts_external_owner_and_only_carrier_delta() {
+        fn session(
+            external_retained_owner_bytes: u128,
+            returned_carrier_bytes: u128,
+        ) -> WasmBuildProbabilitySession {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(Vec::new())),
+                PieceWindow::new(0),
+            )
+            .with_exact_pieces(Some(0));
+            let problem = ProblemCompiler::compile_scenario_pc(&query).expect("empty problem");
+            let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+                .expect("empty compact field");
+            WasmBuildProbabilitySession::new_finite(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                BuildProbabilityFinesseRequest::Off,
+                external_retained_owner_bytes,
+                returned_carrier_bytes,
+            )
+            .expect("finite serial aggregate")
+        }
+
+        let result = symmetry_input(Some("true"), false);
+        let external_retained_owner_bytes = 43_u128;
+        let carrier_delta = 71_u128;
+        let returned_carrier_bytes =
+            core::mem::size_of::<CoreExecutionResult>() as u128 + carrier_delta;
+        let checked_future_bytes = 17_u128;
+        let required = |session: &WasmBuildProbabilitySession| {
+            session
+                .checked_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(external_retained_owner_bytes))
+                .and_then(|bytes| bytes.checked_add(checked_public_result_bytes(&result)?))
+                .and_then(|bytes| bytes.checked_add(checked_future_bytes))
+                .and_then(|bytes| bytes.checked_add(carrier_delta))
+                .expect("checked finite terminal coexistence")
+        };
+
+        assert_eq!(
+            returned_carrier_delta_bytes(returned_carrier_bytes),
+            carrier_delta
+        );
+        assert_eq!(
+            returned_carrier_delta_bytes(core::mem::size_of::<CoreExecutionResult>() as u128 - 1),
+            0
+        );
+
+        let mut one_byte_short = session(external_retained_owner_bytes, returned_carrier_bytes);
+        let short_cap = required(&one_byte_short) - 1;
+        one_byte_short._execution_admission = one_byte_short
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(short_cap)
+            .expect("one-byte-short delegated authority");
+        assert!(matches!(
+            one_byte_short.validate_public_result_memory_with_future(&result, checked_future_bytes),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        drop(one_byte_short);
+
+        let mut exact = session(external_retained_owner_bytes, returned_carrier_bytes);
+        let exact_cap = required(&exact);
+        exact._execution_admission = exact
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(exact_cap)
+            .expect("exact delegated authority");
+        exact
+            .validate_public_result_memory_with_future(&result, checked_future_bytes)
+            .expect("external owner, public result, future, and carrier delta fit exact cap");
+    }
+
+    #[test]
+    fn finite_noncompleted_return_guard_counts_the_full_carrier() {
+        fn session(
+            external_retained_owner_bytes: u128,
+            returned_carrier_bytes: u128,
+        ) -> WasmBuildProbabilitySession {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(Vec::new())),
+                PieceWindow::new(0),
+            )
+            .with_exact_pieces(Some(0));
+            let problem = ProblemCompiler::compile_scenario_pc(&query).expect("empty problem");
+            let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+                .expect("empty compact field");
+            WasmBuildProbabilitySession::new_finite(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                BuildProbabilityFinesseRequest::Off,
+                external_retained_owner_bytes,
+                returned_carrier_bytes,
+            )
+            .expect("finite serial aggregate")
+        }
+
+        let external_retained_owner_bytes = 47_u128;
+        let returned_carrier_bytes = 83_u128;
+        let required = |session: &WasmBuildProbabilitySession| {
+            session
+                .checked_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(external_retained_owner_bytes))
+                .and_then(|bytes| bytes.checked_add(returned_carrier_bytes))
+                .expect("checked finite noncompleted return peak")
+        };
+        let mut one_byte_short = session(external_retained_owner_bytes, returned_carrier_bytes);
+        let short_cap = required(&one_byte_short) - 1;
+        one_byte_short._execution_admission = one_byte_short
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(short_cap)
+            .expect("one-byte-short delegated authority");
+        assert!(matches!(
+            one_byte_short.validate_finite_noncompleted_return_memory(),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        drop(one_byte_short);
+
+        let mut exact = session(external_retained_owner_bytes, returned_carrier_bytes);
+        let exact_cap = required(&exact);
+        exact._execution_admission = exact
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(exact_cap)
+            .expect("exact delegated authority");
+        exact
+            .validate_finite_noncompleted_return_memory()
+            .expect("external owner and full returned carrier fit exact cap");
+    }
+
+    #[test]
+    fn finite_one_byte_short_replacement_carrier_rejects_before_work_and_preserves_authority() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(Vec::new())),
+            PieceWindow::new(0),
+        )
+        .with_exact_pieces(Some(0));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("empty problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .expect("empty compact field");
+        let mut session = WasmBuildProbabilitySession::new_finite(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Off,
+            11,
+            13,
+        )
+        .expect("finite serial aggregate");
+
+        let replacement_external_bytes = 47_u128;
+        let replacement_carrier_bytes = 83_u128;
+        let exact_required = session
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(replacement_external_bytes))
+            .and_then(|bytes| bytes.checked_add(replacement_carrier_bytes))
+            .expect("checked replacement-carrier requirement");
+        session._execution_admission = session
+            ._execution_admission
+            .try_delegate_compute_only_with_memory_cap(exact_required - 1)
+            .expect("one-byte-short delegated authority");
+
+        let previous_caller_memory = session.caller_memory;
+        let previous_pending_len = session.pending.len();
+        let previous_completed_len = session.completed.len();
+        let previous_finished = session.finished;
+        let previous_retained_bytes = session.checked_retained_bytes();
+
+        assert!(matches!(
+            session.advance_finite(
+                usize::MAX,
+                &ExecutionControl::default(),
+                replacement_external_bytes,
+                replacement_carrier_bytes,
+            ),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        assert_eq!(session.caller_memory, previous_caller_memory);
+        assert_eq!(session.pending.len(), previous_pending_len);
+        assert_eq!(session.completed.len(), previous_completed_len);
+        assert_eq!(session.finished, previous_finished);
+        assert_eq!(session.checked_retained_bytes(), previous_retained_bytes);
+    }
+
+    #[test]
+    fn finite_compact_initial_peak_includes_external_owner_and_pending_backing() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(Vec::new())),
+            PieceWindow::new(0),
+        )
+        .with_exact_pieces(Some(0));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("empty problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .expect("empty compact field");
+        let external_retained_owner_bytes = 313_u128;
+        let returned_carrier_bytes = core::mem::size_of::<CoreExecutionResult>() as u128 + 29;
+        let session = WasmBuildProbabilitySession::new_finite(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Off,
+            external_retained_owner_bytes,
+            returned_carrier_bytes,
+        )
+        .expect("finite compact session");
+        let expected_coexisting = external_retained_owner_bytes
+            + session.pending.capacity() as u128
+                * core::mem::size_of::<BuildProbabilitySessionKind>() as u128;
+        let BuildProbabilitySessionKind::Compact(compact) = &session.pending[0] else {
+            panic!("compact field must create a compact session");
+        };
+
+        assert_eq!(compact.coexisting_retained_bytes, expected_coexisting);
+    }
+
+    #[test]
+    fn finite_caller_memory_projection_overflow_fails_closed() {
+        assert!(matches!(
+            BuildProbabilityCallerMemory::finite(
+                u128::MAX,
+                core::mem::size_of::<CoreExecutionResult>() as u128 + 1,
+            ),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_caller_memory_projection_overflow"
+            ))
+        ));
+    }
+
+    #[test]
+    fn compact_symbolic_coverage_finalization_has_an_exact_one_byte_boundary() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(0),
+        )
+        .with_exact_pieces(Some(0))
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("standard-bag problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0; 4])
+            .expect("empty compact field");
+        let unbounded = ExecutionMemoryBound::unbounded_for_problem(&problem)
+            .expect("unbounded test authority");
+        let mut session = CompactBuildProbabilitySession::new_with_memory_bound(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            unbounded,
+        )
+        .expect("compact session");
+        session.candidate_count = 1;
+        let future = PatternBitSet::checked_external_words_materialize_union_future_bytes(
+            session.covered_patterns.pattern_count(),
+        )
+        .expect("checked symbolic finalization projection");
+        let required = session
+            .checked_retained_bytes()
+            .and_then(|retained| retained.checked_add(future))
+            .expect("checked exact cap");
+        session.memory_bound = unbounded
+            .with_cap(required - 1)
+            .expect("one-byte-short bound");
+        assert!(matches!(
+            session.ensure_symbolic_coverage_finalization_bound(),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        session.memory_bound = unbounded.with_cap(required).expect("exact bound");
+        session
+            .ensure_symbolic_coverage_finalization_bound()
+            .expect("exact projection fits");
+    }
+
+    #[test]
+    fn mirror_second_pass_guard_counts_completed_first_result_bytes() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("mirror problem");
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0x0f, 0, 0, 0])
+            .expect("asymmetric compact target")
+            .with_horizontal_mirror_included(true);
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Off,
+        )
+        .expect("two-pass session");
+        while session.completed.is_empty() {
+            assert!(matches!(
+                session
+                    .advance(1_024, &ExecutionControl::default())
+                    .expect("first pass advance"),
+                BuildProbabilityAdvance::Pending
+            ));
+        }
+        assert_eq!(session.completed.len(), 1);
+        assert_eq!(session.pending.len(), 1);
+        let coexisting = session
+            .checked_front_coexisting_retained_bytes()
+            .expect("completed-result coexistence");
+        let active_retained = session.pending[0]
+            .checked_retained_bytes()
+            .expect("active retained bytes");
+        let one_byte_short = active_retained
+            .checked_add(coexisting)
+            .and_then(|bytes| bytes.checked_sub(1))
+            .expect("one-byte-short active cap");
+        let bound = ExecutionMemoryBound::unbounded_for_problem(&problem)
+            .expect("unbounded test authority")
+            .with_cap(one_byte_short)
+            .expect("bounded second pass");
+        match &mut session.pending[0] {
+            BuildProbabilitySessionKind::Compact(active) => active.set_memory_bound_for_test(bound),
+            BuildProbabilitySessionKind::Extended(_) => panic!("compact mirror expected"),
+        }
+        assert!(matches!(
+            session.advance(1, &ExecutionControl::default()),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+    }
+
+    #[test]
+    fn requested_solution_probability_completeness_requires_nontruncated_source() {
+        let merged = merge_symmetry_results(
+            vec![symmetry_input(Some("true"), true)],
+            false,
+            false,
+            &WeightedPatternSet::uniform(1).expect("uniform weights"),
+            false,
+        )
+        .expect("a well-shaped truncated result remains an incomplete result");
+
+        assert_eq!(merged.bool_field("probability_complete"), Some(true));
+        assert_eq!(merged.bool_field("count_complete"), Some(true));
+        assert_eq!(merged.bool_field("resource_truncated"), Some(true));
+        assert_eq!(
+            merged.bool_field("solution_probability_complete"),
+            Some(false)
+        );
+        assert_eq!(
+            merged.field("solution_probability_incomplete_reason"),
+            Some("resource-truncated")
+        );
+        assert_eq!(merged.solution_probabilities().len(), 1);
+        assert!(!merged.solution_probabilities()[0].probability_complete());
+    }
+
+    #[test]
+    fn requested_page_store_materializes_every_key_beyond_the_initial_page() {
+        let mut identities = Vec::new();
+        'identities: for left in 2..64_u32 {
+            for right in left + 1..64_u32 {
+                let cells = 0b11_u64 | (1_u64 << left) | (1_u64 << right);
+                identities.push(
+                    StandardBoard64TilingIdentity::from_placements(
+                        0,
+                        [PiecePlacementMask::new(PieceKind::I, cells)],
+                    )
+                    .expect("syntactically valid paging identity"),
+                );
+                if identities.len() == 101 {
+                    break 'identities;
+                }
+            }
+        }
+        identities.sort_unstable();
+        identities.dedup();
+        assert_eq!(identities.len(), 101);
+        let keys = identities
+            .iter()
+            .copied()
+            .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
+            .map(|key| key.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let coverage = keys
+            .iter()
+            .cloned()
+            .map(|key| NormalizedSolutionCoverage::new(key, PatternBitSet::all(1)))
+            .collect::<Vec<_>>();
+        let store = Arc::new(
+            TilingSolutionPageStore::from_standard_identities(0, identities.clone())
+                .expect("canonical paging store"),
+        );
+        let input = CoreExecutionResult::new(
+            vec![
+                ("coverage_pattern_count".to_owned(), "1".to_owned()),
+                (
+                    "build_probability_aggregation".to_owned(),
+                    "buildability".to_owned(),
+                ),
+                ("unique_solution_count".to_owned(), "101".to_owned()),
+                ("probability_complete".to_owned(), "true".to_owned()),
+                ("count_complete".to_owned(), "true".to_owned()),
+                ("resource_truncated".to_owned(), "false".to_owned()),
+                ("resource_truncation_reason".to_owned(), "none".to_owned()),
+                (
+                    "solution_probabilities_requested".to_owned(),
+                    "true".to_owned(),
+                ),
+            ],
+            Vec::new(),
+        )
+        .with_coverage_pattern_words(vec![1])
+        .with_normalized_solution_keys(keys[..100].to_vec())
+        .with_normalized_solution_identities(identities[..100].to_vec())
+        .with_normalized_solution_coverages(coverage)
+        .with_tiling_solution_page_store(store);
+
+        let merged = merge_symmetry_results(
+            vec![input],
+            false,
+            false,
+            &WeightedPatternSet::uniform(1).expect("uniform weights"),
+            false,
+        )
+        .expect("complete paging merge");
+
+        assert_eq!(merged.normalized_solution_keys(), keys);
+        assert_eq!(merged.solution_probabilities().len(), 101);
+        assert_eq!(merged.usize_field("solution_probability_count"), Some(101));
+        assert_eq!(merged.bool_field("solution_keys_complete"), Some(true));
+        assert_eq!(
+            merged.bool_field("solution_probability_complete"),
+            Some(true)
         );
     }
 
@@ -3124,6 +6643,151 @@ mod finesse_integration_tests {
             }],
             root: 0,
         }
+    }
+
+    #[test]
+    fn finesse_report_attachment_guards_material_report_and_fields_at_one_byte_boundary() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("finesse problem");
+        let material = || {
+            FinesseSearchMaterial::new(
+                &problem,
+                vec![(
+                    "solution".to_owned(),
+                    costed_finesse_language(&one_piece_language(PieceKind::I, 3))
+                        .expect("costed language"),
+                )],
+                true,
+            )
+            .expect("finesse material")
+        };
+
+        let mut required = 0_u128;
+        let attached = attach_finesse_report_with_memory_guard(
+            CoreExecutionResult::default(),
+            vec![material()],
+            FinesseMetric::Inputs,
+            FinessePatternKnowledge::Both,
+            &ExecutionControl::default(),
+            |live, future| {
+                let peak = checked_public_result_bytes(live)
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "test_finesse_projection_overflow",
+                    ))?;
+                required = required.max(peak);
+                Ok(())
+            },
+        )
+        .expect("unbounded guarded attachment");
+        assert!(attached.finesse_report().is_some());
+
+        attach_finesse_report_with_memory_guard(
+            CoreExecutionResult::default(),
+            vec![material()],
+            FinesseMetric::Inputs,
+            FinessePatternKnowledge::Both,
+            &ExecutionControl::default(),
+            |live, future| {
+                let peak = checked_public_result_bytes(live)
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "test_finesse_projection_overflow",
+                    ))?;
+                if peak <= required {
+                    Ok(())
+                } else {
+                    Err(WasmExactSearchError::InvalidProblem(
+                        "test_finesse_memory_cap",
+                    ))
+                }
+            },
+        )
+        .expect("the recorded exact guarded attachment peak is sufficient");
+
+        let mut guard_calls = 0;
+        let error = attach_finesse_report_with_memory_guard(
+            CoreExecutionResult::default(),
+            vec![material()],
+            FinesseMetric::Inputs,
+            FinessePatternKnowledge::Both,
+            &ExecutionControl::default(),
+            |live, future| {
+                guard_calls += 1;
+                let peak = checked_public_result_bytes(live)
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "test_finesse_projection_overflow",
+                    ))?;
+                if peak <= required - 1 {
+                    Ok(())
+                } else {
+                    Err(WasmExactSearchError::InvalidProblem(
+                        "test_finesse_memory_cap",
+                    ))
+                }
+            },
+        )
+        .expect_err("one byte below the guarded attachment peak must fail closed");
+        assert_eq!(error.reason(), "test_finesse_memory_cap");
+        assert_eq!(
+            guard_calls, 1,
+            "the oversized attachment must stop at the pre-build guard"
+        );
+    }
+
+    #[test]
+    fn finesse_projection_skips_product_state_space_for_an_empty_solution_catalog() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("finesse problem");
+        let pieces = [
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+        ];
+        let patterns = (0..128)
+            .map(|index| {
+                QueuePattern::new(
+                    PatternId::new(index),
+                    vec![
+                        pieces[index % pieces.len()],
+                        pieces[(index / pieces.len()) % pieces.len()],
+                        pieces[(index / (pieces.len() * pieces.len())) % pieces.len()],
+                    ],
+                    probability(1.0 / 128.0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut material =
+            FinesseSearchMaterial::new(&problem, Vec::new(), true).expect("finesse material");
+        material.classes =
+            QueueClassSet::group(&patterns, false).expect("128 distinct queue classes");
+        assert_eq!(material.classes.classes().len(), 128);
+
+        assert!(
+            checked_finesse_report_build_future_upper_bound(
+                &[material],
+                FinessePatternKnowledge::Both,
+            )
+            .is_some(),
+            "an empty language catalog must not create an imaginary Visible-7 product",
+        );
     }
 
     #[test]
@@ -3717,6 +7381,9 @@ mod finesse_integration_tests {
         let compact = run(6, 1_u64 << 50);
         let extended = run(7, 1_u64 << 60);
 
+        assert_eq!(compact.field_occurrence_count("board_height"), 1);
+        assert_eq!(compact.unique_field("board_height"), Some("6"));
+        assert_eq!(extended.field_occurrence_count("board_height"), 1);
         assert_eq!(extended.field("board_height"), Some("7"));
         let exact_cost = |result: &CoreExecutionResult| {
             result

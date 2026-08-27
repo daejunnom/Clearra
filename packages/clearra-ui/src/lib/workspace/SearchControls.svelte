@@ -26,7 +26,15 @@
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: tilingOnly = request.scoreMode === 'tiling';
+  $: pathOnly = request.scoreMode === 'path';
   $: failedQueueOnly = request.scoreMode === 'failed-queue';
+  $: saveOnly = request.scoreMode === 'saves' || request.scoreMode === 'best-save';
+  $: scoreFinderOnly = request.scoreMode === 'score-finder';
+  $: fixedScoreProduct =
+    request.scoreMode === 'summary' ||
+    request.scoreMode === 'score-finder' ||
+    request.scoreMode === 'score-minimals';
+  $: scoreMinimalsOnly = request.scoreMode === 'score-minimals';
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     dispatch('change', updateWorkspaceDraft(request, change));
@@ -93,7 +101,7 @@
       <span>{label('queueKnowledge')}</span>
       <select
         value={request.queueKnowledge}
-        disabled={tilingOnly}
+        disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
         on:change={(event) => patch({
           queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['queueKnowledge']
         })}
@@ -111,9 +119,14 @@
         <span>{label('scoreMode')}</span>
         <select value={request.scoreMode} on:change={(event) => patch({ scoreMode: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreMode'] })}>
           <option value="tiling">{label('tilingOnly')}</option>
+          <option value="path">{label('pathFamily')}</option>
           <option value="off">{label('scoreOff')}</option>
           <option value="minimum-cover">{label('minimumSolutions')}</option>
           <option value="summary">{label('scoreSummary')}</option>
+          <option value="score-finder">{label('scoreFinder')}</option>
+          <option value="score-minimals">{label('scoreMinimals')}</option>
+          <option value="saves">{label('saveGroups')}</option>
+          <option value="best-save">{label('bestSave')}</option>
           <option value="failed-queue">{label('failedQueues')}</option>
         </select>
       </label>
@@ -131,18 +144,18 @@
         <input
           type="number"
           min="0"
-          max="65535"
+          max={scoreFinderOnly ? 1 : 65535}
           step="1"
-          value={request.initialB2B}
-          disabled={tilingOnly || failedQueueOnly || request.scoreMode !== 'summary'}
+          value={scoreFinderOnly ? Math.min(1, Math.max(0, request.initialB2B)) : request.initialB2B}
+          disabled={tilingOnly || failedQueueOnly || !fixedScoreProduct}
           on:input={(event) => patch({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })}
         />
       </label>
       <label class="workspace-field">
         <span>{label('scoreProfile')}</span>
         <select
-          value={request.scoreProfile}
-          disabled={tilingOnly || failedQueueOnly || request.scoreMode !== 'summary'}
+          value={scoreFinderOnly ? 'jstris-ultra' : request.scoreProfile}
+          disabled={tilingOnly || failedQueueOnly || scoreFinderOnly || !fixedScoreProduct}
           on:change={(event) => patch({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreProfile'] })}
         >
           <option value="tetrio">{label('scoreProfileTetrio')}</option>
@@ -153,8 +166,8 @@
       <label class="workspace-field">
         <span>{label('spinProfile')}</span>
         <select
-          value={request.spinProfile}
-          disabled={tilingOnly || (request.scoreMode !== 'summary' && !request.preserveB2B)}
+          value={scoreFinderOnly ? 't-spins' : request.spinProfile}
+          disabled={tilingOnly || pathOnly || saveOnly || scoreFinderOnly || (!fixedScoreProduct && !request.preserveB2B)}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -172,7 +185,7 @@
           <input
             type="checkbox"
             checked={request.preserveB2B}
-            disabled={tilingOnly}
+            disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
             on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
           />
           <span class="workspace-switch" aria-hidden="true"></span>
@@ -183,7 +196,7 @@
         <input
           type="checkbox"
           checked={request.solutionProbabilities}
-          disabled={tilingOnly || failedQueueOnly}
+          disabled={tilingOnly || pathOnly || failedQueueOnly || saveOnly || scoreMinimalsOnly}
           on:change={(event) => patch({ solutionProbabilities: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>
@@ -195,6 +208,7 @@
         <input
           type="checkbox"
           checked={request.useAllLogicalProcessors}
+          disabled={fixedScoreProduct}
           on:change={(event) => patch({
             useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked
           })}
@@ -210,7 +224,7 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
-            disabled={tilingOnly}
+            disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
             on:change={(event) => patch({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}
@@ -228,7 +242,7 @@
           <input
             type="checkbox"
             checked={request.precomputeBuildDependencies}
-            disabled={tilingOnly}
+            disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
             on:change={(event) => patch({
               precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
             })}

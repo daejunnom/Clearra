@@ -4,6 +4,7 @@ import type {
 } from '@clearra/ui/wasm';
 
 import { DistributedWasmJobRunner } from './DistributedWasmJobRunner';
+import type { SharedExecutionResourceAuthority } from './SharedExecutionResourceAuthority';
 import { WasmJobRunner } from './WasmJobRunner';
 import type {
   ClearraWasmHostCapabilities,
@@ -17,7 +18,9 @@ export class ClearraProductJobRunner {
     private readonly wasm: ClearraWasmModule,
     private readonly jobId: number,
     private readonly lifecycleOwnerId: string,
-    private readonly hostCapabilities: ClearraWasmHostCapabilities
+    private readonly hostCapabilities: ClearraWasmHostCapabilities,
+    private readonly resourceAuthority?: SharedExecutionResourceAuthority,
+    private readonly resourceWaitTimeoutMs?: number
   ) {}
 
   async run(
@@ -28,22 +31,31 @@ export class ClearraProductJobRunner {
       this.wasm,
       this.jobId,
       this.lifecycleOwnerId,
-      this.hostCapabilities
+      this.hostCapabilities,
+      undefined,
+      this.resourceAuthority,
+      this.resourceWaitTimeoutMs
     );
+    this.activeRunner = distributed;
     try {
       onEvent(preparationProgressEvent(this.jobId));
+      await distributed.acquire();
       const plan = distributed.prepare(commandText);
       if (plan.mode !== 'serial') {
-        this.activeRunner = distributed;
         return await distributed.run(commandText, plan, onEvent);
       }
-      this.wasm.distributed_reset();
+      distributed.resetPreparedCoordinatorForSerial();
       const serial = new WasmJobRunner(this.wasm);
       this.activeRunner = serial;
-      return await serial.run(commandText, onEvent);
+      try {
+        return await serial.run(commandText, onEvent);
+      } finally {
+        // The preparation owner retains the shared lease across the complete
+        // serial execution and releases it only after a terminal/error path.
+        distributed.dispose();
+      }
     } catch (error) {
       this.dispose();
-      distributed.dispose();
       throw error;
     } finally {
       this.activeRunner = null;
@@ -57,11 +69,6 @@ export class ClearraProductJobRunner {
   dispose() {
     this.activeRunner?.dispose();
     this.activeRunner = null;
-    try {
-      this.wasm.distributed_reset();
-    } catch {
-      // Main worker termination releases the entire runtime after an abnormal exit.
-    }
   }
 }
 

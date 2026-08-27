@@ -53,6 +53,103 @@ const production = await import(
 
 const MIB = 1024 * 1024;
 
+test('score-minimals UI exposes the closed mode and pages every exact portfolio tie', () => {
+  const controls = readFileSync(
+    new URL('../src/lib/workspace/SearchControls.svelte', import.meta.url),
+    'utf8'
+  );
+  const standalone = readFileSync(
+    new URL('../src/lib/workspace/PcSolverStandalone.svelte', import.meta.url),
+    'utf8'
+  );
+  const pager = readFileSync(
+    new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(controls, /<option value="score-minimals">/u);
+  assert.match(standalone, /scoreMode: 'score-minimals'/u);
+  assert.match(pager, /payload\?\.contract === 'pc\.score-minimals'/u);
+  assert.match(pager, /Equality, membership, and ordering use score only/u);
+  assert.match(pager, /async function nextOuterPage\(\)/u);
+  assert.match(pager, /async function showMemberPage\(nextMemberPage/u);
+  assert.match(pager, /loadNextPage/u);
+  assert.match(pager, /loadMemberPage/u);
+});
+
+test('PC path and score-finder are reachable on both Web PC entry surfaces', () => {
+  const controls = readFileSync(
+    new URL('../src/lib/workspace/SearchControls.svelte', import.meta.url),
+    'utf8'
+  );
+  const standalone = readFileSync(
+    new URL('../src/lib/workspace/PcSolverStandalone.svelte', import.meta.url),
+    'utf8'
+  );
+  const pager = readFileSync(
+    new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(controls, /<option value="path">/u);
+  assert.match(controls, /<option value="score-finder">/u);
+  assert.match(standalone, /scoreMode: 'path'/u);
+  assert.match(standalone, /scoreMode: 'score-finder'/u);
+  assert.match(pager, /payload\.content\.payload_kind === 'pc-path-family'/u);
+  assert.match(pager, /complete ordinary solution family, not a portfolio tie/u);
+  assert.match(pager, /Inspect every replay step/u);
+});
+
+test('Build result UI separates ordinary families from exact portfolio paging', () => {
+  const pager = readFileSync(
+    new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(pager, /payload_kind === 'build-v2'/u);
+  assert.match(pager, /payload_kind === 'build-coverage-portfolio-v2'/u);
+  assert.match(pager, /payload_kind === 'build-setup-family-v1'/u);
+  assert.match(pager, /loadInitialBuildPortfolioPage/u);
+  assert.match(pager, /All optimal Build portfolios/u);
+  assert.match(pager, /ordinary result family, not a portfolio tie/u);
+  assert.match(pager, /Attack is informational/u);
+  assert.match(pager, /Previous score evidence/u);
+});
+
+test('Build v2 workspace owns all surfaces without collapsing nominal document sources', () => {
+  const workspace = readFileSync(
+    new URL('../src/lib/workspace/BuildV2Workspace.svelte', import.meta.url),
+    'utf8'
+  );
+  const source = readFileSync(
+    new URL('../src/lib/workspace/BuildV2SourceEditor.svelte', import.meta.url),
+    'utf8'
+  );
+  const controls = readFileSync(
+    new URL('../src/lib/workspace/BuildV2Controls.svelte', import.meta.url),
+    'utf8'
+  );
+  const webRoute = readFileSync(
+    new URL('../../../apps/clearra-web/src/routes/+page.svelte', import.meta.url),
+    'utf8'
+  );
+  const desktopRoute = readFileSync(
+    new URL('../../../apps/clearra-desktop/src/routes/+page.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(workspace, /buildV2Command\(executionRequest\)/u);
+  assert.match(workspace, /buildV2RequestForDesktop/u);
+  assert.match(workspace, /loadNextDesktopProductPage/u);
+  assert.match(workspace, /loadProductMemberPage/u);
+  assert.match(source, /colored target document remains a producer input/u);
+  assert.match(source, /never reinterpreted as a target/u);
+  assert.match(controls, /Equality, selection, and ordering use score only/u);
+  assert.match(controls, /Memory options remain unavailable/u);
+  assert.match(webRoute, /selectedTool === 'build'/u);
+  assert.match(desktopRoute, /selectedTool === 'build'/u);
+});
+
 test('draft mode roundtrips preserve inactive PC and build selections', () => {
   const pcSelected = production.updateWorkspaceDraft(
     production.createDefaultWorkspaceRequest(),
@@ -311,6 +408,7 @@ test('device-memory snapshot owns a conservative transfer cap and rejects before
     'clearra_wasm_distributed_verifier_progress_build_nodes_exact',
     'clearra_wasm_distributed_verifier_progress_coverage_checks_exact',
     'clearra_wasm_output_len_exact',
+    'clearra_wasm_output_release',
     'clearra_wasm_last_panic_len_exact'
   ]) {
     assert.match(runtimeSource, new RegExp(`\\b${accessor}\\b`, 'u'), accessor);

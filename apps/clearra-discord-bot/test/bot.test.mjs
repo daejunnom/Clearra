@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -22,40 +23,43 @@ import { DiscordLocalePreferences } from "../src/discord/locale-preferences.mjs"
 import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
 import { decodeViewerDocument } from "../src/viewer/document.mjs";
 
-const REPRESENTED_SFINDER_COMMANDS = [
+const LEGACY_PUBLIC_SEARCH_COMMANDS = [
   "path",
-  "percent",
   "chance",
-  "minimals",
+  "percent",
   "score",
+  "minimals",
   "score-minimals",
-  "saves",
-  "best-save",
-  "cover",
-  "setup",
-  "congruent",
-  "congruent-cover",
-  "setup-cover",
-  "cover-percent",
-  "special-cover",
-  "spin-cover",
-  "spin",
   "score-finder",
-  "damage",
-  "spin-structure",
+  "allspin-sol-finder",
+  "allspin-pres-chance",
+  "cover",
   "pc-setup",
   "best-setup",
   "dpc-finder",
-  "verify",
+  "spin",
+  "spin-cover",
+  "damage",
 ];
 
+const CANONICAL_SEARCH_ROOTS = ["pc", "build", "setup", "forward", "spin-structure", "utility"];
+const COMPATIBILITY_SEARCH_ROOTS = ["finesse"];
+
 test("slash catalog registers only curated active commands", () => {
-  assert.equal(slashCommandCatalog.length, 29);
-  assert.equal(globalCommands.length, 30);
+  assert.equal(slashCommandCatalog.length, 27);
+  assert.equal(globalCommands.length, 28);
   assert.equal(globalCommands.filter(({ type }) => type === 3).length, 1);
   assert.deepEqual(
     slashCommandCatalog.map((command) => command.name),
-    ["help", "render-file", "channel-settings", "server-settings", "finesse", ...REPRESENTED_SFINDER_COMMANDS],
+    [
+      "help",
+      "render-file",
+      "channel-settings",
+      "server-settings",
+      ...CANONICAL_SEARCH_ROOTS,
+      ...COMPATIBILITY_SEARCH_ROOTS,
+      ...LEGACY_PUBLIC_SEARCH_COMMANDS,
+    ],
   );
   assert.deepEqual(
     globalCommands.map((command) => command.name),
@@ -64,8 +68,9 @@ test("slash catalog registers only curated active commands", () => {
       "render-file",
       "channel-settings",
       "server-settings",
-      "finesse",
-      ...REPRESENTED_SFINDER_COMMANDS,
+      ...CANONICAL_SEARCH_ROOTS,
+      ...COMPATIBILITY_SEARCH_ROOTS,
+      ...LEGACY_PUBLIC_SEARCH_COMMANDS,
       "Get original GIF",
     ],
   );
@@ -107,25 +112,54 @@ test("slash catalog registers only curated active commands", () => {
       contexts: [0],
     },
   );
-  for (const command of slashCommandCatalog.filter(({ kind }) => kind === "search")) {
-    if (command.name === "finesse") {
-      assert.deepEqual(command.subcommands.search.argvPrefix, ["finesse", "search"]);
-      assert.deepEqual(command.subcommands.score.argvPrefix, ["finesse", "score"]);
-      continue;
-    }
-    const expectedPrefix = command.name === "score-finder"
-      ? ["sfinder", "score-finder"]
-      : command.input === "remaining"
-        ? ["setup-finder"]
-      : command.name === "damage" || command.name === "spin-structure"
-        ? [command.name]
-        : ["sfinder", command.name];
-    assert.deepEqual(command.argvPrefix, expectedPrefix);
+  for (const { command } of registeredSearchRoutes()) {
+    assert.ok(command.argvPrefix.length > 0);
     assert.equal(
       command.registration.options.some(({ name }) => name === "arguments"),
       false,
     );
+    assert.equal(
+      command.registration.options.some(({ name }) => name === "objective"),
+      command.input?.startsWith("build-v2-") === true,
+    );
   }
+  assert.deepEqual(findVariant("pc", "path").argvPrefix, ["pc", "path"]);
+  assert.deepEqual(findVariant("pc", "chance").argvPrefix, ["pc", "chance"]);
+  assert.deepEqual(findVariant("pc", "chance").resultAllowlist, ["pc-probability.v2"]);
+  assert.equal(findVariant("pc", "chance").resultAuthorityId, "pc-chance");
+  assert.deepEqual(findVariant("pc", "score").argvPrefix, ["pc", "score"]);
+  assert.deepEqual(findVariant("pc", "score").resultAllowlist, ["pc-score-summary.v2"]);
+  assert.equal(findVariant("pc", "score").resultAuthorityId, "pc-score");
+  assert.deepEqual(findSlashCommand("score").argvPrefix, ["sfinder", "score"]);
+  assert.deepEqual(findSlashCommand("score").resultAllowlist, ["pc-scenario"]);
+  assert.equal(findSlashCommand("score").resultAuthorityId, "score");
+  for (const name of ["chance", "percent"]) {
+    const generic = findSlashCommand(name);
+    assert.equal(generic.input, "pc");
+    assert.deepEqual(generic.argvPrefix, ["sfinder", name]);
+    assert.deepEqual(generic.resultAllowlist, ["pc-scenario"]);
+    assert.equal(generic.resultAuthorityId, name);
+    assert.equal(generic.compatibilityClassification, "generic-compatibility");
+  }
+  assert.deepEqual(findVariant("pc", "failed-queue").argvPrefix, ["pc", "failed-queue"]);
+  assert.deepEqual(findVariant("build", "cover").argvPrefix, ["build", "cover"]);
+  assert.deepEqual(findSlashCommand("cover").argvPrefix, ["build-probability"]);
+  assert.deepEqual(findVariant("setup", "joint").argvPrefix, ["setup", "joint"]);
+  assert.deepEqual(findVariant("forward", "spin").argvPrefix, ["spin-finder"]);
+  assert.deepEqual(
+    findVariant("spin-structure", "search").argvPrefix,
+    ["spin-structure", "search"],
+  );
+  assert.deepEqual(
+    findVariant("spin-structure", "cover").argvPrefix,
+    ["spin-structure", "cover"],
+  );
+  assert.deepEqual(
+    findVariant("spin-structure", "guaranteed").argvPrefix,
+    ["spin-structure", "guaranteed"],
+  );
+  assert.deepEqual(findVariant("finesse", "search").argvPrefix, ["build-probability"]);
+  assert.deepEqual(findVariant("finesse", "score").argvPrefix, ["finesse", "score"]);
   assert.deepEqual(
     findSlashCommand("path").registration.options.map(({ name }) => name),
     ["next", "field", "lines", "kicktable", "options"],
@@ -159,23 +193,46 @@ test("slash catalog registers only curated active commands", () => {
     ["next", "field", "kicktable", "options"],
   );
   assert.deepEqual(
-    findSlashCommand("spin-structure").registration.options.map(({ name }) => name),
-    ["pieces", "field", "lines", "profile", "kicktable", "options"],
+    findVariant("spin-structure", "search").registration.options.map(({ name }) => name),
+    [
+      "pieces",
+      "field",
+      "height",
+      "lines",
+      "spin-profile",
+      "kicktable",
+      "fill-bottom",
+      "fill-top",
+      "max-placements",
+      "minimality",
+    ],
   );
   assert.deepEqual(
-    findSlashCommand("spin-structure").registration.options
-      .find(({ name }) => name === "profile")
+    findVariant("spin-structure", "search").registration.options
+      .find(({ name }) => name === "spin-profile")
       .choices.map(({ value }) => value),
     [
       "t-spins",
       "t-spins-plus",
-      "all-mini",
-      "all-mini-plus",
       "all-spin",
       "all-spin-plus",
+      "all-mini",
+      "all-mini-plus",
     ],
   );
   assert.equal(globalCommands.some(({ name }) => name === "cat-finder"), false);
+  assert.equal(findSlashCommand("verify"), null);
+  assert.equal(findSlashCommand("objective"), null);
+  assert.equal(
+    findVariant("build", "cover").registration.options
+      .some(({ name }) => name === "objective"),
+    true,
+  );
+  assert.equal(
+    findSlashCommand("cover").registration.options
+      .some(({ name }) => name === "objective"),
+    false,
+  );
   assert.equal(
     prepareClearraArguments(["damage", "--board-mask-v1", "0", "--queue", "I"])[0],
     "damage",
@@ -228,11 +285,12 @@ test("registered command metadata and every help page stay inside Discord limits
   }
 
   assert.ok(formatSlashCommandHelp().length <= 2_000);
-  for (const name of REPRESENTED_SFINDER_COMMANDS) {
-    const help = formatSlashCommandHelp(name);
-    assert.ok(help.length <= 2_000, `/${name} help exceeds Discord's message limit`);
-    assert.match(help, new RegExp(`^\\*\\*/${name}\\*\\*`));
-    assert.match(help, /guided Modal form/);
+  for (const { path, command } of registeredSearchRoutes()) {
+    const help = formatSlashCommandHelp(path);
+    assert.ok(help.length <= 2_000, `/${path} help exceeds Discord's message limit`);
+    assert.equal(help.startsWith(`**/${path}**`), true);
+    if (command.modalSchemaId === null) assert.doesNotMatch(help, /guided Modal form/);
+    else assert.match(help, /guided Modal form/);
   }
   const englishPcHelp = formatSlashCommandHelp("path", "en");
   const koreanPcHelp = formatSlashCommandHelp("path", "ko");
@@ -243,12 +301,12 @@ test("registered command metadata and every help page stay inside Discord limits
   assert.doesNotMatch(englishPcHelp, /2L\/4L\/6L/);
   assert.doesNotMatch(koreanPcHelp, /2L\/4L\/6L/);
 
-  const englishBuildHelp = formatSlashCommandHelp("setup", "en");
-  const koreanBuildHelp = formatSlashCommandHelp("setup", "ko");
-  assert.match(englishBuildHelp, /1–24 top-first rows/);
-  assert.match(koreanBuildHelp, /1–24줄/u);
-  assert.doesNotMatch(englishBuildHelp, /prefill|starts? (?:at|with) 8/i);
-  assert.doesNotMatch(koreanBuildHelp, /기본(?:값)?(?:은)? 8줄|8줄로 시작/u);
+  const englishBuildHelp = formatSlashCommandHelp("build cover", "en");
+  const koreanBuildHelp = formatSlashCommandHelp("build cover", "ko");
+  assert.match(englishBuildHelp, /base-mask.*target-mask.*height.*1\.\.6/su);
+  assert.match(koreanBuildHelp, /base-mask.*target-mask.*height.*1\.\.6/su);
+  assert.match(englishBuildHelp, /Plain grids.*rejected/u);
+  assert.match(koreanBuildHelp, /일반 격자.*거부/u);
 
   const englishCommandList = formatSlashCommandHelp("", "en");
   const koreanCommandList = formatSlashCommandHelp("", "ko");
@@ -259,7 +317,31 @@ test("registered command metadata and every help page stay inside Discord limits
   assert.doesNotMatch(englishCommandList, /prefill/i);
   assert.doesNotMatch(koreanCommandList, /기본 4줄|기본 8줄/u);
 
-  for (const name of ["render-file", ...REPRESENTED_SFINDER_COMMANDS]) {
+  const englishObjectiveHelp = formatSlashCommandHelp("objective", "en");
+  const koreanObjectiveHelp = formatSlashCommandHelp("objective", "ko");
+  assert.match(englishObjectiveHelp, /`all`, `unique`, `min-cover`, `tiling`/);
+  assert.match(koreanObjectiveHelp, /`all`, `unique`, `min-cover`, `tiling`/);
+  assert.match(englishObjectiveHelp, /PC objectives.*absent from slash options, Modals, and autocomplete/i);
+  assert.match(englishObjectiveHelp, /Build v2.*capability-closed slash objective choices/i);
+  assert.match(englishObjectiveHelp, /\$path.*--objective <ID>/);
+  assert.match(koreanObjectiveHelp, /minimum-cover.*min-cover/u);
+  assert.match(formatSlashCommandHelp("objective minimum-cover", "en"), /objective min-cover/);
+  assert.match(formatSlashCommandHelp("objective tiling-only", "en"), /Unknown objective/);
+  assert.match(formatSlashCommandHelp("objective minimum_cover", "en"), /Unknown objective/);
+  for (const help of [
+    englishCommandList,
+    koreanCommandList,
+    englishObjectiveHelp,
+    koreanObjectiveHelp,
+    ...registeredSearchRoutes().flatMap(({ path }) => [
+      formatSlashCommandHelp(path, "en"),
+      formatSlashCommandHelp(path, "ko"),
+    ]),
+  ]) {
+    assert.doesNotMatch(help, /verify|검증/iu);
+  }
+
+  for (const name of ["render-file", ...registeredSearchRoutes().map(({ path }) => path)]) {
     const koreanHelp = formatSlashCommandHelp(name, "ko");
     assert.ok(koreanHelp.length <= 2_000, `/${name} Korean help exceeds Discord's message limit`);
     assert.doesNotMatch(
@@ -280,8 +362,8 @@ test("registered command metadata and every help page stay inside Discord limits
   assert.match(koreanDamageHelp, /최대 대미지/u);
   assert.match(koreanDamageHelp, /1–24줄/u);
   assert.doesNotMatch(koreanDamageHelp, /initial_b2b|기본값은 4줄/u);
-  const englishSpinStructureHelp = formatSlashCommandHelp("spin-structure", "en");
-  const koreanSpinStructureHelp = formatSlashCommandHelp("spin-structure", "ko");
+  const englishSpinStructureHelp = formatSlashCommandHelp("spin-structure search", "en");
+  const koreanSpinStructureHelp = formatSlashCommandHelp("spin-structure search", "ko");
   assert.match(englishSpinStructureHelp, /unordered IOTSZJL inventory/);
   assert.match(englishSpinStructureHelp, /Regular and Mini results are always reported separately/);
   assert.match(englishSpinStructureHelp, /All-Mini.*All-Spin/);
@@ -322,7 +404,7 @@ test("terminal Modal failures preserve an explicit language selection", async ()
     type: 5,
     locale: "en-US",
     data: {
-      custom_id: "clearra:search:v3:setup",
+      custom_id: "clearra:search:v4:pc~tiling",
       components: [
         {
           type: 18,
@@ -873,6 +955,66 @@ test("dormant CTK3 attachment reader remains available to a future renderer ingr
   assert.equal(messages.length, 1);
   assert.equal(messages[0].files[0].contentType, "image/gif");
   assert.match(messages[0].payload.content, /ctk=/);
+});
+
+test("operation-document utilities resolve exactly one bounded CTK3 attachment into the document field", async () => {
+  const document = {
+    width: 10,
+    pages: [{
+      height: 0,
+      cells: [],
+      operation: { piece: "O", rotation: "spawn", x: 1, y: 0 },
+      flags: { lock: true },
+    }],
+  };
+  const bytes = encodeCtk3File(document);
+  const attachment = {
+    id: "operation-file",
+    filename: "operations.ctk3",
+    content_type: CTK3_FILE_MIME_TYPE,
+    size: bytes.byteLength,
+    url: "https://cdn.discordapp.com/attachments/a/b/operations.ctk3",
+  };
+  const bot = new Clearrabot(
+    {
+      async downloadAttachment(url, limit) {
+        assert.equal(url, attachment.url);
+        assert.equal(limit, 1024 * 1024);
+        return bytes;
+      },
+    },
+    { maxCtk3FileBytes: 1024 * 1024, maxConcurrentSearches: 1 },
+    { executor: { execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }) } },
+  );
+  const command = findVariant("utility", "sequence-dependencies");
+  const options = await bot.resolveOperationDocumentAttachmentOptions(
+    { data: { resolved: { attachments: { [attachment.id]: attachment } } } },
+    command,
+    [{ name: "attachment", type: 11, value: attachment.id }],
+  );
+
+  assert.deepEqual(options.map(({ name }) => name), ["document"]);
+  const decoded = decodeViewerDocument(options[0].value);
+  assert.equal(decoded.width, document.width);
+  assert.deepEqual(decoded.pages[0].operation, document.pages[0].operation);
+  assert.equal(decoded.pages[0].flags.lock, true);
+  const sequenceOptions = await bot.resolveOperationDocumentAttachmentOptions(
+    { data: { resolved: { attachments: { [attachment.id]: attachment } } } },
+    findVariant("utility", "sequence"),
+    [{ name: "attachment", type: 11, value: attachment.id }],
+  );
+  assert.deepEqual(sequenceOptions, options);
+  await assert.rejects(
+    bot.resolveOperationDocumentAttachmentOptions(
+      { data: { resolved: { attachments: { [attachment.id]: attachment } } } },
+      command,
+      [
+        { name: "document", type: 3, value: options[0].value },
+        { name: "attachment", type: 11, value: attachment.id },
+      ],
+    ),
+    /exactly one document string or one CTK3 attachment/,
+  );
 });
 
 test("Oracle starts remote work immediately, then edits a render-first preview with the result", async () => {
@@ -1451,8 +1593,8 @@ test("every registered slash command reaches its fixed engine argv prefix", asyn
     { maxConcurrentSearches: 1 },
     {
       executor: {
-        async execute(arguments_) {
-          invocations.push(arguments_);
+        async execute(arguments_, options) {
+          invocations.push({ arguments_, options });
           return { exitCode: 0, stdout: "ok", stderr: "" };
         },
       },
@@ -1460,23 +1602,381 @@ test("every registered slash command reaches its fixed engine argv prefix", asyn
   );
 
   const field = fumenEncoder.encode([{ field: Field.create() }]);
-  for (const name of REPRESENTED_SFINDER_COMMANDS) {
-    const command = findSlashCommand(name);
+  const coloredDocument = fumenEncoder.encode([{
+    field: Field.create("IIII______"),
+  }]);
+  const finesseDocument = fumenEncoder.encode([{
+    field: Field.create(),
+    operation: { type: "I", rotation: "spawn", x: 4, y: 0 },
+  }]);
+  const routes = registeredSearchRoutes();
+  for (const route of routes) {
     assert.equal(
       await bot.handleInteraction(
-        slashInteraction(name, validSearchOptions(command, field)),
+        searchRouteInteraction(
+          route,
+          validSearchOptions(route.command, field, finesseDocument, coloredDocument),
+        ),
       ),
       true,
     );
   }
 
-  assert.equal(edits.length, REPRESENTED_SFINDER_COMMANDS.length);
-  for (let index = 0; index < REPRESENTED_SFINDER_COMMANDS.length; index += 1) {
-    const command = findSlashCommand(REPRESENTED_SFINDER_COMMANDS[index]);
+  assert.equal(edits.length, routes.length);
+  for (let index = 0; index < routes.length; index += 1) {
+    const command = routes[index].command;
     assert.deepEqual(
-      invocations[index].slice(0, command.argvPrefix.length),
+      invocations[index].arguments_.slice(0, command.argvPrefix.length),
       command.argvPrefix,
     );
+    if (command.capabilityId?.startsWith("pc.allspin-")) {
+      assert.equal(invocations[index].options.timeoutClass, "pc_reverse");
+    }
+  }
+});
+
+test("bot execution keeps typed pc chance separate from generic chance and percent", async () => {
+  const invocations = [];
+  const edits = [];
+  const bot = new Clearrabot(
+    {
+      async deferInteraction() {},
+      async editOriginalInteraction(_applicationId, _token, message) {
+        edits.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute(arguments_) {
+          invocations.push(arguments_);
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: arguments_[0] === "pc"
+                ? "pc-probability.v2"
+                : "pc-scenario",
+              summary: {},
+            }),
+          };
+        },
+      },
+    },
+  );
+  const common = [
+    { name: "field", value: "grid:######____" },
+    { name: "next", value: "I" },
+    { name: "lines", value: 1 },
+    { name: "kicktable", value: "srs" },
+  ];
+
+  await bot.handleInteraction(slashInteraction("pc", [{
+    type: 1,
+    name: "chance",
+    options: [...common, { name: "hold", value: "empty" }],
+  }]));
+  for (const name of ["chance", "percent"]) {
+    await bot.handleInteraction(slashInteraction(name, common));
+  }
+
+  assert.deepEqual(invocations, [
+    [
+      "pc", "chance", "--lines", "1", "--board-mask", "0x3f",
+      "--height", "1", "--pieces", "1", "--queue", "I",
+      "--hold", "empty", "--rule", "srs", "--format", "json",
+      "--include-solution-data",
+    ],
+    [
+      "sfinder", "chance", "--field-mask-v1", "000000000000003f",
+      "--queue", "I", "--lines", "1", "--rule", "srs",
+      "--format", "json", "--include-solution-data",
+    ],
+    [
+      "sfinder", "percent", "--field-mask-v1", "000000000000003f",
+      "--queue", "I", "--lines", "1", "--rule", "srs",
+      "--format", "json", "--include-solution-data",
+    ],
+  ]);
+  assert.equal(invocations[0].includes("--objective"), false);
+  assert.equal(edits.length, 3);
+  assert.equal(edits.every((message) => !/inconsistent result/i.test(message)), true);
+});
+
+test("Discord sequence dependencies executes the exact argv and returns only the small canonical report", async () => {
+  const invocations = [];
+  const edits = [];
+  const source = fumenEncoder.encode([{
+    field: Field.create(),
+    operation: { type: "O", rotation: "spawn", x: 1, y: 0 },
+  }]);
+  const bot = new Clearrabot(
+    {
+      async deferInteraction() {},
+      async editOriginalInteraction(_applicationId, _token, message) {
+        edits.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute(arguments_) {
+          invocations.push(arguments_);
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: "sequence-dependencies",
+              summary: {
+                candidate_id: "candidate-000000",
+                operation_count: 1,
+                exact_order_count: "1",
+                universal_dependency_count: 0,
+                transitive_reduction_count: 0,
+                independent_pair_count: 0,
+                representative_order: "0",
+                reachability_evidence: "must-not-enter-small-discord-report",
+              },
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  await bot.handleInteraction(slashInteraction("utility", [{
+    type: 1,
+    name: "sequence-dependencies",
+    options: [
+      { name: "document", value: source },
+      { name: "rule-profile", value: "srs-x" },
+      { name: "kick-profile", value: "no-kick" },
+      { name: "timeout-seconds", value: 17 },
+    ],
+  }]));
+
+  assert.deepEqual(invocations, [[
+    "utility", "sequence-dependencies",
+    "--document", source,
+    "--rule-profile", "srs-x",
+    "--kick-profile", "no-kick",
+    "--timeout-seconds", "17",
+    "--format", "json",
+  ]]);
+  assert.equal(edits.length, 1);
+  for (const expected of [
+    "candidate-000000", "Exact accepted orders: 1", "Canonical representative order: 0",
+  ]) {
+    assert.match(edits[0], new RegExp(expected));
+  }
+  assert.doesNotMatch(edits[0], /must-not-enter-small-discord-report|reachability_evidence/);
+  assert.doesNotMatch(edits[0], /CTK3 pages/);
+});
+
+test("Discord sequence executes the exact trace argv and returns only the bounded canonical report", async () => {
+  const invocations = [];
+  const edits = [];
+  const source = fumenEncoder.encode([{
+    field: Field.create(),
+    operation: { type: "O", rotation: "spawn", x: 1, y: 0 },
+  }]);
+  const tracePrefix = "0:O:0:1:0;".repeat(30);
+  const traceTail = "must-not-enter-bounded-trace-preview";
+  const bot = new Clearrabot(
+    {
+      async deferInteraction() {},
+      async editOriginalInteraction(_applicationId, _token, message) {
+        edits.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute(arguments_) {
+          invocations.push(arguments_);
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              kind: "sequence",
+              summary: {
+                operation_count: 1,
+                cleared_line_count: 0,
+                trace_key: "4a910fab1f82e125",
+                rule_profile: "srs-x",
+                kick_profile: "no-kick",
+                normalized_trace: `${tracePrefix}${traceTail}`,
+                replay_evidence: "must-not-enter-small-discord-report",
+              },
+            }),
+          };
+        },
+      },
+    },
+  );
+
+  await bot.handleInteraction(slashInteraction("utility", [{
+    type: 1,
+    name: "sequence",
+    options: [
+      { name: "document", value: source },
+      { name: "rule-profile", value: "srs-x" },
+      { name: "kick-profile", value: "no-kick" },
+      { name: "timeout-seconds", value: 17 },
+    ],
+  }]));
+
+  assert.deepEqual(invocations, [[
+    "utility", "sequence",
+    "--document", source,
+    "--rule-profile", "srs-x",
+    "--kick-profile", "no-kick",
+    "--timeout-seconds", "17",
+    "--format", "json",
+  ]]);
+  assert.equal(edits.length, 1);
+  for (const expected of [
+    "Operations: 1",
+    "Cleared lines: 0",
+    "Canonical trace key: 4a910fab1f82e125",
+    "Rule profile: srs-x",
+    "Kick profile: no-kick",
+    "Canonical trace preview:",
+  ]) {
+    assert.match(edits[0], new RegExp(expected));
+  }
+  assert.match(edits[0], /…/u);
+  assert.doesNotMatch(edits[0], new RegExp(traceTail));
+  assert.doesNotMatch(edits[0], /must-not-enter-small-discord-report|replay_evidence/);
+  assert.doesNotMatch(edits[0], /CTK3 pages/);
+  assert.ok(edits[0].length < 600, `bounded sequence report grew to ${edits[0].length} chars`);
+});
+
+test("bot execution keeps typed pc score separate from the generic score preset", async () => {
+  const invocations = [];
+  const edits = [];
+  const bot = new Clearrabot(
+    {
+      async deferInteraction() {},
+      async editOriginalInteraction(_applicationId, _token, message) {
+        edits.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute(arguments_) {
+          invocations.push(arguments_);
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify(
+              arguments_[0] === "pc"
+                ? validPcScoreStructured()
+                : { kind: "pc-scenario", summary: {} },
+            ),
+          };
+        },
+      },
+    },
+  );
+  const common = [
+    { name: "field", value: "grid:######____" },
+    { name: "next", value: "I" },
+    { name: "lines", value: 1 },
+    { name: "kicktable", value: "srs" },
+  ];
+
+  await bot.handleInteraction(slashInteraction("pc", [{
+    type: 1,
+    name: "score",
+    options: [
+      ...common,
+      { name: "hold", value: "empty" },
+      { name: "score-profile", value: "guideline" },
+      { name: "spin-profile", value: "all-mini-plus" },
+      { name: "initial-b2b", value: 2 },
+    ],
+  }]));
+  await bot.handleInteraction(slashInteraction("score", common));
+
+  assert.deepEqual(invocations[0], [
+    "pc", "score", "--lines", "1", "--board-mask", "0x3f",
+    "--height", "1", "--pieces", "1", "--queue", "I",
+    "--hold", "empty", "--score-profile", "guideline",
+    "--spin-profile", "all-mini-plus", "--initial-b2b", "2",
+    "--rule", "srs", "--format", "json", "--include-solution-data",
+  ]);
+  assert.deepEqual(invocations[1].slice(0, 2), ["sfinder", "score"]);
+  assert.equal(invocations[0].includes("--objective"), false);
+  assert.equal(invocations[0].includes("--score"), false);
+  assert.match(edits[0], /Score accuracy: basic-approximation/);
+  assert.match(edits[0], /Profile-specific exact: No/);
+  assert.equal(edits.every((message) => !/inconsistent result/i.test(message)), true);
+});
+
+test("pc score rejects cross-contract and semantically incomplete typed results", async () => {
+  const messages = [];
+  let structured = validPcScoreStructured();
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message.payload.content);
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify(structured),
+          };
+        },
+      },
+    },
+  );
+  const typed = findSearchRouteByPublicKind("pc-score");
+  const legacy = findSearchRouteByPublicKind("score");
+  const run = async (route, publicKind) => {
+    await bot.runInteractionCommand(
+      searchRouteInteraction(route, []),
+      route.command.argvPrefix,
+      null,
+      "en",
+      publicKind,
+    );
+    return messages.at(-1);
+  };
+
+  assert.doesNotMatch(await run(typed, "pc-score"), /inconsistent result/i);
+  structured = { kind: "pc-scenario", summary: {} };
+  assert.match(await run(typed, "pc-score"), /inconsistent result/i);
+  structured = validPcScoreStructured();
+  assert.match(await run(legacy, "score"), /inconsistent result/i);
+
+  const malformed = [
+    (value) => { delete value.contract.command.kind; },
+    (value) => { delete value.summary.score_accuracy_level; },
+    (value) => { value.summary.score_accuracy_level = "profile-exact"; },
+    (value) => { value.summary.score_profile_specific_exact = true; },
+    (value) => { value.summary.score_summary_complete = false; },
+    (value) => { delete value.summary.resource_probability_complete; },
+    (value) => { delete value.resource_report; },
+    (value) => { value.resource_report.truncated = true; },
+    (value) => { value.contract.pc.scoring.score_accuracy_level = "profile-exact"; },
+    (value) => { delete value.contract.pc.execution_report.scoring; },
+    (value) => { value.summary.resource_truncated = true; },
+    (value) => { value.summary.solution_probabilities_requested = true; },
+    (value) => { value.summary.problem_owner = "private"; },
+    (value) => { value.summary.transient_worker_owner = "private"; },
+  ];
+  for (const mutate of malformed) {
+    structured = validPcScoreStructured();
+    mutate(structured);
+    assert.match(await run(typed, "pc-score"), /inconsistent result/i);
+    assert.doesNotMatch(messages.at(-1), /private|transient|profile-exact/i);
   }
 });
 
@@ -1771,8 +2271,9 @@ test("zero-solution search output omits a stale initial-only CTK3 attachment", a
   );
 });
 
-test("Korean structured build commands use the requested public result name", async () => {
+test("Korean canonical and compatibility Build routes use the proven cover result name", async () => {
   const messages = [];
+  let executionCount = 0;
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -1783,6 +2284,42 @@ test("Korean structured build commands use the requested public result name", as
     {
       executor: {
         async execute() {
+          executionCount += 1;
+          if (executionCount === 1) {
+            const resultContract = "build-coverage-portfolio.v2";
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                kind: resultContract,
+                contract: { command: { kind: resultContract } },
+                summary: {
+                  capability_id: "build.cover",
+                  result_contract: resultContract,
+                  payload_kind: "portfolio",
+                  input_identity_sha256: "a".repeat(64),
+                  objective: "min-cover",
+                  coverage_probability: 0.5,
+                  source_candidate_count: "1",
+                  reachable_candidate_count: "1",
+                  pattern_count: "1",
+                  candidates: [{
+                    candidate_key: "candidate-a",
+                    covered_pattern_count: "1",
+                  }],
+                  canonical_candidate_keys: ["candidate-a"],
+                  winners: [],
+                  completeness: {
+                    enumeration_complete: true,
+                    reachability_complete: true,
+                    probability_complete: true,
+                    portfolio_complete: true,
+                    exact: true,
+                  },
+                },
+              }),
+            };
+          }
           return {
             exitCode: 0,
             stderr: "",
@@ -1797,21 +2334,23 @@ test("Korean structured build commands use the requested public result name", as
   );
 
   await bot.runInteractionCommand(
-    slashInteraction("setup", [], undefined, "build-kind-one"),
-    ["sfinder", "setup"],
+    slashInteraction("build", [{ type: 1, name: "cover", options: [] }], undefined, "build-kind-one"),
+    ["build-probability"],
     null,
     "ko",
+    "build-cover-v2",
   );
   await bot.runInteractionCommand(
-    slashInteraction("setup", [], undefined, "build-kind-two"),
-    ["sfinder", "setup"],
+    slashInteraction("cover", [], undefined, "build-kind-two"),
+    ["build-probability"],
     null,
     "ko",
+    "cover",
   );
 
   assert.equal(messages.length, 2);
   for (const message of messages) {
-    assert.match(message.payload.content, /Clearra 목표 셋업 확률 탐색/u);
+    assert.match(message.payload.content, /Clearra 구축 커버리지 탐색/u);
     assert.match(message.payload.content, /커버 확률: 50%/u);
   }
 });
@@ -1987,24 +2526,22 @@ test("spin-structure structured results keep their neutral localized result name
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
-              kind: "spin-structure",
+              kind: "spin-structure-family.v2",
+              contract: { command: { kind: "spin-structure-family.v2" } },
               summary: {
-                result_count: 2,
-                regular_count: 1,
-                mini_count: 1,
-                minimum_placements: 2,
-                workers_used: 8,
-                cloud_run_revision: "private-revision",
-                engine: "private-engine",
-              },
-              contract: {
-                artifacts: {
-                  schema_version: "clearra.solution-data.v1",
-                  solution_keys: [
-                    `ctk2|height=4|initial=${"0".repeat(64)}|placements=T:${"0".repeat(61)}807`,
-                    `ctk2|height=4|initial=${"0".repeat(64)}|placements=T:${"0".repeat(60)}8070`,
-                  ],
-                },
+                capability_id: "spin-structure.search",
+                result_contract: "spin-structure-family.v2",
+                payload_kind: "spin-structure-family",
+                ordering: "candidate-id-ascending",
+                regular_count: "1",
+                mini_count: "1",
+                candidate_count: "2",
+                complete: true,
+                minimum_placements: "2",
+                candidates: [
+                  { candidate_id: "1", partition: "regular", placement_count: "2" },
+                  { candidate_id: "2", partition: "mini", placement_count: "2" },
+                ],
               },
             }),
           };
@@ -2014,32 +2551,40 @@ test("spin-structure structured results keep their neutral localized result name
   );
 
   await bot.runInteractionCommand(
-    slashInteraction("spin-structure", [], undefined, "spin-structure-en"),
-    ["spin-structure"],
+    slashInteraction("spin-structure", [{
+      type: 1,
+      name: "search",
+      options: [],
+    }], undefined, "spin-structure-en"),
+    ["spin-structure", "search"],
     null,
     "en",
+    "spin-structure-search-v2",
   );
   await bot.runInteractionCommand(
-    slashInteraction("spin-structure", [], undefined, "spin-structure-ko"),
-    ["spin-structure"],
+    slashInteraction("spin-structure", [{
+      type: 1,
+      name: "search",
+      options: [],
+    }], undefined, "spin-structure-ko"),
+    ["spin-structure", "search"],
     null,
     "ko",
+    "spin-structure-search-v2",
   );
 
   assert.match(messages[0].payload.content, /Clearra spin-structure search completed\./);
-  assert.match(messages[0].payload.content, /Results: 2/);
   assert.match(messages[0].payload.content, /Regular structures: 1/);
   assert.match(messages[0].payload.content, /Mini structures: 1/);
   assert.match(messages[0].payload.content, /Minimum placements: 2/);
   assert.doesNotMatch(messages[0].payload.content, /Workers used|private|engine/i);
-  assert.equal(messages[0].files[0].name, "spin-structure-result.ctk3");
+  assert.deepEqual(messages[0].files, []);
   assert.match(messages[1].payload.content, /Clearra 스핀 구조 탐색/u);
-  assert.match(messages[1].payload.content, /결과: 2/u);
   assert.match(messages[1].payload.content, /Regular 구조: 1/u);
   assert.match(messages[1].payload.content, /Mini 구조: 1/u);
   assert.match(messages[1].payload.content, /최소 배치 수: 2/u);
   assert.doesNotMatch(messages[1].payload.content, /사용 워커 수|private|engine/iu);
-  assert.equal(messages[1].files[0].name, "spin-structure-result.ctk3");
+  assert.deepEqual(messages[1].files, []);
 });
 
 test("score-finder keeps its public result kind when the engine reports pc-scenario", async () => {
@@ -2150,30 +2695,50 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     percent: ["perfect-clear probability", "퍼펙트 클리어 확률 계산"],
     chance: ["perfect-clear probability", "퍼펙트 클리어 확률 계산"],
     minimals: ["minimum-cover perfect-clear search", "최소 커버 퍼펙트 클리어 탐색"],
-    score: ["Jstris-score perfect-clear search", "Jstris 점수 퍼펙트 클리어 탐색"],
-    score_minimals: ["minimum-cover Jstris-score search", "최소 커버 Jstris 점수 탐색"],
-    saves: ["perfect-clear save analysis", "퍼펙트 클리어 세이브 분석"],
-    best_save: ["perfect-clear save analysis", "퍼펙트 클리어 세이브 분석"],
+    score: ["scored perfect-clear search", "점수 퍼펙트 클리어 탐색"],
+    saves: ["perfect-clear save groups", "퍼펙트 클리어 세이브 그룹"],
+    best_save: ["best perfect-clear save", "최적 퍼펙트 클리어 세이브"],
+    score_minimals: ["minimum-cover scored search", "최소 커버 점수 탐색"],
+    tiling: ["perfect-clear tiling search", "퍼펙트 클리어 타일링 탐색"],
+    failed_queue: ["failed-queue search", "실패 큐 탐색"],
     cover: ["build-coverage search", "구축 커버리지 탐색"],
-    setup: ["target-setup probability search", "목표 셋업 확률 탐색"],
-    congruent: ["target-setup probability search", "목표 셋업 확률 탐색"],
-    congruent_cover: ["target-setup probability search", "목표 셋업 확률 탐색"],
-    setup_cover: ["target-cover probability search", "목표 커버 확률 탐색"],
-    cover_percent: ["target-cover probability search", "목표 커버 확률 탐색"],
-    special_cover: ["T-spin coverage search", "T-spin 커버리지 탐색"],
-    spin_cover: ["forward T-spin search", "정방향 T-spin 탐색"],
-    spin: ["forward T-spin search", "정방향 T-spin 탐색"],
+    spin_cover: ["forward spin search", "정방향 스핀 탐색"],
+    spin: ["forward spin search", "정방향 스핀 탐색"],
     score_finder: ["Jstris-score perfect-clear search", "Jstris 점수 퍼펙트 클리어 탐색"],
     damage: ["damage search", "대미지 탐색"],
+    ren: ["maximum REN search", "최대 REN 탐색"],
     spin_structure: ["spin-structure search", "스핀 구조 탐색"],
+    spin_structure_cover: ["spin-structure coverage", "스핀 구조 커버리지"],
+    spin_structure_guaranteed: ["guaranteed spin-structure search", "보장 스핀 구조 탐색"],
     pc_setup: ["joint setup search", "종합 셋업 탐색"],
     best_setup: ["build-first setup search", "구축 우선 셋업 탐색"],
     dpc_finder: ["PC-first setup search", "PC 우선 셋업 탐색"],
+    setup_score: ["setup score ranking", "셋업 점수 순위 계산"],
     finesse_search: ["finesse search", "피네스 탐색"],
     finesse_score: ["finesse score", "피네스 계산"],
-    verify: ["verification", "검증"],
+    allspin_sol: ["B2B-preserving PC witness search", "B2B 보존 PC 증거 탐색"],
+    allspin_sol_finder: ["B2B-preserving PC witness search", "B2B 보존 PC 증거 탐색"],
+    allspin_pres_chance: ["B2B-preserving PC probability", "B2B 보존 PC 확률 계산"],
+    sequence: ["operation trace validation", "operation trace 유효성 확인"],
+    sequence_dependencies: ["operation-order dependency analysis", "operation 순서 의존성 분석"],
+    parity: ["field-document parity observation", "field-document 패리티 관찰"],
+    fumen: ["Fumen document transform", "Fumen 문서 변환"],
+    render: ["exact field-document render", "정확한 field-document 렌더"],
+    to_gray: ["occupied-color normalization", "점유 색상 회색화"],
+    mirror: ["mirror transform", "좌우 반전"],
+    setup: ["colored-target build family", "색상 목표 구축 패밀리"],
+    congruent: ["colored-target congruence family", "색상 목표 합동 패밀리"],
+    congruent_cover: ["congruence coverage portfolio", "합동 커버리지 포트폴리오"],
+    setup_cover: ["setup coverage portfolio", "셋업 커버리지 포트폴리오"],
+    setup_cover_percent: ["setup coverage probability", "셋업 커버리지 확률"],
+    setup_cover_score: ["score-only setup coverage portfolio", "점수 전용 셋업 커버리지 포트폴리오"],
+    evaluate_cover: ["supplied-solution coverage family", "제공 해법 커버리지 패밀리"],
+    evaluate_minimals: ["supplied-solution minimum portfolio", "제공 해법 최소 포트폴리오"],
+    evaluate_score: ["supplied-solution score portfolio", "제공 해법 점수 포트폴리오"],
+    evaluate_b2b_cover: ["supplied-solution B2B coverage family", "제공 해법 B2B 커버리지 패밀리"],
+    evaluate_cover_percent: ["supplied-solution coverage probability", "제공 해법 커버리지 확률"],
   };
-  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 26);
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 54);
   assert.equal(Object.isFrozen(DISCORD_PUBLIC_SEARCH_CONTRACT), true);
   assert.equal(
     DISCORD_PUBLIC_SEARCH_CONTRACT.every((entry) =>
@@ -2181,25 +2746,23 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     ),
     true,
   );
-  assert.equal(
-    DISCORD_PUBLIC_SEARCH_CONTRACT.filter(({ id }) => id !== "verify").length,
-    25,
-  );
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.some(({ id }) => id === "verify"), false);
   assert.deepEqual(
     new Set(DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ resultKey }) => resultKey)),
     new Set(Object.keys(labels)),
   );
   assert.deepEqual(
     new Set(DISCORD_PUBLIC_SEARCH_CONTRACT.map(({ id }) => id)),
-    new Set(slashCommandCatalog
-      .filter(({ kind }) => kind === "search")
-      .flatMap((command) => command.input === "finesse"
-        ? Object.keys(command.subcommands).map((name) => `finesse-${name}`)
-        : [command.name])),
+    new Set(registeredSearchRoutes().map(({ command }) =>
+      command.resultAuthorityId ?? command.publicResultKind
+    )),
   );
   const messages = [];
   let engineKind = "";
   let finesse = false;
+  let resultContractId = null;
+  let requestedPublicKind = null;
+  let requestedCapabilityId = null;
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -2210,12 +2773,57 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     {
       executor: {
         async execute() {
+          if (engineKind === "pc-score-summary.v2") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validPcScoreStructured()),
+            };
+          }
+          if (engineKind === "pc-score-portfolio.v2") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validPcScoreMinimalsStructured()),
+            };
+          }
+          if (engineKind === "pc-save-groups.v2") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validPcSaveGroupsStructured()),
+            };
+          }
+          if (engineKind === "pc-best-save.v2") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validPcBestSaveStructured()),
+            };
+          }
+          if (requestedCapabilityId?.startsWith("build.")) {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validBuildV2Structured(
+                requestedCapabilityId,
+                engineKind,
+              )),
+            };
+          }
+          const typedDocumentResult = validTypedDocumentUtilityResult(
+            engineKind,
+            requestedPublicKind,
+          );
+          if (typedDocumentResult) return typedDocumentResult;
           return {
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
               kind: engineKind,
-              summary: {},
+              summary: resultContractId
+                ? validAllspinSummary(resultContractId)
+                : {},
               ...(finesse ? { finesse_report: {} } : {}),
             }),
           };
@@ -2224,35 +2832,368 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     },
   );
 
-  for (const { id: publicKind, engineKinds, resultKey } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
-    engineKind = engineKinds.at(-1);
+  for (const {
+    id: publicKind,
+    engineKinds,
+    resultKey,
+    resultContractId: contractId,
+    capabilityId,
+  } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
+    resultContractId = contractId?.startsWith("pc-b2b-") ? contractId : null;
+    requestedPublicKind = publicKind;
+    requestedCapabilityId = capabilityId;
     const [english, korean] = labels[resultKey];
+    const route = findSearchRouteByPublicKind(publicKind);
     finesse = publicKind.startsWith("finesse-");
-    const argv = finesse
-      ? ["finesse", publicKind.slice("finesse-".length)]
-      : findSlashCommand(publicKind).argvPrefix;
+    const argv = executableSearchArguments(route);
+    engineKind = resultContractId ? "pc" : engineKinds.at(-1);
     for (const [locale, label] of [["en", english], ["ko", korean]]) {
       const before = messages.length;
       await bot.runInteractionCommand(
-        slashInteraction(finesse ? "finesse" : publicKind, []),
+        searchRouteInteraction(route, []),
         argv,
         null,
         locale,
+        publicKind,
       );
       assert.equal(messages.length, before + 1, `${publicKind}/${locale}`);
+      const lines = messages.at(-1).split("\n");
+      if (publicKind === "tiling") {
+        assert.match(
+          lines[0],
+          locale === "ko" ? /주의|경고/u : /^WARNING:/u,
+          `${publicKind}/${locale}: warning`,
+        );
+      }
       assert.equal(
-        messages.at(-1).split("\n", 1)[0],
+        publicKind === "tiling"
+          ? lines.find((line) => line.startsWith("Clearra "))
+          : lines[0],
         locale === "ko"
           ? `Clearra ${label}을(를) 완료했습니다.`
           : `Clearra ${label} completed.`,
         `${publicKind}/${locale}`,
       );
+      if (publicKind === "score-minimals") {
+        const rendered = messages.at(-1);
+        assert.equal(
+          rendered.split("\n").filter((line) =>
+            /(?:Canonical candidate ID|정규 후보 ID)/u.test(line)
+          ).length,
+          1,
+        );
+        assert.doesNotMatch(rendered, /tie|alternative|cursor|pages?/iu);
+      }
     }
   }
 });
 
+test("All-Spin results require the requested contract and expose incomplete status safely", async () => {
+  const messages = [];
+  let structured = null;
+  let rawStdout;
+  const bot = new Clearrabot(
+    {
+      async editOriginalInteraction(_applicationId, _token, message) {
+        messages.push(message.payload.content);
+      },
+      async createChannelMessage(_channelId, message) {
+        messages.push(message.payload.content);
+        return { id: "allspin-result-message" };
+      },
+    },
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute() {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: rawStdout === undefined
+              ? JSON.stringify(structured)
+              : rawStdout,
+          };
+        },
+      },
+    },
+  );
+
+  const exact = findSearchRouteByPublicKind("allspin-sol");
+  const exactArguments = executableSearchArguments(exact);
+  const exactScenarioArguments = executableSearchArguments(exact, { scenario: true });
+  structured = {
+    kind: "pc-scenario",
+    summary: validAllspinSummary("pc-b2b-preserving-witness.v1", {
+      pc_allspin_problem_preset: "scenario-pc",
+      pc_allspin_initial_field_supplied: true,
+      pc_allspin_preserving_queue_count: 1,
+      pc_allspin_preservation_probability: 1,
+      pc_allspin_witness_required: true,
+      pc_allspin_complete: false,
+      pc_allspin_incomplete_reason: "preserving-count-incomplete",
+      pc_allspin_count_complete: false,
+      pc_allspin_preserves_b2b: "not-calculated",
+    }),
+  };
+  await bot.runInteractionCommand(
+    searchRouteInteraction(exact, []),
+    exactScenarioArguments,
+    null,
+    "en",
+    exact.command.publicResultKind,
+  );
+  assert.match(messages.at(-1), /B2B-preserving PC witness search completed with a partial result/);
+  assert.match(messages.at(-1), /B2B-preserving queues: 1/);
+  assert.match(messages.at(-1), /B2B-preservation probability: 100%/);
+  assert.match(messages.at(-1), /Preserves B2B: not-calculated/);
+  assert.match(messages.at(-1), /Witness available: No/);
+  assert.match(messages.at(-1), /Some results may be incomplete/);
+  assert.doesNotMatch(messages.at(-1), /preserving-count-incomplete/);
+
+  const chance = findSearchRouteByPublicKind("allspin-pres-chance");
+  const chanceArguments = executableSearchArguments(chance);
+  const chanceAllMiniArguments = executableSearchArguments(chance, {
+    profile: "all-mini-plus",
+  });
+  structured = {
+    kind: "pc",
+    summary: validAllspinSummary("pc-b2b-preservation-probability.v1", {
+      pc_allspin_spin_profile: "all-mini-plus",
+      pc_allspin_preserving_queue_count: "not-calculated",
+      pc_allspin_original_queue_count: 24,
+      pc_allspin_preservation_probability: "not-calculated",
+      pc_allspin_count_complete: false,
+      pc_allspin_probability_complete: false,
+      pc_allspin_complete: false,
+      pc_allspin_incomplete_reason: "preserving-count-incomplete",
+    }),
+  };
+  await bot.runInteractionCommand(
+    searchRouteInteraction(chance, []),
+    chanceAllMiniArguments,
+    null,
+    "ko",
+    chance.command.publicResultKind,
+  );
+  assert.match(messages.at(-1), /B2B 보존 PC 확률 계산.*일부 결과/u);
+  assert.match(messages.at(-1), /큐 개수 완전성: 아니요/u);
+  assert.match(messages.at(-1), /확률 완전성: 아니요/u);
+  assert.match(messages.at(-1), /일부 결과가 불완전/u);
+
+  for (const { arguments_, kind, summary } of [
+    {
+      arguments_: executableSearchArguments(exact, { profile: "t-spins" }),
+      kind: "pc",
+      summary: validAllspinSummary("pc-b2b-preserving-witness.v1", {
+        pc_allspin_spin_profile: "all-mini-plus",
+      }),
+    },
+    {
+      arguments_: exactArguments,
+      kind: "pc-scenario",
+      summary: validAllspinSummary("pc-b2b-preserving-witness.v1"),
+    },
+    {
+      arguments_: exactScenarioArguments,
+      kind: "pc",
+      summary: validAllspinSummary("pc-b2b-preserving-witness.v1", {
+        pc_allspin_problem_preset: "scenario-pc",
+        pc_allspin_initial_field_supplied: true,
+      }),
+    },
+    {
+      arguments_: exactArguments,
+      kind: "pc",
+      summary: validAllspinSummary("pc-b2b-preserving-witness.v1", {
+        pc_allspin_problem_preset: "scenario-pc",
+        pc_allspin_initial_field_supplied: true,
+      }),
+    },
+    {
+      arguments_: exactScenarioArguments,
+      kind: "pc-scenario",
+      summary: validAllspinSummary("pc-b2b-preserving-witness.v1"),
+    },
+  ]) {
+    structured = { kind, summary };
+    await bot.runInteractionCommand(
+      searchRouteInteraction(exact, []),
+      arguments_,
+      null,
+      "en",
+      exact.command.publicResultKind,
+    );
+    assert.equal(
+      messages.at(-1),
+      "Clearra returned an inconsistent result. Please retry the command.",
+    );
+  }
+
+  for (const [publicKind, contractId, engineKind] of [
+    ["allspin-sol", "pc-b2b-preservation-probability.v1", "pc"],
+    ["allspin-pres-chance", "pc-b2b-preserving-witness.v1", "pc"],
+    ["allspin-sol", "pc-b2b-preserving-witness.v1", "pc-scenario"],
+  ]) {
+    const route = findSearchRouteByPublicKind(publicKind);
+    structured = {
+      kind: engineKind,
+      summary: { pc_allspin_result_contract: contractId },
+    };
+    await bot.runInteractionCommand(
+      searchRouteInteraction(route, []),
+      executableSearchArguments(route),
+      null,
+      "en",
+      route.command.publicResultKind,
+    );
+    assert.equal(
+      messages.at(-1),
+      "Clearra returned an inconsistent result. Please retry the command.",
+    );
+  }
+
+  const adversarial = [
+    {},
+    { pc_allspin_result_contract: "pc-b2b-preserving-witness.v1" },
+    validAllspinSummary("pc-b2b-preserving-witness.v1", {
+      pc_allspin_preserving_queue_count: 4,
+      pc_allspin_original_queue_count: 3,
+      pc_allspin_preservation_probability: 2,
+      pc_allspin_preserves_b2b: false,
+      pc_allspin_witness_available: true,
+    }),
+    validAllspinSummary("pc-b2b-preserving-witness.v1", {
+      pc_allspin_count_complete: "true",
+    }),
+    validAllspinSummary("pc-b2b-preserving-witness.v1", {
+      pc_allspin_unregistered_field: true,
+    }),
+  ];
+  for (const summary of adversarial) {
+    structured = { kind: "pc", summary };
+    await bot.runInteractionCommand(
+      searchRouteInteraction(exact, []),
+      exactArguments,
+      null,
+      "en",
+      exact.command.publicResultKind,
+    );
+    assert.equal(
+      messages.at(-1),
+      "Clearra returned an inconsistent result. Please retry the command.",
+    );
+  }
+
+  for (const [preserving, original, probability] of [
+    [0, 4, 0.5],
+    [4, 4, 0.5],
+    [2, 4, 0],
+    [2, 4, 1],
+  ]) {
+    structured = {
+      kind: "pc",
+      summary: validAllspinSummary("pc-b2b-preservation-probability.v1", {
+        pc_allspin_preserving_queue_count: preserving,
+        pc_allspin_original_queue_count: original,
+        pc_allspin_preservation_probability: probability,
+      }),
+    };
+    await bot.runInteractionCommand(
+      searchRouteInteraction(chance, []),
+      chanceArguments,
+      null,
+      "en",
+      chance.command.publicResultKind,
+    );
+    assert.equal(
+      messages.at(-1),
+      "Clearra returned an inconsistent result. Please retry the command.",
+      `${preserving}/${original}/${probability}`,
+    );
+  }
+
+  for (const [preserving, original, probability] of [
+    [0, 4, 0],
+    [2, 4, 0.25],
+    [4, 4, 1],
+  ]) {
+    structured = {
+      kind: "pc",
+      summary: validAllspinSummary("pc-b2b-preservation-probability.v1", {
+        pc_allspin_preserving_queue_count: preserving,
+        pc_allspin_original_queue_count: original,
+        pc_allspin_preservation_probability: probability,
+      }),
+    };
+    await bot.runInteractionCommand(
+      searchRouteInteraction(chance, []),
+      chanceArguments,
+      null,
+      "en",
+      chance.command.publicResultKind,
+    );
+    assert.match(messages.at(-1), /B2B-preserving PC probability completed/);
+  }
+
+  const exactAlias = findSearchRouteByPublicKind("allspin-sol-finder");
+  for (const invalidStdout of ["", "ok", "search result"]) {
+    rawStdout = invalidStdout;
+    for (const route of [exact, exactAlias, chance]) {
+      await bot.runInteractionCommand(
+        searchRouteInteraction(route, []),
+        executableSearchArguments(route),
+        null,
+        "en",
+        route.command.publicResultKind,
+      );
+      assert.equal(
+        messages.at(-1),
+        "Clearra returned an inconsistent result. Please retry the command.",
+      );
+    }
+  }
+  rawStdout = "ok";
+  await bot.runOracleMessageCommand(
+    oracleMessage("allspin-text-malformed", "$allspin_sol_finder IIOOO"),
+    exactArguments,
+    null,
+    "en",
+    exact.command.publicResultKind,
+  );
+  assert.equal(
+    messages.at(-1),
+    "Clearra returned an inconsistent result. Please retry the command.",
+  );
+  await bot.runOracleMessageCommand(
+    oracleMessage("allspin-invalid-argv", "$allspin_sol_finder IIOOO"),
+    ["pc", "allspin-sol", "--queue", "IIOOO"],
+    null,
+    "en",
+    exact.command.publicResultKind,
+  );
+  assert.equal(
+    messages.at(-1),
+    "Clearra returned an inconsistent result. Please retry the command.",
+  );
+  rawStdout = undefined;
+});
+
 test("public aliases reject every formerly broad alternate engine kind in EN and KO", async () => {
   const cases = [
+    ["failed-queue", "percent"],
+    ["failed-queue", "pc-scenario"],
+    ["pc-chance", "pc-scenario"],
+    ["pc-chance", "percent"],
+    ["pc-score", "pc-scenario"],
+    ["pc-score", "score"],
+    ["score-minimals", "pc-scenario"],
+    ["score-minimals", "pc-score-summary.v2"],
+    ["tiling", "pc-tiling-family"],
+    ["tiling", "pc-scenario"],
+    ["tiling", "pc"],
+    ["score", "pc-score-summary.v2"],
+    ["chance", "pc-probability.v2"],
+    ["percent", "pc-probability.v2"],
     ...DISCORD_PUBLIC_SEARCH_CONTRACT
       .filter(({ engineKinds }) => engineKinds.length === 1 && engineKinds[0] === "pc-scenario")
       .flatMap(({ id }) => [[id, "pc"], [id, "percent"]]),
@@ -2285,20 +3226,22 @@ test("public aliases reject every formerly broad alternate engine kind in EN and
 
   for (const [publicKind, forbiddenEngine] of cases) {
     engineKind = forbiddenEngine;
+    const route = findSearchRouteByPublicKind(publicKind);
     for (const [locale, expected] of [
       ["en", "Clearra returned an inconsistent result. Please retry the command."],
       ["ko", "Clearra 결과가 요청한 명령과 일치하지 않습니다. 명령어를 다시 실행해 주세요."],
     ]) {
       await bot.runInteractionCommand(
-        slashInteraction(publicKind, []),
-        findSlashCommand(publicKind).argvPrefix,
+        searchRouteInteraction(route, []),
+        route.command.argvPrefix,
         null,
         locale,
+        publicKind,
       );
       assert.equal(messages.at(-1), expected, `${publicKind}/${forbiddenEngine}/${locale}`);
     }
   }
-  assert.equal(messages.length, 50);
+  assert.equal(messages.length, cases.length * 2);
 });
 
 test("structured result kind mismatches return the stable localized consistency error", async () => {
@@ -2326,11 +3269,13 @@ test("structured result kind mismatches return the stable localized consistency 
     ["en", "Clearra returned an inconsistent result. Please retry the command."],
     ["ko", "Clearra 결과가 요청한 명령과 일치하지 않습니다. 명령어를 다시 실행해 주세요."],
   ]) {
+    const route = findSearchRouteByPublicKind("path");
     await bot.runInteractionCommand(
-      slashInteraction("best-save", []),
-      findSlashCommand("best-save").argvPrefix,
+      searchRouteInteraction(route, []),
+      route.command.argvPrefix,
       null,
       locale,
+      route.command.publicResultKind,
     );
     assert.equal(messages.at(-1), expected);
   }
@@ -2895,6 +3840,382 @@ function slashInteraction(name, options, resolved = undefined, id = "interaction
   };
 }
 
+function findVariant(root, subcommand) {
+  const variant = findSlashCommand(root)?.subcommands?.[subcommand] ?? null;
+  assert.ok(variant, `missing /${root} ${subcommand}`);
+  return variant;
+}
+
+function registeredSearchRoutes() {
+  return slashCommandCatalog.flatMap((root) => {
+    if (root.kind !== "search") return [];
+    if (!root.subcommands) {
+      return [{ root: root.name, subcommand: null, path: root.name, command: root }];
+    }
+    return Object.values(root.subcommands).map((command) => ({
+      root: root.name,
+      subcommand: command.subcommand,
+      path: `${root.name} ${command.subcommand}`,
+      command,
+    }));
+  });
+}
+
+function findSearchRouteByPublicKind(publicResultKind) {
+  const route = registeredSearchRoutes().find(
+    ({ command }) =>
+      (command.resultAuthorityId ?? command.publicResultKind) === publicResultKind,
+  );
+  assert.ok(route, `missing public search route '${publicResultKind}'`);
+  return route;
+}
+
+function executableSearchArguments(route, options = {}) {
+  const prefix = route.command.argvPrefix;
+  if (prefix[0] !== "pc" || ![
+    "allspin-sol",
+    "allspin-pres-chance",
+  ].includes(prefix[1])) return prefix;
+  const scenario = options.scenario === true;
+  const profile = options.profile ?? "all-spin-plus";
+  const source = prefix[1] === "allspin-sol"
+    ? ["--queue", "IIOOO"]
+    : ["--patterns", "[IO]!OOO"];
+  return [
+    ...prefix,
+    "--lines", "2",
+    ...(scenario
+      ? ["--board-mask", "0xf", "--height", "2", "--pieces", "4"]
+      : []),
+    ...source,
+    "--spin-profile", profile,
+    "--rule", "srs-plus",
+  ];
+}
+
+function validPcScoreStructured(overrides = {}) {
+  const summary = {
+    search_output_policy: "trace",
+    coverage_pattern_count: 1,
+    materialized_pattern_count: 1,
+    total_possible_pattern_count: 1,
+    materialized_probability_mass: 1,
+    probability_complete: true,
+    resource_probability_complete: true,
+    count_complete: true,
+    count_truncated_reason: "none",
+    resource_truncated: false,
+    resource_truncation_reason: "none",
+    objective_search_complete: true,
+    objective_complete: true,
+    objective_incomplete_reason: "none",
+    postprocess_scoring_requested: true,
+    score_objective_mode: "summary",
+    score_profile_requested: "tetrio",
+    spin_profile_requested: "t-spins",
+    score_initial_b2b: 0,
+    score_profile: "tetrio-basic",
+    score_accuracy_level: "basic-approximation",
+    score_accuracy_reason:
+      "profile-specific basic score/attack tables with configurable spin detection",
+    score_profile_specific_exact: false,
+    score_evaluation_complete: true,
+    score_matrix_materialized: true,
+    score_matrix_complete: true,
+    score_matrix_cell_count: 1,
+    score_matrix_pattern_count: 1,
+    score_matrix_profile_id: "tetrio-basic",
+    score_matrix_accuracy_level: "basic-approximation",
+    score_matrix_incomplete_reason: "none",
+    score_best_complete: true,
+    score_summary_complete: true,
+    score_summary_incomplete_reason: "none",
+    score_all_universe_patterns_covered: true,
+    score_pattern_optimal_count: 1,
+    score_failed_pc_pattern_count: 0,
+    score_failed_pc_pattern_score: 0,
+    score_covered_probability: 1,
+    score_unconditional_expected_score: 800,
+    score_unconditional_expected_attack: 2,
+    score_best_score: 800,
+    score_best_attack: 2,
+    score_covered_pattern_conditional_average_score: 800,
+    solution_probabilities_requested: false,
+    ...overrides,
+  };
+  const scoring = {
+    score_profile: summary.score_profile,
+    score_matrix_profile_id: summary.score_matrix_profile_id,
+    score_accuracy_level: summary.score_accuracy_level,
+    score_matrix_accuracy_level: summary.score_matrix_accuracy_level,
+    score_profile_accuracy_mode: "basic-approximation",
+    score_accuracy_reason: summary.score_accuracy_reason,
+    score_profile_specific_exact: summary.score_profile_specific_exact,
+    score_evaluation_complete: summary.score_evaluation_complete,
+    score_matrix_materialized: summary.score_matrix_materialized,
+    score_matrix_complete: summary.score_matrix_complete,
+    score_best_complete: summary.score_best_complete,
+    score_summary_complete: summary.score_summary_complete,
+    score_all_universe_patterns_covered: summary.score_all_universe_patterns_covered,
+    score_matrix_incomplete_reason: summary.score_matrix_incomplete_reason,
+    score_summary_incomplete_reason: summary.score_summary_incomplete_reason,
+  };
+  return {
+    kind: "pc-score-summary.v2",
+    contract: {
+      command: { kind: "pc-score-summary.v2" },
+      pc: {
+        scoring: { ...scoring },
+        execution_report: { scoring: { ...scoring } },
+      },
+    },
+    resource_report: {
+      probability_complete: true,
+      count_complete: true,
+      truncated: false,
+      truncation_reason: null,
+      count_truncated_reason: null,
+      materialized_probability_mass: 1,
+      renormalized: false,
+    },
+    summary,
+  };
+}
+
+function validPcScoreMinimalsStructured() {
+  return {
+    kind: "pc-score-portfolio.v2",
+    contract: {
+      command: { kind: "pc-score-portfolio.v2" },
+    },
+    resource_report: {
+      probability_complete: true,
+      count_complete: true,
+      truncated: false,
+      truncation_reason: null,
+      count_truncated_reason: null,
+      renormalized: false,
+    },
+    summary: {
+      score_minimals_contract: "pc-score-portfolio.v2",
+      score_minimals_score_equality: "score-only",
+      score_minimals_attack_role: "informational-only",
+      score_minimals_canonical_selection: "smallest-canonical-candidate-id",
+      score_minimals_canonical_candidate_id: "2",
+      score_minimals_canonical_solution_key: "pc:solution:02",
+      score_best_score: 40_000,
+      score_best_attack: 11,
+    },
+  };
+}
+
+function validPcSaveGroup(candidateId = "1") {
+  return {
+    identity: "hold:-|bag:I",
+    successful_pattern_count: 1,
+    unconditional_probability: 1 / 7,
+    conditional_probability_given_pc: 1,
+    canonical_candidate_id: candidateId,
+    witnesses: [{ candidate_id: candidateId }],
+  };
+}
+
+function validPcSaveGroupsStructured() {
+  return {
+    kind: "pc-save-groups.v2",
+    summary: {
+      save_contract: "pc-save-groups.v2",
+      save_pc_probability: 1 / 7,
+      save_groups: [validPcSaveGroup()],
+    },
+  };
+}
+
+function validPcBestSaveStructured() {
+  const group = validPcSaveGroup();
+  return {
+    kind: "pc-best-save.v2",
+    summary: {
+      best_save_contract: "pc-best-save.v2",
+      best_save_schema: "clearra-save-v1",
+      best_save_probability_basis: "whole-universe-unconditional",
+      best_save_pc_probability: 1 / 7,
+      best_save_winners: [{
+        weighted_total: 6,
+        balanced_jl_count: 0,
+        exact_group_probability: group.unconditional_probability,
+        group,
+      }],
+    },
+  };
+}
+
+function validTypedDocumentUtilityResult(engineKind, publicKind = "fumen") {
+  if (engineKind === "parity-report.v1") {
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        kind: "parity-report.v1",
+        contract_id: "parity-report.v1",
+        result_kind: "parity",
+        payload_kind: "parity-report-page",
+        pages: [{
+          document_format: "fumen",
+          page_number: 1,
+          total_pages: 1,
+          coordinate_basis: "bottom-left",
+          width: 10,
+          height: 0,
+          occupied_cell_count: 0,
+          checker_black_count: 0,
+          checker_white_count: 0,
+          checker_delta: 0,
+          four_color_counts: [0, 0, 0, 0],
+          even_column_count: 0,
+          odd_column_count: 0,
+          column_parity_delta: 0,
+          occupied_area_mod_four: 0,
+          pending_garbage_occupied_cell_count: 0,
+          feasibility_claim: false,
+          pruning_authority: "none",
+          page_handle_available: true,
+        }],
+      }),
+    };
+  }
+  if (["field-document.v1", "field-document-set.v1"].includes(engineKind)) {
+    const document = "v115@vhAAgH";
+    const transform = ["to-gray", "mirror"].includes(publicKind)
+      ? publicKind
+      : "fumen";
+    const payload = {
+      format: "fumen",
+      document,
+      page_count: 1,
+      canonical_sha256: createHash("sha256").update(document).digest("hex"),
+      filename: transform === "fumen"
+        ? "clearra-fumen-page-0001.txt"
+        : `clearra-${transform}-v115.txt`,
+    };
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify(engineKind === "field-document.v1"
+        ? {
+            kind: "field-document.v1",
+            contract_id: "field-document.v1",
+            result_kind: transform,
+            payload_kind: "field-document",
+            payload,
+          }
+        : {
+            kind: "field-document-set.v1",
+            contract_id: "field-document-set.v1",
+            result_kind: "fumen",
+            payload_kind: "field-document-set",
+            payload: {
+              document_contract: "field-document.v1",
+              documents: [payload],
+            },
+          }),
+    };
+  }
+  if (engineKind === "render-artifact.v1") {
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("bot-render-test"),
+    ]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const filename = "clearra-render-page-0001.png";
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        kind: "render-artifact.v1",
+        contract_id: "render-artifact.v1",
+        result_kind: "render",
+        payload_kind: "render-artifact",
+        payload: {
+          document_format: "fumen",
+          artifact_format: "png",
+          selected_page_number: 1,
+          document_page_count: 1,
+          media_type: "image/png",
+          filename,
+          byte_length: bytes.length,
+          sha256,
+          render_exact: true,
+          skin_id: "clearra-exact-v1",
+          product_max_bytes: 4096,
+          transport_max_bytes: 4096,
+        },
+      }),
+      artifact: {
+        contract: "clearra.discord-render-artifact.v1",
+        artifactFormat: "png",
+        mediaType: "image/png",
+        filename,
+        byteLength: bytes.length,
+        sha256,
+        bytesBase64: bytes.toString("base64"),
+        renderExact: true,
+      },
+    };
+  }
+  return null;
+}
+
+function validAllspinSummary(contractId, overrides = {}) {
+  const witness = contractId === "pc-b2b-preserving-witness.v1";
+  const summary = {
+    pc_allspin_result_contract: contractId,
+    pc_allspin_mode: witness
+      ? "exact-queue-witness"
+      : "pattern-preservation-chance",
+    pc_allspin_spin_profile: "all-spin-plus",
+    pc_allspin_problem_preset: "opening-pc",
+    pc_allspin_initial_field_supplied: false,
+    pc_allspin_target_field_supplied: false,
+    pc_allspin_clear_contract: "inverse-lock-clear-to-empty",
+    pc_allspin_semantics: "clearra-explicit-spin-profile",
+    pc_allspin_compatibility: "sfinderbot-command-intent-only",
+    pc_allspin_complete: true,
+    pc_allspin_incomplete_reason: "none",
+    pc_allspin_denominator_semantics: "original-materialized-queue",
+    pc_allspin_evaluation_basis: "candidate-pattern-existence",
+    pc_allspin_path_multiplicity_counted: false,
+    pc_allspin_preserving_queue_count: 0,
+    pc_allspin_original_queue_count: 1,
+    pc_allspin_preservation_probability: 0,
+    pc_allspin_count_complete: true,
+    pc_allspin_probability_complete: true,
+    ...(witness
+      ? {
+          pc_allspin_preserves_b2b: false,
+          pc_allspin_witness_required: false,
+          pc_allspin_witness_available: false,
+          pc_allspin_witness_deterministic: false,
+          pc_allspin_witness_kind: "none",
+          pc_allspin_witness_candidate_key: "not-materialized",
+          pc_allspin_witness_pattern_index: "not-materialized",
+        }
+      : {}),
+    ...overrides,
+  };
+  return summary;
+}
+
+function searchRouteInteraction(route, options, resolved = undefined) {
+  return slashInteraction(
+    route.root,
+    route.subcommand
+      ? [{ type: 1, name: route.subcommand, options }]
+      : options,
+    resolved,
+  );
+}
+
 function discordSnowflakeAt(timestampMs) {
   return ((BigInt(timestampMs) - 1_420_070_400_000n) << 22n).toString();
 }
@@ -2939,13 +4260,92 @@ function oracleMessage(id, content) {
   };
 }
 
-function validSearchOptions(command, field) {
+function validBuildV2Structured(capabilityId, resultContract) {
+  const payloadKind = new Set([
+    "build.setup",
+    "build.congruent",
+    "build.evaluate.cover",
+    "build.evaluate.b2b-cover",
+  ]).has(capabilityId)
+    ? "candidate-family"
+    : new Set([
+        "build.setup-cover-percent",
+        "build.evaluate.cover-percent",
+      ]).has(capabilityId)
+      ? "probability"
+      : new Set([
+          "build.setup-cover-score",
+          "build.evaluate.score",
+        ]).has(capabilityId)
+        ? "score-portfolio"
+        : "portfolio";
+  return {
+    kind: resultContract,
+    contract: { command: { kind: resultContract } },
+    summary: {
+      capability_id: capabilityId,
+      result_contract: resultContract,
+      payload_kind: payloadKind,
+      candidates: [],
+      canonical_candidate_keys: payloadKind.includes("portfolio")
+        ? ["candidate-a"]
+        : [],
+      winners: [],
+      completeness: { exact: true },
+      ...(payloadKind === "score-portfolio"
+        ? { score_equality_basis: "score-only" }
+        : {}),
+    },
+  };
+}
+
+function validSearchOptions(command, field, finesseDocument, coloredDocument) {
   switch (command.input) {
     case "pc":
+    case "pc-v2":
+    case "pc-path-v2":
+    case "pc-chance-v2":
+    case "pc-save-v2":
+    case "pc-score-v2":
+    case "pc-tiling-v2":
+    case "pc-failed-v2":
       return [
         { name: "field", value: field },
         { name: "next", value: "I" },
         { name: "lines", value: 4 },
+      ];
+    case "pc-allspin-exact-v1":
+      return [
+        { name: "field", value: field },
+        { name: "next", value: "IOTSZJLIOT" },
+        { name: "lines", value: 4 },
+        { name: "spin-profile", value: "all-spin-plus" },
+      ];
+    case "pc-allspin-pattern-v1":
+      return [
+        { name: "field", value: field },
+        { name: "next", value: "*!P3" },
+        { name: "lines", value: 4 },
+        { name: "spin-profile", value: "all-spin-plus" },
+      ];
+    case "build-v2-cover":
+      return [
+        { name: "base-mask", value: "0" },
+        { name: "target-mask", value: "15" },
+        { name: "height", value: 1 },
+        { name: "queue", value: "I" },
+      ];
+    case "build-v2-target":
+      return [
+        { name: "target-format", value: "fumen" },
+        { name: "target-document", value: coloredDocument },
+        { name: "queue", value: "I" },
+      ];
+    case "build-v2-supplied":
+      return [
+        { name: "solution-format", value: "fumen" },
+        { name: "solution-document", value: coloredDocument },
+        { name: "queue", value: "I" },
       ];
     case "colored":
     case "spin":
@@ -2954,6 +4354,7 @@ function validSearchOptions(command, field) {
         { name: "next", value: "I" },
       ];
     case "cover":
+    case "build-cover":
       return [
         { name: "base", value: field },
         {
@@ -2962,7 +4363,40 @@ function validSearchOptions(command, field) {
         },
         { name: "next", value: "I" },
       ];
+    case "finesse-search":
+      return [
+        { name: "base", value: field },
+        {
+          name: "target",
+          value: fumenEncoder.encode([{ field: Field.create("IIII______") }]),
+        },
+        { name: "next", value: "I" },
+      ];
+    case "finesse-score":
+    case "finesse-score-v2":
+      return [
+        { name: "document", value: finesseDocument },
+        { name: "next", value: "I" },
+      ];
+    case "operation-document-v1":
+      return [{ name: "document", value: finesseDocument }];
+    case "field-document-v1":
+      return [{ name: "document", value: field }];
+    case "fumen-transform-v1":
+      return [
+        { name: "transform", value: "roundtrip" },
+        { name: "document", value: field },
+      ];
+    case "render-document-v1":
+      return [
+        { name: "document", value: field },
+        { name: "artifact-format", value: "png" },
+        { name: "page", value: 1 },
+      ];
     case "fixed-next":
+    case "forward-spin-v2":
+    case "forward-damage-v2":
+    case "forward-ren-v1":
       return [
         { name: "field", value: field },
         { name: "next", value: "I" },
@@ -2974,17 +4408,37 @@ function validSearchOptions(command, field) {
         { name: "lines", value: 4 },
         { name: "options", value: "initial_b2b=false" },
       ];
+    case "score-fixed-next-v2":
+    case "pc-score-finder-v2":
+      return [
+        { name: "field", value: field },
+        { name: "next", value: "I" },
+        { name: "lines", value: 4 },
+        { name: "initial-b2b", value: 0 },
+      ];
     case "remaining":
+    case "setup-v2":
       return [{ name: "remaining", value: "IOTS" }];
+    case "setup-score-v1":
+      return [
+        { name: "document-format", value: "fumen" },
+        { name: "document", value: coloredDocument },
+        { name: "setup-queue", value: "I" },
+        { name: "solution-queue", value: "I" },
+      ];
     case "spin-structure":
+    case "spin-structure-v2":
+    case "spin-structure-cover-v1":
+    case "spin-structure-guaranteed-v1":
       return [
         { name: "pieces", value: "TTIO" },
         { name: "field", value: field },
         { name: "lines", value: "1+" },
-        { name: "profile", value: "all-mini" },
+        {
+          name: command.input === "spin-structure" ? "profile" : "spin-profile",
+          value: "all-mini",
+        },
       ];
-    case "verify":
-      return [];
     default:
       throw new Error(`unsupported test command input: ${command.input}`);
   }

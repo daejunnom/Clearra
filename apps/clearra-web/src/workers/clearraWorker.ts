@@ -14,6 +14,7 @@ import {
   disposeDistributedWorkers,
   prewarmDistributedWorkers
 } from './DistributedWasmJobRunner';
+import { SharedExecutionAvailabilityError } from './SharedExecutionResourceAuthority';
 import {
   ClearraWasmRuntimeError,
   loadClearraWasmModule,
@@ -57,6 +58,15 @@ type ClearraWorkerMessage =
       offset: number;
       limit: number;
     }
+  | {
+      type: 'load_product_page';
+      requestId: number;
+      action: 'next' | 'get';
+      maximumWorkSteps?: number;
+      outerPageNumber?: number;
+      memberPageNumber?: number;
+    }
+  | { type: 'release_product_pages' }
   | { type: 'cancel_job'; jobId?: number }
   | { type: 'dispose_runtime' };
 
@@ -97,6 +107,14 @@ let warmupPolicy = normalizeRuntimeWarmupPolicy();
 self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
   if (message.data.type === 'load_solution_page') {
     loadSolutionPage(message.data.requestId, message.data.offset, message.data.limit);
+    return;
+  }
+  if (message.data.type === 'load_product_page') {
+    loadProductPage(message.data);
+    return;
+  }
+  if (message.data.type === 'release_product_pages') {
+    releaseProductPages();
     return;
   }
   if (message.data.type === 'dispose_runtime') {
@@ -150,6 +168,43 @@ function loadSolutionPage(requestId: number, offset: number, limit: number) {
   }
 }
 
+function loadProductPage(
+  request: Extract<ClearraWorkerMessage, { type: 'load_product_page' }>
+) {
+  try {
+    if (!loadedWasm) throw new Error('WASM runtime is not loaded');
+    if (!loadedWasm.product_page_available()) {
+      throw new Error('product page handle is not available');
+    }
+    const payload =
+      request.action === 'next'
+        ? loadedWasm.product_page_next(request.maximumWorkSteps ?? 10_000)
+        : loadedWasm.product_page_get(
+            request.outerPageNumber ?? 0,
+            request.memberPageNumber ?? 0
+          );
+    self.postMessage({
+      type: 'product_page',
+      request_id: request.requestId,
+      payload
+    });
+  } catch (error) {
+    self.postMessage({
+      type: 'product_page_failed',
+      request_id: request.requestId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function releaseProductPages() {
+  try {
+    if (loadedWasm?.product_page_available()) loadedWasm.product_page_release();
+  } catch {
+    // A running job owns its source until cancellation/termination completes.
+  }
+}
+
 self.addEventListener('error', (event) => {
   event.preventDefault();
   failCloseUnhandled(event.error ?? new Error(event.message || 'WASM worker crashed'));
@@ -194,9 +249,10 @@ async function runCommandText(
     ));
     wasm.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
     loadedWasm = wasm;
+    releaseProductPages();
     await startTablebaseWarmupAfterWasm(wasm);
     if (job.cancelled) {
-      releaseJobResources(job, wasm);
+      releaseJobResources(job);
       emitCancelled(job);
       closeFailClosedWorker();
       return;
@@ -215,12 +271,12 @@ async function runCommandText(
       postWorkerEvent(emitted);
     });
     if (requiresFailClosedRelease(terminal)) {
-      releaseJobResources(job, wasm);
+      releaseJobResources(job);
       closeFailClosedWorker();
     }
   } catch (error) {
     const diagnostics = wasm?.failure_diagnostics();
-    releaseJobResources(job, wasm);
+    releaseJobResources(job);
     if (job.cancelled) {
       emitCancelled(job);
     } else {
@@ -478,8 +534,9 @@ function cancelActiveJob(jobId: number | undefined) {
   job.cancelled = true;
   try {
     job.runner?.cancel();
+    releaseProductPages();
   } catch (error) {
-    releaseJobResources(job, loadedWasm);
+    releaseJobResources(job);
     emitCancelled(job);
     closeFailClosedWorker();
     console.error('Clearra cancellation cleanup failed', error);
@@ -510,7 +567,7 @@ function disposeRuntime() {
   }
   releasePc4TablebaseAssets();
   const job = active;
-  if (job) releaseJobResources(job, loadedWasm);
+  if (job) releaseJobResources(job);
   else {
     disposeDistributedWorkers();
     try {
@@ -538,26 +595,21 @@ function emitCancelled(job: ActiveJob) {
   postCancelled(job.id);
 }
 
-function releaseJobResources(job: ActiveJob, wasm: ClearraWasmModule | null) {
+function releaseJobResources(job: ActiveJob) {
   try {
     job.runner?.dispose();
   } catch {
     // Worker termination below is the final fail-closed boundary.
   }
+  releaseProductPages();
   job.runner = null;
-  disposeDistributedWorkers();
-  try {
-    wasm?.distributed_reset();
-  } catch {
-    // A trapped module is released when this worker closes.
-  }
 }
 
 function failCloseUnhandled(error: unknown) {
   if (failClosed) return;
   const job = active;
   if (job) {
-    releaseJobResources(job, loadedWasm);
+    releaseJobResources(job);
     if (!job.terminalPosted) {
       job.terminalPosted = true;
       postRuntimeFailure(
@@ -629,7 +681,17 @@ function postCancelled(jobId: number) {
     runtime: 'clearra-wasm',
     event: 'cancelled',
     job_id: jobId,
-    scope_released: true
+    scope_released: true,
+    execution_availability: {
+      state: 'cancelled',
+      reason: 'cancelled-by-caller',
+      surface: 'browser-wasm32',
+      descriptor_pattern_count: null,
+      dense_pattern_count: null,
+      required_dense_bytes: null,
+      required_memory_bytes: null
+    },
+    result_completeness: 'incomplete'
   });
 }
 
@@ -659,11 +721,33 @@ function postRuntimeFailure(
       (wasmDiagnostics.rustPanic ? `; Rust panic: ${wasmDiagnostics.rustPanic}` : '')
     : null;
   const message = context ? `${baseMessage} (${context})` : baseMessage;
+  const runtimeResourceReport =
+    error instanceof ClearraWasmRuntimeError ? error.resourceReport : null;
+  const typedAvailability = runtimeResourceReport
+    ? runtimeResourceReport.execution_availability
+    : error instanceof SharedExecutionAvailabilityError
+      ? error.availability
+      : {
+        state: linearMemoryExhausted ? 'unavailable' : 'incomplete',
+        reason: linearMemoryExhausted ? 'capability-unavailable' : 'partial-execution',
+        surface: 'browser-wasm32',
+        descriptor_pattern_count: null,
+        dense_pattern_count: null,
+        required_dense_bytes: null,
+        required_memory_bytes: null
+      } as const;
   postWorkerEvent({
     schema_version: 1,
     runtime: 'clearra-wasm',
     event: 'failed',
     job_id: jobId,
+    ...(runtimeResourceReport ? { resource_report: runtimeResourceReport } : {}),
+    execution_availability: typedAvailability,
+    result_completeness: runtimeResourceReport
+      ? runtimeResourceReport.result_completeness
+      : error instanceof SharedExecutionAvailabilityError
+        ? 'not-executed'
+        : 'incomplete',
     diagnostics: {
       diagnostics: [
         {

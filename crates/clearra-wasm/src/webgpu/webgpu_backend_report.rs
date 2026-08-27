@@ -32,6 +32,11 @@ impl WebGpuMemoryReport {
             wasm_memory_pressure: "not-reported-backend-unavailable".to_owned(),
         }
     }
+
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        (self.wasm_memory_usage.capacity() as u128)
+            .checked_add(self.wasm_memory_pressure.capacity() as u128)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +59,16 @@ impl WebGpuShaderReport {
             user_shader_allowed: false,
             runtime_shader_injection_allowed: false,
         }
+    }
+
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = self.shader_compile_status.capacity() as u128;
+        for value in [&self.shader_hash, &self.shader_version] {
+            if let Some(value) = value {
+                bytes = bytes.checked_add(value.capacity() as u128)?;
+            }
+        }
+        Some(bytes)
     }
 }
 
@@ -210,5 +225,89 @@ impl WebGpuBackendReport {
             cpu_confirmed: false,
             can_source_exact_probability: false,
         }
+    }
+
+    /// Returns every heap allocation retained by the WebGPU report, using
+    /// actual allocator capacities. Inline limits, flags, and enums are
+    /// excluded.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = self.webgpu_adapter_label_or_redacted.capacity() as u128;
+        for value in [
+            &self.webgpu_unavailable_reason,
+            &self.expected_digest,
+            &self.actual_digest,
+            &self.fallback_backend,
+        ] {
+            if let Some(value) = value {
+                bytes = bytes.checked_add(value.capacity() as u128)?;
+            }
+        }
+        bytes = bytes.checked_add(self.shader.checked_retained_capacity_bytes()?)?;
+        bytes = bytes.checked_add(self.memory.checked_retained_capacity_bytes()?)?;
+        Some(bytes)
+    }
+}
+
+#[cfg(test)]
+mod retained_capacity_tests {
+    use super::*;
+
+    fn allocated(capacity: usize, value: &str) -> String {
+        let mut output = String::with_capacity(capacity);
+        output.push_str(value);
+        output
+    }
+
+    #[test]
+    fn report_counts_nested_string_slack_fieldwise() {
+        let report = WebGpuBackendReport {
+            outcome_state: WebGpuBackendOutcomeState::Unavailable,
+            webgpu_available: false,
+            webgpu_adapter_label_or_redacted: allocated(32, "redacted"),
+            webgpu_limits: WebGpuLimitsReport::default(),
+            webgpu_required_limits: WebGpuLimitsReport::default(),
+            webgpu_unavailable_reason: Some(allocated(48, "unavailable")),
+            expected_digest: Some(allocated(64, "expected")),
+            actual_digest: Some(allocated(80, "actual")),
+            shader: WebGpuShaderReport {
+                shader_compile_status: allocated(96, "not-compiled"),
+                shader_hash: Some(allocated(112, "hash")),
+                shader_version: Some(allocated(128, "version")),
+                embedded_reviewed: false,
+                user_shader_allowed: false,
+                runtime_shader_injection_allowed: false,
+            },
+            memory: WebGpuMemoryReport {
+                wasm_memory_usage: allocated(144, "0"),
+                wasm_memory_pressure: allocated(160, "not-reported"),
+            },
+            fallback_used: true,
+            fallback_backend: Some(allocated(176, "wasm-cpu")),
+            gpu_warmup_requested: false,
+            gpu_warmup_performed: false,
+            gpu_session_reused: false,
+            gpu_trust_state: WebGpuReportTrustState::Unavailable,
+            cpu_confirmed: false,
+            can_source_exact_probability: false,
+        };
+        let expected = [
+            Some(&report.webgpu_adapter_label_or_redacted),
+            report.webgpu_unavailable_reason.as_ref(),
+            report.expected_digest.as_ref(),
+            report.actual_digest.as_ref(),
+            Some(&report.shader.shader_compile_status),
+            report.shader.shader_hash.as_ref(),
+            report.shader.shader_version.as_ref(),
+            Some(&report.memory.wasm_memory_usage),
+            Some(&report.memory.wasm_memory_pressure),
+            report.fallback_backend.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .try_fold(0_u128, |bytes, value| {
+            bytes.checked_add(value.capacity() as u128)
+        });
+
+        assert_eq!(report.checked_retained_capacity_bytes(), expected);
     }
 }

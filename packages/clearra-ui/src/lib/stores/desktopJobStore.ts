@@ -12,6 +12,7 @@ import {
   type ClearraDesktopJobEvent,
   type ClearraDesktopMemoryStatus,
   type ClearraDesktopRequest,
+  type ClearraDesktopRequestInput,
   type ClearraDesktopResourceStatus
 } from '../host';
 import type { ClearraWasmSearchReport } from '../wasm';
@@ -86,7 +87,10 @@ export function clearDesktopTerminalResult() {
 
 export function updateDesktopRequest(patch: Partial<ClearraDesktopRequest>) {
   desktopJobState.update((state) => {
-    const request = buildDesktopAppRequest({ ...state.request, ...patch });
+    const merged = { ...state.request, ...patch };
+    const request = isNominalDesktopRequest(merged)
+      ? (merged as ClearraDesktopRequest)
+      : buildDesktopAppRequest(merged as ClearraDesktopRequestInput);
     const commandChanged = request.command !== state.request.command;
     if (!commandChanged || state.status === 'running' || state.status === 'cancelling') {
       return { ...state, request };
@@ -107,6 +111,19 @@ export function updateDesktopRequest(patch: Partial<ClearraDesktopRequest>) {
       error: null
     };
   });
+}
+
+function isNominalDesktopRequest(
+  request: { command?: string }
+): request is
+  | Extract<ClearraDesktopRequest, { command: 'build-v2' }>
+  | Extract<ClearraDesktopRequest, { command: 'setup-score' }>
+  | Extract<ClearraDesktopRequest, { command: 'spin-structure' }> {
+  return (
+    request.command === 'build-v2' ||
+    request.command === 'setup-score' ||
+    request.command === 'spin-structure'
+  );
 }
 
 export async function validateDesktopRequest() {
@@ -197,7 +214,19 @@ export function resumeDesktopJobPolling() {
 }
 
 export async function prewarmDesktopSearchBackend() {
-  if (!requestsGpu(get(desktopJobState).request.backend)) return;
+  const request = get(desktopJobState).request;
+  if (
+    request.command === 'utility-sequence' ||
+    request.command === 'utility-sequence-dependencies' ||
+    request.command === 'utility-parity' ||
+    request.command === 'utility-fumen' ||
+    request.command === 'utility-render' ||
+    request.command === 'utility-to-gray' ||
+    request.command === 'utility-mirror' ||
+    !requestsGpu(request.backend)
+  ) {
+    return;
+  }
   await beginDesktopSearchBackendPrewarm();
 }
 
@@ -219,7 +248,7 @@ function beginDesktopSearchBackendPrewarm(): Promise<void> {
   return gpuWarmupPromise;
 }
 
-function requestsGpu(backend: ClearraDesktopRequest['backend']): boolean {
+function requestsGpu(backend: 'auto' | 'cpu' | 'gpu' | 'hybrid' | undefined): boolean {
   return backend === 'auto' || backend === 'gpu' || backend === 'hybrid';
 }
 

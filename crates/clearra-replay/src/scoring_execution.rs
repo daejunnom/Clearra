@@ -289,6 +289,26 @@ impl ExactScoringExecutionGraph {
         let start = node.edge_start as usize;
         &self.edges[start..start + node.edge_count as usize]
     }
+
+    /// Heap storage retained by this graph, excluding the inline graph value.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        (self.nodes.capacity() as u128)
+            .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)?
+            .checked_add(
+                (self.edges.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)?,
+            )
+    }
+
+    /// Heap storage requested by `Clone` while the source graph remains live.
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        (self.nodes.len() as u128)
+            .checked_mul(core::mem::size_of::<ScoringExecutionNode>() as u128)?
+            .checked_add(
+                (self.edges.len() as u128)
+                    .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)?,
+            )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -393,5 +413,123 @@ impl ExactScoringExecutionBatch {
 
     pub const fn complete(&self) -> bool {
         self.complete
+    }
+
+    /// Heap storage retained by this batch, excluding the inline batch value.
+    /// Outer vector slots and every nested pattern/graph allocation are counted
+    /// exactly once from their owning capacities.
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.patterns.capacity() as u128)
+            .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
+        for pattern in &self.patterns {
+            bytes = bytes.checked_add(
+                (pattern.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?;
+        }
+        bytes = bytes.checked_add(
+            (self.graphs.capacity() as u128)
+                .checked_mul(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)?,
+        )?;
+        for graph in &self.graphs {
+            bytes = bytes.checked_add(graph.checked_nested_retained_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    /// Heap storage requested by `Clone`, excluding the cloned inline batch.
+    pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.patterns.len() as u128)
+            .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
+        for pattern in &self.patterns {
+            bytes = bytes.checked_add(
+                (pattern.len() as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?;
+        }
+        bytes = bytes.checked_add(
+            (self.graphs.len() as u128)
+                .checked_mul(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)?,
+        )?;
+        for graph in &self.graphs {
+            bytes = bytes.checked_add(graph.checked_clone_nested_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    /// Peak bytes while this batch and a fieldwise clone coexist.
+    pub fn checked_clone_peak_bytes(&self) -> Option<u128> {
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(self.checked_nested_retained_bytes()?)?
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(self.checked_clone_nested_bytes()?)
+    }
+}
+
+#[cfg(test)]
+mod retained_memory_projection_tests {
+    use super::*;
+
+    #[test]
+    fn scoring_batch_projection_counts_owner_capacities_and_clone_lengths() {
+        let mut pattern = Vec::with_capacity(5);
+        pattern.extend([PieceKind::I, PieceKind::O]);
+        let pattern_capacity = pattern.capacity();
+        let mut patterns = Vec::with_capacity(3);
+        patterns.push(pattern);
+        let patterns_capacity = patterns.capacity();
+
+        let mut nodes = Vec::with_capacity(7);
+        nodes.push(ScoringExecutionNode::new(0, 0, true));
+        let nodes_capacity = nodes.capacity();
+        let edges = Vec::with_capacity(11);
+        let edges_capacity = edges.capacity();
+        let graph = ExactScoringExecutionGraph::new(
+            1,
+            StandardBoard64TilingIdentity::from_placements(0, []).expect("empty tiling identity"),
+            0,
+            nodes,
+            edges,
+        );
+        let graph_retained = nodes_capacity as u128
+            * core::mem::size_of::<ScoringExecutionNode>() as u128
+            + edges_capacity as u128 * core::mem::size_of::<ScoringExecutionEdge>() as u128;
+        assert_eq!(graph.checked_nested_retained_bytes(), Some(graph_retained));
+
+        let mut graphs = Vec::with_capacity(4);
+        graphs.push(graph);
+        let graphs_capacity = graphs.capacity();
+        let batch = ExactScoringExecutionBatch::new(
+            Board64Layout::standard_10_by_lines(4).expect("layout"),
+            0,
+            patterns,
+            0,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+            graphs,
+            true,
+        );
+        let retained = patterns_capacity as u128 * core::mem::size_of::<Vec<PieceKind>>() as u128
+            + pattern_capacity as u128 * core::mem::size_of::<PieceKind>() as u128
+            + graphs_capacity as u128 * core::mem::size_of::<ExactScoringExecutionGraph>() as u128
+            + graph_retained;
+        assert_eq!(batch.checked_nested_retained_bytes(), Some(retained));
+
+        let clone_nested = core::mem::size_of::<Vec<PieceKind>>() as u128
+            + 2_u128 * core::mem::size_of::<PieceKind>() as u128
+            + core::mem::size_of::<ExactScoringExecutionGraph>() as u128
+            + core::mem::size_of::<ScoringExecutionNode>() as u128;
+        assert_eq!(batch.checked_clone_nested_bytes(), Some(clone_nested));
+        assert_eq!(
+            batch.checked_clone_peak_bytes(),
+            Some(
+                retained
+                    + clone_nested
+                    + 2_u128 * core::mem::size_of::<ExactScoringExecutionBatch>() as u128
+            )
+        );
     }
 }

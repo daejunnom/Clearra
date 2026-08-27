@@ -3,7 +3,7 @@ use std::{sync::Arc, task::Poll};
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::SearchProblem;
 
-use crate::backend::{GpuExecutionFailure, GpuFailureDisposition};
+use crate::backend::{GpuExecutionFailure, GpuFailureDisposition, WasmCpuSearchError};
 
 use super::{
     distributed::{
@@ -46,7 +46,7 @@ enum WebGpuProducerPhase {
 }
 
 impl WasmWebGpuCandidateProducer {
-    pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+    pub fn new(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
         let verification_required = problem.objective().kind()
             != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         let exact = WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?;
@@ -72,7 +72,7 @@ impl WasmWebGpuCandidateProducer {
     pub fn advance(
         &mut self,
         control: &ExecutionControl,
-    ) -> Result<WasmCandidateProducerAdvance, &'static str> {
+    ) -> Result<WasmCandidateProducerAdvance, WasmCpuSearchError> {
         if control.is_cancelled() {
             return Ok(WasmCandidateProducerAdvance::Cancelled);
         }
@@ -106,12 +106,14 @@ impl WasmWebGpuCandidateProducer {
                     Poll::Ready(Err(GpuRunFailure::Cancelled)) => {
                         return Ok(WasmCandidateProducerAdvance::Cancelled);
                     }
-                    Poll::Ready(Err(GpuRunFailure::TrustMismatch(reason))) => return Err(reason),
+                    Poll::Ready(Err(GpuRunFailure::TrustMismatch(reason))) => {
+                        return Err(invalid(reason));
+                    }
                     Poll::Ready(Err(GpuRunFailure::Execution(failure))) => {
                         if self.start_cpu_fallback(failure)? {
                             continue;
                         }
-                        return Err(failure_reason(failure));
+                        return Err(invalid(failure_reason(failure)));
                     }
                 },
                 WebGpuProducerPhase::Reducing(mut reduction) => {
@@ -135,7 +137,7 @@ impl WasmWebGpuCandidateProducer {
                     let cursor = reduction
                         .path_cursor
                         .as_mut()
-                        .ok_or("webgpu_path_cursor_missing")?;
+                        .ok_or_else(|| invalid("webgpu_path_cursor_missing"))?;
                     match cursor.next_path() {
                         Ok(Some(path)) => {
                             let graph = &reduction.graphs[reduction.graph_cursor];
@@ -143,9 +145,11 @@ impl WasmWebGpuCandidateProducer {
                                 .target_begin
                                 .checked_add(path.batch_index() as usize)
                                 .and_then(|index| u32::try_from(index).ok())
-                                .ok_or("webgpu_target_index_overflow")?;
-                            let exact =
-                                self.exact.as_ref().ok_or("webgpu_exact_session_missing")?;
+                                .ok_or_else(|| invalid("webgpu_target_index_overflow"))?;
+                            let exact = self
+                                .exact
+                                .as_ref()
+                                .ok_or_else(|| invalid("webgpu_exact_session_missing"))?;
                             let identity_hash = exact
                                 .external_candidate_identity_hash(
                                     target_index,
@@ -163,8 +167,10 @@ impl WasmWebGpuCandidateProducer {
                             );
                             self.phase = WebGpuProducerPhase::Reducing(reduction);
                             if !self.verification_required {
-                                let exact =
-                                    self.exact.as_mut().ok_or("webgpu_exact_session_missing")?;
+                                let exact = self
+                                    .exact
+                                    .as_mut()
+                                    .ok_or_else(|| invalid("webgpu_exact_session_missing"))?;
                                 match exact
                                     .process_external_candidate_with_ordinal(
                                         candidate.target_index(),
@@ -178,7 +184,9 @@ impl WasmWebGpuCandidateProducer {
                                         return Ok(WasmCandidateProducerAdvance::Cancelled);
                                     }
                                     Some(super::result::ExactSearchAdvance::Completed(_)) => {
-                                        return Err("wasm_tiling_producer_completed_early");
+                                        return Err(invalid(
+                                            "wasm_tiling_producer_completed_early",
+                                        ));
                                     }
                                     Some(super::result::ExactSearchAdvance::Pending) | None => {}
                                 }
@@ -191,16 +199,16 @@ impl WasmWebGpuCandidateProducer {
                             reduction.path_cursor = None;
                             self.phase = WebGpuProducerPhase::Reducing(reduction);
                         }
-                        Err(_) => return Err("webgpu_solution_graph_invalid"),
+                        Err(_) => return Err(invalid("webgpu_solution_graph_invalid")),
                     }
                 }
                 WebGpuProducerPhase::CpuFallback(mut producer) => {
-                    match producer.advance(control)? {
+                    match producer.advance(control).map_err(invalid)? {
                         WasmCandidateProducerAdvance::Completed(mut summary) => {
                             summary.backend_execution = self
                                 .fallback_execution
                                 .clone()
-                                .ok_or("webgpu_cpu_fallback_metadata_missing")?;
+                                .ok_or_else(|| invalid("webgpu_cpu_fallback_metadata_missing"))?;
                             self.fallback_producer = Some(producer);
                             self.summary = Some(summary.clone());
                             self.phase = WebGpuProducerPhase::Finished;
@@ -213,20 +221,23 @@ impl WasmWebGpuCandidateProducer {
                     }
                 }
                 WebGpuProducerPhase::Finished => {
-                    return Err("wasm_distributed_geometry_already_finished");
+                    return Err(invalid("wasm_distributed_geometry_already_finished"));
                 }
             }
         }
     }
 
-    pub fn into_merger(mut self) -> Result<WasmDistributedResultMerger, &'static str> {
+    pub fn into_merger(mut self) -> Result<WasmDistributedResultMerger, WasmCpuSearchError> {
         if self.summary.is_none() {
-            return Err("wasm_distributed_geometry_not_finished");
+            return Err(invalid("wasm_distributed_geometry_not_finished"));
         }
         if let Some(producer) = self.fallback_producer.take() {
-            return producer.into_merger();
+            return producer.into_merger().map_err(invalid);
         }
-        let exact = self.exact.take().ok_or("webgpu_exact_session_missing")?;
+        let exact = self
+            .exact
+            .take()
+            .ok_or_else(|| invalid("webgpu_exact_session_missing"))?;
         Ok(WasmDistributedResultMerger::from_session(
             exact.into_distributed_finalizer().map_err(map_error)?,
         ))
@@ -266,7 +277,10 @@ impl WasmWebGpuCandidateProducer {
             })
     }
 
-    fn start_cpu_fallback(&mut self, failure: GpuExecutionFailure) -> Result<bool, &'static str> {
+    fn start_cpu_fallback(
+        &mut self,
+        failure: GpuExecutionFailure,
+    ) -> Result<bool, WasmCpuSearchError> {
         let fallback_policy = if self.fallback_allowed {
             clearra_pc_graph::request::BackendFallbackPolicy::Allow
         } else {
@@ -288,7 +302,7 @@ impl WasmWebGpuCandidateProducer {
         });
         self.exact = None;
         self.phase =
-            WebGpuProducerPhase::CpuFallback(WasmCpuCandidateProducer::new(&self.problem)?);
+            WebGpuProducerPhase::CpuFallback(WasmCpuCandidateProducer::new_typed(&self.problem)?);
         Ok(true)
     }
 
@@ -340,9 +354,45 @@ fn failure_reason(failure: GpuExecutionFailure) -> &'static str {
     }
 }
 
-fn map_error(error: WasmExactSearchError) -> &'static str {
+fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     match error {
-        WasmExactSearchError::InvalidProblem(reason) => reason,
-        WasmExactSearchError::Cancelled => "wasm_cpu_search_cancelled",
+        WasmExactSearchError::InvalidProblem(reason) => invalid(reason),
+        WasmExactSearchError::ResourceAdmission(resource_report) => {
+            WasmCpuSearchError::ResourceAdmission { resource_report }
+        }
+        WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
+    }
+}
+
+const fn invalid(reason: &'static str) -> WasmCpuSearchError {
+    WasmCpuSearchError::InvalidProblem { reason }
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::resource::{
+        ExecutionAvailability, ExecutionAvailabilityReason, ResourceReport,
+    };
+
+    use super::*;
+
+    #[test]
+    fn resource_admission_preserves_the_typed_report() {
+        let report = ResourceReport::admission_failure(
+            ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+                .with_pattern_evidence(1_058_400, 1_058_400, 132_304)
+                .with_required_memory_bytes(17_066_704),
+        );
+
+        let mapped = map_error(WasmExactSearchError::ResourceAdmission(report));
+        assert_eq!(
+            mapped,
+            WasmCpuSearchError::ResourceAdmission {
+                resource_report: report
+            }
+        );
+        assert_eq!(mapped.reason(), "shared_execution_memory_exhausted");
+        assert!(!report.execution_started());
+        assert!(!report.result_complete());
     }
 }

@@ -25,6 +25,11 @@
 
   const dispatch = createEventDispatcher<{ change: ForwardSearchRequest }>();
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: toolLabelKey = request.tool === 'damage'
+    ? 'maximumDamage'
+    : request.tool === 'spin-finder'
+      ? 'spinFinder'
+      : 'maximumRen';
   $: categoryOptions = spinCategoryOptions(request.spinProfile);
   $: if (!categoryOptions.includes(request.spinCategory)) update({ spinCategory: 'any' });
 
@@ -33,16 +38,16 @@
   }
 </script>
 
-<WorkspaceControlPanel ariaLabel={label(request.tool === 'damage' ? 'maximumDamage' : 'spinFinder')}>
+<WorkspaceControlPanel ariaLabel={label(toolLabelKey)}>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{label('source')}</h2>
     <div class="workspace-field queue-field">
-    <label class="workspace-field-label" for="forward-queue-input">{label(request.tool === 'damage' ? 'fixedQueue' : 'queuePattern')}</label>
+    <label class="workspace-field-label" for="forward-queue-input">{label(request.tool === 'spin-finder' ? 'queuePattern' : 'fixedQueue')}</label>
     <QueueTextInput
       class="workspace-queue-input"
       id="forward-queue-input"
       value={request.queue}
-      placeholder={request.tool === 'damage' ? 'TZOISLJ' : 'P4 / [^T]4'}
+      placeholder={request.tool === 'spin-finder' ? 'P4 / [^T]4' : 'TZOISLJ'}
       spellcheck="false"
       aria-invalid={validationCodes.includes('forward_queue_invalid')}
       on:value={(event) => update({ queue: event.detail })}
@@ -65,11 +70,11 @@
 
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading">
-      {#if request.tool === 'damage'}<Flame size={16} strokeWidth={1.8} />{:else}<RotateCw size={16} strokeWidth={1.8} />{/if}
-      {label(request.tool === 'damage' ? 'maximumDamage' : 'spinFinder')}
+      {#if request.tool === 'damage'}<Flame size={16} strokeWidth={1.8} />{:else if request.tool === 'spin-finder'}<RotateCw size={16} strokeWidth={1.8} />{:else}<Database size={16} strokeWidth={1.8} />{/if}
+      {label(toolLabelKey)}
     </h2>
     <div class="workspace-field-grid">
-    <label class="workspace-field">
+    {#if request.tool !== 'ren'}<label class="workspace-field">
       <span>{label('rule')}</span>
       <select value={request.rule} on:change={(event) => update({ rule: (event.currentTarget as HTMLSelectElement).value as ForwardSearchRequest['rule'] })}>
         <option value="srs-plus">SRS+</option>
@@ -77,7 +82,7 @@
         <option value="srs-x">SRS-X</option>
         <option value="jstris-180">Jstris 180</option>
       </select>
-    </label>
+    </label>{/if}
     <label class="workspace-field">
       <span>{label('spinProfile')}</span>
       <select value={request.spinProfile} on:change={(event) => update({ spinProfile: (event.currentTarget as HTMLSelectElement).value as ForwardSearchRequest['spinProfile'] })}>
@@ -91,7 +96,7 @@
     </label>
     </div>
 
-    <div class="b2b-preservation-control">
+    {#if request.tool !== 'ren'}<div class="b2b-preservation-control">
       <label class="workspace-switch-label">
         <input
           type="checkbox"
@@ -101,7 +106,7 @@
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('preserveB2B')}</span>
       </label>
-    </div>
+    </div>{/if}
     <div class="worker-policy-control">
       <label class="workspace-switch-label">
         <input
@@ -153,7 +158,7 @@
         <input type="number" min="0" max={MAX_FORWARD_CHAIN} step="1" value={request.initialB2B} on:input={(event) => update({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })} />
       </label>
     </div>
-  {:else}
+  {:else if request.tool === 'spin-finder'}
     <div class="workspace-field-grid">
       <label class="workspace-field">
         <span>{label('spinLines')}</span>
@@ -180,6 +185,8 @@
         </label>
       {/if}
     </div>
+  {:else}
+    <p class="ren-semantics">{label('renExactSemantics')}</p>
   {/if}
   </section>
 
@@ -195,4 +202,5 @@
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
   .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .queue-field :global(input[aria-invalid='true']) { border-color: #bd5a3d; }
+  .ren-semantics { color: #60706a; font-size: 11px; line-height: 1.5; margin: 12px 0 0; }
 </style>

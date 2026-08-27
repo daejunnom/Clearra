@@ -33,10 +33,18 @@ fn disabled_rule_editor_features_expose_diagnostic_codes_for_unsupported_profile
         .expect("srs-x option");
     let custom = schema.presets().last().expect("custom option");
 
-    assert_eq!(
-        srs_x.disabled_reason().map(|reason| reason.code()),
-        Some(DiagnosticCode::ERuleUnsupportedMvp)
-    );
+    assert!(srs_x.disabled_reason().is_none());
+    for profile_id in [RuleProfileId::Asc, RuleProfileId::Ars] {
+        let unsupported = schema
+            .presets()
+            .iter()
+            .find(|option| option.value() == profile_id.as_str())
+            .expect("unsupported rule option");
+        assert_eq!(
+            unsupported.disabled_reason().map(|reason| reason.code()),
+            Some(DiagnosticCode::ERuleUnsupportedMvp)
+        );
+    }
     assert_eq!(
         custom.disabled_reason().map(|reason| reason.code()),
         Some(DiagnosticCode::ERuleUnsupportedMvp)

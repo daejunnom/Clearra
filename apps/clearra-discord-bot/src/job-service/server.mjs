@@ -1,7 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
-import { canonicalClearraOperationalCommand } from "../clearra/command.mjs";
+import {
+  assertDiscordNoTieArguments,
+  canonicalClearraOperationalCommand,
+  searchTimeoutClass,
+  searchTimeoutMsForArguments,
+} from "../clearra/command.mjs";
 import { writeOperationalLog } from "../operational-log.mjs";
 import {
   normalizeRuntimeIdentity,
@@ -186,6 +191,8 @@ export class ClearraJobService {
           scope: this.operationalScope,
           kind: "search",
           command: canonicalClearraOperationalCommand(job.arguments),
+          timeoutClass: job.timeoutClass,
+          timeoutMs: job.timeoutLimitMs,
           status:
             entry.state === "completed"
               ? "succeeded"
@@ -294,8 +301,19 @@ function validateJobRequest(value, config, now) {
     }
     argumentBytes += Buffer.byteLength(argument);
   }
+  try {
+    assertDiscordNoTieArguments(value.arguments);
+  } catch {
+    throw new RequestError(400, "alternative-result paging is unavailable");
+  }
   if (argumentBytes > 8192) {
     throw new RequestError(400, "Clearra arguments are too large");
+  }
+  let timeoutClass;
+  try {
+    timeoutClass = searchTimeoutClass(value.arguments, value.timeoutClass);
+  } catch {
+    throw new RequestError(400, "job timeout class does not match its Clearra arguments");
   }
   if (!Number.isSafeInteger(value.deadlineUnixMs) || value.deadlineUnixMs <= now) {
     throw new RequestError(400, "job deadline has expired or is invalid");
@@ -303,13 +321,26 @@ function validateJobRequest(value, config, now) {
   if (!Number.isSafeInteger(value.maxOutputBytes) || value.maxOutputBytes < 1) {
     throw new RequestError(400, "invalid job output limit");
   }
+  if (!Number.isSafeInteger(value.maxArtifactBytes) || value.maxArtifactBytes < 1) {
+    throw new RequestError(400, "invalid job artifact limit");
+  }
+  const timeoutLimitMs = Math.min(
+    searchTimeoutMsForArguments(value.arguments, config, timeoutClass),
+    value.deadlineUnixMs - now,
+  );
   return {
     protocol: JOB_PROTOCOL,
     id: value.id,
     kind: value.kind,
     arguments: [...value.arguments],
+    timeoutClass,
+    timeoutLimitMs,
     deadlineUnixMs: value.deadlineUnixMs,
     maxOutputBytes: Math.min(value.maxOutputBytes, config.maxOutputBytes),
+    maxArtifactBytes: Math.min(
+      value.maxArtifactBytes,
+      config.maxArtifactBytes ?? config.maxOutputBytes,
+    ),
   };
 }
 
@@ -348,7 +379,11 @@ function jobIdFromPath(pathname) {
 function jobDigest(job) {
   // A retry may have less time remaining, but it must still join the original
   // semantic command. The first accepted request continues to own its deadline.
-  const { deadlineUnixMs: _deadlineUnixMs, ...identity } = job;
+  const {
+    deadlineUnixMs: _deadlineUnixMs,
+    timeoutLimitMs: _timeoutLimitMs,
+    ...identity
+  } = job;
   return createHash("sha256")
     .update(JSON.stringify(identity))
     .digest("hex");

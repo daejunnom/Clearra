@@ -6,7 +6,7 @@ use crate::NativeGeometryCatalog;
 use crate::PackingCandidateView;
 
 use super::{
-    packing_problem_builder::{materialized_pattern, CPackingProblemBuilder},
+    packing_problem_builder::{materialized_pattern, CMaterializedPattern, CPackingProblemBuilder},
     CBuildUpOperation, CBuildUpProblem, CPieceMultisetWindow, FfiProblemError,
     C_BUILDUP_MAX_OPERATIONS, C_LINE_CLEAR_POLICY_STANDARD, C_PIECE_I, C_PIECE_L,
 };
@@ -21,6 +21,36 @@ pub struct CBuildUpProblemTemplate {
 }
 
 impl CBuildUpProblemTemplate {
+    /// Allocation-free retained-byte projection for the `Arc`-owned template
+    /// and its exact materialized-pattern box. The two `usize` words are the
+    /// strong/weak counters in the `Arc` allocation used by the executor.
+    pub fn checked_compile_retained_bytes(
+        problem: &SearchProblem,
+        standard_bag_automaton: bool,
+    ) -> Option<u128> {
+        let pattern_count = if standard_bag_automaton {
+            0
+        } else {
+            problem
+                .piece_source()
+                .materialized_universe()?
+                .pattern_count()
+        };
+        Self::checked_retained_bytes_for_pattern_count(pattern_count)
+    }
+
+    pub fn checked_retained_bytes(&self) -> Option<u128> {
+        Self::checked_retained_bytes_for_pattern_count(self.patterns.len())
+    }
+
+    fn checked_retained_bytes_for_pattern_count(pattern_count: usize) -> Option<u128> {
+        let arc_allocation_bytes = (core::mem::size_of::<Self>() as u128)
+            .checked_add((2 * core::mem::size_of::<usize>()) as u128)?;
+        let pattern_bytes = (pattern_count as u128)
+            .checked_mul(core::mem::size_of::<CMaterializedPattern>() as u128)?;
+        arc_allocation_bytes.checked_add(pattern_bytes)
+    }
+
     pub fn compile(problem: &SearchProblem) -> Result<Self, FfiProblemError> {
         let base = CBuildUpProblemBuilder::from_search_problem(problem)?;
         let universe = problem
@@ -179,6 +209,28 @@ impl CBuildUpProblemTemplate {
                 pattern_id: pattern_id as usize,
                 pattern_count: self.patterns.len(),
             })
+    }
+}
+
+#[cfg(test)]
+mod memory_contract_tests {
+    use super::*;
+
+    #[test]
+    fn template_projection_has_disjoint_owner_and_pattern_components() {
+        let zero = CBuildUpProblemTemplate::checked_retained_bytes_for_pattern_count(0)
+            .expect("zero-pattern projection");
+        let three = CBuildUpProblemTemplate::checked_retained_bytes_for_pattern_count(3)
+            .expect("three-pattern projection");
+        assert_eq!(
+            three.checked_sub(zero),
+            Some(3 * core::mem::size_of::<CMaterializedPattern>() as u128)
+        );
+        assert_eq!(
+            zero,
+            (core::mem::size_of::<CBuildUpProblemTemplate>() + 2 * core::mem::size_of::<usize>())
+                as u128
+        );
     }
 }
 

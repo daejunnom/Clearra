@@ -14,6 +14,7 @@ mod logical;
 mod minimal;
 mod model;
 mod operation_catalog;
+mod order_coverage;
 mod structural_expand;
 mod structural_fill;
 mod structural_search;
@@ -32,4 +33,9 @@ pub use model::{
     SpinStructureMode, SpinStructureOutcome, SpinStructureQuery, SpinStructureReport,
     SpinStructureStageMetrics, SpinStructureTask, SpinStructureTimingMetrics, StructureOperation,
     StructurePlacement,
+};
+pub use order_coverage::{
+    analyze_spin_structure_coverage, guaranteed_spin_structure_family,
+    SpinStructureCoverageAnalysis, SpinStructureCoverageRow, SpinStructureOrderCoverageError,
+    DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS,
 };

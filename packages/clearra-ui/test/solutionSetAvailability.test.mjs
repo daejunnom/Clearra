@@ -23,7 +23,10 @@ test('explicit availability keeps not-calculated distinct from an actual zero', 
     ...unavailable,
     solution_count_calculated: true,
     solution_set_materialized: true,
-    solution_keys_complete: true
+    solution_keys_complete: true,
+    count_complete: true,
+    execution_availability: { state: 'available' },
+    result_completeness: 'complete'
   };
 
   assert.equal(workspaceSolutionCount(unavailable), null);
@@ -33,7 +36,7 @@ test('explicit availability keeps not-calculated distinct from an actual zero', 
   assert.equal(workspaceSolutionKeysComplete(calculatedZero), true);
 });
 
-test('summary markers and legacy numeric reports preserve backward compatibility', () => {
+test('bare legacy numeric reports fail closed while typed complete evidence permits counts', () => {
   assert.equal(
     workspaceSolutionCount({
       unique_solution_count: 0,
@@ -41,14 +44,47 @@ test('summary markers and legacy numeric reports preserve backward compatibility
     }),
     null
   );
-  assert.equal(workspaceSolutionCount({ unique_solution_count: 3 }), 3);
+  assert.equal(workspaceSolutionCount({ unique_solution_count: 3 }), null);
+  assert.equal(workspaceSolutionCount({
+    unique_solution_count: 3,
+    solution_count_calculated: true,
+    count_complete: true,
+    execution_availability: { state: 'available' },
+    result_completeness: 'complete'
+  }), 3);
   assert.equal(
     workspaceSolutionPageAvailable({
       unique_solution_count: 3,
       summary_fields: [['solution_page_available', 'true']]
     }),
-    true
+    false
   );
+});
+
+test('all numeric counts require explicit available complete count authority', () => {
+  const base = {
+    search_output_policy: 'summary',
+    unique_solution_count: 0,
+    solution_count_calculated: true,
+    count_complete: true,
+    execution_availability: { state: 'available' },
+    result_completeness: 'complete'
+  };
+  for (const [label, report] of [
+    ['availability missing', { ...base, execution_availability: undefined }],
+    ['completeness missing', { ...base, result_completeness: undefined }],
+    ['count completeness missing', { ...base, count_complete: undefined }],
+    ['availability contradictory', {
+      ...base,
+      execution_availability: { state: 'exhausted' }
+    }],
+    ['completeness contradictory', { ...base, result_completeness: 'incomplete' }]
+  ]) {
+    assert.equal(workspaceSolutionCount(report), null, label);
+    assert.equal(workspaceSolutionCountCalculated(report), false, label);
+  }
+  assert.equal(workspaceSolutionCount(base), 0);
+  assert.equal(workspaceSolutionCount({ ...base, unique_solution_count: 17 }), 17);
 });
 
 function canonicalCoverageSummaryReport() {
@@ -136,12 +172,15 @@ test('CoverageSummary availability is one atomic fail-closed tuple', () => {
   assertUnavailable(contradictoryProjection, 'contradictory projected fields');
 });
 
-test('legacy solution-count inference remains scoped to non-CoverageSummary reports', () => {
-  assert.equal(workspaceSolutionCount({ unique_solution_count: 0 }), 0);
+test('numeric zero requires explicit complete authority outside CoverageSummary', () => {
+  assert.equal(workspaceSolutionCount({ unique_solution_count: 0 }), null);
   assert.equal(
     workspaceSolutionCount({
       unique_solution_count: 0,
       solution_count_calculated: true,
+      count_complete: true,
+      execution_availability: { state: 'available' },
+      result_completeness: 'complete',
       summary_fields: [['search_output_policy', 'summary']]
     }),
     0
@@ -154,4 +193,47 @@ test('legacy solution-count inference remains scoped to non-CoverageSummary repo
       ['normalized_unique_solution_count', 'not-calculated']
     ]
   }, 'missing CoverageSummary policy');
+});
+
+test('typed pc tiling keeps the complete family count while exposing its next page', () => {
+  const report = {
+    search_output_policy: 'tiling-only',
+    unique_solution_count: 137,
+    normalized_solution_keys: Array.from({ length: 100 }, (_, index) => `ctk1:${index}`),
+    normalized_solution_set_hash: 'cts1:typed-family',
+    solution_count_calculated: true,
+    solution_set_materialized: true,
+    solution_keys_materialized_count: 100,
+    solution_keys_complete: false,
+    solution_page_available: true,
+    count_complete: true,
+    execution_availability: { state: 'available' },
+    result_completeness: 'complete',
+    summary_fields: [
+      ['search_output_policy', 'tiling-only'],
+      ['unique_solution_count', '137'],
+      ['normalized_unique_solution_count', '137'],
+      ['solution_count_calculated', 'true'],
+      ['solution_set_materialized', 'true'],
+      ['solution_keys_materialized_count', '100'],
+      ['solution_keys_complete', 'false'],
+      ['solution_page_available', 'true'],
+      ['normalized_solution_set_hash', 'cts1:typed-family'],
+      ['actual_normalized_solution_set_hash', 'cts1:typed-family']
+    ]
+  };
+
+  assert.equal(workspaceSolutionCount(report), 137);
+  assert.equal(workspaceSolutionCountCalculated(report), true);
+  assert.equal(workspaceSolutionSetMaterialized(report), true);
+  assert.equal(workspaceSolutionKeysComplete(report), false);
+  assert.equal(workspaceSolutionPageAvailable(report), true);
+
+  assertUnavailable({
+    ...report,
+    search_output_policy: 'tiling_only',
+    summary_fields: report.summary_fields.map(([key, value]) =>
+      key === 'search_output_policy' ? [key, 'tiling_only'] : [key, value]
+    )
+  }, 'noncanonical tiling policy');
 });

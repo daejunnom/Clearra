@@ -1,4 +1,4 @@
-use std::{ffi::c_void, ptr::NonNull};
+use std::{ffi::c_void, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     native::buildup_geometry_language::{
@@ -13,6 +13,24 @@ use crate::{
 pub(crate) struct RawBuildUpWorkspace {
     pointer: NonNull<c_void>,
 }
+
+pub(crate) struct RawBuildUpWorkspaceHandle<'a> {
+    pointer: NonNull<c_void>,
+    _exclusive_borrow: PhantomData<&'a mut RawBuildUpWorkspace>,
+}
+
+impl RawBuildUpWorkspaceHandle<'_> {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.pointer.as_ptr()
+    }
+}
+
+// A workspace has exclusive mutable ownership and the C object contains no
+// thread-affine handles. Moving it to its one worker preserves that ownership;
+// sharing references across workers remains forbidden because Sync is not
+// implemented. Keep this unsafe boundary beside the raw owner it describes.
+#[cfg(feature = "native-c-core")]
+unsafe impl Send for crate::native::NativeBuildUpWorkspace {}
 
 impl RawBuildUpWorkspace {
     pub(crate) fn create() -> Option<Self> {
@@ -54,8 +72,11 @@ impl RawBuildUpWorkspace {
         crate::raw::bindings::buildup_workspace::retained_bytes(self.pointer.as_ptr())
     }
 
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut c_void {
-        self.pointer.as_ptr()
+    pub(crate) fn handle(&mut self) -> RawBuildUpWorkspaceHandle<'_> {
+        RawBuildUpWorkspaceHandle {
+            pointer: self.pointer,
+            _exclusive_borrow: PhantomData,
+        }
     }
 
     pub(crate) fn query_geometry_language(

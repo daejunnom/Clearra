@@ -1,11 +1,12 @@
 import {
   BUILTIN_KICKTABLES,
   NATIVE_BUILTIN_KICKTABLES,
+  findShadowedTextCommand,
   findSlashCommand,
   localizedSlashCommandName,
   resolveSlashCommandInvocation,
 } from "./slash-command-catalog.mjs";
-import { normalizeDiscordLocale } from "./i18n.mjs";
+import { DiscordInputError, normalizeDiscordLocale } from "./i18n.mjs";
 import {
   DISCORD_PC_FIELD_MAX_ROWS,
   DISCORD_WIDE_FIELD_MAX_ROWS,
@@ -35,11 +36,31 @@ const PC_TARGET_ROWS = Object.freeze(Array.from(
 
 const INPUT_SCHEMAS = Object.freeze({
   pc: schema(["field", "next", "lines", "kicktable", "options"], ["field", "next"], ["field"]),
+  "pc-v2": schema(["field", "next", "lines", "hold", "kicktable"], ["field", "next"], ["field"]),
+  "pc-path-v2": schema(["field", "next", "lines", "hold", "kicktable"], ["field", "next"], ["field"]),
+  "pc-chance-v2": schema(["field", "next", "lines", "hold", "kicktable"], ["field", "next"], ["field"]),
+  "pc-save-v2": schema(["field", "next", "lines", "hold", "kicktable"], ["field", "next"], ["field"]),
+  "pc-allspin-exact-v1": schema(
+    ["field", "next", "lines", "spin-profile", "kicktable"],
+    ["field", "next", "spin-profile"],
+    ["field"],
+  ),
+  "pc-allspin-pattern-v1": schema(
+    ["field", "next", "lines", "spin-profile", "kicktable"],
+    ["field", "next", "spin-profile"],
+    ["field"],
+  ),
+  "pc-score-v2": schema(["field", "next", "lines", "score-profile", "kicktable"], ["field", "next"], ["field"]),
+  "pc-tiling-v2": schema(["field", "next", "lines", "hold"], ["field", "next"], ["field"]),
+  "pc-failed-v2": schema(["field", "next", "lines", "hold", "kicktable"], ["field", "next"], ["field"]),
   cover: schema(["base", "target", "next", "kicktable", "options"], ["base", "target", "next"], ["base", "target"]),
+  "build-cover": schema(["base", "target", "next", "kicktable", "hold"], ["base", "target", "next"], ["base", "target"]),
   colored: schema(["field", "next", "kicktable"], ["field", "next"], ["field"]),
   spin: schema(["field", "next", "kicktable", "options"], ["field", "next"], ["field"]),
   "fixed-next": schema(["field", "next", "kicktable", "options"], ["field", "next"], ["field"]),
   "score-fixed-next": schema(["field", "next", "lines", "kicktable", "options"], ["field", "next"], ["field"]),
+  "score-fixed-next-v2": schema(["field", "next", "lines", "kicktable", "initial-b2b"], ["field", "next"], ["field"]),
+  "pc-score-finder-v2": schema(["field", "next", "lines", "hold", "kicktable"], ["field", "next"], ["field"]),
   "spin-structure": schema(
     ["pieces", "field", "lines", "profile", "kicktable"],
     ["pieces", "field"],
@@ -50,7 +71,46 @@ const INPUT_SCHEMAS = Object.freeze({
     ["remaining"],
     [],
   ),
-  verify: schema(["scope"], [], [], true),
+  "setup-v2": schema(
+    ["remaining", "mode", "qb", "queue-knowledge", "kicktable"],
+    ["remaining"],
+    [],
+  ),
+  "setup-score-v1": schema(
+    ["document-format", "document", "setup-queue", "solution-queue", "score-profile"],
+    ["document-format", "document", "setup-queue", "solution-queue"],
+    [],
+  ),
+  "forward-spin-v2": schema(
+    ["field", "next", "height", "spin-profile", "lines"],
+    ["field", "next"],
+    ["field"],
+  ),
+  "forward-damage-v2": schema(
+    ["field", "next", "height", "spin-profile", "hold"],
+    ["field", "next"],
+    ["field"],
+  ),
+  "forward-ren-v1": schema(
+    ["field", "next", "height", "hold", "kicktable"],
+    ["field", "next"],
+    ["field"],
+  ),
+  "spin-structure-v2": schema(
+    ["pieces", "field", "lines", "spin-profile", "kicktable"],
+    ["pieces", "field"],
+    ["field"],
+  ),
+  "spin-structure-cover-v1": schema(
+    ["pieces", "field", "lines", "spin-profile", "kicktable"],
+    ["pieces", "field"],
+    ["field"],
+  ),
+  "spin-structure-guaranteed-v1": schema(
+    ["pieces", "field", "lines", "spin-profile", "kicktable"],
+    ["pieces", "field"],
+    ["field"],
+  ),
   "finesse-search": schema(
     ["target", "next", "base", "kicktable", "options"],
     ["target", "next", "base"],
@@ -60,6 +120,30 @@ const INPUT_SCHEMAS = Object.freeze({
     ["document", "next", "kicktable", "options"],
     ["document", "next"],
     [],
+  ),
+  "finesse-score-v2": schema(
+    ["document", "next", "kicktable", "hold", "knowledge"],
+    ["document", "next"],
+    [],
+  ),
+  "operation-document-v1": schema(
+    ["document", "rule-profile", "kick-profile", "timeout-seconds"],
+    ["document"],
+    [],
+    true,
+  ),
+  "field-document-v1": schema(["document"], ["document"], [], true),
+  "fumen-transform-v1": schema(
+    ["transform", "document", "page", "offset", "comments"],
+    ["transform"],
+    [],
+    true,
+  ),
+  "render-document-v1": schema(
+    ["document", "artifact-format", "page"],
+    ["document", "artifact-format"],
+    [],
+    true,
   ),
 });
 const V3_REMAINING_SCHEMA = schema(
@@ -83,12 +167,42 @@ export function buildCommandModalResponse(interaction, locale = "en") {
   const language = normalizeDiscordLocale(locale);
 
   const supplied = readSlashValues(invocation.rawOptions, command);
-  const missingRequired = inputSchema.required.some((name) => !supplied.has(name));
+  const typedDocumentAttachment =
+    [
+      "operation-document-v1",
+      "field-document-v1",
+      "fumen-transform-v1",
+      "render-document-v1",
+    ].includes(command.input) && supplied.has("attachment");
+  const missingRequired = command.input === "setup-score-v1"
+    ? !supplied.has("document-format") ||
+      !supplied.has("document") ||
+      !["setup-queue", "setup-patterns"].some((name) => supplied.has(name)) ||
+      !["solution-queue", "solution-patterns"].some((name) => supplied.has(name))
+    : inputSchema.required.some((name) =>
+      !supplied.has(name) && !(name === "document" && typedDocumentAttachment)
+    );
   const richTextBoard = inputSchema.boards.some((name) =>
     supplied.has(name) && requiresDiscordFieldModal(supplied.get(name))
   );
+  const unrepresented = [...supplied.keys()].filter((name) =>
+    !inputSchema.order.includes(name) &&
+    !(
+      [
+        "operation-document-v1",
+        "field-document-v1",
+        "fumen-transform-v1",
+        "render-document-v1",
+      ].includes(command.input) && name === "attachment"
+    )
+  );
+  if ((missingRequired || richTextBoard) && unrepresented.length > 0) {
+    throw new DiscordInputError("options.modal_unrepresented", {
+      options: unrepresented.join(", "),
+    });
+  }
   if (
-    command.input === "remaining" &&
+    ["remaining", "setup-v2"].includes(command.input) &&
     missingRequired &&
     ["next-cycle-remaining", "setup-length"].some((name) => supplied.has(name))
   ) {
@@ -120,7 +234,7 @@ export function buildCommandModalResponse(interaction, locale = "en") {
     data: Object.freeze({
       custom_id: `${MODAL_ID_PREFIX}${modalCommandKey(command)}`,
       title: (language === "ko"
-        ? `${localizedSlashCommandName(command.rootName ?? command.name, language)}${command.subcommand ? ` ${localizedFinesseSubcommand(command.subcommand, language)}` : " 탐색"} 입력`
+        ? `${localizedSlashCommandName(command.rootName ?? command.name, language)}${command.subcommand ? ` ${localizedSubcommand(command.subcommand, language)}` : " 탐색"} 입력`
         : `${command.rootName ?? command.name}${command.subcommand ? ` ${command.subcommand}` : " search"} form`
       ).slice(0, 45),
       components: Object.freeze(components),
@@ -225,9 +339,20 @@ function modalCommandKey(command) {
   return command.subcommand ? `${root}~${command.subcommand}` : root;
 }
 
-function localizedFinesseSubcommand(subcommand, locale) {
+function localizedSubcommand(subcommand, locale) {
   if (normalizeDiscordLocale(locale) !== "ko") return subcommand;
-  return subcommand === "search" ? "탐색" : subcommand === "score" ? "계산" : subcommand;
+  return ({
+    search: "탐색",
+    score: "계산",
+    path: "경로",
+    chance: "확률",
+    minimals: "최소집합",
+    joint: "종합",
+    build: "구축",
+    pc: "PC",
+    spin: "스핀",
+    damage: "대미지",
+  })[subcommand] ?? subcommand;
 }
 
 function commandModalRoute(interaction) {
@@ -256,10 +381,10 @@ function commandModalRoute(interaction) {
   if (extra !== undefined) return null;
   const root = findSlashCommand(rootName);
   const command = subcommand
-    ? root?.input === "finesse"
-      ? root.subcommands?.[subcommand] ?? null
-      : null
-    : root;
+    ? root?.subcommands?.[subcommand] ?? null
+    : root?.subcommands
+      ? findShadowedTextCommand(rootName)
+      : root;
   const inputSchema = inputSchemaForVersion(command, version);
   if (!command || !inputSchema) return null;
   if (version === 1 && inputSchema.boards.length === 0) return null;
@@ -407,13 +532,155 @@ function readSubmittedLocale(component) {
 function modalSelectSpec(command, name, locale = "en") {
   const input = command?.input ?? "";
   const korean = normalizeDiscordLocale(locale) === "ko";
-  if (input === "spin-structure" && name === "lines") {
+  if (input === "fumen-transform-v1" && name === "transform") {
+    return selectSpec(
+      "roundtrip",
+      korean ? "Fumen 변환 선택" : "Choose Fumen transform",
+      [
+        ["Roundtrip", "roundtrip"],
+        ["Combine", "combine"],
+        ["Split", "split"],
+        ["Get page", "get-page"],
+        ["Page shift", "page-shift"],
+        ["Clean comments", "clean-comments"],
+        ["Preserve comments", "preserve-comments"],
+        ["To gray", "to-gray"],
+        ["Mirror", "mirror"],
+        ["Text to Fumen", "text-to-fumen"],
+      ].map(([label, value]) => ({ label, value })),
+    );
+  }
+  if (input === "render-document-v1" && name === "artifact-format") {
+    return selectSpec(
+      "png",
+      korean ? "렌더 형식 선택" : "Choose render format",
+      [
+        { label: korean ? "PNG 페이지 (기본값)" : "PNG page (default)", value: "png" },
+        { label: korean ? "GIF 타임라인" : "GIF timeline", value: "gif" },
+      ],
+    );
+  }
+  if ([
+    "pc-v2",
+    "pc-path-v2",
+    "pc-chance-v2",
+    "pc-save-v2",
+    "pc-tiling-v2",
+    "pc-failed-v2",
+    "pc-score-finder-v2",
+  ].includes(input) && name === "hold") {
+    return selectSpec("empty", korean ? "초기 홀드 선택" : "Choose initial hold", [
+      { label: korean ? "빈 홀드 (기본값)" : "Empty hold (default)", value: "empty" },
+      { label: korean ? "홀드 비활성" : "Hold disabled", value: "disabled" },
+      ...["I", "O", "T", "S", "Z", "J", "L"].map((piece) => ({
+        label: korean ? `${piece} 미노 보유` : `Occupied by ${piece}`,
+        value: piece,
+      })),
+    ]);
+  }
+  if (["pc-score-v2", "setup-score-v1"].includes(input) && name === "score-profile") {
+    return selectSpec("tetrio", korean ? "점수 프로필 선택" : "Choose scoring profile", [
+      { label: "TETR.IO (default)", value: "tetrio" },
+      { label: korean ? "가이드라인" : "Guideline", value: "guideline" },
+      { label: "Jstris Ultra", value: "jstris-ultra" },
+    ]);
+  }
+  if (input === "setup-score-v1" && name === "document-format") {
+    return selectSpec("ctk3", korean ? "문서 형식 선택" : "Choose document format", [
+      { label: "CTK3 (default)", value: "ctk3" },
+      { label: "Fumen v115", value: "fumen" },
+    ]);
+  }
+  if (
+    input === "operation-document-v1" &&
+    (name === "rule-profile" || name === "kick-profile")
+  ) {
+    return selectSpec(
+      "srs-plus",
+      korean
+        ? `${name === "rule-profile" ? "규칙" : "킥"} 프로필 선택`
+        : `Choose ${name === "rule-profile" ? "rule" : "kick"} profile`,
+      NATIVE_BUILTIN_KICKTABLES.map(({ name: label, value }) => ({
+        label: korean && value === "srs-plus" ? "SRS+ (기본값)" : label,
+        value,
+      })),
+    );
+  }
+  if (input === "setup-v2" && name === "mode") {
+    return selectSpec("oracle", korean ? "셋업 공급 모드 선택" : "Choose setup supply mode", [
+      { label: korean ? "Oracle (기본값)" : "Oracle (default)", value: "oracle" },
+      { label: korean ? "관측 QB 그룹" : "Observed QB group", value: "qb" },
+    ]);
+  }
+  if (
+    [
+      "forward-spin-v2",
+      "forward-damage-v2",
+      "pc-allspin-exact-v1",
+      "pc-allspin-pattern-v1",
+    ].includes(input) &&
+    name === "spin-profile"
+  ) {
+    const choices = [
+      { label: "T-Spins", value: "t-spins" },
+      { label: "T-Spins+", value: "t-spins-plus" },
+      { label: "All-Spin", value: "all-spin" },
+      { label: "All-Spin+", value: "all-spin-plus" },
+      { label: "All-Mini", value: "all-mini" },
+      { label: "All-Mini+", value: "all-mini-plus" },
+    ];
+    if (input === "forward-damage-v2") {
+      choices.unshift({ label: korean ? "비활성" : "Disabled", value: "disabled" });
+    }
+    const defaultValue = input === "forward-damage-v2"
+      ? "all-mini-plus"
+      : input.startsWith("pc-allspin-")
+        ? "all-spin-plus"
+        : "t-spins";
+    return selectSpec(
+      defaultValue,
+      korean ? "스핀 판정 프로필 선택" : "Choose a spin-recognition profile",
+      choices,
+    );
+  }
+  if (["forward-damage-v2", "forward-ren-v1"].includes(input) && name === "hold") {
+    return selectSpec("on", korean ? "홀드 사용 여부 선택" : "Choose hold policy", [
+      { label: korean ? "사용 (기본값)" : "On (default)", value: "on" },
+      { label: korean ? "사용 안 함" : "Off", value: "off" },
+    ]);
+  }
+  if (input === "forward-spin-v2" && name === "lines") {
+    return selectSpec(
+      "any",
+      korean ? "마지막 스핀의 줄 수 선택" : "Choose terminal-spin line count",
+      [
+        { label: korean ? "모든 줄 수" : "Any line count", value: "any" },
+        ...Array.from({ length: 5 }, (_, value) => ({
+          label: korean ? `정확히 ${value}줄` : `Exactly ${value} line${value === 1 ? "" : "s"}`,
+          value: String(value),
+        })),
+        ...Array.from({ length: 4 }, (_, index) => ({
+          label: korean ? `최소 ${index + 1}줄` : `At least ${index + 1} lines`,
+          value: `${index + 1}+`,
+        })),
+      ],
+    );
+  }
+  if ([
+    "spin-structure",
+    "spin-structure-v2",
+    "spin-structure-cover-v1",
+    "spin-structure-guaranteed-v1",
+  ].includes(input) && name === "lines") {
     return selectSpec(
       "1+",
       korean ? "마지막 스핀의 줄 수 선택" : "Choose terminal-spin line count",
       [
         { label: korean ? "모든 줄 수" : "Any line count", value: "any" },
-        ...Array.from({ length: 5 }, (_, value) => ({
+        ...Array.from(
+          { length: input.endsWith("-v1") ? 4 : 5 },
+          (_, index) => index + (input.endsWith("-v1") ? 1 : 0),
+        ).map((value) => ({
           label: korean
             ? `정확히 ${value}줄`
             : `Exactly ${value} line${value === 1 ? "" : "s"}`,
@@ -445,8 +712,26 @@ function modalSelectSpec(command, name, locale = "en") {
       ],
     );
   }
+  if ([
+    "spin-structure-v2",
+    "spin-structure-cover-v1",
+    "spin-structure-guaranteed-v1",
+  ].includes(input) && name === "spin-profile") {
+    return selectSpec(
+      "t-spins",
+      korean ? "스핀 판정 프로필 선택" : "Choose a spin-recognition profile",
+      [
+        { label: korean ? "T 스핀" : "T-Spins", value: "t-spins" },
+        { label: korean ? "T 스핀+" : "T-Spins+", value: "t-spins-plus" },
+        { label: korean ? "전체 Mini" : "All-Mini", value: "all-mini" },
+        { label: korean ? "전체 Mini+" : "All-Mini+", value: "all-mini-plus" },
+        { label: korean ? "전체 스핀" : "All-Spin", value: "all-spin" },
+        { label: korean ? "전체 스핀+" : "All-Spin+", value: "all-spin-plus" },
+      ],
+    );
+  }
   if (name === "lines") {
-    if (input === "score-fixed-next") {
+    if (["score-fixed-next", "score-fixed-next-v2"].includes(input)) {
       return selectSpec(
         "4",
         korean ? "퍼펙트 클리어 줄 수 선택" : "Choose perfect-clear rows",
@@ -473,6 +758,12 @@ function modalSelectSpec(command, name, locale = "en") {
       ],
     );
   }
+  if (input === "score-fixed-next-v2" && name === "initial-b2b") {
+    return selectSpec("off", korean ? "초기 B2B 상태 선택" : "Choose initial B2B state", [
+      { label: korean ? "비활성 (기본값)" : "Off (default)", value: "off" },
+      { label: korean ? "활성" : "On", value: "on" },
+    ]);
+  }
   if (name === "kicktable") {
     const kicktables = nativeKicktableInput(input)
       ? NATIVE_BUILTIN_KICKTABLES
@@ -485,6 +776,27 @@ function modalSelectSpec(command, name, locale = "en") {
         value,
       })),
     );
+  }
+  if (["build-cover", "finesse-score-v2"].includes(input) && name === "hold") {
+    return selectSpec(
+      "empty",
+      korean ? "초기 홀드 상태 선택" : "Choose initial hold state",
+      [
+        { label: korean ? "빈 홀드 (기본값)" : "Empty hold (default)", value: "empty" },
+        { label: korean ? "홀드 비활성" : "Hold disabled", value: "disabled" },
+        ...["I", "O", "T", "S", "Z", "J", "L"].map((piece) => ({
+          label: korean ? `${piece}가 든 홀드` : `Occupied by ${piece}`,
+          value: piece,
+        })),
+      ],
+    );
+  }
+  if (input === "finesse-score-v2" && name === "knowledge") {
+    return selectSpec("both", korean ? "큐 공개 범위 선택" : "Choose queue knowledge", [
+      { label: korean ? "전체 큐 및 공개 7개 (기본값)" : "Full queue and visible 7 (default)", value: "both" },
+      { label: korean ? "전체 큐" : "Full queue oracle", value: "oracle" },
+      { label: korean ? "공개 7개" : "Visible 7 pieces", value: "visible-7" },
+    ]);
   }
   if (input === "remaining" && name === "priority") {
     const defaultValue = command.setupPriority ?? "all";
@@ -503,7 +815,7 @@ function modalSelectSpec(command, name, locale = "en") {
       })),
     );
   }
-  if (input === "remaining" && name === "max-setup-pieces") {
+  if (["remaining", "setup-v2"].includes(input) && name === "max-setup-pieces") {
     return selectSpec(
       "9",
       korean ? "최대 구축 미노 수 선택" : "Choose maximum setup pieces",
@@ -518,7 +830,7 @@ function modalSelectSpec(command, name, locale = "en") {
       }),
     );
   }
-  if (input === "remaining" && name === "queue-knowledge") {
+  if (["remaining", "setup-v2"].includes(input) && name === "queue-knowledge") {
     return selectSpec(
       "full-queue",
       korean ? "큐 공개 범위 선택" : "Choose queue knowledge",
@@ -587,25 +899,8 @@ function modalSelectSpec(command, name, locale = "en") {
       choices,
     );
   }
-  if (name === "scope" && input === "verify") {
-    return selectSpec("all", korean ? "검증 범위 선택" : "Choose verification scope", [
-      { label: korean ? "전체 검증" : "All checks", value: "all" },
-      ...["pc", "setup", "cover", "build", "kicks"].map((value) => ({
-        label: korean ? KOREAN_VERIFY_SCOPE_LABELS[value] : value,
-        value,
-      })),
-    ]);
-  }
   return null;
 }
-
-const KOREAN_VERIFY_SCOPE_LABELS = Object.freeze({
-  pc: "퍼펙트 클리어",
-  setup: "셋업",
-  cover: "커버리지",
-  build: "빌드",
-  kicks: "킥",
-});
 
 function selectSpec(defaultValue, placeholder, options) {
   return Object.freeze({
@@ -617,18 +912,39 @@ function selectSpec(defaultValue, placeholder, options) {
 
 function nativeKicktableInput(input) {
   return [
+    "build-cover",
+    "pc-v2",
+    "pc-chance-v2",
+    "pc-save-v2",
+    "pc-allspin-exact-v1",
+    "pc-allspin-pattern-v1",
+    "pc-score-v2",
+    "pc-failed-v2",
     "fixed-next",
+    "forward-spin-v2",
+    "forward-damage-v2",
+    "forward-ren-v1",
     "remaining",
+    "setup-v2",
     "spin-structure",
+    "spin-structure-v2",
+    "spin-structure-cover-v1",
+    "spin-structure-guaranteed-v1",
     "finesse-search",
     "finesse-score",
+    "finesse-score-v2",
   ].includes(input);
 }
 
 function normalizeSelectValue(input, name, raw) {
   if (name === "lines") return String(raw);
-  if (name === "kicktable") return String(raw).trim().toLowerCase();
-  if (input === "spin-structure" && name === "profile") {
+  if (["kicktable", "rule-profile", "kick-profile"].includes(name)) {
+    return String(raw).trim().toLowerCase();
+  }
+  if (
+    (input === "spin-structure" && name === "profile") ||
+    name === "spin-profile"
+  ) {
     return String(raw).trim().toLowerCase().replaceAll("_", "-");
   }
   if (name === "scope") return String(raw).trim().toLowerCase();
@@ -684,7 +1000,9 @@ function modalValue(value, name) {
 }
 
 function modalMaximum(option) {
-  if (option.type === 4) return 1;
+  if (option.type === 4) {
+    return String(option.max_value ?? Number.MAX_SAFE_INTEGER).length;
+  }
   return Math.min(option.max_length ?? MODAL_TEXT_LIMIT, MODAL_TEXT_LIMIT);
 }
 
@@ -696,6 +1014,9 @@ function modalLabelText(input, name, locale = "en") {
       base: `기존 필드 — 10열, 1–${maximum}줄`,
       target: `목표 차이 — 10열, 1–${maximum}줄`,
       document: "배치 문서 — CTK3 / v115 Fumen",
+      "document-format": "셋업 문서 형식",
+      "setup-queue": "정확한 셋업 큐",
+      "solution-queue": "정확한 후속 큐",
       next: isFixedQueueInput(input) ? "정확한 넥스트 큐" : "넥스트 큐 / 패턴",
       lines: input === "spin-structure" ? "마지막 스핀 줄 수" : "PC 목표 줄",
       kicktable: "킥테이블",
@@ -714,7 +1035,12 @@ function modalLabelText(input, name, locale = "en") {
       "queue-knowledge": "큐 공개 범위",
       pieces: "순서 없는 미노 목록",
       profile: "스핀 판정 프로필",
-      scope: "검증 범위",
+      "spin-profile": "스핀 판정 프로필",
+      "score-profile": "점수 프로필 (기초 근삿)",
+      "rule-profile": "이동 규칙 프로필",
+      "kick-profile": "회전 킥 프로필",
+      "timeout-seconds": "제한시간 (초)",
+      hold: "초기 홀드",
     })[name] ?? name;
   }
   return ({
@@ -722,6 +1048,9 @@ function modalLabelText(input, name, locale = "en") {
     base: `Base — 10 columns, 1–${maximum} rows`,
     target: `Target delta — 10 columns, 1–${maximum} rows`,
     document: "Placement document — CTK3 / v115 Fumen",
+    "document-format": "Setup document format",
+    "setup-queue": "Exact setup queue",
+    "solution-queue": "Exact continuation queue",
     next: isFixedQueueInput(input) ? "Exact next queue" : "Next queue / pattern",
     lines: input === "spin-structure" ? "Terminal-spin line count" : "PC target rows",
     kicktable: "Kick table",
@@ -740,7 +1069,12 @@ function modalLabelText(input, name, locale = "en") {
     "queue-knowledge": "Queue knowledge",
     pieces: "Unordered piece inventory",
     profile: "Spin-recognition profile",
-    scope: "Verification scope",
+    "spin-profile": "Spin-recognition profile",
+    "score-profile": "Score profile (basic approximation)",
+    "rule-profile": "Movement rule profile",
+    "kick-profile": "Rotation kick profile",
+    "timeout-seconds": "Timeout (seconds)",
+    hold: "Initial hold",
   })[name] ?? name;
 }
 
@@ -754,7 +1088,18 @@ function modalDescription(input, name, locale = "en") {
       ? "정확한 IOTSZJL 큐만 입력하며 영문 대소문자를 구분하지 않습니다."
       : "고정 큐 또는 지원되는 그룹·가방 패턴이며 영문 대소문자를 구분하지 않습니다.";
     if (name === "pieces") return "IOTSZJL 미노 목록이며 반복 문자는 수량을 뜻합니다. 큐나 홀드로 해석하지 않습니다.";
-    if (name === "profile") return "모든 프로필에서 Regular와 Mini를 분리하며 +는 immobile T 판정을 추가합니다.";
+    if (["profile", "spin-profile"].includes(name)) return "모든 프로필에서 Regular와 Mini를 분리하며 +는 immobile T 판정을 추가합니다.";
+    if (name === "score-profile") {
+      return input === "setup-score-v1"
+        ? "이 요청의 후보 점수화에 사용할 내장 점수 프로필입니다."
+        : "내장 프로필은 모두 basic-approximation이며 profile-specific exact는 false입니다.";
+    }
+    if (name === "document-format") return "문서와 정확히 일치하는 CTK3 또는 v115 Fumen 형식을 선택합니다.";
+    if (name === "setup-queue") return "패턴 대신 사용할 정확한 IOTSZJL 셋업 큐입니다.";
+    if (name === "solution-queue") return "패턴 대신 사용할 정확한 IOTSZJL 후속 큐입니다.";
+    if (name === "rule-profile") return "배치 도달성의 내장 이동 규칙이며 기본값은 SRS+입니다.";
+    if (name === "kick-profile") return "회전 도달성의 내장 킥 프로필이며 기본값은 SRS+입니다.";
+    if (name === "timeout-seconds") return "정확 분석 제한시간은 1–900초이며 기본값은 900초입니다.";
     if (name === "lines") return input === "score-fixed-next"
       ? `1–${DISCORD_PC_FIELD_MAX_ROWS}줄 퍼펙트 클리어 목표 높이 중 하나를 선택합니다.`
       : input === "spin-structure"
@@ -774,7 +1119,8 @@ function modalDescription(input, name, locale = "en") {
     if (name === "priority") return "구축 × PC 종합, 구축 확률 우선, PC 확률 우선 중 하나로 정렬합니다.";
     if (name === "max-setup-pieces") return "1–10개이며 기본값은 9개입니다. 10개는 완성된 PC도 포함합니다.";
     if (name === "queue-knowledge") return "전체 미래 큐 또는 실제로 공개되는 7개만 사용합니다.";
-    return "범위 하나를 선택하거나 전체를 선택해 모든 검증을 실행합니다.";
+    if (name === "hold") return "홀드 비활성, 빈 홀드 또는 미노 하나가 든 홀드 중 하나를 선택합니다.";
+    return "이 명령의 입력 값을 제공합니다.";
   }
   if (["field", "base", "target"].includes(name)) {
     return "Top first. Prefer # for filled and _ for empty. CTK3, Fumen, and URLs also work.";
@@ -784,13 +1130,25 @@ function modalDescription(input, name, locale = "en") {
     ? "Exact IOTSZJL queue only; piece letters are case-insensitive."
     : "Fixed queue or supported group/bag pattern; letters are case-insensitive.";
   if (name === "pieces") return "IOTSZJL inventory; repeats are multiplicities, not queue order or hold.";
-  if (name === "profile") return "Every profile keeps Regular and Mini separate; + adds the immobile-T fallback.";
+  if (["profile", "spin-profile"].includes(name)) return "Every profile keeps Regular and Mini separate; + adds the immobile-T fallback.";
+  if (name === "score-profile") {
+    return input === "setup-score-v1"
+      ? "Built-in score profile used to rank this request's candidates."
+      : "All built-in profiles are basic-approximation; profile-specific exactness is false.";
+  }
+  if (name === "document-format") return "Select CTK3 or v115 Fumen to match the supplied document exactly.";
+  if (name === "setup-queue") return "Exact IOTSZJL setup queue; use direct slash input for patterns.";
+  if (name === "solution-queue") return "Exact IOTSZJL continuation queue; use direct slash input for patterns.";
+  if (name === "rule-profile") return "Built-in movement rules for placement reachability; defaults to SRS+.";
+  if (name === "kick-profile") return "Built-in rotation kicks for reachability; defaults to SRS+.";
+  if (name === "timeout-seconds") return "Exact-analysis timeout from 1 through 900 seconds; defaults to 900.";
   if (name === "lines") return input === "score-fixed-next"
     ? `Choose any perfect-clear target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows.`
     : input === "spin-structure"
       ? "Lines cleared by the terminal spin; the default is at least one."
     : `Auto evaluates rows 1–${DISCORD_PC_FIELD_MAX_ROWS} from the field and next, then searches valid targets.`;
   if (name === "kicktable") return "Built-in profiles only; custom kick JSON remains intentionally unavailable.";
+  if (name === "hold") return "Choose disabled hold, empty hold, or one occupied IOTSZJL piece.";
   if (name === "options") return input === "spin"
     ? "TSM remains intentionally unavailable."
     : input === "score-fixed-next"
@@ -804,30 +1162,32 @@ function modalDescription(input, name, locale = "en") {
   if (name === "priority") return "Order by joint build × PC, build probability first, or PC probability first.";
   if (name === "max-setup-pieces") return "Choose 1–10; the default is 9, while 10 includes complete PCs.";
   if (name === "queue-knowledge") return "Use the full future queue or only the 7 pieces visible during play.";
-  return "Choose one scope, or All to run every verification group.";
+  return "Provide the value required by this command.";
 }
 
 function modalPlaceholder(input, name) {
   if (["field", "base", "target"].includes(name)) return emptyGrid(defaultBoardRows(input));
   if (name === "next") return isFixedQueueInput(input) ? "IOTSZJL" : "*! or [IOSZ]p2";
   if (name === "document") return "ctk3_… or v115@…";
+  if (["setup-queue", "solution-queue"].includes(name)) return "IOTSZJL";
+  if (name === "timeout-seconds") return "900";
   if (name === "pieces") return "IOTSZJL";
   if (name === "remaining") return "IOTSZJL";
   return "";
 }
 
 function defaultBoardRows(input) {
-  return input === "pc" || input === "score-fixed-next" ? 4 : 8;
+  return ["pc", "pc-v2", "pc-path-v2", "pc-chance-v2", "pc-save-v2", "pc-score-v2", "pc-tiling-v2", "pc-failed-v2", "pc-score-finder-v2", "pc-allspin-exact-v1", "pc-allspin-pattern-v1", "score-fixed-next", "score-fixed-next-v2"].includes(input) ? 4 : 8;
 }
 
 function maximumBoardRows(input) {
-  return input === "pc" || input === "score-fixed-next"
+  return ["pc", "pc-v2", "pc-path-v2", "pc-chance-v2", "pc-save-v2", "pc-score-v2", "pc-tiling-v2", "pc-failed-v2", "pc-score-finder-v2", "pc-allspin-exact-v1", "pc-allspin-pattern-v1", "score-fixed-next", "score-fixed-next-v2"].includes(input)
     ? DISCORD_PC_FIELD_MAX_ROWS
     : DISCORD_WIDE_FIELD_MAX_ROWS;
 }
 
 function isFixedQueueInput(input) {
-  return input === "fixed-next" || input === "score-fixed-next";
+  return ["fixed-next", "forward-damage-v2", "forward-ren-v1", "pc-allspin-exact-v1", "pc-score-finder-v2", "score-fixed-next", "score-fixed-next-v2"].includes(input);
 }
 
 function emptyGrid(rows) {

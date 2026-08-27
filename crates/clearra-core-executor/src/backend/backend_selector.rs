@@ -8,7 +8,8 @@ use super::{
     },
     CapabilityQueryError, CpuParallelGeometryExactCoverBackend, GpuExecutionFailure,
     GpuExecutionFailureResolution, GpuExecutionFailureStage, GpuSearchCapability,
-    NativeSearchBackendCapabilityProvider, SearchBackendCapabilityProvider,
+    NativeSearchBackendCapabilityProvider, PackingCandidateProvenance,
+    SearchBackendCapabilityProvider,
 };
 
 mod availability {
@@ -482,12 +483,14 @@ mod report {
         fallback_reason: Option<SearchBackendFallbackReason>,
         gpu_failure: Option<GpuExecutionFailureResolution>,
         workers_used: usize,
+        execution_selection_reason: Option<SearchBackendSelectionReason>,
     }
 
     impl SearchBackendReport {
         pub(crate) fn from_execution(
             mut selection: PcBackendSelection,
             actual_backend: SelectedSearchBackend,
+            candidate_provenance: PackingCandidateProvenance,
             execution_fallback_reason: Option<SearchBackendFallbackReason>,
             execution_gpu_failure: Option<GpuExecutionFailureResolution>,
             execution_gpu_device: Option<GpuDeviceSummary>,
@@ -503,12 +506,18 @@ mod report {
             if execution_gpu_device.is_some() {
                 selection.gpu_device = execution_gpu_device;
             }
+            let execution_selection_reason = (candidate_provenance.is_raw_geometry()
+                && selection.selected_backend
+                    == SelectedSearchBackend::CpuParallelGeometryExactCover
+                && actual_backend == SelectedSearchBackend::CpuGeometryExactCover)
+                .then_some(SearchBackendSelectionReason::RawGeometryDeterministicSerial);
             Self {
                 selection,
                 actual_backend,
                 fallback_reason,
                 gpu_failure,
                 workers_used,
+                execution_selection_reason,
             }
         }
 
@@ -529,7 +538,9 @@ mod report {
         }
 
         pub fn selection_reason(&self) -> SearchBackendSelectionReason {
-            if self.actual_backend != self.selection.selected_backend
+            if let Some(reason) = self.execution_selection_reason {
+                reason
+            } else if self.actual_backend != self.selection.selected_backend
                 && self.fallback_reason.is_some()
             {
                 SearchBackendSelectionReason::ExplicitFallbackToCpuGeometryExactCover

@@ -29,9 +29,6 @@ objects.
 backend metrics, C/Rust bridge details, score internals, coverage row internals,
 and executor flow fields.
 
-`--diagnostics` selects the diagnostic text profile and expands diagnostic
-evidence without requiring users to read the full JSON contract.
-
 `--format json` remains the full stable contract and must preserve all contract
 fields regardless of text verbosity.
 
@@ -59,14 +56,67 @@ Scoring output is an overlay on replay/objective results. It exposes
 `coverage_probability`.
 
 Score summary selects the highest legal movement trace for each
-`(candidate_id, pattern_id)`, then the highest-scoring candidate for each
-pattern before applying the pattern weight model. Patterns without a PC
-execution contribute score zero to `score_field_average_score`. Missing or
+`(candidate_id, pattern_id)` by integer score alone, then retains every
+highest-scoring candidate for each pattern before applying the requested
+reducer. Attack cannot break any score tie or alter ordering. Patterns without
+a PC execution contribute score zero to `score_field_average_score`. Missing or
 partial score evidence reports an incomplete matrix rather than inventing a
-score. The product does not serialize per-solution average score rows or expose
-score-aware cover objectives. `objective_min_cover_selected_rows` remains the
-ordinary minimum set whose PatternBitSet union covers the requested PC
-patterns.
+score. `objective_min_cover_selected_rows` remains the ordinary minimum set
+whose PatternBitSet union covers the requested PC patterns;
+`pc.score-minimals` and typed `max-score-cover` use separate score-optimal row
+and exact portfolio contracts.
+
+## Portfolio Alternative Output
+
+Portfolio tie output is used only when the public result unit is a portfolio.
+`portfolio-alternative-set.v1` carries query/source/profile/universe/build and
+candidate-map identity, proven optimal cardinality,
+`known_alternative_count_decimal`, nullable
+`total_alternative_count_decimal`, `enumeration_complete`, and restart evidence.
+`portfolio-alternative-page.v1` carries one outer portfolio and opaque
+previous/next cursors. `portfolio-member-page.v1` reads that result's candidate
+dictionary in pages of exactly 100.
+
+GUI result stores prepare automatically but enumerate only for navigation or
+bounded prefetch. They keep current/previous/next state and release it on new
+search, cancellation, navigation away, disposal, or app exit. They do not put
+snapshot state in share URLs or carry it across restarts in v0.8.
+
+CLI tie enumeration is opt-in:
+
+```text
+clearra <original-command> ... --ties --tie-snapshot PATH
+clearra continue --tie-snapshot PATH --tie-cursor TOKEN
+```
+
+The initial path must be new. Snapshot output is versioned, query/build bound,
+exclusively locked, no-replace, and rejects symlink/reparse targets. Default CLI
+output remains unchanged without the flags. Discord does not expose tie flags,
+counts, pages, cursors, buttons, explanations, or attachments and accepts only
+the canonical first portfolio in the existing result shape.
+
+Normal solution or witness families, including `pc.score`, `pc.allspin-sol`,
+Setup rankings, Forward outcomes, and operation-order lists, keep their own
+family paging and never acquire portfolio tie metadata merely because multiple
+members exist.
+
+## Native Solution-Set CTK3 And Fumen
+
+`solution-set-artifact.v2` requires every solution-bearing native CLI command to
+support `--format text|json|ctk3|fumen` and
+`--solution-artifact-format compact|json|ctk3|fumen`. Existing text and compact
+defaults do not change. A selected portfolio encodes all of its members, not
+only the visible 100-member page; a normal family follows its capability paging
+contract.
+
+Native CTK3 uses a Rust codec conforming to the language-neutral CTK3 document
+contract and the same KAT fixtures as the browser/Discord TypeScript package.
+The native path must not launch Node/JavaScript or call a network codec. Large
+documents stream through CTK3 segment/bundle framing. Native Fumen writes a
+compatible multi-page document and rejects CTK3-only information that cannot be
+represented without loss. Cancellation, codec failure, and publication failure
+must not leave a successful partial stdout/file; native file publication keeps
+atomic-new-file, no-overwrite, and symlink rejection.
 
 Spin target output is a coverage result. `SpinProbabilityResult` fields include
 `spin_target_id`, `spin_target_name`, `covered_pattern_count`, `pattern_count`,
@@ -175,8 +225,8 @@ execution has started.
 `memory_pressure_level`.
 
 Default text output keeps this short: backend selection, GPU unavailable/trust
-summary, and memory clean/pressure summary. Verbose and diagnostics output may
-show lower-level hybrid scheduler and C memory details.
+summary, and memory clean/pressure summary. Verbose output may show lower-level
+hybrid scheduler and C memory details.
 
 Default text backend summary is intentionally small:
 

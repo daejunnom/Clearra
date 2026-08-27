@@ -26,10 +26,9 @@ command contracts are independently represented by the typed Clearra engines.
 | sfinder-man `cat-finder` | Expands one exact queue into its unique hold reorderings, asks solution-finder `path` for an exact perfect clear at the selected height, and ranks the paths with Jstris scoring plus the supplied initial state. | Clearra exposes this contract only as `score-finder` (including Discord `/score-finder`); the former raw name is retired. Clearra compiles it to fixed-queue `pc --objective all --score --score-profile jstris-ultra`, not forward `damage`. Nonzero initial combo and B2B end bonus fail closed until the typed scoring contract can represent them. |
 | `cover` | Consumes supplied operation or fumen solutions and evaluates which queues can build them. It does not run perfect-pack search. | Direct `clearra cover` remains the historical alias of typed `build-coverage`. Active Discord `/cover` accepts a colorless base plus a target delta and compiles to build probability. The raw CLI `clearra sfinder cover <solution-fumen> ...` form remains a separate legacy exact-solution boundary. |
 | `setup` | Searches placements satisfying required-area and margin constraints. It is not a PC-family setup policy finder. | Direct `clearra setup` remains the historical alias of the PC-family `setup-finder`. Sfinder's colored required-area contract is isolated at `clearra sfinder setup` and maps to the build-probability surface. |
-| `spin` | Uses a specialized T-spin structure search and SRS reachability. | Clearra uses the selected kick and spin profiles in its separate forward spin finder. SRS-only assumptions are not imported. |
+| `spin` | Uses a specialized unordered T-spin structure search and SRS reachability. | This is a `spin-structure` family contract, not an ordered forward-spin alias. The compatibility namespace fails closed until the structural search/cover projection is implemented; Clearra's native forward spin finder remains a separate command. |
 | `ren` | Runs forward longest-combo search, with separate hold and no-hold searchers. | Clearra forward-search infrastructure is the applicable boundary; no PC packing evidence is generated. |
 | `util` | Transforms fields, operations, and fumens. | Clearra codec, CTK, and Fumen tools remain outside the search core. |
-| `verify` | Verifies kick and input contracts. | Clearra rule-profile verification remains a validation command and never runs packing. |
 
 ## Adopted Optimization
 
@@ -89,9 +88,12 @@ queue syntax and compiles a typed request; it never starts Java or another solve
   coverage on the raw CLI: `cover`;
 - colored target/build analysis: `setup`, `congruent`, `congruent-cover`,
   `setup-cover`, `cover-percent`, and `special-cover`;
-- forward search: `spin-cover`, `spin`, and native Discord `/damage`;
-- PC-family setup ranking: `pc-setup`, `best-setup`, and `dpc-finder`;
-- validation: `verify`.
+- structural search: native Clearra `spin-structure`; Sfinder `spin` and
+  sfinder-man `spincover` remain explicitly unavailable until the distinct
+  structural cover result contract is implemented;
+- forward search: native Clearra `spin-finder`/Discord forward-spin and damage
+  surfaces only;
+- PC-family setup ranking: `pc-setup`, `best-setup`, and `dpc-finder`.
 
 The legacy raw CLI colored-Fumen allow-list uses exact initial occupancy plus
 one aggregate occupancy mask per piece kind. This preserves repeated equal
@@ -114,8 +116,8 @@ The remaining differences are product-contract differences, not spelling bugs:
 - solution-finder `setup` has required, margin, free, and forbidden regions that
   are not equivalent to Clearra's PC-family setup finder or a colored exact-fill
   build-probability target;
-- solution-finder `spin` is an SRS T-spin structure search, whereas Clearra's
-  mapping uses its profile-aware forward-search contract;
+- solution-finder `spin` is an unordered SRS T-spin structure search. It is
+  not lowered to Clearra's ordered, queue-consuming forward-search contract;
 - the official solution-finder percent fixture reports 4,374 / 5,040 under its
   SRS contract; the measured Jstris-180 dialect reports 4,408 / 5,040. This is a
   deliberate rule-contract difference and must not be advertised as parity.
@@ -130,15 +132,15 @@ Clearra target instead of maintaining a second pool:
   verification coordinator;
 - Discord `/cover` and target setup/cover variants use distributed build
   probability; legacy raw CLI colored-Fumen cover retains the PC/scenario path;
-- spin and damage variants use the forward-search coordinator;
+- native ordered spin and damage variants use the forward-search coordinator;
+  Sfinder structural spin variants do not enter that coordinator;
 - PC setup variants use the setup coordinator.
 
 The compatibility boundary accepts `--workers N` and its `--cpu-threads N`
 alias as a fixed request. `--auto-workers N` is an adaptive ceiling: it retains
 each target engine's small-work serial gate. `--use-all-cpu-threads` is required
 when either selection consumes the normally reserved logical processor. Fixed
-and adaptive requests are mutually exclusive. `verify` rejects worker options
-because it has no search pool.
+and adaptive requests are mutually exclusive.
 
 The boundary only transports resource policy. Exact canonical reduction,
 candidate identities, and coverage unions remain owned by the target engine, so
@@ -156,14 +158,14 @@ worker completion order cannot change the result set.
 
 ## 2026-08-02 Discord and Translator Audit
 
-The Discord boundary registers one slash command for each represented Sfinder
-contract, including `/path`, `/percent`, `/setup`, and `/verify`. It does not
-register the native command families, a `/clearra` catch-all, or `/view`.
+The historical Discord boundary registered one slash command for each represented
+Sfinder contract. The current boundary does not register the native command
+families, a `/clearra`
+catch-all, or `/view`.
 Tablebase, dependency-DAG, output format, native file/output paths, custom WGSL,
 and custom kick JSON remain host-owned or blocked. Commands continue to use an
 argv array and `shell:false`; sfinder-man's shell command, upload/list/delete,
-process-list, and message-content-intent model is not imported. Verify does not
-receive a worker option.
+process-list, and message-content-intent model is not imported.
 
 The active slash path is Discord directly to one Cloud Run interaction service
 and then directly back to the Discord interaction webhook. With no
@@ -178,7 +180,9 @@ inputs:
 
 - extra positional values, including an additional cover Fumen;
 - setup-family options that the one-inventory native contract cannot preserve;
-- T-spin mini (`TSM`), which cannot be represented by the current TSS target;
+- every Sfinder `spin`/`spincover` variant, because an unordered structural
+  inventory and structural cover projection cannot be represented by the
+  ordered forward-spin request;
 - unsupported Sfinder commands such as `ren`, `util`, `parity`, render tools, and
   `special-minimals`.
 
@@ -254,7 +258,10 @@ allow-list:
   sfinder-man positional form also accepts combo and B2B end-bonus positions,
   but both must remain zero until the typed scoring contract represents them;
 - `/cover`: `hold=use|avoid` only; its height is derived from the two fields;
-- `/spin-cover` and `/spin`: `type=TSS|TSD|TST|TSPIN|T-SPIN|ANY`;
+- historical Clearra `/spin-cover` and `/spin` forward-search aliases:
+  `type=TSS|TSD|TST|TSPIN|T-SPIN|ANY`; these names never establish Sfinder
+  structural-spin parity and are replaced by the typed forward-spin options in
+  the grouped v0.8 surface;
 - all other represented commands: no bundled settings.
 
 Worker selection, output format, paths, custom code/profiles, primary field and

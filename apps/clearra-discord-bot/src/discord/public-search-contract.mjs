@@ -1,43 +1,92 @@
-/**
- * The public Discord identity is the trust boundary for result projection.
- * Each row names the only engine result kind(s) the curated translator may
- * return and the timeout class applied to that public search path.
- */
-export const DISCORD_PUBLIC_SEARCH_CONTRACT = Object.freeze([
-  row("path", "pc-scenario", "reverse"),
-  row("percent", "pc-scenario", "reverse"),
-  row("chance", "pc-scenario", "reverse"),
-  row("minimals", "pc-scenario", "reverse"),
-  row("score", "pc-scenario", "reverse"),
-  row("score-minimals", "pc-scenario", "reverse"),
-  row("saves", "pc-scenario", "reverse"),
-  row("best-save", "pc-scenario", "reverse"),
-  row("cover", "build-probability", "forward"),
-  row("setup", "build-probability", "forward"),
-  row("congruent", "build-probability", "forward"),
-  row("congruent-cover", "build-probability", "forward"),
-  row("setup-cover", "build-probability", "forward"),
-  row("cover-percent", "build-probability", "forward"),
-  row("special-cover", "build-probability", "forward"),
-  row("spin-cover", "spin-finder", "forward"),
-  row("spin", "spin-finder", "forward"),
-  row("score-finder", "pc-scenario", "reverse"),
-  row("damage", "damage", "forward"),
-  row("spin-structure", "spin-structure", "forward"),
-  row("pc-setup", "setup", "setup"),
-  row("best-setup", "setup", "setup"),
-  row("dpc-finder", "setup", "setup"),
-  row("finesse-search", "build-probability", "forward"),
-  row("finesse-score", "build-probability", "forward"),
-  row("verify", ["verify", "verify-kicks"], "default"),
-]);
+import {
+  activeDiscordSearchCapabilities,
+  activeDiscordGenericCompatibilityRoutes,
+  hiddenTextSearchCapabilities,
+} from "./capability-registry.mjs";
 
-function row(id, engineKinds, timeoutClass) {
-  const kinds = Array.isArray(engineKinds) ? engineKinds : [engineKinds];
+/**
+ * Result projection is generated from typed product capabilities plus the
+ * separately governed generic-compatibility routes. Route authority IDs keep
+ * identical user-facing labels from cross-accepting engine result kinds.
+ */
+export const DISCORD_PUBLIC_SEARCH_CONTRACT = Object.freeze(
+  resultRows(
+    activeDiscordSearchCapabilities(),
+    activeDiscordGenericCompatibilityRoutes(),
+  ),
+);
+
+// Hidden text diagnostics use the same fail-closed result translator without
+// becoming public slash/help capabilities.
+export const DISCORD_HIDDEN_TEXT_SEARCH_CONTRACT = Object.freeze(
+  resultRows(hiddenTextSearchCapabilities()),
+);
+
+function resultRows(capabilities, genericRoutes = []) {
+  const rows = new Map();
+  for (const capability of capabilities) {
+    for (const route of [capability.canonical, ...capability.aliases]) {
+      if (!route.slash && !route.text) continue;
+      const publicResultKind = route.publicResultKind ??
+        (route.subcommand ? capability.publicResultKind : route.root);
+      const id = route.resultAuthorityId ?? publicResultKind;
+      if (!id || !publicResultKind) continue;
+      const candidate = row(id, publicResultKind, capability, route);
+      const previous = rows.get(id);
+      if (previous && !sameContract(previous, candidate)) {
+        throw new Error(`Discord result identity '${id}' has conflicting capability contracts.`);
+      }
+      rows.set(id, candidate);
+    }
+  }
+  for (const route of genericRoutes) {
+    const candidate = row(
+      route.resultAuthorityId,
+      route.publicResultKind,
+      route,
+    );
+    const previous = rows.get(candidate.id);
+    if (previous && !sameContract(previous, candidate)) {
+      throw new Error(
+        `Discord result identity '${candidate.id}' has conflicting route contracts.`,
+      );
+    }
+    rows.set(candidate.id, candidate);
+  }
+  return [...rows.values()];
+}
+
+function row(id, publicResultKind, capability, route = null) {
+  const problemContractId = route?.problemContractId ?? capability.problemContractId;
+  const resultContractId = route?.resultContractId ?? capability.resultContractId;
+  const effectClasses = route?.effectClasses ?? capability.effectClasses;
+  const engineKinds = route?.engineKinds ?? capability.engineKinds;
   return Object.freeze({
     id,
-    engineKinds: Object.freeze([...kinds]),
-    resultKey: id.replaceAll("-", "_"),
-    timeoutClass,
+    publicResultKind,
+    capabilityId: capability.id,
+    problemContractId,
+    resultContractId,
+    algorithmFamily: capability.algorithmFamily,
+    effectClasses: Object.freeze([...effectClasses]),
+    productTimeoutClass: capability.timeoutClass,
+    timeoutClass: capability.timeoutClass,
+    engineKinds: Object.freeze([...engineKinds]),
+    telemetryIdentity: capability.telemetryIdentity,
+    loweringAuthority: capability.loweringAuthority,
+    resultKey: publicResultKind.replaceAll("-", "_"),
   });
+}
+
+function sameContract(left, right) {
+  return left.publicResultKind === right.publicResultKind &&
+    left.problemContractId === right.problemContractId &&
+    left.resultContractId === right.resultContractId &&
+    left.algorithmFamily === right.algorithmFamily &&
+    JSON.stringify(left.effectClasses) === JSON.stringify(right.effectClasses) &&
+    left.productTimeoutClass === right.productTimeoutClass &&
+    left.timeoutClass === right.timeoutClass &&
+    JSON.stringify(left.engineKinds) === JSON.stringify(right.engineKinds) &&
+    left.telemetryIdentity === right.telemetryIdentity &&
+    left.loweringAuthority === right.loweringAuthority;
 }

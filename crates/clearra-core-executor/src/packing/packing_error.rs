@@ -26,6 +26,10 @@ pub enum PackingRunnerError {
         backend: SelectedSearchBackend,
         trust_state: BackendTrustState,
     },
+    CandidateProvenanceMismatch {
+        expected: crate::backend::PackingCandidateProvenance,
+        actual: crate::backend::PackingCandidateProvenance,
+    },
     GpuExecution(GpuExecutionFailure),
     GpuExecutionRejected(GpuExecutionFailureResolution),
     CandidateIdentityExhausted,

@@ -7,7 +7,8 @@ product path is:
 
 ## Forbidden Search Families
 
-Independent front-half/back-half PC joins are not part of Clearra. Line clears,
+Meet-in-the-middle PC search is not part of Clearra. Independent
+front-half/back-half PC joins are forbidden for the same reason: line clears,
 y adjustment, grounded placement, queue order, and hold transitions make those
 joins unsound. Exact component composition is allowed only after the placement
 hypergraph proves that no legal row crosses the separator; its piece-count

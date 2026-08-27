@@ -178,6 +178,55 @@ fn calculated_zero_remains_distinct_from_not_calculated() {
 }
 
 #[test]
+fn dedicated_tiling_policy_accepts_one_complete_family_with_a_partial_initial_page() {
+    let fields = vec![
+        ("search_output_policy".to_owned(), "tiling-only".to_owned()),
+        ("unique_solution_count".to_owned(), "137".to_owned()),
+        (
+            "normalized_unique_solution_count".to_owned(),
+            "137".to_owned(),
+        ),
+        ("solution_count_calculated".to_owned(), "true".to_owned()),
+        ("solution_set_materialized".to_owned(), "true".to_owned()),
+        (
+            "solution_keys_materialized_count".to_owned(),
+            "100".to_owned(),
+        ),
+        ("solution_keys_complete".to_owned(), "false".to_owned()),
+        ("solution_page_available".to_owned(), "true".to_owned()),
+    ];
+
+    let report = SearchExecutionReport::from_summary_fields(&fields, Vec::new());
+    let availability = report.solution_set_availability();
+
+    assert!(availability.contract_valid());
+    assert!(availability.uses_explicit_contract());
+    assert!(!availability.uses_legacy_inference());
+    assert!(availability.solution_count_calculated());
+    assert!(availability.solution_set_materialized());
+    assert_eq!(availability.solution_keys_materialized_count(), 100);
+    assert!(!availability.solution_keys_complete());
+    assert!(availability.solution_page_available());
+}
+
+#[test]
+fn dedicated_tiling_policy_never_falls_back_to_legacy_count_inference() {
+    let fields = vec![
+        ("search_output_policy".to_owned(), "tiling-only".to_owned()),
+        ("unique_solution_count".to_owned(), "137".to_owned()),
+    ];
+
+    let report = SearchExecutionReport::from_summary_fields(&fields, Vec::new());
+    let availability = report.solution_set_availability();
+
+    assert!(!availability.contract_valid());
+    assert!(!availability.uses_legacy_inference());
+    assert!(!availability.solution_count_calculated());
+    assert!(!availability.solution_set_materialized());
+    assert!(!availability.solution_page_available());
+}
+
+#[test]
 fn legacy_numeric_counts_infer_calculated_and_materialized_availability() {
     let fields = vec![("unique_solution_count".to_owned(), "0".to_owned())];
 

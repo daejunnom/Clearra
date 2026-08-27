@@ -1,4 +1,4 @@
-use clearra_app::{GuiAppRequestPreview, GuiBridgeError};
+use clearra_app::{GuiAppRequestPreview, GuiBridgeError, RequestStructuralProfiles};
 
 use crate::{
     host_language_resolver::GuiHostLanguageResolver,
@@ -20,6 +20,7 @@ pub struct GuiAppState {
     diagnostics: Vec<String>,
     execution_state: GuiExecutionState,
     user_preferences: GuiUserPreferences,
+    request_structural_profiles: RequestStructuralProfiles,
 }
 
 impl GuiAppState {
@@ -43,6 +44,7 @@ impl GuiAppState {
             diagnostics: Vec::new(),
             execution_state: GuiExecutionState::idle(),
             user_preferences,
+            request_structural_profiles: RequestStructuralProfiles::STANDARD,
         }
     }
 }
@@ -101,6 +103,11 @@ impl GuiAppState {
         self.diagnostics.push(diagnostic.into());
         self
     }
+
+    pub fn with_request_structural_profiles(mut self, profiles: RequestStructuralProfiles) -> Self {
+        self.request_structural_profiles = profiles;
+        self
+    }
 }
 impl GuiAppState {
     pub fn current_language(&self) -> &str {
@@ -150,6 +157,10 @@ impl GuiAppState {
 impl GuiAppState {
     pub fn user_preferences(&self) -> &GuiUserPreferences {
         &self.user_preferences
+    }
+
+    pub const fn request_structural_profiles(&self) -> RequestStructuralProfiles {
+        self.request_structural_profiles
     }
 }
 

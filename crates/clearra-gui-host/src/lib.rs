@@ -51,5 +51,8 @@ pub use validation::{
     GuiValidationDiagnostic, GuiValidationSummary,
 };
 
+#[cfg(all(not(target_family = "wasm"), feature = "wasm-cpu-runtime"))]
+pub use clearra_app::register_system_native_build_probability_host;
+
 #[cfg(test)]
 mod gui_host_contract_tests;

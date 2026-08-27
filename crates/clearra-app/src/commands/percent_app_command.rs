@@ -15,6 +15,7 @@ use crate::{
     app_error::{AppError, AppErrorCode},
     app_response::{AppResponse, AppStatus},
     commands::execution_error_response::core_execution_error_response,
+    pc_failed_queue_result::{PcFailedQueueCompiledAuthority, PcFailedQueueIngressOrigin},
     render::AppRenderModel,
 };
 
@@ -35,6 +36,7 @@ enum PercentSearchQuery {
 enum PercentResultMode {
     Percent,
     FailedQueue,
+    PcFailedQueueV2(PcFailedQueueIngressOrigin),
 }
 
 impl PercentAppCommand {
@@ -59,6 +61,25 @@ impl PercentAppCommand {
             query: PercentSearchQuery::Opening(query),
             failed_pattern_limit: usize::MAX,
             result_mode: PercentResultMode::FailedQueue,
+        }
+    }
+
+    pub fn pc_failed_queue(query: PcScenarioQuery, origin: PcFailedQueueIngressOrigin) -> Self {
+        Self {
+            query: PercentSearchQuery::Scenario(query),
+            failed_pattern_limit: usize::MAX,
+            result_mode: PercentResultMode::PcFailedQueueV2(origin),
+        }
+    }
+
+    pub fn pc_failed_queue_opening(
+        query: OpeningPcSearchQuery,
+        origin: PcFailedQueueIngressOrigin,
+    ) -> Self {
+        Self {
+            query: PercentSearchQuery::Opening(query),
+            failed_pattern_limit: usize::MAX,
+            result_mode: PercentResultMode::PcFailedQueueV2(origin),
         }
     }
 
@@ -87,7 +108,17 @@ impl PercentAppCommand {
     }
 
     pub const fn is_failed_queue(&self) -> bool {
-        matches!(self.result_mode, PercentResultMode::FailedQueue)
+        matches!(
+            self.result_mode,
+            PercentResultMode::FailedQueue | PercentResultMode::PcFailedQueueV2(_)
+        )
+    }
+
+    pub const fn pc_failed_queue_origin(&self) -> Option<PcFailedQueueIngressOrigin> {
+        match self.result_mode {
+            PercentResultMode::PcFailedQueueV2(origin) => Some(origin),
+            PercentResultMode::Percent | PercentResultMode::FailedQueue => None,
+        }
     }
 
     pub fn requested_backend(&self) -> &'static str {
@@ -129,9 +160,7 @@ impl PercentAppCommand {
                     query,
                 )
             }
-            PercentSearchQuery::Scenario(query)
-                if matches!(self.result_mode, PercentResultMode::FailedQueue) =>
-            {
+            PercentSearchQuery::Scenario(query) if self.is_failed_queue() => {
                 clearra_validation::validators::pc_query_validator::validate_pc_scenario_query(
                     query,
                 )
@@ -146,6 +175,10 @@ impl RunnableAppCommand for PercentAppCommand {
         let report = self.validate();
         if report.has_errors() {
             return AppResponse::validation_failed(report);
+        }
+
+        if let PercentResultMode::PcFailedQueueV2(origin) = self.result_mode {
+            return self.run_pc_failed_queue(origin, context);
         }
 
         let problem = match &self.query {
@@ -192,6 +225,48 @@ impl RunnableAppCommand for PercentAppCommand {
                 }
             }
             Err(error) => core_execution_error_response(error),
+        }
+    }
+}
+
+impl PercentAppCommand {
+    fn run_pc_failed_queue(
+        self,
+        origin: PcFailedQueueIngressOrigin,
+        context: &AppExecutionContext<'_>,
+    ) -> AppResponse {
+        let authority = match &self.query {
+            PercentSearchQuery::Opening(query) => {
+                PcFailedQueueCompiledAuthority::opening(query, origin, self.failed_pattern_limit)
+            }
+            PercentSearchQuery::Scenario(query) => {
+                PcFailedQueueCompiledAuthority::scenario(query, origin, self.failed_pattern_limit)
+            }
+        };
+        let authority = match authority {
+            Ok(authority) => authority,
+            Err(error) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(AppErrorCode::ProblemCompileFailed, error.reason()),
+                )
+            }
+        };
+        let execution = context
+            .services()
+            .core_executor()
+            .execute_pc_failed_queue_with_control(&authority, context.execution_control());
+        let (result, evidence) = match execution {
+            Ok(execution) => execution,
+            Err(error) => return error.into_response(),
+        };
+        match authority.validate_and_decorate(result, evidence) {
+            Ok((result, evidence)) => AppResponse::success(AppRenderModel::Percent(result))
+                .with_pc_failed_queue_execution_evidence(evidence),
+            Err(error) => AppResponse::failed(
+                AppStatus::ExecutionFailed,
+                AppError::new(AppErrorCode::ExecutionFailed, error.reason()),
+            ),
         }
     }
 }

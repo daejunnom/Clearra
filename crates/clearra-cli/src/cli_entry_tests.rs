@@ -54,6 +54,50 @@ mod case_run_with_args_routes_pc_command_through_validation {
     }
 }
 
+mod case_canonical_pc_tiling_emits_the_typed_family_contract {
+    use super::*;
+
+    #[test]
+    fn canonical_pc_tiling_emits_the_typed_family_contract() {
+        let output = run_with_args([
+            "clearra",
+            "--format",
+            "json",
+            "pc",
+            "tiling",
+            "--lines",
+            "2",
+            "--queue",
+            "IIOOO",
+            "--no-hold",
+            "--backend",
+            "cpu",
+            "--max-candidates",
+            "5000",
+        ]);
+
+        assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
+        let value: serde_json::Value =
+            serde_json::from_str(output.stdout()).expect("typed pc tiling JSON");
+        assert_eq!(value["kind"], "pc-tiling-family.v1");
+        assert_eq!(value["contract"]["command"]["kind"], "pc-tiling-family.v1");
+        assert_eq!(value["contract"]["pc"]["tiling"]["family_complete"], true);
+        assert_eq!(
+            value["contract"]["pc"]["tiling"]["family_incomplete_reason"],
+            "none"
+        );
+        assert_eq!(
+            value["contract"]["pc"]["tiling"]["initial_page_complete"],
+            true
+        );
+        assert_eq!(value["resource_report"]["truncated"], false);
+        assert_eq!(
+            value["resource_report"]["truncation_reason"],
+            serde_json::Value::Null
+        );
+    }
+}
+
 mod case_ux_smoke_rejects_internal_fields_in_default_text {
     use super::*;
 
@@ -172,7 +216,7 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
     }
 
     #[test]
-    fn pc_tiling_json_quotes_not_calculated_probability_for_both_entry_points() {
+    fn generic_tiling_aliases_quote_probability_and_fail_closed_as_noncanonical() {
         for objective in ["--tiling-only", "--objective"] {
             let mut args = vec![
                 "clearra",
@@ -196,6 +240,7 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
             }
             let value = run_json(&args);
 
+            assert_eq!(value["kind"], "pc", "{objective}");
             assert_eq!(
                 value["summary"]["coverage_probability"], "not-calculated",
                 "{objective}"
@@ -216,10 +261,9 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
                 value["summary"]["resource_probability_complete"], false,
                 "{objective}"
             );
-            assert_eq!(value["resource_report"]["truncated"], false, "{objective}");
+            assert_eq!(value["resource_report"]["truncated"], true, "{objective}");
             assert_eq!(
-                value["resource_report"]["truncation_reason"],
-                serde_json::Value::Null,
+                value["resource_report"]["truncation_reason"], "noncanonical-tiling-objective",
                 "{objective}"
             );
         }
@@ -251,6 +295,95 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
         ]);
 
         assert_eq!(value["summary"]["coverage_probability"], "not-calculated");
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn build_probability_json_exposes_requested_per_solution_probabilities_only() {
+        let run = |request_probabilities: bool, include_solution_data: bool| {
+            let mut args = vec!["clearra", "--format", "json"];
+            if include_solution_data {
+                args.push("--include-solution-data");
+            }
+            args.extend([
+                "build-probability",
+                "--base-mask",
+                "0x0",
+                "--target-mask",
+                "0xf",
+                "--height",
+                "4",
+                "--queue",
+                "I",
+                "--no-hold",
+                "--no-mirror",
+                "--backend",
+                "cpu",
+                "--workers",
+                "1",
+            ]);
+            if request_probabilities {
+                args.push("--solution-probabilities");
+            }
+            run_json(&args)
+        };
+
+        let omitted = run(false, false);
+        assert_eq!(
+            omitted["summary"]["solution_probabilities_requested"],
+            false
+        );
+        assert_eq!(omitted["summary"]["solution_probability_count"], 0);
+        assert_eq!(omitted["summary"]["solution_probability_complete"], true);
+        assert_eq!(
+            omitted["summary"]["solution_probability_basis"],
+            "not-requested"
+        );
+        assert_eq!(
+            omitted["summary"]["solution_probability_incomplete_reason"],
+            "none"
+        );
+        assert!(omitted["summary"]["solution_probabilities"].is_null());
+
+        let included = run(true, false);
+        assert_eq!(
+            included["summary"]["solution_probabilities_requested"],
+            true
+        );
+        assert_eq!(included["summary"]["solution_probability_count"], 1);
+        assert_eq!(included["summary"]["solution_probability_complete"], true);
+        assert_eq!(
+            included["summary"]["solution_probability_basis"],
+            "normalized-solution-pattern-bitset-or-union"
+        );
+        assert_eq!(
+            included["summary"]["solution_probability_incomplete_reason"],
+            "none"
+        );
+        let reports = included["summary"]["solution_probabilities"]
+            .as_array()
+            .expect("summary solution probability reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["probability"], 1);
+        assert_eq!(reports[0]["covered_pattern_count"], 1);
+        assert_eq!(reports[0]["pattern_count"], 1);
+        assert_eq!(reports[0]["probability_complete"], true);
+        assert!(reports[0]["solution_key"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty()));
+
+        let artifact = run(true, true);
+        assert!(artifact["summary"]["solution_probabilities"].is_null());
+        let artifact_reports = artifact["contract"]["artifacts"]["solution_probabilities"]
+            .as_array()
+            .expect("artifact solution probability reports");
+        let solution_keys = artifact["contract"]["artifacts"]["solution_keys"]
+            .as_array()
+            .expect("artifact solution keys");
+        assert_eq!(artifact_reports.len(), 1);
+        assert_eq!(solution_keys.len(), 1);
+        assert_eq!(artifact_reports[0]["solution_key"], solution_keys[0]);
+        assert_eq!(artifact_reports[0]["probability"], 1);
     }
 
     #[cfg(feature = "wasm-cpu-runtime")]
@@ -362,6 +495,46 @@ mod case_run_with_args_selects_korean_help_label_without_translating_contract_ke
         assert!(output
             .stdout()
             .contains("build-probability finesse: add --finesse inputs"));
+    }
+}
+
+mod case_build_probability_help_matches_the_runnable_parser_surface {
+    use super::*;
+
+    #[test]
+    fn build_probability_help_uses_runnable_spellings_and_dependencies() {
+        let output = run_with_args(["clearra", "build-probability", "--help"]);
+
+        assert_eq!(output.exit_code(), ExitCode::Success);
+        for marker in [
+            "--base-mask HEX",
+            "--hold empty|PIECE|--no-hold",
+            "--aggregate buildability|tiling|spin",
+            "--solution-probabilities",
+            "--include-mirror|--no-mirror",
+            "--source-pieces N",
+            "--max-patterns N",
+            "--max-candidates N",
+            "--max-memory-mib N",
+            "--spin-profile requires --aggregate spin or --preserve-b2b",
+        ] {
+            assert!(
+                output.stdout().contains(marker),
+                "missing help marker: {marker}"
+            );
+        }
+        for stale in [
+            "--initial-mask HEX",
+            "--aggregation buildability",
+            "--mirror|--no-mirror",
+            "--gpu-warmup",
+            "--gpu-device",
+        ] {
+            assert!(
+                !output.stdout().contains(stale),
+                "stale help marker: {stale}"
+            );
+        }
     }
 }
 
@@ -724,9 +897,20 @@ mod case_run_with_args_routes_verify_command {
         let output = run_with_args(["clearra", "verify", "pc"]);
 
         assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
-        assert!(output.stdout().contains("kind: pc"));
-        assert!(output.stdout().contains("queue_len: 5"));
-        assert!(output.stdout().contains("hold_enabled: false"));
+        assert_eq!(
+            output.stdout().lines().collect::<Vec<_>>(),
+            vec![
+                "kind: verify",
+                "scope: pc",
+                "status: verified",
+                "probe_result_kind: pc",
+                "probes_attempted: 1",
+                "probes_passed: 1",
+                "probes_failed: 0",
+            ]
+        );
+        assert!(!output.stdout().contains("queue_len:"));
+        assert!(!output.stdout().contains("hold_enabled:"));
     }
 }
 

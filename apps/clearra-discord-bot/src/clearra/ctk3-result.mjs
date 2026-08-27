@@ -129,13 +129,13 @@ export function buildCtk3Result(jsonOrObject) {
   const located = locateArtifacts(jsonOrObject);
   if (!located) return null;
 
-  const { artifacts, summary } = located;
+  const { artifacts, summary, kind } = located;
   validateArtifactSchema(artifacts);
   // A zero count from the authoritative search summary wins over stale or
   // synthetic solution artifacts. In particular, an initial-only key must not
   // turn the input field into a one-page "solution" document.
   if (summaryReportsZeroSolutions(summary)) return null;
-  const plan = buildPlan(artifacts);
+  const plan = buildPlan(artifacts, kind);
 
   const warnings = [];
   const state = { complete: true, warnings };
@@ -266,7 +266,7 @@ function locateArtifacts(jsonOrObject) {
     const summary = hasOwn(value, "summary")
       ? requireRecord(value.summary, "result.summary")
       : null;
-    return { artifacts, summary };
+    return { artifacts, summary, kind: optionalResultKind(value) };
   }
 
   if (hasOwn(value, "artifacts")) {
@@ -275,6 +275,7 @@ function locateArtifacts(jsonOrObject) {
       summary: hasOwn(value, "summary")
         ? requireRecord(value.summary, "result.summary")
         : null,
+      kind: optionalResultKind(value),
     };
   }
 
@@ -286,7 +287,7 @@ function locateArtifacts(jsonOrObject) {
     hasOwn(value, "setup_conditions") ||
     hasOwn(value, "forward")
   ) {
-    return { artifacts: value, summary: null };
+    return { artifacts: value, summary: null, kind: null };
   }
   return null;
 }
@@ -304,7 +305,7 @@ function validateArtifactSchema(artifacts) {
   }
 }
 
-function buildPlan(artifacts) {
+function buildPlan(artifacts, resultKind) {
   const solutionKeys = optionalArray(
     artifacts,
     "solution_keys",
@@ -340,9 +341,10 @@ function buildPlan(artifacts) {
   let forward = null;
   if (hasOwn(artifacts, "forward")) {
     const value = requireRecord(artifacts.forward, "artifacts.forward");
+    const outcomes = requiredArray(value, "outcomes", "artifacts.forward.outcomes");
     forward = {
       value,
-      outcomes: requiredArray(value, "outcomes", "artifacts.forward.outcomes"),
+      outcomes: resultKind === "ren" ? smallestCanonicalForwardOutcome(outcomes) : outcomes,
     };
   }
 
@@ -384,6 +386,41 @@ function buildPlan(artifacts) {
     finesseScore,
     pageCount,
   };
+}
+
+function optionalResultKind(value) {
+  return typeof value.kind === "string"
+    ? value.kind.toLowerCase().replaceAll("_", "-")
+    : null;
+}
+
+function smallestCanonicalForwardOutcome(outcomes) {
+  if (outcomes.length < 2) return outcomes;
+  let winner = outcomes[0];
+  let winnerId = canonicalForwardOutcomeId(winner, 0);
+  for (let index = 1; index < outcomes.length; index += 1) {
+    const candidateId = canonicalForwardOutcomeId(outcomes[index], index);
+    if (candidateId < winnerId) {
+      winner = outcomes[index];
+      winnerId = candidateId;
+    }
+  }
+  return [winner];
+}
+
+function canonicalForwardOutcomeId(outcome, index) {
+  const value = requireRecord(outcome, `artifacts.forward.outcomes[${index}]`).id;
+  if (
+    (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) &&
+    (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value))
+  ) {
+    fail(
+      "invalid-forward-candidate-id",
+      `artifacts.forward.outcomes[${index}].id`,
+      "expected a non-negative canonical integer ID",
+    );
+  }
+  return BigInt(value);
 }
 
 function finesseReportComments(plan, state) {
@@ -1452,6 +1489,11 @@ function forwardOutcomeComment(outcome, path) {
         0,
         Number.MAX_SAFE_INTEGER,
       )}`,
+    );
+  }
+  if (hasOwn(outcome, "ren_count")) {
+    parts.push(
+      `REN=${requiredInteger(outcome, "ren_count", `${path}.ren_count`, 0, 21)}`,
     );
   }
   if (hasOwn(outcome, "spin_piece")) {

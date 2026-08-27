@@ -67,7 +67,7 @@ fn default_build_reports_native_runtime_unavailable() {
     assert_eq!(
         CoreExecutor::execute(&problem),
         Err(CoreExecutionError::RuntimeUnavailable {
-            component: "native_geometry_exact_cover_not_connected"
+            component: "core_c_packing_runtime_unavailable"
         })
     );
 }
@@ -201,7 +201,7 @@ fn core_executor_routes_build_coverage_query_to_cover_service() {
     assert_eq!(
         CoreExecutor::execute_build_coverage(&problem, &coverage_query),
         Err(CoreExecutionError::RuntimeUnavailable {
-            component: "native_geometry_exact_cover_not_connected"
+            component: "core_c_packing_runtime_unavailable"
         })
     );
 }

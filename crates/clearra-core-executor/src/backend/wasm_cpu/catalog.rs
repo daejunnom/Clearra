@@ -84,6 +84,74 @@ impl Iterator for InstantiatedRealizationIter<'_> {
 }
 
 impl GeometryCatalog {
+    /// Allocation-free conservative peak for compiling the complete Board64
+    /// geometry catalog. The bound keeps raw and ordered realization storage
+    /// live together and uses pre-dedup row counts for every downstream index;
+    /// it is deliberately an upper bound rather than an exact allocation
+    /// claim.
+    pub fn checked_compile_peak_upper_bound(problem: &SearchProblem) -> Option<u128> {
+        let width = u8::try_from(problem.initial_board().width()).ok()?;
+        let height = u8::try_from(problem.visible_height()).ok()?;
+        let cell_count = usize::from(width).checked_mul(usize::from(height))?;
+        if width == 0 || height == 0 || cell_count > u64::BITS as usize || height > 16 {
+            return None;
+        }
+        let realization_count = checked_realization_count_upper_bound(width, height)?;
+        let row_count = realization_count;
+        let row_count_usize = usize::try_from(row_count).ok()?;
+        let clear_state_count = 1_u128.checked_shl(u32::from(height))?;
+
+        let raw_and_ordered_realizations = realization_count
+            .checked_mul(2)?
+            .checked_mul(core::mem::size_of::<Realization>() as u128)?;
+        let skeleton_bytes = row_count.checked_mul(core::mem::size_of::<SkeletonRow>() as u128)?;
+        let temporal_bytes = row_count
+            .checked_mul(core::mem::size_of::<u16>() as u128)?
+            .checked_add(if height <= 6 {
+                row_count.checked_mul(core::mem::size_of::<u64>() as u128)?
+            } else {
+                0
+            })?;
+        let support_bytes = ((cell_count as u128).checked_add(1)?)
+            .checked_mul(core::mem::size_of::<u32>() as u128)?
+            .checked_add(
+                row_count
+                    .checked_mul(4)?
+                    .checked_mul(core::mem::size_of::<u32>() as u128)?,
+            )?;
+        let apdp_bytes = ExactArmPairIndex::checked_compile_peak_upper_bound(row_count_usize)?;
+        let projection_bytes =
+            ProjectionCatalog::checked_compile_peak_upper_bound(row_count_usize, width)?;
+        let separator_bytes = u128::from(width)
+            .checked_mul(3)?
+            .checked_mul(core::mem::size_of::<u64>() as u128)?;
+
+        let instantiation_value_count = realization_count.checked_mul(clear_state_count)?;
+        let (instantiation_offset_bytes, instantiation_value_bytes) =
+            if instantiation_value_count <= MAX_INSTANTIATION_TABLE_VALUES as u128 {
+                (
+                    row_count
+                        .checked_mul(clear_state_count)?
+                        .checked_add(1)?
+                        .checked_mul(core::mem::size_of::<u32>() as u128)?,
+                    instantiation_value_count
+                        .checked_mul(core::mem::size_of::<InstantiatedRealization>() as u128)?,
+                )
+            } else {
+                (0, 0)
+            };
+
+        raw_and_ordered_realizations
+            .checked_add(skeleton_bytes)?
+            .checked_add(temporal_bytes)?
+            .checked_add(support_bytes)?
+            .checked_add(apdp_bytes)?
+            .checked_add(projection_bytes)?
+            .checked_add(separator_bytes)?
+            .checked_add(instantiation_offset_bytes)?
+            .checked_add(instantiation_value_bytes)
+    }
+
     pub fn compile(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
         let width = u8::try_from(problem.initial_board().width())
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_board_width_overflow"))?;
@@ -178,7 +246,19 @@ impl GeometryCatalog {
         }
 
         let registry = standard_tetromino_registry();
+        let realization_capacity = checked_realization_count_upper_bound(width, height)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_geometry_catalog_projection_overflow",
+            ))?;
         let mut realizations = Vec::new();
+        realizations
+            .try_reserve_exact(realization_capacity)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_realization_storage_unavailable",
+                )
+            })?;
         for piece in PieceKind::STANDARD_TETROMINOES {
             let definition = registry
                 .get(piece)
@@ -221,7 +301,21 @@ impl GeometryCatalog {
         realizations.dedup();
 
         let mut skeletons = Vec::new();
-        let mut ordered_realizations = Vec::with_capacity(realizations.len());
+        skeletons
+            .try_reserve_exact(realizations.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_skeleton_storage_unavailable",
+                )
+            })?;
+        let mut ordered_realizations = Vec::new();
+        ordered_realizations
+            .try_reserve_exact(realizations.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_realization_storage_unavailable",
+                )
+            })?;
         let mut cursor = 0;
         while cursor < realizations.len() {
             let piece = realizations[cursor].piece;
@@ -242,9 +336,32 @@ impl GeometryCatalog {
                 realization_count: count as u16,
             });
         }
+        drop(realizations);
 
-        let mut support_offsets = Vec::with_capacity(cell_count + 1);
+        let mut support_offsets = Vec::new();
+        support_offsets
+            .try_reserve_exact(cell_count.checked_add(1).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_support_projection_overflow",
+                ),
+            )?)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_support_storage_unavailable",
+                )
+            })?;
         let mut support_rows = Vec::new();
+        support_rows
+            .try_reserve_exact(skeletons.len().checked_mul(4).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_support_projection_overflow",
+                ),
+            )?)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_catalog_support_storage_unavailable",
+                )
+            })?;
         support_offsets.push(0);
         for cell in 0..cell_count {
             let bit = 1_u64 << cell;
@@ -264,9 +381,14 @@ impl GeometryCatalog {
                 "wasm_projection_catalog_storage_unavailable_or_unsupported",
             ),
         )?;
-        let separator_catalog = SeparatorCatalog::compile(width, height, &skeletons);
+        let separator_catalog = SeparatorCatalog::compile(width, height, &skeletons).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_separator_catalog_storage_unavailable"),
+        )?;
         let (skeleton_occupied_rows, skeleton_requirement_domains) =
-            compile_skeleton_temporal_metadata(width, height, &skeletons, &ordered_realizations);
+            compile_skeleton_temporal_metadata(width, height, &skeletons, &ordered_realizations)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_geometry_temporal_metadata_storage_unavailable",
+                ))?;
 
         let (clear_state_count, instantiation_offsets, instantiated_realizations) =
             compile_instantiation_table(width, height, &skeletons, &ordered_realizations);
@@ -331,6 +453,10 @@ impl GeometryCatalog {
 
     pub fn skeleton(&self, row_id: u32) -> SkeletonRow {
         self.skeletons[row_id as usize]
+    }
+
+    pub fn try_skeleton(&self, row_id: u32) -> Option<SkeletonRow> {
+        self.skeletons.get(row_id as usize).copied()
     }
 
     pub fn skeleton_id(&self, piece: PieceKind, cells: u64) -> Option<u32> {
@@ -471,8 +597,8 @@ impl GeometryCatalog {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.skeletons.len() * core::mem::size_of::<SkeletonRow>()
-            + self.realizations.len() * core::mem::size_of::<Realization>()
+        self.skeletons.capacity() * core::mem::size_of::<SkeletonRow>()
+            + self.realizations.capacity() * core::mem::size_of::<Realization>()
             + self.skeleton_occupied_rows.capacity() * core::mem::size_of::<u16>()
             + self
                 .skeleton_requirement_domains
@@ -480,8 +606,8 @@ impl GeometryCatalog {
                 .map_or(0, |domains| {
                     domains.capacity() * core::mem::size_of::<u64>()
                 })
-            + self.support_offsets.len() * core::mem::size_of::<u32>()
-            + self.support_rows.len() * core::mem::size_of::<u32>()
+            + self.support_offsets.capacity() * core::mem::size_of::<u32>()
+            + self.support_rows.capacity() * core::mem::size_of::<u32>()
             + self.apdp_index.retained_bytes()
             + self.projection_catalog.retained_bytes()
             + self.separator_catalog.retained_bytes()
@@ -493,6 +619,80 @@ impl GeometryCatalog {
     }
 }
 
+fn checked_realization_count_upper_bound(width: u8, height: u8) -> Option<u128> {
+    let registry = standard_tetromino_registry();
+    let mut total = 0_u128;
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        let definition = registry.get(piece)?;
+        for rotation in RotationState::ALL {
+            let shape = definition.shape(rotation);
+            let max_x = i16::from(width).checked_sub(i16::from(shape.width()))?;
+            if max_x < 0 {
+                continue;
+            }
+            let mut local_rows = [0_u8; 4];
+            for (index, cell) in shape.cells().into_iter().enumerate() {
+                local_rows[index] = cell.y() as u8;
+            }
+            local_rows.sort_unstable();
+            let mut local_row_count = 0_usize;
+            for row in local_rows {
+                if local_row_count == 0 || local_rows[local_row_count - 1] != row {
+                    local_rows[local_row_count] = row;
+                    local_row_count += 1;
+                }
+            }
+            let row_projection_count = checked_row_projection_count(
+                &local_rows[..local_row_count],
+                height,
+                &mut [0_u8; 4],
+                0,
+            )?;
+            total = total.checked_add(
+                row_projection_count.checked_mul(u128::try_from(max_x.checked_add(1)?).ok()?)?,
+            )?;
+        }
+    }
+    Some(total)
+}
+
+fn checked_row_projection_count(
+    local_rows: &[u8],
+    height: u8,
+    target_rows: &mut [u8; 4],
+    row_index: usize,
+) -> Option<u128> {
+    if row_index == local_rows.len() {
+        return Some(1);
+    }
+    let local_row = *local_rows.get(row_index)?;
+    let local_last = *local_rows.last()?;
+    let minimum = if row_index == 0 {
+        local_row
+    } else {
+        target_rows[row_index - 1].checked_add(local_row.checked_sub(local_rows[row_index - 1])?)?
+    };
+    let remaining_span = local_last.checked_sub(local_row)?;
+    if remaining_span >= height {
+        return Some(0);
+    }
+    let maximum = height.checked_sub(1)?.checked_sub(remaining_span)?;
+    if minimum > maximum {
+        return Some(0);
+    }
+    let mut count = 0_u128;
+    for target_row in minimum..=maximum {
+        target_rows[row_index] = target_row;
+        count = count.checked_add(checked_row_projection_count(
+            local_rows,
+            height,
+            target_rows,
+            row_index + 1,
+        )?)?;
+    }
+    Some(count)
+}
+
 const MAX_INSTANTIATION_TABLE_VALUES: usize = 4 * 1024 * 1024;
 
 fn compile_skeleton_temporal_metadata(
@@ -500,9 +700,16 @@ fn compile_skeleton_temporal_metadata(
     height: u8,
     skeletons: &[SkeletonRow],
     realizations: &[Realization],
-) -> (Vec<u16>, Option<Vec<u64>>) {
-    let mut occupied_rows = Vec::with_capacity(skeletons.len());
-    let mut requirement_domains = (height <= 6).then(|| Vec::with_capacity(skeletons.len()));
+) -> Option<(Vec<u16>, Option<Vec<u64>>)> {
+    let mut occupied_rows = Vec::new();
+    occupied_rows.try_reserve_exact(skeletons.len()).ok()?;
+    let mut requirement_domains = if height <= 6 {
+        let mut domains = Vec::new();
+        domains.try_reserve_exact(skeletons.len()).ok()?;
+        Some(domains)
+    } else {
+        None
+    };
     for skeleton in skeletons {
         let mut row_mask = 0_u16;
         let mut cells = skeleton.cells;
@@ -528,7 +735,7 @@ fn compile_skeleton_temporal_metadata(
             domains.push(domain);
         }
     }
-    (occupied_rows, requirement_domains)
+    Some((occupied_rows, requirement_domains))
 }
 
 fn compile_instantiation_table(

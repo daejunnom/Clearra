@@ -161,22 +161,30 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     invalidSharedLink = false;
-    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    const scorePolicyFixed =
+      next.scoreMode === 'summary' ||
+      next.scoreMode === 'score-finder' ||
+      next.scoreMode === 'score-minimals';
+    const requestedUseAll = scorePolicyFixed ? false : next.useAllLogicalProcessors;
+    const useAllChanged = requestedUseAll !== request.useAllLogicalProcessors;
+    const scoreModeChanged = next.scoreMode !== request.scoreMode;
     request = withAutomaticTarget({
       ...next,
-      workers: useAllChanged
-        ? automaticWorkerAuthority(
-            hostCapabilitySnapshot,
-            next.useAllLogicalProcessors
-          ).workersEffective
-        : next.workers,
-      backend: 'auto',
+      workers: scorePolicyFixed
+        ? 1
+        : useAllChanged
+          ? automaticWorkerAuthority(
+              hostCapabilitySnapshot,
+              requestedUseAll
+            ).workersEffective
+          : next.workers,
+      useAllLogicalProcessors: requestedUseAll,
+      backend: scorePolicyFixed ? 'cpu' : 'auto',
       gpuDevice: 'auto',
-      scoreMode: 'off',
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
     });
-    if (useAllChanged) {
+    if (useAllChanged || scoreModeChanged) {
       workerController.prewarm(
         request.workers,
         false,
@@ -407,6 +415,60 @@
         </label>
         <QueuePatternHelp {language} />
 
+        <fieldset class="result-control">
+          <legend>{label('scoreMode')}</legend>
+          <div class="result-chips">
+            <button
+              type="button"
+              class:active={request.scoreMode === 'path'}
+              aria-pressed={request.scoreMode === 'path'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'path' })}
+            >{label('pathFamily')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'off'}
+              aria-pressed={request.scoreMode === 'off'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'off' })}
+            >{label('scoreOff')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'minimum-cover'}
+              aria-pressed={request.scoreMode === 'minimum-cover'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'minimum-cover' })}
+            >{label('minimumSolutions')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'summary'}
+              aria-pressed={request.scoreMode === 'summary'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'summary' })}
+            >{label('scoreSummary')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'score-finder'}
+              aria-pressed={request.scoreMode === 'score-finder'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'score-finder' })}
+            >{label('scoreFinder')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'score-minimals'}
+              aria-pressed={request.scoreMode === 'score-minimals'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'score-minimals' })}
+            >{label('scoreMinimals')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'saves'}
+              aria-pressed={request.scoreMode === 'saves'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'saves' })}
+            >{label('saveGroups')}</button>
+            <button
+              type="button"
+              class:active={request.scoreMode === 'best-save'}
+              aria-pressed={request.scoreMode === 'best-save'}
+              on:click={() => updateRequest({ ...request, scoreMode: 'best-save' })}
+            >{label('bestSave')}</button>
+          </div>
+        </fieldset>
+
         <div class="option-row">
           <span>{label('hold')}</span>
           <button
@@ -430,6 +492,7 @@
             role="switch"
             aria-label={label('useAllThreads')}
             aria-checked={request.useAllLogicalProcessors}
+            disabled={request.scoreMode === 'summary' || request.scoreMode === 'score-finder' || request.scoreMode === 'score-minimals'}
             on:click={() => updateRequest({
               ...request,
               useAllLogicalProcessors: !request.useAllLogicalProcessors
@@ -476,6 +539,10 @@
     targetLines={resultTargetLines}
     loadSolutionPage={(offset, limit, signal) =>
       workerController.loadSolutionPage(offset, limit, signal)}
+    loadNextProductPage={(signal) => workerController.loadNextProductPage(signal)}
+    loadProductMemberPage={(outerPageNumber, memberPageNumber, signal) =>
+      workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal)}
+    releaseProductPages={() => workerController.releaseProductPages()}
   />
 </main>
 
@@ -511,7 +578,7 @@
   .control-heading span { color: #68736f; font-size: 10px; font-weight: 750; text-transform: uppercase; }
   .control-heading strong { font-size: 17px; }
   .queue-field { display: grid; gap: 7px; }
-  .queue-field span, .option-row > span, .rule-control legend { color: #53605b; font-size: 11px; font-weight: 750; }
+  .queue-field span, .option-row > span, .rule-control legend, .result-control legend { color: #53605b; font-size: 11px; font-weight: 750; }
   .queue-field :global(.workspace-queue-input) { border: 1px solid #bfc9c4; border-radius: 5px; color: #1d544f; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 14px; font-weight: 750; height: 42px; min-width: 0; padding: 0 11px; width: 100%; }
   .queue-field :global(.workspace-queue-input:focus) { border-color: #16877d; box-shadow: 0 0 0 3px #16877d1f; outline: 0; }
   .queue-field :global(.workspace-queue-input[aria-invalid='true']) { border-color: #c45635; }
@@ -520,11 +587,12 @@
   .switch i { background: #fff; border-radius: 50%; display: block; height: 18px; transform: translateX(0); transition: transform 120ms ease; width: 18px; }
   .switch.active { background: #16877d; }
   .switch.active i { transform: translateX(18px); }
-  .rule-control { border: 0; margin: 17px 0 0; padding: 0; }
-  .rule-control legend { margin-bottom: 8px; padding: 0; }
-  .rule-chips { display: grid; gap: 6px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .rule-chips button { background: #f6f8f6; border: 1px solid #cbd3ce; border-radius: 5px; color: #53605b; cursor: pointer; font-size: 11px; font-weight: 750; min-height: 34px; padding: 0 8px; }
-  .rule-chips button.active { background: #dcece7; border-color: #16877d; color: #075f58; }
+  .rule-control, .result-control { border: 0; margin: 17px 0 0; padding: 0; }
+  .rule-control legend, .result-control legend { margin-bottom: 8px; padding: 0; }
+  .rule-chips, .result-chips { display: grid; gap: 6px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .result-chips { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .rule-chips button, .result-chips button { background: #f6f8f6; border: 1px solid #cbd3ce; border-radius: 5px; color: #53605b; cursor: pointer; font-size: 11px; font-weight: 750; min-height: 34px; padding: 0 8px; }
+  .rule-chips button.active, .result-chips button.active { background: #dcece7; border-color: #16877d; color: #075f58; }
   .validation, .notice { align-items: flex-start; background: #fff2ec; border: 1px solid #e0a28d; border-radius: 5px; color: #833c26; display: flex; font-size: 11px; gap: 8px; margin: 12px 0; padding: 9px 11px; }
   .validation { display: grid; }
   .validation p { margin: 0; }

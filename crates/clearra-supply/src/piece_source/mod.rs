@@ -1,3 +1,4 @@
+mod finite_piece_source;
 mod piece_set_id;
 pub mod piece_source;
 mod piece_source_descriptors;
@@ -7,6 +8,12 @@ mod piece_source_kind;
 mod supply_truncation_reason;
 
 pub use crate::pattern_universe::MaterializedPatternUniverse;
+pub use finite_piece_source::{
+    finite_build_piece_source_returned_carrier_delta_bytes,
+    FiniteBuildPieceSourceAllocationProjection, FiniteBuildPieceSourceMaterialization,
+    FiniteBuildPieceSourceRequest, FiniteBuildQueueRef, FiniteBuildSupplyQueue,
+    FinitePieceSourceMaterializationError, FiniteSupplyProvenanceRef,
+};
 pub use piece_set_id::PieceSetId;
 pub use piece_source::PieceSource;
 pub use piece_source_descriptors::{

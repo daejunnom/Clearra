@@ -62,6 +62,7 @@ pub use build_probability_distributed::{
     WasmBuildProbabilityDistributedVerifier,
 };
 pub use distributed::{
+    canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
     WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier,
@@ -71,6 +72,7 @@ pub use pc4_tablebase::{
     Pc4CompactTablebase, Pc4CompactTablebaseArtifact, Pc4TablebaseError, Pc4TablebaseLookup,
     PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
+pub(crate) use reachability::{DocumentLockReachability, DocumentReachabilityEngine};
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 #[cfg(not(target_family = "wasm"))]
@@ -90,7 +92,41 @@ pub(crate) use webgpu_search::WasmWebGpuSearchSession;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WasmExactSearchError {
     InvalidProblem(&'static str),
+    ResourceAdmission(clearra_core_domain::resource::ResourceReport),
     Cancelled,
+}
+
+impl WasmExactSearchError {
+    pub(super) const fn reason(self) -> &'static str {
+        use clearra_core_domain::resource::{
+            ExecutionAvailabilityReason as Reason, ExecutionAvailabilityState as State,
+        };
+        match self {
+            Self::InvalidProblem(reason) => reason,
+            Self::Cancelled => "wasm_cpu_search_cancelled",
+            Self::ResourceAdmission(report) => match (
+                report.execution_availability().state(),
+                report.execution_availability().reason(),
+            ) {
+                (State::Unavailable, Some(Reason::PatternCountAddressSpaceExceeded)) => {
+                    "pattern_count_address_space_unavailable"
+                }
+                (State::Unavailable, Some(Reason::DensePatternRepresentationUnavailable)) => {
+                    "dense_pattern_representation_unavailable"
+                }
+                (State::Deferred, Some(Reason::SharedResourceContention)) => {
+                    "shared_execution_resource_deferred"
+                }
+                (State::Exhausted, Some(Reason::MemoryBudgetExceeded)) => {
+                    "shared_execution_memory_exhausted"
+                }
+                (State::Exhausted, Some(Reason::ComputeBudgetExceeded)) => {
+                    "shared_execution_compute_exhausted"
+                }
+                _ => "shared_execution_resource_unavailable",
+            },
+        }
+    }
 }
 
 const MAX_BOARD64_PIECES: usize = 15;

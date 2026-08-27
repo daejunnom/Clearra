@@ -9,6 +9,7 @@ pub enum AppCommandKind {
     BuildProbability,
     Damage,
     SpinFinder,
+    Ren,
     SpinStructure,
     Cover,
     Continue,
@@ -18,6 +19,13 @@ pub enum AppCommandKind {
     InspectUnsupported,
     Verify,
     VerifyKicks,
+    UtilitySequence,
+    UtilitySequenceDependencies,
+    UtilityParity,
+    UtilityFumen,
+    UtilityRender,
+    UtilityToGray,
+    UtilityMirror,
 }
 
 impl AppCommandKind {
@@ -30,6 +38,7 @@ impl AppCommandKind {
             Self::BuildProbability => "build-probability",
             Self::Damage => "damage",
             Self::SpinFinder => "spin-finder",
+            Self::Ren => "ren",
             Self::SpinStructure => "spin-structure",
             Self::Cover => "cover",
             Self::Continue => "continue",
@@ -39,6 +48,13 @@ impl AppCommandKind {
             Self::InspectUnsupported => "inspect-unsupported",
             Self::Verify => "verify",
             Self::VerifyKicks => "verify-kicks",
+            Self::UtilitySequence => "utility-sequence",
+            Self::UtilitySequenceDependencies => "utility-sequence-dependencies",
+            Self::UtilityParity => "utility-parity",
+            Self::UtilityFumen => "utility-fumen",
+            Self::UtilityRender => "utility-render",
+            Self::UtilityToGray => "utility-to-gray",
+            Self::UtilityMirror => "utility-mirror",
         }
     }
 }

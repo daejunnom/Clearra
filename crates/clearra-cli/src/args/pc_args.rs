@@ -10,6 +10,7 @@ pub struct PcArgs {
     score_requested: bool,
     score_profile: Option<String>,
     spin_profile: Option<String>,
+    preserve_back_to_back: bool,
     initial_b2b: Option<u32>,
     rule: Option<String>,
     kick_profile_json: Option<String>,
@@ -43,6 +44,7 @@ impl PcArgs {
             score_requested: false,
             score_profile: None,
             spin_profile: None,
+            preserve_back_to_back: false,
             initial_b2b: None,
             rule: None,
             kick_profile_json: None,
@@ -106,6 +108,10 @@ impl PcArgs {
 
     pub fn spin_profile(&self) -> Option<&str> {
         self.spin_profile.as_deref()
+    }
+
+    pub const fn preserves_back_to_back(&self) -> bool {
+        self.preserve_back_to_back
     }
 }
 impl PcArgs {
@@ -254,6 +260,11 @@ impl PcArgs {
 
     pub fn with_spin_profile(mut self, spin_profile: Option<String>) -> Self {
         self.spin_profile = spin_profile;
+        self
+    }
+
+    pub fn with_back_to_back_preservation(mut self, preserve: bool) -> Self {
+        self.preserve_back_to_back = preserve;
         self
     }
 }

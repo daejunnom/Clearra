@@ -11,18 +11,21 @@ use clearra_core_ffi::{
         C_PIECE_I, C_PIECE_J, C_PIECE_L, C_PIECE_MULTISET_FAMILY_CAPACITY, C_PIECE_O, C_PIECE_S,
         C_PIECE_T, C_PIECE_Z,
     },
-    CPackingCandidate, CPackingProblem, CPackingState, FfiProblemError, NativeGeometryCatalog,
-    NativePruningLedger, PackingCandidateBatch, PackingCandidateIter, PackingCandidateView,
+    CPackingCandidate, CPackingProblem, CPackingState, FfiProblemError, NativeCoreError,
+    NativeGeometryCatalog, NativePruningLedger, PackingCandidateBatch, PackingCandidateIter,
+    PackingCandidateView,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SearchProblem;
+use clearra_supply::pattern_universe::piece_multiset_group::PackingMultisetBuildError;
 use clearra_supply::{PackingHoldProjection, PackingPatternMembershipKind, PieceMultisetKey};
 
 use crate::{
     backend::{
-        execute_selected_buildable_packing, BackendTrustReport, NativePackingExecutorRegistry,
-        NativeSearchBackendCapabilityProvider, SearchBackendCapabilityProvider,
-        SearchBackendExecutorResolver, SearchBackendReport, SelectedSearchBackend,
+        execute_selected_buildable_packing, execute_selected_raw_geometry_packing,
+        BackendTrustReport, NativePackingExecutorRegistry, NativeSearchBackendCapabilityProvider,
+        PackingCandidateProvenance, SearchBackendCapabilityProvider, SearchBackendExecutorResolver,
+        SearchBackendReport, SelectedSearchBackend,
     },
     buildup::buildup_native_bridge::uses_standard_bag_automaton,
     packing::{
@@ -38,6 +41,7 @@ use crate::{
         PackingExecutionPlan, PackingState,
     },
     performance::{ExecutorSearchStage, SearchStageSpan},
+    resource::{admit_budget_bound_search_execution, ExecutionAdmission, ExecutionMemoryBound},
 };
 
 #[cfg(test)]
@@ -60,8 +64,31 @@ pub struct PackingRunResult {
     candidate_patterns: CandidatePatternIndex,
     multiset_group_count: usize,
     multiset_membership_kind: PackingPatternMembershipKind,
-    buildability_preverified: bool,
+    candidate_provenance: PackingCandidateProvenance,
+    execution_admission: Option<PackingExecutionAdmission>,
 }
+
+#[derive(Clone)]
+struct PackingExecutionAdmission(Arc<ExecutionAdmission>);
+
+impl core::fmt::Debug for PackingExecutionAdmission {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PackingExecutionAdmission")
+            .field("token", &self.0.lease_token())
+            .finish()
+    }
+}
+
+impl PartialEq for PackingExecutionAdmission {
+    fn eq(&self, _other: &Self) -> bool {
+        // Lease identity is operational lifetime authority, not a semantic
+        // property of the packing result.
+        true
+    }
+}
+
+impl Eq for PackingExecutionAdmission {}
 
 impl PackingRunResult {
     pub(crate) fn new(
@@ -79,7 +106,8 @@ impl PackingRunResult {
         candidate_patterns: CandidatePatternIndex,
         multiset_group_count: usize,
         multiset_membership_kind: PackingPatternMembershipKind,
-        buildability_preverified: bool,
+        candidate_provenance: PackingCandidateProvenance,
+        execution_admission: Option<Arc<ExecutionAdmission>>,
     ) -> Self {
         let memory_report = PackingMemoryReport::from_execution(
             execution_source,
@@ -103,7 +131,8 @@ impl PackingRunResult {
             candidate_patterns,
             multiset_group_count,
             multiset_membership_kind,
-            buildability_preverified,
+            candidate_provenance,
+            execution_admission: execution_admission.map(PackingExecutionAdmission),
         }
     }
 }
@@ -227,7 +256,11 @@ impl PackingRunResult {
     }
 
     pub(crate) const fn buildability_preverified(&self) -> bool {
-        self.buildability_preverified
+        self.candidate_provenance.buildability_preverified()
+    }
+
+    pub(crate) const fn candidate_provenance(&self) -> PackingCandidateProvenance {
+        self.candidate_provenance
     }
 }
 impl PackingRunResult {
@@ -266,6 +299,24 @@ impl PackingRunResult {
             &self.candidates,
             &self.candidate_patterns,
         );
+    }
+
+    pub(crate) fn checked_retained_execution_bytes(&self) -> Option<u128> {
+        let candidate_and_catalog = self.candidates.checked_retained_bytes()?.checked_add(
+            self.geometry_catalog
+                .as_ref()
+                .map_or(0_u128, |catalog| catalog.resident_bytes() as u128),
+        )?;
+        let engine_peak = self.resource_report.peak_cpu_bytes as u128;
+        engine_peak
+            .max(candidate_and_catalog)
+            .checked_add(self.candidate_patterns.checked_owned_resident_bytes()?)
+    }
+
+    pub(crate) fn execution_memory_bound(&self) -> Option<ExecutionMemoryBound> {
+        self.execution_admission
+            .as_ref()
+            .map(|admission| admission.0.memory_bound())
     }
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -329,6 +380,21 @@ impl PackingRunner {
         if cancellation.is_cancelled() {
             return Err(PackingRunnerError::ExecutionCancelled);
         }
+        #[cfg(all(not(test), not(feature = "native-c-core")))]
+        if !executors.supports_native_candidate_streaming() {
+            return Err(PackingRunnerError::BackendExecutorUnavailable {
+                backend: crate::backend::SelectedSearchBackend::CpuGeometryExactCover,
+                reason: "native_geometry_exact_cover_not_connected",
+            });
+        }
+        let execution_admission = executors
+            .supports_native_candidate_streaming()
+            .then(|| {
+                admit_budget_bound_search_execution(problem, preprocessing_worker_count(problem))
+                    .map(Arc::new)
+                    .map_err(packing_admission_error)
+            })
+            .transpose()?;
         let family_span = SearchStageSpan::begin(ExecutorSearchStage::PackingUniverseAndFamily);
         let universe = problem
             .piece_source()
@@ -344,23 +410,44 @@ impl PackingRunner {
                 },
             ));
         }
-        let family = universe
-            .packing_multiset_family_for_execution_with_workers(
+        let hold_projection = if problem.supply().projects_unplaced_lookahead()
+            && !problem.supply().projects_standard_bag_lookahead()
+        {
+            PackingHoldProjection::ReleaseHeldAtTerminal
+        } else {
+            PackingHoldProjection::PreserveFinalHoldLanguage
+        };
+        let family_result = if let Some(admission) = &execution_admission {
+            universe.packing_multiset_family_for_execution_with_workers_and_memory_limit(
                 placed_piece_count,
                 problem.initial_hold(),
                 problem.supply().hold_enabled(),
-                if problem.supply().projects_unplaced_lookahead()
-                    && !problem.supply().projects_standard_bag_lookahead()
-                {
-                    PackingHoldProjection::ReleaseHeldAtTerminal
-                } else {
-                    PackingHoldProjection::PreserveFinalHoldLanguage
-                },
+                hold_projection,
+                preprocessing_worker_count(problem),
+                0,
+                admission.memory_cap_bytes(),
+            )
+        } else {
+            universe.packing_multiset_family_for_execution_with_workers(
+                placed_piece_count,
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                hold_projection,
                 preprocessing_worker_count(problem),
             )
-            .map_err(|_| PackingRunnerError::ParallelWorkerPanicked)?;
+        };
+        let family = family_result
+            .map_err(|error| packing_family_error(error, execution_admission.as_deref()))?;
         if family.is_empty() {
             return Err(PackingRunnerError::NoReachablePieceMultiset);
+        }
+        let family_retained_bytes = family
+            .checked_retained_bytes()
+            .ok_or_else(packing_projection_overflow)?;
+        if let Some(admission) = &execution_admission {
+            admission
+                .ensure_memory_bound(family_retained_bytes, 0)
+                .map_err(packing_admission_error)?;
         }
         family_span.finish(family.len() as u64);
 
@@ -375,6 +462,8 @@ impl PackingRunner {
                 capability_provider,
                 executors,
                 cancellation,
+                execution_admission.clone(),
+                family_retained_bytes,
             )?
         } else {
             Self::run_multiset_groups(
@@ -384,6 +473,8 @@ impl PackingRunner {
                 capability_provider,
                 executors,
                 cancellation,
+                execution_admission.clone(),
+                family_retained_bytes,
             )?
         };
         backend_span.finish(result.candidate_count() as u64);
@@ -409,6 +500,8 @@ impl PackingRunner {
         capability_provider: &impl SearchBackendCapabilityProvider,
         executors: &impl SearchBackendExecutorResolver,
         cancellation: &ExecutionCancellationToken,
+        execution_admission: Option<Arc<ExecutionAdmission>>,
+        family_retained_bytes: u128,
     ) -> Result<PackingRunResult, PackingRunnerError> {
         let prepared = prepare_packing_problem_for_multiset_family_with_provider(
             problem,
@@ -416,7 +509,12 @@ impl PackingRunner {
             capability_provider,
         )
         .map_err(PackingRunnerError::from_prepare_error)?;
-        let compact_problem = prepared.compact_problem();
+        let mut compact_problem = prepared.compact_problem();
+        apply_engine_memory_cap(
+            &mut compact_problem,
+            execution_admission.as_deref(),
+            family_retained_bytes,
+        )?;
         let backend_selection = prepared.backend_selection();
         let initial_state = PackingState::from_raw(CPackingState::empty(
             problem.initial_board().occupied_mask(),
@@ -432,6 +530,21 @@ impl PackingRunner {
         )?;
         if cancellation.is_cancelled() {
             return Err(PackingRunnerError::ExecutionCancelled);
+        }
+
+        let engine_retained_bytes = outcome_observed_retained_bytes(&outcome)?;
+        let requested_index_bytes =
+            CandidatePatternIndex::checked_requested_bytes(family.len(), outcome.candidates.len())
+                .ok_or_else(packing_projection_overflow)?;
+        if let Some(admission) = &execution_admission {
+            admission
+                .ensure_memory_bound(
+                    family_retained_bytes
+                        .checked_add(engine_retained_bytes)
+                        .ok_or_else(packing_projection_overflow)?,
+                    requested_index_bytes,
+                )
+                .map_err(packing_admission_error)?;
         }
 
         let mut candidate_patterns = CandidatePatternIndex::default();
@@ -452,13 +565,27 @@ impl PackingRunner {
             if family.groups()[group_index].pattern_bits().is_empty() {
                 return Err(PackingRunnerError::CandidateMultisetOutsideFamily);
             }
-            candidate_patterns.bind_candidate(group_indices[group_index]);
+            candidate_patterns.bind_candidate(group_indices[group_index])?;
+        }
+        if let Some(admission) = &execution_admission {
+            admission
+                .ensure_memory_bound(
+                    family_retained_bytes
+                        .checked_add(engine_retained_bytes)
+                        .ok_or_else(packing_projection_overflow)?,
+                    candidate_patterns
+                        .checked_owned_resident_bytes()
+                        .ok_or_else(packing_projection_overflow)?,
+                )
+                .map_err(packing_admission_error)?;
         }
 
         let fallback_reason = outcome.fallback.and_then(|fallback| fallback.reason());
+        let candidate_provenance = outcome.candidate_provenance();
         let backend_report = SearchBackendReport::from_execution(
             backend_selection,
             outcome.actual_backend,
+            candidate_provenance,
             fallback_reason,
             outcome.gpu_failure,
             outcome.gpu_device.clone(),
@@ -487,7 +614,8 @@ impl PackingRunner {
             candidate_patterns,
             family.len(),
             family.membership_kind(),
-            outcome.buildability_preverified,
+            candidate_provenance,
+            execution_admission,
         ))
     }
 
@@ -498,6 +626,8 @@ impl PackingRunner {
         capability_provider: &impl SearchBackendCapabilityProvider,
         executors: &impl SearchBackendExecutorResolver,
         cancellation: &ExecutionCancellationToken,
+        execution_admission: Option<Arc<ExecutionAdmission>>,
+        family_retained_bytes: u128,
     ) -> Result<PackingRunResult, PackingRunnerError> {
         let mut merged: Option<PackingRunResult> = None;
         let max_candidates = problem.backend_request().max_candidates();
@@ -505,6 +635,15 @@ impl PackingRunner {
             if cancellation.is_cancelled() {
                 return Err(PackingRunnerError::ExecutionCancelled);
             }
+            let retained_result_bytes = match merged.as_ref() {
+                Some(result) => result
+                    .checked_retained_execution_bytes()
+                    .ok_or_else(packing_projection_overflow)?,
+                None => 0,
+            };
+            let retained_before_engine = retained_result_bytes
+                .checked_add(family_retained_bytes)
+                .ok_or_else(packing_projection_overflow)?;
             let group_result = Self::run_multiset_group(
                 problem,
                 group.key(),
@@ -513,11 +652,53 @@ impl PackingRunner {
                 capability_provider,
                 executors,
                 cancellation,
+                execution_admission.clone(),
+                retained_before_engine,
             )?;
+            if let (Some(admission), Some(existing)) = (&execution_admission, merged.as_ref()) {
+                let candidate_merge = existing
+                    .candidates
+                    .checked_merge_transient_bytes(&group_result.candidates)
+                    .ok_or_else(packing_projection_overflow)?;
+                let index_merge = CandidatePatternIndex::checked_requested_bytes(
+                    existing
+                        .candidate_patterns
+                        .pattern_group_count()
+                        .checked_add(group_result.candidate_patterns.pattern_group_count())
+                        .ok_or_else(packing_projection_overflow)?,
+                    existing
+                        .candidate_count()
+                        .checked_add(group_result.candidate_count())
+                        .ok_or_else(packing_projection_overflow)?,
+                )
+                .ok_or_else(packing_projection_overflow)?;
+                admission
+                    .ensure_memory_bound(
+                        family_retained_bytes,
+                        candidate_merge
+                            .checked_add(index_merge)
+                            .ok_or_else(packing_projection_overflow)?,
+                    )
+                    .map_err(packing_admission_error)?;
+            }
             merge_group_result(&mut merged, group_result)?;
             let result = merged
                 .as_mut()
                 .expect("a merged packing group result was just inserted");
+            if let Some(admission) = &execution_admission {
+                admission
+                    .ensure_memory_bound(
+                        family_retained_bytes
+                            .checked_add(
+                                result
+                                    .checked_retained_execution_bytes()
+                                    .ok_or_else(packing_projection_overflow)?,
+                            )
+                            .ok_or_else(packing_projection_overflow)?,
+                        0,
+                    )
+                    .map_err(packing_admission_error)?;
+            }
             if max_candidates != 0 && result.candidates.len() > max_candidates {
                 truncate_candidates(result, max_candidates);
                 result
@@ -546,6 +727,8 @@ impl PackingRunner {
         capability_provider: &impl SearchBackendCapabilityProvider,
         executors: &impl SearchBackendExecutorResolver,
         cancellation: &ExecutionCancellationToken,
+        execution_admission: Option<Arc<ExecutionAdmission>>,
+        retained_before_engine: u128,
     ) -> Result<PackingRunResult, PackingRunnerError> {
         let prepared = prepare_packing_problem_for_multiset_with_provider(
             problem,
@@ -553,7 +736,12 @@ impl PackingRunner {
             capability_provider,
         )
         .map_err(PackingRunnerError::from_prepare_error)?;
-        let compact_problem = prepared.compact_problem();
+        let mut compact_problem = prepared.compact_problem();
+        apply_engine_memory_cap(
+            &mut compact_problem,
+            execution_admission.as_deref(),
+            retained_before_engine,
+        )?;
         let backend_selection = prepared.backend_selection();
         let initial_state = PackingState::from_raw(CPackingState::empty(
             problem.initial_board().occupied_mask(),
@@ -570,10 +758,26 @@ impl PackingRunner {
         if cancellation.is_cancelled() {
             return Err(PackingRunnerError::ExecutionCancelled);
         }
+        let engine_retained_bytes = outcome_observed_retained_bytes(&outcome)?;
+        let requested_index_bytes =
+            CandidatePatternIndex::checked_requested_bytes(1, outcome.candidates.len())
+                .ok_or_else(packing_projection_overflow)?;
+        if let Some(admission) = &execution_admission {
+            admission
+                .ensure_memory_bound(
+                    retained_before_engine
+                        .checked_add(engine_retained_bytes)
+                        .ok_or_else(packing_projection_overflow)?,
+                    requested_index_bytes,
+                )
+                .map_err(packing_admission_error)?;
+        }
         let fallback_reason = outcome.fallback.and_then(|fallback| fallback.reason());
+        let candidate_provenance = outcome.candidate_provenance();
         let backend_report = SearchBackendReport::from_execution(
             backend_selection,
             outcome.actual_backend,
+            candidate_provenance,
             fallback_reason,
             outcome.gpu_failure,
             outcome.gpu_device.clone(),
@@ -587,11 +791,22 @@ impl PackingRunner {
             outcome.trust_report,
             outcome.candidates.len(),
         );
-
         let mut candidate_patterns = CandidatePatternIndex::default();
         let group_index = candidate_patterns.push_shared_pattern_group(source_pattern_bits)?;
         for _ in 0..outcome.candidates.len() {
-            candidate_patterns.bind_candidate(group_index);
+            candidate_patterns.bind_candidate(group_index)?;
+        }
+        if let Some(admission) = &execution_admission {
+            admission
+                .ensure_memory_bound(
+                    retained_before_engine
+                        .checked_add(engine_retained_bytes)
+                        .ok_or_else(packing_projection_overflow)?,
+                    candidate_patterns
+                        .checked_owned_resident_bytes()
+                        .ok_or_else(packing_projection_overflow)?,
+                )
+                .map_err(packing_admission_error)?;
         }
         let result = PackingRunResult::new(
             plan,
@@ -608,7 +823,8 @@ impl PackingRunner {
             candidate_patterns,
             1,
             membership_kind,
-            outcome.buildability_preverified,
+            candidate_provenance,
+            execution_admission,
         );
 
         debug_assert_eq!(
@@ -620,6 +836,143 @@ impl PackingRunner {
     }
 }
 
+fn outcome_observed_retained_bytes(
+    outcome: &crate::backend::PackingBackendOutcome,
+) -> Result<u128, PackingRunnerError> {
+    let retained = outcome
+        .candidates
+        .checked_retained_bytes()
+        .ok_or_else(packing_projection_overflow)?
+        .checked_add(
+            outcome
+                .geometry_catalog
+                .as_ref()
+                .map_or(0_u128, |catalog| catalog.resident_bytes() as u128),
+        )
+        .ok_or_else(packing_projection_overflow)?;
+    Ok(retained.max(outcome.resource_report.peak_cpu_bytes as u128))
+}
+
+fn apply_engine_memory_cap(
+    problem: &mut CPackingProblem,
+    admission: Option<&ExecutionAdmission>,
+    already_retained_bytes: u128,
+) -> Result<(), PackingRunnerError> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    admission
+        .ensure_memory_bound(already_retained_bytes, 0)
+        .map_err(packing_admission_error)?;
+    let remaining = admission
+        .memory_cap_bytes()
+        .checked_sub(already_retained_bytes)
+        .ok_or_else(packing_projection_overflow)?;
+    let remaining_mib = remaining / (1024 * 1024);
+    problem.budget.max_memory_mib = u32::try_from(remaining_mib).map_err(|_| {
+        packing_admission_error(clearra_core_domain::resource::ResourceReport::admission_failure(
+            clearra_core_domain::resource::ExecutionAvailability::unavailable(
+                clearra_core_domain::resource::ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
+            )
+            .with_required_memory_bytes(remaining),
+        ))
+    })?;
+    problem.budget.has_max_memory_mib = 1;
+    Ok(())
+}
+
+fn packing_projection_overflow() -> PackingRunnerError {
+    packing_admission_error(clearra_core_domain::resource::ResourceReport::admission_failure(
+        clearra_core_domain::resource::ExecutionAvailability::unavailable(
+            clearra_core_domain::resource::ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
+        )
+        .with_required_memory_bytes(u128::MAX),
+    ))
+}
+
+fn packing_family_error(
+    error: PackingMultisetBuildError,
+    admission: Option<&ExecutionAdmission>,
+) -> PackingRunnerError {
+    match error {
+        PackingMultisetBuildError::WorkerPanicked
+        | PackingMultisetBuildError::WorkerSpawnFailed => {
+            PackingRunnerError::ParallelWorkerPanicked
+        }
+        PackingMultisetBuildError::ProjectionOverflow => packing_family_resource_error(
+            clearra_core_domain::resource::ExecutionAvailability::unavailable(
+                clearra_core_domain::resource::ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
+            ),
+            u128::MAX,
+            admission,
+        ),
+        PackingMultisetBuildError::AllocationFailed {
+            required_memory_bytes,
+        }
+        | PackingMultisetBuildError::MemoryCapacityExceeded {
+            required_memory_bytes,
+            ..
+        } => packing_family_resource_error(
+            clearra_core_domain::resource::ExecutionAvailability::exhausted(
+                clearra_core_domain::resource::ExecutionAvailabilityReason::MemoryBudgetExceeded,
+            ),
+            required_memory_bytes,
+            admission,
+        ),
+        PackingMultisetBuildError::PatternBitSet(error) => match error {
+            clearra_coverage::pattern::pattern_bitset::PatternBitSetAllocationError::ProjectionOverflow
+            | clearra_coverage::pattern::pattern_bitset::PatternBitSetAllocationError::InvalidPattern(_) => {
+                packing_family_resource_error(
+                    clearra_core_domain::resource::ExecutionAvailability::unavailable(
+                        clearra_core_domain::resource::ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
+                    ),
+                    u128::MAX,
+                    admission,
+                )
+            }
+            clearra_coverage::pattern::pattern_bitset::PatternBitSetAllocationError::MemoryCapacityExceeded {
+                required_memory_bytes,
+                ..
+            } => packing_family_resource_error(
+                clearra_core_domain::resource::ExecutionAvailability::exhausted(
+                    clearra_core_domain::resource::ExecutionAvailabilityReason::MemoryBudgetExceeded,
+                ),
+                required_memory_bytes,
+                admission,
+            ),
+        },
+        PackingMultisetBuildError::BagProjection(error) => {
+            PackingRunnerError::BagMultisetProjection(error)
+        }
+    }
+}
+
+fn packing_family_resource_error(
+    mut availability: clearra_core_domain::resource::ExecutionAvailability,
+    required_memory_bytes: u128,
+    admission: Option<&ExecutionAdmission>,
+) -> PackingRunnerError {
+    if let Some(admission) = admission {
+        availability = availability.with_pattern_evidence(
+            admission.dense_preflight.descriptor_pattern_count,
+            admission.dense_preflight.dense_pattern_count,
+            admission.dense_preflight.required_dense_bytes,
+        );
+    }
+    packing_admission_error(
+        clearra_core_domain::resource::ResourceReport::admission_failure(
+            availability.with_required_memory_bytes(required_memory_bytes),
+        ),
+    )
+}
+
+fn packing_admission_error(resource_report: ResourceReport) -> PackingRunnerError {
+    PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+        status: 0,
+        resource_report,
+    })
+}
+
 fn execute_packing_for_problem(
     problem: &SearchProblem,
     source_pattern_bits: Option<&PatternBitSet>,
@@ -628,32 +981,89 @@ fn execute_packing_for_problem(
     cancellation: &ExecutionCancellationToken,
     executors: &impl SearchBackendExecutorResolver,
 ) -> Result<crate::backend::PackingBackendOutcome, PackingRunnerError> {
-    if should_stream_buildable_candidates(problem, source_pattern_bits, executors) {
-        return execute_selected_buildable_packing(
+    let expected_provenance = expected_candidate_provenance(problem);
+    #[cfg(test)]
+    let resolved_executor_outcome = executors
+        .use_resolved_executor_for_test()
+        .then(|| {
+            execute_selected_packing(
+                backend_selection,
+                compact_problem,
+                problem.backend_request(),
+                cancellation,
+                executors,
+            )
+        })
+        .transpose()?;
+    #[cfg(not(test))]
+    let resolved_executor_outcome: Option<crate::backend::PackingBackendOutcome> = None;
+
+    let outcome = if let Some(outcome) = resolved_executor_outcome {
+        outcome
+    } else if expected_provenance == PackingCandidateProvenance::RawGeometry
+        && executors.supports_native_candidate_streaming()
+    {
+        execute_selected_raw_geometry_packing(
+            backend_selection,
+            compact_problem,
+            problem.backend_request(),
+            cancellation,
+        )?
+    } else if should_stream_buildable_candidates(problem, source_pattern_bits, executors) {
+        execute_selected_buildable_packing(
             problem,
             source_pattern_bits,
             backend_selection,
             compact_problem,
             problem.backend_request(),
             cancellation,
-        );
+        )?
+    } else {
+        #[cfg(test)]
+        {
+            execute_selected_packing(
+                backend_selection,
+                compact_problem,
+                problem.backend_request(),
+                cancellation,
+                executors,
+            )?
+        }
+        #[cfg(not(test))]
+        {
+            return Err(PackingRunnerError::BackendExecutorUnavailable {
+                backend: backend_selection.selected_backend(),
+                reason: "buildable_geometry_stream_required",
+            });
+        }
+    };
+    let actual_provenance = outcome.candidate_provenance();
+    if actual_provenance != expected_provenance {
+        return Err(PackingRunnerError::CandidateProvenanceMismatch {
+            expected: expected_provenance,
+            actual: actual_provenance,
+        });
     }
-    #[cfg(test)]
+    Ok(outcome)
+}
+
+fn expected_candidate_provenance(problem: &SearchProblem) -> PackingCandidateProvenance {
+    candidate_provenance_for(problem.preset(), problem.objective())
+}
+
+fn candidate_provenance_for(
+    preset: clearra_problem::SearchProblemPreset,
+    objective: clearra_objectives::policy::objective_policy::ObjectivePolicy,
+) -> PackingCandidateProvenance {
+    if matches!(
+        preset,
+        clearra_problem::SearchProblemPreset::OpeningPc
+            | clearra_problem::SearchProblemPreset::ScenarioPc
+    ) && objective == clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling()
     {
-        return execute_selected_packing(
-            backend_selection,
-            compact_problem,
-            problem.backend_request(),
-            cancellation,
-            executors,
-        );
-    }
-    #[cfg(not(test))]
-    {
-        Err(PackingRunnerError::BackendExecutorUnavailable {
-            backend: backend_selection.selected_backend(),
-            reason: "buildable_geometry_stream_required",
-        })
+        PackingCandidateProvenance::RawGeometry
+    } else {
+        PackingCandidateProvenance::BuildabilityPrefiltered
     }
 }
 
@@ -713,7 +1123,12 @@ fn merge_group_result(
             trust_state: group.trust_report.state(),
         });
     }
-    result.buildability_preverified &= group.buildability_preverified;
+    if result.candidate_provenance != group.candidate_provenance {
+        return Err(PackingRunnerError::CandidateProvenanceMismatch {
+            expected: result.candidate_provenance,
+            actual: group.candidate_provenance,
+        });
+    }
     match (&result.geometry_catalog, group.geometry_catalog.take()) {
         (Some(existing), Some(incoming)) if existing != &incoming => {
             return Err(PackingRunnerError::GeometryCatalogMismatch);

@@ -102,8 +102,18 @@ fixed_mode_search!(
 );
 
 impl SpinStructureSearcher {
+    /// Validate and normalize the public pre-spawn field snapshot exactly as
+    /// every search entry point does. Hosts that retain the query for result
+    /// identity validation must retain this normalized value, not the
+    /// pre-clear transport snapshot.
+    pub fn normalize_query(
+        query: SpinStructureQuery,
+    ) -> Result<SpinStructureQuery, SpinStructureError> {
+        prepare_query(query)
+    }
+
     pub fn run(query: SpinStructureQuery) -> Result<SpinStructureReport, SpinStructureError> {
-        let query = prepare_query(query)?;
+        let query = Self::normalize_query(query)?;
         let tasks = partition_prepared(query.clone());
         if tasks.is_empty() {
             return Ok(empty_report(query));
@@ -118,7 +128,7 @@ impl SpinStructureSearcher {
     pub fn partition(
         query: SpinStructureQuery,
     ) -> Result<Vec<SpinStructureTask>, SpinStructureError> {
-        Ok(partition_prepared(prepare_query(query)?))
+        Ok(partition_prepared(Self::normalize_query(query)?))
     }
 
     pub fn run_task(task: SpinStructureTask) -> Result<SpinStructureReport, SpinStructureError> {
@@ -185,7 +195,7 @@ fn partition_prepared(query: SpinStructureQuery) -> Vec<SpinStructureTask> {
 pub(crate) fn run_exhaustive(
     query: SpinStructureQuery,
 ) -> Result<SpinStructureReport, SpinStructureError> {
-    let query = prepare_query(query)?;
+    let query = SpinStructureSearcher::normalize_query(query)?;
     if query.mode.t_only() && query.inventory.count(PieceKind::T) == 0 {
         return Ok(empty_report(query));
     }

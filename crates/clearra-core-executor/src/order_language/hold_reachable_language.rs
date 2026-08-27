@@ -66,6 +66,10 @@ impl HoldReachableLanguage {
     pub fn supports_long_carryover(&self) -> bool {
         self.transitions.supports_long_carryover()
     }
+
+    pub fn orders(&self) -> &[Vec<OperationId>] {
+        &self.transitions.reachable_orders
+    }
 }
 
 #[cfg(test)]

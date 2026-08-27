@@ -159,8 +159,12 @@ function withSearchProfile(
 
 function createWorkerHostYield(): () => Promise<void> {
   const channel = new MessageChannel();
+  const nodePort1 = channel.port1 as MessagePort & { unref?: () => void };
+  const nodePort2 = channel.port2 as MessagePort & { unref?: () => void };
   const pending: Array<() => void> = [];
   channel.port1.onmessage = () => pending.shift()?.();
+  nodePort1.unref?.();
+  nodePort2.unref?.();
   return () =>
     new Promise<void>((resolve) => {
       pending.push(resolve);

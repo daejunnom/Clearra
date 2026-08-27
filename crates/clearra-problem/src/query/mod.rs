@@ -17,8 +17,8 @@ pub mod spin_target_query;
 
 pub use build_probability_query::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFieldError,
-    BuildProbabilityFinesseRequest, BuildProbabilityQuery, FinesseMetric, FinessePatternKnowledge,
-    FinessePlacement, FinesseScoreRequest,
+    BuildProbabilityFinesseRequest, BuildProbabilityQuery, BuildSolutionProbabilityPolicy,
+    FinesseMetric, FinessePatternKnowledge, FinessePlacement, FinesseScoreRequest,
 };
 pub use build_query::{BuildProblemLimits, BuildQuery, BuildTemplateBridge};
 pub use pc_query::PcQuery;

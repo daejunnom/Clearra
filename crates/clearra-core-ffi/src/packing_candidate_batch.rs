@@ -74,6 +74,17 @@ impl OperationDictionary {
             )
     }
 
+    fn checked_retained_bytes(&self) -> Option<u128> {
+        (self.entries.capacity() as u128)
+            .checked_mul(size_of::<CPackingOperation>() as u128)?
+            .checked_add(
+                (self.bucket_heads.capacity() as u128).checked_mul(size_of::<u32>() as u128)?,
+            )?
+            .checked_add(
+                (self.next_indices.capacity() as u128).checked_mul(size_of::<u32>() as u128)?,
+            )
+    }
+
     fn resident_allocation_count(&self) -> usize {
         usize::from(self.entries.capacity() != 0)
             + usize::from(self.bucket_heads.capacity() != 0)
@@ -380,6 +391,72 @@ impl PackingCandidateBatch {
             )
     }
 
+    pub fn checked_retained_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.segments.capacity() as u128)
+            .checked_mul(size_of::<PackingCandidateSegment>() as u128)?
+            .checked_add(
+                (self.candidate_order.capacity() as u128)
+                    .checked_mul(size_of::<CandidateLocation>() as u128)?,
+            )?;
+        for segment in &self.segments {
+            bytes = bytes
+                .checked_add(
+                    (segment.candidates.capacity() as u128)
+                        .checked_mul(size_of::<CompactPackingCandidate>() as u128)?,
+                )?
+                .checked_add(
+                    (segment.operation_refs.capacity() as u128)
+                        .checked_mul(size_of::<u16>() as u128)?,
+                )?
+                .checked_add(segment.operation_dictionary.checked_retained_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    /// Checked allocation request for the two global index vectors while two
+    /// payload batches remain live. Payload segments move without copying; the
+    /// old and replacement index buffers may coexist during `Vec` growth.
+    pub fn checked_merge_transient_bytes(&self, other: &Self) -> Option<u128> {
+        let live_payloads = self
+            .checked_retained_bytes()?
+            .checked_add(other.checked_retained_bytes()?)?;
+        let target_segments = self.segments.len().checked_add(other.segments.len())?;
+        let target_candidates = self
+            .candidate_order
+            .len()
+            .checked_add(other.candidate_order.len())?;
+        live_payloads
+            .checked_add(
+                (target_segments as u128)
+                    .checked_mul(size_of::<PackingCandidateSegment>() as u128)?,
+            )?
+            .checked_add(
+                (target_candidates as u128).checked_mul(size_of::<CandidateLocation>() as u128)?,
+            )
+    }
+
+    /// Checked peak while all worker payload batches remain live and the two
+    /// replacement global index vectors are allocated. Segment payloads move
+    /// without copying, so they are counted exactly once in `live_payloads`.
+    pub fn checked_merge_batches_transient_bytes(batches: &[Self]) -> Option<u128> {
+        let mut live_payloads = 0u128;
+        let mut target_segments = 0usize;
+        let mut target_candidates = 0usize;
+        for batch in batches {
+            live_payloads = live_payloads.checked_add(batch.checked_retained_bytes()?)?;
+            target_segments = target_segments.checked_add(batch.segments.len())?;
+            target_candidates = target_candidates.checked_add(batch.candidate_order.len())?;
+        }
+        live_payloads
+            .checked_add(
+                (target_segments as u128)
+                    .checked_mul(size_of::<PackingCandidateSegment>() as u128)?,
+            )?
+            .checked_add(
+                (target_candidates as u128).checked_mul(size_of::<CandidateLocation>() as u128)?,
+            )
+    }
+
     pub fn resident_allocation_count(&self) -> usize {
         usize::from(self.segments.capacity() != 0)
             + usize::from(self.candidate_order.capacity() != 0)
@@ -642,6 +719,39 @@ impl PackingCandidateBatch {
             candidate.candidate_id = identity;
             candidate.canonical_operation_set_id = identity;
         }
+    }
+}
+
+#[cfg(test)]
+mod resource_projection_tests {
+    use super::*;
+
+    #[test]
+    fn empty_merge_projection_is_checked_and_covers_observed_result() {
+        let left = PackingCandidateBatch::new(10, 4).expect("left");
+        let right = PackingCandidateBatch::new(10, 4).expect("right");
+        let projected = left
+            .checked_merge_transient_bytes(&right)
+            .expect("checked projection");
+        let merged = PackingCandidateBatch::merge_batches(vec![left, right], 10, 4).expect("merge");
+        assert!(projected >= merged.checked_retained_bytes().expect("retained"));
+    }
+
+    #[test]
+    fn multi_batch_projection_counts_payload_once_and_replacement_indexes_once() {
+        let batches = vec![
+            PackingCandidateBatch::new(10, 4).expect("first"),
+            PackingCandidateBatch::new(10, 4).expect("second"),
+            PackingCandidateBatch::new(10, 4).expect("third"),
+        ];
+        let live_payloads = batches.iter().try_fold(0u128, |total, batch| {
+            total.checked_add(batch.checked_retained_bytes()?)
+        });
+        let projected = PackingCandidateBatch::checked_merge_batches_transient_bytes(&batches)
+            .expect("checked projection");
+        assert_eq!(projected, live_payloads.expect("live payloads"));
+        let merged = PackingCandidateBatch::merge_batches(batches, 10, 4).expect("merge");
+        assert!(projected >= merged.checked_retained_bytes().expect("retained"));
     }
 }
 

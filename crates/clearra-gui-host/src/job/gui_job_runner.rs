@@ -10,8 +10,11 @@ use clearra_app::{AppContext, AppResponse, AppStatus};
 use clearra_core_domain::execution_cancellation::{
     ExecutionControl, ExecutionProgress, ProgressSink,
 };
+use clearra_host_contract::HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES;
 
 use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobProgress, GuiJobResult};
+
+const GUI_JOB_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct GuiJobRunner;
@@ -24,53 +27,61 @@ impl GuiJobRunner {
         let cancel_handle = job.cancel_handle();
         let request = job.into_request();
 
-        let join_handle = thread::spawn(move || {
-            if cancel_token.is_cancelled() {
-                let _ = sender.send(GuiJobEvent::Cancelled { job_id });
-                return GuiJobResult::cancelled(job_id);
-            }
+        let join_handle = thread::Builder::new()
+            .name(format!("clearra-gui-job-{}", job_id.get()))
+            .stack_size(GUI_JOB_STACK_BYTES)
+            .spawn(move || {
+                if cancel_token.is_cancelled() {
+                    let _ = sender.send(GuiJobEvent::Cancelled { job_id });
+                    return GuiJobResult::cancelled(job_id);
+                }
 
-            let _ = sender.send(GuiJobEvent::Started { job_id });
-            let _ = sender.send(GuiJobEvent::Progress {
-                job_id,
-                progress: GuiJobProgress::new(0, 1, "clearra-app"),
-            });
-            let progress_sink = Arc::new(GuiProgressSink {
-                job_id,
-                sender: sender.clone(),
-            });
-            let control = ExecutionControl::new(cancel_token.execution_token().clone())
-                .with_progress_sink(progress_sink);
-            let response = app_context.run_with_execution_control(request, &control);
-            if cancel_token.is_cancelled() {
-                let _ = sender.send(GuiJobEvent::Cancelled { job_id });
-                return GuiJobResult::cancelled(job_id);
-            }
+                let _ = sender.send(GuiJobEvent::Started { job_id });
+                let _ = sender.send(GuiJobEvent::Progress {
+                    job_id,
+                    progress: GuiJobProgress::new(0, 1, "clearra-app"),
+                });
+                let progress_sink = Arc::new(GuiProgressSink {
+                    job_id,
+                    sender: sender.clone(),
+                });
+                let control = ExecutionControl::new(cancel_token.execution_token().clone())
+                    .with_progress_sink(progress_sink);
+                let response = app_context.run_with_execution_control(request, &control);
+                if cancel_token.is_cancelled() {
+                    let _ = sender.send(GuiJobEvent::Cancelled { job_id });
+                    return GuiJobResult::cancelled(job_id);
+                }
 
-            emit_diagnostics(job_id, &response, |event| {
-                let _ = sender.send(event);
-            });
+                emit_diagnostics(job_id, &response, |event| {
+                    let _ = sender.send(event);
+                });
 
-            let _ = sender.send(GuiJobEvent::Progress {
-                job_id,
-                progress: GuiJobProgress::new(1, 1, "clearra-app"),
-            });
-            #[cfg(feature = "wasm-cpu-runtime")]
-            let search_report_json =
-                clearra_wasm::serialize_search_report_from_app_response(&response);
-            #[cfg(not(feature = "wasm-cpu-runtime"))]
-            let search_report_json = None;
-            let _ = sender.send(GuiJobEvent::Completed {
-                job_id,
-                response: response.to_host_response(),
-                search_report_json,
-            });
-            if response.status() == AppStatus::Success {
-                GuiJobResult::completed(job_id, response)
-            } else {
-                GuiJobResult::failed(job_id, response)
-            }
-        });
+                let _ = sender.send(GuiJobEvent::Progress {
+                    job_id,
+                    progress: GuiJobProgress::new(1, 1, "clearra-app"),
+                });
+                #[cfg(feature = "wasm-cpu-runtime")]
+                let search_report_json =
+                    clearra_wasm::serialize_search_report_from_app_response(&response);
+                #[cfg(not(feature = "wasm-cpu-runtime"))]
+                let search_report_json = None;
+                let product_page_source_owner = response.public_page_source_owner();
+                let _ = sender.send(GuiJobEvent::Completed {
+                    job_id,
+                    response: response.to_host_response_with_solution_set_artifact(Some(
+                        HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
+                    )),
+                    search_report_json,
+                    product_page_source_owner,
+                });
+                if response.status() == AppStatus::Success {
+                    GuiJobResult::completed(job_id, response)
+                } else {
+                    GuiJobResult::failed(job_id, response)
+                }
+            })
+            .expect("spawn Clearra GUI job runner thread");
 
         GuiJobHandle {
             receiver,

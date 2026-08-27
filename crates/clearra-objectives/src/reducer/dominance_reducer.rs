@@ -63,15 +63,15 @@ fn dominates(left: &DominanceCandidate, right: &DominanceCandidate) -> Option<bo
     if !left.patterns.is_superset(&right.patterns).ok()? {
         return Some(false);
     }
-    if left.score < right.score || left.attack < right.attack {
+    // Attack is informational and must never participate in product
+    // eligibility or dominance. Equal-score identities are retained even when
+    // one coverage row is a superset: the narrower original row can still be
+    // a member of a distinct equal-cardinality optimum with other rows.
+    if left.score <= right.score {
         return Some(false);
     }
 
-    let strictly_better = left.patterns != right.patterns
-        || left.score > right.score
-        || left.attack > right.attack
-        || left.candidate_id < right.candidate_id;
-    Some(strictly_better)
+    Some(true)
 }
 
 #[cfg(test)]
@@ -102,5 +102,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 3]
         );
+    }
+
+    #[test]
+    fn attack_and_candidate_id_do_not_dominate_equal_score_rows() {
+        let candidates = vec![
+            DominanceCandidate::new(1, bitset(2, &[0, 1]), 100, 999),
+            DominanceCandidate::new(2, bitset(2, &[0]), 100, 0),
+            DominanceCandidate::new(3, bitset(2, &[0]), 100, 1_000),
+        ];
+
+        let reduced = DominanceReducer::reduce(&candidates);
+
+        assert_eq!(reduced, candidates);
     }
 }

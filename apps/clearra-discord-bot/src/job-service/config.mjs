@@ -67,16 +67,51 @@ export function loadClearraJobServiceConfig(
       environment.CLEARRA_MAX_OUTPUT_BYTES,
       4 * 1024 * 1024,
     ),
+    maxArtifactBytes: positiveInteger(
+      environment.CLEARRA_MAX_GIF_BYTES,
+      24 * 1024 * 1024,
+    ),
     searchTimeoutMs: positiveInteger(
       environment.CLEARRA_SEARCH_TIMEOUT_MS,
-      170_000,
+      3 * 60_000,
     ),
-    reverseSearchTimeoutMs: positiveInteger(
-      environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
+    diagnosticTimeoutMs: positiveInteger(
+      environment.CLEARRA_DIAGNOSTIC_TIMEOUT_MS,
+      positiveInteger(environment.CLEARRA_SEARCH_TIMEOUT_MS, 3 * 60_000),
+    ),
+    pcSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
+        environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
       5 * 60_000,
+    ),
+    // Kept for one compatibility window; runtime selection uses
+    // pcSearchTimeoutMs and the pc_reverse class.
+    reverseSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
+        environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
+      5 * 60_000,
+    ),
+    buildSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_BUILD_SEARCH_TIMEOUT_MS ??
+        environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+      15 * 60_000,
+    ),
+    setupSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_SETUP_SEARCH_TIMEOUT_MS ??
+        environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+      15 * 60_000,
     ),
     forwardSearchTimeoutMs: positiveInteger(
       environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+      15 * 60_000,
+    ),
+    structureSearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS ??
+        environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
+      15 * 60_000,
+    ),
+    utilitySearchTimeoutMs: positiveInteger(
+      environment.CLEARRA_UTILITY_SEARCH_TIMEOUT_MS,
       15 * 60_000,
     ),
     terminationGraceMs: positiveInteger(

@@ -3,7 +3,9 @@ use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
 #[cfg(feature = "native-c-core")]
 use clearra_core_domain::pruning::PruningEvidencePolicy;
 #[cfg(feature = "native-c-core")]
-use clearra_core_domain::resource::ResourceReport;
+use clearra_core_domain::resource::{
+    ExecutionAvailability, ExecutionAvailabilityReason, ResourceReport,
+};
 
 #[cfg(all(feature = "native-c-core", any(test, feature = "test-support")))]
 use crate::packing_problem::CPackingCandidate;
@@ -14,10 +16,11 @@ use crate::problem::CPackingProblem;
 use super::NativeCoreError;
 #[cfg(feature = "native-c-core")]
 use super::NativePackingCandidateConsumer;
+#[cfg(feature = "native-c-core")]
+use super::NativePackingStreamOutcome;
 #[cfg(all(feature = "native-c-core", any(test, feature = "test-support")))]
 use super::{
     NativeGeometryMaterializationOutcome, NativeGeometryStreamOutcome, NativePackingOutcome,
-    NativePackingStreamOutcome,
 };
 
 #[repr(C)]
@@ -131,11 +134,11 @@ mod linked {
     };
 
     const C_PACKING_STATUS_OK: i32 = 0;
-    #[cfg(any(test, feature = "test-support"))]
     const C_PACKING_STATUS_CAPACITY_EXCEEDED: i32 = 6;
     const C_PACKING_STATUS_CANCELLED: i32 = 7;
     const C_PRUNING_EVIDENCE_BEST_EFFORT: i32 = 1;
     const MAX_CACHED_GEOMETRY_CATALOGS: usize = 8;
+    const NATIVE_MEMORY_BUDGET_QUANTUM_BYTES: u128 = 1024 * 1024;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct NativeGeometryCatalogCacheKey {
@@ -189,6 +192,21 @@ mod linked {
         inner: Arc<NativeGeometryCatalogInner>,
     }
 
+    fn convert_pruning_ledger_or_release_unpublished_catalog(
+        pointer: &mut *mut c_void,
+        pruning_ledger: &CNativePruningProofLedger,
+        release: impl FnOnce(&mut *mut c_void),
+    ) -> Result<NativePruningLedger, NativeCoreError> {
+        match pruning_ledger.to_owned_report() {
+            Ok(ledger) => Ok(ledger),
+            Err(error) => {
+                release(pointer);
+                debug_assert!((*pointer).is_null());
+                Err(NativeCoreError::InvalidPruningLedger(error))
+            }
+        }
+    }
+
     impl NativeGeometryCatalog {
         pub(crate) fn compile(problem: &CPackingProblem) -> Result<Self, NativeCoreError> {
             let mut resource_report = CNativeResourceReport::default();
@@ -216,13 +234,18 @@ mod linked {
                 crate::raw::bindings::geometry_catalog::release(&mut failed_pointer);
                 return Err(NativeCoreError::PackingStatus(1));
             }
+            let mut owned_pointer = pointer.as_ptr();
+            let pruning_ledger = convert_pruning_ledger_or_release_unpublished_catalog(
+                &mut owned_pointer,
+                &pruning_ledger,
+                crate::raw::bindings::geometry_catalog::release,
+            )?;
+            let pointer = NonNull::new(owned_pointer).ok_or(NativeCoreError::PackingStatus(1))?;
             Ok(Self {
                 inner: Arc::new(NativeGeometryCatalogInner {
                     pointer,
                     compile_resource_report: resource_report,
-                    pruning_ledger: pruning_ledger
-                        .to_owned_report()
-                        .map_err(NativeCoreError::InvalidPruningLedger)?,
+                    pruning_ledger,
                     identity: raw_view.identity,
                 }),
             })
@@ -272,7 +295,7 @@ mod linked {
         ) -> Result<NativeBuildableGeometryTaskOutcome, NativeCoreError> {
             let _control =
                 crate::raw::execution_control::NativeExecutionControlGuard::install(cancellation)?;
-            let workspace = buildup_workspace.raw_pointer()?;
+            let mut workspace = buildup_workspace.raw_handle()?;
             let mut report = CNativeBuildableGeometryStreamReport::default();
             let mut pruning_ledger = CNativePruningProofLedger::default();
             let native_evidence_policy = match evidence_policy {
@@ -287,7 +310,7 @@ mod linked {
                     skeleton_row_ids,
                     packing_problem,
                     buildup_scratch,
-                    workspace,
+                    workspace.as_mut_ptr(),
                     sink.as_mut(),
                     native_evidence_policy,
                     &mut pruning_ledger,
@@ -337,7 +360,6 @@ mod linked {
             })
         }
 
-        #[cfg(any(test, feature = "test-support"))]
         pub fn stream_partition(
             &self,
             problem: &CPackingProblem,
@@ -581,13 +603,37 @@ mod linked {
         problem: &CPackingProblem,
         catalog: &NativeGeometryCatalog,
     ) -> bool {
-        if problem.budget.has_max_memory_mib == 0 {
-            return true;
+        match configured_request_memory_bytes(problem) {
+            Some(max_bytes) => catalog.resident_bytes() as u128 <= max_bytes,
+            None => true,
         }
-        let max_bytes = (problem.budget.max_memory_mib as usize)
-            .checked_mul(1024 * 1024)
-            .unwrap_or(usize::MAX);
-        catalog.resident_bytes() <= max_bytes
+    }
+
+    fn configured_request_memory_bytes(problem: &CPackingProblem) -> Option<u128> {
+        (problem.budget.has_max_memory_mib != 0)
+            .then(|| u128::from(problem.budget.max_memory_mib) * NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)
+    }
+
+    fn memory_budget_error(required_memory_bytes: u128) -> NativeCoreError {
+        NativeCoreError::PackingIncomplete {
+            status: C_PACKING_STATUS_CAPACITY_EXCEEDED,
+            resource_report: ResourceReport::admission_failure(
+                ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+                    .with_required_memory_bytes(required_memory_bytes),
+            ),
+        }
+    }
+
+    fn ensure_request_memory_budget(
+        problem: &CPackingProblem,
+        required_memory_bytes: u128,
+    ) -> Result<(), NativeCoreError> {
+        if configured_request_memory_bytes(problem)
+            .is_some_and(|max_bytes| required_memory_bytes > max_bytes)
+        {
+            return Err(memory_budget_error(required_memory_bytes));
+        }
+        Ok(())
     }
 
     pub(crate) fn compile(
@@ -629,7 +675,16 @@ mod linked {
         let _execution_control = cancellation
             .map(crate::raw::execution_control::NativeExecutionControlGuard::install)
             .transpose()?;
+        // The C ABI accepts memory limits in whole MiB. A configured zero-MiB
+        // request must therefore fail before its first catalog allocation;
+        // every non-zero request gives the C allocator at least one complete
+        // budget quantum, which it enforces for each subsequent allocation.
+        ensure_request_memory_budget(problem, NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)?;
         let catalog = NativeGeometryCatalog::compile(problem)?;
+        // The C allocator accounts catalog-owned buffers, but this boundary is
+        // also the cache/publication owner. Reject and drop an over-cap result
+        // before it can enter the process-wide cache.
+        ensure_request_memory_budget(problem, catalog.resident_bytes() as u128)?;
         if cancellation.is_some_and(ExecutionCancellationToken::is_cancelled) {
             return Err(NativeCoreError::ExecutionCancelled);
         }
@@ -651,6 +706,85 @@ mod linked {
         }
         cache.push_back((key, catalog.clone()));
         Ok(catalog)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::cell::Cell;
+
+        use super::*;
+
+        #[test]
+        fn invalid_compile_ledger_releases_unpublished_catalog_exactly_once() {
+            let mut pointer = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+            let expected_pointer = pointer;
+            let release_count = Cell::new(0_usize);
+
+            let result = convert_pruning_ledger_or_release_unpublished_catalog(
+                &mut pointer,
+                &CNativePruningProofLedger::default(),
+                |released_pointer| {
+                    assert_eq!(*released_pointer, expected_pointer);
+                    release_count.set(release_count.get() + 1);
+                    *released_pointer = core::ptr::null_mut();
+                },
+            );
+
+            assert!(matches!(
+                result,
+                Err(NativeCoreError::InvalidPruningLedger(_))
+            ));
+            assert_eq!(release_count.get(), 1);
+            assert!(pointer.is_null());
+        }
+
+        #[test]
+        fn configured_zero_mib_is_rejected_before_native_catalog_allocation() {
+            let mut problem = CPackingProblem::default();
+            problem.budget.has_max_memory_mib = 1;
+            problem.budget.max_memory_mib = 0;
+
+            let error = ensure_request_memory_budget(&problem, NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)
+                .expect_err("zero MiB cannot authorize the first allocation");
+            let NativeCoreError::PackingIncomplete {
+                resource_report, ..
+            } = error
+            else {
+                panic!("expected typed resource failure");
+            };
+            let availability = resource_report.execution_availability();
+            assert_eq!(
+                availability.reason(),
+                Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+            );
+            assert_eq!(
+                availability.required_memory_bytes(),
+                Some(NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)
+            );
+            assert!(!resource_report.execution_started());
+            assert!(!resource_report.result_complete());
+        }
+
+        #[test]
+        fn configured_catalog_budget_uses_the_native_mib_unit_exactly() {
+            let mut problem = CPackingProblem::default();
+            problem.budget.has_max_memory_mib = 1;
+            problem.budget.max_memory_mib = 2;
+
+            assert_eq!(
+                configured_request_memory_bytes(&problem),
+                Some(2 * NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)
+            );
+            assert!(
+                ensure_request_memory_budget(&problem, 2 * NATIVE_MEMORY_BUDGET_QUANTUM_BYTES)
+                    .is_ok()
+            );
+            assert!(ensure_request_memory_budget(
+                &problem,
+                2 * NATIVE_MEMORY_BUDGET_QUANTUM_BYTES + 1
+            )
+            .is_err());
+        }
     }
 }
 
@@ -698,7 +832,6 @@ impl NativeGeometryCatalog {
         Err(NativeCoreError::Unavailable)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn stream_partition(
         &self,
         _problem: &CPackingProblem,

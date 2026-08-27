@@ -11,7 +11,7 @@ webgpu-search = ["clearra-app/webgpu-search"]
 stage-profiling = ["clearra-app/wasm-stage-profiling"]
 
 [dependencies]
-clearra-app = { path = "../clearra-app", default-features = false }
+clearra-app = { path = "../clearra-app", default-features = false, features = ["bitmap-render"] }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-core-executor = { path = "../clearra-core-executor", default-features = false }
 clearra-coverage = { path = "../clearra-coverage" }
@@ -19,6 +19,7 @@ clearra-forward-search = { path = "../clearra-forward-search" }
 clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-problem = { path = "../clearra-problem" }
+clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-web-command = { path = "../clearra-web-command" }
 
 [lib]

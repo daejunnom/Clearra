@@ -79,16 +79,14 @@ pub(super) fn materialized_probabilities(
     let uniform = 1.0 / total_pattern_count as f64;
     let complete = materialized_count as u128 == total_pattern_count;
     let mut probabilities = Vec::with_capacity(materialized_count);
-    let mut assigned = 0.0;
 
     for index in 0..materialized_count {
         let value = if complete && index + 1 == materialized_count {
-            1.0 - assigned
+            1.0 - uniform * materialized_count.saturating_sub(1) as f64
         } else {
             uniform
         };
         let probability = ProbabilityValue::new(value)?;
-        assigned += probability.get();
         probabilities.push(probability);
     }
 

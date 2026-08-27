@@ -37,6 +37,9 @@ impl CandidatePatternIndex {
             .map_err(|_| PackingRunnerError::PatternGroupCapacityExceeded)?;
         let pattern_count = u32::try_from(patterns.pattern_count())
             .map_err(|_| PackingRunnerError::PatternGroupCapacityExceeded)?;
+        self.pattern_groups
+            .try_reserve_exact(1)
+            .map_err(|_| PackingRunnerError::PatternGroupCapacityExceeded)?;
         self.pattern_groups.push(CandidatePatternGroup {
             pattern_count,
             member_count: patterns.count_ones(),
@@ -45,9 +48,13 @@ impl CandidatePatternIndex {
         Ok(index)
     }
 
-    pub(crate) fn bind_candidate(&mut self, group_index: u32) {
+    pub(crate) fn bind_candidate(&mut self, group_index: u32) -> Result<(), PackingRunnerError> {
         debug_assert!((group_index as usize) < self.pattern_groups.len());
+        self.candidate_group_indices
+            .try_reserve_exact(1)
+            .map_err(|_| PackingRunnerError::PatternGroupCapacityExceeded)?;
         self.candidate_group_indices.push(group_index);
+        Ok(())
     }
 
     pub(crate) fn pattern_group_count(&self) -> usize {
@@ -154,6 +161,35 @@ impl CandidatePatternIndex {
             )
     }
 
+    pub(crate) fn owned_resident_bytes(&self) -> usize {
+        self.pattern_groups
+            .capacity()
+            .saturating_mul(size_of::<CandidatePatternGroup>())
+            .saturating_add(
+                self.candidate_group_indices
+                    .capacity()
+                    .saturating_mul(size_of::<u32>()),
+            )
+    }
+
+    pub(crate) fn checked_owned_resident_bytes(&self) -> Option<u128> {
+        (self.pattern_groups.capacity() as u128)
+            .checked_mul(size_of::<CandidatePatternGroup>() as u128)?
+            .checked_add(
+                (self.candidate_group_indices.capacity() as u128)
+                    .checked_mul(size_of::<u32>() as u128)?,
+            )
+    }
+
+    pub(crate) fn checked_requested_bytes(
+        pattern_group_count: usize,
+        candidate_count: usize,
+    ) -> Option<u128> {
+        (pattern_group_count as u128)
+            .checked_mul(size_of::<CandidatePatternGroup>() as u128)?
+            .checked_add((candidate_count as u128).checked_mul(size_of::<u32>() as u128)?)
+    }
+
     pub(crate) fn resident_allocation_count(&self) -> usize {
         let pattern_allocations = self
             .pattern_groups
@@ -163,6 +199,33 @@ impl CandidatePatternIndex {
         usize::from(self.pattern_groups.capacity() != 0)
             + usize::from(self.candidate_group_indices.capacity() != 0)
             + pattern_allocations
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_index_bytes_are_checked_and_never_exceed_observed_owned_storage() {
+        let patterns = Arc::new(PatternBitSet::all(129));
+        let mut index = CandidatePatternIndex::default();
+        let group = index
+            .push_shared_pattern_group(patterns)
+            .expect("one pattern group");
+        for _ in 0..17 {
+            index.bind_candidate(group).expect("candidate binding");
+        }
+        let requested =
+            CandidatePatternIndex::checked_requested_bytes(1, 17).expect("checked request");
+        assert!(index.checked_owned_resident_bytes().unwrap() >= requested);
+        assert_eq!(
+            CandidatePatternIndex::checked_requested_bytes(usize::MAX, usize::MAX),
+            Some(
+                (usize::MAX as u128) * size_of::<CandidatePatternGroup>() as u128
+                    + (usize::MAX as u128) * size_of::<u32>() as u128
+            )
+        );
     }
 }
 

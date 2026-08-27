@@ -1,4 +1,3 @@
-use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_supply::hold_automaton::{HoldAutomatonMemoKey, HoldAutomatonState};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -17,7 +16,6 @@ pub struct BuildUpMemoKey {
     pub current_board_mask: u64,
     pub deleted_line_state: DeletedLineState,
     pub hold_automaton_state: HoldAutomatonMemoKey,
-    pub piece_source_cursor: u16,
     pub reachability_relevant_state: u64,
     pub cleared_lines: u8,
 }
@@ -38,7 +36,6 @@ impl BuildUpMemoKey {
             current_board_mask,
             deleted_line_state,
             hold_automaton_state: hold_automaton_state.memo_key(),
-            piece_source_cursor: hold_automaton_state.cursor,
             reachability_relevant_state,
             cleared_lines,
         }
@@ -52,32 +49,10 @@ impl BuildUpMemoKey {
         mix_u64(&mut hash, self.current_board_mask);
         mix_u16(&mut hash, self.deleted_line_state.deleted_row_mask);
         mix_u8(&mut hash, self.deleted_line_state.deleted_count);
-        mix_u64(&mut hash, self.hold_automaton_state.piece_source_id.get());
-        mix_u16(&mut hash, self.hold_automaton_state.cursor);
-        mix_u16(&mut hash, self.hold_automaton_state.bag_epoch);
-        mix_u64(&mut hash, self.hold_automaton_state.bag_remainder_key);
-        mix_u64(&mut hash, self.hold_automaton_state.provenance.0);
-        mix_u8(
-            &mut hash,
-            self.hold_automaton_state.hold_piece.map_or(0, piece_id),
-        );
-        mix_u8(&mut hash, self.hold_automaton_state.hold_empty as u8);
-        mix_u16(&mut hash, self.piece_source_cursor);
+        mix_u64(&mut hash, self.hold_automaton_state.stable_hash());
         mix_u64(&mut hash, self.reachability_relevant_state);
         mix_u8(&mut hash, self.cleared_lines);
         hash
-    }
-}
-
-fn piece_id(piece: PieceKind) -> u8 {
-    match piece {
-        PieceKind::I => 1,
-        PieceKind::O => 2,
-        PieceKind::T => 3,
-        PieceKind::S => 4,
-        PieceKind::Z => 5,
-        PieceKind::J => 6,
-        PieceKind::L => 7,
     }
 }
 

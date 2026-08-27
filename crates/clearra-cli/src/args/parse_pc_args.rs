@@ -26,6 +26,7 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut score_requested = false;
     let mut score_profile = None;
     let mut spin_profile = None;
+    let mut preserve_back_to_back = false;
     let mut initial_b2b = None;
     let mut rule = None;
     let mut kick_profile_json = None;
@@ -95,8 +96,11 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
             }
             "--spin-profile" => {
                 spin_profile = Some(option_value(args, index, "--spin-profile")?.to_owned());
-                score_requested = true;
                 index += 2;
+            }
+            "--preserve-b2b" => {
+                preserve_back_to_back = true;
+                index += 1;
             }
             "--initial-b2b" => {
                 initial_b2b = Some(u32::from(parse_u16_option(args, index, "--initial-b2b")?));
@@ -242,11 +246,24 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     } else {
         objective.unwrap_or_else(|| "all".to_owned())
     };
+    if spin_profile.is_some() && !score_requested && !preserve_back_to_back {
+        return Err(CliParseError::InvalidValue {
+            option: "--spin-profile",
+            value: "requires --score or --preserve-b2b".to_owned(),
+        });
+    }
+    if initial_b2b.is_some() && !score_requested {
+        return Err(CliParseError::InvalidValue {
+            option: "--initial-b2b",
+            value: "requires --score".to_owned(),
+        });
+    }
     if objective.trim().to_ascii_lowercase().replace('_', "-") == "tiling" {
         let incompatible = [
             (score_requested, "--score"),
             (score_profile.is_some(), "--score-profile"),
             (spin_profile.is_some(), "--spin-profile"),
+            (preserve_back_to_back, "--preserve-b2b"),
             (initial_b2b.is_some(), "--initial-b2b"),
             (rule.is_some(), "--rule"),
             (kick_profile_json.is_some(), "--kick-profile-json"),
@@ -276,6 +293,7 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         .with_score_requested(score_requested)
         .with_score_profile(score_profile)
         .with_spin_profile(spin_profile)
+        .with_back_to_back_preservation(preserve_back_to_back)
         .with_initial_b2b(initial_b2b)
         .with_rule(rule)
         .with_kick_profile_json(kick_profile_json)

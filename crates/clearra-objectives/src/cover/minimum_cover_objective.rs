@@ -1,5 +1,8 @@
 use clearra_coverage::{
-    cover::{cover_selection::CoverSelection, minimum_cover_solver::MinimumCoverSolver},
+    cover::{
+        cover_selection::CoverSelection, minimum_cover_solver::MinimumCoverSolver,
+        ExactMinimumCoverPortfolioEnumerator, ExactMinimumCoverPortfolioError,
+    },
     matrix::coverage_matrix::TypedCoverageMatrix,
     pattern::pattern_bitset::PatternBitSet,
 };
@@ -10,6 +13,13 @@ pub struct MinimumCoverObjective;
 impl MinimumCoverObjective {
     pub fn select(matrix: &TypedCoverageMatrix, required: &PatternBitSet) -> CoverSelection {
         MinimumCoverSolver::solve(matrix, required)
+    }
+
+    pub fn portfolios(
+        matrix: &TypedCoverageMatrix,
+        required: &PatternBitSet,
+    ) -> Result<ExactMinimumCoverPortfolioEnumerator, ExactMinimumCoverPortfolioError> {
+        MinimumCoverSolver::exact_typed_portfolios(matrix, required)
     }
 }
 

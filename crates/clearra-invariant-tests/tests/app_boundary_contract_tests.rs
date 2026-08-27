@@ -48,7 +48,6 @@ fn app_boundary_docs_pin_typed_product_contract() {
         "DiagnosticsPolicy",
         "LocalePolicy",
         "ResourceBudget",
-        "VerifyKicks",
         "cli_pc_builds_app_request",
         "gui_form_builds_app_request",
         "wasm_command_builds_app_request",
@@ -58,6 +57,10 @@ fn app_boundary_docs_pin_typed_product_contract() {
     ] {
         assert_contains(&text, marker);
     }
+    assert!(
+        !text.contains("- `Verify`") && !text.contains("- `VerifyKicks`"),
+        "hidden diagnostic commands must not be described in public app-boundary docs"
+    );
 }
 
 #[test]

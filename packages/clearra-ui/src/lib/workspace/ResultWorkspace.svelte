@@ -3,6 +3,12 @@
 
   import { writeClipboardText } from './clipboardText';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import ProductResultPager from './ProductResultPager.svelte';
+  import type {
+    ProductMemberPageLoader,
+    ProductNextPageLoader,
+    ProductPageRelease
+  } from './productResultPager';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { ScoreMode } from './solverWorkspaceModel';
@@ -36,6 +42,9 @@
   export let failedQueueRequested = false;
   export let scoreMode: ScoreMode = 'off';
   export let loadSolutionPage: SolutionPageLoader | null = null;
+  export let loadNextProductPage: ProductNextPageLoader | null = null;
+  export let loadProductMemberPage: ProductMemberPageLoader | null = null;
+  export let releaseProductPages: ProductPageRelease | null = null;
 
   let copyFormat: SolutionCopyFormat = 'ctk';
   let failedQueueCopyComplete = false;
@@ -43,6 +52,7 @@
   let failedQueueResultIdentity = '';
 
   $: report = view.searchReport;
+  $: productResultPayload = view.response?.product_result_payload ?? null;
   $: solutionCount = workspaceSolutionCount(report);
   $: canonicalSolutionKeys = report?.normalized_solution_keys ?? [];
   $: solutionProbabilityByKey = Object.fromEntries(
@@ -112,9 +122,11 @@
   $: scoringRequested = summaryFields.score_requested === 'true';
   $: progressMode = failedQueueResult
     ? 'pc-failed-queue' as const
-    : summaryFields.objective === 'minimum-cover' || scoreMode === 'minimum-cover'
+    : summaryFields.objective === 'minimum-cover' ||
+        scoreMode === 'minimum-cover' ||
+        scoreMode === 'score-minimals'
       ? 'pc-minimum-cover' as const
-      : scoringRequested || scoreMode === 'summary'
+      : scoringRequested || scoreMode === 'summary' || scoreMode === 'score-finder'
         ? 'pc-score' as const
         : 'pc-all' as const;
   $: solutionExportKeySource = createSolutionExportKeySource();
@@ -337,6 +349,14 @@
           <article><span>{label('averageScore')}</span><strong>{summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong></article>
         </div>
       {/if}
+
+      <ProductResultPager
+        payload={productResultPayload}
+        {language}
+        loadNextPage={loadNextProductPage}
+        loadMemberPage={loadProductMemberPage}
+        releasePages={releaseProductPages}
+      />
 
       <section class="solutions-section" aria-label={label('solutions')}>
         <div class="solutions-heading">

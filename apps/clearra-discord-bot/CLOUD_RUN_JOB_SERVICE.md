@@ -294,7 +294,7 @@ $sourceCommit = "<same-full-40-character-accepted-commit>"
 $tag = "source-$sourceCommit"
 $image = "asia-northeast1-docker.pkg.dev/$projectId/clearra/clearra-current-job:$tag"
 $serviceName = "clearra-current-job"
-$revisionSuffix = "v075-" + $sourceCommit.Substring(0, 7)
+$revisionSuffix = "v080-" + $sourceCommit.Substring(0, 7)
 $candidateTag = "candidate-" + $sourceCommit.Substring(0, 7)
 $runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
 $jobBearerSecret = "clearra-job-token"
@@ -370,7 +370,7 @@ if ($priorCapture.priorRevision -cne $priorRevision -or
     $priorCapture.priorOracleReleaseId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or
     $priorCapture.priorOracleRelease -cne "/opt/clearra/releases/$($priorCapture.priorOracleReleaseId)" -or
     $priorCapture.priorOracleReleaseSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-    $priorCapture.priorOracleSettingsBackup -cnotmatch '^/etc/clearra-gateway/settings\.pre-v0\.7\.5-[0-9a-f]{64}$' -or
+    $priorCapture.priorOracleSettingsBackup -cnotmatch '^/etc/clearra-gateway/settings\.pre-v0\.8\.0-[0-9a-f]{64}$' -or
     $priorCapture.priorOracleSettingsSha256 -cnotmatch '^[0-9a-f]{64}$' -or
     $priorCapture.priorRuntimeAuthorityKind -cne $priorRuntimeAuthorityKind -or
     $priorCapture.priorRuntimeAuthoritySha256 -cnotmatch '^[0-9a-f]{64}$' -or

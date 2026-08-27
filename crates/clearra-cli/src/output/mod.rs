@@ -3,8 +3,10 @@ pub mod cli_output_dispatcher;
 pub mod command_field;
 pub mod command_renderer;
 pub mod diagnostic_printer;
+pub(crate) mod document_utility_output;
 pub mod output_verbosity_args;
 pub mod render_format_selector;
+pub mod solution_artifact_output;
 pub mod summary_render_contract;
 
 pub use app_response_renderer::AppResponseRenderer;
@@ -16,4 +18,5 @@ pub use command_renderer::CommandRenderer;
 pub use diagnostic_printer::DiagnosticPrinter;
 pub use output_verbosity_args::OutputVerbosity;
 pub use render_format_selector::{RenderFormatSelectionError, RenderFormatSelector};
+pub use solution_artifact_output::{SolutionArtifactOutputFormat, SolutionArtifactOutputRequest};
 pub use summary_render_contract::SummaryRenderContract;

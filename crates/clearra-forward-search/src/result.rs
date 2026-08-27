@@ -119,7 +119,10 @@ pub struct ForwardSearchOutcome {
     spin_piece: Option<PieceKind>,
     spin_mini: bool,
     spin_lines: u8,
+    ren_count: Option<u8>,
     total_damage: u32,
+    evidence_path_count: String,
+    evidence_complete: bool,
     path: Vec<ForwardPathStep>,
 }
 
@@ -134,6 +137,7 @@ impl ForwardSearchOutcome {
         spin_piece: Option<PieceKind>,
         spin_mini: bool,
         spin_lines: u8,
+        ren_count: Option<u8>,
         total_damage: u32,
         path: Vec<ForwardPathStep>,
     ) -> Self {
@@ -146,7 +150,10 @@ impl ForwardSearchOutcome {
             spin_piece,
             spin_mini,
             spin_lines,
+            ren_count,
             total_damage,
+            evidence_path_count: "1".to_owned(),
+            evidence_complete: true,
             path,
         }
     }
@@ -175,11 +182,35 @@ impl ForwardSearchOutcome {
     pub const fn spin_lines(&self) -> u8 {
         self.spin_lines
     }
+    pub const fn ren_count(&self) -> Option<u8> {
+        self.ren_count
+    }
     pub const fn total_damage(&self) -> u32 {
         self.total_damage
     }
+    /// Exact decimal count of distinct placement-path witnesses folded into this outcome.
+    ///
+    /// Damage and REN witnesses remain one public outcome per path, so their count is one.
+    /// Forward-spin outcomes use terminal spin identity and retain every equivalent path in the
+    /// search trace DAG; this field reports the exact folded witness count without materializing
+    /// an exponentially duplicated result vector.
+    pub fn evidence_path_count(&self) -> &str {
+        &self.evidence_path_count
+    }
+    pub const fn evidence_complete(&self) -> bool {
+        self.evidence_complete
+    }
     pub fn path(&self) -> &[ForwardPathStep] {
         &self.path
+    }
+
+    pub(crate) fn with_evidence_path_count(mut self, count: String) -> Self {
+        debug_assert!(!count.is_empty());
+        debug_assert!(count.bytes().all(|byte| byte.is_ascii_digit()));
+        debug_assert!(count != "0");
+        debug_assert!(!count.starts_with('0'));
+        self.evidence_path_count = count;
+        self
     }
 
     pub(crate) fn assign_id(&mut self, id: u64) {
@@ -247,7 +278,15 @@ impl ForwardSearchReport {
     pub fn maximum_damage(&self) -> Option<u32> {
         self.outcomes
             .iter()
+            .filter(|outcome| outcome.ren_count().is_none())
             .map(ForwardSearchOutcome::total_damage)
+            .max()
+    }
+
+    pub fn maximum_ren(&self) -> Option<u8> {
+        self.outcomes
+            .iter()
+            .filter_map(ForwardSearchOutcome::ren_count)
             .max()
     }
 

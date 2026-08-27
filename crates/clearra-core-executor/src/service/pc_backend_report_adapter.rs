@@ -11,9 +11,37 @@ pub(crate) fn backend_fields(
     packing: &PackingRunResult,
     buildup: &BuildUpRunResult,
 ) -> Vec<(String, String)> {
+    backend_fields_with_buildup(report, policy, packing, buildup.buildup_backend(), "cpu")
+}
+
+pub(crate) fn tiling_backend_fields(
+    report: &SearchBackendReport,
+    policy: &clearra_pc_graph::request::PcExecutionPolicy,
+    packing: &PackingRunResult,
+    packing_source_raw_geometry: bool,
+) -> Vec<(String, String)> {
+    if packing_source_raw_geometry {
+        backend_fields_with_buildup(report, policy, packing, "none", "none")
+    } else {
+        backend_fields_with_buildup(
+            report,
+            policy,
+            packing,
+            "embedded-in-packing",
+            "packing-runner",
+        )
+    }
+}
+
+fn backend_fields_with_buildup(
+    report: &SearchBackendReport,
+    policy: &clearra_pc_graph::request::PcExecutionPolicy,
+    packing: &PackingRunResult,
+    buildup_backend: &'static str,
+    buildup_backend_owner: &'static str,
+) -> Vec<(String, String)> {
     let fallback = BackendFallback::from_report(report);
     let candidate_backend = packing.execution_source().candidate_backend();
-    let buildup_backend = buildup.buildup_backend();
     let hybrid_scheduler = packing.hybrid_scheduler_report();
     let actual_backend = packing.actual_backend();
     let trust = packing.trust_report();
@@ -40,7 +68,7 @@ pub(crate) fn backend_fields(
         ),
         field("candidate_backend", candidate_backend),
         field("buildup_backend", buildup_backend),
-        field("buildup_backend_owner", "cpu"),
+        field("buildup_backend_owner", buildup_backend_owner),
         field("gpu_confirmed", gpu_executed && trust.cpu_confirmed()),
         field("cpu_confirmed", trust.cpu_confirmed()),
         field("selected_model", report.selected_model().as_str()),
@@ -207,6 +235,32 @@ pub(crate) fn solver_backend(packing: &PackingRunResult) -> &'static str {
         SelectedSearchBackend::None
         | SelectedSearchBackend::CpuGeometryExactCover
         | SelectedSearchBackend::CpuParallelGeometryExactCover => "core-c-cpu-packing-cpu-buildup",
+    }
+}
+
+pub(crate) fn tiling_solver_backend(
+    packing: &PackingRunResult,
+    packing_source_raw_geometry: bool,
+) -> &'static str {
+    match (packing.actual_backend(), packing_source_raw_geometry) {
+        (SelectedSearchBackend::Gpu, true) => "core-c-gpu-packing-no-buildup",
+        (SelectedSearchBackend::Hybrid, true) => "core-c-hybrid-packing-no-buildup",
+        (
+            SelectedSearchBackend::None
+            | SelectedSearchBackend::CpuGeometryExactCover
+            | SelectedSearchBackend::CpuParallelGeometryExactCover,
+            true,
+        ) => "core-c-cpu-packing-no-buildup",
+        (SelectedSearchBackend::Gpu, false) => "core-c-gpu-packing-embedded-buildability-subset",
+        (SelectedSearchBackend::Hybrid, false) => {
+            "core-c-hybrid-packing-embedded-buildability-subset"
+        }
+        (
+            SelectedSearchBackend::None
+            | SelectedSearchBackend::CpuGeometryExactCover
+            | SelectedSearchBackend::CpuParallelGeometryExactCover,
+            false,
+        ) => "core-c-cpu-packing-embedded-buildability-subset",
     }
 }
 

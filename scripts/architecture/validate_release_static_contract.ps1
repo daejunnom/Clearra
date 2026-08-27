@@ -468,6 +468,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
     $oracleRollbackProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs'
     $oracleRestore = Read-Text 'apps/clearra-discord-bot/scripts/restore-oracle-release'
+    $oracleDeployLauncher = Read-Text 'apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-oracle-release-deploy'
     $oracleRollbackCapture = Read-Text 'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
     $oracleReleaseDigest = Read-Text 'apps/clearra-discord-bot/scripts/release-tree-digest.mjs'
     $oracleProofProducerTest = Read-Text 'apps/clearra-discord-bot/test/oracle-deployment-proof-producer.test.mjs'
@@ -1750,11 +1751,40 @@ function Invoke-ReleaseIdentityGateValidation {
         $cloudReadme -like '*CLEARRA_ORACLE_CANDIDATE_VERIFIED*') {
         Add-ArchitectureError 'Cloud cutover must not trust an unbound reusable Oracle verification boolean'
     }
+    foreach ($deploymentDoc in @(
+        @{ Name = 'apps/clearra-discord-bot/CLOUD_RUN_JOB_SERVICE.md'; Text = $cloudDeploy },
+        @{ Name = 'apps/clearra-discord-bot/README.md'; Text = $cloudReadme }
+    )) {
+        if ($deploymentDoc.Text.IndexOf(
+                'settings\.pre-v0\.7\.5-',
+                [System.StringComparison]::Ordinal
+            ) -ge 0) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must use the v0.8.0 Oracle settings backup namespace"
+        }
+    }
+    foreach ($required in @(
+        'settings.pre-v0.8.0-$deployment_nonce',
+        'v0.8.0-$commit_prefix',
+        'clearra-current-job-v080-$commit_prefix'
+    )) {
+        if ($oracleDeployLauncher.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle release launcher is missing v0.8.0 identity marker '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'settings.pre-v0.7.5-$deployment_nonce',
+        'v0.7.5-$commit_prefix',
+        'clearra-current-job-v075-$commit_prefix'
+    )) {
+        if ($oracleDeployLauncher.IndexOf($forbidden, [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError "Oracle release launcher retains stale v0.7.5 identity marker '$forbidden'"
+        }
+    }
     foreach ($required in @(
         'active Oracle release is outside the immutable release root',
         'active Oracle settings must be a root-owned regular file',
         'active Oracle job URL must be a credential-free HTTPS /jobs URL',
-        '/etc/clearra-gateway/settings.pre-v0.7.5-',
+        '/etc/clearra-gateway/settings.pre-v0.8.0-',
         'openSync(temporaryPath, "wx", 0o600)',
         'linkSync(temporaryPath, backupPath)'
     )) {
@@ -1854,6 +1884,15 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($testContract.Text.IndexOf($testContract.Marker, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Oracle $($testContract.Name) recurrence contract is missing '$($testContract.Marker)'"
+        }
+    }
+    foreach ($candidateFixture in @(
+        @{ Name = 'candidate verifier'; Text = $oracleCandidateProofTest },
+        @{ Name = 'trusted producer'; Text = $oracleProofProducerTest }
+    )) {
+        if ($candidateFixture.Text -cnotmatch 'oracleReleaseId\s*:\s*"v0\.8\.0-[0-9a-f]{7}"' -or
+            $candidateFixture.Text -cnotmatch 'candidateRevision\s*:\s*"clearra-current-job-v080-[0-9a-f]{7}"') {
+            Add-ArchitectureError "Oracle $($candidateFixture.Name) success fixture must bind one v0.8.0/v080 candidate identity"
         }
     }
 

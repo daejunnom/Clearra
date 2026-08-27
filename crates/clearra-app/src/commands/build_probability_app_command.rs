@@ -5,8 +5,8 @@ use crate::{
     app_context::AppExecutionContext,
     app_error::{AppError, AppErrorCode},
     app_response::{AppResponse, AppStatus},
+    build_solution_probability_result::build_probability_response,
     commands::execution_error_response::core_execution_error_response,
-    render::AppRenderModel,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -21,6 +21,10 @@ impl BuildProbabilityAppCommand {
 
     pub fn query(&self) -> &BuildProbabilityQuery {
         &self.query
+    }
+
+    pub(crate) fn into_query(self) -> BuildProbabilityQuery {
+        self.query
     }
 }
 
@@ -49,9 +53,16 @@ impl RunnableAppCommand for BuildProbabilityAppCommand {
                 self.query.field(),
                 self.query.aggregation(),
                 self.query.finesse_request().clone(),
+                self.query.solution_probability_policy(),
                 context.execution_control(),
             ) {
-            Ok(result) => AppResponse::success(AppRenderModel::BuildProbability(result)),
+            Ok(result) => build_probability_response(
+                self.query.finesse_request(),
+                self.query.field(),
+                self.query.aggregation(),
+                self.query.solution_probability_policy(),
+                result,
+            ),
             Err(error) => core_execution_error_response(error),
         }
     }
@@ -59,6 +70,19 @@ impl RunnableAppCommand for BuildProbabilityAppCommand {
 
 pub(crate) fn invalid_query_reason(query: &BuildProbabilityQuery) -> Option<&'static str> {
     let field = query.field();
+    if query.aggregation().is_tiling_only()
+        && query
+            .queue_observation_policy()
+            .requires_observation_policy()
+    {
+        return Some("visible-7 queue knowledge is unavailable with tiling-only Build");
+    }
+    if query.solution_probability_policy().requested() && query.aggregation().is_tiling_only() {
+        return Some("per-solution probabilities are unavailable with tiling-only Build");
+    }
+    if query.solution_probability_policy().requested() && query.finesse_score().is_some() {
+        return Some("per-solution probabilities are unavailable with Build finesse scoring");
+    }
     if field.width() != 10 || field.height() == 0 || field.height() > 24 {
         return Some("build probability requires a 10-wide field between 1 and 24 rows");
     }
@@ -101,10 +125,12 @@ mod tests {
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
     use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
     use clearra_problem::{
-        BuildProbabilityField, BuildProbabilityQuery, FinesseMetric, FinessePatternKnowledge,
-        FinessePlacement, FinesseScoreRequest,
+        BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityQuery,
+        BuildSolutionProbabilityPolicy, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
+        FinesseScoreRequest,
     };
     use clearra_supply::queue::fixed_sequence::FixedSequence;
+    use clearra_supply::QueueObservationPolicy;
 
     use super::invalid_query_reason;
 
@@ -146,6 +172,18 @@ mod tests {
         }
     }
 
+    fn one_piece_query() -> BuildProbabilityQuery {
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("compact one-piece field");
+        BuildProbabilityQuery::new(core, field)
+    }
+
     #[test]
     fn completed_base_row_is_normalized_for_finesse_search_and_score_only() {
         assert!(invalid_query_reason(&query_with_completed_base(FinesseRequest::Off)).is_some());
@@ -175,6 +213,58 @@ mod tests {
         assert_eq!(
             invalid_query_reason(&query),
             Some("build target cells overlap the existing field")
+        );
+    }
+
+    #[test]
+    fn per_solution_probabilities_reject_tiling_and_finesse_score_only() {
+        let include = BuildSolutionProbabilityPolicy::Include;
+        assert_eq!(
+            invalid_query_reason(
+                &one_piece_query()
+                    .with_aggregation(BuildProbabilityAggregation::TilingOnly)
+                    .with_solution_probability_policy(include)
+            ),
+            Some("per-solution probabilities are unavailable with tiling-only Build")
+        );
+        assert_eq!(
+            invalid_query_reason(
+                &query_with_completed_base(FinesseRequest::Score)
+                    .with_solution_probability_policy(include)
+            ),
+            Some("per-solution probabilities are unavailable with Build finesse scoring")
+        );
+
+        assert_eq!(
+            invalid_query_reason(&one_piece_query().with_solution_probability_policy(include)),
+            None
+        );
+        assert_eq!(
+            invalid_query_reason(
+                &one_piece_query()
+                    .with_finesse(FinesseMetric::Inputs, FinessePatternKnowledge::Oracle)
+                    .with_solution_probability_policy(include)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn app_boundary_rejects_visible_seven_with_tiling_only() {
+        assert_eq!(
+            invalid_query_reason(
+                &one_piece_query()
+                    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+                    .with_aggregation(BuildProbabilityAggregation::TilingOnly)
+            ),
+            Some("visible-7 queue knowledge is unavailable with tiling-only Build")
+        );
+        assert_eq!(
+            invalid_query_reason(
+                &one_piece_query()
+                    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+            ),
+            None
         );
     }
 }

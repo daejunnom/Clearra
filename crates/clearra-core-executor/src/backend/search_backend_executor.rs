@@ -21,6 +21,29 @@ pub enum BackendTrustState {
     DeterministicReferenceMatched,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackingCandidateProvenance {
+    RawGeometry,
+    BuildabilityPrefiltered,
+}
+
+impl PackingCandidateProvenance {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RawGeometry => "raw-geometry",
+            Self::BuildabilityPrefiltered => "buildability-prefiltered",
+        }
+    }
+
+    pub const fn is_raw_geometry(self) -> bool {
+        matches!(self, Self::RawGeometry)
+    }
+
+    pub const fn buildability_preverified(self) -> bool {
+        matches!(self, Self::BuildabilityPrefiltered)
+    }
+}
+
 impl BackendTrustState {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -108,15 +131,46 @@ pub struct PackingBackendOutcome {
     pub workers_used: usize,
     pub geometry_catalog: Option<NativeGeometryCatalog>,
     pub pruning_ledger: Option<NativePruningLedger>,
-    pub buildability_preverified: bool,
+    candidate_provenance: PackingCandidateProvenance,
 }
 
 impl PackingBackendOutcome {
-    pub fn exact(
+    pub fn raw_geometry_exact(
+        actual_backend: SelectedSearchBackend,
+        candidates: PackingCandidateBatch,
+        resource_report: ResourceReport,
+        trust_report: BackendTrustReport,
+    ) -> Self {
+        Self::exact_with_provenance(
+            actual_backend,
+            candidates,
+            resource_report,
+            trust_report,
+            PackingCandidateProvenance::RawGeometry,
+        )
+    }
+
+    pub fn buildability_prefiltered_exact(
+        actual_backend: SelectedSearchBackend,
+        candidates: PackingCandidateBatch,
+        resource_report: ResourceReport,
+        trust_report: BackendTrustReport,
+    ) -> Self {
+        Self::exact_with_provenance(
+            actual_backend,
+            candidates,
+            resource_report,
+            trust_report,
+            PackingCandidateProvenance::BuildabilityPrefiltered,
+        )
+    }
+
+    fn exact_with_provenance(
         actual_backend: SelectedSearchBackend,
         mut candidates: PackingCandidateBatch,
         resource_report: ResourceReport,
         trust_report: BackendTrustReport,
+        candidate_provenance: PackingCandidateProvenance,
     ) -> Self {
         candidates.canonicalize_identities();
         Self {
@@ -130,8 +184,12 @@ impl PackingBackendOutcome {
             workers_used: 1,
             geometry_catalog: None,
             pruning_ledger: None,
-            buildability_preverified: false,
+            candidate_provenance,
         }
+    }
+
+    pub const fn candidate_provenance(&self) -> PackingCandidateProvenance {
+        self.candidate_provenance
     }
 
     pub fn with_workers_used(mut self, workers_used: usize) -> Self {
@@ -151,11 +209,6 @@ impl PackingBackendOutcome {
 
     pub fn with_pruning_ledger(mut self, pruning_ledger: NativePruningLedger) -> Self {
         self.pruning_ledger = Some(pruning_ledger);
-        self
-    }
-
-    pub fn with_buildability_preverified(mut self) -> Self {
-        self.buildability_preverified = true;
         self
     }
 
@@ -185,6 +238,11 @@ pub trait SearchBackendExecutorResolver {
 
     #[cfg(test)]
     fn cpu_fallback_executor(&self) -> &dyn SearchBackendExecutor;
+
+    #[cfg(test)]
+    fn use_resolved_executor_for_test(&self) -> bool {
+        false
+    }
 
     fn supports_native_candidate_streaming(&self) -> bool {
         false

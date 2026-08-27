@@ -16,6 +16,11 @@ use super::{
 #[cfg(not(all(feature = "webgpu-search", feature = "native-c-core")))]
 use super::{GpuExecutionFailure, GpuExecutionFailureStage, SearchBackendFallbackReason};
 
+#[cfg(all(test, feature = "native-c-core"))]
+std::thread_local! {
+    static CPU_CATALOG_DISPATCH_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn execute_selected_buildable_packing(
     search_problem: &SearchProblem,
     source_pattern_bits: Option<&PatternBitSet>,
@@ -25,6 +30,14 @@ pub(crate) fn execute_selected_buildable_packing(
     cancellation: &ExecutionCancellationToken,
 ) -> Result<PackingBackendOutcome, PackingRunnerError> {
     let selected = selection.selected_backend();
+    #[cfg(all(test, feature = "native-c-core"))]
+    if matches!(
+        selected,
+        SelectedSearchBackend::CpuGeometryExactCover
+            | SelectedSearchBackend::CpuParallelGeometryExactCover
+    ) {
+        CPU_CATALOG_DISPATCH_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+    }
     let attempt = execute_backend(
         search_problem,
         source_pattern_bits,
@@ -218,4 +231,64 @@ fn execute_gpu(
 
 fn effective_worker_count(policy: &PcExecutionPolicy) -> usize {
     policy.workers()
+}
+
+#[cfg(all(test, feature = "native-c-core"))]
+mod tests {
+    use clearra_core_domain::{
+        pc::pc_target::PcTarget,
+        piece::piece_kind::PieceKind,
+        resource::{ExecutionAvailabilityReason, ExecutionAvailabilityState},
+    };
+    use clearra_pc_graph::request::{
+        OpeningPcSearchQuery, PcExecutionPolicy, PcHoldPolicy, PcQueueInput, RequestedSearchBackend,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use crate::packing::{PackingRunner, PackingRunnerError};
+
+    use super::CPU_CATALOG_DISPATCH_ATTEMPTS;
+
+    #[test]
+    fn product_runner_fails_admission_before_native_catalog_dispatch() {
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_workers(4)
+            .with_max_memory_mib(Some(0));
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_execution_policy(policy);
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
+
+        CPU_CATALOG_DISPATCH_ATTEMPTS.with(|attempts| attempts.set(0));
+        let error = PackingRunner::run(&problem)
+            .expect_err("zero memory budget must fail native product admission");
+        let report = match error {
+            PackingRunnerError::Native(clearra_core_ffi::NativeCoreError::PackingIncomplete {
+                resource_report,
+                ..
+            }) => resource_report,
+            other => panic!("unexpected admission failure: {other:?}"),
+        };
+
+        assert_eq!(CPU_CATALOG_DISPATCH_ATTEMPTS.with(std::cell::Cell::get), 0);
+        assert!(!report.execution_started());
+        assert!(!report.result_complete());
+        assert_eq!(
+            report.execution_availability().state(),
+            ExecutionAvailabilityState::Exhausted
+        );
+        assert_eq!(
+            report.execution_availability().reason(),
+            Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+        );
+    }
 }

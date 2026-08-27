@@ -7,6 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::export::render_allocation_authority::{allocation_attempts, reset_allocation_attempts};
 
 fn golden() -> Value {
     serde_json::from_str(include_str!(
@@ -123,6 +124,10 @@ fn renderer_reports_export_limits() {
     let limits = RenderExportLimits::tight_for_tests();
     assert_eq!(limits.max_frame_width(), 64);
     assert_eq!(
+        RenderExportLimits::product_default().max_materialization_bytes(),
+        256 * 1024 * 1024
+    );
+    assert_eq!(
         limits.validate_frame(65, 1),
         Err(RenderError::ExportLimitExceeded {
             limit: "max_frame_width",
@@ -138,6 +143,127 @@ fn renderer_reports_export_limits() {
             max: 8,
         })
     );
+}
+
+#[test]
+fn oversized_frame_dimension_is_rejected_before_rgba_allocation() {
+    let board = RenderBoard::from_rows(&["."]).expect("board");
+    reset_allocation_attempts();
+
+    let error =
+        ExactBitmapRenderer::render_board_png(&board, 65, RenderExportLimits::tight_for_tests());
+
+    assert_eq!(
+        error,
+        Err(RenderError::ExportLimitExceeded {
+            limit: "max_frame_width",
+            actual: 65,
+            max: 64,
+        })
+    );
+    assert_eq!(allocation_attempts(), 0);
+}
+
+#[test]
+fn oversized_frame_height_is_rejected_before_rgba_allocation() {
+    let board = RenderBoard::from_rows(&[".", "."]).expect("board");
+    reset_allocation_attempts();
+
+    let error =
+        ExactBitmapRenderer::render_board_png(&board, 33, RenderExportLimits::tight_for_tests());
+
+    assert_eq!(
+        error,
+        Err(RenderError::ExportLimitExceeded {
+            limit: "max_frame_height",
+            actual: 66,
+            max: 64,
+        })
+    );
+    assert_eq!(allocation_attempts(), 0);
+}
+
+#[test]
+fn oversized_frame_pixel_count_is_rejected_before_rgba_allocation() {
+    let board = RenderBoard::from_rows(&["..", ".."]).expect("board");
+    let limits = RenderExportLimits::tight_for_tests().with_max_frame_pixels_for_test(3);
+    reset_allocation_attempts();
+
+    let error = ExactBitmapRenderer::render_board_png(&board, 1, limits);
+
+    assert_eq!(
+        error,
+        Err(RenderError::ExportLimitExceeded {
+            limit: "max_frame_pixels",
+            actual: 4,
+            max: 3,
+        })
+    );
+    assert_eq!(allocation_attempts(), 0);
+}
+
+#[test]
+fn oversized_frame_memory_is_rejected_before_rgba_allocation() {
+    let board = RenderBoard::from_rows(&["..", ".."]).expect("board");
+    let limits = RenderExportLimits::tight_for_tests().with_max_materialization_bytes_for_test(15);
+    reset_allocation_attempts();
+
+    let error = ExactBitmapRenderer::render_board_png(&board, 1, limits);
+
+    assert_eq!(
+        error,
+        Err(RenderError::ExportLimitExceeded {
+            limit: "max_materialization_bytes",
+            actual: 16,
+            max: 15,
+        })
+    );
+    assert_eq!(allocation_attempts(), 0);
+}
+
+#[test]
+fn oversized_timeline_frame_count_is_rejected_before_rgba_allocation() {
+    let board = RenderBoard::from_rows(&["."]).expect("board");
+    let frames = vec![board; 9];
+    reset_allocation_attempts();
+
+    let error = ExactBitmapRenderer::render_timeline_gif(
+        &frames,
+        1,
+        40,
+        RenderExportLimits::tight_for_tests(),
+    );
+
+    assert_eq!(
+        error,
+        Err(RenderError::ExportLimitExceeded {
+            limit: "max_gif_frames",
+            actual: 9,
+            max: 8,
+        })
+    );
+    assert_eq!(allocation_attempts(), 0);
+}
+
+#[test]
+fn oversized_timeline_memory_is_rejected_before_frame_carrier_or_rgba_allocation() {
+    let board = RenderBoard::from_rows(&["."]).expect("board");
+    let frames = vec![board; 240];
+    let required_bytes = 240 * (529 * 529 * 4 + core::mem::size_of::<Vec<u8>>() as u64);
+    let limits = RenderExportLimits::product_default();
+    reset_allocation_attempts();
+
+    let error = ExactBitmapRenderer::render_timeline_gif(&frames, 529, 40, limits);
+
+    assert_eq!(
+        error,
+        Err(RenderError::ExportLimitExceeded {
+            limit: "max_materialization_bytes",
+            actual: required_bytes,
+            max: 256 * 1024 * 1024,
+        })
+    );
+    assert_eq!(allocation_attempts(), 0);
 }
 
 fn decode_rgba(png_bytes: &[u8]) -> (u32, Vec<u8>) {

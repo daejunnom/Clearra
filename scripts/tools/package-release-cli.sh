@@ -81,6 +81,39 @@ run_json_smoke() {
                 identity?.artifact_schema_version !== "clearra.solution-data.v1") {
                 throw new Error(`Clearra CLI ${name} smoke returned a mismatched product build identity`);
             }
+            if (Object.hasOwn(expected, "kind") && parsed?.kind !== expected.kind) {
+                throw new Error(
+                    `Clearra CLI ${name} smoke expected kind=${JSON.stringify(expected.kind)}, ` +
+                    `received ${JSON.stringify(parsed?.kind)}`
+                );
+            }
+            if (Object.hasOwn(expected, "command_kind") &&
+                parsed?.contract?.command?.kind !== expected.command_kind) {
+                throw new Error(
+                    `Clearra CLI ${name} smoke expected contract.command.kind=` +
+                    `${JSON.stringify(expected.command_kind)}, received ` +
+                    `${JSON.stringify(parsed?.contract?.command?.kind)}`
+                );
+            }
+            if (Object.hasOwn(expected, "tiling_family_complete") &&
+                parsed?.contract?.pc?.tiling?.family_complete !==
+                    expected.tiling_family_complete) {
+                throw new Error(
+                    `Clearra CLI ${name} smoke expected contract.pc.tiling.family_complete=` +
+                    `${JSON.stringify(expected.tiling_family_complete)}, received ` +
+                    `${JSON.stringify(parsed?.contract?.pc?.tiling?.family_complete)}`
+                );
+            }
+            if (Object.hasOwn(expected, "tiling_family_incomplete_reason") &&
+                parsed?.contract?.pc?.tiling?.family_incomplete_reason !==
+                    expected.tiling_family_incomplete_reason) {
+                throw new Error(
+                    `Clearra CLI ${name} smoke expected ` +
+                    `contract.pc.tiling.family_incomplete_reason=` +
+                    `${JSON.stringify(expected.tiling_family_incomplete_reason)}, received ` +
+                    `${JSON.stringify(parsed?.contract?.pc?.tiling?.family_incomplete_reason)}`
+                );
+            }
             for (const [key, value] of Object.entries(expectedSummary)) {
                 if (parsed?.summary?.[key] !== value) {
                     throw new Error(
@@ -134,9 +167,9 @@ run_json_smoke rules-export-srs-x \
 run_json_smoke solver '{}' \
     --format json pc --lines 2 --queue IJLOO --fixed --no-hold
 run_json_smoke pc-tiling \
-    '{"summary":{"coverage_probability":"not-calculated","probability_calculated":false,"probability_complete":false,"supply_probability_complete":false,"resource_probability_complete":false},"resource_report":{"truncated":false,"truncation_reason":null,"probability_complete":false}}' \
-    --format json pc --lines 2 --queue IJLOO --fixed --no-hold \
-    --objective tiling --backend cpu --workers 1
+    '{"kind":"pc-tiling-family.v1","command_kind":"pc-tiling-family.v1","tiling_family_complete":true,"tiling_family_incomplete_reason":"none","summary":{"coverage_probability":"not-calculated","probability_calculated":false,"probability_complete":false,"supply_probability_complete":false,"resource_probability_complete":false},"resource_report":{"truncated":false,"truncation_reason":null,"probability_complete":false}}' \
+    --format json pc tiling --lines 2 --queue IIOOO --no-hold \
+    --backend cpu --workers 1
 run_json_smoke failed-queue '{}' \
     --format json failed-queue --lines 2 --patterns P5 --backend cpu --failed-count 7
 run_json_smoke build-probability \

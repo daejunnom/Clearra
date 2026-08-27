@@ -115,47 +115,63 @@ impl NormalizedTilingSolutionKey {
     }
 
     pub fn parse_canonical(value: &str) -> Result<Self, NormalizedTilingSolutionError> {
-        let payload = value
-            .strip_prefix("ctk1|initial=")
-            .ok_or(NormalizedTilingSolutionError::InvalidCanonicalKey)?;
-        let (initial, placements) = payload
-            .split_once("|placements=")
-            .ok_or(NormalizedTilingSolutionError::InvalidCanonicalKey)?;
-        if initial.len() != 16 {
-            return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
-        }
-        let initial_board_mask = u64::from_str_radix(initial, 16)
-            .map_err(|_| NormalizedTilingSolutionError::InvalidCanonicalKey)?;
-        let mut parsed = Vec::new();
-        if !placements.is_empty() {
-            for placement in placements.split(',') {
-                let (piece, mask) = placement
-                    .split_once(':')
-                    .ok_or(NormalizedTilingSolutionError::InvalidCanonicalKey)?;
-                if piece.len() != 1 || mask.len() != 16 {
-                    return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
-                }
-                let piece = match piece.as_bytes()[0] {
-                    b'I' => PieceKind::I,
-                    b'O' => PieceKind::O,
-                    b'T' => PieceKind::T,
-                    b'S' => PieceKind::S,
-                    b'Z' => PieceKind::Z,
-                    b'J' => PieceKind::J,
-                    b'L' => PieceKind::L,
-                    _ => return Err(NormalizedTilingSolutionError::InvalidCanonicalKey),
-                };
-                let mask = u64::from_str_radix(mask, 16)
-                    .map_err(|_| NormalizedTilingSolutionError::InvalidCanonicalKey)?;
-                parsed.push(PiecePlacementMask::new(piece, mask));
-            }
-        }
-        let key = Self::from_placements(initial_board_mask, parsed)?;
+        let identity = parse_standard_board64_identity(value)?;
+        let key = Self::from_standard_board64_identity(identity);
         if key.as_str() != value {
             return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
         }
         Ok(key)
     }
+
+    /// Recovers the allocation-free semantic identity carried by this
+    /// canonical key. Document codecs use this instead of reparsing private
+    /// string details or treating the display form as an opaque payload.
+    pub fn standard_board64_identity(
+        &self,
+    ) -> Result<StandardBoard64TilingIdentity, NormalizedTilingSolutionError> {
+        parse_standard_board64_identity(self.as_str())
+    }
+}
+
+fn parse_standard_board64_identity(
+    value: &str,
+) -> Result<StandardBoard64TilingIdentity, NormalizedTilingSolutionError> {
+    let payload = value
+        .strip_prefix("ctk1|initial=")
+        .ok_or(NormalizedTilingSolutionError::InvalidCanonicalKey)?;
+    let (initial, placements) = payload
+        .split_once("|placements=")
+        .ok_or(NormalizedTilingSolutionError::InvalidCanonicalKey)?;
+    if initial.len() != 16 {
+        return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
+    }
+    let initial_board_mask = u64::from_str_radix(initial, 16)
+        .map_err(|_| NormalizedTilingSolutionError::InvalidCanonicalKey)?;
+    let mut parsed = Vec::new();
+    if !placements.is_empty() {
+        for placement in placements.split(',') {
+            let (piece, mask) = placement
+                .split_once(':')
+                .ok_or(NormalizedTilingSolutionError::InvalidCanonicalKey)?;
+            if piece.len() != 1 || mask.len() != 16 {
+                return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
+            }
+            let piece = match piece.as_bytes()[0] {
+                b'I' => PieceKind::I,
+                b'O' => PieceKind::O,
+                b'T' => PieceKind::T,
+                b'S' => PieceKind::S,
+                b'Z' => PieceKind::Z,
+                b'J' => PieceKind::J,
+                b'L' => PieceKind::L,
+                _ => return Err(NormalizedTilingSolutionError::InvalidCanonicalKey),
+            };
+            let mask = u64::from_str_radix(mask, 16)
+                .map_err(|_| NormalizedTilingSolutionError::InvalidCanonicalKey)?;
+            parsed.push(PiecePlacementMask::new(piece, mask));
+        }
+    }
+    StandardBoard64TilingIdentity::from_placements(initial_board_mask, parsed)
 }
 
 /// Allocation-free canonical identity for the standard tetromino Board64 fast path.
@@ -408,12 +424,11 @@ pub enum NormalizedTilingSolutionError {
 }
 
 fn stable_solution_set_hash(keys: &[NormalizedTilingSolutionKey]) -> String {
-    let mut hasher = StableFnv64::default();
+    let mut hasher = NormalizedTilingSolutionSetHasher::default();
     for key in keys {
-        hasher.write(key.as_str().as_bytes());
-        hasher.write(&[0]);
+        hasher.update_canonical_key(key);
     }
-    format!("cts1:{:016x}", hasher.finish())
+    hasher.finish()
 }
 
 pub fn normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
@@ -465,6 +480,15 @@ pub struct NormalizedTilingSolutionSetHasher {
 }
 
 impl NormalizedTilingSolutionSetHasher {
+    /// Updates the set hash with one already-canonical key without retaining
+    /// that key or materializing the complete set. Callers remain responsible
+    /// for the same strict sorted/deduplicated order used by
+    /// `NormalizedTilingSolutionSet::new`.
+    pub fn update_canonical_key(&mut self, key: &NormalizedTilingSolutionKey) {
+        self.hasher.write(key.as_str().as_bytes());
+        self.hasher.write(&[0]);
+    }
+
     pub fn begin_canonical_identity(&mut self, initial_board_mask: u64) {
         self.hasher.write(b"ctk1|initial=");
         write_hex_u64(&mut self.hasher, initial_board_mask);
@@ -579,5 +603,48 @@ impl Hasher for StableFnv64 {
             self.0 ^= u64::from(*byte);
             self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
+    }
+}
+
+#[cfg(test)]
+mod incremental_hasher_tests {
+    use super::*;
+
+    fn key(
+        initial_board_mask: u64,
+        placements: impl IntoIterator<Item = PiecePlacementMask>,
+    ) -> NormalizedTilingSolutionKey {
+        NormalizedTilingSolutionKey::from_placements(initial_board_mask, placements)
+            .expect("valid normalized key")
+    }
+
+    #[test]
+    fn incremental_canonical_keys_match_constructor_order_dedup_and_hash_fieldwise() {
+        let first = key(0, []);
+        let second = key(0, [PiecePlacementMask::new(PieceKind::I, 0x0f)]);
+        let third = key(0x0f, [PiecePlacementMask::new(PieceKind::O, 0xf0)]);
+        let constructed = NormalizedTilingSolutionSet::new([
+            third.clone(),
+            first.clone(),
+            second.clone(),
+            second.clone(),
+        ]);
+
+        assert_eq!(constructed.keys(), [first, second, third].as_slice());
+        assert_eq!(constructed.len(), 3);
+        assert!(!constructed.is_empty());
+
+        let mut incremental = NormalizedTilingSolutionSetHasher::default();
+        for canonical_key in constructed.keys() {
+            incremental.update_canonical_key(canonical_key);
+        }
+        assert_eq!(incremental.finish(), constructed.hash());
+
+        let empty = NormalizedTilingSolutionSet::new([]);
+        assert!(empty.keys().is_empty());
+        assert_eq!(
+            NormalizedTilingSolutionSetHasher::default().finish(),
+            empty.hash()
+        );
     }
 }

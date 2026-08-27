@@ -1,4 +1,8 @@
-import type { ClearraProductBuildIdentity } from '@clearra/ui/wasm';
+import type {
+  ClearraHostAppResponse,
+  ClearraProductPageWorkerPayload,
+  ClearraProductBuildIdentity
+} from '@clearra/ui/wasm';
 
 // SRP rationale: this module has one behavior-level change reason: adapting the validated
 // WASM ABI exports into the browser runtime contract.
@@ -25,6 +29,13 @@ export type ClearraWasmModule = {
   tiling_solution_count: () => number;
   tiling_solution_page: (offset: number, limit: number) => string[];
   tiling_solution_release: () => void;
+  product_page_available: () => boolean;
+  product_page_next: (maximumWorkSteps: number) => ClearraProductPageWorkerPayload;
+  product_page_get: (
+    outerPageNumber: number,
+    memberPageNumber: number
+  ) => ClearraProductPageWorkerPayload;
+  product_page_release: () => void;
   distributed_cancel: () => void;
   distributed_reset: () => void;
   distributed_verifier_start: (initialization: string | ArrayBuffer) => void;
@@ -139,6 +150,7 @@ const CONSERVATIVE_HOST_CAPABILITIES: ClearraWasmHostCapabilities = Object.freez
 });
 const ARTIFACT_NETWORK_TIMEOUT_MS = 30_000;
 const ARTIFACT_MODULE_TIMEOUT_MS = 60_000;
+const ABI_OUTPUT_NOT_RELEASED = -2;
 
 type ClearraRawWasmExports = {
   memory: WebAssembly.Memory;
@@ -198,6 +210,13 @@ type ClearraRawWasmExports = {
   clearra_wasm_tiling_solution_count_exact: () => number;
   clearra_wasm_tiling_solution_page: (offset: number, limit: number) => number;
   clearra_wasm_tiling_solution_release: () => number;
+  clearra_wasm_product_page_available: () => number;
+  clearra_wasm_product_page_next: (maximumWorkSteps: number) => number;
+  clearra_wasm_product_page_get: (
+    outerPageNumber: number,
+    memberPageNumber: number
+  ) => number;
+  clearra_wasm_product_page_release: () => number;
   clearra_wasm_distributed_cancel: () => number;
   clearra_wasm_distributed_reset: () => number;
   clearra_wasm_distributed_verifier_start: () => number;
@@ -226,6 +245,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_output_ptr: () => number;
   clearra_wasm_output_len: () => number;
   clearra_wasm_output_len_exact: () => number;
+  clearra_wasm_output_release: () => number;
   clearra_wasm_last_panic_ptr: () => number;
   clearra_wasm_last_panic_len: () => number;
   clearra_wasm_last_panic_len_exact: () => number;
@@ -251,6 +271,7 @@ export const CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS = Object.freeze([
   'clearra_wasm_distributed_progress_layer_total_exact',
   'clearra_wasm_tiling_solution_count_available',
   'clearra_wasm_tiling_solution_count_exact',
+  'clearra_wasm_product_page_available',
   'clearra_wasm_distributed_verifier_last_candidate_count_available',
   'clearra_wasm_distributed_verifier_last_candidate_count_exact',
   'clearra_wasm_distributed_verifier_progress_available',
@@ -258,6 +279,7 @@ export const CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS = Object.freeze([
   'clearra_wasm_distributed_verifier_progress_build_nodes_exact',
   'clearra_wasm_distributed_verifier_progress_coverage_checks_exact',
   'clearra_wasm_output_len_exact',
+  'clearra_wasm_output_release',
   'clearra_wasm_last_panic_len_exact'
 ] as const);
 
@@ -292,17 +314,138 @@ type ClearraWasmArtifact = {
 export class ClearraWasmRuntimeError extends Error {
   constructor(
     public readonly diagnosticCode: string,
-    message: string
+    message: string,
+    public readonly resourceReport: ClearraHostAppResponse['resource_report'] | null = null
   ) {
     super(message);
     this.name = 'ClearraWasmRuntimeError';
   }
 
   static fromRuntimeOutput(output: string): ClearraWasmRuntimeError {
-    const match = /^(E_[A-Z0-9_]+):\s*([\s\S]*)$/.exec(output.trim());
+    const trimmed = output.trim();
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (isStructuredRuntimeError(parsed)) {
+        if (parsed.resource_report === null) {
+          return new ClearraWasmRuntimeError(parsed.code, parsed.message);
+        }
+        if (!isRuntimeResourceReport(parsed.resource_report)) {
+          return new ClearraWasmRuntimeError(
+            'E_WASM_RESOURCE_REPORT_INVALID',
+            'WASM runtime returned an invalid typed resource report'
+          );
+        }
+        return new ClearraWasmRuntimeError(
+          parsed.code,
+          parsed.message,
+          parsed.resource_report
+        );
+      }
+    } catch {
+      // Legacy text errors remain supported for non-resource ABI failures.
+    }
+    const match = /^(E_[A-Z0-9_]+):\s*([\s\S]*)$/.exec(trimmed);
     if (!match) return new ClearraWasmRuntimeError('E_WASM_EXECUTION_FAILED', output);
     return new ClearraWasmRuntimeError(match[1], match[2]);
   }
+}
+
+type StructuredRuntimeError = {
+  code: string;
+  message: string;
+  resource_report: unknown;
+};
+
+function isStructuredRuntimeError(value: unknown): value is StructuredRuntimeError {
+  if (!value || typeof value !== 'object') return false;
+  const error = value as Partial<StructuredRuntimeError>;
+  return (
+    typeof error.code === 'string' &&
+    /^E_[A-Z0-9_]+$/u.test(error.code) &&
+    typeof error.message === 'string' &&
+    Object.prototype.hasOwnProperty.call(error, 'resource_report')
+  );
+}
+
+function isRuntimeResourceReport(
+  value: unknown
+): value is ClearraHostAppResponse['resource_report'] {
+  if (!value || typeof value !== 'object') return false;
+  const report = value as Partial<ClearraHostAppResponse['resource_report']>;
+  const counts = [
+    report.peak_frontier_states,
+    report.peak_candidate_rows,
+    report.peak_hash_buckets,
+    report.peak_gpu_bytes,
+    report.peak_cpu_bytes,
+    report.build_worker_backlog_peak,
+    report.coverage_rows_emitted
+  ];
+  if (
+    report.solver_executed !== false ||
+    report.memory_status !== 'not-executed' ||
+    report.truncated !== false ||
+    report.truncation_reason !== null ||
+    report.probability_complete !== false ||
+    report.result_completeness !== 'not-executed' ||
+    !isRuntimeExecutionAvailabilityReport(report.execution_availability) ||
+    report.execution_availability?.state === 'available'
+  ) {
+    return false;
+  }
+  return counts.every(
+    (count) => Number.isSafeInteger(count) && (count as number) >= 0
+  );
+}
+
+function isRuntimeExecutionAvailabilityReport(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const report = value as Record<string, unknown>;
+  if (report.surface !== 'browser-wasm32') return false;
+  const reason = report.reason;
+  const stateReasonValid =
+    (report.state === 'unavailable' &&
+      (reason === 'not-executed' ||
+        reason === 'capability-unavailable' ||
+        reason === 'pattern-count-address-space-exceeded' ||
+        reason === 'dense-pattern-representation-unavailable')) ||
+    (report.state === 'deferred' && reason === 'shared-resource-contention') ||
+    (report.state === 'exhausted' &&
+      (reason === 'compute-budget-exceeded' || reason === 'memory-budget-exceeded')) ||
+    (report.state === 'cancelled' && reason === 'cancelled-by-caller') ||
+    (report.state === 'incomplete' && reason === 'partial-execution');
+  if (!stateReasonValid) return false;
+  const evidence = [
+    report.descriptor_pattern_count,
+    report.dense_pattern_count,
+    report.required_dense_bytes
+  ];
+  if (!evidence.every((entry) => entry === null || isCanonicalDecimal(entry))) return false;
+  const populated = evidence.filter((entry) => entry !== null);
+  if (populated.length !== 0 && populated.length !== evidence.length) return false;
+  if (
+    report.required_memory_bytes !== null &&
+    !isCanonicalDecimal(report.required_memory_bytes)
+  ) {
+    return false;
+  }
+  if (populated.length === 0) return true;
+  const descriptor = BigInt(report.descriptor_pattern_count as string);
+  const dense = BigInt(report.dense_pattern_count as string);
+  const denseBytes = BigInt(report.required_dense_bytes as string);
+  const projectedBytes =
+    report.required_memory_bytes === null
+      ? null
+      : BigInt(report.required_memory_bytes as string);
+  return (
+    dense <= descriptor &&
+    denseBytes === ((dense + 63n) / 64n) * 8n &&
+    (projectedBytes === null || projectedBytes >= denseBytes)
+  );
+}
+
+function isCanonicalDecimal(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/u.test(value);
 }
 
 const encoder = new TextEncoder();
@@ -706,24 +849,32 @@ function wrapRawModule(
 
   let hostTransferByteCap = CONSERVATIVE_HOST_CAPABILITIES.transferByteCap;
   const outputText = () => {
-    requireExactLength(
-      raw.clearra_wasm_output_len_exact(),
-      'E_WASM_OUTPUT_TOO_LARGE',
-      'WASM output length exceeds the exact host ABI range'
-    );
-    const ptr = raw.clearra_wasm_output_ptr() >>> 0;
-    const len = raw.clearra_wasm_output_len() >>> 0;
-    return decoder.decode(new Uint8Array(raw.memory.buffer, ptr, len));
+    try {
+      requireExactLength(
+        raw.clearra_wasm_output_len_exact(),
+        'E_WASM_OUTPUT_TOO_LARGE',
+        'WASM output length exceeds the exact host ABI range'
+      );
+      const ptr = raw.clearra_wasm_output_ptr() >>> 0;
+      const len = raw.clearra_wasm_output_len() >>> 0;
+      return decoder.decode(new Uint8Array(raw.memory.buffer, ptr, len));
+    } finally {
+      raw.clearra_wasm_output_release();
+    }
   };
   const outputBytes = () => {
-    requireExactLength(
-      raw.clearra_wasm_output_len_exact(),
-      'E_WASM_OUTPUT_TOO_LARGE',
-      'WASM output length exceeds the exact host ABI range'
-    );
-    const ptr = raw.clearra_wasm_output_ptr() >>> 0;
-    const len = raw.clearra_wasm_output_len() >>> 0;
-    return new Uint8Array(raw.memory.buffer, ptr, len).slice().buffer;
+    try {
+      requireExactLength(
+        raw.clearra_wasm_output_len_exact(),
+        'E_WASM_OUTPUT_TOO_LARGE',
+        'WASM output length exceeds the exact host ABI range'
+      );
+      const ptr = raw.clearra_wasm_output_ptr() >>> 0;
+      const len = raw.clearra_wasm_output_len() >>> 0;
+      return new Uint8Array(raw.memory.buffer, ptr, len).slice().buffer;
+    } finally {
+      raw.clearra_wasm_output_release();
+    }
   };
   const lastPanic = () => {
     requireExactLength(
@@ -736,6 +887,13 @@ function wrapRawModule(
     return len === 0 ? null : decoder.decode(new Uint8Array(raw.memory.buffer, ptr, len));
   };
   const requireOk = (status: number) => {
+    if (status === ABI_OUTPUT_NOT_RELEASED) {
+      raw.clearra_wasm_output_release();
+      throw new ClearraWasmRuntimeError(
+        'E_WASM_OUTPUT_NOT_RELEASED',
+        'the prior WASM output owner was not released before the next mutation'
+      );
+    }
     if (status < 0) throw ClearraWasmRuntimeError.fromRuntimeOutput(outputText());
   };
   const setCommand = (commandText: string) => {
@@ -982,6 +1140,25 @@ function wrapRawModule(
     tiling_solution_release() {
       requireOk(raw.clearra_wasm_tiling_solution_release());
     },
+    product_page_available() {
+      return raw.clearra_wasm_product_page_available() !== 0;
+    },
+    product_page_next(maximumWorkSteps) {
+      requireOk(raw.clearra_wasm_product_page_next(Math.max(1, maximumWorkSteps) >>> 0));
+      return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;
+    },
+    product_page_get(outerPageNumber, memberPageNumber) {
+      requireOk(
+        raw.clearra_wasm_product_page_get(
+          Math.max(0, outerPageNumber) >>> 0,
+          Math.max(0, memberPageNumber) >>> 0
+        )
+      );
+      return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;
+    },
+    product_page_release() {
+      requireOk(raw.clearra_wasm_product_page_release());
+    },
     distributed_cancel() {
       requireOk(raw.clearra_wasm_distributed_cancel());
     },
@@ -1083,8 +1260,14 @@ function wrapRawModule(
         }
         const status = raw.clearra_wasm_gpu_warmup_advance();
         requireOk(status);
-        if (status === 1) return 'connected';
-        if (status === 2) return 'unavailable';
+        if (status === 1) {
+          raw.clearra_wasm_output_release();
+          return 'connected';
+        }
+        if (status === 2) {
+          raw.clearra_wasm_output_release();
+          return 'unavailable';
+        }
         if (status !== 0) throw new Error(`invalid GPU warmup status: ${status}`);
         await yieldToRuntimeHost();
       }

@@ -49,6 +49,12 @@ impl ExecutionCancellationHandle {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire) == CANCELLED
     }
+
+    /// Exposes the shared atomic owner by reference for fieldwise ownership
+    /// accounting and pointer-identity checks without exposing a raw pointer.
+    pub fn atomic_flag(&self) -> &AtomicU32 {
+        self.cancelled.as_ref()
+    }
 }
 
 pub type CancellationHandle = ExecutionCancellationHandle;

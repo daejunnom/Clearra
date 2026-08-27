@@ -32,18 +32,23 @@ pub struct CNativeResourceReport {
 
 impl CNativeResourceReport {
     pub fn to_domain(self) -> ResourceReport {
-        ResourceReport {
-            truncated: self.truncated != 0,
-            truncation_reason: truncation_reason(self.truncation_reason),
-            peak_frontier_states: self.peak_frontier_states,
-            peak_candidate_rows: self.peak_candidate_rows,
-            peak_hash_buckets: self.peak_hash_buckets,
-            peak_gpu_bytes: self.peak_gpu_bytes,
-            peak_cpu_bytes: self.peak_cpu_bytes,
-            build_worker_backlog_peak: self.build_worker_backlog_peak,
-            coverage_rows_emitted: self.coverage_rows_emitted,
-            probability_complete: self.probability_complete != 0 && self.truncated == 0,
+        let mut report = ResourceReport::complete();
+        report.peak_frontier_states = self.peak_frontier_states;
+        report.peak_candidate_rows = self.peak_candidate_rows;
+        report.peak_hash_buckets = self.peak_hash_buckets;
+        report.peak_gpu_bytes = self.peak_gpu_bytes;
+        report.peak_cpu_bytes = self.peak_cpu_bytes;
+        report.build_worker_backlog_peak = self.build_worker_backlog_peak;
+        report.coverage_rows_emitted = self.coverage_rows_emitted;
+        report.probability_complete = self.probability_complete != 0 && self.truncated == 0;
+        if self.truncated != 0 {
+            if let Some(reason) = truncation_reason(self.truncation_reason) {
+                report.mark_truncated(reason);
+            } else {
+                report.mark_truncated_unknown();
+            }
         }
+        report
     }
 }
 

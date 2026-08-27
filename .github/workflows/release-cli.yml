@@ -55,6 +55,11 @@ jobs:
             exit 2
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate final-source evidence contract regression coverage
+        shell: bash
+        run: node --test scripts/release/final-source-attempt-journal.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
+      - name: Install JavaScript workspace for product authority
+        run: npm ci --ignore-scripts
       - name: Validate every product version and changelog surface
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
@@ -67,6 +72,11 @@ jobs:
           fi
       - name: Validate release metadata regression coverage
         run: node --test scripts/release/validate-release-metadata.test.mjs
+      - name: Require the product capability and alias parser authority
+        run: |
+          node --test tests/contracts/product_capability_registry.test.mjs
+          node --test apps/clearra-discord-bot/test/capability-registry.test.mjs
+          node --test scripts/tools/audit-upstream-drift.test.mjs
       - name: Validate remote annotated tag regression coverage
         run: node --test scripts/release/verify-remote-annotated-tag.test.mjs
       - name: Validate release CLI smoke wiring
@@ -233,7 +243,11 @@ jobs:
               [Parameter(Mandatory)] [string] $Name,
               [Parameter(Mandatory)] [string[]] $CommandArguments,
               [hashtable] $ExpectedSummary = @{},
-              [hashtable] $ExpectedResourceReport = @{}
+              [hashtable] $ExpectedResourceReport = @{},
+              [string] $ExpectedKind,
+              [string] $ExpectedCommandKind,
+              [Nullable[bool]] $ExpectedTilingFamilyComplete,
+              [string] $ExpectedTilingFamilyIncompleteReason
             )
             $jsonLines = & $cli @CommandArguments
             $exitCode = $LASTEXITCODE
@@ -253,6 +267,21 @@ jobs:
                 $identity.supply_semantics_id -ne 'clearra.supply.projected-terminal-lookahead.v1' -or
                 $identity.artifact_schema_version -ne 'clearra.solution-data.v1') {
               throw "Clearra CLI $Name smoke returned a mismatched product build identity"
+            }
+            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {
+              throw "Clearra CLI $Name smoke expected kind=$ExpectedKind, received $($parsed.kind)"
+            }
+            if ($ExpectedCommandKind -and
+                $parsed.contract.command.kind -ne $ExpectedCommandKind) {
+              throw "Clearra CLI $Name smoke expected contract.command.kind=$ExpectedCommandKind, received $($parsed.contract.command.kind)"
+            }
+            if ($null -ne $ExpectedTilingFamilyComplete -and
+                $parsed.contract.pc.tiling.family_complete -ne $ExpectedTilingFamilyComplete) {
+              throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_complete=$ExpectedTilingFamilyComplete, received $($parsed.contract.pc.tiling.family_complete)"
+            }
+            if ($ExpectedTilingFamilyIncompleteReason -and
+                $parsed.contract.pc.tiling.family_incomplete_reason -ne $ExpectedTilingFamilyIncompleteReason) {
+              throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_incomplete_reason=$ExpectedTilingFamilyIncompleteReason, received $($parsed.contract.pc.tiling.family_incomplete_reason)"
             }
             foreach ($entry in $ExpectedSummary.GetEnumerator()) {
               $property = $parsed.summary.PSObject.Properties[$entry.Key]
@@ -301,7 +330,11 @@ jobs:
             -ExpectedSummary @{ action = 'export'; profile = 'srs-x' }
           Invoke-ClearraJsonSmoke -Name 'solver' -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IJLOO', '--fixed', '--no-hold')
           Invoke-ClearraJsonSmoke -Name 'pc-tiling' `
-            -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IJLOO', '--fixed', '--no-hold', '--objective', 'tiling', '--backend', 'cpu', '--workers', '1') `
+            -CommandArguments @('--format', 'json', 'pc', 'tiling', '--lines', '2', '--queue', 'IIOOO', '--no-hold', '--backend', 'cpu', '--workers', '1') `
+            -ExpectedKind 'pc-tiling-family.v1' `
+            -ExpectedCommandKind 'pc-tiling-family.v1' `
+            -ExpectedTilingFamilyComplete $true `
+            -ExpectedTilingFamilyIncompleteReason 'none' `
             -ExpectedSummary @{ coverage_probability = 'not-calculated'; probability_calculated = $false; probability_complete = $false; supply_probability_complete = $false; resource_probability_complete = $false } `
             -ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }
           Invoke-ClearraJsonSmoke -Name 'failed-queue' -CommandArguments @('--format', 'json', 'failed-queue', '--lines', '2', '--patterns', 'P5', '--backend', 'cpu', '--failed-count', '7')

@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-08-28
+
+- Added actual typed product paths for all twelve Build v2 capabilities,
+  including colored target and congruence generation, exact coverage
+  portfolios, supplied-solution evaluation, probability, score, and B2B
+  variants across CLI, WASM, Web, desktop, GUI, and Discord.
+- Completed the remaining PC, Setup, and unordered no-hold spin-structure
+  families with full-result authority, deterministic canonical identities,
+  strict distinction between ordinary solution families and alternative
+  optimal portfolios, and fail-closed incomplete-result handling.
+- Added exact, restartable portfolio-alternative enumeration. GUI, Web, and
+  desktop results page through every tied optimal portfolio; CLI exposes only
+  explicit durable tie snapshots and continuation; Discord publishes the
+  smallest canonical candidate only and exposes no tie metadata.
+- Made maximum-score selection score-only. Attack remains an informational
+  observation in equal-score traces and cannot affect eligibility, ranking,
+  tie membership, canonical order, or Discord representative selection.
+- Added complete native solution-set export in text, JSON, compact, CTK3, and
+  Fumen forms with bounded streaming, full-family/portfolio preservation,
+  exact byte contracts, and atomic no-overwrite publication.
+- Added request-local board, piece, bag, rule, spin, and score profiles. Every
+  accepted profile is bound into the executed query; unsupported, unverified,
+  or incompatible profiles fail closed without ambient fallback.
+- Added typed field and operation-document utilities for Fumen transforms,
+  color normalization, mirroring, deterministic rendering, parity observation,
+  sequence replay, and exact sequence-dependency languages while preserving
+  page, operation, comment, garbage, and color identity.
+- Added durable native and browser delegation journals with acknowledged
+  two-phase publication, hash-chained records, leases, fencing, recovery,
+  quarantine, and explicit terminal ownership so partial or uncertain work is
+  never presented as complete.
+- Activated the v0.8 capability ledger and fieldwise Discord runtime
+  projection, preserving legacy routes under their own result authority while
+  keeping hidden diagnostics undiscoverable and advanced objectives scoped to
+  their owning capabilities.
+- Hardened release provenance around exact-source archives, release-freeze
+  drift evidence, Pages accepted-SHA publication, zero-traffic Cloud Run
+  candidates, Oracle rollback authority, command-catalog readback, annotated
+  tags, and exactly three immutable release assets.
+
 ## 0.7.5 - 2026-08-20
 
 - Hardened accepted-source export so Cloud Build and Oracle consume one

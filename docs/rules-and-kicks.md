@@ -32,7 +32,20 @@ MVP2 owns the long-lived kick contract types:
   piece-specific transitions through profile entries, first-success order
   preservation, source/provenance, and `verified=true|false`.
 
-`verify kicks` uses these contracts for built-in SRS 90, no-kick, SRS+ 180, SRS-X, and Jstris 180 profiles. `rules verify --input` reports `missing_transition_count`, `duplicate_transition_count`, `unsupported_annotation_count`, `verified_profile`, `c_compact_descriptor_ready`, and `unsupported_backend_reason` without pretending a profile was imported. `rules import --input` succeeds only for `VerifiedKickTableProfile` values; unverified profiles are rejected, while verified-but-backend-unsupported profiles must still disclose the unsupported backend reason. Imported kick JSON is strict: unknown fields are rejected, duplicate transitions keep the profile unverified, missing transitions are reported, invalid rotation transitions are rejected, unsupported piece ids are rejected, and first-success offset order is preserved. Future property import/export should produce and consume verified `KickTableProfile` values instead of letting search or CLI parse raw property text directly.
+These contracts cover built-in SRS 90, no-kick, SRS+ 180, SRS-X, and Jstris 180
+profiles. `rules verify --input` reports `missing_transition_count`,
+`duplicate_transition_count`, `unsupported_annotation_count`,
+`verified_profile`, `c_compact_descriptor_ready`, and
+`unsupported_backend_reason` without pretending a profile was imported.
+`rules import --input` succeeds only for `VerifiedKickTableProfile` values;
+unverified profiles are rejected, while verified-but-backend-unsupported
+profiles must still disclose the unsupported backend reason. Imported kick JSON
+is strict: unknown fields are rejected, duplicate transitions keep the profile
+unverified, missing transitions are reported, invalid rotation transitions are
+rejected, unsupported piece ids are rejected, and first-success offset order is
+preserved. Future property import/export should produce and consume verified
+`KickTableProfile` values instead of letting search or CLI parse raw property
+text directly.
 
 X1 Rule / Kick Expansion keeps `SRS-X`, `ASC`, and `ARS` visible as named
 profiles while preventing silent runtime fallback. WASM uses the built-in

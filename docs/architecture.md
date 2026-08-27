@@ -2103,12 +2103,23 @@ replay events that come from C BuildUp evidence plus `clearra-replay`; output mu
 
 Core search exports every buildable `(candidate_id, pattern_id, trace_identity)`
 replay seed without assigning a score. `clearra-postprocess` evaluates all legal
-executions, keeps the highest legal score for each concrete supply pattern, and
-applies the materialized pattern weights. Patterns without a PC execution
-contribute zero. The result reports the full-universe field average and a
-covered-pattern conditional average. It does not expose per-solution score rows
-or score-aware minimum sets. The ordinary exact minimum-cover objective remains
-independent of scoring.
+executions. The ordinary `pc.score` summary keeps the highest integer score for
+each concrete supply pattern and applies materialized pattern weights afterward;
+patterns without a PC execution contribute zero. Its result reports the
+full-universe field average and a covered-pattern conditional average.
+
+Score equality and candidate eligibility are score-only. Attack is never an
+objective coordinate, tie breaker, dominance coordinate, canonical-order key,
+or Discord representative selector. If equal-score traces need one displayed
+attack value, the normalized trace key selects the informational representative
+and output declares `informational_attack_basis=canonical_equal_score_trace`.
+
+`pc.score-minimals` and the Build `max-score-cover` forms are distinct typed
+portfolio objectives. They retain every candidate tied for the highest score of
+each pattern, then compute the exact minimum-cardinality cover of those rows.
+All portfolios at that cardinality are public portfolio alternatives. This does
+not make the ordinary minimum-cover objective depend on scoring and does not
+turn the `pc.score` solution family into a portfolio tie.
 
 When the execution batch, trace basis, or weights cannot materialize a complete
 matrix, score summary reports `objective_complete=false` and an explicit
@@ -2121,6 +2132,36 @@ X4 contract markers: score profile exact/basic accuracy 표시; score event basi
 from C/replay; failed PC patterns contribute zero; score does not modify
 coverage probability; score evaluation basis visible; sample vs full
 evaluation distinguished.
+
+## Exact Portfolio Alternative Authority
+
+`REQ-V080-012` owns equivalent-coverage classes and the existing exact
+single-portfolio primitive. `REQ-V080-021` separately owns complete public
+enumeration when the product result unit is an optimal portfolio. Witness,
+trace, cell, and contribution ties remain internal unless a capability's public
+result unit is itself that witness.
+
+The exact portfolio service has two passes. Pass one proves the optimum and
+selects the lexicographically first canonical portfolio. Pass two enumerates
+all portfolios at the proven cardinality from the original candidate rows.
+Dominated or equal rows may be collapsed while proving the optimum only if the
+enumeration pass restores every stable candidate identity. A generic greedy
+fallback cannot source this product result.
+
+Candidate IDs are assigned from sorted stable normalized solution keys and are
+one-based. A portfolio sorts those numeric IDs; portfolios are ordered by
+numeric lexicographic vector order. Worker count, backend, traversal order, and
+hash-table iteration cannot change that identity. The enumerator is lazy and
+unbounded at the semantic level: `known_alternative_count_decimal` grows
+monotonically, `total_alternative_count_decimal` stays null until the traversal
+is sealed, and interruption publishes an explicit incomplete state with restart
+information rather than an apparently complete prefix.
+
+App owns result-bound portfolio handles and validates snapshot/query/build/
+profile/universe/candidate-map identity. GUI outer pages contain one portfolio;
+member dictionaries page 100 candidates at a time. Native CLI paging uses a
+durable, exclusive, versioned snapshot. Discord never requests enumeration and
+projects only the first canonical portfolio without tie metadata.
 
 ## Spin And Score Coverage Contract
 

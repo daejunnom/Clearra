@@ -17,7 +17,9 @@ fn percent_reports_pattern_counts_probability_and_c_buildup_rows() {
     )
     .with_exact_pieces(Some(1))
     .with_count_policy(PcCountPolicy::CountUnique);
-    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+    let problem = ProblemCompiler::compile_scenario_pc(&query)
+        .expect("problem")
+        .with_pc_chance_probability_v2_evidence();
 
     let result = PercentService::execute(&problem).expect("percent");
 
@@ -71,6 +73,45 @@ fn percent_reports_pattern_counts_probability_and_c_buildup_rows() {
             .usize_field("covered_pattern_count")
             .unwrap_or_default()
     );
+    let evidence = result
+        .pc_chance_coverage_evidence()
+        .expect("private typed Build coverage evidence");
+    assert!(evidence.problem().matches_search_problem(&problem));
+    let universe = problem
+        .piece_source()
+        .materialized_universe()
+        .expect("compiled universe");
+    assert_eq!(
+        evidence.row_kind(),
+        &clearra_coverage::row::coverage_row_kind::CoverageRowKind::Build
+    );
+    assert_eq!(
+        evidence.piece_source_id(),
+        problem.piece_source().id().get()
+    );
+    assert_eq!(
+        evidence.pattern_universe_id(),
+        universe.pattern_universe_id()
+    );
+    assert_eq!(
+        evidence.pattern_weight_model_id(),
+        universe.pattern_weight_model_id()
+    );
+    assert_eq!(evidence.pattern_count(), universe.pattern_count());
+    assert_eq!(
+        evidence.row_count(),
+        result
+            .usize_field("c_buildup_coverage_row_count")
+            .expect("coverage row count")
+    );
+    assert_eq!(
+        evidence.coverage_union().words(),
+        result.coverage_pattern_words()
+    );
+    assert_eq!(
+        evidence.complete(),
+        result.bool_field("probability_complete").unwrap()
+    );
 }
 
 #[test]
@@ -82,7 +123,9 @@ fn complete_percent_with_no_solution_returns_an_exact_zero_coverage_set() {
     )
     .with_exact_pieces(Some(1))
     .with_count_policy(PcCountPolicy::CountUnique);
-    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+    let problem = ProblemCompiler::compile_scenario_pc(&query)
+        .expect("problem")
+        .with_pc_chance_probability_v2_evidence();
 
     let result = PercentService::execute(&problem).expect("percent");
 
@@ -90,6 +133,29 @@ fn complete_percent_with_no_solution_returns_an_exact_zero_coverage_set() {
     assert_eq!(result.field("probability"), Some("0"));
     assert_eq!(result.field("probability_complete"), Some("true"));
     assert_eq!(result.coverage_pattern_words(), &[0]);
+    let evidence = result
+        .pc_chance_coverage_evidence()
+        .expect("complete empty typed evidence");
+    assert!(evidence.complete());
+    assert_eq!(evidence.row_count(), 0);
+    assert_eq!(evidence.coverage_union().words(), &[0]);
+}
+
+#[test]
+fn generic_percent_does_not_retain_private_pc_probability_v2_evidence() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_count_policy(PcCountPolicy::CountUnique);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("generic problem");
+
+    let result = PercentService::execute(&problem).expect("generic percent");
+
+    assert_eq!(result.coverage_pattern_words(), &[0]);
+    assert!(result.pc_chance_coverage_evidence().is_none());
 }
 
 #[test]
@@ -113,6 +179,11 @@ fn truncated_observed_percent_reports_verified_materialized_patterns_without_cla
     let buildup = BuildUpRunner::run_for_coverage(&problem, &packing).expect("buildup");
     assert!(!buildup.coverage_complete());
     assert!(buildup.materialized_coverage_complete());
+    // These preliminary runs only establish the expected truncation shape.
+    // Their result owners must be released before PercentService starts its
+    // own governed packing/build-up execution under the shared authority.
+    drop(buildup);
+    drop(packing);
 
     let result = PercentService::execute(&problem).expect("percent");
 

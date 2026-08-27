@@ -110,6 +110,33 @@ fn assembles_rule_and_verified_kick_profile_override_into_pc_query() {
 }
 
 #[test]
+fn assembles_existential_b2b_preservation_without_implicitly_enabling_score() {
+    let args = PcArgs::new(4)
+        .with_back_to_back_preservation(true)
+        .with_spin_profile(Some("all-spin-plus".to_owned()));
+    let query = PcQueryAssembler::assemble(&args).expect("B2B-preserving query");
+    let objective = query.objective();
+
+    assert!(!objective.score().requested());
+    assert!(objective.execution_constraints().preserves_back_to_back());
+    assert_eq!(
+        objective.execution_constraints().spin_profile(),
+        clearra_objectives::policy::score_objective_policy::SpinProfileSelection::AllSpinPlus
+    );
+}
+
+#[test]
+fn b2b_preservation_without_an_explicit_spin_profile_uses_the_pc_default() {
+    let args = PcArgs::new(4).with_back_to_back_preservation(true);
+    let query = PcQueryAssembler::assemble(&args).expect("default B2B-preserving query");
+
+    assert_eq!(
+        query.objective().execution_constraints().spin_profile(),
+        clearra_objectives::policy::score_objective_policy::SpinProfileSelection::TSpins
+    );
+}
+
+#[test]
 fn assembles_execution_policy_into_pc_query() {
     let args = PcArgs::new(2)
         .with_backend(Some("cpu".to_owned()))

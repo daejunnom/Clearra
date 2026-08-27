@@ -11,10 +11,10 @@ impl LanguageIntersection {
         build_orders: &BuildOrderLanguage,
         hold_orders: &HoldReachableLanguage,
     ) -> bool {
-        build_orders
+        hold_orders
             .orders()
             .iter()
-            .any(|order| hold_orders.accepts_order(order))
+            .any(|order| build_orders.accepts_order(order))
     }
 }
 

@@ -16,7 +16,7 @@ const [
 ] = process.argv.slice(2);
 if (!bindingsPath || !commandText) {
   throw new Error(
-    'usage: node wasm-pc-environment-probe.mjs CLEARRA_WASM_BINDINGS "clearra pc ..." [WORK_BUDGET] [summary|full] [--manifest PATH --expected-source-commit SHA|unverified-local-build]',
+    'usage: node wasm-pc-environment-probe.mjs CLEARRA_WASM_BINDINGS "clearra pc ..." [WORK_BUDGET] [summary|full] [--product-page] [--manifest PATH --expected-source-commit SHA|unverified-local-build]',
   );
 }
 if (!['summary', 'full'].includes(outputMode)) {
@@ -24,7 +24,8 @@ if (!['summary', 'full'].includes(outputMode)) {
 }
 
 const workBudget = positiveInteger(workBudgetText, 'WORK_BUDGET');
-const contractOptions = parseContractArguments(contractArguments);
+const probeOptions = parseProbeArguments(contractArguments);
+const contractOptions = parseContractArguments(probeOptions.contractArguments);
 const expectedRuntimeIdentity = contractOptions === null
   ? null
   : expectedWasmProbeIdentity(
@@ -145,6 +146,9 @@ if (profilingEnabled) {
   }
   searchProfile = JSON.parse(readOutput(api));
 }
+const productPage = probeOptions.productPage
+  ? probeCoveragePortfolioPage(api, finalEvent, workBudget)
+  : null;
 
 console.log(JSON.stringify({
   runtime: 'wasm-bindgen-web-host',
@@ -160,6 +164,7 @@ console.log(JSON.stringify({
   terminal_status: terminalStatus,
   search_profile: searchProfile,
   command: commandText,
+  product_page: productPage,
   final: outputMode === 'full' ? finalEvent : summarizeFinal(finalEvent, searchReport),
 }, null, 2));
 
@@ -276,6 +281,7 @@ function bindRawAbi(exports) {
     drainJobEvents: exports.clearra_wasm_drain_job_events,
     outputPtr: exports.clearra_wasm_output_ptr,
     outputLen: exports.clearra_wasm_output_len,
+    outputRelease: exports.clearra_wasm_output_release,
   };
   for (const [name, value] of Object.entries(required)) {
     if (value === undefined) {
@@ -286,13 +292,129 @@ function bindRawAbi(exports) {
     ...required,
     profileStart: exports.clearra_wasm_profile_start,
     profileFinish: exports.clearra_wasm_profile_finish,
+    productPageAvailable: exports.clearra_wasm_product_page_available,
+    productPageNext: exports.clearra_wasm_product_page_next,
+    productPageGet: exports.clearra_wasm_product_page_get,
+    productPageRelease: exports.clearra_wasm_product_page_release,
   };
 }
 
+function probeCoveragePortfolioPage(api, finalEvent, workBudget) {
+  for (const name of [
+    'productPageAvailable',
+    'productPageNext',
+    'productPageGet',
+    'productPageRelease',
+  ]) {
+    if (typeof api[name] !== 'function') {
+      throw new Error(`Clearra WASM export missing: ${name}`);
+    }
+  }
+
+  const productResult = finalEvent?.response?.product_result_payload;
+  const initialPayload = productResult?.content?.payload;
+  if (
+    productResult?.contract !== 'pc.minimals' ||
+    productResult?.content?.payload_kind !== 'coverage-portfolio' ||
+    initialPayload?.page_handle_available !== true
+  ) {
+    throw new Error('pc.minimals terminal response did not transfer a coverage portfolio page handle');
+  }
+  validateCanonicalDecimal(initialPayload.alternative_index, 'initial alternative_index');
+  for (const [index, member] of initialPayload.members.entries()) {
+    validateCanonicalDecimal(member?.candidate_id, `initial members[${index}].candidate_id`);
+  }
+  if (api.productPageAvailable() !== 1) {
+    throw new Error('pc.minimals terminal response advertised a page handle that is unavailable');
+  }
+
+  let released = false;
+  try {
+    if (api.productPageGet(1, 1) !== 0) {
+      throw new Error(readOutput(api));
+    }
+    const loadedPage = JSON.parse(readOutput(api));
+    validateCoveragePortfolioRuntimePage(loadedPage);
+
+    if (api.productPageNext(workBudget) !== 0) {
+      throw new Error(readOutput(api));
+    }
+    const nextState = JSON.parse(readOutput(api));
+    validateCoveragePortfolioAdvance(nextState);
+
+    if (api.productPageRelease() !== 0) {
+      throw new Error(readOutput(api));
+    }
+    released = true;
+    if (api.productPageAvailable() !== 0) {
+      throw new Error('coverage portfolio page owner remained available after release');
+    }
+    return {
+      contract: productResult.contract,
+      payload_kind: productResult.content.payload_kind,
+      initial_alternative_index: initialPayload.alternative_index,
+      loaded_alternative_index: loadedPage.page.alternative_index,
+      first_candidate_id: loadedPage.page.members[0]?.candidate_id ?? null,
+      next_state: nextState.state,
+      page_owner_released: true,
+    };
+  } finally {
+    if (!released && api.productPageAvailable() === 1) {
+      api.productPageRelease();
+    }
+  }
+}
+
+function validateCoveragePortfolioRuntimePage(value) {
+  if (
+    value?.schema_version !== 1 ||
+    value?.runtime !== 'clearra-wasm' ||
+    value?.product_page_kind !== 'coverage-portfolio' ||
+    value?.state !== 'page' ||
+    !value.page ||
+    !Array.isArray(value.page.members) ||
+    value.page.members.length === 0
+  ) {
+    throw new Error('coverage portfolio get did not return a non-empty runtime page');
+  }
+  validateCanonicalDecimal(value.page.alternative_index, 'loaded alternative_index');
+  validateCanonicalDecimal(value.page.member_page_number, 'loaded member_page_number');
+  for (const [index, member] of value.page.members.entries()) {
+    validateCanonicalDecimal(member?.candidate_id, `loaded members[${index}].candidate_id`);
+  }
+}
+
+function validateCoveragePortfolioAdvance(value) {
+  if (
+    value?.schema_version !== 1 ||
+    value?.runtime !== 'clearra-wasm' ||
+    value?.product_page_kind !== 'coverage-portfolio' ||
+    !['page', 'work-budget-exhausted', 'sealed'].includes(value?.state)
+  ) {
+    throw new Error('coverage portfolio next returned an invalid advance state');
+  }
+  if (value.state === 'page') {
+    validateCoveragePortfolioRuntimePage(value);
+  } else {
+    validateCanonicalDecimal(value.known_alternative_count, 'known_alternative_count', true);
+  }
+}
+
+function validateCanonicalDecimal(value, label, allowZero = false) {
+  const pattern = allowZero ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/;
+  if (typeof value !== 'string' || !pattern.test(value)) {
+    throw new Error(`${label} must be a canonical decimal string`);
+  }
+}
+
 function readOutput(api) {
-  return new TextDecoder().decode(
-    new Uint8Array(api.memory.buffer, api.outputPtr(), api.outputLen()),
-  );
+  try {
+    return new TextDecoder().decode(
+      new Uint8Array(api.memory.buffer, api.outputPtr(), api.outputLen()),
+    );
+  } finally {
+    api.outputRelease();
+  }
 }
 
 function positiveInteger(value, label) {
@@ -306,6 +428,20 @@ function positiveInteger(value, label) {
 function optionalPositiveInteger(value, label) {
   if (value === undefined || value === '') return null;
   return positiveInteger(value, label);
+}
+
+function parseProbeArguments(argumentsList) {
+  let productPage = false;
+  const contractArguments = [];
+  for (const argument of argumentsList) {
+    if (argument === '--product-page') {
+      if (productPage) throw new Error('--product-page may only be specified once');
+      productPage = true;
+    } else {
+      contractArguments.push(argument);
+    }
+  }
+  return { productPage, contractArguments };
 }
 
 function parseContractArguments(argumentsList) {

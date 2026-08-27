@@ -64,7 +64,7 @@ test("rollback authority capture freezes exact v0.7.4 legacy authority without i
   assert.equal(captured.priorJobUrl, "https://stable.example.run.app/jobs");
   assert.equal(
     backup.path,
-    `/etc/clearra-gateway/settings.pre-v0.7.5-${nonce}`,
+    `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`,
   );
   assert.equal(backup.bytes, settings);
 });

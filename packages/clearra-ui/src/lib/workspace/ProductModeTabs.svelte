@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { Blocks, Flame, Gamepad2, Grid3X3, Layers3, Palette, RotateCw } from '@lucide/svelte';
+  import { Blocks, FileStack, Flame, Gamepad2, GitBranch, Grid3X3, Image, Layers3, ListOrdered, Palette, Scale, RotateCw } from '@lucide/svelte';
 
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import type { WorkspaceMode } from './workspaceMode';
@@ -46,6 +46,36 @@
     <Layers3 size={16} strokeWidth={1.8} />{label('setupFinder')}
   </a>
   <a
+    href="?tool=setup-score"
+    class:active={active === 'setup-score'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'setup-score' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Layers3 size={16} strokeWidth={1.8} />{language === 'ko' ? 'Setup 점수' : 'Setup score'}
+  </a>
+  <a
+    href="?tool=spin-structure"
+    class:active={active === 'spin-structure'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'spin-structure' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <RotateCw size={16} strokeWidth={1.8} />{language === 'ko' ? 'Spin 구조' : 'Spin structure'}
+  </a>
+  <a
+    href="?tool=build"
+    class:active={active === 'build'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'build' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Blocks size={16} strokeWidth={1.8} />{language === 'ko' ? 'Build 도구' : 'Build tools'}
+  </a>
+  <a
     href="?tool=build-probability"
     class:active={active === 'build-probability'}
     class:busy
@@ -54,6 +84,76 @@
     on:click={preventBusyNavigation}
   >
     <Blocks size={16} strokeWidth={1.8} />{label('buildProbability')}
+  </a>
+  <a
+    href="?tool=sequence"
+    class:active={active === 'sequence'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'sequence' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <ListOrdered size={16} strokeWidth={1.8} />{label('operationSequence')}
+  </a>
+  <a
+    href="?tool=sequence-dependencies"
+    class:active={active === 'sequence-dependencies'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'sequence-dependencies' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <GitBranch size={16} strokeWidth={1.8} />{label('sequenceDependencies')}
+  </a>
+  <a
+    href="?tool=parity"
+    class:active={active === 'parity'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'parity' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Scale size={16} strokeWidth={1.8} />{label('utilityParity')}
+  </a>
+  <a
+    href="?tool=fumen"
+    class:active={active === 'fumen'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'fumen' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <FileStack size={16} strokeWidth={1.8} />{label('utilityFumen')}
+  </a>
+  <a
+    href="?tool=render"
+    class:active={active === 'render'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'render' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Image size={16} strokeWidth={1.8} />{label('utilityRender')}
+  </a>
+  <a
+    href="?tool=to-gray"
+    class:active={active === 'to-gray'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'to-gray' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Palette size={16} strokeWidth={1.8} />{label('utilityToGray')}
+  </a>
+  <a
+    href="?tool=mirror"
+    class:active={active === 'mirror'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'mirror' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <RotateCw size={16} strokeWidth={1.8} />{label('utilityMirror')}
   </a>
   <a
     href="?tool=damage"
@@ -74,6 +174,16 @@
     on:click={preventBusyNavigation}
   >
     <RotateCw size={16} strokeWidth={1.8} />{label('spinFinder')}
+  </a>
+  <a
+    href="?tool=ren"
+    class:active={active === 'ren'}
+    class:busy
+    aria-disabled={busy}
+    aria-current={active === 'ren' ? 'page' : undefined}
+    on:click={preventBusyNavigation}
+  >
+    <Layers3 size={16} strokeWidth={1.8} />{label('maximumRen')}
   </a>
   <a
     href="?tool=ctk"
@@ -103,9 +213,20 @@
     <select aria-label={label('workspaceMode')} value={`?tool=${active}`} disabled={busy} on:change={changeMode}>
       <option value="?tool=pc">{label('pcSearch')}</option>
       <option value="?tool=setup">{label('setupFinder')}</option>
+      <option value="?tool=setup-score">{language === 'ko' ? 'Setup 점수' : 'Setup score'}</option>
+      <option value="?tool=spin-structure">{language === 'ko' ? 'Spin 구조' : 'Spin structure'}</option>
+      <option value="?tool=build">{language === 'ko' ? 'Build 도구' : 'Build tools'}</option>
       <option value="?tool=build-probability">{label('buildProbability')}</option>
+      <option value="?tool=sequence">{label('operationSequence')}</option>
+      <option value="?tool=sequence-dependencies">{label('sequenceDependencies')}</option>
+      <option value="?tool=parity">{label('utilityParity')}</option>
+      <option value="?tool=fumen">{label('utilityFumen')}</option>
+      <option value="?tool=render">{label('utilityRender')}</option>
+      <option value="?tool=to-gray">{label('utilityToGray')}</option>
+      <option value="?tool=mirror">{label('utilityMirror')}</option>
       <option value="?tool=damage">{label('maximumDamage')}</option>
       <option value="?tool=spin-finder">{label('spinFinder')}</option>
+      <option value="?tool=ren">{label('maximumRen')}</option>
       <option value="?tool=ctk">{label('ctkDrawer')}</option>
       <option value="?tool=player">{label('player')}</option>
     </select>
@@ -121,6 +242,7 @@
     gap: 4px;
     min-height: 49px;
     padding: 0 max(24px, calc((100vw - 1460px) / 2));
+    overflow-x: auto;
   }
 
   a {

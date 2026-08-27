@@ -6,6 +6,10 @@ pub enum CliErrorCode {
     CliInvalidValue,
     CliOutputFormatUnsupported,
     CliOutputLimitExceeded,
+    CliArtifactInvalid,
+    CliArtifactPublishFailed,
+    CliArtifactDurabilityUncertain,
+    CliArtifactCommittedButOutputFailed,
     CliCommandUnknown,
     CliUnknownOption,
     CliCommandUnsupported,
@@ -40,8 +44,28 @@ pub enum CliErrorCode {
     ContinueTokenRequired,
     ContinueTokenInvalid,
     ContinueSearchInternal,
+    TieSnapshotUnsafePath,
+    TieSnapshotTargetExists,
+    TieSnapshotLocked,
+    TieSnapshotIo,
+    TieSnapshotInvalid,
+    TieSnapshotTampered,
+    TieSnapshotStale,
+    TieSnapshotQueryMismatch,
+    TieSnapshotBuildMismatch,
+    TieSnapshotCandidateMismatch,
     VerifyTargetUnknown,
     VerifyKicksFailed,
+    OperationSequenceInvalid,
+    OperationSequenceCancelled,
+    OperationSequenceTimedOut,
+    OperationSequenceIncomplete,
+    UtilityParityInvalid,
+    UtilityFumenInvalid,
+    UtilityRenderInvalid,
+    UtilityRenderLimitExceeded,
+    UtilityToGrayInvalid,
+    UtilityMirrorInvalid,
 }
 
 impl CliErrorCode {
@@ -51,6 +75,12 @@ impl CliErrorCode {
             Self::CliInvalidValue => "E_CLI_INVALID_VALUE",
             Self::CliOutputFormatUnsupported => "E_CLI_OUTPUT_FORMAT_UNSUPPORTED",
             Self::CliOutputLimitExceeded => "E_CLI_OUTPUT_LIMIT_EXCEEDED",
+            Self::CliArtifactInvalid => "E_CLI_ARTIFACT_INVALID",
+            Self::CliArtifactPublishFailed => "E_CLI_ARTIFACT_PUBLISH_FAILED",
+            Self::CliArtifactDurabilityUncertain => "E_CLI_ARTIFACT_DURABILITY_UNCERTAIN",
+            Self::CliArtifactCommittedButOutputFailed => {
+                "E_CLI_ARTIFACT_COMMITTED_BUT_OUTPUT_FAILED"
+            }
             Self::CliCommandUnknown => "E_CLI_COMMAND_UNKNOWN",
             Self::CliUnknownOption => "E_CLI_UNKNOWN_OPTION",
             Self::CliCommandUnsupported => "E_CLI_COMMAND_UNSUPPORTED",
@@ -85,8 +115,28 @@ impl CliErrorCode {
             Self::ContinueTokenRequired => "E_CONTINUE_TOKEN_REQUIRED",
             Self::ContinueTokenInvalid => "E_CONTINUE_TOKEN_INVALID",
             Self::ContinueSearchInternal => "E_CONTINUE_SEARCH_INTERNAL",
+            Self::TieSnapshotUnsafePath => "E_TIE_SNAPSHOT_PATH_UNSAFE",
+            Self::TieSnapshotTargetExists => "E_TIE_SNAPSHOT_TARGET_EXISTS",
+            Self::TieSnapshotLocked => "E_TIE_SNAPSHOT_LOCKED",
+            Self::TieSnapshotIo => "E_TIE_SNAPSHOT_IO",
+            Self::TieSnapshotInvalid => "E_TIE_SNAPSHOT_INVALID",
+            Self::TieSnapshotTampered => "E_TIE_SNAPSHOT_TAMPERED",
+            Self::TieSnapshotStale => "E_TIE_SNAPSHOT_STALE",
+            Self::TieSnapshotQueryMismatch => "E_TIE_SNAPSHOT_QUERY_MISMATCH",
+            Self::TieSnapshotBuildMismatch => "E_TIE_SNAPSHOT_BUILD_MISMATCH",
+            Self::TieSnapshotCandidateMismatch => "E_TIE_SNAPSHOT_CANDIDATE_MISMATCH",
             Self::VerifyTargetUnknown => "E_VERIFY_TARGET_UNKNOWN",
             Self::VerifyKicksFailed => "E_VERIFY_KICKS_FAILED",
+            Self::OperationSequenceInvalid => "E_OPERATION_SEQUENCE_INPUT_INVALID",
+            Self::OperationSequenceCancelled => "E_OPERATION_SEQUENCE_CANCELLED",
+            Self::OperationSequenceTimedOut => "E_OPERATION_SEQUENCE_TIMED_OUT",
+            Self::OperationSequenceIncomplete => "E_OPERATION_SEQUENCE_INCOMPLETE",
+            Self::UtilityParityInvalid => "E_UTILITY_PARITY_INPUT_INVALID",
+            Self::UtilityFumenInvalid => "E_UTILITY_FUMEN_INPUT_INVALID",
+            Self::UtilityRenderInvalid => "E_UTILITY_RENDER_INPUT_INVALID",
+            Self::UtilityRenderLimitExceeded => "E_UTILITY_RENDER_LIMIT_EXCEEDED",
+            Self::UtilityToGrayInvalid => "E_UTILITY_TO_GRAY_INPUT_INVALID",
+            Self::UtilityMirrorInvalid => "E_UTILITY_MIRROR_INPUT_INVALID",
         }
     }
 }
@@ -103,11 +153,19 @@ impl CliErrorCode {
             | Self::PcScenarioSearchInternal
             | Self::ContinueSearchInternal
             | Self::TablebaseInstallFailed
-            | Self::VerifyKicksFailed => ExitCode::InternalError,
+            | Self::CliArtifactPublishFailed
+            | Self::CliArtifactDurabilityUncertain
+            | Self::CliArtifactCommittedButOutputFailed
+            | Self::TieSnapshotIo
+            | Self::VerifyKicksFailed
+            | Self::OperationSequenceCancelled
+            | Self::OperationSequenceTimedOut
+            | Self::OperationSequenceIncomplete => ExitCode::InternalError,
             Self::CliMissingValue
             | Self::CliInvalidValue
             | Self::CliOutputFormatUnsupported
             | Self::CliOutputLimitExceeded
+            | Self::CliArtifactInvalid
             | Self::CliCommandUnknown
             | Self::CliUnknownOption
             | Self::PcTargetInvalid
@@ -132,7 +190,23 @@ impl CliErrorCode {
             | Self::ConvertInputInvalid
             | Self::ContinueTokenRequired
             | Self::ContinueTokenInvalid
-            | Self::VerifyTargetUnknown => ExitCode::ValidationFailed,
+            | Self::TieSnapshotUnsafePath
+            | Self::TieSnapshotTargetExists
+            | Self::TieSnapshotLocked
+            | Self::TieSnapshotInvalid
+            | Self::TieSnapshotTampered
+            | Self::TieSnapshotStale
+            | Self::TieSnapshotQueryMismatch
+            | Self::TieSnapshotBuildMismatch
+            | Self::TieSnapshotCandidateMismatch
+            | Self::VerifyTargetUnknown
+            | Self::OperationSequenceInvalid
+            | Self::UtilityParityInvalid
+            | Self::UtilityFumenInvalid
+            | Self::UtilityRenderInvalid
+            | Self::UtilityRenderLimitExceeded
+            | Self::UtilityToGrayInvalid
+            | Self::UtilityMirrorInvalid => ExitCode::ValidationFailed,
         }
     }
 }
@@ -172,6 +246,22 @@ mod tests {
             "E_PATH_TRACE_UNAVAILABLE"
         );
         assert_eq!(
+            CliErrorCode::CliArtifactInvalid.as_str(),
+            "E_CLI_ARTIFACT_INVALID"
+        );
+        assert_eq!(
+            CliErrorCode::CliArtifactPublishFailed.as_str(),
+            "E_CLI_ARTIFACT_PUBLISH_FAILED"
+        );
+        assert_eq!(
+            CliErrorCode::CliArtifactDurabilityUncertain.as_str(),
+            "E_CLI_ARTIFACT_DURABILITY_UNCERTAIN"
+        );
+        assert_eq!(
+            CliErrorCode::CliArtifactCommittedButOutputFailed.as_str(),
+            "E_CLI_ARTIFACT_COMMITTED_BUT_OUTPUT_FAILED"
+        );
+        assert_eq!(
             CliErrorCode::CliMissingValue.default_exit_code(),
             ExitCode::ValidationFailed
         );
@@ -181,6 +271,10 @@ mod tests {
         );
         assert_eq!(
             CliErrorCode::PcSearchInternal.default_exit_code(),
+            ExitCode::InternalError
+        );
+        assert_eq!(
+            CliErrorCode::CliArtifactPublishFailed.default_exit_code(),
             ExitCode::InternalError
         );
     }

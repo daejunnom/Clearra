@@ -9,11 +9,15 @@ pub mod pc_service;
 #[cfg(test)]
 mod pc_service_tests;
 pub mod pc_summary_builder;
+mod pc_tiling_materialization;
 pub mod percent_service;
 
 pub use cover_service::{CoverService, CoverServiceError};
 pub use pc_service::{PcService, PcServiceError};
-pub use percent_service::{PercentService, PercentServiceError};
+pub use pc_tiling_materialization::PcTilingMaterializationError;
+pub use percent_service::{
+    PcFailedQueueExecution, PcFailedQueueExecutionError, PercentService, PercentServiceError,
+};
 
 pub(crate) fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())

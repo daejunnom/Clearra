@@ -58,6 +58,63 @@ assert.doesNotThrow(() =>
   )
 );
 
+const resourceReport = {
+  solver_executed: false,
+  memory_status: 'not-executed',
+  truncated: false,
+  truncation_reason: null,
+  peak_frontier_states: 0,
+  peak_candidate_rows: 0,
+  peak_hash_buckets: 0,
+  peak_gpu_bytes: 0,
+  peak_cpu_bytes: 0,
+  build_worker_backlog_peak: 0,
+  coverage_rows_emitted: 0,
+  probability_complete: false,
+  execution_availability: {
+    state: 'unavailable',
+    reason: 'dense-pattern-representation-unavailable',
+    surface: 'browser-wasm32',
+    descriptor_pattern_count: '35384428800',
+    dense_pattern_count: '35384428800',
+    required_dense_bytes: '4423053600',
+    required_memory_bytes: '8846107200'
+  },
+  result_completeness: 'not-executed'
+} as const;
+const typedResourceError = ClearraWasmRuntimeError.fromRuntimeOutput(
+  JSON.stringify({
+    code: 'E_WASM_DISTRIBUTED_START',
+    message: 'dense_pattern_representation_unavailable',
+    resource_report: resourceReport
+  })
+);
+assert.equal(typedResourceError.diagnosticCode, 'E_WASM_DISTRIBUTED_START');
+assert.equal(typedResourceError.resourceReport?.solver_executed, false);
+assert.deepEqual(typedResourceError.resourceReport, resourceReport);
+
+const invalidResourceError = ClearraWasmRuntimeError.fromRuntimeOutput(
+  JSON.stringify({
+    code: 'E_WASM_DISTRIBUTED_START',
+    message: 'invalid report must fail closed',
+    resource_report: {
+      ...resourceReport,
+      execution_availability: {
+        ...resourceReport.execution_availability,
+        required_dense_bytes: '1'
+      }
+    }
+  })
+);
+assert.equal(invalidResourceError.diagnosticCode, 'E_WASM_RESOURCE_REPORT_INVALID');
+assert.equal(invalidResourceError.resourceReport, null);
+
+const legacyRuntimeError = ClearraWasmRuntimeError.fromRuntimeOutput(
+  'E_WASM_LEGACY_FAILURE: legacy text remains supported'
+);
+assert.equal(legacyRuntimeError.diagnosticCode, 'E_WASM_LEGACY_FAILURE');
+assert.equal(legacyRuntimeError.resourceReport, null);
+
 const resolved = await withArtifactDeadline('resolved artifact', 50, async () => 7);
 assert.equal(resolved, 7);
 
@@ -116,4 +173,39 @@ const runtimeSource = await readFile(
 assert.match(
   runtimeSource,
   /function wrapRawModule\([\s\S]*assertClearraWasmAvailabilityExactnessExports\(raw\)/u
+);
+const outputTextReader = runtimeSource.indexOf('const outputText = () => {');
+const outputBytesReader = runtimeSource.indexOf('const outputBytes = () => {');
+const outputTextRelease = runtimeSource.indexOf(
+  'raw.clearra_wasm_output_release();',
+  outputTextReader
+);
+const outputBytesRelease = runtimeSource.indexOf(
+  'raw.clearra_wasm_output_release();',
+  outputBytesReader
+);
+assert.ok(
+  outputTextReader >= 0 &&
+    outputTextRelease > outputTextReader &&
+    outputTextRelease < outputBytesReader,
+  'text output is released immediately after the host copy'
+);
+assert.ok(
+  outputBytesReader >= 0 && outputBytesRelease > outputBytesReader,
+  'binary output is released immediately after the host copy'
+);
+assert.match(
+  runtimeSource.slice(outputTextReader, outputBytesReader),
+  /finally\s*\{\s*raw\.clearra_wasm_output_release\(\);\s*\}/u,
+  'text output releases even when exactness validation or UTF-8 decoding throws'
+);
+assert.match(
+  runtimeSource.slice(outputBytesReader, runtimeSource.indexOf('const lastPanic = () => {')),
+  /finally\s*\{\s*raw\.clearra_wasm_output_release\(\);\s*\}/u,
+  'binary output releases even when exactness validation or copying throws'
+);
+assert.match(
+  runtimeSource,
+  /if \(status === ABI_OUTPUT_NOT_RELEASED\) \{[\s\S]*?raw\.clearra_wasm_output_release\(\);[\s\S]*?E_WASM_OUTPUT_NOT_RELEASED/u,
+  'the host maps the allocation-free outstanding-owner status without decoding stale output'
 );

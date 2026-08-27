@@ -115,6 +115,121 @@ const windowsSetupNodeStep = section(
   "\n      - uses: actions/setup-node@v4",
   "\n      - name: Validate Windows exact source archive regression coverage",
 );
+const productAuthorityStep = section(
+  metadataJob,
+  "\n      - name: Require the product capability and alias parser authority",
+  "\n      - name: Validate remote annotated tag regression coverage",
+);
+const finalSourceEvidenceStep = section(
+  metadataJob,
+  "\n      - name: Validate final-source evidence contract regression coverage",
+  "\n      - name: Install JavaScript workspace for product authority",
+);
+const linuxPcTilingEnforcement = section(
+  packageScript,
+  '\n            if (Object.hasOwn(expected, "kind") && parsed?.kind !== expected.kind) {',
+  "\n            for (const [key, value] of Object.entries(expectedSummary)) {",
+);
+const windowsPcTilingEnforcement = section(
+  windowsJob,
+  "\n            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {",
+  "\n            foreach ($entry in $ExpectedSummary.GetEnumerator()) {",
+);
+const linuxPcTilingSmoke = section(
+  packageScript,
+  "\nrun_json_smoke pc-tiling",
+  "\nrun_json_smoke failed-queue",
+);
+const windowsPcTilingSmoke = section(
+  windowsJob,
+  "\n          Invoke-ClearraJsonSmoke -Name 'pc-tiling'",
+  "\n          Invoke-ClearraJsonSmoke -Name 'failed-queue'",
+);
+
+requireExactNormalizedText(
+  productAuthorityStep,
+  [
+    "",
+    "      - name: Require the product capability and alias parser authority",
+    "        run: |",
+    "          node --test tests/contracts/product_capability_registry.test.mjs",
+    "          node --test apps/clearra-discord-bot/test/capability-registry.test.mjs",
+    "          node --test scripts/tools/audit-upstream-drift.test.mjs",
+  ].join("\n"),
+  "product capability and alias parser authority step",
+);
+requireExactNormalizedText(
+  finalSourceEvidenceStep,
+  [
+    "",
+    "      - name: Validate final-source evidence contract regression coverage",
+    "        shell: bash",
+    "        run: node --test scripts/release/final-source-attempt-journal.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
+  ].join("\n"),
+  "final-source evidence contract regression step",
+);
+requireExactNormalizedText(
+  linuxPcTilingEnforcement,
+  [
+    "",
+    '            if (Object.hasOwn(expected, "kind") && parsed?.kind !== expected.kind) {',
+    "                throw new Error(",
+    "                    `Clearra CLI ${name} smoke expected kind=${JSON.stringify(expected.kind)}, ` +",
+    "                    `received ${JSON.stringify(parsed?.kind)}`",
+    "                );",
+    "            }",
+    '            if (Object.hasOwn(expected, "command_kind") &&',
+    "                parsed?.contract?.command?.kind !== expected.command_kind) {",
+    "                throw new Error(",
+    "                    `Clearra CLI ${name} smoke expected contract.command.kind=` +",
+    "                    `${JSON.stringify(expected.command_kind)}, received ` +",
+    "                    `${JSON.stringify(parsed?.contract?.command?.kind)}`",
+    "                );",
+    "            }",
+    '            if (Object.hasOwn(expected, "tiling_family_complete") &&',
+    "                parsed?.contract?.pc?.tiling?.family_complete !==",
+    "                    expected.tiling_family_complete) {",
+    "                throw new Error(",
+    "                    `Clearra CLI ${name} smoke expected contract.pc.tiling.family_complete=` +",
+    "                    `${JSON.stringify(expected.tiling_family_complete)}, received ` +",
+    "                    `${JSON.stringify(parsed?.contract?.pc?.tiling?.family_complete)}`",
+    "                );",
+    "            }",
+    '            if (Object.hasOwn(expected, "tiling_family_incomplete_reason") &&',
+    "                parsed?.contract?.pc?.tiling?.family_incomplete_reason !==",
+    "                    expected.tiling_family_incomplete_reason) {",
+    "                throw new Error(",
+    "                    `Clearra CLI ${name} smoke expected ` +",
+    "                    `contract.pc.tiling.family_incomplete_reason=` +",
+    "                    `${JSON.stringify(expected.tiling_family_incomplete_reason)}, received ` +",
+    "                    `${JSON.stringify(parsed?.contract?.pc?.tiling?.family_incomplete_reason)}`",
+    "                );",
+    "            }",
+  ].join("\n"),
+  "Linux typed pc.tiling enforcement body",
+);
+requireExactNormalizedText(
+  windowsPcTilingEnforcement,
+  [
+    "",
+    "            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {",
+    '              throw "Clearra CLI $Name smoke expected kind=$ExpectedKind, received $($parsed.kind)"',
+    "            }",
+    "            if ($ExpectedCommandKind -and",
+    "                $parsed.contract.command.kind -ne $ExpectedCommandKind) {",
+    '              throw "Clearra CLI $Name smoke expected contract.command.kind=$ExpectedCommandKind, received $($parsed.contract.command.kind)"',
+    "            }",
+    "            if ($null -ne $ExpectedTilingFamilyComplete -and",
+    "                $parsed.contract.pc.tiling.family_complete -ne $ExpectedTilingFamilyComplete) {",
+    '              throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_complete=$ExpectedTilingFamilyComplete, received $($parsed.contract.pc.tiling.family_complete)"',
+    "            }",
+    "            if ($ExpectedTilingFamilyIncompleteReason -and",
+    "                $parsed.contract.pc.tiling.family_incomplete_reason -ne $ExpectedTilingFamilyIncompleteReason) {",
+    '              throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_incomplete_reason=$ExpectedTilingFamilyIncompleteReason, received $($parsed.contract.pc.tiling.family_incomplete_reason)"',
+    "            }",
+  ].join("\n"),
+  "Windows typed pc.tiling enforcement body",
+);
 
 requireText(
   packageScript,
@@ -178,6 +293,17 @@ requireText(
   packageScript,
   '"resource_report":{"truncated":false,"truncation_reason":null,"probability_complete":false}',
   "Linux tiling non-calculation resource assertion",
+);
+requireExactNormalizedText(
+  linuxPcTilingSmoke,
+  [
+    "",
+    "run_json_smoke pc-tiling \\",
+    '    \'{"kind":"pc-tiling-family.v1","command_kind":"pc-tiling-family.v1","tiling_family_complete":true,"tiling_family_incomplete_reason":"none","summary":{"coverage_probability":"not-calculated","probability_calculated":false,"probability_complete":false,"supply_probability_complete":false,"resource_probability_complete":false},"resource_report":{"truncated":false,"truncation_reason":null,"probability_complete":false}}\' \\',
+    "    --format json pc tiling --lines 2 --queue IIOOO --no-hold \\",
+    "    --backend cpu --workers 1",
+  ].join("\n"),
+  "Linux canonical pc.tiling smoke",
 );
 const linuxTerminalSmoke = section(
   packageScript,
@@ -288,6 +414,21 @@ requireText(
   windowsJob,
   "-ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }",
   "Windows tiling non-calculation resource assertion",
+);
+requireExactNormalizedText(
+  windowsPcTilingSmoke,
+  [
+    "",
+    "          Invoke-ClearraJsonSmoke -Name 'pc-tiling' `",
+    "            -CommandArguments @('--format', 'json', 'pc', 'tiling', '--lines', '2', '--queue', 'IIOOO', '--no-hold', '--backend', 'cpu', '--workers', '1') `",
+    "            -ExpectedKind 'pc-tiling-family.v1' `",
+    "            -ExpectedCommandKind 'pc-tiling-family.v1' `",
+    "            -ExpectedTilingFamilyComplete $true `",
+    "            -ExpectedTilingFamilyIncompleteReason 'none' `",
+    "            -ExpectedSummary @{ coverage_probability = 'not-calculated'; probability_calculated = $false; probability_complete = $false; supply_probability_complete = $false; resource_probability_complete = $false } `",
+    "            -ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }",
+  ].join("\n"),
+  "Windows canonical pc.tiling smoke",
 );
 const windowsTerminalSmoke = section(
   windowsJob,

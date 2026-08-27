@@ -198,6 +198,11 @@ mod search_output_policy {
         #[default]
         Summary,
         Trace,
+        /// Dedicated geometry-family projection for the canonical `pc.tiling`
+        /// product contract. It retains the complete normalized solution set
+        /// while excluding representative BuildUp traces and candidate-digest
+        /// evidence that do not belong to the geometry-only result.
+        TilingOnly,
         CoverageRows,
         CoverageSummary,
     }
@@ -207,6 +212,7 @@ mod search_output_policy {
             match self {
                 Self::Summary => "summary",
                 Self::Trace => "trace",
+                Self::TilingOnly => "tiling-only",
                 Self::CoverageRows => "coverage-rows",
                 Self::CoverageSummary => "coverage-summary",
             }
@@ -217,11 +223,62 @@ mod search_output_policy {
         }
 
         pub const fn retains_representative_trace(self) -> bool {
-            !matches!(self, Self::CoverageSummary)
+            !matches!(self, Self::TilingOnly | Self::CoverageSummary)
         }
 
         pub const fn retains_candidate_digest(self) -> bool {
-            !matches!(self, Self::CoverageSummary)
+            !matches!(self, Self::TilingOnly | Self::CoverageSummary)
+        }
+    }
+}
+mod pc_chance_evidence_policy {
+    /// Closed, non-wire policy for retaining product-private PC chance evidence.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum PcChanceEvidencePolicy {
+        #[default]
+        Disabled,
+        PcProbabilityV2,
+        PcMinimumCoverV2,
+        /// Purpose-separated private evidence for the typed
+        /// `pc.score-minimals` producer. This is not interchangeable with
+        /// either the score-only or minimum-cover-only product contract.
+        PcScorePortfolioV2,
+        /// Purpose-separated private execution evidence for `pc.saves` and
+        /// `pc.best-save`. The product consumes terminal hold/cursor states,
+        /// so ordinary Trace output is not sufficient authority.
+        PcSaveGroupsV2,
+        /// Purpose-separated private replay evidence for `pc.path`. The
+        /// product consumes the complete legal replay family without enabling
+        /// scoring or treating attack as an ordering coordinate.
+        PcPathV2,
+    }
+
+    impl PcChanceEvidencePolicy {
+        pub const fn retains_pc_probability_v2_evidence(self) -> bool {
+            matches!(self, Self::PcProbabilityV2)
+        }
+
+        pub const fn retains_pc_coverage_evidence(self) -> bool {
+            matches!(
+                self,
+                Self::PcProbabilityV2 | Self::PcMinimumCoverV2 | Self::PcScorePortfolioV2
+            )
+        }
+
+        pub const fn retains_pc_minimum_cover_v2_evidence(self) -> bool {
+            matches!(self, Self::PcMinimumCoverV2 | Self::PcScorePortfolioV2)
+        }
+
+        pub const fn retains_pc_score_portfolio_v2_evidence(self) -> bool {
+            matches!(self, Self::PcScorePortfolioV2)
+        }
+
+        pub const fn retains_pc_save_groups_v2_evidence(self) -> bool {
+            matches!(self, Self::PcSaveGroupsV2)
+        }
+
+        pub const fn retains_pc_path_v2_evidence(self) -> bool {
+            matches!(self, Self::PcPathV2)
         }
     }
 }
@@ -339,6 +396,28 @@ mod search_problem_id {
         pub fn as_str(&self) -> &str {
             &self.value
         }
+
+        /// Returns only the heap payload retained by the identifier string,
+        /// measured by `String` allocation capacity. The inline identifier is
+        /// excluded.
+        pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+            Some(self.value.capacity() as u128)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SearchProblemId;
+
+        #[test]
+        fn retained_capacity_counts_identifier_allocation_capacity() {
+            let mut value = String::with_capacity(256);
+            value.push_str("opening-pc");
+            let expected = value.capacity() as u128;
+            let id = SearchProblemId::new(value);
+
+            assert_eq!(id.checked_retained_capacity_bytes(), Some(expected));
+        }
     }
 }
 mod search_problem_kind {
@@ -438,6 +517,23 @@ mod supply_provenance {
         pub fn queue(&self) -> &PcQueueInput {
             &self.queue
         }
+
+        /// Returns only heap payload retained by the queue provenance when it
+        /// is accepted by the typed `pc.score` contract.
+        ///
+        /// Queue buffers are measured by allocation capacity. The inline
+        /// `SupplyProvenance` and `PcQueueInput` owners are excluded. Queue
+        /// kinds outside the score contract return `None`.
+        pub fn checked_pc_score_retained_capacity_bytes(&self) -> Option<u128> {
+            self.queue.checked_pc_score_retained_capacity_bytes()
+        }
+
+        /// Returns heap payload retained by the BuildProbability supply queue.
+        /// The inline provenance and queue owners are excluded.
+        pub fn checked_build_probability_retained_capacity_bytes(&self) -> Option<u128> {
+            self.queue
+                .checked_build_probability_retained_capacity_bytes()
+        }
     }
     impl SupplyProvenance {
         pub fn queue_mode(&self) -> &'static str {
@@ -529,6 +625,7 @@ pub use continuation_policy::ContinuationPolicy;
 pub use count_policy::CountPolicy;
 pub use exact_target_policy::ExactTargetPolicy;
 pub use kick_profile::KickProfile;
+pub use pc_chance_evidence_policy::PcChanceEvidencePolicy;
 pub use resource_budget::ResourceBudget;
 pub use rule_profile_selection::RuleProfileSelection;
 pub use search_output_policy::SearchOutputPolicy;

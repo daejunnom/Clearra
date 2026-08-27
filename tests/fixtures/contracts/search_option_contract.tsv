@@ -1,71 +1,113 @@
-# Clearra search option contract v1.
-# family<TAB>option<TAB>kind<TAB>valid representatives<TAB>invalid representatives<TAB>web default<TAB>native default<TAB>Discord surface<TAB>constraints
-pc	lines	integer	2|4|6	0|1|7	4	2	named	opening-even;scenario-1-through-6
-pc	source	enum	fixed|pattern|empty	both	-	-	named	omitted-normalizes-to-standard-bag
-pc	hold	boolean	off|on	-	on	on	packed:hold	-
-pc	queue-knowledge	enum	oracle|visible-7	full-queue	oracle	oracle	sfinder-baked	visible-7-forces-serial
-pc	score-mode	enum	off|minimum-cover|summary|failed-queue|tiling	-	off	all	sfinder-baked	mode-normalizes-incompatible-options
-pc	rule	enum	srs-plus|srs|srs-x|jstris-180	-	srs-plus	srs-plus	named	unavailable-with-tiling;sfinder-four-rule-surface
-pc	spin-profile	enum	t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled	t-spins	t-spins	hidden	requires-summary-or-preserve-b2b
-pc	preserve-b2b	boolean	off|on	-	off	off	hidden	unavailable-with-tiling
-pc	initial-b2b	integer	0|1|65535	65536	0	0	sfinder-baked	summary-only
-pc	solution-probabilities	boolean	off|on	-	off	off	sfinder-baked	unavailable-with-tiling-or-failed-queue
-pc	backend	enum	auto|cpu|gpu|hybrid	-	auto	auto	host	-
-pc	fallback	enum	default|allow|deny	allow+deny	allow	default	host	order-independent
-pc	workers	integer	1|2|64	0	adaptive	auto	host	fixed-auto-exclusive
-pc	tablebase	boolean	off|on	-	off	off	host	unavailable-with-tiling
-pc	dependency-dag	boolean	off|on	-	off	off	host	unavailable-with-tiling
-pc	gpu-device	enum	auto|0|15	-1	auto	auto	host	cpu-normalizes-to-auto
-setup	mode	enum	oracle|qb	-	oracle	oracle	packed:mode	qb-requires-qb-source
-setup	remaining	inventory	I|IOT|IOTS|IOTSZJL	invalid	IOTSZJL	IOTSZJL	named	setup-residue-contract
-setup	qb	inventory	I|OS|IOTS	invalid	-	-	packed:qb	qb-mode-only
-setup	queue-knowledge	enum	full-queue|oracle|visible-7	invalid	oracle	oracle	named	public-full-queue-normalizes-to-oracle
-setup	next-cycle-remaining	inventory	I|IOTS|IOTSZJL	invalid	-	-	named	count-derived-from-remaining
-setup	post-cycle-borrow	boolean	off|on	-	off	off	packed:post-cycle-borrow	cycle-seven-only
-setup	priority	enum	all|build|pc	-	all	all	named	-
-setup	length	enum	auto|longer|shorter	-	auto	auto	named	-
-setup	max-setup-pieces	integer	1|9|10	0|11	9	9	named	-
-setup	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	-	srs-plus	srs-plus	named-native	-
-setup	tablebase	boolean	off|on	-	off	off	host	-
-setup	workers	integer	1|2|64	0	adaptive	auto	host	fixed-auto-exclusive
-build	height	integer	1|8|24	0|25	8	-	hidden	-
-build	source	enum	fixed|pattern|empty	both	-	-	named	omitted-normalizes-to-standard-bag
-build	hold	boolean	off|on	-	on	on	packed:hold	-
-build	aggregation	enum	buildability|spin|tiling	-	buildability	buildability	sfinder-baked	tiling-not-exposed-as-discord-option
-build	rule	enum	srs-plus|srs|srs-x|jstris-180	-	srs-plus	srs-plus	named	unavailable-with-tiling;sfinder-four-rule-surface
-build	spin-profile	enum	t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled	t-spins	t-spins	hidden	requires-spin-or-preserve-b2b
-build	preserve-b2b	boolean	off|on	-	off	off	hidden	unavailable-with-tiling
-build	dependency-dag	boolean	off|on	-	off	off	host	unavailable-with-tiling
-build	finesse	enum	off|inputs	invalid	off	off	hidden	unavailable-with-tiling
-build	pattern-knowledge	enum	both|oracle|visible-7	full-queue	both	both	hidden	finesse-only
-build	mirror	boolean	off|on	-	auto	on	sfinder-baked	-
-build	backend	enum	auto|cpu|gpu|hybrid	-	cpu	cpu	host	-
-build	fallback	enum	default|allow|deny	allow+deny	deny	default	host	order-independent
-build	workers	integer	1|2|64	0	adaptive	auto	host	fixed-auto-exclusive
-damage	height	integer	1|8|24	0|25	8	8	hidden	-
-damage	source	enum	fixed	pattern|empty	-	-	named	exact-queue-only
-damage	hold	boolean	off|on	-	on	on	packed:hold	-
-damage	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	-	srs-plus	srs-plus	named-native	-
-damage	spin-profile	enum	disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	invalid	all-mini-plus	t-spins	packed:spin-profile	-
-damage	damage-mode	enum	maximum|at-least	-	maximum	maximum	packed:minimum-damage	at-least-requires-minimum-damage
-damage	minimum-damage	integer	0|1|4294967295	4294967296	0	-	packed:minimum-damage	damage-mode-at-least-only
-damage	initial-combo	integer	0|1|65535	65536	0	0	packed:initial-combo	zero-means-unset
-damage	initial-b2b	integer	0|1|65535	65536	0	0	packed:initial-b2b	-
-damage	preserve-b2b	boolean	off|on	-	off	off	packed:preserve-b2b	-
-damage	workers	integer	1|2|64	0	adaptive	auto	host	-
-spin-finder	height	integer	1|8|24	0|25	8	8	hidden	-
-spin-finder	source	enum	fixed|pattern	both|empty	-	-	named	exactly-one
-spin-finder	hold	boolean	off|on	-	on	on	sfinder-baked	-
-spin-finder	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	-	srs-plus	srs-plus	sfinder-baked	-
-spin-finder	spin-profile	enum	t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled|invalid	t-spins	t-spins	sfinder-baked	-
-spin-finder	lines	enum	any|0|1|2|3|4|1+|2+|3+|4+	5|0+	any	any	sfinder-baked	-
-spin-finder	category	enum	any|t|other	invalid	any	any	sfinder-baked	profile-dependent
-spin-finder	initial-combo	integer	0|1|65535	65536	0	0	hidden	-
-spin-finder	initial-b2b	integer	0|1|65535	65536	0	0	hidden	-
-spin-finder	preserve-b2b	boolean	off|on	-	off	off	hidden	-
-spin-finder	workers	integer	1|2|64	0	adaptive	auto	host	-
-spin-finder	inventory	inventory	I|IOT|IOTSZJL	invalid	-	-	named-native	spin-structure-only
-spin-finder	fill-bottom	integer	0|1|23	24	0	0	packed:fill-bottom	spin-structure-only-and-below-fill-top
-spin-finder	fill-top	integer	1|5|24	0|25	5	5	packed:fill-top	spin-structure-only-and-above-fill-bottom
-spin-finder	max-placements	integer	1|4|7	0|8	-	-	packed:max-placements	spin-structure-only-and-no-more-than-inventory
-spin-finder	minimality	enum	subset-minimal|minimum-piece-count	invalid	subset-minimal	subset-minimal	packed:minimality	spin-structure-only
+# Clearra search option contract v2.
+# family<TAB>option<TAB>kind<TAB>valid representatives<TAB>invalid representatives<TAB>Discord default<TAB>native default<TAB>disposition<TAB>Discord path<TAB>exposure<TAB>lowering<TAB>reason<TAB>dependencies
+pc	lines	integer	1|4|6	0|7	auto	2	named	/pc path	lines	--lines	direct-typed-slash-option	omitted=serial-feasible-targets
+pc	source	enum	fixed|pattern|empty	both	standard-bag	standard-bag	named	/pc path	next	--queue|--patterns	one-discriminated-source-field	exactly-one-source
+pc	hold	enum	disabled|empty|I	invalid	empty	empty	named	/pc path	hold	--hold|--no-hold	direct-initial-hold-state	none
+pc	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/pc path	kicktable	--rule	direct-built-in-profile	unavailable-with-objective=tiling
+pc	queue-knowledge	enum	oracle|visible-7	full-queue	oracle	oracle	named	/pc path	queue-knowledge	--queue-knowledge	direct-observation-policy	visible-7-incompatible-with-objective=minimum-cover-or-tiling
+pc	objective	enum	all|unique|minimum-cover|tiling	invalid	all	all	preset	/pc path|/pc chance|/pc minimals|/pc tiling	subcommand	--objective|--tiling-only	canonical-subcommand-preset	each-canonical-subcommand-pins-one-objective;generic-objective-flags-remain-untyped;native-default-equals-pc-path=all
+pc	failed-queue	boolean	off|on	invalid	off	off	preset	/pc failed-queue	subcommand	failed-queue	typed-native-subcommand	objective-score-probability-and-tiling-options-unavailable
+pc	failed-count	integer	1|17|4294967295	0	all	all	named	/pc failed-queue	failed-count	--failed-count	direct-result-bound	failed-queue-only
+pc	score-mode	enum	score-only-summary|score-only-minimum-cover	invalid	score-only-summary	score-only-summary	preset	/pc score|/pc score-minimals	subcommand	score|score-minimals	subcommand-selects-a-closed-typed-score-product	attack-is-informational-only-and-score-minimals-fixes-minimum-cover-internally
+pc	score-profile	enum	tetrio|guideline|jstris-ultra	invalid	tetrio	tetrio	named	/pc score	score-profile	--score-profile	direct-scoring-profile	legacy-/score-is-pinned-to-jstris-ultra
+pc	spin-profile	enum	t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled	t-spins	t-spins	named	/pc path	spin-profile	--spin-profile	direct-spin-recognition-profile	requires-score-or-preserve-b2b;unavailable-with-tiling
+pc	preserve-b2b	boolean	off|on	invalid	off	off	named	/pc path	preserve-b2b	--preserve-b2b	direct-typed-witness-objective	unavailable-with-tiling
+pc	initial-b2b	integer	0|1|65535	65536	0	0	named	/pc score	initial-b2b	--initial-b2b	direct-scoring-state	score-only
+pc	solution-probabilities	boolean	off|on	invalid	off	off	named	/pc path	solution-probabilities	--solution-probabilities	direct-per-solution-projection	unavailable-with-tiling-or-failed-queue
+pc	best-save-projection	enum	best-witness	aggregate	-	-	excluded	-	-	none	translator-currently-reuses-saves-and-cannot-prove-best-witness	requires-distinct-result-projection
+pc	backend	enum	auto|cpu|gpu|hybrid	invalid	auto	auto	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
+pc	fallback	enum	default|allow|deny	allow+deny	default	default	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
+pc	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+pc	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+pc	tablebase	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+pc	dependency-dag	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+pc	gpu-device	enum	auto|0|15	-1	auto	auto	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
+build	height	integer	1|8|24	0|25	8	required	named	/build cover	height	--height	direct-typed-slash-option	must-include-base-and-target
+build	source	enum	fixed|pattern|empty	both	standard-bag	standard-bag	named	/build cover	next	--queue|--patterns	one-discriminated-source-field	exactly-one-source
+build	hold	enum	disabled|empty|I	invalid	empty	empty	named	/build cover	hold	--hold|--no-hold	direct-initial-hold-state	none
+build	source-pieces	integer	1|17|4294967295	0|4294967296	auto	auto	named	/build cover	source-pieces	--source-pieces	direct-supply-window	omitted=target-piece-count+hold-enabled-occupied-initial-hold
+build	aggregation	enum	buildability|spin|tiling	invalid	buildability	buildability	named	/build cover	aggregation	--aggregate|--tiling-only	direct-result-projection	tiling-excludes-rule-spin-preserve-finesse
+build	solution-probabilities	boolean	off|on	invalid	off	off	named	/build cover	solution-probabilities	--solution-probabilities	direct-per-solution-projection	unavailable-with-tiling
+build	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/build cover	kicktable	--rule	direct-built-in-profile	unavailable-with-tiling
+build	spin-profile	enum	t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled	t-spins	t-spins	named	/build cover	spin-profile	--spin-profile	direct-spin-recognition-profile	requires-aggregation=spin-or-preserve-b2b=on
+build	preserve-b2b	boolean	off|on	invalid	off	off	named	/build cover	preserve-b2b	--preserve-b2b	direct-objective-filter	unavailable-with-tiling
+build	finesse	enum	off|inputs	invalid	off	off	named	/build cover	finesse	--finesse	direct-finesse-projection	unavailable-with-tiling
+build	pattern-knowledge	enum	both|oracle|visible-7	full-queue	both	both	named	/build cover	finesse-knowledge	--pattern-knowledge	direct-finesse-knowledge	requires-finesse=inputs
+build	mirror	enum	auto|include|exclude	invalid	auto	include	named	/build cover	mirror	--include-mirror|--no-mirror	auto-derives-from-base-symmetry	none
+build	legacy-cover-preset	enum	direct-build	sfinder-supplied-solution	direct-build	-	preset	/cover	subcommand	--no-mirror	historical-clearra-base-target-cover-directly-lowers-to-build	height-derived-from-fields;hold-use-maps-to-empty
+build	backend	enum	auto|cpu|gpu|hybrid	invalid	cpu	cpu	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
+build	fallback	enum	default|allow|deny	allow+deny	deny	default	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
+build	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+build	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+build	dependency-dag	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+setup	mode	enum	oracle|qb	invalid	oracle	oracle	named	/setup joint	mode	--mode	direct-supply-mode	qb-requires-qb
+setup	remaining	inventory	I|IOT|IOTSZJL	invalid	IOTSZJL	IOTSZJL	named	/setup joint	remaining	--remaining	direct-unordered-inventory	one-duplicate-kind-at-most
+setup	qb	inventory	I|OS|IOTS	invalid	-	-	named	/setup joint	qb	--qb	direct-observed-bag-group	mode=qb-only;remaining+qb<=7
+setup	queue-knowledge	enum	full-queue|visible-7	invalid	full-queue	oracle	named	/setup joint	queue-knowledge	--queue-knowledge	full-queue-normalizes-to-oracle	none
+setup	next-cycle-remaining	inventory	I|IOTS|IOTSZJL	invalid	-	-	named	/setup joint	next-cycle-remaining	--next-cycle-remaining	direct-next-cycle-residue	count-derived-from-remaining
+setup	post-cycle-borrow	boolean	off|on	invalid	off	off	named	/setup joint	post-cycle-borrow	--allow-post-cycle-borrow	direct-borrow-policy	remaining-count=3-only
+setup	priority	enum	all|build|pc	invalid	route	all	preset	/setup joint|/setup build|/setup pc	subcommand	--priority	subcommand-selects-ranking-policy	none
+setup	length	enum	auto|longer|shorter	invalid	auto	auto	named	/setup joint	setup-length	--setup-length	direct-setup-length-policy	none
+setup	max-setup-pieces	integer	1|9|10	0|11	9	9	named	/setup joint	max-setup-pieces	--max-setup-pieces	direct-typed-slash-option	none
+setup	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/setup joint	kicktable	--rule	direct-built-in-profile	none
+setup	tablebase	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+setup	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+setup	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+forward-damage	height	integer	1|8|24	0|25	8	8	named	/forward damage	height	--height	direct-typed-slash-option	must-include-field
+forward-damage	source	enum	fixed	pattern|empty	-	-	named	/forward damage	next	--queue	exact-queue-only	exactly-one-source
+forward-damage	hold	boolean	off|on	invalid	on	on	named	/forward damage	hold	--hold|--no-hold	direct-hold-policy	none
+forward-damage	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/forward damage	kicktable	--rule	direct-built-in-profile	none
+forward-damage	spin-profile	enum	disabled|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	invalid	all-mini-plus	all-mini-plus	named	/forward damage	spin-profile	--spin-profile	gui-native-and-discord-default-aligned	none
+forward-damage	damage-mode	enum	maximum|at-least	invalid	maximum	maximum	named	/forward damage	damage-mode	--minimum-damage	typed-result-mode	at-least-requires-minimum-damage
+forward-damage	minimum-damage	integer	0|1|4294967295	4294967296	-	-	named	/forward damage	minimum-damage	--minimum-damage	direct-threshold	damage-mode=at-least-only
+forward-damage	initial-combo	integer	0|1|65535	65536	0	0	named	/forward damage	initial-combo	--initial-combo	direct-scoring-state	zero-omitted
+forward-damage	initial-b2b	integer	0|1|65535	65536	0	0	named	/forward damage	initial-b2b	--initial-b2b	direct-scoring-state	none
+forward-damage	preserve-b2b	boolean	off|on	invalid	off	off	named	/forward damage	preserve-b2b	--preserve-b2b	direct-objective-filter	none
+forward-damage	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+forward-damage	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+forward-spin	height	integer	1|8|24	0|25	8	8	named	/forward spin	height	--height	direct-typed-slash-option	must-include-field
+forward-spin	source	enum	fixed|pattern	both|empty	standard-bag	standard-bag	named	/forward spin	next	--queue|--patterns	one-discriminated-source-field	exactly-one-source
+forward-spin	hold	boolean	off|on	invalid	on	on	named	/forward spin	hold	--hold|--no-hold	direct-hold-policy	none
+forward-spin	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/forward spin	kicktable	--rule	direct-built-in-profile	none
+forward-spin	spin-profile	enum	t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled	t-spins	t-spins	named	/forward spin	spin-profile	--spin-profile	direct-spin-recognition-profile	none
+forward-spin	lines	enum	any|0|1|2|3|4|1+|2+|3+|4+	5|0+	any	any	named	/forward spin	lines	--lines	direct-terminal-line-filter	none
+forward-spin	category	enum	any|t|other	invalid	any	any	named	/forward spin	spin-category	--spin-category	direct-terminal-piece-filter	other-requires-all-spin(+)-or-all-mini(+)
+forward-spin	initial-combo	integer	0|1|65535	65536	0	0	named	/forward spin	initial-combo	--initial-combo	direct-scoring-state	zero-omitted
+forward-spin	initial-b2b	integer	0|1|65535	65536	0	0	named	/forward spin	initial-b2b	--initial-b2b	direct-scoring-state	none
+forward-spin	preserve-b2b	boolean	off|on	invalid	off	off	named	/forward spin	preserve-b2b	--preserve-b2b	direct-objective-filter	none
+forward-spin	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+forward-spin	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+spin-structure	inventory	inventory	I|IOT|IOTSZJL	invalid	-	-	named	/spin-structure	pieces	--pieces	direct-unordered-inventory	multiplicity-preserved
+spin-structure	height	integer	1|8|24	0|25	8	8	named	/spin-structure	height	--height	direct-typed-slash-option	must-include-field
+spin-structure	lines	enum	any|0|1|2|3|4|1+|2+|3+|4+	5|0+	1+	1+	named	/spin-structure	lines	--lines	direct-terminal-line-filter	none
+spin-structure	spin-profile	enum	t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus	disabled	t-spins	t-spins	named	/spin-structure	spin-profile	--spin-profile	direct-spin-recognition-profile	regular-and-mini-results-remain-separate
+spin-structure	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/spin-structure	kicktable	--rule	direct-built-in-profile	none
+spin-structure	fill-bottom	integer	0|1|23	24	0	0	named	/spin-structure	fill-bottom	--fill-bottom	direct-region-bound	fill-bottom<fill-top
+spin-structure	fill-top	integer	1|5|24	0|25	5	5	named	/spin-structure	fill-top	--fill-top	direct-region-bound	fill-bottom<fill-top
+spin-structure	max-placements	integer	1|4|7	0|8	-	-	named	/spin-structure	max-placements	--max-placements	direct-search-bound	max-placements<=inventory-count
+spin-structure	minimality	enum	subset-minimal|minimum-piece-count	invalid	subset-minimal	subset-minimal	named	/spin-structure	minimality	--minimality	direct-result-minimization-policy	none
+spin-structure	hold	boolean	off	on	off	off	excluded	-	semantic-exclusion	none	unordered-structure-contract-never-uses-hold	would-change-problem-family
+spin-structure	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+spin-structure	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+finesse-score	document	document	ctk3|fumen	grid	-	-	named	/build finesse-score	document	--initial-mask|--placements	typed-placement-document	every-page-requires-one-operation
+finesse-score	source	enum	fixed|pattern|empty	both	standard-bag	standard-bag	named	/build finesse-score	next	--queue|--patterns	one-discriminated-source-field	exactly-one-source
+finesse-score	hold	enum	disabled|empty|I	invalid	empty	empty	named	/build finesse-score	hold	--hold|--no-hold	direct-initial-hold-state	none
+finesse-score	knowledge	enum	both|oracle|visible-7	full-queue	both	both	named	/build finesse-score	knowledge	--pattern-knowledge	direct-finesse-knowledge	none
+finesse-score	source-pieces	integer	1|7|128	0|129	-	-	named	/build finesse-score	source-pieces	--source-pieces	direct-materialization-bound	none
+finesse-score	rule	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/build finesse-score	kicktable	--rule	direct-built-in-profile	none
+finesse-score	height	integer	1|8|24	0|25	document	document	preset	/build finesse-score	document	--height	derived-from-initial-document	not-user-settable
+finesse-score	placements	sequence	T:spawn:3:0	missing	document	document	preset	/build finesse-score	document	--placements	derived-from-document-operations	one-operation-per-page
+finesse-score	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+finesse-score	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
+sequence-dependencies	document	document	ctk3|fumen	grid	-	-	named	/utility sequence-dependencies	document|attachment	--document	typed-operation-document	every-page-requires-one-concrete-operation
+sequence-dependencies	rule-profile	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/utility sequence-dependencies	rule-profile	--rule-profile	direct-built-in-profile	none
+sequence-dependencies	kick-profile	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/utility sequence-dependencies	kick-profile	--kick-profile	direct-built-in-profile	none
+sequence-dependencies	timeout-seconds	integer	1|300|900	0|901	900	900	named	/utility sequence-dependencies	timeout-seconds	--timeout-seconds	direct-bounded-timeout	1..900
+sequence-dependencies	queue	sequence	absent	I	-	-	excluded	-	semantic-exclusion	none	operation-document-is-sole-authority	would-infer-or-change-operation-multiset
+sequence-dependencies	hold	boolean	absent	off|on	-	-	excluded	-	semantic-exclusion	none	operation-document-is-sole-authority	would-infer-or-change-operation-order-language
+sequence	document	document	ctk3|fumen	grid	-	-	named	/utility sequence	document|attachment	--document	typed-operation-document	every-page-requires-one-concrete-operation
+sequence	rule-profile	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/utility sequence	rule-profile	--rule-profile	direct-built-in-profile	none
+sequence	kick-profile	enum	srs-plus|srs|srs-x|jstris-180|no-kick	custom	srs-plus	srs-plus	named	/utility sequence	kick-profile	--kick-profile	direct-built-in-profile	none
+sequence	timeout-seconds	integer	1|300|900	0|901	900	900	named	/utility sequence	timeout-seconds	--timeout-seconds	direct-bounded-timeout	1..900
+sequence	queue	sequence	absent	I	-	-	excluded	-	semantic-exclusion	none	operation-document-is-sole-authority	would-infer-or-change-operation-trace
+sequence	hold	boolean	absent	off|on	-	-	excluded	-	semantic-exclusion	none	operation-document-is-sole-authority	would-infer-or-change-operation-trace

@@ -41,47 +41,43 @@ const PC_COMMANDS = [
   "path",
   "percent",
   "chance",
-  "minimals",
   "score",
-  "score-minimals",
-  "saves",
-  "best-save",
 ];
-const COLORED_COMMANDS = [
-  "setup",
-  "congruent",
-  "congruent-cover",
-  "setup-cover",
-  "cover-percent",
-  "special-cover",
-];
+const SCORED_PC_COMMANDS = ["score-minimals"];
+const TYPED_PC_COMMANDS = ["minimals"];
+const COLORED_COMMANDS = [];
 const SPIN_COMMANDS = ["spin-cover", "spin"];
 const REMAINING_COMMANDS = ["pc-setup", "best-setup", "dpc-finder"];
 
-test("every ungrouped bare search command opens a v4 search Modal while help stays direct", () => {
-  for (const command of slashCommandCatalog.filter(({ kind, input }) => kind === "search" && input !== "finesse")) {
-    const response = buildMissingBoardModalResponse(slashInteraction(command.name));
-    assert.equal(response?.type, 9, `/${command.name} must open a Modal`);
-    assert.equal(response.data.custom_id, `clearra:search:v4:${command.name}`);
+test("every modal-backed search route opens its capability-specific v4 Modal while help stays direct", () => {
+  for (const route of searchRoutes()) {
+    const response = buildMissingBoardModalResponse(routeInteraction(route));
+    assert.equal(response?.type, 9, `/${route.path} must open a Modal`);
+    assert.equal(response.data.custom_id, `clearra:search:v4:${route.modalKey}`);
     assert.ok(
       response.data.components.length <= 5,
-      `/${command.name} exceeded Discord's five-component Modal limit`,
+      `/${route.path} exceeded Discord's five-component Modal limit`,
     );
     assert.equal(
-      findFieldModalCommand(modalInteraction(response.data.custom_id, []))?.name,
-      command.name,
+      componentNames(response).includes("objective"),
+      false,
+      `/${route.path} exposed the advanced text-only objective in a Modal`,
+    );
+    assert.equal(
+      findFieldModalCommand(modalInteraction(response.data.custom_id, []))?.capabilityId,
+      route.command.capabilityId,
     );
   }
 
-  for (const subcommand of ["search", "score"]) {
-    const response = buildMissingBoardModalResponse(
-      slashInteraction("finesse", [{ type: 1, name: subcommand, options: [] }]),
+  for (const command of Object.values(findSlashCommand("build").subcommands)) {
+    if (!command.input?.startsWith("build-v2-")) continue;
+    assert.equal(
+      buildMissingBoardModalResponse(
+        slashInteraction("build", [{ type: 1, name: command.subcommand, options: [] }]),
+      ),
+      null,
+      `/build ${command.subcommand} must remain direct-only`,
     );
-    assert.equal(response?.type, 9);
-    assert.equal(response.data.custom_id, `clearra:search:v4:finesse~${subcommand}`);
-    const command = findFieldModalCommand(modalInteraction(response.data.custom_id, []));
-    assert.equal(command?.name, "finesse");
-    assert.equal(command?.subcommand, subcommand);
   }
 
   assert.equal(buildMissingBoardModalResponse(slashInteraction("help")), null);
@@ -94,6 +90,35 @@ test("render-file stays direct and removed render Modal routes stay inactive", (
     findFieldModalCommand(modalInteraction("clearra:search:v3:render", [])),
     null,
   );
+});
+
+test("forward REN uses the bounded exact-queue guided form", () => {
+  const response = buildMissingBoardModalResponse(
+    slashInteraction("forward", [{ type: 1, name: "ren", options: [] }]),
+    "en",
+  );
+  assert.equal(response?.type, 9);
+  assert.equal(response.data.custom_id, "clearra:search:v4:forward~ren");
+  assert.deepEqual(componentNames(response), ["field", "next", "height", "hold", "kicktable"]);
+  const command = findFieldModalCommand(modalInteraction(response.data.custom_id, []));
+  assert.equal(command?.capabilityId, "forward.ren");
+});
+
+test("pc score Modal discloses approximation accuracy in both locales", () => {
+  const interaction = slashInteraction("pc", [{
+    type: 1,
+    name: "score",
+    options: [],
+  }]);
+  const english = buildMissingBoardModalResponse(interaction, "en");
+  const korean = buildMissingBoardModalResponse(interaction, "ko");
+  assert.match(label(english, "score-profile").label, /basic approximation/i);
+  assert.match(
+    label(english, "score-profile").description,
+    /profile-specific exactness is false/i,
+  );
+  assert.match(label(korean, "score-profile").label, /기초 근삿/u);
+  assert.match(label(korean, "score-profile").description, /profile-specific exact.*false/iu);
 });
 
 test("finesse subcommands use bounded localized guided forms", () => {
@@ -144,10 +169,10 @@ test("finesse subcommands use bounded localized guided forms", () => {
 });
 
 test("missing inputs and rich-text multi-line boards open the Modal", () => {
-  for (const command of slashCommandCatalog.filter(({ kind, input }) => kind === "search" && input !== "finesse")) {
-    const complete = completeOptions(command.input);
+  for (const route of searchRoutes()) {
+    const complete = completeOptions(route.command.input);
     const response = buildMissingBoardModalResponse(
-      slashInteraction(command.name, complete),
+      routeInteraction(route, complete),
     );
     const hasMultilineBoard = complete.some(({ name, value }) =>
       ["field", "base", "target"].includes(name) && String(value).includes("\n")
@@ -155,24 +180,117 @@ test("missing inputs and rich-text multi-line boards open the Modal", () => {
     assert.equal(
       response?.type ?? null,
       hasMultilineBoard ? 9 : null,
-      `/${command.name} used the wrong direct-input boundary`,
+      `/${route.path} used the wrong direct-input boundary`,
     );
 
     const missing = complete.slice(1);
     assert.equal(
-      buildMissingBoardModalResponse(slashInteraction(command.name, missing))?.type,
+      buildMissingBoardModalResponse(routeInteraction(route, missing))?.type,
       9,
-      `/${command.name} with a missing runtime input must open a Modal`,
+      `/${route.path} with a missing runtime input must open a Modal`,
     );
   }
 
   assert.equal(
-    buildMissingBoardModalResponse(slashInteraction("spin-structure", [
-      { name: "pieces", value: "IOTS" },
-      { name: "field", value: "grid:__________ / ####______".replaceAll(" ", "") },
-    ])),
+    buildMissingBoardModalResponse(slashInteraction("spin-structure", [{
+      type: 1,
+      name: "search",
+      options: [
+        { name: "pieces", value: "IOTS" },
+        { name: "field", value: "grid:__________ / ####______".replaceAll(" ", "") },
+      ],
+    }])),
     null,
     "compact single-line grids must remain direct slash options",
+  );
+});
+
+test("All-Spin exact and pattern Modals keep five typed fields and fail closed on lost prefill", () => {
+  const exact = modalForSubcommand("pc", "allspin-sol");
+  const chance = modalForSubcommand("pc", "allspin-pres-chance");
+  for (const modal of [exact, chance]) {
+    assert.deepEqual(componentNames(modal), [
+      "field", "next", "lines", "spin-profile", "kicktable",
+    ]);
+    assert.equal(componentNames(modal).includes("locale"), false);
+    assertStringSelect(
+      component(modal, "spin-profile"),
+      [
+        "t-spins", "t-spins-plus", "all-spin", "all-spin-plus",
+        "all-mini", "all-mini-plus",
+      ],
+      "all-spin-plus",
+    );
+    assertStringSelect(component(modal, "kicktable"), NATIVE_KICKTABLES, "srs-plus");
+    assert.equal(component(modal, "field").required, true);
+    assert.equal(component(modal, "next").required, true);
+    assert.equal(component(modal, "spin-profile").required, true);
+  }
+  assert.equal(component(exact, "next").placeholder, "IOTSZJL");
+  assert.match(component(chance, "next").placeholder, /\*!|\[IOSZ\]/);
+
+  const exactSubmit = modalInteraction(exact.data.custom_id, [
+    textLabel("field", "__________\n####______"),
+    textLabel("next", "IOTS"),
+    selectLabel("lines", ["2"]),
+    selectLabel("spin-profile", ["all-mini-plus"]),
+    selectLabel("kicktable", ["no-kick"]),
+  ]);
+  const exactCommand = findFieldModalCommand(exactSubmit);
+  assert.equal(exactCommand.inputSchemaId, "pc-allspin-exact-queue.v1");
+  assert.deepEqual(optionsByName(readFieldModalOptions(exactSubmit, exactCommand)), {
+    field: "__________\n####______",
+    next: "IOTS",
+    lines: 2,
+    "spin-profile": "all-mini-plus",
+    kicktable: "no-kick",
+  });
+  assert.equal(
+    findFieldModalCommand(modalInteraction(chance.data.custom_id, []))?.inputSchemaId,
+    "pc-allspin-pattern.v1",
+  );
+
+  for (const [subcommand, name, value] of [
+    ["allspin-sol", "hold", "off"],
+    ["allspin-sol", "max-nodes", 17],
+    ["allspin-pres-chance", "max-memory-mib", 64],
+  ]) {
+    assert.throws(
+      () => buildMissingBoardModalResponse(slashInteraction("pc", [{
+        type: 1,
+        name: subcommand,
+        options: [{ name, value }],
+      }])),
+      (error) => error?.code === "options.modal_unrepresented" &&
+        error?.details?.options === name,
+      `${subcommand}/${name}`,
+    );
+  }
+
+  assert.equal(buildMissingBoardModalResponse(slashInteraction("pc", [{
+    type: 1,
+    name: "allspin-sol",
+    options: [
+      { name: "field", value: "grid:__________/####______" },
+      { name: "next", value: "IOTS" },
+      { name: "spin-profile", value: "all-spin-plus" },
+    ],
+  }])), null);
+});
+
+test("Build v2 source-pieces stays named while the typed mask source remains direct-only", () => {
+  const build = findSlashCommand("build").subcommands.cover;
+  assert.equal(
+    build.registration.options.some(({ name }) => name === "source-pieces"),
+    true,
+  );
+  assert.equal(
+    buildMissingBoardModalResponse(slashInteraction("build", [{
+      type: 1,
+      name: "cover",
+      options: [{ name: "source-pieces", value: 17 }],
+    }])),
+    null,
   );
 });
 
@@ -186,6 +304,24 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
       "options",
     ]);
   }
+  for (const name of TYPED_PC_COMMANDS) {
+    assert.deepEqual(componentNames(modalFor(name)), [
+      "field",
+      "next",
+      "lines",
+      "hold",
+      "kicktable",
+    ]);
+  }
+  for (const name of SCORED_PC_COMMANDS) {
+    assert.deepEqual(componentNames(modalFor(name)), [
+      "field",
+      "next",
+      "lines",
+      "score-profile",
+      "kicktable",
+    ]);
+  }
 
   assert.deepEqual(componentNames(modalFor("cover")), [
     "base",
@@ -194,6 +330,14 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
     "kicktable",
     "options",
   ]);
+  assert.equal(
+    buildMissingBoardModalResponse(slashInteraction("build", [{
+      type: 1,
+      name: "cover",
+      options: [],
+    }])),
+    null,
+  );
 
   for (const name of COLORED_COMMANDS) {
     assert.deepEqual(componentNames(modalFor(name)), [
@@ -226,11 +370,11 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
     "options",
     "locale",
   ]);
-  assert.deepEqual(componentNames(modalFor("spin-structure")), [
+  assert.deepEqual(componentNames(modalForSubcommand("spin-structure", "search")), [
     "pieces",
     "field",
     "lines",
-    "profile",
+    "spin-profile",
     "kicktable",
   ]);
   for (const name of REMAINING_COMMANDS) {
@@ -242,7 +386,7 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
       "queue-knowledge",
     ]);
   }
-  assert.deepEqual(componentNames(modalFor("verify")), ["scope", "locale"]);
+  assert.equal(buildMissingBoardModalResponse(slashInteraction("verify")), null);
 });
 
 test("setup ranking Modals preserve command defaults within Discord's five-component cap", () => {
@@ -321,9 +465,20 @@ test("setup ranking Modal submits explicit defaults and rejects hidden-option lo
       () => buildMissingBoardModalResponse(slashInteraction("pc-setup", [
         { name, value: name === "setup-length" ? "longer" : "Z" },
       ])),
-      /remaining must also be supplied directly/,
+      (error) => error?.code === "options.modal_unrepresented" &&
+        error?.details?.options === name,
     );
   }
+});
+
+test("pc tiling Modal resolves only the canonical typed tiling authority", () => {
+  const modal = modalForSubcommand("pc", "tiling");
+  const command = findFieldModalCommand(modalInteraction(modal.data.custom_id, []));
+  assert.equal(command.capabilityId, "pc.tiling");
+  assert.equal(command.input, "pc-tiling-v2");
+  assert.deepEqual(command.argvPrefix, ["pc", "tiling"]);
+  assert.equal(command.resultContractId, "pc-tiling-family.v1");
+  assert.deepEqual(command.resultAllowlist, ["pc-tiling-family.v1"]);
 });
 
 test("PC fields default to four rows and other board searches default to eight", () => {
@@ -337,15 +492,18 @@ test("PC fields default to four rows and other board searches default to eight",
     ...COLORED_COMMANDS.map((name) => [name, "field"]),
     ...SPIN_COMMANDS.map((name) => [name, "field"]),
     ["damage", "field"],
-    ["spin-structure", "field"],
   ];
   for (const [name, input] of eightRowFields) {
     assert.equal(component(modalFor(name), input).value, EMPTY_EIGHT_ROWS);
   }
+  assert.equal(
+    component(modalForSubcommand("spin-structure", "search"), "field").value,
+    EMPTY_EIGHT_ROWS,
+  );
   assert.equal(component(modalFor("score-finder"), "field").value, EMPTY_FOUR_ROWS);
 });
 
-test("v4 lines, kicktable, hold, spin type, language, and verify scope use string selects", () => {
+test("v4 lines, kicktable, hold, spin type, and language use string selects", () => {
   const path = modalFor("path");
   assertStringSelect(
     component(path, "lines"),
@@ -393,14 +551,14 @@ test("v4 lines, kicktable, hold, spin type, language, and verify scope use strin
     "initial-b2b=false",
   );
 
-  const spinStructure = modalFor("spin-structure");
+  const spinStructure = modalForSubcommand("spin-structure", "search");
   assertStringSelect(
     component(spinStructure, "lines"),
     SPIN_STRUCTURE_LINES,
     "1+",
   );
   assertStringSelect(
-    component(spinStructure, "profile"),
+    component(spinStructure, "spin-profile"),
     SPIN_STRUCTURE_PROFILES,
     "t-spins",
   );
@@ -411,27 +569,7 @@ test("v4 lines, kicktable, hold, spin type, language, and verify scope use strin
   );
   assert.equal(componentNames(spinStructure).includes("locale"), false);
 
-  assertStringSelect(
-    component(modalFor("verify"), "scope"),
-    ["all", "pc", "setup", "cover", "build", "kicks"],
-    "all",
-  );
-  assertStringSelect(component(modalFor("verify"), "locale"), ["en", "ko"], "en");
-
-  const koreanVerify = modalFor("verify", [], "ko");
-  assert.equal(koreanVerify.data.title, "검증 탐색 입력");
-  assert.deepEqual(
-    component(koreanVerify, "scope").options.map(({ label: text }) => text),
-    ["전체 검증", "퍼펙트 클리어", "셋업", "커버리지", "빌드", "킥"],
-  );
-  assert.deepEqual(
-    component(koreanVerify, "locale").options.map(({ label: text }) => text),
-    ["영어", "한국어"],
-  );
-  assert.deepEqual(
-    component(modalFor("verify"), "locale").options.map(({ label: text }) => text),
-    ["English", "Korean"],
-  );
+  assert.equal(buildMissingBoardModalResponse(slashInteraction("verify")), null);
 
   const koreanPath = modalFor("path", [], "ko");
   assert.deepEqual(
@@ -453,7 +591,7 @@ test("v4 lines, kicktable, hold, spin type, language, and verify scope use strin
   assert.equal(componentNames(koreanScoreFinder).includes("locale"), false);
   assert.equal(componentNames(modalFor("damage", [], "ko")).includes("locale"), true);
 
-  const koreanSpinStructure = modalFor("spin-structure", [], "ko");
+  const koreanSpinStructure = modalForSubcommand("spin-structure", "search", [], "ko");
   assert.equal(koreanSpinStructure.data.title, "스핀-구조 탐색 입력");
   assert.deepEqual(
     component(koreanSpinStructure, "lines").options.map(({ label: text }) => text),
@@ -471,11 +609,11 @@ test("v4 lines, kicktable, hold, spin type, language, and verify scope use strin
     ],
   );
   assert.deepEqual(
-    component(koreanSpinStructure, "profile").options.map(({ label: text }) => text),
+    component(koreanSpinStructure, "spin-profile").options.map(({ label: text }) => text),
     ["T 스핀", "T 스핀+", "전체 Mini", "전체 Mini+", "전체 스핀", "전체 스핀+"],
   );
-  assert.match(label(koreanSpinStructure, "profile").description, /Regular.*Mini.*분리/u);
-  assert.match(label(spinStructure, "profile").description, /Regular.*Mini separate/);
+  assert.match(label(koreanSpinStructure, "spin-profile").description, /Regular.*Mini.*분리/u);
+  assert.match(label(spinStructure, "spin-profile").description, /Regular.*Mini separate/);
 });
 
 test("board forms prefer keyboard # and _ cells without advertising G", () => {
@@ -483,8 +621,8 @@ test("board forms prefer keyboard # and _ cells without advertising G", () => {
   const korean = modalFor("path", [], "ko");
   const englishField = label(english, "field");
   const koreanField = label(korean, "field");
-  const englishBuildField = label(modalFor("setup", [], "en"), "field");
-  const koreanBuildField = label(modalFor("setup", [], "ko"), "field");
+  const englishBuildField = label(modalFor("spin", [], "en"), "field");
+  const koreanBuildField = label(modalFor("spin", [], "ko"), "field");
 
   assert.equal(englishField.component.value, EMPTY_FOUR_ROWS);
   assert.match(englishField.label, /1–6 rows/);
@@ -509,13 +647,16 @@ test("board forms prefer keyboard # and _ cells without advertising G", () => {
 });
 
 test("v4 Modal language selection is explicit only when the layout has capacity", () => {
-  const verifyModal = modalFor("verify", [], "ko");
-  const verifySubmit = modalInteraction(verifyModal.data.custom_id, [
-    selectLabel("scope", ["all"]),
+  const coloredModal = modalFor("spin", [], "ko");
+  const coloredSubmit = modalInteraction(coloredModal.data.custom_id, [
+    textLabel("field", EMPTY_EIGHT_ROWS),
+    textLabel("next", "I"),
+    selectLabel("kicktable", ["srs-plus"]),
+    selectLabel("options", ["type=TSS"]),
     selectLabel("locale", ["ko"]),
   ]);
-  assert.equal(readCommandModalLocale(verifySubmit), "ko");
-  assert.match(verifyModal.data.title, /입력/u);
+  assert.equal(readCommandModalLocale(coloredSubmit), "ko");
+  assert.match(coloredModal.data.title, /입력/u);
 
   const pathModal = modalFor("path", [], "ko");
   assert.equal(componentNames(pathModal).includes("locale"), false);
@@ -568,22 +709,22 @@ test("score-finder Modal submits explicit row and initial-B2B defaults", () => {
 });
 
 test("spin-structure Modal submits inventory, terminal lines, profile, and rule", () => {
-  const modal = modalFor("spin-structure");
+  const modal = modalForSubcommand("spin-structure", "search");
   const interaction = modalInteraction(modal.data.custom_id, [
     textLabel("pieces", "Ttio"),
     textLabel("field", EMPTY_EIGHT_ROWS),
     selectLabel("lines", ["2+"]),
-    selectLabel("profile", ["all-mini-plus"]),
+    selectLabel("spin-profile", ["all-mini-plus"]),
     selectLabel("kicktable", ["srs-x"]),
   ]);
   const command = findFieldModalCommand(interaction);
-  assert.equal(command?.name, "spin-structure");
+  assert.equal(command?.capabilityId, "spin-structure.search");
   assert.equal(readCommandModalLocale(interaction), null);
   assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
     pieces: "Ttio",
     field: EMPTY_EIGHT_ROWS,
     lines: "2+",
-    profile: "all-mini-plus",
+    "spin-profile": "all-mini-plus",
     kicktable: "srs-x",
   });
 });
@@ -691,6 +832,45 @@ function modalFor(name, options = [], locale = "en") {
   return response;
 }
 
+function modalForSubcommand(root, subcommand, options = [], locale = "en") {
+  const response = buildMissingBoardModalResponse(
+    slashInteraction(root, [{ type: 1, name: subcommand, options }]),
+    locale,
+  );
+  assert.equal(response?.type, 9, `/${root} ${subcommand} did not open a Modal`);
+  return response;
+}
+
+function searchRoutes() {
+  return slashCommandCatalog.flatMap((command) => {
+    if (command.kind !== "search") return [];
+    if (!command.subcommands) {
+      return command.input === "group" ? [] : [{
+        command,
+        path: command.name,
+        modalKey: command.name,
+        root: command.name,
+        subcommand: null,
+      }];
+    }
+    return Object.values(command.subcommands).map((variant) => ({
+      command: variant,
+      path: `${command.name} ${variant.subcommand}`,
+      modalKey: `${command.name}~${variant.subcommand}`,
+      root: command.name,
+      subcommand: variant.subcommand,
+    }));
+  }).filter(({ command }) =>
+    command.modalSchemaId !== null && !command.input?.startsWith("build-v2-")
+  );
+}
+
+function routeInteraction(route, options = []) {
+  return route.subcommand
+    ? slashInteraction(route.root, [{ type: 1, name: route.subcommand, options }])
+    : slashInteraction(route.root, options);
+}
+
 function slashInteraction(name, options = []) {
   return {
     type: 2,
@@ -700,12 +880,49 @@ function slashInteraction(name, options = []) {
 
 function completeOptions(input) {
   switch (input) {
+    case "pc-v2":
+    case "pc-path-v2":
+    case "pc-chance-v2":
+    case "pc-save-v2":
+      return [
+        { name: "field", value: EMPTY_FOUR_ROWS },
+        { name: "next", value: "I" },
+      ];
+    case "pc-allspin-exact-v1":
+      return [
+        { name: "field", value: EMPTY_FOUR_ROWS },
+        { name: "next", value: "IOTSZJLOIT" },
+        { name: "spin-profile", value: "all-spin-plus" },
+      ];
+    case "pc-allspin-pattern-v1":
+      return [
+        { name: "field", value: EMPTY_FOUR_ROWS },
+        { name: "next", value: "*!P3" },
+        { name: "spin-profile", value: "all-spin-plus" },
+      ];
+    case "pc-score-v2":
+      return [
+        { name: "field", value: EMPTY_FOUR_ROWS },
+        { name: "next", value: "IOTSZ" },
+      ];
+    case "pc-tiling-v2":
+    case "pc-failed-v2":
+      return [
+        { name: "field", value: EMPTY_FOUR_ROWS },
+        { name: "next", value: "I" },
+      ];
     case "pc":
       return [
         { name: "field", value: EMPTY_FOUR_ROWS },
         { name: "next", value: "I" },
       ];
     case "cover":
+      return [
+        { name: "base", value: EMPTY_EIGHT_ROWS },
+        { name: "target", value: `${emptyGrid(7)}\n....####..` },
+        { name: "next", value: "I" },
+      ];
+    case "build-cover":
       return [
         { name: "base", value: EMPTY_EIGHT_ROWS },
         { name: "target", value: `${emptyGrid(7)}\n....####..` },
@@ -726,7 +943,28 @@ function completeOptions(input) {
         { name: "field", value: EMPTY_EIGHT_ROWS },
         { name: "next", value: "I" },
       ];
+    case "forward-spin-v2":
+      return [
+        { name: "field", value: EMPTY_EIGHT_ROWS },
+        { name: "next", value: "T" },
+      ];
+    case "forward-damage-v2":
+      return [
+        { name: "field", value: EMPTY_EIGHT_ROWS },
+        { name: "next", value: "I" },
+      ];
+    case "forward-ren-v1":
+      return [
+        { name: "field", value: EMPTY_EIGHT_ROWS },
+        { name: "next", value: "I" },
+      ];
     case "score-fixed-next":
+      return [
+        { name: "field", value: EMPTY_FOUR_ROWS },
+        { name: "next", value: "I" },
+      ];
+    case "score-fixed-next-v2":
+    case "pc-score-finder-v2":
       return [
         { name: "field", value: EMPTY_FOUR_ROWS },
         { name: "next", value: "I" },
@@ -736,10 +974,54 @@ function completeOptions(input) {
         { name: "pieces", value: "IOTS" },
         { name: "field", value: EMPTY_EIGHT_ROWS },
       ];
+    case "spin-structure-v2":
+    case "spin-structure-cover-v1":
+    case "spin-structure-guaranteed-v1":
+      return [
+        { name: "pieces", value: "IOTS" },
+        { name: "field", value: EMPTY_EIGHT_ROWS },
+      ];
     case "remaining":
       return [{ name: "remaining", value: "IOTS" }];
-    case "verify":
-      return [{ name: "scope", value: "pc" }];
+    case "setup-v2":
+      return [{ name: "remaining", value: "IOTS" }];
+    case "setup-score-v1":
+      return [
+        { name: "document-format", value: "fumen" },
+        { name: "document", value: "v115@vhAAgH" },
+        { name: "setup-queue", value: "IOTS" },
+        { name: "solution-queue", value: "ZJLT" },
+      ];
+    case "finesse-search":
+      return [
+        { name: "target", value: `${emptyGrid(7)}\n....####..` },
+        { name: "next", value: "I" },
+        { name: "base", value: EMPTY_EIGHT_ROWS },
+      ];
+    case "finesse-score":
+      return [
+        { name: "document", value: "ctk3_example" },
+        { name: "next", value: "I" },
+      ];
+    case "finesse-score-v2":
+      return [
+        { name: "document", value: "ctk3_example" },
+        { name: "next", value: "I" },
+      ];
+    case "operation-document-v1":
+      return [{ name: "document", value: "ctk3_example" }];
+    case "field-document-v1":
+      return [{ name: "document", value: "v115@vhAAgH" }];
+    case "fumen-transform-v1":
+      return [
+        { name: "transform", value: "roundtrip" },
+        { name: "document", value: "v115@vhAAgH" },
+      ];
+    case "render-document-v1":
+      return [
+        { name: "document", value: "v115@vhAAgH" },
+        { name: "artifact-format", value: "png" },
+      ];
     default:
       throw new Error(`unknown test input contract: ${input}`);
   }

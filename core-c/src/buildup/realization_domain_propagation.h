@@ -1,6 +1,7 @@
 #ifndef CLEARRA_REALIZATION_DOMAIN_PROPAGATION_H
 #define CLEARRA_REALIZATION_DOMAIN_PROPAGATION_H
 
+#include "clr_buildup_status.h"
 #include "../packing/geometry_catalog_internal.h"
 
 typedef struct ClearraRealizationCandidateDomain {
@@ -66,7 +67,7 @@ bool clearra_realization_domain_value_is_active(
 
 bool clearra_realization_domain_common_predecessors(
     const ClearraRealizationDomainPropagationInput *input,
-    uint16_t out_predecessors[16]);
+    uint16_t out_predecessors[CLR_BUILDUP_MAX_OPERATIONS]);
 
 ClearraRealizationDomainPropagationStatus
 clearra_realization_domain_propagate(

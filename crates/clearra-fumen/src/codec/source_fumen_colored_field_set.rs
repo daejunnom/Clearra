@@ -34,6 +34,13 @@ impl SourceFumenColoredFieldSet {
         let mut identities = Vec::with_capacity(document.pages.len());
         let mut operation_replay_available = false;
         for (page_index, page) in document.pages.iter().enumerate() {
+            if page
+                .garbage_row
+                .iter()
+                .any(|cell| *cell != CellColor::Empty)
+            {
+                return Err(SourceFumenDiagramError::PendingGarbageUnsupported { page_index });
+            }
             let decoded = decode_colored_page(page_index, &page.field)?;
             match initial_board_mask {
                 Some(expected) if expected != decoded.initial_board_mask => {

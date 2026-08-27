@@ -5,23 +5,26 @@
 
 use std::{cell::Cell, collections::BTreeSet};
 
-use clearra_core_domain::resource::ResourceReport;
+use clearra_core_domain::resource::{
+    ExecutionAvailabilityReason, ExecutionAvailabilityState, ResourceReport,
+};
 use clearra_core_domain::{
     pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
 };
-#[cfg(not(feature = "native-c-core"))]
-use clearra_core_ffi::NativeCoreError;
 use clearra_core_ffi::{
     problem::{CPackingProblem, C_KICK_SRS_X, C_RULE_SRS_X},
     supply::C_PIECE_SOURCE_FIXED_QUEUE,
-    CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits, CoreCNative,
+    CBuildUpProblemBuilder, CNativeBuildUpEnumerationLimits, CoreCNative, NativeCoreError,
+};
+use clearra_objectives::policy::{
+    objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
 };
 use clearra_pc_graph::request::{
     GpuDeviceSelection, OpeningPcSearchQuery, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
     PcScenarioQuery, PieceWindow, RequestedSearchBackend,
 };
-use clearra_problem::ProblemCompiler;
+use clearra_problem::{ProblemCompiler, SearchProblemPreset};
 use clearra_rules::{
     kicks::{KickTableProfile, KickTableProfileId, SrsKicks, VerifiedKickTableProfile},
     profile::{
@@ -30,13 +33,15 @@ use clearra_rules::{
     },
 };
 use clearra_supply::queue::fixed_sequence::FixedSequence;
+use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 
 use crate::{
     backend::{
         BackendTrustReport, CapabilityQueryError, GpuExecutionFailure, GpuExecutionFailureClass,
         GpuExecutionFailureStage, GpuPartialResultDisposition, GpuSearchCapability,
-        GpuUnavailableReason, PackingBackendOutcome, SearchBackendCapabilityProvider,
-        SearchBackendExecutor, SearchBackendExecutorResolver, SelectedSearchBackend,
+        GpuUnavailableReason, PackingBackendOutcome, PackingCandidateProvenance,
+        SearchBackendCapabilityProvider, SearchBackendExecutor, SearchBackendExecutorResolver,
+        SelectedSearchBackend,
     },
     buildup::BuildUpRunner,
     packing::{packing_metrics::PackingExecutionSource, PackingRunner, PackingRunnerError},
@@ -47,6 +52,42 @@ use crate::{
     },
     WasmCpuSearchBackend,
 };
+
+#[test]
+fn raw_geometry_provenance_is_scoped_to_canonical_pc_tiling_presets() {
+    for preset in [
+        SearchProblemPreset::OpeningPc,
+        SearchProblemPreset::ScenarioPc,
+    ] {
+        assert_eq!(
+            super::candidate_provenance_for(preset, ObjectivePolicy::tiling()),
+            PackingCandidateProvenance::RawGeometry
+        );
+    }
+
+    for preset in [SearchProblemPreset::Setup, SearchProblemPreset::Build] {
+        assert_eq!(
+            super::candidate_provenance_for(preset, ObjectivePolicy::tiling()),
+            PackingCandidateProvenance::BuildabilityPrefiltered
+        );
+    }
+
+    for objective in [
+        ObjectivePolicy::all(),
+        ObjectivePolicy::unique(),
+        ObjectivePolicy::minimum_cover(),
+        ObjectivePolicy::tiling().with_score_summary(),
+        ObjectivePolicy::tiling().with_back_to_back_preservation(SpinProfileSelection::AllSpin),
+        ObjectivePolicy::all()
+            .with_score_summary()
+            .with_spin_profile(SpinProfileSelection::AllSpin),
+    ] {
+        assert_eq!(
+            super::candidate_provenance_for(SearchProblemPreset::OpeningPc, objective),
+            PackingCandidateProvenance::BuildabilityPrefiltered
+        );
+    }
+}
 
 #[cfg(feature = "native-c-core")]
 #[test]
@@ -141,9 +182,15 @@ fn occupied_initial_hold_terminal_inventory_matches_serial_parallel_and_native_b
     let parallel_problem = problem(4);
     assert!(serial_problem.supply().projects_unplaced_lookahead());
     let serial = PackingRunner::run(&serial_problem).expect("serial packing");
-    let parallel = PackingRunner::run(&parallel_problem).expect("parallel packing");
     let serial_candidates = serial.candidates().collect::<Vec<_>>();
+    // A completed packing result deliberately retains its execution admission
+    // while callers may still derive governed materializations from it. This
+    // comparison starts a separate execution, so snapshot the semantic result
+    // and release the serial owner before acquiring the parallel admission.
+    drop(serial);
+    let parallel = PackingRunner::run(&parallel_problem).expect("parallel packing");
     let parallel_candidates = parallel.candidates().collect::<Vec<_>>();
+    drop(parallel);
 
     assert!(!serial_candidates.is_empty());
     assert_eq!(parallel_candidates, serial_candidates);
@@ -204,6 +251,10 @@ fn terminal_supply_p0_native_packing_and_c_buildup_match_the_canonical_wasm_set_
         native_hash.as_str(),
         TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH
     );
+    // The canonical WASM run is an independent governed execution. Release
+    // the native packing result after its complete semantic snapshot has been
+    // captured so its retained-memory lease cannot overlap the WASM lease.
+    drop(packing);
 
     let wasm = WasmCpuSearchBackend::execute_with_control(
         &problem,
@@ -573,10 +624,7 @@ fn default_build_does_not_synthesize_portable_packing_results() {
 
     assert_eq!(
         PackingRunner::run(&problem),
-        Err(PackingRunnerError::BackendExecutorUnavailable {
-            backend: SelectedSearchBackend::CpuGeometryExactCover,
-            reason: "native_geometry_exact_cover_not_connected",
-        })
+        Err(PackingRunnerError::Native(NativeCoreError::Unavailable))
     );
 }
 
@@ -662,7 +710,7 @@ impl SearchBackendExecutor for SuccessfulPackingExecutor {
                 BackendTrustReport::cpu_exact()
             }
         });
-        Ok(PackingBackendOutcome::exact(
+        Ok(PackingBackendOutcome::buildability_prefiltered_exact(
             self.actual_backend,
             clearra_core_ffi::PackingCandidateBatch::from_candidates(
                 problem.board.width,
@@ -713,6 +761,81 @@ impl SearchBackendExecutor for FailingGpuExecutor {
 struct TestExecutorResolver<'a> {
     cpu: &'a dyn SearchBackendExecutor,
     gpu: &'a dyn SearchBackendExecutor,
+}
+
+struct AdmissionAwareTestResolver<'a>(TestExecutorResolver<'a>);
+
+impl SearchBackendExecutorResolver for AdmissionAwareTestResolver<'_> {
+    fn executor_for(&self, backend: SelectedSearchBackend) -> Option<&dyn SearchBackendExecutor> {
+        self.0.executor_for(backend)
+    }
+
+    fn cpu_fallback_executor(&self) -> &dyn SearchBackendExecutor {
+        self.0.cpu_fallback_executor()
+    }
+
+    fn supports_native_candidate_streaming(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn product_family_projection_rejects_before_any_catalog_backend_call() {
+    let execution_policy = PcExecutionPolicy::mvp_default()
+        .with_workers(1)
+        .with_worker_hardware_limit(1)
+        .with_max_memory_mib(Some(1));
+    let problem = ProblemCompiler::compile_opening_pc(
+        &OpeningPcSearchQuery::new(PcTarget::four_lines())
+            .with_queue(PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("P7P4", 4_233_600)
+                    .expect("complete factorized 7-bag plus four-piece universe"),
+            ))
+            .with_execution_policy(execution_policy),
+    )
+    .expect("lazy product problem");
+    assert_eq!(
+        problem
+            .piece_source()
+            .materialized_universe()
+            .expect("materialized descriptor")
+            .pattern_count(),
+        4_233_600
+    );
+    let provider = FixedGpuCapabilityProvider {
+        capability: GpuSearchCapability::unavailable(GpuUnavailableReason::DeviceNotFound),
+    };
+    let cpu = SuccessfulPackingExecutor::new(SelectedSearchBackend::CpuGeometryExactCover, 91);
+    let gpu = SuccessfulPackingExecutor::new(SelectedSearchBackend::Gpu, 92);
+    let resolver = AdmissionAwareTestResolver(TestExecutorResolver {
+        cpu: &cpu,
+        gpu: &gpu,
+    });
+
+    let error = PackingRunner::run_with_components(&problem, &provider, &resolver)
+        .expect_err("family record projection exceeds one MiB before backend execution");
+    let PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+        resource_report, ..
+    }) = error
+    else {
+        panic!("expected typed family admission failure, got {error:?}");
+    };
+    let availability = resource_report.execution_availability();
+    assert!(!resource_report.execution_started());
+    assert!(!resource_report.result_complete());
+    assert_eq!(availability.state(), ExecutionAvailabilityState::Exhausted);
+    assert_eq!(
+        availability.reason(),
+        Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+    );
+    assert!(availability
+        .required_dense_bytes()
+        .is_some_and(|bytes| bytes <= 1024 * 1024));
+    assert!(availability
+        .required_memory_bytes()
+        .is_some_and(|bytes| bytes > 1024 * 1024));
+    assert_eq!(cpu.calls(), 0);
+    assert_eq!(gpu.calls(), 0);
 }
 
 impl SearchBackendExecutorResolver for TestExecutorResolver<'_> {
@@ -795,6 +918,33 @@ fn gpu_unavailable_selection_executes_cpu_with_fallback_reason() {
         Some(crate::backend::SearchBackendFallbackReason::GpuDeviceNotFound)
     );
     assert_eq!(result.candidate_at(0).expect("candidate").candidate_id, 1);
+}
+
+#[test]
+fn merged_groups_reject_mixed_candidate_provenance() {
+    let problem = opening_problem_with_backend(RequestedSearchBackend::Cpu, false);
+    let provider = FixedGpuCapabilityProvider {
+        capability: GpuSearchCapability::unavailable(GpuUnavailableReason::DeviceNotFound),
+    };
+    let cpu = SuccessfulPackingExecutor::new(SelectedSearchBackend::CpuGeometryExactCover, 13);
+    let gpu = SuccessfulPackingExecutor::new(SelectedSearchBackend::Gpu, 14);
+    let resolver = TestExecutorResolver {
+        cpu: &cpu,
+        gpu: &gpu,
+    };
+    let first = PackingRunner::run_with_components(&problem, &provider, &resolver)
+        .expect("first buildability-prefiltered group");
+    let mut mixed = first.clone();
+    mixed.candidate_provenance = PackingCandidateProvenance::RawGeometry;
+    let mut merged = Some(first);
+
+    assert_eq!(
+        super::merge_group_result(&mut merged, mixed),
+        Err(PackingRunnerError::CandidateProvenanceMismatch {
+            expected: PackingCandidateProvenance::BuildabilityPrefiltered,
+            actual: PackingCandidateProvenance::RawGeometry,
+        })
+    );
 }
 
 #[test]

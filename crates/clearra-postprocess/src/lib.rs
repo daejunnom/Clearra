@@ -9,18 +9,28 @@ pub mod pc_scoring;
 pub mod score_batch;
 mod score_profile_selection;
 
+pub use score_profile_selection::{
+    checked_score_profile_memory_projection, score_profile_with_memory_guard,
+    ScoreProfileMemoryGuardError, ScoreProfileMemoryProjection, ScoreProfileMemoryReport,
+};
+
 #[cfg(feature = "webgpu-postprocess")]
 pub use coverage_batch::{PostProcessCoverageUnion, PostProcessCoverageUnionError};
 pub use pc_scoring::{
-    PcPostProcessCancelled, PcScoringPostProcessInput, PcScoringPostProcessResult,
+    PcPostProcessCancelled, PcScoringMemoryGuardError, PcScoringMemoryProjection,
+    PcScoringMemoryReport, PcScoringPostProcessInput, PcScoringPostProcessResult,
     PcScoringPostProcessor,
 };
 #[cfg(feature = "stage-profiling")]
 pub use score_batch::ExactScoringExecutionProfile;
 pub use score_batch::{
-    BackToBackEdgePolicy, BackToBackExecutionFilter, CandidateExecution,
-    CandidateExecutionAggregate, CandidatePatternCoverage, ExactScoredExecution,
-    ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
-    ExactScoringExecutionMaterializer, ScoreCell, ScoreMatrix, SpinCoverageTarget,
+    BackToBackEdgePolicy, BackToBackExecutionFilter, BackToBackFilterError,
+    BackToBackFilterMemoryProjection, BackToBackFilterMemoryReport, CandidateExecution,
+    CandidateExecutionAggregate, CandidatePatternCoverage, ExactScoreCellMaterialization,
+    ExactScoreCellMaterializationError, ExactScoreCellMemoryProjection, ExactScoreCellMemoryReport,
+    ExactScoredExecution, ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
+    ExactScoringExecutionMaterializer, ScoreCell, ScoreMatrix, ScoreMatrixMemoryGuardError,
+    ScoreMatrixMemoryProjection, ScoreMatrixMemoryReport, SpinCoverageTarget,
+    TSpinCoverageMaterializationError, TSpinCoverageMemoryProjection, TSpinCoverageMemoryReport,
     TSpinCoverageOnlyMaterialization, TSpinCoverageOnlyMaterializer,
 };

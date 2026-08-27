@@ -24,6 +24,7 @@ mod native_packing_executors;
 pub mod native_webgpu_packing_executor;
 #[cfg(test)]
 mod packing_backend_dispatch;
+mod raw_geometry_packing_executor;
 pub mod search_backend_capability_provider;
 pub mod search_backend_executor;
 pub mod search_backend_warmup;
@@ -33,6 +34,7 @@ pub mod wasm_cpu_search_backend;
 pub mod wasm_setup_parallel_backend;
 pub mod wasm_setup_search_backend;
 
+pub use crate::resource::WasmCpuTerminalResourceAuthority;
 pub use backend_capability::BackendCapability;
 pub use backend_fallback::BackendFallback;
 pub use backend_kind::BackendKind;
@@ -81,6 +83,7 @@ pub use native_packing_executors::{
 };
 #[cfg(test)]
 pub(crate) use packing_backend_dispatch::execute_selected_packing;
+pub(crate) use raw_geometry_packing_executor::execute_selected_raw_geometry_packing;
 pub use search_backend_capability_provider::{
     CapabilityQueryError, GpuSearchCapability, NativeSearchBackendCapabilityProvider,
     SearchBackendCapabilityProvider,
@@ -88,7 +91,8 @@ pub use search_backend_capability_provider::{
 #[cfg(test)]
 pub use search_backend_executor::SearchBackendExecutor;
 pub use search_backend_executor::{
-    BackendTrustReport, BackendTrustState, PackingBackendOutcome, SearchBackendExecutorResolver,
+    BackendTrustReport, BackendTrustState, PackingBackendOutcome, PackingCandidateProvenance,
+    SearchBackendExecutorResolver,
 };
 pub use search_backend_warmup::{
     prewarm_gpu_search, prewarm_gpu_search_async, GpuSearchWarmupReport,
@@ -99,18 +103,21 @@ pub use wasm_build_probability_backend::{
 #[cfg(feature = "webgpu-search")]
 pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
-    compile_pc4_compact_tablebase, install_pc4_compact_tablebase, release_pc4_compact_tablebase,
-    Pc4CompactTablebase, Pc4CompactTablebaseArtifact, Pc4TablebaseError, Pc4TablebaseLookup,
-    WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
-    WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
-    WasmCpuCandidateProducer, WasmDistributedBackendExecution, WasmDistributedGeometrySummary,
-    WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
-    WasmPackedTilingIdentity, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
-    WasmTilingRootResultMerger, WasmTilingRootWorker, PC4_COMPACT_TABLEBASE_MAX_BYTES,
+    canonical_wasm_candidate_packet_batch_sha256, compile_pc4_compact_tablebase,
+    encode_canonical_wasm_candidate_packet_batch, install_pc4_compact_tablebase,
+    release_pc4_compact_tablebase, Pc4CompactTablebase, Pc4CompactTablebaseArtifact,
+    Pc4TablebaseError, Pc4TablebaseLookup, WasmBuildProbabilityCandidateProducer,
+    WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
+    WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
+    WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
+    WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
+    WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger,
+    WasmTilingRootWorker, PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
+pub(crate) use wasm_cpu::{DocumentLockReachability, DocumentReachabilityEngine};
 pub use wasm_cpu_search_backend::{
     WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
-    WasmProductSearchBackend,
+    WasmCpuSearchTerminalAuthority, WasmProductSearchBackend,
 };
 pub use wasm_setup_parallel_backend::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,

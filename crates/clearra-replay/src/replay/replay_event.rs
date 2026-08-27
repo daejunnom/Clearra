@@ -114,6 +114,24 @@ mod event {
         TraceCompleteness(TraceCompletenessEvent),
         TraceMarker(ReplayTraceMarker),
     }
+
+    impl ReplayEvent {
+        /// Heap storage retained by this event, excluding the inline enum.
+        pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+            match self {
+                Self::Lock(event) => event.checked_nested_retained_bytes(),
+                _ => Some(0),
+            }
+        }
+
+        /// Heap storage requested by cloning this event's nested owners.
+        pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+            match self {
+                Self::Lock(event) => event.checked_clone_nested_bytes(),
+                _ => Some(0),
+            }
+        }
+    }
 }
 mod hold_release_event {
     use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -341,8 +359,39 @@ mod lock_event {
         }
     }
     impl ReplayLockEvent {
+        /// Heap storage retained by this lock event's cell-owner table.
+        pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+            checked_cell_owner_payload_bytes(self.cleared_cell_owners.capacity() as u128)
+        }
+
+        /// Heap storage requested by cloning this lock event's cell-owner table.
+        pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
+            checked_cell_owner_payload_bytes(self.cleared_cell_owners.len() as u128)
+        }
+    }
+    impl ReplayLockEvent {
         pub fn board_after_clear(&self) -> OccupancyField {
             self.board_after_clear
+        }
+    }
+
+    fn checked_cell_owner_payload_bytes(owner_count: u128) -> Option<u128> {
+        owner_count.checked_mul(core::mem::size_of::<CellOwner>() as u128)
+    }
+
+    #[cfg(test)]
+    mod retained_memory_projection_tests {
+        use super::*;
+
+        #[test]
+        fn lock_event_owner_projection_is_checked_and_capacity_based() {
+            let owners = Vec::<CellOwner>::with_capacity(13);
+            let capacity = owners.capacity() as u128;
+            assert_eq!(
+                checked_cell_owner_payload_bytes(capacity),
+                Some(capacity * core::mem::size_of::<CellOwner>() as u128)
+            );
+            assert_eq!(checked_cell_owner_payload_bytes(u128::MAX), None);
         }
     }
 }
