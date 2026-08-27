@@ -125,8 +125,11 @@ command-set mismatch fails closed.
 
 The implementation-start observation is retained in
 `tests/fixtures/contracts/upstream_drift_implementation_start.v1.json`. The
-separate exact-source release observation is retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze.v1.json`; it reports
+separate exact-source release observations are retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze.v1.json` and
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry1.v1.json`. The
+second observation is the current candidate freeze after correcting the
+metadata workflow's missing CTK3 build step. Both report
 `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new

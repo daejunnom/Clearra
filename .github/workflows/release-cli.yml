@@ -60,6 +60,8 @@ jobs:
         run: node --test scripts/release/final-source-attempt-journal.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
       - name: Install JavaScript workspace for product authority
         run: npm ci --ignore-scripts
+      - name: Build CTK3 workspace for product authority
+        run: npm run build --workspace ctk3
       - name: Validate every product version and changelog surface
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
