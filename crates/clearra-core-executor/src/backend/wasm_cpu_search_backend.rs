@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: the WASM CPU backend's exact search execution contract.
 use std::sync::Arc;
 
 use clearra_core_domain::{

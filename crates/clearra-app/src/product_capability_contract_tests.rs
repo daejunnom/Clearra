@@ -1,3 +1,5 @@
+// SRP rationale: this test module has one behavior-level change reason: verifying product capability validation and query-bound authority invariants.
+
 use std::sync::Arc;
 
 use clearra_core_domain::{

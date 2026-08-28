@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: lowering curated web commands into typed application requests.
 use clearra_app::{
     AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand,
     FieldDocumentTransformAppCommand, FieldDocumentTransformKind, FumenAppCommand,

@@ -1,3 +1,5 @@
+// SRP rationale: this test module has one behavior-level change reason: verifying stable rendering of typed application responses across supported CLI formats.
+
 use clearra_app::{
     encode_ctk3_compact, AppContext, AppCoreExecutorService, AppError, AppResultKind, AppServices,
     AppStatus, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece, FinesseReport, FinesseReportInput,

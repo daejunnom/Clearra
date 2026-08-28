@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: projecting validated product execution evidence into typed host payloads.
+
 use std::sync::Arc;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;

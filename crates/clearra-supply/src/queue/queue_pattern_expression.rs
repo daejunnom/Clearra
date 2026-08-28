@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: parsing and normalizing the queue-pattern expression language.
 use std::{borrow::Cow, collections::BTreeSet, fmt};
 
 use clearra_core_domain::piece::piece_kind::PieceKind;

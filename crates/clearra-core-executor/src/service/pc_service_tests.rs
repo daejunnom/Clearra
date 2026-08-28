@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: executable behavior coverage for the PC service boundary.
 #![cfg_attr(not(feature = "native-c-core"), allow(dead_code, unused_imports))]
 
 use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};

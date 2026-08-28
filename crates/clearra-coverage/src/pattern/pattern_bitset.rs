@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: canonical bounded bit-set operations over pattern identities.
 use std::sync::{Arc, OnceLock};
 
 use super::pattern_id::PatternId;

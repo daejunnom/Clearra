@@ -552,13 +552,22 @@ mod case_unsafe_allowed_only_in_core_ffi_raw {
             validator.contains("crates/clearra-core-ffi/src/raw/")
                 && validator
                     .contains("crates/clearra-core-ffi/src/memory/native_memory_bindings.rs")
+                && validator.contains("crates/clearra-platform-fs/src/linux.rs")
+                && validator.contains("crates/clearra-platform-fs/src/windows.rs")
                 && !validator.contains("crates/clearra-core-ffi/src/native/buildup.rs")
                 && !validator.contains("crates/clearra-core-ffi/src/buildup/build_variant_view.rs"),
-            "unsafe boundary allowlist must keep BuildUp allocation and pointer copies in raw"
+            "unsafe boundary allowlist must keep BuildUp allocation and pointer copies in raw and isolate platform filesystem ABI calls"
         );
         assert!(
-        validator.contains("must not contain unsafe/raw pointer boundary code outside clearra-core-ffi raw/native binding allowlist"),
-        "unsafe boundary validator must reject unsafe outside the allowlist"
-    );
+            validator.contains("must not contain unsafe/raw pointer boundary code outside clearra-core-ffi raw/native binding allowlist"),
+            "unsafe boundary validator must reject unsafe outside the allowlist"
+        );
+        assert!(
+            validator.contains(
+                r"\bunsafe\s*(?:\{|\(|(?:const\s+)?fn\b|impl\b|(?:auto\s+)?trait\b|extern\b|static\b|\|\|)",
+            )
+                && validator.contains("tie-snapshot-path-unsafe"),
+            "unsafe boundary syntax detection must include Rust 2024 unsafe attributes without treating domain reason strings as code"
+        );
     }
 }

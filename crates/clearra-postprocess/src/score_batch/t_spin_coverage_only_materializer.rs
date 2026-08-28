@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: exact T-Spin coverage-only score materialization.
 use std::{ops::Range, sync::Arc};
 
 use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;

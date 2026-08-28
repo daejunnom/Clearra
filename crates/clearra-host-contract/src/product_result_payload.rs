@@ -1,4 +1,5 @@
 //! Closed public payloads for typed product results.
+//! SRP rationale: this module has one change reason: the finite serialized host contract for typed product results.
 //!
 //! The host contract owns only finite, serializable DTOs. Live solver stores
 //! stay behind a runtime-specific page handle; `page_handle_available` tells a

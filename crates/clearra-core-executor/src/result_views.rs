@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: read-only typed views over core execution results.
 mod backend_report {
     use super::summary_fields::field_value;
 

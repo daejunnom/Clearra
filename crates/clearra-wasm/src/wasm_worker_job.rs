@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: lifecycle and validation of one WASM worker job.
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},

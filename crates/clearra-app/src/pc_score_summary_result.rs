@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: binding validated PC score execution evidence into typed summary and witness result contracts.
+
 use std::{fmt, mem::size_of, sync::Arc};
 
 use clearra_core_domain::resource::ResourceReport;

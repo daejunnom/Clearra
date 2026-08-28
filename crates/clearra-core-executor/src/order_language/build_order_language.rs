@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: parsing and evaluating the canonical Build order language.
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,

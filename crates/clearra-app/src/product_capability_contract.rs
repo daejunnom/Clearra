@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: validating public product capability requests into query-bound application authority.
+
 use std::{fmt, sync::Arc};
 
 use clearra_host_contract::{AppCommandKind, QueryEnvelope};

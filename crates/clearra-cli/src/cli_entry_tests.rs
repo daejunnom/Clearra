@@ -1,3 +1,5 @@
+// SRP rationale: this test module has one behavior-level change reason: verifying CLI entry orchestration from parsed arguments through effects, output, and exit codes.
+
 use std::path::PathBuf;
 
 use crate::{error::CliErrorCode, exit::ExitCode};

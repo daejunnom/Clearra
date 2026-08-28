@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: defining Build probability result contracts and their application-boundary projections.
+
 //! SRP rationale: this module owns the App boundary contract for Build's
 //! optional per-solution probability projection.
 

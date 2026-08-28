@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: validating and atomically encoding typed solution artifacts and explicit portfolio pages.
+
 use std::{
     fmt,
     mem::size_of,

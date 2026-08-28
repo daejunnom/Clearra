@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: the typed outcome contract emitted by one core execution.
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_domain::solution::normalized_tiling_solution::{
     StandardBoard64TilingIdentity, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,

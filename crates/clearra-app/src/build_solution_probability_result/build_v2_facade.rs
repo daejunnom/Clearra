@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: executing admitted Build v2 requests and returning query-bound validated portfolio results.
+
 //! App-owned execution seam for the first actual Build v2 vertical.
 //!
 //! The legacy `build-probability` command still owns its byte-compatible

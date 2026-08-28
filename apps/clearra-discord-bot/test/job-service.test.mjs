@@ -583,6 +583,15 @@ test("render runner cleans its private output on start failure, timeout, and can
         terminationGraceMs: 100,
       },
       {
+        // A real ChildProcess keeps the event loop alive until close. This
+        // synthetic child does not, so keep its deadline timer referenced to
+        // make the timeout branch deterministic on every supported Node 22+
+        // platform while preserving the runner's production unref policy.
+        setTimeout: (callback, timeoutMs) => {
+          const timer = setTimeout(callback, timeoutMs);
+          timer.unref = () => timer;
+          return timer;
+        },
         spawn: (_executable, arguments_) => {
           outputPath = arguments_[arguments_.indexOf("--output") + 1];
           if (mode === "start-failure") throw new Error("fixture start failure");

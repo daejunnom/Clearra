@@ -1,4 +1,5 @@
 //! Crash-recoverable authority for producer-to-worker delegation.
+//! SRP rationale: this module has one change reason: crash-recoverable delegation authority and its state transitions.
 //!
 //! This is deliberately separate from the in-process resource lease. A resource
 //! lease answers whether work may run on this process; this journal answers

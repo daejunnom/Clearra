@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: deterministic CTK3 document encoding and decoding.
 use std::collections::HashMap;
 use std::io::Write;
 

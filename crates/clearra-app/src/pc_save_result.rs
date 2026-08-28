@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: validating and materializing typed PC save-group and best-save result evidence.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,

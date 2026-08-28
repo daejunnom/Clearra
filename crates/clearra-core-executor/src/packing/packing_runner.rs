@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: orchestration of one exact packing search and its evidence.
 use std::sync::Arc;
 
 use clearra_core_domain::{

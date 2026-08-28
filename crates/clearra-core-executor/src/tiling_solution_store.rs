@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: bounded canonical storage of normalized tiling solutions.
 use std::{cmp::Reverse, collections::BinaryHeap, sync::Arc};
 
 use clearra_core_domain::solution::normalized_tiling_solution::{

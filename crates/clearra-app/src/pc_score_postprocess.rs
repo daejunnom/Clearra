@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: deriving deterministic PC score matrices, summaries, and winner families from exact search results.
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use clearra_core_domain::{

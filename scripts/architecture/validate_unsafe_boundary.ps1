@@ -12,6 +12,8 @@ function Test-RustUnsafeBoundaryAllowed([string]$RelativePath) {
             "crates/clearra-core-executor/src/performance/search_stage_profiler.rs",
             "crates/clearra-core-executor/src/performance/host_clock.rs",
             "crates/clearra-postprocess/src/score_batch/exact_scoring_execution_materializer.rs",
+            "crates/clearra-platform-fs/src/linux.rs",
+            "crates/clearra-platform-fs/src/windows.rs",
             "crates/clearra-webgpu/src/geometry_exact_cover_timing.rs"
         )) {
         return $true
@@ -32,7 +34,9 @@ function Test-RustUnsafeBoundaryAllowed([string]$RelativePath) {
     return $false
 }function Test-RustProductionContainsUnsafeBoundary([string]$Contents) {
     $production = Get-RustProductionContents $Contents
-    return $production -match '\bunsafe\b' -or
+    # Match Rust boundary syntax, not domain strings such as
+    # tie-snapshot-path-unsafe that merely describe a rejected path.
+    return $production -match '\bunsafe\s*(?:\{|\(|(?:const\s+)?fn\b|impl\b|(?:auto\s+)?trait\b|extern\b|static\b|\|\|)' -or
         $production -match 'extern\s+"C"' -or
         $production -match '\bNonNull\s*<' -or
         $production -match '\*(mut|const)\s+'

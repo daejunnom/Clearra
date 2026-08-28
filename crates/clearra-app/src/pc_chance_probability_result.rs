@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: validating PC chance evidence and materializing exact probability products.
+
 use std::{collections::BTreeSet, fmt};
 
 use clearra_core_domain::probability::probability_value::ProbabilityValue;

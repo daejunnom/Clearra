@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: creating, authenticating, resuming, and paging explicit tie-portfolio snapshots.
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Seek, SeekFrom, Write},

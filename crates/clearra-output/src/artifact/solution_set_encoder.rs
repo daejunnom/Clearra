@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: deterministic publication encoding for complete solution sets.
 use std::{fmt, io, io::Write, str};
 
 use clearra_platform_fs::{NeverCancelled, PublicationCheckpoint, PublicationControl};

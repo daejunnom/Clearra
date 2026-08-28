@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: materializing the canonical PC service output model.
 fn option_usize(value: Option<usize>) -> String {
     value
         .map(|value| value.to_string())

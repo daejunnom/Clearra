@@ -1,4 +1,4 @@
-// SRP rationale: this module owns only crash-recoverable delegation authority.
+// SRP rationale: this module has one change reason: crash-recoverable browser delegation authority.
 // In-process CPU/memory leases remain in SharedExecutionResourceAuthority.
 
 export const DELEGATION_JOURNAL_SCHEMA = 'clearra.delegation-journal.v1' as const;

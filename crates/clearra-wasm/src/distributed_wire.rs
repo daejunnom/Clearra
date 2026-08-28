@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: the closed distributed-worker wire contract for WASM execution.
 use clearra_core_domain::{
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{

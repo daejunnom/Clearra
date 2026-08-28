@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: validating typed PC result projections against their originating search contracts.
+
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;
 use clearra_objectives::policy::{
     objective_policy::ObjectivePolicy,

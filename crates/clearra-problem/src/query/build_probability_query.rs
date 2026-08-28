@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: validated Build-probability query construction.
 use clearra_core_domain::board::standard_pc_board::{
     Board256Mask, BOARD256_WORD_COUNT, STANDARD_PC_BOARD_WIDTH, STANDARD_PC_COMPACT_MAX_LINES,
     STANDARD_PC_MAX_LINES,

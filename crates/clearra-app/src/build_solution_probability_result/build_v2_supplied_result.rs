@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: replaying supplied Build solutions and reducing reachable identities into exact minimum-cover products.
+
 //! Actual supplied-solution replay and minimum-cover reduction for
 //! `build.evaluate.minimals`.
 //!

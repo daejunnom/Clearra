@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: materializing exact scoring executions from validated batches.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,

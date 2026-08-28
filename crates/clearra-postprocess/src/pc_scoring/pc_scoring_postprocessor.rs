@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: exact PC score postprocessing and canonical winner projection.
 use std::fmt::{self, Write};
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;

@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: admission and lease ownership for one bounded execution.
 use clearra_core_domain::resource::{
     ExecutionAvailability, ExecutionAvailabilityReason, ExecutionAvailabilityState, ResourceLease,
     ResourceLeaseRequest, ResourceLeaseToken, ResourceReport,

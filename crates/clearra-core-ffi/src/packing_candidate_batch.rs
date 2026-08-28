@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: safe typed ownership of native packing candidate batches.
 use core::{cmp::Ordering, mem::size_of};
 
 use clearra_core_domain::{

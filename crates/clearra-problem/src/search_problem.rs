@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: the validated canonical search-problem model.
 pub use clearra_core_domain::field::occupancy_field::OccupancyField;
 
 mod board_accessors {

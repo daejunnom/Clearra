@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: defining and validating distinct typed Build v2 target-search and supplied-solution boundaries.
+
 //! Build-owned typed product boundary for the v2 Build family.
 //!
 //! Target search and supplied-solution evaluation deliberately have separate

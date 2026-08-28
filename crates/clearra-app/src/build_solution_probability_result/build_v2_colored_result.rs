@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: replaying colored-target Build queries and reducing verified executions into typed results.
+
 //! Actual colored-target Build replay and reduction.
 //!
 //! A colored target is a nominal input authority distinct from a supplied

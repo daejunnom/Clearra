@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: exact PC-chance coverage evidence construction and validation.
 use clearra_core_domain::{
     field::occupancy_field::OccupancyField, objective::objective_kind::ObjectiveKind,
     pc::pc_target::PcTarget, piece::piece_kind::PieceKind,

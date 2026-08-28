@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: exact grouping of piece multisets in a pattern universe.
 use std::sync::Arc;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;

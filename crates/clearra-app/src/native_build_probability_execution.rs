@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: coordinating bounded native Build-probability workers and deterministically merging their verified results.
+
 use std::{
     collections::VecDeque,
     fmt::Write as _,

@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: exact failed-queue evidence ownership for PC execution.
 use std::sync::Arc;
 
 use clearra_core_domain::{

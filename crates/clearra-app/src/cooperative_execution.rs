@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: driving resumable application execution under cooperative memory and cancellation contracts.
+
 use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;

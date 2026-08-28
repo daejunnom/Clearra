@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: executable contract coverage for the GUI host boundary.
 use crate::{
     DesktopTauriCommandBridge, GuiAppState, GuiBackendChoice, GuiBackendForm, GuiExecutionPhase,
     GuiExecutionState, GuiHostLanguageResolver, GuiJobId, GuiOpeningPcForm, GuiOutputFormat,

@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: enforcing the admitted, crash-fenced durable native Build-probability delegation protocol.
+
 //! Provider-admitted, crash-fenced native Build delegation.
 //!
 //! This module is a child of `native_build_probability_execution` so it can

@@ -1,4 +1,5 @@
 //! Typed, fail-closed audit and portfolio planning for normalized solution sets.
+//! SRP rationale: this module has one change reason: exact audit and portfolio-plan semantics for one normalized solution set.
 //!
 //! Probability and execution-constraint authority stay in their existing owners. This module
 //! consumes their already-materialized normalized coverage evidence and records how a solution

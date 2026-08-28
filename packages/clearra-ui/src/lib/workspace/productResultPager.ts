@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: fail-closed paging models for typed product results.
 import type {
   ClearraPcBestSavePayload,
   ClearraPcSaveGroupPayload,

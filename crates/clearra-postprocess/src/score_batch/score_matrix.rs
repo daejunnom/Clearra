@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: canonical score-matrix representation and queries.
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},

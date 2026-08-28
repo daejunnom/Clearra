@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: assembling and validating the typed application response envelope from governed execution evidence.
+
 use crate::{
     app_error::{AppError, AppErrorCode},
     build_solution_probability_result::build_v2_facade::{BuildCoveragePortfolioV2, BuildSetupV1},

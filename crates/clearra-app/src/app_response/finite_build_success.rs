@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: constructing finite Build success responses while enforcing allocation and evidence invariants.
+
 use core::fmt::Write as _;
 
 use clearra_core_executor::{CoreExecutionError, CoreExecutionResult};

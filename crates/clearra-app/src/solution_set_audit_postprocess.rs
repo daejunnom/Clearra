@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: attaching deterministic solution-set audit evidence to materialized PC and Build results.
+
 //! Attaches the private typed solution-set audit at the common PC/build application boundary.
 //!
 //! This adapter only consumes already-materialized result authority. It does not evaluate

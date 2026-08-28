@@ -1,4 +1,5 @@
 //! Closed Host DTO for the remaining Build v2 product families.
+//! SRP rationale: this module has one change reason: the closed host payload contract for Build v2 products.
 //!
 //! The producer selects one of four nominal shapes. Optional fields exist only
 //! to keep a single stable wire object; `try_*` constructors validate the exact

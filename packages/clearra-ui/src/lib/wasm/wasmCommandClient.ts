@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: the typed UI client contract for WASM command execution.
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
 import type {
   HostCapabilitySnapshot,

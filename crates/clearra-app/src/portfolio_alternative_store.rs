@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: enumerating, checkpointing, and paging deterministic coverage-portfolio alternatives.
+
 use std::sync::Arc;
 
 use clearra_coverage::{

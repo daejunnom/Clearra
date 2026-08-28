@@ -1,3 +1,4 @@
+// SRP rationale: this module has one change reason: deterministic distributed Build-probability execution on WASM CPU workers.
 use std::collections::VecDeque;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;

@@ -29,7 +29,7 @@ function Get-ReleaseSourceSurface {
             Where-Object {
                 $_.Extension -in @('.rs', '.ts', '.tsx', '.js', '.svelte', '.c', '.h') -and
                 $_.Name -notmatch '(_tests|\.test|\.spec)\.' -and
-                $_.FullName -notmatch '[\\/](node_modules|dist|dist-server|build|target|coverage|tests|\.cache|\.svelte-kit)[\\/]'
+                $_.FullName -notmatch '[\\/](node_modules|dist|dist-server|build|target|coverage|tests?|\.cache|\.svelte-kit)[\\/]'
             } |
             ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }
     }
@@ -253,7 +253,7 @@ function Invoke-ReleaseForbiddenApiValidation {
 
     $wasmSurface = Get-ReleaseSourceSurface @(
         'crates/clearra-wasm/src', 'crates/clearra-web-command/src',
-        'apps/clearra-web', 'packages/clearra-ui/src/wasm'
+        'apps/clearra-web', 'packages/clearra-ui/src/lib/wasm'
     )
     foreach ($forbidden in @(
         'std::process::Command', 'process::Command', 'clearra.exe',
@@ -468,7 +468,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
     $oracleRollbackProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs'
     $oracleRestore = Read-Text 'apps/clearra-discord-bot/scripts/restore-oracle-release'
-    $oracleDeployLauncher = Read-Text 'apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-oracle-release-deploy'
+    $oracleDeployLauncher = Read-Text 'scripts/release/oracle/clearra-oracle-release-deploy-v080'
     $oracleRollbackCapture = Read-Text 'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
     $oracleReleaseDigest = Read-Text 'apps/clearra-discord-bot/scripts/release-tree-digest.mjs'
     $oracleProofProducerTest = Read-Text 'apps/clearra-discord-bot/test/oracle-deployment-proof-producer.test.mjs'
