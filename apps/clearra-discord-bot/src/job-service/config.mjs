@@ -7,13 +7,21 @@ export function loadClearraJobServiceConfig(
   runtime = {},
 ) {
   const processLogicalProcessors = runtimeLogicalProcessorCount(runtime);
+  const expectedVcpus = environment.K_SERVICE
+    ? positiveInteger(
+        environment.CLEARRA_EXPECTED_VCPUS,
+        processLogicalProcessors,
+      )
+    : undefined;
+  const cpuAuthorityLogicalProcessors =
+    expectedVcpus ?? processLogicalProcessors;
   const useAllLogicalProcessors = booleanSetting(
     environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS,
     true,
   );
   const sharedWorkerCapacity = useAllLogicalProcessors
-    ? processLogicalProcessors
-    : Math.max(1, processLogicalProcessors - 1);
+    ? cpuAuthorityLogicalProcessors
+    : Math.max(1, cpuAuthorityLogicalProcessors - 1);
   const maxConcurrentJobs = positiveInteger(
     environment.CLEARRA_MAX_CONCURRENT_JOBS ??
       environment.CLEARRA_MAX_CONCURRENT_SEARCHES,
@@ -128,9 +136,7 @@ export function loadClearraJobServiceConfig(
       64,
     ),
     processLogicalProcessors,
-    expectedVcpus: environment.K_SERVICE
-      ? processLogicalProcessors
-      : undefined,
+    expectedVcpus,
     searchWorkersPerSession,
     useAllLogicalProcessors,
     runtimeIdentity: runtimeIdentityFromEnvironment(environment),

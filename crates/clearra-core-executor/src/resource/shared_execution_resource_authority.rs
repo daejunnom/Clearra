@@ -91,11 +91,17 @@ fn host_compute_capacity() -> u32 {
     if cfg!(target_family = "wasm") {
         return 1;
     }
-    std::thread::available_parallelism()
-        .ok()
-        .and_then(|value| u32::try_from(value.get()).ok())
-        .unwrap_or(1)
-        .max(1)
+    // Worker selection may raise Rust's quota-aware recommendation to an
+    // explicitly configured vCPU ceiling after validating Linux affinity.
+    // Admission must use that same authority or an accepted worker policy can
+    // immediately reject itself with `compute-budget-exceeded`.
+    host_compute_capacity_from_hard_limit(
+        clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit(),
+    )
+}
+
+fn host_compute_capacity_from_hard_limit(hard_limit: usize) -> u32 {
+    u32::try_from(hard_limit).unwrap_or(u32::MAX).max(1)
 }
 
 const fn host_memory_capacity() -> u64 {
@@ -118,5 +124,12 @@ mod tests {
         assert_ne!(left, right);
         assert_ne!(left.get(), 0);
         assert_ne!(right.get(), 0);
+    }
+
+    #[test]
+    fn native_compute_capacity_preserves_the_authoritative_worker_ceiling() {
+        assert_eq!(host_compute_capacity_from_hard_limit(0), 1);
+        assert_eq!(host_compute_capacity_from_hard_limit(8), 8);
+        assert_eq!(host_compute_capacity_from_hard_limit(usize::MAX), u32::MAX);
     }
 }

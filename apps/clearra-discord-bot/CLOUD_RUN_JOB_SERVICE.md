@@ -172,6 +172,7 @@ CLEARRA_EXECUTABLE=/usr/local/bin/clearra
 CLEARRA_SEARCH_TIMEOUT_MS=170000
 CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
 CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_EXPECTED_VCPUS=8
 CLEARRA_SEARCH_WORKERS_PER_SESSION=8
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1
 CLEARRA_MAX_CONCURRENT_JOBS=1
@@ -179,14 +180,16 @@ CLEARRA_MAX_OUTPUT_BYTES=4194304
 ```
 
 One automatic job receives the service's explicit eight-worker allocation.
-Keep this numeric bound aligned with `--cpu=8`: Cloud Run startup CPU boost can
-temporarily make the host report more logical processors than the steady-state
-Linux affinity ceiling, so deriving the allocation from startup visibility is
-not release-safe. The native runtime still validates that ceiling before
-creating workers. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` is an explicit native
-execution authority: the job service must preserve it as
-`--use-all-cpu-threads` even when startup boost makes Node see nine processors,
-while the separate numeric worker bound remains eight. Set
+Keep `CLEARRA_EXPECTED_VCPUS=8` and the numeric worker bound aligned with
+`--cpu=8`: Cloud Run startup CPU boost can temporarily make the host report more
+logical processors than the steady-state Linux affinity ceiling, so deriving
+either authority from startup visibility is not release-safe. The expected-vCPU
+setting binds Node's partition and Rust's resource lease to the deployed CPU
+limit; the native runtime still validates that ceiling before creating workers.
+`CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` is an explicit native execution
+authority: the job service must preserve it as `--use-all-cpu-threads` even when
+startup boost makes Node see nine processors, while the separate numeric worker
+bound remains eight. Set
 `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0` only when deliberately reserving one
 processor. Caller-supplied worker switches are stripped and cannot exceed the
 service policy.
@@ -426,7 +429,7 @@ gcloud run deploy $serviceName `
   --cpu-boost `
   --timeout=900s `
   --set-secrets="CLEARRA_JOB_TOKEN=${jobBearerSecret}:latest" `
-  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000,CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000,CLEARRA_SEARCH_WORKERS_PER_SESSION=8,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
+  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000,CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000,CLEARRA_EXPECTED_VCPUS=8,CLEARRA_SEARCH_WORKERS_PER_SESSION=8,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
 if ($LASTEXITCODE -ne 0) { throw "no-traffic candidate deployment failed" }
 
 $candidateRevision = "$serviceName-$revisionSuffix"

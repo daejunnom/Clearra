@@ -392,6 +392,7 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
     {
       K_SERVICE: "clearra-current-job",
       CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_EXPECTED_VCPUS: "8",
       CLEARRA_SEARCH_WORKERS_PER_SESSION: "8",
       CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "1",
       CLEARRA_MAX_CONCURRENT_JOBS: "1",
@@ -400,7 +401,7 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
   );
 
   assert.equal(config.processLogicalProcessors, 9);
-  assert.equal(config.expectedVcpus, 9);
+  assert.equal(config.expectedVcpus, 8);
   assert.equal(config.searchWorkersPerSession, 8);
   assert.equal(config.useAllLogicalProcessors, true);
   assert.deepEqual(
@@ -426,6 +427,22 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
       "json",
       "--include-solution-data",
     ],
+  );
+
+  assert.throws(
+    () =>
+      loadClearraJobServiceConfig(
+        {
+          K_SERVICE: "clearra-current-job",
+          CLEARRA_JOB_TOKEN: "job-token",
+          CLEARRA_EXPECTED_VCPUS: "8",
+          CLEARRA_SEARCH_WORKERS_PER_SESSION: "9",
+          CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "1",
+          CLEARRA_MAX_CONCURRENT_JOBS: "1",
+        },
+        { availableParallelism: () => 9 },
+      ),
+    /per-job runtime limit of 8/,
   );
 });
 

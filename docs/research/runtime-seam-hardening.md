@@ -146,9 +146,10 @@ optimization passes:
   Rust's quota-aware limit. Rust accepts a higher hard ceiling only after
   validating the current Linux affinity list, which is re-probed at worker-pool
   boundaries rather than cached for the process lifetime. Every secondary
-  worker recap uses that same hard ceiling; a failed validation falls back to
-  the standard probe. No external
-  `CLEARRA_EXPECTED_VCPUS` deployment setting is needed.
+  worker recap and the shared execution-resource lease use that same hard
+  ceiling; a failed validation falls back to the standard probe. Production
+  deployment pins `CLEARRA_EXPECTED_VCPUS=8` to the revision's explicit CPU
+  limit so a startup-time Node observation cannot become a second authority.
 - The Discord JavaScript suite passes all 95 tests. Rust formatting, the
   core-domain CPU-capacity tests, PC graph/core-executor checks, and the
   odd-/six-line compatibility regressions pass. Windows Application Control

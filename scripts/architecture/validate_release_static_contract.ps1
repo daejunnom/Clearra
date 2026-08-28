@@ -2011,7 +2011,12 @@ function Invoke-ReleaseIdentityGateValidation {
             $deploymentDoc.Text,
             'CLEARRA_SEARCH_WORKERS_PER_SESSION=8'
         ).Count
+        $explicitEightVcpuAuthorityCount = [regex]::Matches(
+            $deploymentDoc.Text,
+            'CLEARRA_EXPECTED_VCPUS=8'
+        ).Count
         if ($explicitEightWorkerCount -lt 2 -or
+            $explicitEightVcpuAuthorityCount -lt 2 -or
             $deploymentDoc.Text.IndexOf(
                 'CLEARRA_SEARCH_WORKERS_PER_SESSION=auto',
                 [System.StringComparison]::Ordinal
@@ -2025,7 +2030,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 'startup CPU boost',
                 [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
             )) {
-            Add-ArchitectureError "$($deploymentDoc.Name) must pin the 8-vCPU service to eight workers and document startup CPU boost visibility"
+            Add-ArchitectureError "$($deploymentDoc.Name) must pin the 8-vCPU authority and worker allocation and document startup CPU boost visibility"
         }
     }
     $syncHeadingIndex = $cloudDeploy.IndexOf('## Exact-SHA command synchronization', [System.StringComparison]::Ordinal)
