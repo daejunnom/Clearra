@@ -588,10 +588,11 @@ Production job execution is pinned to one search with an explicit ceiling of
 eight workers; it does not derive that ceiling from the processor count visible
 to Node during startup. `CLEARRA_EXPECTED_VCPUS=8` binds both the Node worker
 partition and Rust execution-resource admission to the revision's `--cpu=8`
-authority. Cloud Run startup CPU boost may temporarily expose nine logical
-processors, but `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` still authorizes native
-Clearra to use the otherwise reserved final processor without raising the
-independent `--auto-workers 8` ceiling. Native Clearra revalidates its
+authority. Startup CPU boost is enabled, and the candidate's Node startup probe
+was observed reporting nine logical processors; that runtime observation is not
+the configured CPU authority. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` still
+authorizes native Clearra to use the otherwise reserved final processor without
+raising the independent `--auto-workers 8` ceiling. Native Clearra revalidates its
 steady-state Linux affinity limit before creating the worker pool. A numeric
 request above that hard limit is rejected rather than retried with an automatic
 fallback. At four instances the service can run at most four searches and 32
@@ -1008,10 +1009,11 @@ command-schema evidence and an exact command-catalog restore.
 
 Keep `CLEARRA_EXPECTED_VCPUS=8` and
 `CLEARRA_SEARCH_WORKERS_PER_SESSION=8` for the single-session 8-vCPU Cloud Run
-service. Startup CPU boost can temporarily inflate the processor count seen by
-the Node host beyond the steady-state Linux affinity ceiling; an automatic
-allocation derived during that window can therefore over-request native
-workers. The explicit vCPU authority keeps Node partitioning and Rust admission
+service. Startup CPU boost is enabled, while startup-time runtime probes can
+still differ from the configured CPU limit; the candidate's Node probe was
+observed reporting nine. An allocation derived from that observation can
+therefore over-request native workers. The explicit vCPU authority keeps Node
+partitioning and Rust admission
 on the deployed CPU limit, while the worker bound preserves all eight service
 vCPUs and native Clearra independently validates the affinity ceiling at every
 worker-pool boundary. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` must therefore

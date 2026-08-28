@@ -181,14 +181,15 @@ CLEARRA_MAX_OUTPUT_BYTES=4194304
 
 One automatic job receives the service's explicit eight-worker allocation.
 Keep `CLEARRA_EXPECTED_VCPUS=8` and the numeric worker bound aligned with
-`--cpu=8`: Cloud Run startup CPU boost can temporarily make the host report more
-logical processors than the steady-state Linux affinity ceiling, so deriving
-either authority from startup visibility is not release-safe. The expected-vCPU
-setting binds Node's partition and Rust's resource lease to the deployed CPU
-limit; the native runtime still validates that ceiling before creating workers.
+`--cpu=8`. Startup CPU boost is enabled, while a startup-time runtime probe can
+still differ from the configured limit; the candidate's Node probe was observed
+reporting nine logical processors. Deriving either authority from that
+observation is not release-safe. The expected-vCPU setting binds Node's
+partition and Rust's resource lease to the deployed CPU limit; the native
+runtime still validates that ceiling before creating workers.
 `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` is an explicit native execution
 authority: the job service must preserve it as `--use-all-cpu-threads` even when
-startup boost makes Node see nine processors, while the separate numeric worker
+the Node startup probe sees nine processors, while the separate numeric worker
 bound remains eight. Set
 `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0` only when deliberately reserving one
 processor. Caller-supplied worker switches are stripped and cannot exceed the

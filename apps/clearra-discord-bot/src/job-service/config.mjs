@@ -7,12 +7,13 @@ export function loadClearraJobServiceConfig(
   runtime = {},
 ) {
   const processLogicalProcessors = runtimeLogicalProcessorCount(runtime);
-  const expectedVcpus = environment.K_SERVICE
-    ? positiveInteger(
-        environment.CLEARRA_EXPECTED_VCPUS,
-        processLogicalProcessors,
-      )
-    : undefined;
+  const configuredExpectedVcpus = environment.CLEARRA_EXPECTED_VCPUS;
+  const expectedVcpus =
+    configuredExpectedVcpus !== undefined && configuredExpectedVcpus !== ""
+      ? positiveInteger(configuredExpectedVcpus, processLogicalProcessors)
+      : environment.K_SERVICE
+        ? processLogicalProcessors
+        : undefined;
   const cpuAuthorityLogicalProcessors =
     expectedVcpus ?? processLogicalProcessors;
   const useAllLogicalProcessors = booleanSetting(

@@ -444,6 +444,19 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
       ),
     /per-job runtime limit of 8/,
   );
+
+  const nonCloud = loadClearraJobServiceConfig(
+    {
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_EXPECTED_VCPUS: "8",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "auto",
+      CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "1",
+    },
+    { availableParallelism: () => 9 },
+  );
+  assert.equal(nonCloud.processLogicalProcessors, 9);
+  assert.equal(nonCloud.expectedVcpus, 8);
+  assert.equal(nonCloud.searchWorkersPerSession, 8);
 });
 
 test("unauthenticated local job service is restricted to loopback", () => {
