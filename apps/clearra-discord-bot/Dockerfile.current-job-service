@@ -67,11 +67,7 @@ RUN node -e "const p=/^[0-9a-f]{40}$/; if(!p.test(process.env.CLEARRA_SOURCE_COM
 
 COPY --from=clearra-build /workspace/target/release/clearra /usr/local/bin/clearra
 COPY --from=node-build /workspace/node_modules ./node_modules
-COPY --from=node-build /workspace/apps/clearra-discord-bot/src/clearra ./src/clearra
-COPY --from=node-build /workspace/apps/clearra-discord-bot/src/discord/build-v2-result.mjs ./src/discord/build-v2-result.mjs
-COPY --from=node-build /workspace/apps/clearra-discord-bot/src/discord/typed-product-result.mjs ./src/discord/typed-product-result.mjs
-COPY --from=node-build /workspace/apps/clearra-discord-bot/src/job-service ./src/job-service
-COPY --from=node-build /workspace/apps/clearra-discord-bot/src/operational-log.mjs ./src/operational-log.mjs
+COPY --from=node-build /workspace/apps/clearra-discord-bot/src ./src
 COPY --from=node-build /workspace/packages/ctk3/package.json ./packages/ctk3/package.json
 COPY --from=node-build /workspace/packages/ctk3/dist ./packages/ctk3/dist
 
