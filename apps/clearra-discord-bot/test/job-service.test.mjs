@@ -369,6 +369,47 @@ test("job service uses every Cloud Run logical processor by default", () => {
   );
 });
 
+test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility", () => {
+  const config = loadClearraJobServiceConfig(
+    {
+      K_SERVICE: "clearra-current-job",
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "8",
+      CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "1",
+      CLEARRA_MAX_CONCURRENT_JOBS: "1",
+    },
+    { availableParallelism: () => 9 },
+  );
+
+  assert.equal(config.processLogicalProcessors, 9);
+  assert.equal(config.expectedVcpus, 9);
+  assert.equal(config.searchWorkersPerSession, 8);
+  assert.equal(config.useAllLogicalProcessors, false);
+  assert.deepEqual(
+    prepareClearraArguments(["pc", "--lines", "2", "--queue", "IJLOO"], {
+      workers: config.searchWorkersPerSession,
+      useAllLogicalProcessors: config.useAllLogicalProcessors,
+      logicalProcessors: config.processLogicalProcessors,
+      outputFormat: "json",
+      includeSolutionData: true,
+    }),
+    [
+      "pc",
+      "--lines",
+      "2",
+      "--queue",
+      "IJLOO",
+      "--no-tablebase",
+      "--no-build-dependency-dag",
+      "--auto-workers",
+      "8",
+      "--format",
+      "json",
+      "--include-solution-data",
+    ],
+  );
+});
+
 test("unauthenticated local job service is restricted to loopback", () => {
   assert.throws(
     () => loadClearraJobServiceConfig({

@@ -2007,6 +2007,26 @@ function Invoke-ReleaseIdentityGateValidation {
             $deploymentBootstrapIndex -ge $deployIndex) {
             Add-ArchitectureError "$($deploymentDoc.Name) must repeat the exact runtime-SA/Secret/caller preflight immediately before Cloud Run deployment"
         }
+        $explicitEightWorkerCount = [regex]::Matches(
+            $deploymentDoc.Text,
+            'CLEARRA_SEARCH_WORKERS_PER_SESSION=8'
+        ).Count
+        if ($explicitEightWorkerCount -lt 2 -or
+            $deploymentDoc.Text.IndexOf(
+                'CLEARRA_SEARCH_WORKERS_PER_SESSION=auto',
+                [System.StringComparison]::Ordinal
+            ) -ge 0 -or
+            $deploymentDoc.Text.IndexOf(
+                '--cpu=8',
+                [System.StringComparison]::Ordinal
+            ) -lt 0 -or
+            -not [regex]::IsMatch(
+                $deploymentDoc.Text,
+                'startup CPU boost',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )) {
+            Add-ArchitectureError "$($deploymentDoc.Name) must pin the 8-vCPU service to eight workers and document startup CPU boost visibility"
+        }
     }
     $syncHeadingIndex = $cloudDeploy.IndexOf('## Exact-SHA command synchronization', [System.StringComparison]::Ordinal)
     $syncPreflightIndex = $cloudDeploy.IndexOf(
