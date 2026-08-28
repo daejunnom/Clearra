@@ -132,7 +132,9 @@ the repaired-candidate observations retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry2.v1.json`,
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry3.v1.json`,
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry4.v1.json`, and
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry5.v1.json`.
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry5.v1.json`, with
+the deployment-admission repair retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry6.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -141,7 +143,12 @@ freezes the host-independent requested/effective worker assertion repaired after
 the canonical Windows runner exposed its four-logical-processor clamp; retry 5
 freezes CLI ownership of a 16 MiB product-execution stack after canonical Windows
 ProductE2E exposed the native debug executable's 1 MiB main-thread stack overflow.
-The stack repair does not alter search or result semantics. Every release observation
+Retry 6 follows the zero-traffic managed-Secret smoke that exposed a split between
+the Cloud Run worker ceiling and the shared execution-resource lease. It pins the
+configured 8-vCPU authority through Node partitioning, the Rust child environment,
+worker selection, and admission; candidate enumeration, ranking, and result
+semantics are unchanged. The stack and admission repairs do not alter search or
+result semantics. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new
