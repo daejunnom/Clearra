@@ -199,10 +199,11 @@ mod tests {
         explicitly_bounded.budget.has_max_memory_mib = 1;
         explicitly_bounded.budget.max_memory_mib = 64;
 
-        assert_eq!(policy.workers(), 4);
+        assert_eq!(policy.workers_requested(), Some(4));
+        assert!((1..=4).contains(&policy.workers()));
         assert_eq!(raw_worker_count(&unbounded, &policy), 1);
         assert_eq!(raw_worker_count(&explicitly_bounded, &policy), 1);
-        assert_eq!(policy.workers(), 4);
+        assert_eq!(policy.workers_requested(), Some(4));
         assert_eq!(
             raw_actual_backend(SelectedSearchBackend::CpuParallelGeometryExactCover),
             SelectedSearchBackend::CpuGeometryExactCover

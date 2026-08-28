@@ -129,12 +129,15 @@ separate exact-source release observations are retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze.v1.json` and
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry1.v1.json`, with
 the repaired-candidate observations retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry2.v1.json` and
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry3.v1.json`.
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry2.v1.json`,
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry3.v1.json`, and
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry4.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
-the final unsafe-syntax detector hardening and actual UI WASM scan path. Every release
+the final unsafe-syntax detector hardening and actual UI WASM scan path; retry 4
+freezes the host-independent requested/effective worker assertion repaired after
+the canonical Windows runner exposed its four-logical-processor clamp. Every release
 observation reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new
