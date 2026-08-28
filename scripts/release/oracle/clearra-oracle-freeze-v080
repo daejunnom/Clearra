@@ -313,10 +313,16 @@ assemble_candidate() {
 }
 
 tool_authority() {
-  path=$1
+  current_sha256=$1
+  path=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
     require_root_regular_mode "$path" 755
-    /usr/bin/printf '%s:%s\n' "$(sha256_of "$path")" "$(/usr/bin/stat -c '%s' -- "$path")"
+    installed_sha256=$(sha256_of "$path")
+    if [ "$installed_sha256" = "$current_sha256" ]; then
+      /usr/bin/printf '%s\n' 'absent:0'
+    else
+      /usr/bin/printf '%s:%s\n' "$installed_sha256" "$(/usr/bin/stat -c '%s' -- "$path")"
+    fi
   else
     /usr/bin/printf '%s\n' 'absent:0'
   fi
@@ -436,8 +442,8 @@ candidate_files0644=$(/usr/bin/find "$candidate_root" -xdev -type f -perm 0644 -
 candidate_files0755=$(/usr/bin/find "$candidate_root" -xdev -type f -perm 0755 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
 candidate_symlinks=$(/usr/bin/find "$candidate_root" -xdev -type l -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
 [ "$candidate_files0755" = 8 ] && [ "$candidate_symlinks" = 2 ] || fail 65
-prior_launcher=$(tool_authority "$canonical_launcher")
-prior_digester=$(tool_authority "$canonical_digester")
+prior_launcher=$(tool_authority "$launcher_sha256" "$canonical_launcher")
+prior_digester=$(tool_authority "$digester_sha256" "$canonical_digester")
 
 manifest_path=$freeze_root/oracle-inactive-stage-v080.json
 /usr/bin/python3 - "$manifest_path" \

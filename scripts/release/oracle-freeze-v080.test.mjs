@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -198,4 +199,69 @@ test("v0.8 Oracle freeze helper seals uploads and preserves the active authority
   assert.match(text, /oracle_manifest_base64=\$manifest_base64/u);
   assert.doesNotMatch(text, /(?:cat|head|tail|sed|awk).*\$settings_path/u);
   assert.doesNotMatch(text, /(?:cat|head|tail|sed|awk).*\$baseline_config_path/u);
+});
+
+test("v0.8 Oracle freeze records only a distinct installed tool as prior authority", () => {
+  const text = readFileSync(freezeHelper, "utf8");
+  const functionStart = text.indexOf("tool_authority() {");
+  const functionEnd = text.indexOf("\ncleanup() {", functionStart);
+  assert.ok(functionStart >= 0 && functionEnd > functionStart);
+
+  const temporaryRoot = mkdtempSync(
+    join(tmpdir(), "clearra-oracle-tool-authority-test-"),
+  );
+  try {
+    const installedTool = join(temporaryRoot, "installed-tool");
+    const probe = join(temporaryRoot, "probe.sh");
+    writeFileSync(installedTool, "same tool bytes\n", { flag: "wx" });
+    writeFileSync(
+      probe,
+      [
+        "#!/bin/sh",
+        "set -eu",
+        'fail() { exit "${1:-1}"; }',
+        'require_root_regular_mode() { [ -f "$1" ] && [ ! -L "$1" ]; }',
+        "sha256_of() { sha256sum -- \"$1\" | cut -d ' ' -f 1; }",
+        text.slice(functionStart, functionEnd),
+        'tool_authority "$1" "$2"',
+        "",
+      ].join("\n"),
+      { flag: "wx" },
+    );
+
+    const installedBytes = readFileSync(installedTool);
+    const installedSha256 = createHash("sha256")
+      .update(installedBytes)
+      .digest("hex");
+    const identical = runUnix("dash", [
+      toUnixPath(probe),
+      installedSha256,
+      toUnixPath(installedTool),
+    ]);
+    assert.equal(identical.status, 0, identical.stderr);
+    assert.equal(identical.stdout.trim(), "absent:0");
+
+    const replacementSha256 = "f".repeat(64);
+    assert.notEqual(replacementSha256, installedSha256);
+    const distinct = runUnix("dash", [
+      toUnixPath(probe),
+      replacementSha256,
+      toUnixPath(installedTool),
+    ]);
+    assert.equal(distinct.status, 0, distinct.stderr);
+    assert.equal(
+      distinct.stdout.trim(),
+      `${installedSha256}:${installedBytes.length}`,
+    );
+
+    const missing = runUnix("dash", [
+      toUnixPath(probe),
+      replacementSha256,
+      toUnixPath(join(temporaryRoot, "missing-tool")),
+    ]);
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.equal(missing.stdout.trim(), "absent:0");
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
