@@ -13,6 +13,7 @@ pub enum CliErrorCode {
     CliCommandUnknown,
     CliUnknownOption,
     CliCommandUnsupported,
+    CliProductThreadUnavailable,
     ProductRuntimeUnsupported,
     NativeCoreUnavailable,
     BackendGpuUnavailable,
@@ -84,6 +85,7 @@ impl CliErrorCode {
             Self::CliCommandUnknown => "E_CLI_COMMAND_UNKNOWN",
             Self::CliUnknownOption => "E_CLI_UNKNOWN_OPTION",
             Self::CliCommandUnsupported => "E_CLI_COMMAND_UNSUPPORTED",
+            Self::CliProductThreadUnavailable => "E_CLI_PRODUCT_THREAD_UNAVAILABLE",
             Self::ProductRuntimeUnsupported => "E_PRODUCT_RUNTIME_UNSUPPORTED",
             Self::NativeCoreUnavailable => "E_NATIVE_CORE_UNAVAILABLE",
             Self::BackendGpuUnavailable => "E_BACKEND_GPU_UNAVAILABLE",
@@ -149,6 +151,7 @@ impl CliErrorCode {
             | Self::BackendGpuUnavailable
             | Self::ConvertDirectionUnsupported => ExitCode::Unsupported,
             Self::PcSearchInternal
+            | Self::CliProductThreadUnavailable
             | Self::PathSearchInternal
             | Self::PcScenarioSearchInternal
             | Self::ContinueSearchInternal
@@ -262,6 +265,10 @@ mod tests {
             "E_CLI_ARTIFACT_COMMITTED_BUT_OUTPUT_FAILED"
         );
         assert_eq!(
+            CliErrorCode::CliProductThreadUnavailable.as_str(),
+            "E_CLI_PRODUCT_THREAD_UNAVAILABLE"
+        );
+        assert_eq!(
             CliErrorCode::CliMissingValue.default_exit_code(),
             ExitCode::ValidationFailed
         );
@@ -275,6 +282,10 @@ mod tests {
         );
         assert_eq!(
             CliErrorCode::CliArtifactPublishFailed.default_exit_code(),
+            ExitCode::InternalError
+        );
+        assert_eq!(
+            CliErrorCode::CliProductThreadUnavailable.default_exit_code(),
             ExitCode::InternalError
         );
     }
