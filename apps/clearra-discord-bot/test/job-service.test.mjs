@@ -346,6 +346,24 @@ test("job service uses every Cloud Run logical processor by default", () => {
   assert.equal(reserveCore.searchWorkersPerSession, 5);
   assert.equal(reserveCore.useAllLogicalProcessors, false);
   assert.equal(reserveCore.expectedVcpus, undefined);
+  assert.deepEqual(
+    prepareClearraArguments(["pc", "--lines", "1"], {
+      workers: reserveCore.searchWorkersPerSession,
+      useAllLogicalProcessors: reserveCore.useAllLogicalProcessors,
+      logicalProcessors: reserveCore.processLogicalProcessors,
+    }),
+    [
+      "pc",
+      "--lines",
+      "1",
+      "--no-tablebase",
+      "--no-build-dependency-dag",
+      "--auto-workers",
+      "5",
+      "--format",
+      "text",
+    ],
+  );
 
   assert.throws(
     () => loadClearraJobServiceConfig(
@@ -384,7 +402,7 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
   assert.equal(config.processLogicalProcessors, 9);
   assert.equal(config.expectedVcpus, 9);
   assert.equal(config.searchWorkersPerSession, 8);
-  assert.equal(config.useAllLogicalProcessors, false);
+  assert.equal(config.useAllLogicalProcessors, true);
   assert.deepEqual(
     prepareClearraArguments(["pc", "--lines", "2", "--queue", "IJLOO"], {
       workers: config.searchWorkersPerSession,
@@ -403,6 +421,7 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
       "--no-build-dependency-dag",
       "--auto-workers",
       "8",
+      "--use-all-cpu-threads",
       "--format",
       "json",
       "--include-solution-data",
@@ -437,6 +456,26 @@ test("job service partitions its CPU limit across concurrent jobs", () => {
 
   assert.equal(config.maxConcurrentJobs, 2);
   assert.equal(config.searchWorkersPerSession, 3);
+  assert.equal(config.useAllLogicalProcessors, true);
+  assert.deepEqual(
+    prepareClearraArguments(["pc", "--lines", "1"], {
+      workers: config.searchWorkersPerSession,
+      useAllLogicalProcessors: config.useAllLogicalProcessors,
+      logicalProcessors: config.processLogicalProcessors,
+    }),
+    [
+      "pc",
+      "--lines",
+      "1",
+      "--no-tablebase",
+      "--no-build-dependency-dag",
+      "--auto-workers",
+      "3",
+      "--use-all-cpu-threads",
+      "--format",
+      "text",
+    ],
+  );
   assert.throws(
     () => loadClearraJobServiceConfig(
       {

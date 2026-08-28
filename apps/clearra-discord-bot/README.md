@@ -583,14 +583,19 @@ gcloud services enable policytroubleshooter.googleapis.com --project=$projectId
 if ($LASTEXITCODE -ne 0) { throw "Policy Troubleshooter API prerequisite failed" }
 ```
 
-Automatic job execution uses every logical processor visible to the Node host.
-On Cloud Run, native Clearra may accept that eight-worker ceiling only after
-validating the Linux affinity mask; a failed validation falls back to the
-standard quota-aware probe. This fixes the observed Node=8/Rust=6 split without
-permitting workers above the assigned eight vCPUs. At four instances the
-service can run at most four searches and 32 workers in aggregate, although the
-current Oracle caller intentionally admits only one remote job at a time.
-`CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0` reserves one processor per instance.
+Production job execution is pinned to one search with an explicit ceiling of
+eight workers; it does not derive that ceiling from the processor count visible
+to Node during startup. Cloud Run startup CPU boost may temporarily expose nine
+logical processors, but `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` still authorizes
+native Clearra to use the otherwise reserved final processor without raising
+the independent `--auto-workers 8` ceiling. Native Clearra revalidates its
+steady-state Linux affinity limit before creating the worker pool. A numeric
+request above that hard limit is rejected rather than retried with an automatic
+fallback. At four instances the service can run at most four searches and 32
+workers in aggregate, although the current Oracle caller intentionally admits
+only one remote job at a time. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0` reserves
+one processor per instance. Configurations with a different CPU limit or more
+than one concurrent job require a separately bounded per-session allocation.
 Users cannot override the service policy with `--workers`, `--auto-workers`,
 `--cpu-threads`, or `--use-all-cpu-threads`.
 
@@ -1003,8 +1008,11 @@ by the Node host beyond the steady-state Linux affinity ceiling; an automatic
 allocation derived during that window can therefore over-request native
 workers. The explicit bound preserves all eight service vCPUs while native
 Clearra independently validates the affinity ceiling at every worker-pool
-boundary. Configurations with a different CPU limit or multiple concurrent
-searches must use the corresponding bounded per-session number.
+boundary. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` must therefore always preserve
+the native `--use-all-cpu-threads` authority; it is not re-derived from Node's
+temporarily inflated startup count. The independent numeric allocation still
+caps the request at eight. Configurations with a different CPU limit or multiple
+concurrent searches must use the corresponding bounded per-session number.
 
 Set Oracle's `CLEARRA_JOB_URL` to the `clearra-current-job` URL plus `/jobs`.
 Leave the Discord application's **Interactions Endpoint URL empty** so all

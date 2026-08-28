@@ -132,9 +132,7 @@ export function loadClearraJobServiceConfig(
       ? processLogicalProcessors
       : undefined,
     searchWorkersPerSession,
-    useAllLogicalProcessors:
-      useAllLogicalProcessors &&
-      searchWorkersPerSession > Math.max(1, processLogicalProcessors - 1),
+    useAllLogicalProcessors,
     runtimeIdentity: runtimeIdentityFromEnvironment(environment),
   };
 }

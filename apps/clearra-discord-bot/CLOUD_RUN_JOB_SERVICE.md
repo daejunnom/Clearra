@@ -183,7 +183,10 @@ Keep this numeric bound aligned with `--cpu=8`: Cloud Run startup CPU boost can
 temporarily make the host report more logical processors than the steady-state
 Linux affinity ceiling, so deriving the allocation from startup visibility is
 not release-safe. The native runtime still validates that ceiling before
-creating workers. Set
+creating workers. `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1` is an explicit native
+execution authority: the job service must preserve it as
+`--use-all-cpu-threads` even when startup boost makes Node see nine processors,
+while the separate numeric worker bound remains eight. Set
 `CLEARRA_USE_ALL_LOGICAL_PROCESSORS=0` only when deliberately reserving one
 processor. Caller-supplied worker switches are stripped and cannot exceed the
 service policy.
