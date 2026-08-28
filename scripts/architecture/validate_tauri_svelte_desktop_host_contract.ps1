@@ -147,7 +147,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     foreach ($requiredMarker in @(
         "GuiToAppRequest::build",
         "self.app_context.run(request)",
-        "response.to_host_response()",
+        "response.to_host_response_with_solution_set_artifact",
         "serde_json::to_string",
         "PcQueueInput::fixed_sequence",
         "PcHoldPolicy::Disabled"

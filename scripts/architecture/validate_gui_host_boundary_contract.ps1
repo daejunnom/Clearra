@@ -25,7 +25,7 @@ function Invoke-GuiHostBoundaryContractValidation() {
         "GuiToAppRequest::build",
         "self.app_context.validate_request",
         "self.app_context.run(request)",
-        "response.to_host_response()"
+        "response.to_host_response_with_solution_set_artifact"
     )) {
         if ($desktopBridge -notlike "*$requiredMarker*") {
             Add-ArchitectureError "U3 desktop bridge is missing executable boundary marker '$requiredMarker'"

@@ -195,7 +195,7 @@ foreach ($requiredMarker in @(
 }
 foreach ($requiredMarker in @(
     "self.app_context.run(request)",
-    "response.to_host_response()",
+    "response.to_host_response_with_solution_set_artifact",
     "serde_json::to_string",
     "GuiToAppRequest::build"
 )) {
