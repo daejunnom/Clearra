@@ -1,0 +1,396 @@
+name: Preserve or Restore GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Capture the active Pages source or restore a captured artifact
+        required: true
+        type: choice
+        options:
+          - capture
+          - restore
+      snapshot_sha:
+        description: Exact source commit represented by the active Pages site
+        required: true
+        type: string
+      expected_current_main:
+        description: Exact current main commit that owns this rollback bracket
+        required: true
+        type: string
+      current_pages_sha:
+        description: Exact Pages source active immediately before restore; blank for capture
+        required: false
+        type: string
+      snapshot_run_id:
+        description: Successful capture workflow run ID; required only for restore
+        required: false
+        type: string
+      snapshot_artifact_id:
+        description: Exact capture artifact ID; required only for restore
+        required: false
+        type: string
+      snapshot_artifact_name:
+        description: Run-attempt-bound capture artifact name; required only for restore
+        required: false
+        type: string
+      snapshot_artifact_digest:
+        description: Exact sha256-prefixed capture artifact digest; required only for restore
+        required: false
+        type: string
+      snapshot_tar_sha256:
+        description: Exact SHA-256 of the captured Pages artifact.tar; required only for restore
+        required: false
+        type: string
+      restore_authorization:
+        description: Exact ROLLBACK current-to-snapshot sentinel; required only for restore
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  capture-authority:
+    if: ${{ inputs.mode == 'capture' }}
+    permissions:
+      contents: read
+      actions: read
+      pages: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_current_main }}
+          path: authority-source
+      - name: Verify active Pages capture authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: capture
+          PAGES_AUTHORITY_PHASE: initial
+          AUTHORITY_SHA: ${{ inputs.expected_current_main }}
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
+          CAPTURE_ARTIFACT_ID: ${{ inputs.snapshot_artifact_id }}
+          CAPTURE_ARTIFACT_NAME: ${{ inputs.snapshot_artifact_name }}
+          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.snapshot_artifact_digest }}
+          CAPTURE_TAR_SHA256: ${{ inputs.snapshot_tar_sha256 }}
+          RESTORE_AUTHORIZATION: ${{ inputs.restore_authorization }}
+        shell: bash
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
+
+  capture-build:
+    if: ${{ inputs.mode == 'capture' }}
+    needs: capture-authority
+    permissions:
+      contents: read
+      actions: read
+      pages: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.snapshot_sha }}
+          path: snapshot-source
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_current_main }}
+          path: authority-source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: snapshot-source/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/Clearra/build/cargo-target-wasm
+          key: pages-rollback-wasm-${{ runner.os }}-${{ hashFiles('snapshot-source/Cargo.lock') }}-bindgen-0.2.126
+      - name: Prepare Rust WASM toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.126" ]]; then
+            cargo install wasm-bindgen-cli --version 0.2.126 --locked
+          fi
+      - name: Install GUI dependencies
+        working-directory: snapshot-source
+        run: npm ci --ignore-scripts
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Build previous Pages source
+        working-directory: snapshot-source
+        env:
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+        run: |
+          CLEARRA_WEB_BASE_PATH="/${GITHUB_REPOSITORY#*/}" \
+          CLEARRA_SOURCE_COMMIT="$SNAPSHOT_SHA" \
+          CLEARRA_ENGINE_BUILD_ID="$SNAPSHOT_SHA" \
+          npm run build --workspace apps/clearra-web
+      - name: Stamp exact rollback identity
+        env:
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in \
+            snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json \
+            snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json; do
+            jq -e --arg sha "$SNAPSHOT_SHA" '
+              .build.runtime_identity.source_commit == $sha and
+              .build.runtime_identity.engine_build_id == $sha and
+              .build.runtime_identity.contract_schema_version == "clearra.search.contract.v2" and
+              .build.runtime_identity.supply_semantics_id == "clearra.supply.projected-terminal-lookahead.v1" and
+              .build.runtime_identity.artifact_schema_version == "clearra.solution-data.v1"
+            ' "$manifest" >/dev/null
+          done
+          version="$(node snapshot-source/scripts/release/validate-release-metadata.mjs)"
+          jq -n --arg sourceCommit "$SNAPSHOT_SHA" \
+            --arg engineBuildId "$SNAPSHOT_SHA" \
+            --arg version "$version" \
+            '{schema:"clearra.pages.identity.v2",sourceCommit:$sourceCommit,engineBuildId:$engineBuildId,contractSchemaVersion:"clearra.search.contract.v2",supplySemanticsId:"clearra.supply.projected-terminal-lookahead.v1",artifactSchemaVersion:"clearra.solution-data.v1",version:$version}' \
+            > snapshot-source/apps/clearra-web/build/clearra-build-identity.json
+          jq -e --arg sha "$SNAPSHOT_SHA" '
+            .schema == "clearra.pages.identity.v2" and
+            .sourceCommit == $sha and .engineBuildId == $sha and
+            .contractSchemaVersion == "clearra.search.contract.v2" and
+            .supplySemanticsId == "clearra.supply.projected-terminal-lookahead.v1" and
+            .artifactSchemaVersion == "clearra.solution-data.v1" and
+            (.version | type == "string" and length > 0)
+          ' snapshot-source/apps/clearra-web/build/clearra-build-identity.json >/dev/null
+          if find snapshot-source/apps/clearra-web/build -type l -print -quit | grep -q .; then
+            echo 'Pages rollback site must not contain symbolic links' >&2
+            exit 2
+          fi
+          export LC_ALL=C
+          while IFS= read -r -d '' relative_path; do
+            tar_member="./${relative_path}"
+            if (( ${#tar_member} > 100 )); then
+              echo 'Pages rollback site contains a tar member name longer than the portable header field' >&2
+              exit 2
+            fi
+          done < <(find snapshot-source/apps/clearra-web/build -mindepth 1 -printf '%P\0')
+      - name: Revalidate capture authority immediately before artifact creation
+        id: artifact-authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: capture
+          PAGES_AUTHORITY_PHASE: preartifact
+          AUTHORITY_SHA: ${{ inputs.expected_current_main }}
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
+          CAPTURE_ARTIFACT_ID: ${{ inputs.snapshot_artifact_id }}
+          CAPTURE_ARTIFACT_NAME: ${{ inputs.snapshot_artifact_name }}
+          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.snapshot_artifact_digest }}
+          CAPTURE_TAR_SHA256: ${{ inputs.snapshot_tar_sha256 }}
+          RESTORE_AUTHORIZATION: ${{ inputs.restore_authorization }}
+        run: |
+          node authority-source/scripts/release/pages-rollback-authority.mjs
+          echo "artifact_name=clearra-pages-rollback-${SNAPSHOT_SHA}-authority-${AUTHORITY_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Upload durable Pages rollback artifact
+        id: snapshot
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: ${{ steps.artifact-authority.outputs.artifact_name }}
+          path: snapshot-source/apps/clearra-web/build
+          retention-days: 90
+      - name: Record exact rollback artifact authorities
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_ARTIFACT_NAME: ${{ steps.artifact-authority.outputs.artifact_name }}
+          SNAPSHOT_ARTIFACT_ID: ${{ steps.snapshot.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SNAPSHOT_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] ||
+             [[ ! -f "$RUNNER_TEMP/artifact.tar" ]]; then
+            echo 'Pages rollback artifact did not return exact ID and tar authorities' >&2
+            exit 2
+          fi
+          tar_sha256="$(sha256sum "$RUNNER_TEMP/artifact.tar" | awk '{print $1}')"
+          if [[ ! "$tar_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Pages rollback tar SHA-256 is invalid' >&2
+            exit 2
+          fi
+          for attempt in {1..6}; do
+            artifact_json="$(mktemp)"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${SNAPSHOT_ARTIFACT_ID}" > "$artifact_json"
+            if jq -e --argjson id "$SNAPSHOT_ARTIFACT_ID" \
+                 --arg name "$SNAPSHOT_ARTIFACT_NAME" \
+                 --argjson runId "$GITHUB_RUN_ID" \
+                 --arg sha "$GITHUB_SHA" '
+                   .id == $id and .name == $name and .expired == false and
+                   (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                   .workflow_run.id == $runId and
+                   .workflow_run.head_branch == "main" and
+                   .workflow_run.head_sha == $sha
+                 ' "$artifact_json" >/dev/null; then
+              created_epoch="$(date -u -d "$(jq -r '.created_at' "$artifact_json")" +%s)"
+              expires_epoch="$(date -u -d "$(jq -r '.expires_at' "$artifact_json")" +%s)"
+              if (( expires_epoch - created_epoch >= 89 * 24 * 60 * 60 )); then
+                artifact_digest="$(jq -r '.digest' "$artifact_json")"
+                expires_at="$(jq -r '.expires_at' "$artifact_json")"
+                rm -f "$artifact_json"
+                {
+                  echo "### Pages rollback capture authority"
+                  echo "artifact_id=${SNAPSHOT_ARTIFACT_ID}"
+                  echo "artifact_name=${SNAPSHOT_ARTIFACT_NAME}"
+                  echo "artifact_digest=${artifact_digest}"
+                  echo "artifact_tar_sha256=${tar_sha256}"
+                  echo "artifact_expires_at=${expires_at}"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+            fi
+            rm -f "$artifact_json"
+            sleep 2
+          done
+          echo 'Pages rollback artifact API readback did not prove ID, digest, run, and 90-day retention' >&2
+          exit 2
+
+  restore-authority:
+    if: ${{ inputs.mode == 'restore' }}
+    permissions:
+      contents: read
+      actions: read
+      pages: read
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.authority.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_current_main }}
+          path: authority-source
+      - name: Verify rollback run and artifact authority
+        id: authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: restore
+          PAGES_AUTHORITY_PHASE: initial
+          AUTHORITY_SHA: ${{ inputs.expected_current_main }}
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
+          CAPTURE_ARTIFACT_ID: ${{ inputs.snapshot_artifact_id }}
+          CAPTURE_ARTIFACT_NAME: ${{ inputs.snapshot_artifact_name }}
+          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.snapshot_artifact_digest }}
+          CAPTURE_TAR_SHA256: ${{ inputs.snapshot_tar_sha256 }}
+          RESTORE_AUTHORIZATION: ${{ inputs.restore_authorization }}
+        run: |
+          node authority-source/scripts/release/pages-rollback-authority.mjs
+          echo "artifact_name=${CAPTURE_ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+  restore-package:
+    if: ${{ inputs.mode == 'restore' }}
+    needs: restore-authority
+    permissions:
+      contents: read
+      actions: read
+      pages: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_current_main }}
+          path: authority-source
+      - name: Download exact rollback package
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.restore-authority.outputs.artifact_name }}
+          path: rollback-package
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.snapshot_run_id }}
+      - name: Verify downloaded rollback package
+        env:
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          SNAPSHOT_TAR_SHA256: ${{ inputs.snapshot_tar_sha256 }}
+          PAGES_ROLLBACK_PACKAGE_DIR: rollback-package
+        run: node authority-source/scripts/release/pages-rollback-package.mjs
+      - name: Upload exact rollback Pages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-pages
+          path: rollback-package/artifact.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  deploy-restore:
+    if: ${{ inputs.mode == 'restore' }}
+    needs:
+      - restore-authority
+      - restore-package
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_current_main }}
+          path: authority-source
+      - name: Revalidate rollback artifact immediately before deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: restore
+          PAGES_AUTHORITY_PHASE: predeploy
+          AUTHORITY_SHA: ${{ inputs.expected_current_main }}
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
+          CAPTURE_ARTIFACT_ID: ${{ inputs.snapshot_artifact_id }}
+          CAPTURE_ARTIFACT_NAME: ${{ inputs.snapshot_artifact_name }}
+          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.snapshot_artifact_digest }}
+          CAPTURE_TAR_SHA256: ${{ inputs.snapshot_tar_sha256 }}
+          RESTORE_AUTHORIZATION: ${{ inputs.restore_authorization }}
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
+      - name: Deploy exact Pages rollback
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify restored Pages source identity
+        env:
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        shell: bash
+        run: |
+          for attempt in {1..12}; do
+            if identity="$(curl --fail --silent --show-error \
+              "${PAGE_URL%/}/clearra-build-identity.json?rollback=${SNAPSHOT_SHA}")" &&
+               manifest="$(curl --fail --silent --show-error \
+              "${PAGE_URL%/}/wasm/clearra_wasm.manifest.json?rollback=${SNAPSHOT_SHA}")" &&
+               jq -e --arg sha "$SNAPSHOT_SHA" '
+                 .schema == "clearra.pages.identity.v2" and
+                 .sourceCommit == $sha and .engineBuildId == $sha and
+                 .contractSchemaVersion == "clearra.search.contract.v2" and
+                 .supplySemanticsId == "clearra.supply.projected-terminal-lookahead.v1" and
+                 .artifactSchemaVersion == "clearra.solution-data.v1" and
+                 (.version | type == "string" and length > 0)
+               ' <<<"$identity" >/dev/null &&
+               jq -e --arg sha "$SNAPSHOT_SHA" '
+                 .build.runtime_identity.source_commit == $sha and
+                 .build.runtime_identity.engine_build_id == $sha and
+                 .build.runtime_identity.contract_schema_version == "clearra.search.contract.v2" and
+                 .build.runtime_identity.supply_semantics_id == "clearra.supply.projected-terminal-lookahead.v1" and
+                 .build.runtime_identity.artifact_schema_version == "clearra.solution-data.v1"
+               ' <<<"$manifest" >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'restored Pages identity did not converge to the rollback SHA' >&2
+          exit 2

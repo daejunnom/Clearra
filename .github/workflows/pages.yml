@@ -7,6 +7,30 @@ on:
         description: Exact main commit that already passed canonical ReleaseAcceptance
         required: true
         type: string
+      rollback_snapshot_sha:
+        description: Exact Pages source active before this deployment
+        required: true
+        type: string
+      rollback_capture_run_id:
+        description: Successful Pages rollback capture workflow run ID
+        required: true
+        type: string
+      rollback_artifact_id:
+        description: Exact durable rollback artifact ID
+        required: true
+        type: string
+      rollback_artifact_name:
+        description: Exact run-attempt-bound durable rollback artifact name
+        required: true
+        type: string
+      rollback_artifact_digest:
+        description: Exact sha256-prefixed durable rollback artifact digest
+        required: true
+        type: string
+      rollback_tar_sha256:
+        description: Exact SHA-256 of the captured Pages artifact.tar
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,7 +40,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   accepted-source:
@@ -56,6 +80,35 @@ jobs:
             echo 'Pages source has no successful canonical workflow_dispatch acceptance run' >&2
             exit 2
           fi
+      - name: Verify durable rollback capture before Pages build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: forward
+          PAGES_AUTHORITY_PHASE: initial
+          AUTHORITY_SHA: ${{ inputs.accepted_sha }}
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
+          CAPTURE_ARTIFACT_ID: ${{ inputs.rollback_artifact_id }}
+          CAPTURE_ARTIFACT_NAME: ${{ inputs.rollback_artifact_name }}
+          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.rollback_artifact_digest }}
+          CAPTURE_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          RESTORE_AUTHORIZATION: ""
+        run: node scripts/release/pages-rollback-authority.mjs
+      - name: Download durable rollback capture before Pages build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.rollback_artifact_name }}
+          path: rollback-capture-initial
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rollback_capture_run_id }}
+      - name: Verify exact rollback package before Pages build
+        env:
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          SNAPSHOT_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-initial
+        run: node scripts/release/pages-rollback-package.mjs
 
   build:
     needs: accepted-source
@@ -127,6 +180,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.accepted_sha }}
+          path: authority-source
       - name: Revalidate accepted source immediately before deployment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -149,6 +206,35 @@ jobs:
             echo 'Pages source no longer has a successful exact-SHA canonical acceptance run' >&2
             exit 2
           fi
+      - name: Redownload durable rollback capture immediately before deployment
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.rollback_artifact_name }}
+          path: rollback-capture-predeploy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rollback_capture_run_id }}
+      - name: Revalidate exact rollback package immediately before deployment
+        env:
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          SNAPSHOT_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-predeploy
+        run: node authority-source/scripts/release/pages-rollback-package.mjs
+      - name: Revalidate durable rollback capture immediately before deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: forward
+          PAGES_AUTHORITY_PHASE: predeploy
+          AUTHORITY_SHA: ${{ inputs.accepted_sha }}
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
+          CAPTURE_ARTIFACT_ID: ${{ inputs.rollback_artifact_id }}
+          CAPTURE_ARTIFACT_NAME: ${{ inputs.rollback_artifact_name }}
+          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.rollback_artifact_digest }}
+          CAPTURE_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          RESTORE_AUTHORIZATION: ""
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
       - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4

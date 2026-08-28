@@ -134,7 +134,9 @@ the repaired-candidate observations retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry4.v1.json`, and
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry5.v1.json`, with
 the deployment-admission repair retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry6.v1.json`.
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry6.v1.json`, and the
+Pages rollback repair is retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry7.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -147,8 +149,15 @@ Retry 6 follows the zero-traffic managed-Secret smoke that exposed a split betwe
 the Cloud Run worker ceiling and the shared execution-resource lease. It pins the
 configured 8-vCPU authority through Node partitioning, the Rust child environment,
 worker selection, and admission; candidate enumeration, ranking, and result
-semantics are unchanged. The stack and admission repairs do not alter search or
-result semantics. Every release observation
+semantics are unchanged. Retry 7 closes the predeployment Pages rollback gap
+exposed by the already-expired prior `github-pages` artifact. The tracked rollback
+workflow verifies the live prior source identity, rebuilds and retains the official
+Pages `artifact.tar` for 90 days, and binds the exact capture run/attempt, artifact
+ID/name/REST digest, and inner-tar SHA-256 to one authority-main bracket. Both the
+normal Pages workflow and restore path fresh-download and validate the complete tar
+before mutation, reject expired, corrupt, unsafe, mismatched, or drifted authorities,
+and revalidate the bracket immediately before deployment. The stack, admission, and
+rollback repairs do not alter search or result semantics. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new
@@ -261,6 +270,22 @@ machinery, fail-closed deployment authorities, and runbook are implemented in
 the release source. It does not predeclare the later Pages, Oracle, Discord,
 observation, tag, or immutable-release events; those are recorded only in the
 external hash-chained release-attempt journal after they occur.
+
+The Pages portion of that machinery includes a separate capture/restore workflow.
+Before the v0.8.0 Pages mutation, it must bind the live prior Pages identity to a
+non-expired 90-day Actions artifact containing the official Pages `artifact.tar`.
+The bracket records the capture run and attempt, artifact ID/name/REST digest, and
+inner-tar SHA-256. The ordinary forward workflow must fresh-download and verify that
+package both before build and immediately before deployment. Restore is fail closed
+unless the exact authority-main bracket, prior source SHA, successful capture build,
+artifact metadata and retention, complete tar hash and safe contents, typed build
+identity, live candidate identity, and WASM runtime identity all still match. It also
+requires the exact `ROLLBACK:<current>:TO:<snapshot>` sentinel and the absence of the
+v0.8.0 tag and release. Ninety-day retention does not broaden the artifact beyond its
+capture-time authority-main bracket. Capture reruns receive a distinct attempt-bound
+artifact, while forward and restore public mutations reject workflow reruns and require
+a fresh dispatch so the fixed deployment artifact name is never ambiguous across
+attempts.
 
 `REQ-V080-013` is implemented. The shared two-phase state machine is connected
 to both the admitted native producer and registered native host boundaries,

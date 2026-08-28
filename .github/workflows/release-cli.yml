@@ -55,6 +55,9 @@ jobs:
             exit 2
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate Pages rollback authority regression coverage
+        shell: bash
+        run: node --test scripts/release/pages-rollback-authority.test.mjs scripts/release/pages-rollback-package.test.mjs
       - name: Validate final-source evidence contract regression coverage
         shell: bash
         run: node --test scripts/release/final-source-attempt-journal.test.mjs scripts/release/validate-final-source-revalidation.test.mjs

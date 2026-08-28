@@ -450,6 +450,11 @@ function Invoke-ArchitectureValidationAuthorityPolicy {
 function Invoke-ReleaseIdentityGateValidation {
     $release = Read-Text '.github/workflows/release-cli.yml'
     $pages = Read-Text '.github/workflows/pages.yml'
+    $pagesRollback = Read-Text '.github/workflows/pages-rollback.yml'
+    $pagesRollbackAuthority = Read-Text 'scripts/release/pages-rollback-authority.mjs'
+    $pagesRollbackAuthorityTest = Read-Text 'scripts/release/pages-rollback-authority.test.mjs'
+    $pagesRollbackPackage = Read-Text 'scripts/release/pages-rollback-package.mjs'
+    $pagesRollbackPackageTest = Read-Text 'scripts/release/pages-rollback-package.test.mjs'
     $cloudBuild = Read-Text 'apps/clearra-discord-bot/cloudbuild-current-job-service.yaml'
     $currentDocker = Read-Text 'apps/clearra-discord-bot/Dockerfile.current-job-service'
     $legacyCloudBuild = Read-Text 'apps/clearra-discord-bot/cloudbuild-job-service.yaml'
@@ -507,6 +512,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'node --test scripts/release/validate-release-metadata.test.mjs',
         'node --test scripts/release/verify-remote-annotated-tag.test.mjs',
         'node --test scripts/release/create-exact-source-archive.test.mjs',
+        'node --test scripts/release/pages-rollback-authority.test.mjs',
+        'scripts/release/pages-rollback-package.test.mjs',
         'validate-release-cli-smokes.mjs',
         'release tag must point at the exact current main commit',
         'release tag is no longer the exact current main commit',
@@ -1078,8 +1085,30 @@ function Invoke-ReleaseIdentityGateValidation {
     if ($pages -match '(?ms)^\s*push:\s*\r?\n\s*branches:\s*\[main\]') {
         Add-ArchitectureError 'Pages must not deploy an unaccepted main push'
     }
-    if ($pages -match '(?m)^\s*(?!ref:|[A-Z_]+:)\S.*\$\{\{\s*inputs\.') {
-        Add-ArchitectureError 'Pages shell steps must receive workflow inputs through environment variables, never direct expression interpolation'
+    if ($pages.IndexOf('cancel-in-progress: false', [System.StringComparison]::Ordinal) -lt 0) {
+        Add-ArchitectureError 'Pages deployment must serialize with rollback capture and restore without cancelling an in-flight authority'
+    }
+    $pagesRunBlockIndent = $null
+    foreach ($line in ($pages -split "`n")) {
+        if ($line -match '^(\s*)run:\s*(.*)$') {
+            $pagesRunBlockIndent = $Matches[1].Length
+            if ($Matches[2] -match '\$\{\{\s*inputs\.') {
+                Add-ArchitectureError 'Pages shell steps must receive workflow inputs through environment variables, never direct expression interpolation'
+            }
+            continue
+        }
+        if ($null -ne $pagesRunBlockIndent) {
+            if ($line.Trim().Length -eq 0) {
+                continue
+            }
+            $lineIndent = $line.Length - $line.TrimStart().Length
+            if ($lineIndent -le $pagesRunBlockIndent) {
+                $pagesRunBlockIndent = $null
+            }
+            elseif ($line -match '\$\{\{\s*inputs\.') {
+                Add-ArchitectureError 'Pages shell steps must receive workflow inputs through environment variables, never direct expression interpolation'
+            }
+        }
     }
     foreach ($required in @(
         'EXPECTED_SHA: ${{ inputs.accepted_sha }}',
@@ -1111,6 +1140,176 @@ function Invoke-ReleaseIdentityGateValidation {
         if ($pages.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages workflow is missing exact product build identity '$required'"
         }
+    }
+    foreach ($required in @(
+        'rollback_snapshot_sha:',
+        'rollback_capture_run_id:',
+        'rollback_artifact_id:',
+        'rollback_artifact_name:',
+        'rollback_artifact_digest:',
+        'rollback_tar_sha256:',
+        'Verify durable rollback capture before Pages build',
+        'Download durable rollback capture before Pages build',
+        'Verify exact rollback package before Pages build',
+        'Redownload durable rollback capture immediately before deployment',
+        'Revalidate exact rollback package immediately before deployment',
+        'Revalidate durable rollback capture immediately before deployment',
+        'scripts/release/pages-rollback-authority.mjs',
+        'scripts/release/pages-rollback-package.mjs',
+        'github-token: ${{ github.token }}',
+        'run-id: ${{ inputs.rollback_capture_run_id }}'
+    )) {
+        if ($pages.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages forward workflow is missing durable rollback admission '$required'"
+        }
+    }
+    if (([regex]::Matches($pages, 'pages-rollback-authority\.mjs')).Count -ne 2 -or
+        ([regex]::Matches($pages, 'pages-rollback-package\.mjs')).Count -ne 2) {
+        Add-ArchitectureError 'Pages forward workflow must verify rollback metadata and package both before build and immediately before deployment'
+    }
+    foreach ($required in @(
+        'name: Preserve or Restore GitHub Pages',
+        'mode:',
+        '- capture',
+        '- restore',
+        'snapshot_sha:',
+        'expected_current_main:',
+        'current_pages_sha:',
+        'snapshot_run_id:',
+        'snapshot_artifact_id:',
+        'snapshot_artifact_name:',
+        'snapshot_artifact_digest:',
+        'snapshot_tar_sha256:',
+        'restore_authorization:',
+        'group: pages',
+        'cancel-in-progress: false',
+        'Revalidate capture authority immediately before artifact creation',
+        'clearra-pages-rollback-${SNAPSHOT_SHA}-authority-${AUTHORITY_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}',
+        'actions/upload-pages-artifact@v3',
+        'retention-days: 90',
+        '$RUNNER_TEMP/artifact.tar',
+        'Pages rollback artifact API readback did not prove ID, digest, run, and 90-day retention',
+        'actions/download-artifact@v4',
+        'github-token: ${{ github.token }}',
+        'run-id: ${{ inputs.snapshot_run_id }}',
+        'node authority-source/scripts/release/pages-rollback-package.mjs',
+        'Upload exact rollback Pages artifact',
+        'name: github-pages',
+        'compression-level: 0',
+        'Revalidate rollback artifact immediately before deployment',
+        'actions/deploy-pages@v4',
+        'restored Pages identity did not converge to the rollback SHA'
+    )) {
+        if ($pagesRollback.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages rollback workflow is missing fail-closed authority '$required'"
+        }
+    }
+    if ($pagesRollback -match '(?ms)^\s*push:\s*\r?\n\s*branches:') {
+        Add-ArchitectureError 'Pages rollback capture or restore must never run automatically on push'
+    }
+    foreach ($required in @(
+        'refs/heads/main',
+        '.github/workflows/pages.yml',
+        '.github/workflows/pages-rollback.yml',
+        '.github/workflows/release-cli.yml',
+        '/compare/${snapshotSha}...${authoritySha}',
+        'snapshot SHA must be the authority main SHA or its ancestor',
+        'capture run must contain exactly one capture-build job',
+        'MINIMUM_RETENTION_MS',
+        'forward and restore mutations require a fresh workflow dispatch, not a rerun',
+        'clearra-pages-rollback-${snapshot}-authority-${authority}-run-${runId}-attempt-${attempt}',
+        'validatePagesIdentity(identity, manifest, currentPagesSha)',
+        'ROLLBACK:${currentPagesSha}:TO:${snapshotSha}',
+        '/git/ref/tags/${RELEASE_TAG}',
+        '/releases/tags/${RELEASE_TAG}',
+        'capture run must complete before the consuming Pages mutation starts'
+    )) {
+        if ($pagesRollbackAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages rollback authority verifier is missing fail-closed contract '$required'"
+        }
+    }
+    foreach ($required in @(
+        'createHash("sha256")',
+        'Pages rollback tar header checksum is invalid',
+        'Pages rollback tar contains an unsafe member path',
+        'Pages rollback tar contains a link or special entry',
+        'Pages rollback tar contains a duplicate member path',
+        'Downloaded Pages artifact.tar differs from the captured SHA-256',
+        'clearra-build-identity.json',
+        'wasm/clearra_wasm.manifest.json',
+        'validatePagesIdentity(identity, manifest, sha)'
+    )) {
+        if ($pagesRollbackPackage.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages rollback package verifier is missing exact-package contract '$required'"
+        }
+    }
+    foreach ($required in @(
+        'canonical acceptance permits multiple exact successes',
+        'capture authority binds the run attempt, job, artifact, retention, and consumer order',
+        'capture names are unique per authority, run, and rerun attempt',
+        'capture reruns are unique while forward and restore require a fresh dispatch'
+    )) {
+        if ($pagesRollbackAuthorityTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages rollback authority regression is missing adversarial case '$required'"
+        }
+    }
+    foreach ($required in @(
+        'validates the exact tar hash and both complete identity documents',
+        'rejects traversal, links, duplicate identities, and forged identity',
+        'rejects corrupted headers and data after the tar end marker'
+    )) {
+        if ($pagesRollbackPackageTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages rollback package regression is missing adversarial case '$required'"
+        }
+    }
+    $captureValidationIndex = $pagesRollback.IndexOf(
+        'Revalidate capture authority immediately before artifact creation',
+        [System.StringComparison]::Ordinal
+    )
+    $captureUploadIndex = $pagesRollback.IndexOf(
+        'Upload durable Pages rollback artifact',
+        [System.StringComparison]::Ordinal
+    )
+    $captureReadbackIndex = $pagesRollback.IndexOf(
+        'Record exact rollback artifact authorities',
+        [System.StringComparison]::Ordinal
+    )
+    if ($captureValidationIndex -lt 0 -or
+        $captureUploadIndex -le $captureValidationIndex -or
+        $captureReadbackIndex -le $captureUploadIndex) {
+        Add-ArchitectureError 'Pages rollback capture must revalidate, create the exact Pages tar, and read back durable authorities in order'
+    }
+    $rollbackDownloadIndex = $pagesRollback.IndexOf(
+        'Download exact rollback package',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackPackageValidationIndex = $pagesRollback.IndexOf(
+        'Verify downloaded rollback package',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackUploadIndex = $pagesRollback.IndexOf(
+        'Upload exact rollback Pages artifact',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackLateValidationIndex = $pagesRollback.IndexOf(
+        'Revalidate rollback artifact immediately before deployment',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackDeployIndex = $pagesRollback.IndexOf(
+        'actions/deploy-pages@v4',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackReadbackIndex = $pagesRollback.IndexOf(
+        'Verify restored Pages source identity',
+        [System.StringComparison]::Ordinal
+    )
+    if ($rollbackDownloadIndex -lt 0 -or
+        $rollbackPackageValidationIndex -le $rollbackDownloadIndex -or
+        $rollbackUploadIndex -le $rollbackPackageValidationIndex -or
+        $rollbackLateValidationIndex -le $rollbackUploadIndex -or
+        $rollbackDeployIndex -le $rollbackLateValidationIndex -or
+        $rollbackReadbackIndex -le $rollbackDeployIndex) {
+        Add-ArchitectureError 'Pages rollback must download, validate, re-upload, revalidate, deploy, and read back the exact snapshot in order'
     }
     foreach ($package in @(
         @{ Name = 'UI'; Text = $uiPackage; Config = $uiContractTypecheck },
