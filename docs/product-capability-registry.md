@@ -148,7 +148,9 @@ dependency-free metadata evidence import closure retained in
 single installed-owner product registry validation retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry12.v1.json`, and its
 release-identity static ownership lock retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry13.v1.json`.
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry13.v1.json`, and the
+permanent product-pager contract test cohesion rationale retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry14.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -192,7 +194,9 @@ registry and alias parser test from the dependency-free metadata root to the exi
 installed Discord job, while metadata retains the pure upstream drift contract. It
 runs each authority once and adds no capability. Retry 13 makes that exact job skeleton,
 test command, and metadata exclusion a release-identity architecture invariant. It also
-adds no capability. Every release observation
+adds no capability. Retry 14 follows the canonical Linux SRP gate exposing that the
+cohesive product-result pager contract test lacked its permanent behavior-level single
+change reason. The test-ownership explanation adds no capability. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new

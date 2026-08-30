@@ -1,3 +1,4 @@
+// SRP rationale: this contract test has one behavior-level change reason: verifying the complete fail-closed product-result validation, canonical identity, and paging boundary exposed by the workspace pager.
 import assert from 'node:assert/strict';
 
 import type {
