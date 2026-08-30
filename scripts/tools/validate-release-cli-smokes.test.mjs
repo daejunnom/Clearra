@@ -91,8 +91,8 @@ test("rejects a Windows pc.tiling smoke without its typed result kind", async ()
 test("rejects a skipped product capability registry authority", async () => {
   const skippedWorkflow = replaceExactlyOnce(
     normalizedWorkflow,
-    "      - name: Require the product capability and alias parser authority\n        if: github.event_name == 'workflow_dispatch'\n        run: |\n",
-    "      - name: Require the product capability and alias parser authority\n        if: false\n        run: |\n",
+    "      - name: Require the product capability and alias parser authority\n        if: github.event_name == 'workflow_dispatch'\n        run: node --test tests/contracts/product_capability_registry.test.mjs\n",
+    "      - name: Require the product capability and alias parser authority\n        if: false\n        run: node --test tests/contracts/product_capability_registry.test.mjs\n",
   );
   const result = await runValidator(skippedWorkflow);
   assert.notEqual(result.status, 0, diagnostic(result));
@@ -101,8 +101,8 @@ test("rejects a skipped product capability registry authority", async () => {
 test("rejects a skipped upstream drift snapshot contract", async () => {
   const skippedWorkflow = replaceExactlyOnce(
     normalizedWorkflow,
-    "          node --test scripts/tools/audit-upstream-drift.test.mjs\n",
-    "          # node --test scripts/tools/audit-upstream-drift.test.mjs\n",
+    "      - name: Require the upstream drift audit authority\n        if: github.event_name == 'workflow_dispatch'\n        run: node --test scripts/tools/audit-upstream-drift.test.mjs\n",
+    "      - name: Require the upstream drift audit authority\n        if: false\n        run: node --test scripts/tools/audit-upstream-drift.test.mjs\n",
   );
   const result = await runValidator(skippedWorkflow);
   assert.notEqual(result.status, 0, diagnostic(result));
@@ -304,12 +304,12 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects duplicate Discord capability registry coverage in metadata",
+    "rejects runtime-backed capability registry coverage in metadata",
     (source) =>
       replaceExactlyOnce(
         source,
-        "          node --test tests/contracts/product_capability_registry.test.mjs\n",
-        "          node --test tests/contracts/product_capability_registry.test.mjs\n          node --test apps/clearra-discord-bot/test/capability-registry.test.mjs\n",
+        "        run: node --test scripts/tools/audit-upstream-drift.test.mjs\n",
+        "        run: |\n          node --test scripts/tools/audit-upstream-drift.test.mjs\n          node --test tests/contracts/product_capability_registry.test.mjs\n",
       ),
   ],
   [

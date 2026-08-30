@@ -848,7 +848,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'rejects Discord consumption of a different CTK3 artifact',
         'rejects canonical acceptance consumption of a different CTK3 artifact',
         'rejects canonical acceptance without the accepted CTK3 release path',
-        'rejects duplicate Discord capability registry coverage in metadata',
+        'rejects runtime-backed capability registry coverage in metadata',
         'rejects a standalone release smoke validation outside its mutation owner',
         'rejects Discord without the accepted CTK3 dependency',
         'rejects canonical acceptance without the exact Pages base path',
@@ -1357,7 +1357,8 @@ function Invoke-ReleaseIdentityGateValidation {
                 '- name: Download accepted CTK3 distribution',
                 '- name: Install JavaScript workspace',
                 '- name: Verify accepted CTK3 distribution',
-                '- name: Verify Clearrabot contracts'
+                '- name: Verify Clearrabot contracts',
+                '- name: Require the product capability and alias parser authority'
             ) `
             -Contract 'Discord accepted CTK3 consumer'
         foreach ($requiredDiscordConsumerMarker in @(
@@ -1365,7 +1366,8 @@ function Invoke-ReleaseIdentityGateValidation {
             'name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
             'path: packages/ctk3/dist',
             'run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"',
-            'run: npm run test:built --workspace @clearra/discord-bot'
+            'run: npm run test:built --workspace @clearra/discord-bot',
+            'run: node --test tests/contracts/product_capability_registry.test.mjs'
         )) {
             if ($discordJob.IndexOf($requiredDiscordConsumerMarker, [System.StringComparison]::Ordinal) -lt 0) {
                 Add-ArchitectureError "Discord accepted CTK3 consumer is missing '$requiredDiscordConsumerMarker'"

@@ -106,11 +106,9 @@ jobs:
       - name: Validate release metadata regression coverage
         if: github.event_name == 'workflow_dispatch'
         run: node --test scripts/release/validate-release-metadata.test.mjs
-      - name: Require the product capability and alias parser authority
+      - name: Require the upstream drift audit authority
         if: github.event_name == 'workflow_dispatch'
-        run: |
-          node --test tests/contracts/product_capability_registry.test.mjs
-          node --test scripts/tools/audit-upstream-drift.test.mjs
+        run: node --test scripts/tools/audit-upstream-drift.test.mjs
       - name: Validate remote annotated tag regression coverage
         if: github.event_name == 'workflow_dispatch'
         run: node --test scripts/release/verify-remote-annotated-tag.test.mjs
@@ -213,6 +211,9 @@ jobs:
         run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Verify Clearrabot contracts
         run: npm run test:built --workspace @clearra/discord-bot
+      - name: Require the product capability and alias parser authority
+        if: github.event_name == 'workflow_dispatch'
+        run: node --test tests/contracts/product_capability_registry.test.mjs
 
   release-acceptance:
     if: github.event_name == 'workflow_dispatch'

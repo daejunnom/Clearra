@@ -79,7 +79,11 @@ The `Publish Product Release` workflow has two deliberately different modes:
 The dispatch matrix also assigns one execution owner to every expensive or
 overlapping surface. The dedicated `ctk3` job builds and tests CTK3 once, seals
 the source-bound distribution, and lets Discord and Windows product acceptance
-consume those exact bytes through built-only tests and probes. During
+consume those exact bytes through built-only tests and probes.
+The metadata root remains dependency-free: it validates source, release, drift,
+rollback, and evidence helpers with Node built-ins only. The Discord job, after
+its single workspace install and accepted CTK3 verification, owns the
+runtime-backed product capability and alias parser contract exactly once. During
 `ReleaseAcceptance`, `AdversarialCorrectness` owns the C adversarial target while
 `RustExactTests` owns the single full Rust library suite and verifies the
 delegated adversarial and complete-required test names from that same output.

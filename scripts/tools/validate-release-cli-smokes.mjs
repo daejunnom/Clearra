@@ -245,8 +245,13 @@ const pagesLateAcceptedRunStep = section(
   "\n      - name: Redownload durable rollback capture immediately before deployment",
 );
 const productAuthorityStep = section(
-  metadataJob,
+  workflow,
   "\n      - name: Require the product capability and alias parser authority",
+  "\n\n  release-acceptance:",
+);
+const upstreamAuthorityStep = section(
+  metadataJob,
+  "\n      - name: Require the upstream drift audit authority",
   "\n      - name: Validate remote annotated tag regression coverage",
 );
 const finalSourceEvidenceStep = section(
@@ -286,11 +291,19 @@ requireExactNormalizedText(
     "",
     "      - name: Require the product capability and alias parser authority",
     "        if: github.event_name == 'workflow_dispatch'",
-    "        run: |",
-    "          node --test tests/contracts/product_capability_registry.test.mjs",
-    "          node --test scripts/tools/audit-upstream-drift.test.mjs",
+    "        run: node --test tests/contracts/product_capability_registry.test.mjs",
   ].join("\n"),
   "product capability and alias parser authority step",
+);
+requireExactNormalizedText(
+  upstreamAuthorityStep,
+  [
+    "",
+    "      - name: Require the upstream drift audit authority",
+    "        if: github.event_name == 'workflow_dispatch'",
+    "        run: node --test scripts/tools/audit-upstream-drift.test.mjs",
+  ].join("\n"),
+  "upstream drift audit authority step",
 );
 requireExactNormalizedText(
   finalSourceEvidenceStep,
@@ -856,7 +869,7 @@ for (const stepName of [
   "Validate focused test selection regression coverage",
   "Validate every product version and changelog surface",
   "Validate release metadata regression coverage",
-  "Require the product capability and alias parser authority",
+  "Require the upstream drift audit authority",
   "Validate remote annotated tag regression coverage",
 ]) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -870,12 +883,11 @@ for (const stepName of [
   );
 }
 if (
-  metadataJob.includes(
-    "apps/clearra-discord-bot/test/capability-registry.test.mjs",
-  )
+  metadataJob.includes("tests/contracts/product_capability_registry.test.mjs") ||
+  metadataJob.includes("apps/clearra-discord-bot/test/capability-registry.test.mjs")
 ) {
   throw new Error(
-    "Linux metadata must not duplicate the Discord capability-registry suite",
+    "Linux metadata must remain dependency-free and must not duplicate runtime-backed capability-registry suites",
   );
 }
 if (
@@ -979,6 +991,7 @@ requireExactStepSkeleton(
     "- name: Install JavaScript workspace",
     "- name: Verify accepted CTK3 distribution",
     "- name: Verify Clearrabot contracts",
+    "- name: Require the product capability and alias parser authority",
   ],
   "Discord accepted CTK3 consumer",
 );
