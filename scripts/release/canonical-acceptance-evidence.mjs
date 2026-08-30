@@ -162,11 +162,18 @@ export async function writeReleaseGateReports(outputDirectory, authority, toolch
 
 export function collectLocalToolchains(dependencies = {}) {
   const run = dependencies.run ?? runVersionCommand;
+  const platform = dependencies.platform ?? process.platform;
+  const npmInvocation = platform === "win32"
+    ? Object.freeze([
+        "cmd.exe",
+        Object.freeze(["/d", "/s", "/c", "npm.cmd --version"]),
+      ])
+    : Object.freeze(["npm", Object.freeze(["--version"])]);
   return Object.freeze({
     rust: firstLine(run("rustc", ["--version"]), "rustc"),
     cargo: firstLine(run("cargo", ["--version"]), "cargo"),
     node: firstLine(run("node", ["--version"]), "node"),
-    npm: firstLine(run(process.platform === "win32" ? "npm.cmd" : "npm", ["--version"]), "npm"),
+    npm: firstLine(run(...npmInvocation), "npm"),
     wasm_bindgen: firstLine(run("wasm-bindgen", ["--version"]), "wasm-bindgen"),
     cmake: firstLine(run("cmake", ["--version"]), "cmake"),
     powershell: firstLine(
@@ -705,8 +712,11 @@ async function main() {
       return;
     }
     throw new Error("canonical acceptance evidence command must be gate, collect, or verify");
-  } catch {
-    console.error("canonical_acceptance_evidence=failed");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unknown failure";
+    console.error(
+      `canonical_acceptance_evidence=failed reason=${JSON.stringify(reason)}`,
+    );
     process.exitCode = 2;
   }
 }

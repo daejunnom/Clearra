@@ -136,6 +136,31 @@ test("toolchain collection uses closed commands and keeps only first version lin
   assert.deepEqual(calls[0], ["rustc", ["--version"]]);
 });
 
+test("Windows toolchain collection invokes npm through a closed command interpreter", () => {
+  const calls = [];
+  collectLocalToolchains({
+    platform: "win32",
+    run(command, arguments_) {
+      calls.push([command, arguments_]);
+      return `${command} version\n`;
+    },
+  });
+
+  assert.deepEqual(
+    calls[3],
+    ["cmd.exe", ["/d", "/s", "/c", "npm.cmd --version"]],
+  );
+  assert.equal(calls.some(([command]) => command === "npm.cmd"), false);
+});
+
+test(
+  "Windows npm version probe executes while child-process shell expansion stays disabled",
+  { skip: process.platform !== "win32" },
+  () => {
+    assert.match(collectLocalToolchains().npm, /^\d+\.\d+\.\d+/u);
+  },
+);
+
 test("release job evidence rejects duplicate jobs and any failed required step", () => {
   assert.equal(validateReleaseJobs(jobsPayload(), authority()).length, 6);
   const duplicate = jobsPayload();
