@@ -142,7 +142,9 @@ final multi-candidate/UI/release-pipeline repair retained in
 closed canonical-attempt/deployment-observation authority is retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry9.v1.json`, and the
 Desktop next-page abort-to-release closure retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry10.v1.json`.
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry10.v1.json`, and the
+dependency-free metadata evidence import closure retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry11.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -178,7 +180,10 @@ authority closures likewise add no product capability.
 Retry 10 closes the final Desktop paging cancellation gap: aborting an in-flight
 next-page prefetch now reaches `product_page_release` and the active Tauri cancel
 token, while every completion path removes its listener. This lifecycle repair also
-adds no product capability. Every release observation
+adds no product capability. Retry 11 removes static Discord runtime and CTK3 imports
+from the metadata evidence validation closure; command production and synchronization
+load those dependencies only at their explicit execution boundary. This deployment
+test-ownership repair adds no capability. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new

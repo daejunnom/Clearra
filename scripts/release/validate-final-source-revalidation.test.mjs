@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -12,6 +13,21 @@ import {
 
 const COMMIT = "1".repeat(40);
 const HASH = "a".repeat(64);
+
+test("final-source validation keeps Discord runtime packages outside its import closure", () => {
+  const catalogSource = readFileSync(
+    new URL(
+      "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const firstExport = catalogSource.indexOf("export const DISCORD_CATALOG_SCHEMA_ID");
+  assert.ok(firstExport > 0, "Discord catalog schema export must remain present");
+  const staticImportPrefix = catalogSource.slice(0, firstExport);
+  assert.doesNotMatch(staticImportPrefix, /\.\.\/src\/discord\//u);
+  assert.doesNotMatch(staticImportPrefix, /(?:^|[^A-Za-z0-9_-])ctk3(?:[^A-Za-z0-9_-]|$)/u);
+});
 
 function evidence(id, extra = {}) {
   return { id, sha256: HASH, source_commit: COMMIT, ...extra };

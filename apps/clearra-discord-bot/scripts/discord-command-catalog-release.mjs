@@ -19,14 +19,6 @@ import {
   sealCanonicalReport,
   verifyCanonicalReportHash,
 } from "../../../scripts/release/canonical-release-evidence.mjs";
-import {
-  loadCommandRegistrationCredentials,
-  synchronizeGlobalCommandRegistrationFromObserved,
-  verifyGlobalCommandRegistration,
-} from "../src/discord/command-registration.mjs";
-import { DiscordRestClient } from "../src/discord/rest.mjs";
-import { globalCommands } from "../src/discord/slash-command-catalog.mjs";
-
 export const DISCORD_CATALOG_SCHEMA_ID =
   "clearra.discord.command-catalog.v1";
 export const DISCORD_CATALOG_SNAPSHOT_SCHEMA_ID =
@@ -82,9 +74,12 @@ const WRITABLE_CHOICE_KEYS = new Set([
 
 export function createCanonicalDiscordCatalog({
   sourceCommit,
-  commands = globalCommands,
+  commands,
 }) {
   const commit = requireSourceCommit(sourceCommit);
+  if (!Array.isArray(commands)) {
+    throw new Error("Discord canonical catalog commands are required");
+  }
   const normalized = normalizeDiscordCatalog(commands);
   return Object.freeze({
     schema_id: DISCORD_CATALOG_SCHEMA_ID,
@@ -216,6 +211,10 @@ export async function synchronizeDiscordCatalogRelease({
   now = () => new Date().toISOString(),
   synchronizationOptions,
 }) {
+  const {
+    synchronizeGlobalCommandRegistrationFromObserved,
+    verifyGlobalCommandRegistration,
+  } = await import("../src/discord/command-registration.mjs");
   const application = requireApplicationId(applicationId);
   const commit = requireSourceCommit(sourceCommit);
   validateCanonicalDiscordCatalog(catalog, commit);
@@ -356,6 +355,10 @@ export async function restoreDiscordCatalogRelease({
   now = () => new Date().toISOString(),
   synchronizationOptions,
 }) {
+  const {
+    synchronizeGlobalCommandRegistrationFromObserved,
+    verifyGlobalCommandRegistration,
+  } = await import("../src/discord/command-registration.mjs");
   const application = requireApplicationId(applicationId);
   const commit = requireSourceCommit(sourceCommit);
   const expectedDigest = requireSha256(
@@ -718,13 +721,19 @@ async function main() {
   const { command, values } = parseCliArguments(process.argv.slice(2));
   const sourceCommit = values["--source-commit"];
   if (command === "canonical") {
-    const catalog = createCanonicalDiscordCatalog({ sourceCommit });
+    const { globalCommands } = await import("../src/discord/slash-command-catalog.mjs");
+    const catalog = createCanonicalDiscordCatalog({ sourceCommit, commands: globalCommands });
     await writeCanonicalJsonNew(values["--output"], catalog);
     process.stdout.write(`${DISCORD_CATALOG_SCHEMA_ID} ${catalog.catalog_sha256}\n`);
     return;
   }
 
   const applicationId = values["--application-id"];
+  const [{ loadCommandRegistrationCredentials }, { DiscordRestClient }] =
+    await Promise.all([
+      import("../src/discord/command-registration.mjs"),
+      import("../src/discord/rest.mjs"),
+    ]);
   const credentials = loadCommandRegistrationCredentials({
     ...process.env,
     DISCORD_APPLICATION_ID: applicationId,
