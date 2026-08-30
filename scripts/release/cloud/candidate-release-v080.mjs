@@ -344,19 +344,33 @@ function validateCandidateResources(service, revision) {
 function validateScaleReadback(resource, label) {
   const annotations = resource?.metadata?.annotations ?? {};
   const scaling = resource?.spec?.scaling ?? {};
-  const minimum = firstDefined(
+  const minimums = [
     annotations["autoscaling.knative.dev/minScale"],
     annotations["run.googleapis.com/minScale"],
     scaling.minInstanceCount,
-  );
-  const maximum = firstDefined(
+  ].filter((value) => value !== undefined);
+  const maximums = [
     annotations["autoscaling.knative.dev/maxScale"],
     annotations["run.googleapis.com/maxScale"],
     scaling.maxInstanceCount,
-  );
-  if (Number(minimum) !== 0 || Number(maximum) !== 4) {
+  ].filter((value) => value !== undefined);
+  // Cloud Run canonicalizes an explicit zero minimum to the omitted/default
+  // representation. Every value that is present must agree exactly; the
+  // non-default maximum must remain explicitly observable as four.
+  if (
+    minimums.some((value) => !isExactScaleValue(value, 0)) ||
+    maximums.length === 0 ||
+    maximums.some((value) => !isExactScaleValue(value, 4))
+  ) {
     throw new Error(`Cloud candidate ${label} scale readback drifted`);
   }
+}
+
+function isExactScaleValue(value, expected) {
+  return (
+    (typeof value === "number" && Number.isSafeInteger(value) && value === expected) ||
+    (typeof value === "string" && value === String(expected))
+  );
 }
 
 export function validateSmokeJobReadback(job, authority) {

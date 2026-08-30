@@ -770,6 +770,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'candidate-${commitPrefix}',
         'image@sha256',
         '--no-traffic',
+        '--min=0',
+        '--min-instances=0',
+        '--max=4',
+        '--max-instances=4',
         '--set-secrets=CLEARRA_JOB_TOKEN=',
         '${authority.jobBearerSecretVersion}',
         'run", "jobs", "deploy',
@@ -797,6 +801,7 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'deploy resolves one tag to image@sha256 and independently seals zero traffic readback',
         'deploy and readback reject tag, traffic, image, and Secret-reference drift',
+        "scale readback accepts Cloud Run's omitted default zero and rejects explicit drift",
         'smoke deploys one digest-bound managed-secret Job against the zero-traffic URL',
         'managed smoke log readback retries boundedly and rejects ambiguous attestations',
         'helper never reads a Secret payload or accepts a bearer value',

@@ -609,8 +609,13 @@ Both pairs are required. Setting only `--max=4` can leave the active revision's
 `maxScale` at its lower default, making three—not four—the effective cap.
 Likewise, set both minimum flags to make scale-to-zero explicit at both levels.
 After every candidate deploy, inspect the service and candidate revision
-separately and verify concurrency 1, min 0, max 4, 8 vCPU, and 16 GiB before
-the explicit traffic mutation. A candidate failure leaves `$priorRevision`
+separately and verify concurrency 1, effective min 0, explicit max 4, 8 vCPU,
+and 16 GiB before the explicit traffic mutation. Cloud Run may canonicalize an
+explicit zero minimum by omitting every recognized minimum field; that omission
+alone is the default-zero authority. If any minimum field is present, every one
+must be exactly zero. At least one maximum field must be present, and every
+present maximum must be exactly four; null, malformed, nonzero, or conflicting
+duplicates fail closed. A candidate failure leaves `$priorRevision`
 serving 100 percent. Keep Oracle pinned to the exact tagged
 `$candidateUrl/jobs` through command sync and the pre-sync rollback window;
 stable-URL rebinding is forbidden during that window. If a post-cutover gate

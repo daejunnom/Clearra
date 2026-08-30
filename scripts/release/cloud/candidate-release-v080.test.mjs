@@ -56,7 +56,6 @@ function serviceFixture(overrides = {}) {
     metadata: {
       name: "clearra-current-job",
       annotations: {
-        "run.googleapis.com/minScale": "0",
         "run.googleapis.com/maxScale": "4",
       },
     },
@@ -98,7 +97,6 @@ function revisionFixture(overrides = {}) {
     metadata: {
       name: expected.candidateRevision,
       annotations: {
-        "autoscaling.knative.dev/minScale": "0",
         "autoscaling.knative.dev/maxScale": "4",
         "run.googleapis.com/startup-cpu-boost": "true",
       },
@@ -179,6 +177,10 @@ test("deploy resolves one tag to image@sha256 and independently seals zero traff
   const deploy = calls.find((arguments_) => arguments_[1] === "deploy");
   assert.ok(deploy.includes(`--image=${imageDigest}`));
   assert.ok(deploy.includes("--no-traffic"));
+  assert.ok(deploy.includes("--min=0"));
+  assert.ok(deploy.includes("--min-instances=0"));
+  assert.ok(deploy.includes("--max=4"));
+  assert.ok(deploy.includes("--max-instances=4"));
   assert.ok(deploy.includes(
     `--set-secrets=CLEARRA_JOB_TOKEN=clearra-job-token:${jobBearerSecretVersion}`,
   ));
@@ -329,6 +331,95 @@ test("deploy and readback reject tag, traffic, image, and Secret-reference drift
       jobBearerSecretVersion: "latest",
     }),
     /Secret version is invalid/u,
+  );
+});
+
+test("scale readback accepts Cloud Run's omitted default zero and rejects explicit drift", () => {
+  const expected = authority();
+  assert.equal(
+    validateZeroTrafficReadback({
+      service: serviceFixture(),
+      revision: revisionFixture(),
+    }, expected),
+    candidateUrl,
+  );
+
+  const explicitZeroService = serviceFixture();
+  explicitZeroService.metadata.annotations["run.googleapis.com/minScale"] = "0";
+  explicitZeroService.spec.scaling = { minInstanceCount: 0, maxInstanceCount: 4 };
+  const explicitZeroRevision = revisionFixture();
+  explicitZeroRevision.metadata.annotations["autoscaling.knative.dev/minScale"] = "0";
+  explicitZeroRevision.spec.scaling = { minInstanceCount: 0, maxInstanceCount: 4 };
+  assert.equal(
+    validateZeroTrafficReadback({
+      service: explicitZeroService,
+      revision: explicitZeroRevision,
+    }, expected),
+    candidateUrl,
+  );
+
+  const serviceMinimumDrift = serviceFixture();
+  serviceMinimumDrift.metadata.annotations["run.googleapis.com/minScale"] = "1";
+  assert.throws(
+    () => validateZeroTrafficReadback({
+      service: serviceMinimumDrift,
+      revision: revisionFixture(),
+    }, expected),
+    /service scale readback drifted/u,
+  );
+
+  const revisionMinimumDrift = revisionFixture();
+  revisionMinimumDrift.metadata.annotations["autoscaling.knative.dev/minScale"] = "1";
+  assert.throws(
+    () => validateZeroTrafficReadback({
+      service: serviceFixture(),
+      revision: revisionMinimumDrift,
+    }, expected),
+    /revision scale readback drifted/u,
+  );
+
+  const conflictingMinimum = serviceFixture();
+  conflictingMinimum.metadata.annotations["run.googleapis.com/minScale"] = "0";
+  conflictingMinimum.spec.scaling = { minInstanceCount: 1 };
+  assert.throws(
+    () => validateZeroTrafficReadback({
+      service: conflictingMinimum,
+      revision: revisionFixture(),
+    }, expected),
+    /service scale readback drifted/u,
+  );
+
+  for (const invalidMinimum of [null, "", "00", "0.0"]) {
+    const malformedMinimum = revisionFixture();
+    malformedMinimum.metadata.annotations["autoscaling.knative.dev/minScale"] =
+      invalidMinimum;
+    assert.throws(
+      () => validateZeroTrafficReadback({
+        service: serviceFixture(),
+        revision: malformedMinimum,
+      }, expected),
+      /revision scale readback drifted/u,
+    );
+  }
+
+  const conflictingMaximum = serviceFixture();
+  conflictingMaximum.spec.scaling = { maxInstanceCount: 5 };
+  assert.throws(
+    () => validateZeroTrafficReadback({
+      service: conflictingMaximum,
+      revision: revisionFixture(),
+    }, expected),
+    /service scale readback drifted/u,
+  );
+
+  const maximumOmitted = revisionFixture();
+  delete maximumOmitted.metadata.annotations["autoscaling.knative.dev/maxScale"];
+  assert.throws(
+    () => validateZeroTrafficReadback({
+      service: serviceFixture(),
+      revision: maximumOmitted,
+    }, expected),
+    /revision scale readback drifted/u,
   );
 });
 

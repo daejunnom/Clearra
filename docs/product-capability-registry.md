@@ -152,9 +152,11 @@ release-identity static ownership lock retained in
   permanent product-pager contract test cohesion rationale retained in
   `tests/fixtures/contracts/upstream_drift_release_freeze_retry14.v1.json`, and
   the final deployment/publication authority closure retained in
-  `tests/fixtures/contracts/upstream_drift_release_freeze_retry15.v1.json`, and
-  the closed cross-platform Cloud candidate launcher retained in
-  `tests/fixtures/contracts/upstream_drift_release_freeze_retry16.v1.json`.
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry15.v1.json`, the
+  closed cross-platform Cloud candidate launcher retained in
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry16.v1.json`, and
+  the exact Cloud Run zero-minimum default-omission readback retained in
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry17.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -221,7 +223,13 @@ cohesive product-result pager contract test lacked its permanent behavior-level 
   `cmd.exe /d /s /c gcloud.cmd` only on Windows, retains native argv execution elsewhere,
   rejects command metacharacters, and proves the real Windows shim preserves the closed
   argument vector without Cloud access. This deployment-launcher repair adds no product
-  capability. Every release observation
+  capability. Retry 17 follows the first real zero-traffic deploy exposing Cloud Run's
+  canonical omission of an explicitly requested zero minimum. The readback accepts an
+  omitted minimum as the platform default zero, requires every present minimum authority
+  to be exactly zero, and still requires every present non-default maximum authority to be
+  exactly four with at least one maximum observable. Conflicting, null, malformed, or
+  nonzero duplicate authorities remain fail-closed. This control-plane normalization repair
+  adds no product capability. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new
