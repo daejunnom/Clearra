@@ -781,7 +781,14 @@ function Invoke-ReleaseIdentityGateValidation {
         'labels.execution_name',
         'execution_readback_sha256',
         'validateCloudCandidateSmokeReport',
-        'writeCanonicalReportNew'
+        'writeCanonicalReportNew',
+        'gcloudProcessInvocation',
+        'CLOSED_GCLOUD_ATOM',
+        'CLOSED_GCLOUD_LOG_FILTER',
+        'gcloud candidate arguments are not a closed command surface',
+        'environment?.ComSpec',
+        'gcloud.cmd',
+        'shell: false'
     )) {
         if ($cloudCandidateRelease.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Managed Cloud candidate producer is missing '$required'"
@@ -792,7 +799,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'deploy and readback reject tag, traffic, image, and Secret-reference drift',
         'smoke deploys one digest-bound managed-secret Job against the zero-traffic URL',
         'managed smoke log readback retries boundedly and rejects ambiguous attestations',
-        'helper never reads a Secret payload or accepts a bearer value'
+        'helper never reads a Secret payload or accepts a bearer value',
+        'gcloud runner uses a closed Windows command shim and native non-Windows argv',
+        'Windows gcloud command shim preserves one closed argument vector without cloud access',
+        ' --verbosity=debug '
     )) {
         if ($cloudCandidateReleaseTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Managed Cloud candidate producer regression is missing '$required'"

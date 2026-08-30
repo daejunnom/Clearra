@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -9,7 +12,9 @@ import {
   buildSmokeJobDeployArguments,
   candidateAuthority,
   deployZeroTrafficCandidate,
+  gcloudProcessInvocation,
   readSmokeLogAttestation,
+  runGcloud,
   smokeZeroTrafficCandidate,
   validateSmokeExecution,
   validateSmokeJobReadback,
@@ -179,6 +184,106 @@ test("deploy resolves one tag to image@sha256 and independently seals zero traff
   ));
   assert.equal(deploy.some((argument) => argument.includes(":latest")), false);
 });
+
+test("gcloud runner uses a closed Windows command shim and native non-Windows argv", () => {
+  const arguments_ = [
+    "run",
+    "jobs",
+    "logs",
+    "read",
+    "clearra-candidate-smoke-111111111111",
+    '--log-filter=labels.execution_name="execution-1" AND textPayload:"candidate_smoke_job=passed"',
+    "--format=json",
+  ];
+  const comspec = "C:\\Windows\\System32\\cmd.exe";
+  assert.deepEqual(
+    gcloudProcessInvocation(arguments_, "win32", { ComSpec: comspec }),
+    {
+      command: comspec,
+      arguments: ["/d", "/s", "/c", "gcloud.cmd", ...arguments_],
+    },
+  );
+  assert.deepEqual(
+    gcloudProcessInvocation(arguments_, "linux", {}),
+    { command: "gcloud", arguments: arguments_ },
+  );
+  assert.throws(
+    () => gcloudProcessInvocation(["version", "safe&whoami"], "win32", {}),
+    /not a closed command surface/u,
+  );
+  for (const argument of ["%COMSPEC%", " --verbosity=debug ", "safe --format=json"]) {
+    assert.throws(
+      () => gcloudProcessInvocation(["version", argument], "win32", {}),
+      /not a closed command surface/u,
+    );
+  }
+
+  const calls = [];
+  const output = runGcloud(["version", "--format=json"], {
+    platform: "win32",
+    environment: { ComSpec: comspec, SENTINEL: "preserved" },
+    spawn(command, childArguments, options) {
+      calls.push({ command, childArguments, options });
+      return { status: 0, stdout: '{"ok":true}', stderr: "" };
+    },
+  });
+  assert.deepEqual(JSON.parse(output), { ok: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, comspec);
+  assert.deepEqual(
+    calls[0].childArguments,
+    ["/d", "/s", "/c", "gcloud.cmd", "version", "--format=json"],
+  );
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.windowsVerbatimArguments, undefined);
+  assert.deepEqual(calls[0].options.env, {
+    ComSpec: comspec,
+    SENTINEL: "preserved",
+  });
+});
+
+test(
+  "Windows gcloud command shim preserves one closed argument vector without cloud access",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const directory = await mkdtemp(join(tmpdir(), "clearra-gcloud-shim-"));
+    context.after(() => rm(directory, { recursive: true, force: true }));
+    await writeFile(
+      join(directory, "gcloud-argv-probe.mjs"),
+      'process.stdout.write(JSON.stringify(process.argv.slice(2)));\n',
+      { encoding: "utf8", mode: 0o600 },
+    );
+    await writeFile(
+      join(directory, "gcloud.cmd"),
+      '@echo off\r\nnode "%~dp0gcloud-argv-probe.mjs" %*\r\n',
+      { encoding: "utf8", mode: 0o700 },
+    );
+    const environment = { ...process.env };
+    const originalPath = Object.entries(environment)
+      .find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+    for (const key of Object.keys(environment)) {
+      if (key.toUpperCase() === "PATH") delete environment[key];
+    }
+    environment.PATH = `${directory}${delimiter}${originalPath}`;
+    const arguments_ = [
+      "run",
+      "jobs",
+      "logs",
+      "read",
+      "clearra-candidate-smoke-111111111111",
+      '--log-filter=labels.execution_name="execution-1" AND textPayload:"candidate_smoke_job=passed"',
+      "--format=json",
+    ];
+    assert.deepEqual(
+      JSON.parse(runGcloud(arguments_, {
+        platform: "win32",
+        environment,
+        spawn: spawnSync,
+      })),
+      arguments_,
+    );
+  },
+);
 
 test("deploy and readback reject tag, traffic, image, and Secret-reference drift", async () => {
   const expected = authority();
@@ -361,6 +466,17 @@ test("smoke fails closed on Job or execution drift and always requests cleanup",
       },
     }),
     /did not complete exactly once/u,
+  );
+  assert.throws(
+    () => validateSmokeExecution({
+      metadata: { name: "safe&whoami" },
+      status: {
+        conditions: [{ type: "Completed", status: "True" }],
+        succeededCount: 1,
+        failedCount: 0,
+      },
+    }),
+    /execution identity is unavailable/u,
   );
 
   const calls = [];

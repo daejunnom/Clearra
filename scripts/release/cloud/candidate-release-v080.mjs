@@ -29,6 +29,9 @@ const PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u;
 const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,62}$/u;
 const SECRET_VERSION = /^[1-9][0-9]{0,18}$/u;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const EXECUTION_NAME = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/u;
+const CLOSED_GCLOUD_ATOM = /^[A-Za-z0-9_./:=,@+\-]+$/u;
+const CLOSED_GCLOUD_LOG_FILTER = /^--log-filter=labels\.execution_name="[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?" AND textPayload:"candidate_smoke_job=passed"$/u;
 const DEFAULT_LOG_ATTEMPTS = 30;
 const DEFAULT_LOG_RETRY_DELAY_MS = 2_000;
 
@@ -397,10 +400,11 @@ export function validateSmokeExecution(execution) {
     throw new Error("managed-secret candidate smoke execution did not complete exactly once");
   }
   const name = execution?.metadata?.name ?? execution?.name;
-  if (typeof name !== "string" || name.length === 0) {
+  const executionName = typeof name === "string" ? name.split("/").at(-1) : "";
+  if (!EXECUTION_NAME.test(executionName)) {
     throw new Error("managed-secret candidate smoke execution identity is unavailable");
   }
-  return name.split("/").at(-1);
+  return executionName;
 }
 
 export function validateSmokeLogAttestation(logs, authority, executionName) {
@@ -673,15 +677,55 @@ function runGcloudJson(arguments_) {
   }
 }
 
-function runGcloud(arguments_) {
-  const result = spawnSync("gcloud", arguments_, {
+export function gcloudProcessInvocation(
+  arguments_,
+  platform = process.platform,
+  environment = process.env,
+) {
+  if (
+    !Array.isArray(arguments_) ||
+    arguments_.length === 0 ||
+    arguments_.some((value) =>
+      typeof value !== "string" ||
+      (!CLOSED_GCLOUD_ATOM.test(value) && !CLOSED_GCLOUD_LOG_FILTER.test(value)))
+  ) {
+    throw new Error("gcloud candidate arguments are not a closed command surface");
+  }
+  if (platform === "win32") {
+    const command = environment?.ComSpec || environment?.COMSPEC || "cmd.exe";
+    return Object.freeze({
+      command,
+      arguments: Object.freeze(["/d", "/s", "/c", "gcloud.cmd", ...arguments_]),
+    });
+  }
+  return Object.freeze({
+    command: "gcloud",
+    arguments: Object.freeze([...arguments_]),
+  });
+}
+
+export function runGcloud(arguments_, dependencies = {}) {
+  const platform = dependencies.platform ?? process.platform;
+  const environment = dependencies.environment ?? process.env;
+  const spawn = dependencies.spawn ?? spawnSync;
+  const invocation = gcloudProcessInvocation(arguments_, platform, environment);
+  const result = spawn(invocation.command, invocation.arguments, {
     encoding: "utf8",
+    env: environment,
     maxBuffer: 4 * 1024 * 1024,
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
-  if (result.error || result.status !== 0) {
-    throw new Error("gcloud candidate operation failed");
+  if (result.error) {
+    const code = /^[A-Z0-9_]+$/u.test(result.error.code ?? "")
+      ? result.error.code
+      : "UNKNOWN";
+    throw new Error(`gcloud candidate process failed to start (${platform}:${code})`);
+  }
+  if (result.status !== 0) {
+    const status = Number.isSafeInteger(result.status) ? result.status : "unknown";
+    throw new Error(`gcloud candidate process exited unsuccessfully (${status})`);
   }
   return result.stdout;
 }
