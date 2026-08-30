@@ -38,6 +38,7 @@ const REQUIRED_SURFACES = Object.freeze([
 ]);
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/u;
+const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const RELEASE_VERSION = "0.8.0";
 const CONTRACT_SCHEMA_VERSION = "clearra.search.contract.v2";
 const SUPPLY_SEMANTICS_ID =
@@ -421,6 +422,14 @@ function validateSurfaceIdentity(surface, identity, sourceCommit) {
       "command_catalog_prior_snapshot_sha256",
       "command_catalog_readback_sha256",
       "command_catalog_sync_report_sha256",
+      "accepted_run_id",
+      "accepted_run_attempt",
+      "accepted_ctk3_manifest_sha256",
+      "canonical_acceptance_evidence_sha256",
+      "canonical_acceptance_evidence_file_sha256",
+      "command_catalog_file_sha256",
+      "command_sync_authority_sha256",
+      "command_sync_authority_file_sha256",
       "command_count",
       "command_names",
       "status",
@@ -431,7 +440,19 @@ function validateSurfaceIdentity(surface, identity, sourceCommit) {
       "command_catalog_prior_snapshot_sha256",
       "command_catalog_readback_sha256",
       "command_catalog_sync_report_sha256",
+      "accepted_ctk3_manifest_sha256",
+      "canonical_acceptance_evidence_sha256",
+      "canonical_acceptance_evidence_file_sha256",
+      "command_catalog_file_sha256",
+      "command_sync_authority_sha256",
+      "command_sync_authority_file_sha256",
     ]) requireSha256(identity[key], `Discord identity ${key}`);
+    if (
+      !DECIMAL_ID.test(identity.accepted_run_id ?? "") ||
+      !DECIMAL_ID.test(identity.accepted_run_attempt ?? "")
+    ) {
+      throw new Error("Discord accepted run authority is invalid");
+    }
     if (
       !Array.isArray(identity.command_names) ||
       identity.command_names.length !== identity.command_count ||
@@ -690,9 +711,14 @@ function validateFreshness(surface, freshness) {
   } else {
     requireExactKeys(freshness, [
       "probe_id",
+      "deployment_readback_sha256",
       "identity_readback_sha256",
     ], "Pages observation freshness");
     requireSha256(freshness.probe_id, "Pages probe ID");
+    requireSha256(
+      freshness.deployment_readback_sha256,
+      "Pages deployment readback SHA-256",
+    );
     requireSha256(freshness.identity_readback_sha256, "Pages identity readback SHA-256");
   }
 }

@@ -36,6 +36,13 @@ import {
   validateCloudCandidateSmokeReport,
 } from "./cloud-candidate-smoke-report.mjs";
 import {
+  validatePagesDeploymentAuthorityReport,
+} from "./pages-deployment-authority.mjs";
+import {
+  readDiscordCommandSyncAuthority,
+  validateDiscordCommandSyncAuthority,
+} from "./discord-command-sync-authority.mjs";
+import {
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
   validateSurfaceProbeResult,
 } from "./observe-production-surfaces.mjs";
@@ -45,8 +52,6 @@ const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const PROJECT_ID = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u;
 const REGION = /^[a-z]+(?:-[a-z0-9]+)+[0-9]$/u;
-const DECIMAL_ID = /^[1-9][0-9]*$/u;
-const BASE_PATH = /^\/[A-Za-z0-9._-]+$/u;
 const VERSION = "0.8.0";
 const PAGES_IDENTITY_SCHEMA = "clearra.pages.identity.v2";
 const MAX_HTTP_BYTES = 2 * 1024 * 1024;
@@ -58,6 +63,9 @@ export async function probeDiscordProductionSurface({
   sourceCommit,
   applicationId,
   catalog,
+  catalogFileSha256,
+  syncAuthority,
+  syncAuthorityFileSha256,
   syncReport,
   sequence,
   rest,
@@ -66,11 +74,27 @@ export async function probeDiscordProductionSurface({
   const commit = requireSourceCommit(sourceCommit);
   const application = requireDiscordApplicationId(applicationId);
   const observationSequence = requireSequence(sequence);
+  const catalogFileHash = requireSha256(
+    catalogFileSha256,
+    "Discord canonical catalog file SHA-256",
+  );
+  const syncAuthorityFileHash = requireSha256(
+    syncAuthorityFileSha256,
+    "Discord command sync authority file SHA-256",
+  );
   validateCanonicalDiscordCatalog(catalog, commit);
+  validateDiscordCommandSyncAuthority(syncAuthority, {
+    sourceCommit: commit,
+    catalog,
+    catalogFileSha256: catalogFileHash,
+  });
   validateDiscordCatalogSyncReport(syncReport, {
     expectedSourceCommit: commit,
     expectedApplicationId: application,
     expectedCatalog: catalog,
+    expectedCatalogFileSha256: catalogFileHash,
+    expectedSyncAuthority: syncAuthority,
+    expectedSyncAuthorityFileSha256: syncAuthorityFileHash,
   });
   if (!rest || typeof rest.getGlobalCommands !== "function") {
     throw new Error("Discord production probe requires a read-only REST client");
@@ -109,6 +133,17 @@ export async function probeDiscordProductionSurface({
       command_catalog_prior_snapshot_sha256: syncReport.prior_snapshot_sha256,
       command_catalog_readback_sha256: readbackSha256,
       command_catalog_sync_report_sha256: syncReport.report_sha256,
+      accepted_run_id: syncReport.accepted_run_id,
+      accepted_run_attempt: syncReport.accepted_run_attempt,
+      accepted_ctk3_manifest_sha256: syncReport.accepted_ctk3_manifest_sha256,
+      canonical_acceptance_evidence_sha256:
+        syncReport.canonical_acceptance_evidence_sha256,
+      canonical_acceptance_evidence_file_sha256:
+        syncReport.canonical_acceptance_evidence_file_sha256,
+      command_catalog_file_sha256: syncReport.command_catalog_file_sha256,
+      command_sync_authority_sha256: syncReport.command_sync_authority_sha256,
+      command_sync_authority_file_sha256:
+        syncReport.command_sync_authority_file_sha256,
       command_count: normalized.length,
       command_names: commandNames,
       status: "active",
@@ -246,37 +281,38 @@ export async function probeCloudProductionSurface({
 
 export async function probePagesProductionSurface({
   sourceCommit,
-  pageUrl,
-  deploymentId,
-  artifactSha256,
-  basePath,
-  acceptedRunId,
-  acceptedRunAttempt,
+  deploymentReport,
   sequence,
   fetchJson = fetchJsonBounded,
+  fetchDeploymentStatus = readPagesDeploymentStatusControlPlane,
   now = () => new Date().toISOString(),
 }) {
   const commit = requireSourceCommit(sourceCommit);
-  const url = requireCredentialFreeHttpsUrl(pageUrl, "Pages URL");
-  const deployment = requireNonEmptyString(deploymentId, "Pages deployment ID");
-  const artifact = requireSha256(artifactSha256, "Pages artifact SHA-256");
-  const expectedBasePath = requirePattern(basePath, BASE_PATH, "Pages base path");
-  const runId = requirePattern(String(acceptedRunId ?? ""), DECIMAL_ID, "Pages accepted run ID");
-  const runAttempt = requirePattern(
-    String(acceptedRunAttempt ?? ""),
-    DECIMAL_ID,
-    "Pages accepted run attempt",
-  );
+  validatePagesDeploymentAuthorityReport(deploymentReport, {
+    expectedSourceCommit: commit,
+  });
+  if (deploymentReport.mode !== "forward") {
+    throw new Error("Pages production probe requires a forward deployment report");
+  }
+  const url = requireCredentialFreeHttpsUrl(deploymentReport.page_url, "Pages URL");
+  const deployment = deploymentReport.deployment_id;
+  const artifact = deploymentReport.artifact_sha256;
+  const expectedBasePath = deploymentReport.base_path;
+  const runId = deploymentReport.accepted_run_id;
+  const runAttempt = deploymentReport.accepted_run_attempt;
   const observationSequence = requireSequence(sequence);
-  if (typeof fetchJson !== "function") {
-    throw new Error("Pages production probe requires an HTTP reader");
+  if (typeof fetchJson !== "function" || typeof fetchDeploymentStatus !== "function") {
+    throw new Error("Pages production probe requires public and GitHub HTTP readers");
   }
   const normalizedPageUrl = requirePagesUrlBasePath(url, expectedBasePath);
   const observedAt = canonicalTimestamp(now(), "Pages probe observation time");
   const identityUrl = new URL("clearra-build-identity.json", normalizedPageUrl);
   identityUrl.searchParams.set("source", commit);
   identityUrl.searchParams.set("observation", String(observationSequence));
-  const readback = await fetchJson(identityUrl.toString(), "Pages build identity");
+  const [readback, deploymentReadback] = await Promise.all([
+    fetchJson(identityUrl.toString(), "Pages build identity"),
+    fetchDeploymentStatus(deploymentReport),
+  ]);
   validatePagesIdentity(readback, {
     sourceCommit: commit,
     basePath: expectedBasePath,
@@ -284,12 +320,26 @@ export async function probePagesProductionSurface({
     acceptedRunAttempt: runAttempt,
   });
   const readbackSha256 = canonicalSha256(readback);
+  if (readbackSha256 !== deploymentReport.live_identity_sha256) {
+    throw new Error("Pages live identity differs from the sealed deployment readback");
+  }
+  requirePlainObject(deploymentReadback, "Pages deployment status readback");
+  if (deploymentReadback.status !== "succeed") {
+    throw new Error("Pages deployment status is not succeed");
+  }
+  const deploymentReadbackSha256 = canonicalSha256(deploymentReadback);
+  if (deploymentReadbackSha256 !== deploymentReport.deployment_api_readback_sha256) {
+    throw new Error("Pages deployment status differs from the sealed API readback");
+  }
   const probeId = createProbeId({
     surface: "pages",
     sourceCommit: commit,
     sequence: observationSequence,
     observedAt,
-    evidence: { identity_readback_sha256: readbackSha256 },
+    evidence: {
+      deployment_readback_sha256: deploymentReadbackSha256,
+      identity_readback_sha256: readbackSha256,
+    },
   });
   return finishProbe({
     schema_id: PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
@@ -307,6 +357,7 @@ export async function probePagesProductionSurface({
     },
     freshness: {
       probe_id: probeId,
+      deployment_readback_sha256: deploymentReadbackSha256,
       identity_readback_sha256: readbackSha256,
     },
   }, commit);
@@ -331,6 +382,26 @@ export async function readCloudRunControlPlane({
     name: revision,
   });
   return { serviceReadback, revisionReadback };
+}
+
+export async function readPagesDeploymentStatusControlPlane(report) {
+  validatePagesDeploymentAuthorityReport(report);
+  return runJsonCommand(
+    process.platform === "win32" ? "gh.exe" : "gh",
+    [
+      "api",
+      "--method",
+      "GET",
+      `repos/${report.repository}/pages/deployments/${report.deployment_id}`,
+      "--header",
+      "Accept: application/vnd.github+json",
+      "--header",
+      "X-GitHub-Api-Version: 2022-11-28",
+    ],
+    DEFAULT_CONTROL_PLANE_TIMEOUT_MS,
+    MAX_CONTROL_PLANE_BYTES,
+    "Pages deployment status readback",
+  );
 }
 
 export function validateCloudCandidateControlPlane({
@@ -852,6 +923,8 @@ function parseCliArguments(args) {
       "--application-id",
       "--catalog",
       "--catalog-file-sha256",
+      "--sync-authority",
+      "--sync-authority-file-sha256",
       "--sync-report",
       "--sync-report-file-sha256",
       "--observation-sequence",
@@ -870,12 +943,8 @@ function parseCliArguments(args) {
     ]],
     ["pages", [
       "--source-commit",
-      "--url",
-      "--deployment-id",
-      "--artifact-sha256",
-      "--base-path",
-      "--accepted-run-id",
-      "--accepted-run-attempt",
+      "--deployment-report",
+      "--deployment-report-file-sha256",
       "--observation-sequence",
     ]],
   ]);
@@ -916,6 +985,15 @@ async function main() {
       "Discord canonical catalog",
       values["--catalog-file-sha256"],
     );
+    const syncAuthorityInput = await readDiscordCommandSyncAuthority(
+      values["--sync-authority"],
+      values["--sync-authority-file-sha256"],
+      {
+        sourceCommit: values["--source-commit"],
+        catalog,
+        catalogFileSha256: values["--catalog-file-sha256"],
+      },
+    );
     const syncReport = await readCanonicalJsonFile(
       values["--sync-report"],
       "Discord command sync report",
@@ -925,6 +1003,9 @@ async function main() {
       sourceCommit: values["--source-commit"],
       applicationId: values["--application-id"],
       catalog,
+      catalogFileSha256: values["--catalog-file-sha256"],
+      syncAuthority: syncAuthorityInput.authority,
+      syncAuthorityFileSha256: syncAuthorityInput.fileSha256,
       syncReport,
       sequence: values["--observation-sequence"],
       rest: new DiscordRestClient(credentials.token),
@@ -948,12 +1029,11 @@ async function main() {
   } else {
     result = await probePagesProductionSurface({
       sourceCommit: values["--source-commit"],
-      pageUrl: values["--url"],
-      deploymentId: values["--deployment-id"],
-      artifactSha256: values["--artifact-sha256"],
-      basePath: values["--base-path"],
-      acceptedRunId: values["--accepted-run-id"],
-      acceptedRunAttempt: values["--accepted-run-attempt"],
+      deploymentReport: await readCanonicalJsonFile(
+        values["--deployment-report"],
+        "Pages deployment authority report",
+        values["--deployment-report-file-sha256"],
+      ),
       sequence: values["--observation-sequence"],
     });
   }

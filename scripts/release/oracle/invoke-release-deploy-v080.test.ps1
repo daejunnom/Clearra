@@ -107,6 +107,52 @@ if (-not $rejected) {
     throw 'Typed invoker accepted an operation-crossing argument.'
 }
 
+$evidencePath = [IO.Path]::Combine(
+    [IO.Path]::GetTempPath(),
+    "clearra-oracle-evidence-$([Guid]::NewGuid().ToString('N')).json"
+)
+$rejected = $false
+try {
+    [void]@(& $wrapper `
+        -Operation capture-rollback-authority `
+        -ScriptReleaseId $scriptReleaseId `
+        -ScriptReleaseSha256 $scriptReleaseSha256 `
+        -PriorRevision 'clearra-current-job-v075-042ec21' `
+        -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
+        -DeploymentNonce $deploymentNonce `
+        -EvidenceOutput $evidencePath `
+        -AuditOnly)
+} catch {
+    $rejected = $_.Exception.Message -like '*unavailable in AuditOnly*'
+}
+if (-not $rejected -or (Test-Path -LiteralPath $evidencePath)) {
+    throw 'AuditOnly unexpectedly created durable Oracle evidence.'
+}
+
+$rejected = $false
+try {
+    [void]@(& $wrapper `
+        -Operation verify-candidate `
+        -ScriptReleaseId $scriptReleaseId `
+        -ScriptReleaseSha256 $scriptReleaseSha256 `
+        -Proof "/run/clearra-deploy/clearra-oracle-candidate-$deploymentNonce.json" `
+        -SourceCommit $sourceCommit `
+        -CandidateUrl $candidateUrl `
+        -CandidateRevision $candidateRevision `
+        -OracleReleaseId $scriptReleaseId `
+        -OracleReleaseSha256 $scriptReleaseSha256 `
+        -OracleSettingsSha256 ('c' * 64) `
+        -DeploymentNonce $deploymentNonce `
+        -VerifiedAfter $verifiedAfter `
+        -EvidenceOutput $evidencePath `
+        -AuditOnly)
+} catch {
+    $rejected = $_.Exception.Message -like '*only valid for capture or observation*'
+}
+if (-not $rejected -or (Test-Path -LiteralPath $evidencePath)) {
+    throw 'A non-evidence Oracle operation accepted EvidenceOutput.'
+}
+
 $source = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $wrapper))
 foreach ($required in @(
     "Test-Path -LiteralPath `$IdentityFile -PathType Leaf",
@@ -118,7 +164,15 @@ foreach ($required in @(
     "'IdentityAgent=none'",
     "'ProxyCommand=none'",
     "'ProxyJump=none'",
-    "'ClearAllForwardings=yes'"
+    "'ClearAllForwardings=yes'",
+    'Assert-EvidenceOutputPath',
+    'ConvertTo-CanonicalJson',
+    'Write-CanonicalEvidenceOutput',
+    '[IO.FileMode]::CreateNew',
+    '[IO.FileShare]::None',
+    '[Text.UTF8Encoding]::new($false)',
+    '$stream.Flush($true)',
+    "if (`$Operation -notin @('capture-rollback-authority', 'observe-candidate')) {"
 )) {
     if ($source.IndexOf($required, [StringComparison]::Ordinal) -lt 0) {
         throw "Typed invoker is missing pinned identity/SSH marker: $required"
@@ -126,6 +180,269 @@ foreach ($required in @(
 }
 if ($source -match '(?i)(Get-Content|Get-FileHash|ReadAllBytes|ReadAllText)[^\r\n]*\$IdentityFile') {
     throw 'Typed invoker reads or hashes the identity file.'
+}
+
+function Read-CanonicalEvidenceFile {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or
+        (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'Oracle evidence output was not a regular, non-link file.'
+    }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0 -or $bytes[$bytes.Length - 1] -ne 10 -or $bytes -contains 13) {
+        throw 'Oracle evidence output did not use exactly one LF terminator.'
+    }
+    if ($bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) {
+        throw 'Oracle evidence output unexpectedly contains a UTF-8 BOM.'
+    }
+    $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    $json = $text.Substring(0, $text.Length - 1)
+    $value = $json | ConvertFrom-Json -DateKind String
+    if (($value | ConvertTo-Json -Compress -Depth 10) -cne $json) {
+        throw 'Oracle evidence output was not canonical compact JSON.'
+    }
+    $objects = @($value)
+    $runtimeIdentityProperty = $value.PSObject.Properties['runtimeIdentity']
+    if ($null -ne $runtimeIdentityProperty) {
+        $objects += $runtimeIdentityProperty.Value
+    }
+    foreach ($object in $objects) {
+        [string[]]$actualNames = @($object.PSObject.Properties.Name)
+        [string[]]$sortedNames = @($actualNames)
+        [Array]::Sort($sortedNames, [StringComparer]::Ordinal)
+        if (Compare-Object -CaseSensitive -SyncWindow 0 $sortedNames $actualNames) {
+            throw 'Oracle evidence output keys were not in canonical ordinal order.'
+        }
+    }
+    return $value
+}
+
+$evidenceRoot = [IO.Path]::Combine(
+    [IO.Path]::GetTempPath(),
+    "clearra-oracle-evidence-boundary-$([Guid]::NewGuid().ToString('N'))"
+)
+$captureEvidencePath = Join-Path $evidenceRoot 'capture.json'
+$observationEvidencePath = Join-Path $evidenceRoot 'observation.json'
+$lockedIdentityPath = Join-Path $evidenceRoot 'locked-identity'
+$relativeEvidencePath = "clearra-oracle-relative-$([Guid]::NewGuid().ToString('N')).json"
+$relativeEvidenceFullPath = Join-Path (Get-Location).Path $relativeEvidencePath
+$realParentPath = Join-Path $evidenceRoot 'real-parent'
+$linkedParentPath = Join-Path $evidenceRoot 'linked-parent'
+$linkedEvidencePath = Join-Path $linkedParentPath 'evidence.json'
+$linkedEvidenceTargetPath = Join-Path $realParentPath 'evidence.json'
+$identityLock = $null
+$linkCreated = $false
+$global:clearraOracleTestMockOutput = $null
+$global:clearraOracleTestMockSshInvocationCount = 0
+$global:clearraOracleTestLockedIdentityPath = $lockedIdentityPath
+
+function ssh-keygen {
+    $global:LASTEXITCODE = 0
+    '256 SHA256:mdw7bdzZOBrd6sCebPmMVuTaps+ct2OaOle/gaZMBKU 157.151.254.175 (ED25519)'
+}
+
+function wsl.exe {
+    $global:LASTEXITCODE = 0
+    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq 'wslpath') {
+        '/tmp/clearra-oracle-release-deploy-v080'
+        return
+    }
+    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq 'dash') {
+        return
+    }
+    throw 'Unexpected WSL invocation in Oracle evidence boundary test.'
+}
+
+function ssh {
+    $identityArgumentIndex = [Array]::IndexOf([object[]]$args, '-i')
+    if ($identityArgumentIndex -lt 0 -or
+        $identityArgumentIndex + 1 -ge $args.Count -or
+        [string]$args[$identityArgumentIndex + 1] -cne $global:clearraOracleTestLockedIdentityPath) {
+        throw 'Oracle wrapper did not pass the locked identity path only as an SSH argument.'
+    }
+    $global:clearraOracleTestMockSshInvocationCount += 1
+    $global:LASTEXITCODE = 0
+    $global:clearraOracleTestMockOutput
+}
+
+function Invoke-CaptureEvidenceFile {
+    param([Parameter(Mandatory = $true)][string] $OutputPath)
+    return @(& $wrapper `
+        -Operation capture-rollback-authority `
+        -ScriptReleaseId $scriptReleaseId `
+        -ScriptReleaseSha256 $scriptReleaseSha256 `
+        -PriorRevision $captureObject.priorRevision `
+        -PriorRuntimeAuthorityKind $captureObject.priorRuntimeAuthorityKind `
+        -DeploymentNonce $deploymentNonce `
+        -EvidenceOutput $OutputPath `
+        -IdentityFile $lockedIdentityPath)
+}
+
+function Assert-CaptureEvidencePathRejected {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $ErrorPattern,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    $rejected = $false
+    try {
+        [void](Invoke-CaptureEvidenceFile -OutputPath $Path)
+    } catch {
+        $rejected = $_.Exception.Message -like $ErrorPattern
+    }
+    if (-not $rejected) {
+        throw "Oracle evidence output accepted $Label."
+    }
+}
+
+try {
+    [IO.Directory]::CreateDirectory($evidenceRoot) | Out-Null
+    [IO.Directory]::CreateDirectory($realParentPath) | Out-Null
+    $parentItem = Get-Item -LiteralPath $evidenceRoot -Force
+    if (-not $parentItem.PSIsContainer -or
+        (($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'Oracle evidence test parent is not a regular, non-link directory.'
+    }
+
+    [IO.File]::WriteAllBytes($lockedIdentityPath, [byte[]](1..32))
+    $identityLock = [IO.File]::Open(
+        $lockedIdentityPath,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+    )
+
+    $captureObject = [ordered]@{
+        priorRevision = 'clearra-current-job-v075-042ec21'
+        priorOracleRelease = '/opt/clearra/releases/v0.7.5-042ec21'
+        priorOracleReleaseId = 'v0.7.5-042ec21'
+        priorOracleReleaseSha256 = ('d' * 64)
+        priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.0-$deploymentNonce"
+        priorOracleSettingsSha256 = ('e' * 64)
+        priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
+        priorRuntimeAuthoritySha256 = ('f' * 64)
+        priorJobUrl = 'https://prior.example.test/jobs'
+        deploymentNonce = $deploymentNonce
+    }
+    $global:clearraOracleTestMockOutput = $captureObject | ConvertTo-Json -Compress
+    [void](Invoke-CaptureEvidenceFile -OutputPath $captureEvidencePath)
+    $captureEvidence = Read-CanonicalEvidenceFile -Path $captureEvidencePath
+    if ($captureEvidence.deploymentNonce -cne $deploymentNonce -or
+        $captureEvidence.priorRevision -cne $captureObject.priorRevision) {
+        throw 'Oracle rollback capture evidence changed validated identity fields.'
+    }
+
+    $observationObject = [ordered]@{
+        contract = 'clearra.oracle.candidate-observation.v1'
+        sourceCommit = $sourceCommit
+        candidateUrl = $candidateUrl
+        candidateRevision = $candidateRevision
+        jobUrl = "$candidateUrl/jobs"
+        oracleReleaseId = $scriptReleaseId
+        activeReleasePath = "/opt/clearra/releases/$scriptReleaseId"
+        oracleReleaseSha256 = $scriptReleaseSha256
+        oracleSettingsSha256 = ('c' * 64)
+        deploymentNonce = $deploymentNonce
+        gatewayPid = 1234
+        gatewayStartMonotonicUsec = 5678
+        bootId = '12345678-1234-4234-8234-123456789abc'
+        readyRecordObserved = $true
+        freshOperationAt = '2026-08-30T00:00:01.000Z'
+        observedAt = '2026-08-30T00:00:02.000Z'
+        runtimeIdentity = [ordered]@{
+            candidateRevision = $candidateRevision
+            sourceCommit = $sourceCommit
+        }
+    }
+    $global:clearraOracleTestMockOutput = $observationObject | ConvertTo-Json -Compress -Depth 4
+    [void]@(& $wrapper `
+        -Operation observe-candidate `
+        -ScriptReleaseId $scriptReleaseId `
+        -ScriptReleaseSha256 $scriptReleaseSha256 `
+        -SourceCommit $sourceCommit `
+        -CandidateUrl $candidateUrl `
+        -CandidateRevision $candidateRevision `
+        -OracleReleaseId $scriptReleaseId `
+        -OracleReleaseSha256 $scriptReleaseSha256 `
+        -OracleSettingsSha256 ('c' * 64) `
+        -DeploymentNonce $deploymentNonce `
+        -VerifiedAfter $verifiedAfter `
+        -EvidenceOutput $observationEvidencePath `
+        -IdentityFile $lockedIdentityPath)
+    $observationEvidence = Read-CanonicalEvidenceFile -Path $observationEvidencePath
+    if ($observationEvidence.freshOperationAt -cne '2026-08-30T00:00:01.000Z' -or
+        $observationEvidence.observedAt -cne '2026-08-30T00:00:02.000Z' -or
+        $observationEvidence.sourceCommit -cne $sourceCommit) {
+        throw 'Oracle observation evidence did not preserve canonical UTC timestamps and source identity.'
+    }
+
+    $captureBytesBeforeRetry = [IO.File]::ReadAllBytes($captureEvidencePath)
+    Assert-CaptureEvidencePathRejected `
+        -Path $captureEvidencePath `
+        -ErrorPattern '*must be a new path*' `
+        -Label 'an existing path overwrite'
+    $captureBytesAfterRetry = [IO.File]::ReadAllBytes($captureEvidencePath)
+    if ([Convert]::ToHexString($captureBytesAfterRetry) -cne
+        [Convert]::ToHexString($captureBytesBeforeRetry)) {
+        throw 'Oracle evidence output changed after a rejected overwrite.'
+    }
+
+    Assert-CaptureEvidencePathRejected `
+        -Path $relativeEvidencePath `
+        -ErrorPattern '*must be an absolute path*' `
+        -Label 'a relative path'
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Windows
+    )) {
+        New-Item -ItemType Junction -Path $linkedParentPath -Target $realParentPath | Out-Null
+    } else {
+        New-Item -ItemType SymbolicLink -Path $linkedParentPath -Target $realParentPath | Out-Null
+    }
+    $linkCreated = $true
+    $linkedParentItem = Get-Item -LiteralPath $linkedParentPath -Force
+    if (($linkedParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        throw 'Oracle evidence test could not establish a linked parent boundary.'
+    }
+    Assert-CaptureEvidencePathRejected `
+        -Path $linkedEvidencePath `
+        -ErrorPattern '*must not traverse a reparse point*' `
+        -Label 'a linked parent path'
+    if (Test-Path -LiteralPath $linkedEvidenceTargetPath) {
+        throw 'Oracle evidence output accepted a linked parent path.'
+    }
+    if ($global:clearraOracleTestMockSshInvocationCount -ne 2) {
+        throw 'Oracle evidence boundary test unexpectedly invoked the SSH command path.'
+    }
+} finally {
+    if ($null -ne $identityLock) {
+        $identityLock.Dispose()
+    }
+    foreach ($path in @(
+        $captureEvidencePath,
+        $observationEvidencePath,
+        $lockedIdentityPath,
+        $relativeEvidenceFullPath,
+        $linkedEvidenceTargetPath
+    )) {
+        if ([IO.File]::Exists($path)) {
+            [IO.File]::Delete($path)
+        }
+    }
+    if ($linkCreated -and (Test-Path -LiteralPath $linkedParentPath)) {
+        Remove-Item -LiteralPath $linkedParentPath -Force
+    }
+    if ([IO.Directory]::Exists($realParentPath)) {
+        [IO.Directory]::Delete($realParentPath)
+    }
+    if ([IO.Directory]::Exists($evidenceRoot)) {
+        [IO.Directory]::Delete($evidenceRoot)
+    }
+    Remove-Variable -Name clearraOracleTestMockOutput -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name clearraOracleTestMockSshInvocationCount -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name clearraOracleTestLockedIdentityPath -Scope Global -ErrorAction SilentlyContinue
 }
 
 'oracle_release_deploy_wrapper_test=pass'

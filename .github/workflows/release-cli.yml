@@ -89,11 +89,11 @@ jobs:
       - name: Validate Pages rollback authority regression coverage
         if: github.event_name == 'workflow_dispatch'
         shell: bash
-        run: node --test scripts/release/canonical-acceptance-run.test.mjs scripts/release/pages-rollback-authority.test.mjs scripts/release/pages-rollback-package.test.mjs
+        run: node --test scripts/release/canonical-acceptance-run.test.mjs scripts/release/pages-deployment-authority.test.mjs scripts/release/pages-rollback-authority.test.mjs scripts/release/pages-rollback-package.test.mjs
       - name: Validate final-source evidence contract regression coverage
         if: github.event_name == 'workflow_dispatch'
         shell: bash
-        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
+        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
       - name: Validate focused test selection regression coverage
         if: github.event_name == 'workflow_dispatch'
         run: node --test scripts/tools/run-focused-js-tests.test.mjs
@@ -622,15 +622,26 @@ jobs:
             exit 2
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; published versions are immutable" >&2
-            exit 2
+            if [[ "$GITHUB_RUN_ATTEMPT" == '1' ]]; then
+              echo "release $GITHUB_REF_NAME already exists on the first tag attempt" >&2
+              exit 2
+            fi
+            node scripts/release/release-publication-evidence.mjs recover \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$GITHUB_REF_NAME" \
+              --source-commit "$GITHUB_SHA" \
+              --workflow-run-id "$GITHUB_RUN_ID" \
+              --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \
+              --products dist
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "Clearra $GITHUB_REF_NAME" \
+              --draft
+            gh release edit "$GITHUB_REF_NAME" --draft=false
           fi
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --verify-tag \
-            --generate-notes \
-            --title "Clearra $GITHUB_REF_NAME" \
-            --draft
-          gh release edit "$GITHUB_REF_NAME" --draft=false
           immutable="$(gh api --method GET \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
@@ -639,3 +650,20 @@ jobs:
             echo 'published release is not immutable' >&2
             exit 2
           fi
+          mkdir publication-receipt
+          node scripts/release/release-publication-evidence.mjs capture \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --source-commit "$GITHUB_SHA" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \
+            --products dist \
+            --output publication-receipt/clearra-release-publication-receipt.v1.json
+      - name: Upload canonical publication receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-publication-receipt-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: publication-receipt/clearra-release-publication-receipt.v1.json
+          if-no-files-found: error
+          retention-days: 90

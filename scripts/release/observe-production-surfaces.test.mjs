@@ -174,6 +174,27 @@ test("probe spec requires four hash-bound adapters and forbids secret fields", (
   assert.throws(() => validateProductionProbeSpec(duplicate), /identity set/u);
 });
 
+test("Discord production identity requires its accepted-run and sync-authority chain", async () => {
+  const probes = probeSet(new Map());
+  const original = probes.discord;
+  probes.discord = async (context) => {
+    const result = await original(context);
+    delete result.identity.command_sync_authority_file_sha256;
+    return result;
+  };
+  await assert.rejects(
+    observeProductionSurfaces({
+      sourceCommit: COMMIT,
+      durationSeconds: 1,
+      intervalSeconds: 1,
+      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      probes,
+      probeSpec: validProbeSpec(),
+    }),
+    /fields differ from the closed schema/u,
+  );
+});
+
 function validProbeSpec() {
   const probes = ["cloud", "discord", "oracle", "pages"].map((surface) => ({
     surface,
@@ -213,6 +234,14 @@ function probeSet(calls) {
       command_catalog_prior_snapshot_sha256: "a".repeat(64),
       command_catalog_readback_sha256: "b".repeat(64),
       command_catalog_sync_report_sha256: "c".repeat(64),
+      accepted_run_id: "123456789",
+      accepted_run_attempt: "2",
+      accepted_ctk3_manifest_sha256: "1".repeat(64),
+      canonical_acceptance_evidence_sha256: "2".repeat(64),
+      canonical_acceptance_evidence_file_sha256: "3".repeat(64),
+      command_catalog_file_sha256: "4".repeat(64),
+      command_sync_authority_sha256: "5".repeat(64),
+      command_sync_authority_file_sha256: "6".repeat(64),
       command_count: 2,
       command_names: ["1:help", "3:Get original GIF"],
       status: "active",
@@ -316,7 +345,11 @@ function freshnessFor(surface, sequence) {
       tagged_health_sha256: "4".repeat(64),
     };
   }
-  return { probe_id: probeId, identity_readback_sha256: "5".repeat(64) };
+  return {
+    probe_id: probeId,
+    deployment_readback_sha256: "6".repeat(64),
+    identity_readback_sha256: "5".repeat(64),
+  };
 }
 
 function fakeClock(start) {

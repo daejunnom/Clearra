@@ -1,15 +1,25 @@
-import { createHash } from "node:crypto";
-import {
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  unlink,
-} from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { validateFinalSourceRevalidation } from "./validate-final-source-revalidation.mjs";
+import { canonicalJson, requireSha256 } from "./canonical-release-evidence.mjs";
+import {
+  FINAL_SOURCE_STAGE_CARDINALITY,
+  FINAL_SOURCE_STAGE_ORDER,
+  stageForFinalSourceEventKind,
+  validateFinalSourceEventPayload,
+} from "./final-source-event-contract.mjs";
+import {
+  createAcceptanceStageEvidence,
+  createDeploymentStageEvidence,
+  createPublicationStageEvidence,
+  FINAL_SOURCE_STAGE_EVIDENCE_SCHEMA_ID,
+  validateFinalSourceStageEvidence,
+} from "./final-source-stage-evidence.mjs";
+import {
+  validateFinalSourceRevalidationFromStages,
+} from "./validate-final-source-revalidation.mjs";
 
 export const FINAL_SOURCE_ATTEMPT_SCHEMA_ID =
   "clearra.final-source-attempt-journal.v1";
@@ -20,38 +30,6 @@ const RELEASE = "v0.8.0";
 const SHA1 = /^[0-9a-f]{40}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const ATTEMPT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const SECRET_KEY = /(?:^|_)(?:secret|token|password|credential|api_key|private_key)(?:_|$)/iu;
-const FORBIDDEN_PRIOR_AUTHORITY = /(?:^|[^0-9])v?0\.7\.5(?:[^0-9]|$)/iu;
-const EVENT_KINDS = Object.freeze([
-  "source",
-  "contracts",
-  "toolchains",
-  "drift-audit",
-  "canonical-gate",
-  "surface-report",
-  "release-artifact",
-  "deployment-pages",
-  "deployment-discord",
-  "rollback-snapshot",
-  "observation",
-  "tag",
-  "immutable-release",
-]);
-const REQUIRED_CARDINALITY = Object.freeze(new Map([
-  ["source", 1],
-  ["contracts", 1],
-  ["toolchains", 1],
-  ["drift-audit", 2],
-  ["canonical-gate", 1],
-  ["surface-report", 4],
-  ["release-artifact", 3],
-  ["deployment-pages", 1],
-  ["deployment-discord", 1],
-  ["rollback-snapshot", 1],
-  ["observation", 1],
-  ["tag", 1],
-  ["immutable-release", 1],
-]));
 
 export async function initializeFinalSourceAttempt({
   journalPath,
@@ -79,38 +57,57 @@ export async function initializeFinalSourceAttempt({
   }
 }
 
-export async function appendFinalSourceAttemptEvent({
+export async function appendFinalSourceAttemptStage({
   journalPath,
-  kind,
-  payload,
-}) {
+  stageEvidencePath,
+  stageEvidenceFileSha256,
+}, dependencies = {}) {
   const path = requirePath(journalPath, "journalPath");
-  requireEventKind(kind);
-  requirePlainObject(payload, "event payload");
-  rejectForbiddenMaterial(payload);
+  const stageInput = await readCanonicalReport(
+    stageEvidencePath,
+    "final-source stage evidence",
+    stageEvidenceFileSha256,
+  );
+  const replaceJournal = dependencies.replaceJournal ?? replaceJournalAtomically;
   const releaseLock = await acquireJournalLock(path);
   try {
-    const records = await readVerifiedJournal(path);
+    const { raw, records } = await readVerifiedJournal(path);
     const header = records[0];
-    const previous = records.at(-1);
-    const event = sealRecord({
-      schema_id: FINAL_SOURCE_EVENT_SCHEMA_ID,
-      sequence: previous.sequence + 1,
-      attempt_id: header.attempt_id,
-      release: header.release,
-      source_commit: header.source_commit,
-      kind,
-      payload,
-      previous_sha256: previous.record_sha256,
-    });
-    const handle = await open(path, "a", 0o600);
-    try {
-      await handle.writeFile(`${canonicalJson(event)}\n`, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
+    const completedStages = verifyRecordedStages(records.slice(1), header.source_commit);
+    const expectedStage = FINAL_SOURCE_STAGE_ORDER[completedStages.length];
+    if (expectedStage === undefined) {
+      throw new Error("final-source attempt already contains every stage");
     }
-    return event;
+    const stage = validateFinalSourceStageEvidence(stageInput.value, {
+      expectedStage,
+      expectedSourceCommit: header.source_commit,
+    });
+    const descriptor = Object.freeze({
+      stage: stage.stage,
+      schema_id: stage.schema_id,
+      report_sha256: stage.report_sha256,
+      file_sha256: stageInput.fileSha256,
+    });
+    const appended = [];
+    let previous = records.at(-1);
+    for (const entry of stage.events) {
+      const record = sealRecord({
+        schema_id: FINAL_SOURCE_EVENT_SCHEMA_ID,
+        sequence: previous.sequence + 1,
+        attempt_id: header.attempt_id,
+        release: header.release,
+        source_commit: header.source_commit,
+        kind: entry.kind,
+        payload: entry.payload,
+        stage_evidence: descriptor,
+        previous_sha256: previous.record_sha256,
+      });
+      appended.push(record);
+      previous = record;
+    }
+    const batch = `${appended.map((record) => canonicalJson(record)).join("\n")}\n`;
+    await replaceJournal(path, raw, batch);
+    return Object.freeze(appended);
   } finally {
     await releaseLock();
   }
@@ -119,21 +116,121 @@ export async function appendFinalSourceAttemptEvent({
 export async function materializeFinalSourceManifest({
   journalPath,
   outputPath,
-  discordCatalogSyncReport,
-  productionObservationReport,
-}) {
+  sourceRoot,
+  acceptanceStageEvidencePath,
+  acceptanceStageEvidenceFileSha256,
+  deploymentStageEvidencePath,
+  deploymentStageEvidenceFileSha256,
+  publicationStageEvidencePath,
+  publicationStageEvidenceFileSha256,
+  canonicalAcceptanceEvidencePath,
+  canonicalAcceptanceEvidenceFileSha256,
+  pagesDeploymentAuthorityPath,
+  pagesDeploymentAuthorityFileSha256,
+  pagesRollbackCapturePath,
+  pagesRollbackCaptureFileSha256,
+  discordCatalogPath,
+  discordCatalogFileSha256,
+  discordPriorSnapshotPath,
+  discordPriorSnapshotFileSha256,
+  discordCommandSyncAuthorityPath,
+  discordCommandSyncAuthorityFileSha256,
+  discordCatalogSyncReportPath,
+  discordCatalogSyncReportFileSha256,
+  cloudCandidateSmokeReportPath,
+  cloudCandidateSmokeReportFileSha256,
+  oracleRollbackCapturePath,
+  oracleRollbackCaptureFileSha256,
+  oracleObservationPath,
+  oracleObservationFileSha256,
+  productionProbeSpecPath,
+  productionProbeSpecFileSha256,
+  productionObservationReportPath,
+  productionObservationReportFileSha256,
+  releasePublicationEvidencePath,
+  releasePublicationEvidenceFileSha256,
+  releasePublicationFinalAuthorityPath,
+  releasePublicationFinalAuthorityFileSha256,
+  releasePublicationReceiptPath,
+  releasePublicationReceiptFileSha256,
+}, dependencies = {}) {
   const path = requirePath(journalPath, "journalPath");
-  const target = outputPath === undefined
-    ? undefined
-    : requirePath(outputPath, "outputPath");
-  if (target !== undefined) await ensureSafeDirectory(dirname(target));
+  const target = requirePath(outputPath, "outputPath");
+  await ensureSafeDirectory(dirname(target));
+  const [acceptance, deployment, publication, sync, observation] =
+    await Promise.all([
+      readCanonicalReport(acceptanceStageEvidencePath, "acceptance stage evidence", acceptanceStageEvidenceFileSha256),
+      readCanonicalReport(deploymentStageEvidencePath, "deployment stage evidence", deploymentStageEvidenceFileSha256),
+      readCanonicalReport(publicationStageEvidencePath, "publication stage evidence", publicationStageEvidenceFileSha256),
+      readCanonicalReport(discordCatalogSyncReportPath, "Discord command catalog sync report", discordCatalogSyncReportFileSha256),
+      readCanonicalReport(productionObservationReportPath, "production observation report", productionObservationReportFileSha256),
+    ]);
+  const reconstructStages = dependencies.reconstructStages ?? reconstructFinalSourceStages;
+  const reconstructed = await reconstructStages({
+    expectedSourceCommit: acceptance.value.source_commit,
+    sourceRoot,
+    submittedStages: [acceptance, deployment, publication],
+    canonicalAcceptanceEvidencePath,
+    canonicalAcceptanceEvidenceFileSha256,
+    pagesDeploymentAuthorityPath,
+    pagesDeploymentAuthorityFileSha256,
+    pagesRollbackCapturePath,
+    pagesRollbackCaptureFileSha256,
+    discordCatalogPath,
+    discordCatalogFileSha256,
+    discordPriorSnapshotPath,
+    discordPriorSnapshotFileSha256,
+    discordCommandSyncAuthorityPath,
+    discordCommandSyncAuthorityFileSha256,
+    discordCatalogSyncReportPath,
+    discordCatalogSyncReportFileSha256,
+    discordCatalogSyncReport: sync,
+    cloudCandidateSmokeReportPath,
+    cloudCandidateSmokeReportFileSha256,
+    oracleRollbackCapturePath,
+    oracleRollbackCaptureFileSha256,
+    oracleObservationPath,
+    oracleObservationFileSha256,
+    productionProbeSpecPath,
+    productionProbeSpecFileSha256,
+    productionObservationReportPath,
+    productionObservationReportFileSha256,
+    productionObservationReport: observation,
+    releasePublicationEvidencePath,
+    releasePublicationEvidenceFileSha256,
+    releasePublicationFinalAuthorityPath,
+    releasePublicationFinalAuthorityFileSha256,
+    releasePublicationReceiptPath,
+    releasePublicationReceiptFileSha256,
+  });
+  for (const [index, submitted] of [acceptance, deployment, publication].entries()) {
+    if (canonicalJson(submitted.value) !== canonicalJson(reconstructed.stages[index])) {
+      throw new Error(
+        `${FINAL_SOURCE_STAGE_ORDER[index]} stage differs from its reopened original producers`,
+      );
+    }
+  }
   const releaseLock = await acquireJournalLock(path);
   try {
-    const records = await readVerifiedJournal(path);
+    const { records } = await readVerifiedJournal(path);
     const header = records[0];
-    const events = records.slice(1);
-    const grouped = groupEvents(events);
-    requireCompleteEventSet(grouped);
+    const stageInputs = [acceptance, deployment, publication];
+    for (const [index, input] of stageInputs.entries()) {
+      validateFinalSourceStageEvidence(input.value, {
+        expectedStage: FINAL_SOURCE_STAGE_ORDER[index],
+        expectedSourceCommit: header.source_commit,
+      });
+    }
+    const completedStages = verifyRecordedStages(records.slice(1), header.source_commit);
+    if (completedStages.length !== FINAL_SOURCE_STAGE_ORDER.length) {
+      throw new Error("final-source attempt is incomplete");
+    }
+    for (const [index, recorded] of completedStages.entries()) {
+      requireExactStageMatch(recorded, stageInputs[index]);
+    }
+    requireDeploymentProducerMatch(deployment.value, "discord-catalog-sync", sync.value.report_sha256, sync.fileSha256);
+    requireDeploymentProducerMatch(deployment.value, "production-observation", observation.value.report_sha256, observation.fileSha256);
+    const grouped = groupEvents(records.slice(1));
     const manifest = {
       schema_id: "clearra.final-source-revalidation.v1",
       release: header.release,
@@ -153,19 +250,88 @@ export async function materializeFinalSourceManifest({
       tag: onlyPayload(grouped, "tag"),
       immutable_release: onlyPayload(grouped, "immutable-release"),
     };
-    validateFinalSourceRevalidation(manifest, {
+    validateFinalSourceRevalidationFromStages(manifest, {
       expectedSourceCommit: header.source_commit,
       expectedRelease: header.release,
-      discordCatalogSyncReport,
-      productionObservationReport,
+      acceptanceStageEvidence: acceptance.value,
+      acceptanceStageEvidenceFileSha256: acceptance.fileSha256,
+      deploymentStageEvidence: deployment.value,
+      deploymentStageEvidenceFileSha256: deployment.fileSha256,
+      publicationStageEvidence: publication.value,
+      publicationStageEvidenceFileSha256: publication.fileSha256,
+      discordCatalogSyncReport: sync.value,
+      discordCatalogSyncReportFileSha256: sync.fileSha256,
+      productionObservationReport: observation.value,
+      productionObservationReportFileSha256: observation.fileSha256,
     });
-    if (target !== undefined) {
-      await writeNewFile(target, `${JSON.stringify(manifest, null, 2)}\n`);
-    }
+    await writeNewFile(target, `${canonicalJson(manifest)}\n`);
     return manifest;
   } finally {
     await releaseLock();
   }
+}
+
+async function reconstructFinalSourceStages(options) {
+  const [canonicalAcceptance, pages, pagesRollback, catalog, prior, syncAuthority,
+    smoke, oracleCapture, oracleObservation, probeSpec, publication,
+    publicationAuthority, receipt] =
+    await Promise.all([
+      readCanonicalReport(options.canonicalAcceptanceEvidencePath, "canonical acceptance evidence", options.canonicalAcceptanceEvidenceFileSha256),
+      readCanonicalReport(options.pagesDeploymentAuthorityPath, "Pages deployment authority", options.pagesDeploymentAuthorityFileSha256),
+      readCanonicalReport(options.pagesRollbackCapturePath, "Pages rollback capture", options.pagesRollbackCaptureFileSha256),
+      readCanonicalReport(options.discordCatalogPath, "Discord canonical catalog", options.discordCatalogFileSha256),
+      readCanonicalReport(options.discordPriorSnapshotPath, "Discord prior snapshot", options.discordPriorSnapshotFileSha256),
+      readCanonicalReport(options.discordCommandSyncAuthorityPath, "Discord command sync authority", options.discordCommandSyncAuthorityFileSha256),
+      readCanonicalReport(options.cloudCandidateSmokeReportPath, "Cloud candidate smoke report", options.cloudCandidateSmokeReportFileSha256),
+      readCanonicalReport(options.oracleRollbackCapturePath, "Oracle rollback capture", options.oracleRollbackCaptureFileSha256),
+      readCanonicalReport(options.oracleObservationPath, "Oracle candidate observation", options.oracleObservationFileSha256),
+      readCanonicalReport(options.productionProbeSpecPath, "production probe spec", options.productionProbeSpecFileSha256),
+      readCanonicalReport(options.releasePublicationEvidencePath, "release publication evidence", options.releasePublicationEvidenceFileSha256),
+      readCanonicalReport(options.releasePublicationFinalAuthorityPath, "release publication final authority", options.releasePublicationFinalAuthorityFileSha256),
+      readCanonicalReport(options.releasePublicationReceiptPath, "release publication receipt", options.releasePublicationReceiptFileSha256),
+    ]);
+  const acceptance = await createAcceptanceStageEvidence({
+    expectedSourceCommit: options.expectedSourceCommit,
+    sourceRoot: options.sourceRoot,
+    acceptanceEvidence: canonicalAcceptance.value,
+    acceptanceEvidenceFileSha256: canonicalAcceptance.fileSha256,
+  });
+  const deployment = createDeploymentStageEvidence({
+    expectedSourceCommit: options.expectedSourceCommit,
+    pagesDeploymentAuthority: pages.value,
+    pagesDeploymentAuthorityFileSha256: pages.fileSha256,
+    pagesRollbackCapture: pagesRollback.value,
+    pagesRollbackCaptureFileSha256: pagesRollback.fileSha256,
+    discordCatalog: catalog.value,
+    discordCatalogFileSha256: catalog.fileSha256,
+    discordPriorSnapshot: prior.value,
+    discordPriorSnapshotFileSha256: prior.fileSha256,
+    discordCommandSyncAuthority: syncAuthority.value,
+    discordCommandSyncAuthorityFileSha256: syncAuthority.fileSha256,
+    discordCatalogSyncReport: options.discordCatalogSyncReport.value,
+    discordCatalogSyncFileSha256: options.discordCatalogSyncReport.fileSha256,
+    cloudCandidateSmokeReport: smoke.value,
+    cloudCandidateSmokeFileSha256: smoke.fileSha256,
+    oracleRollbackCapture: oracleCapture.value,
+    oracleRollbackCaptureFileSha256: oracleCapture.fileSha256,
+    oracleObservation: oracleObservation.value,
+    oracleObservationFileSha256: oracleObservation.fileSha256,
+    productionProbeSpec: probeSpec.value,
+    productionProbeSpecFileSha256: probeSpec.fileSha256,
+    productionObservationReport: options.productionObservationReport.value,
+    productionObservationFileSha256: options.productionObservationReport.fileSha256,
+  });
+  const publicationStage = createPublicationStageEvidence({
+    expectedSourceCommit: options.expectedSourceCommit,
+    releasePublicationEvidence: publication.value,
+    releasePublicationFileSha256: publication.fileSha256,
+    releasePublicationFinalAuthority: publicationAuthority.value,
+    releasePublicationFinalAuthorityFileSha256: publicationAuthority.fileSha256,
+    releasePublicationReceipt: receipt.value,
+    releasePublicationReceiptFileSha256: receipt.fileSha256,
+    acceptanceEvidence: canonicalAcceptance.value,
+  });
+  return Object.freeze({ stages: Object.freeze([acceptance, deployment, publicationStage]) });
 }
 
 export function parseFinalSourceAttemptCliArguments(args) {
@@ -178,22 +344,52 @@ export function parseFinalSourceAttemptCliArguments(args) {
       allowed: ["--journal", "--attempt-id", "--source-commit"],
       required: ["--journal", "--attempt-id", "--source-commit"],
     }],
-    ["append", {
-      allowed: ["--journal", "--kind", "--payload"],
-      required: ["--journal", "--kind", "--payload"],
+    ["append-stage", {
+      allowed: ["--journal", "--stage-evidence", "--stage-evidence-file-sha256"],
+      required: ["--journal", "--stage-evidence", "--stage-evidence-file-sha256"],
     }],
     ["materialize", {
       allowed: [
-        "--journal",
-        "--output",
-        "--discord-catalog-sync-report",
-        "--production-observation-report",
+        "--journal", "--output", "--source-root",
+        "--acceptance-stage-evidence", "--acceptance-stage-evidence-file-sha256",
+        "--deployment-stage-evidence", "--deployment-stage-evidence-file-sha256",
+        "--publication-stage-evidence", "--publication-stage-evidence-file-sha256",
+        "--canonical-acceptance-evidence", "--canonical-acceptance-evidence-file-sha256",
+        "--pages-deployment-authority", "--pages-deployment-authority-file-sha256",
+        "--pages-rollback-capture", "--pages-rollback-capture-file-sha256",
+        "--discord-catalog", "--discord-catalog-file-sha256",
+        "--discord-prior-snapshot", "--discord-prior-snapshot-file-sha256",
+        "--discord-command-sync-authority", "--discord-command-sync-authority-file-sha256",
+        "--discord-catalog-sync-report", "--discord-catalog-sync-report-file-sha256",
+        "--cloud-candidate-smoke-report", "--cloud-candidate-smoke-report-file-sha256",
+        "--oracle-rollback-capture", "--oracle-rollback-capture-file-sha256",
+        "--oracle-observation", "--oracle-observation-file-sha256",
+        "--production-probe-spec", "--production-probe-spec-file-sha256",
+        "--production-observation-report", "--production-observation-report-file-sha256",
+        "--release-publication-evidence", "--release-publication-evidence-file-sha256",
+        "--release-publication-final-authority", "--release-publication-final-authority-file-sha256",
+        "--release-publication-receipt", "--release-publication-receipt-file-sha256",
       ],
       required: [
-        "--journal",
-        "--output",
-        "--discord-catalog-sync-report",
-        "--production-observation-report",
+        "--journal", "--output", "--source-root",
+        "--acceptance-stage-evidence", "--acceptance-stage-evidence-file-sha256",
+        "--deployment-stage-evidence", "--deployment-stage-evidence-file-sha256",
+        "--publication-stage-evidence", "--publication-stage-evidence-file-sha256",
+        "--canonical-acceptance-evidence", "--canonical-acceptance-evidence-file-sha256",
+        "--pages-deployment-authority", "--pages-deployment-authority-file-sha256",
+        "--pages-rollback-capture", "--pages-rollback-capture-file-sha256",
+        "--discord-catalog", "--discord-catalog-file-sha256",
+        "--discord-prior-snapshot", "--discord-prior-snapshot-file-sha256",
+        "--discord-command-sync-authority", "--discord-command-sync-authority-file-sha256",
+        "--discord-catalog-sync-report", "--discord-catalog-sync-report-file-sha256",
+        "--cloud-candidate-smoke-report", "--cloud-candidate-smoke-report-file-sha256",
+        "--oracle-rollback-capture", "--oracle-rollback-capture-file-sha256",
+        "--oracle-observation", "--oracle-observation-file-sha256",
+        "--production-probe-spec", "--production-probe-spec-file-sha256",
+        "--production-observation-report", "--production-observation-report-file-sha256",
+        "--release-publication-evidence", "--release-publication-evidence-file-sha256",
+        "--release-publication-final-authority", "--release-publication-final-authority-file-sha256",
+        "--release-publication-receipt", "--release-publication-receipt-file-sha256",
       ],
     }],
   ]);
@@ -201,14 +397,13 @@ export function parseFinalSourceAttemptCliArguments(args) {
   if (specification === undefined) {
     throw new Error(`unsupported final-source attempt command: ${String(command)}`);
   }
-  const values = parseStrictNamedArguments(args.slice(1), specification);
-  return { command, values };
+  return { command, values: parseStrictNamedArguments(args.slice(1), specification) };
 }
 
 async function readVerifiedJournal(journalPath) {
   const path = resolve(journalPath);
   await assertSafePathChain(dirname(path));
-  await assertRegularNonLinkFile(path);
+  await assertRegularNonLinkFile(path, "final-source attempt journal");
   const raw = await readFile(path, "utf8");
   if (raw.length === 0 || !raw.endsWith("\n")) {
     throw new Error("final-source attempt journal is empty or torn");
@@ -225,24 +420,18 @@ async function readVerifiedJournal(journalPath) {
   for (let index = 1; index < records.length; index += 1) {
     verifyEvent(records[index], records[index - 1], records[0], index);
   }
-  return records;
+  verifyRecordedStages(records.slice(1), records[0].source_commit);
+  return Object.freeze({ raw, records });
 }
 
 function verifyHeader(header) {
   requirePlainObject(header, "attempt journal header");
   requireExactKeys(header, [
-    "schema_id",
-    "sequence",
-    "attempt_id",
-    "release",
-    "source_commit",
-    "previous_sha256",
-    "record_sha256",
+    "schema_id", "sequence", "attempt_id", "release", "source_commit",
+    "previous_sha256", "record_sha256",
   ], "attempt journal header");
-  if (header.schema_id !== FINAL_SOURCE_ATTEMPT_SCHEMA_ID ||
-      header.sequence !== 0 ||
-      header.release !== RELEASE ||
-      header.previous_sha256 !== null) {
+  if (header.schema_id !== FINAL_SOURCE_ATTEMPT_SCHEMA_ID || header.sequence !== 0 ||
+      header.release !== RELEASE || header.previous_sha256 !== null) {
     throw new Error("attempt journal header identity is invalid");
   }
   requireAttemptId(header.attempt_id);
@@ -253,35 +442,88 @@ function verifyHeader(header) {
 function verifyEvent(event, previous, header, index) {
   requirePlainObject(event, `attempt journal event ${index}`);
   requireExactKeys(event, [
-    "schema_id",
-    "sequence",
-    "attempt_id",
-    "release",
-    "source_commit",
-    "kind",
-    "payload",
-    "previous_sha256",
-    "record_sha256",
+    "schema_id", "sequence", "attempt_id", "release", "source_commit",
+    "kind", "payload", "stage_evidence", "previous_sha256", "record_sha256",
   ], `attempt journal event ${index}`);
-  if (event.schema_id !== FINAL_SOURCE_EVENT_SCHEMA_ID ||
-      event.sequence !== index ||
-      event.attempt_id !== header.attempt_id ||
-      event.release !== header.release ||
+  if (event.schema_id !== FINAL_SOURCE_EVENT_SCHEMA_ID || event.sequence !== index ||
+      event.attempt_id !== header.attempt_id || event.release !== header.release ||
       event.source_commit !== header.source_commit ||
       event.previous_sha256 !== previous.record_sha256) {
     throw new Error(`attempt journal event ${index} identity or chain is invalid`);
   }
-  requireEventKind(event.kind);
-  requirePlainObject(event.payload, `attempt journal event ${index} payload`);
-  rejectForbiddenMaterial(event.payload);
+  validateFinalSourceEventPayload(event.kind, event.payload, header.source_commit);
+  verifyStageDescriptor(event.stage_evidence, event.kind);
   verifyRecordHash(event, `attempt journal event ${index}`);
 }
 
+function verifyStageDescriptor(descriptor, kind) {
+  requirePlainObject(descriptor, "attempt journal stage descriptor");
+  requireExactKeys(descriptor, ["stage", "schema_id", "report_sha256", "file_sha256"], "attempt journal stage descriptor");
+  if (descriptor.stage !== stageForFinalSourceEventKind(kind) ||
+      descriptor.schema_id !== FINAL_SOURCE_STAGE_EVIDENCE_SCHEMA_ID) {
+    throw new Error("attempt journal stage descriptor identity is invalid");
+  }
+  requireSha256(descriptor.report_sha256, "stage evidence report SHA-256");
+  requireSha256(descriptor.file_sha256, "stage evidence file SHA-256");
+}
+
+function verifyRecordedStages(events, sourceCommit) {
+  if (events.length === 0) return [];
+  const completed = [];
+  let offset = 0;
+  for (const expectedStage of FINAL_SOURCE_STAGE_ORDER) {
+    if (offset >= events.length) break;
+    const descriptor = events[offset].stage_evidence;
+    if (descriptor.stage !== expectedStage) {
+      throw new Error("attempt journal stages are not in canonical order");
+    }
+    const expectedCount = [...FINAL_SOURCE_STAGE_CARDINALITY.get(expectedStage).values()]
+      .reduce((sum, count) => sum + count, 0);
+    const batch = events.slice(offset, offset + expectedCount);
+    if (batch.length !== expectedCount) {
+      throw new Error(`${expectedStage} stage journal batch is incomplete`);
+    }
+    if (batch.some((event) => canonicalJson(event.stage_evidence) !== canonicalJson(descriptor))) {
+      throw new Error(`${expectedStage} stage journal batch mixes producer authorities`);
+    }
+    const expectedKinds = [...FINAL_SOURCE_STAGE_CARDINALITY.get(expectedStage).entries()]
+      .flatMap(([kind, count]) => Array.from({ length: count }, () => kind));
+    if (canonicalJson(batch.map(({ kind }) => kind)) !== canonicalJson(expectedKinds)) {
+      throw new Error(`${expectedStage} stage journal event order is invalid`);
+    }
+    completed.push(Object.freeze({
+      descriptor,
+      events: batch.map(({ kind, payload }) => ({ kind, payload })),
+    }));
+    offset += expectedCount;
+  }
+  if (offset !== events.length) {
+    throw new Error("attempt journal contains events outside the canonical stages");
+  }
+  return completed;
+}
+
+function requireExactStageMatch(recorded, input) {
+  const report = input.value;
+  if (recorded.descriptor.stage !== report.stage ||
+      recorded.descriptor.schema_id !== report.schema_id ||
+      recorded.descriptor.report_sha256 !== report.report_sha256 ||
+      recorded.descriptor.file_sha256 !== input.fileSha256 ||
+      canonicalJson(recorded.events) !== canonicalJson(report.events)) {
+    throw new Error(`${report.stage} journal batch differs from its exact stage evidence file`);
+  }
+}
+
+function requireDeploymentProducerMatch(stage, role, evidenceSha256, fileSha256) {
+  const input = stage.producer_inputs.find((entry) => entry.role === role);
+  if (input === undefined || input.evidence_sha256 !== evidenceSha256 ||
+      input.file_sha256 !== fileSha256) {
+    throw new Error(`deployment stage ${role} input differs from materialization authority`);
+  }
+}
+
 function sealRecord(record) {
-  return {
-    ...record,
-    record_sha256: sha256(canonicalJson(record)),
-  };
+  return { ...record, record_sha256: sha256(canonicalJson(record)) };
 }
 
 function verifyRecordHash(record, label) {
@@ -295,18 +537,12 @@ function verifyRecordHash(record, label) {
 }
 
 function groupEvents(events) {
-  const grouped = new Map(EVENT_KINDS.map((kind) => [kind, []]));
+  const grouped = new Map();
+  for (const stage of FINAL_SOURCE_STAGE_CARDINALITY.values()) {
+    for (const kind of stage.keys()) grouped.set(kind, []);
+  }
   for (const event of events) grouped.get(event.kind).push(event.payload);
   return grouped;
-}
-
-function requireCompleteEventSet(grouped) {
-  for (const [kind, count] of REQUIRED_CARDINALITY) {
-    const actual = grouped.get(kind).length;
-    if (actual !== count) {
-      throw new Error(`final-source attempt requires ${count} ${kind} event(s), found ${actual}`);
-    }
-  }
 }
 
 function onlyPayload(grouped, kind) {
@@ -314,11 +550,8 @@ function onlyPayload(grouped, kind) {
 }
 
 function sortedPayloads(grouped, kind, key) {
-  return [...grouped.get(kind)].sort((left, right) => {
-    const leftKey = String(left[key]);
-    const rightKey = String(right[key]);
-    return leftKey.localeCompare(rightKey, "en");
-  });
+  return [...grouped.get(kind)].sort((left, right) =>
+    String(left[key]).localeCompare(String(right[key]), "en"));
 }
 
 function parseStrictNamedArguments(args, { allowed, required }) {
@@ -340,17 +573,9 @@ function parseStrictNamedArguments(args, { allowed, required }) {
     index += 1;
   }
   for (const option of required) {
-    if (!Object.hasOwn(values, option)) {
-      throw new Error(`${option} is required`);
-    }
+    if (!Object.hasOwn(values, option)) throw new Error(`${option} is required`);
   }
   return values;
-}
-
-function requireEventKind(kind) {
-  if (!EVENT_KINDS.includes(kind)) {
-    throw new Error(`unsupported final-source attempt event kind: ${String(kind)}`);
-  }
 }
 
 function requireAttemptId(attemptId) {
@@ -363,6 +588,7 @@ function requireSourceCommit(sourceCommit) {
   if (typeof sourceCommit !== "string" || !SHA1.test(sourceCommit)) {
     throw new Error("sourceCommit must be a full lowercase SHA-1 commit");
   }
+  return sourceCommit;
 }
 
 function requirePath(value, label) {
@@ -370,42 +596,6 @@ function requirePath(value, label) {
     throw new Error(`${label} must be a non-empty filesystem path`);
   }
   return resolve(value);
-}
-
-function rejectForbiddenMaterial(value, path = "payload") {
-  if (typeof value === "string") {
-    if (FORBIDDEN_PRIOR_AUTHORITY.test(value)) {
-      throw new Error(`${path} reuses a v0.7.5 authority identity`);
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => rejectForbiddenMaterial(entry, `${path}[${index}]`));
-    return;
-  }
-  if (value === null || typeof value !== "object") return;
-  for (const [key, nested] of Object.entries(value)) {
-    if (SECRET_KEY.test(key)) throw new Error(`${path}.${key} is forbidden secret material`);
-    rejectForbiddenMaterial(nested, `${path}.${key}`);
-  }
-}
-
-function canonicalJson(value) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("canonical JSON forbids non-finite numbers");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
-  }
-  requirePlainObject(value, "canonical JSON value");
-  const fields = Object.keys(value).sort().map((key) =>
-    `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
-  );
-  return `{${fields.join(",")}}`;
 }
 
 function sha256(value) {
@@ -423,6 +613,44 @@ function requireExactKeys(value, expected, label) {
 function requirePlainObject(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
+  }
+}
+
+async function readCanonicalReport(path, label, expectedFileSha256) {
+  const target = requirePath(path, `${label} path`);
+  await assertSafePathChain(dirname(target));
+  await assertRegularNonLinkFile(target, label);
+  const raw = await readFile(target, "utf8");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  if (raw !== `${canonicalJson(value)}\n`) {
+    throw new Error(`${label} bytes are not canonical producer JSON`);
+  }
+  const fileSha256 = sha256(raw);
+  if (fileSha256 !== requireSha256(expectedFileSha256, `${label} file SHA-256`)) {
+    throw new Error(`${label} raw file SHA-256 differs from the requested authority`);
+  }
+  return Object.freeze({ value, fileSha256 });
+}
+
+async function replaceJournalAtomically(path, original, batch) {
+  const temporary = `${path}.next-${process.pid}-${randomUUID()}`;
+  let handle;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${original}${batch}`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, path);
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -503,10 +731,10 @@ async function assertSafePathChain(directory) {
   }
 }
 
-async function assertRegularNonLinkFile(path) {
+async function assertRegularNonLinkFile(path, label) {
   const status = await lstat(path);
   if (!status.isFile() || status.isSymbolicLink()) {
-    throw new Error(`release evidence journal is not a regular non-link file: ${path}`);
+    throw new Error(`${label} is not a regular non-link file: ${path}`);
   }
 }
 
@@ -519,27 +747,53 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         attemptId: values["--attempt-id"],
         sourceCommit: values["--source-commit"],
       });
-    } else if (command === "append") {
-      const payload = JSON.parse(await readFile(resolve(values["--payload"]), "utf8"));
-      await appendFinalSourceAttemptEvent({
+    } else if (command === "append-stage") {
+      await appendFinalSourceAttemptStage({
         journalPath: values["--journal"],
-        kind: values["--kind"],
-        payload,
+        stageEvidencePath: values["--stage-evidence"],
+        stageEvidenceFileSha256: values["--stage-evidence-file-sha256"],
       });
     } else {
-      const discordCatalogSyncReport = await readCanonicalProducerReport(
-        values["--discord-catalog-sync-report"],
-        "Discord command catalog sync report",
-      );
-      const productionObservationReport = await readCanonicalProducerReport(
-        values["--production-observation-report"],
-        "production observation report",
-      );
       await materializeFinalSourceManifest({
         journalPath: values["--journal"],
         outputPath: values["--output"],
-        discordCatalogSyncReport,
-        productionObservationReport,
+        sourceRoot: values["--source-root"],
+        acceptanceStageEvidencePath: values["--acceptance-stage-evidence"],
+        acceptanceStageEvidenceFileSha256: values["--acceptance-stage-evidence-file-sha256"],
+        deploymentStageEvidencePath: values["--deployment-stage-evidence"],
+        deploymentStageEvidenceFileSha256: values["--deployment-stage-evidence-file-sha256"],
+        publicationStageEvidencePath: values["--publication-stage-evidence"],
+        publicationStageEvidenceFileSha256: values["--publication-stage-evidence-file-sha256"],
+        canonicalAcceptanceEvidencePath: values["--canonical-acceptance-evidence"],
+        canonicalAcceptanceEvidenceFileSha256: values["--canonical-acceptance-evidence-file-sha256"],
+        pagesDeploymentAuthorityPath: values["--pages-deployment-authority"],
+        pagesDeploymentAuthorityFileSha256: values["--pages-deployment-authority-file-sha256"],
+        pagesRollbackCapturePath: values["--pages-rollback-capture"],
+        pagesRollbackCaptureFileSha256: values["--pages-rollback-capture-file-sha256"],
+        discordCatalogPath: values["--discord-catalog"],
+        discordCatalogFileSha256: values["--discord-catalog-file-sha256"],
+        discordPriorSnapshotPath: values["--discord-prior-snapshot"],
+        discordPriorSnapshotFileSha256: values["--discord-prior-snapshot-file-sha256"],
+        discordCommandSyncAuthorityPath: values["--discord-command-sync-authority"],
+        discordCommandSyncAuthorityFileSha256: values["--discord-command-sync-authority-file-sha256"],
+        discordCatalogSyncReportPath: values["--discord-catalog-sync-report"],
+        discordCatalogSyncReportFileSha256: values["--discord-catalog-sync-report-file-sha256"],
+        cloudCandidateSmokeReportPath: values["--cloud-candidate-smoke-report"],
+        cloudCandidateSmokeReportFileSha256: values["--cloud-candidate-smoke-report-file-sha256"],
+        oracleRollbackCapturePath: values["--oracle-rollback-capture"],
+        oracleRollbackCaptureFileSha256: values["--oracle-rollback-capture-file-sha256"],
+        oracleObservationPath: values["--oracle-observation"],
+        oracleObservationFileSha256: values["--oracle-observation-file-sha256"],
+        productionProbeSpecPath: values["--production-probe-spec"],
+        productionProbeSpecFileSha256: values["--production-probe-spec-file-sha256"],
+        productionObservationReportPath: values["--production-observation-report"],
+        productionObservationReportFileSha256: values["--production-observation-report-file-sha256"],
+        releasePublicationEvidencePath: values["--release-publication-evidence"],
+        releasePublicationEvidenceFileSha256: values["--release-publication-evidence-file-sha256"],
+        releasePublicationFinalAuthorityPath: values["--release-publication-final-authority"],
+        releasePublicationFinalAuthorityFileSha256: values["--release-publication-final-authority-file-sha256"],
+        releasePublicationReceiptPath: values["--release-publication-receipt"],
+        releasePublicationReceiptFileSha256: values["--release-publication-receipt-file-sha256"],
       });
     }
     process.stdout.write(`${FINAL_SOURCE_ATTEMPT_SCHEMA_ID}\n`);
@@ -547,21 +801,4 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 2;
   }
-}
-
-async function readCanonicalProducerReport(path, label) {
-  const target = resolve(requirePath(path, `${label} path`));
-  await assertSafePathChain(dirname(target));
-  await assertRegularNonLinkFile(target);
-  const raw = await readFile(target, "utf8");
-  let value;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error(`${label} is not valid JSON`);
-  }
-  if (raw !== `${canonicalJson(value)}\n`) {
-    throw new Error(`${label} bytes are not canonical producer JSON`);
-  }
-  return value;
 }

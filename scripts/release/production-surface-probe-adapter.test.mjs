@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -6,6 +7,7 @@ import {
   normalizeDiscordCatalog,
 } from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 import {
+  canonicalJson,
   canonicalSha256,
   sealCanonicalReport,
 } from "./canonical-release-evidence.mjs";
@@ -20,6 +22,12 @@ const HASH = "a".repeat(64);
 const APPLICATION_ID = "223456789012345678";
 const IMAGE_DIGEST = `sha256:${"f".repeat(64)}`;
 const NOW = "2026-08-30T00:00:10.000Z";
+
+function fileSha256(value) {
+  return createHash("sha256")
+    .update(`${canonicalJson(value)}\n`, "utf8")
+    .digest("hex");
+}
 
 test("Discord adapter performs one independent GET and binds the sealed catalog reports", async () => {
   const commands = [
@@ -37,6 +45,22 @@ test("Discord adapter performs one independent GET and binds the sealed catalog 
   const readbackSha256 = canonicalSha256(normalizeDiscordCatalog(readback, {
     allowResponseMetadata: true,
   }));
+  const catalogFileSha256 = fileSha256(catalog);
+  const syncAuthority = sealCanonicalReport({
+    schema_id: "clearra.discord.command-sync-authority.v1",
+    source_commit: COMMIT,
+    repository: "daejunnom/Clearra",
+    release_version: "0.8.0",
+    pages_base_path: "/Clearra",
+    accepted_run_id: "123456789",
+    accepted_run_attempt: "2",
+    accepted_ctk3_manifest_sha256: "2".repeat(64),
+    canonical_acceptance_evidence_sha256: "3".repeat(64),
+    canonical_acceptance_evidence_file_sha256: "4".repeat(64),
+    command_catalog_sha256: catalog.catalog_sha256,
+    command_catalog_file_sha256: catalogFileSha256,
+  });
+  const syncAuthorityFileSha256 = fileSha256(syncAuthority);
   const syncReport = sealCanonicalReport({
     schema_id: "clearra.discord.command-catalog-sync.v1",
     source_commit: COMMIT,
@@ -47,6 +71,16 @@ test("Discord adapter performs one independent GET and binds the sealed catalog 
     changed: true,
     command_count: 2,
     expected_catalog_sha256: catalog.catalog_sha256,
+    accepted_run_id: syncAuthority.accepted_run_id,
+    accepted_run_attempt: syncAuthority.accepted_run_attempt,
+    accepted_ctk3_manifest_sha256: syncAuthority.accepted_ctk3_manifest_sha256,
+    canonical_acceptance_evidence_sha256:
+      syncAuthority.canonical_acceptance_evidence_sha256,
+    canonical_acceptance_evidence_file_sha256:
+      syncAuthority.canonical_acceptance_evidence_file_sha256,
+    command_catalog_file_sha256: catalogFileSha256,
+    command_sync_authority_sha256: syncAuthority.report_sha256,
+    command_sync_authority_file_sha256: syncAuthorityFileSha256,
     prior_snapshot_sha256: "8".repeat(64),
     prior_catalog_sha256: "9".repeat(64),
     current_before_sha256: "9".repeat(64),
@@ -57,6 +91,9 @@ test("Discord adapter performs one independent GET and binds the sealed catalog 
     sourceCommit: COMMIT,
     applicationId: APPLICATION_ID,
     catalog,
+    catalogFileSha256,
+    syncAuthority,
+    syncAuthorityFileSha256,
     syncReport,
     sequence: 4,
     rest: {
@@ -72,6 +109,18 @@ test("Discord adapter performs one independent GET and binds the sealed catalog 
   assert.equal(result.surface, "discord");
   assert.equal(result.identity.command_catalog_readback_sha256, readbackSha256);
   assert.equal(result.identity.command_catalog_prior_snapshot_sha256, "8".repeat(64));
+  for (const field of [
+    "accepted_run_id",
+    "accepted_run_attempt",
+    "accepted_ctk3_manifest_sha256",
+    "canonical_acceptance_evidence_sha256",
+    "canonical_acceptance_evidence_file_sha256",
+    "command_catalog_file_sha256",
+    "command_sync_authority_sha256",
+    "command_sync_authority_file_sha256",
+  ]) {
+    assert.equal(result.identity[field], syncReport[field]);
+  }
   assert.deepEqual(result.identity.command_names, ["1:help", "3:Get original GIF"]);
   assert.doesNotMatch(JSON.stringify(result), /token|secret|password/iu);
 
@@ -83,12 +132,31 @@ test("Discord adapter performs one independent GET and binds the sealed catalog 
       sourceCommit: COMMIT,
       applicationId: APPLICATION_ID,
       catalog,
+      catalogFileSha256,
+      syncAuthority,
+      syncAuthorityFileSha256,
       syncReport: stale,
       sequence: 5,
       rest: { async getGlobalCommands() { return structuredClone(readback); } },
       now: () => NOW,
     }),
     /differs from the sealed sync readback/u,
+  );
+
+  await assert.rejects(
+    probeDiscordProductionSurface({
+      sourceCommit: COMMIT,
+      applicationId: APPLICATION_ID,
+      catalog,
+      catalogFileSha256,
+      syncAuthority,
+      syncAuthorityFileSha256: "f".repeat(64),
+      syncReport,
+      sequence: 6,
+      rest: { async getGlobalCommands() { return structuredClone(readback); } },
+      now: () => NOW,
+    }),
+    /differs from the command sync authority file bytes/u,
   );
 });
 
@@ -184,29 +252,32 @@ test("Cloud adapter rejects a smoke report without managed execution authority",
   );
 });
 
-test("Pages adapter cache-busts and validates the closed accepted-build identity", async () => {
+test("Pages adapter validates the sealed report, live deployment status, and accepted-build identity", async () => {
   const readback = pagesIdentityFixture();
+  const deploymentReport = pagesDeploymentReportFixture(readback);
   const calls = [];
+  let deploymentReads = 0;
   const result = await probePagesProductionSurface({
     sourceCommit: COMMIT,
-    pageUrl: "https://daejunnom.github.io/Clearra/",
-    deploymentId: "pages-deployment-123",
-    artifactSha256: HASH,
-    basePath: "/Clearra",
-    acceptedRunId: "123456789",
-    acceptedRunAttempt: "2",
+    deploymentReport,
     sequence: 8,
     async fetchJson(url) {
       calls.push(url);
       return structuredClone(readback);
     },
+    async fetchDeploymentStatus(report) {
+      deploymentReads += 1;
+      assert.equal(report.deployment_id, COMMIT);
+      return { status: "succeed" };
+    },
     now: () => NOW,
   });
 
   assert.equal(calls.length, 1);
+  assert.equal(deploymentReads, 1);
   assert.match(calls[0], /clearra-build-identity\.json\?source=/u);
   assert.equal(result.identity.source_commit, COMMIT);
-  assert.equal(result.identity.deployment_id, "pages-deployment-123");
+  assert.equal(result.identity.deployment_id, COMMIT);
   assert.equal(
     result.freshness.identity_readback_sha256,
     canonicalSha256(readback),
@@ -217,17 +288,25 @@ test("Pages adapter cache-busts and validates the closed accepted-build identity
   await assert.rejects(
     probePagesProductionSurface({
       sourceCommit: COMMIT,
-      pageUrl: "https://daejunnom.github.io/Clearra/",
-      deploymentId: "pages-deployment-123",
-      artifactSha256: HASH,
-      basePath: "/Clearra",
-      acceptedRunId: "123456789",
-      acceptedRunAttempt: "2",
+      deploymentReport,
       sequence: 9,
       async fetchJson() { return mixed; },
+      async fetchDeploymentStatus() { return { status: "succeed" }; },
       now: () => NOW,
     }),
     /differs from accepted deployment authority/u,
+  );
+
+  await assert.rejects(
+    probePagesProductionSurface({
+      sourceCommit: COMMIT,
+      deploymentReport,
+      sequence: 10,
+      async fetchJson() { return pagesIdentityFixture(); },
+      async fetchDeploymentStatus() { return { status: "failed" }; },
+      now: () => NOW,
+    }),
+    /status is not succeed/u,
   );
 });
 
@@ -351,4 +430,33 @@ function pagesIdentityFixture() {
       { path: "wasm/clearra_wasm_bg.wasm", size: 256, sha256: "2".repeat(64) },
     ],
   };
+}
+
+function pagesDeploymentReportFixture(liveIdentity = pagesIdentityFixture()) {
+  return sealCanonicalReport({
+    schema_id: "clearra.pages.deployment-authority.v1",
+    mode: "forward",
+    repository: "daejunnom/Clearra",
+    source_commit: COMMIT,
+    workflow_source_commit: COMMIT,
+    workflow_run_id: "22222",
+    workflow_run_attempt: "1",
+    workflow_path: ".github/workflows/pages.yml",
+    accepted_run_id: "123456789",
+    accepted_run_attempt: "2",
+    artifact_id: "33333",
+    artifact_name: "github-pages",
+    artifact_digest: `sha256:${HASH}`,
+    artifact_sha256: HASH,
+    artifact_api_readback_sha256: "1".repeat(64),
+    workflow_run_api_readback_sha256: "2".repeat(64),
+    deployment_id: COMMIT,
+    deployment_status: "succeed",
+    deployment_api_readback_sha256: canonicalSha256({ status: "succeed" }),
+    page_url: "https://daejunnom.github.io/Clearra/",
+    base_path: "/Clearra",
+    pages_configuration_api_readback_sha256: "4".repeat(64),
+    live_identity_sha256: canonicalSha256(liveIdentity),
+    status: "active",
+  });
 }

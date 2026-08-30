@@ -109,10 +109,11 @@ test("rejects a skipped upstream drift snapshot contract", async () => {
 });
 
 test("rejects removal of the final-source attempt journal regression", async () => {
+  const canonicalCommand = "node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs";
   const weakenedWorkflow = replaceExactlyOnce(
     normalizedWorkflow,
-    "node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
-    "node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
+    canonicalCommand,
+    canonicalCommand.replace("scripts/release/final-source-attempt-journal.test.mjs ", ""),
   );
   const result = await runValidator(weakenedWorkflow);
   assert.notEqual(result.status, 0, diagnostic(result));
@@ -567,8 +568,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "            --products dist\n",
-        "",
+        '            --base-path "/${{ github.event.repository.name }}" \\\n            --products dist\n',
+        '            --base-path "/${{ github.event.repository.name }}"\n',
       ),
   ],
   [
@@ -649,6 +650,51 @@ for (const [name, mutate] of [
       ),
   ],
   [
+    "rejects Pages upload without external artifact ID propagation",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      pages_artifact_id: ${{ steps.pages-artifact.outputs.artifact_id }}\n",
+        "      pages_artifact_id: forged\n",
+      ),
+  ],
+  [
+    "rejects manually transcribed Pages rollback artifact authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      rollback_capture_run_id:\n        description: Successful Pages rollback capture workflow run ID\n        required: true\n        type: string\n",
+        "      rollback_capture_run_id:\n        description: Successful Pages rollback capture workflow run ID\n        required: true\n        type: string\n      rollback_artifact_id:\n        description: forbidden manual authority\n        required: true\n        type: string\n",
+      ),
+  ],
+  [
+    "rejects Pages rollback admission without sealed report resolution",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          PAGES_AUTHORITY_MODE: resolve-forward\n",
+        "          PAGES_AUTHORITY_MODE: forward\n",
+      ),
+  ],
+  [
+    "rejects Pages deployment without the tracked sealed authority producer",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "        run: node authority-source/scripts/release/pages-deployment-authority.mjs\n",
+        "        run: echo skipped\n",
+      ),
+  ],
+  [
+    "rejects short-lived Pages deployment authority evidence",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          retention-days: 90\n",
+        "          retention-days: 1\n",
+      ),
+  ],
+  [
     "rejects Pages download of a differently named accepted artifact",
     (source) =>
       replaceExactlyOnce(
@@ -658,12 +704,12 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects deployed Pages identity without exact base-path readback",
+    "rejects deployed Pages authority without exact base-path binding",
     (source) =>
       replaceExactlyOnce(
         source,
-        "                 .basePath == $basePath and\n",
-        "                 true and\n",
+        "          EXPECTED_ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}\n          EXPECTED_BASE_PATH: /${{ github.event.repository.name }}\n",
+        "          EXPECTED_ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}\n          EXPECTED_BASE_PATH: /forged\n",
       ),
   ],
 ]) {

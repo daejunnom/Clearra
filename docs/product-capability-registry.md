@@ -149,8 +149,10 @@ single installed-owner product registry validation retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry12.v1.json`, and its
 release-identity static ownership lock retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry13.v1.json`, and the
-permanent product-pager contract test cohesion rationale retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry14.v1.json`.
+  permanent product-pager contract test cohesion rationale retained in
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry14.v1.json`, and
+  the final deployment/publication authority closure retained in
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry15.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -183,6 +185,10 @@ downloaded-product byte revalidation, accepted CTK3 v2 reuse, immutable-digest C
 candidate with numeric managed-Secret execution smoke, typed read-only Oracle boundary,
 hash-bound four-surface observation, and append-only final journal. These deployment
 authority closures likewise add no product capability.
+The Pages navigation exposes only PC, Setup, Build probability, Damage, Spin Finder,
+CTK, and Player. Advanced query routes remain addressable, CTK owns Render, and Pages
+computation stays inside the browser module Worker/local WASM boundary rather than
+calling the Discord Cloud/Oracle compute tier.
 Retry 10 closes the final Desktop paging cancellation gap: aborting an in-flight
 next-page prefetch now reaches `product_page_release` and the active Tauri cancel
 token, while every completion path removes its listener. This lifecycle repair also
@@ -196,7 +202,19 @@ runs each authority once and adds no capability. Retry 13 makes that exact job s
 test command, and metadata exclusion a release-identity architecture invariant. It also
 adds no capability. Retry 14 follows the canonical Linux SRP gate exposing that the
 cohesive product-result pager contract test lacked its permanent behavior-level single
-change reason. The test-ownership explanation adds no capability. Every release observation
+  change reason. The test-ownership explanation adds no capability. Retry 15 closes the
+  final deployment/publication authority audit: Pages capture, forward, and restore resolve
+  sealed run-attempt reports and bind actual artifact/deployment/API/public readbacks;
+  Discord command synchronization binds the accepted run, CTK3 manifest, canonical
+  acceptance evidence, canonical catalog bytes, and independent readback; Oracle rollback
+  capture and direct observation persist as closed canonical evidence; the final journal
+  accepts only source-bound acceptance/deployment/publication stage reports through atomic
+  stage-batch replacement; and publication finalization exact-one resolves and downloads the
+  run-attempt receipt artifact, verifies its API digest, ZIP structure, and raw canonical
+  bytes only after the original tag run completes successfully. A local closed resolver then
+  exact-one selects the successful finalizer artifact, revalidates its archive and raw files,
+  and seals `clearra.release-publication-final-authority.v1`. These authority repairs add
+  no product capability. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new
@@ -310,21 +328,43 @@ the release source. It does not predeclare the later Pages, Oracle, Discord,
 observation, tag, or immutable-release events; those are recorded only in the
 external hash-chained release-attempt journal after they occur.
 
-The Pages portion of that machinery includes a separate capture/restore workflow.
-Before the v0.8.0 Pages mutation, it must bind the live prior Pages identity to a
-non-expired 90-day Actions artifact containing the official Pages `artifact.tar`.
-The bracket records the capture run and attempt, artifact ID/name/REST digest, and
-inner-tar SHA-256. The ordinary forward workflow must fresh-download and verify that
-package both before build and immediately before deployment. Restore is fail closed
-unless the exact authority-main bracket, prior source SHA, successful capture build,
-artifact metadata and retention, complete tar hash and safe contents, typed build
-identity, live candidate identity, and WASM runtime identity all still match. It also
-requires the exact `ROLLBACK:<current>:TO:<snapshot>` sentinel and the absence of the
-v0.8.0 tag and release. Ninety-day retention does not broaden the artifact beyond its
-capture-time authority-main bracket. Capture reruns receive a distinct attempt-bound
-artifact, while forward and restore public mutations reject workflow reruns and require
-a fresh dispatch so the fixed deployment artifact name is never ambiguous across
-attempts.
+The Pages portion of that machinery includes separate capture, forward, and restore
+authorities. Before the v0.8.0 Pages mutation, capture binds the live prior identity to
+a non-expired 90-day Actions artifact containing the official Pages `artifact.tar`,
+then uploads a separate run-attempt-bound
+`clearra.pages.rollback-capture-authority.v1` report artifact. The report seals the
+capture run/attempt, rollback artifact ID/name/API digest, inner-tar SHA-256, retention,
+and exact authority-main bracket. Forward and restore accept only the snapshot SHA and
+capture run ID, exact-one resolve that sealed report through the Actions API, derive the
+rollback package identity from it, and fresh-download and verify both artifacts before
+build and immediately before public mutation. No manual artifact ID/name/digest/tar hash
+input exists. Restore also requires the exact `ROLLBACK:<current>:TO:<snapshot>`
+sentinel, unchanged live candidate and WASM identity, and the absence of the v0.8.0 tag
+and release. After an actual forward or restore deployment, a separate 90-day
+`clearra.pages.deployment-authority.v1` report seals the workflow run/attempt,
+upload-pages artifact ID/name/API digest, Pages configuration, deployment-status API
+readback, and public identity readback. Retention never broadens either report beyond
+its exact bracket. Capture reruns receive distinct attempt-bound artifacts, while
+forward and restore public mutations reject workflow reruns and require a fresh
+dispatch so the fixed deployment artifact name is never ambiguous across attempts.
+
+Discord command synchronization has its own closed authority that binds the accepted
+run and attempt, accepted CTK3 manifest, canonical acceptance evidence and raw file,
+canonical catalog and raw file, and the independent post-sync readback. The Oracle SSH
+owner writes rollback capture and direct candidate observation only to new canonical
+durable evidence files; it never reads or hashes the identity key. Final-source events
+cannot be appended as arbitrary JSON. Actual producers first create source-bound
+acceptance, deployment, and publication stage reports, and the journal atomically
+replaces its file with each complete stage batch in that order. Publication itself is
+two-phase: the active tag run uploads an immutable-release receipt, and only after that
+run is `completed/success` does a `workflow_run` finalizer exact-one resolve the receipt
+  artifact and verify its API digest, ZIP structure, and raw canonical bytes before
+  producing final publication evidence. The authenticated local resolver accepts no manual
+  token or artifact identity, globally exact-one resolves a completed-success finalizer
+  artifact, and binds its receipt/evidence raw bytes into
+  `clearra.release-publication-final-authority.v1`; the publication stage and final journal
+  reopen all three files. `implemented` records these fail-closed source contracts, not
+  completion of the later production events.
 
 `REQ-V080-013` is implemented. The shared two-phase state machine is connected
 to both the admitted native producer and registered native host boundaries,

@@ -1,0 +1,58 @@
+name: Finalize Release Publication Evidence
+
+on:
+  workflow_run:
+    workflows: ["Publish Product Release"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: finalize-release-publication-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'v0.8.0' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Finalize exact completed tag-run publication evidence
+        id: finalization
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN_ID: ${{ github.event.workflow_run.id }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          ORIGINAL_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          ORIGINAL_TAG: ${{ github.event.workflow_run.head_branch }}
+        shell: bash
+        run: |
+          node scripts/release/release-publication-evidence.mjs finalize \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$ORIGINAL_TAG" \
+            --source-commit "$ORIGINAL_SOURCE_COMMIT" \
+            --workflow-run-id "$ORIGINAL_RUN_ID" \
+            --workflow-run-attempt "$ORIGINAL_RUN_ATTEMPT" \
+            --finalizer-workflow-run-id "$GITHUB_RUN_ID" \
+            --finalizer-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output-directory release-publication-evidence >> "$GITHUB_OUTPUT"
+      - name: Upload final publication evidence
+        if: steps.finalization.outputs.upload_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.finalization.outputs.artifact_name }}
+          path: release-publication-evidence
+          if-no-files-found: error
+          retention-days: 90

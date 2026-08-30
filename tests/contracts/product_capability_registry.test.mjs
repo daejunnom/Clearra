@@ -1,5 +1,7 @@
+// SRP rationale: the behavior-level change reason is to keep registry claim validation cohesive by requiring every implementation-evidence path to resolve to a tracked regular file in this repository.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -26,6 +28,7 @@ const legacyAliasFixtureUrl = new URL(
   import.meta.url,
 );
 const readmeUrl = new URL('../../README.md', import.meta.url);
+const repositoryRootUrl = new URL('../../', import.meta.url);
 
 const SFINDER_MAN_COMMANDS = Object.freeze([
   'angery',
@@ -294,8 +297,21 @@ test('every capability and exclusion has one explicit four-state implementation 
   }
 });
 
-test('implementation evidence paths resolve on the current exact source', () => {
+test('implementation evidence paths resolve to tracked regular files on the current exact source', () => {
   const contract = registry();
+  const trackedFiles = new Map(
+    execFileSync('git', ['ls-files', '--stage', '-z', '--'], {
+      cwd: repositoryRootUrl,
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    }).split('\0').filter(Boolean).map((record) => {
+      const separator = record.indexOf('\t');
+      assert.ok(separator > 0, `malformed tracked-file record: ${record}`);
+      const [mode] = record.slice(0, separator).split(' ');
+      return [record.slice(separator + 1), mode];
+    }),
+  );
   const evidenceOwners = [
     ...contract.capability_implementation.map((entry) => ({
       id: `capability:${entry.capability_id}`,
@@ -313,11 +329,32 @@ test('implementation evidence paths resolve on the current exact source', () => 
 
   for (const owner of evidenceOwners) {
     for (const evidence of owner.evidence) {
-      assert.match(evidence, /^(?![A-Za-z]:|\/|\\)(?!.*(?:^|\/)\.\.(?:\/|$)).+/u, owner.id);
+      assert.match(
+        evidence,
+        /^(?![A-Za-z]:)(?!\/)(?!.*\\)(?!.*[\u0000-\u001f\u007f])(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^/]+(?:\/[^/]+)*$/u,
+        `non-canonical repository-relative implementation evidence for ${owner.id}: ${evidence}`,
+      );
+      const evidenceUrl = new URL(`../../${evidence}`, import.meta.url);
       assert.equal(
-        existsSync(new URL(`../../${evidence}`, import.meta.url)),
+        existsSync(evidenceUrl),
         true,
         `stale implementation evidence for ${owner.id}: ${evidence}`,
+      );
+      assert.equal(
+        trackedFiles.has(evidence),
+        true,
+        `untracked implementation evidence for ${owner.id}: ${evidence}`,
+      );
+      assert.match(
+        trackedFiles.get(evidence),
+        /^100(?:644|755)$/u,
+        `implementation evidence is not a Git regular file for ${owner.id}: ${evidence}`,
+      );
+      const metadata = lstatSync(evidenceUrl);
+      assert.equal(
+        metadata.isFile() && !metadata.isSymbolicLink(),
+        true,
+        `implementation evidence must be a regular non-link file for ${owner.id}: ${evidence}`,
       );
     }
   }

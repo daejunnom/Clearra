@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  parseFinalSourceCliArguments,
   validateFinalSourceRevalidation,
+  validateFinalSourceRevalidationFromStages,
 } from "./validate-final-source-revalidation.mjs";
 import {
   canonicalSha256,
@@ -13,6 +15,21 @@ import {
 
 const COMMIT = "1".repeat(40);
 const HASH = "a".repeat(64);
+
+test("direct execution fails closed because journal materialization is the sole production entrypoint", () => {
+  const script = fileURLToPath(new URL(
+    "./validate-final-source-revalidation.mjs",
+    import.meta.url,
+  ));
+  const result = spawnSync(process.execPath, [script, "--manifest", "forged.json"], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /library-only.*final-source-attempt-journal/u);
+  assert.equal(result.stdout, "");
+});
 
 test("final-source validation keeps Discord runtime packages outside its import closure", () => {
   const catalogSource = readFileSync(
@@ -44,6 +61,14 @@ function validBundle() {
     changed: true,
     command_count: 2,
     expected_catalog_sha256: HASH,
+    accepted_run_id: "456",
+    accepted_run_attempt: "1",
+    accepted_ctk3_manifest_sha256: "1".repeat(64),
+    canonical_acceptance_evidence_sha256: "2".repeat(64),
+    canonical_acceptance_evidence_file_sha256: "3".repeat(64),
+    command_catalog_file_sha256: "4".repeat(64),
+    command_sync_authority_sha256: "5".repeat(64),
+    command_sync_authority_file_sha256: "6".repeat(64),
     prior_catalog_sha256: "b".repeat(64),
     prior_snapshot_sha256: "8".repeat(64),
     current_before_sha256: "b".repeat(64),
@@ -87,10 +112,10 @@ function validBundle() {
       readiness_open_count: 0,
     }),
     surface_reports: [
-      evidence("native-report", { surface: "native", status: "passed" }),
-      evidence("wasm-report", { surface: "wasm", status: "passed" }),
       evidence("desktop-report", { surface: "desktop", status: "passed" }),
       evidence("discord-report", { surface: "discord", status: "passed" }),
+      evidence("native-report", { surface: "native", status: "passed" }),
+      evidence("wasm-report", { surface: "wasm", status: "passed" }),
     ],
     release_artifacts: [
       { role: "linux-cli", name: "Clearra-CLI-v0.8.0-linux-x86_64", sha256: HASH, size_bytes: 1, source_commit: COMMIT },
@@ -188,6 +213,14 @@ function productionObservation(catalogSyncReportSha256) {
       command_catalog_prior_snapshot_sha256: "8".repeat(64),
       command_catalog_readback_sha256: "c".repeat(64),
       command_catalog_sync_report_sha256: catalogSyncReportSha256,
+      accepted_run_id: "456",
+      accepted_run_attempt: "1",
+      accepted_ctk3_manifest_sha256: "1".repeat(64),
+      canonical_acceptance_evidence_sha256: "2".repeat(64),
+      canonical_acceptance_evidence_file_sha256: "3".repeat(64),
+      command_catalog_file_sha256: "4".repeat(64),
+      command_sync_authority_sha256: "5".repeat(64),
+      command_sync_authority_file_sha256: "6".repeat(64),
       command_count: 2,
       command_names: ["1:help", "3:Get original GIF"],
       status: "active",
@@ -282,7 +315,11 @@ function observationFreshness(surface, identity, sequence) {
       tagged_health_sha256: "4".repeat(64),
     };
   }
-  return { probe_id: probeId, identity_readback_sha256: "8".repeat(64) };
+  return {
+    probe_id: probeId,
+    deployment_readback_sha256: "7".repeat(64),
+    identity_readback_sha256: "8".repeat(64),
+  };
 }
 
 test("accepts exactly one fully observed v0.8.0 source identity", () => {
@@ -370,49 +407,121 @@ test("requires actual catalog and observation producer reports and exact binding
   );
 });
 
-test("validator CLI rejects unknown duplicate missing and malformed arguments", () => {
-  assert.deepEqual(
-    parseFinalSourceCliArguments([
-      "--manifest",
-      "report.json",
-      "--discord-catalog-sync-report",
-      "catalog-sync.json",
-      "--production-observation-report",
-      "observation.json",
-      "--expected-source-commit",
-      COMMIT,
-    ]),
-    {
-      manifestPath: "report.json",
+test("library validation requires the exact acceptance deployment and publication stages", () => {
+  const bundle = validBundle();
+  const stages = stageAuthorities(bundle);
+  assert.equal(
+    validateFinalSourceRevalidationFromStages(bundle.manifest, {
       expectedSourceCommit: COMMIT,
-      discordCatalogSyncReportPath: "catalog-sync.json",
-      productionObservationReportPath: "observation.json",
-    },
+      ...stages.options,
+    }),
+    true,
   );
-  assert.throws(() => parseFinalSourceCliArguments([]), /--manifest PATH is required/u);
+
+  const substituted = structuredClone(stages.options.deploymentStageEvidence);
+  delete substituted.report_sha256;
+  substituted.producer_inputs.find(({ role }) => role === "discord-catalog-sync")
+    .file_sha256 = "9".repeat(64);
+  const resealed = sealCanonicalReport(substituted);
   assert.throws(
-    () => parseFinalSourceCliArguments(["--manifest", "one", "--manifest", "two"]),
-    /duplicate/u,
+    () => validateFinalSourceRevalidationFromStages(bundle.manifest, {
+      expectedSourceCommit: COMMIT,
+      ...stages.options,
+      deploymentStageEvidence: resealed,
+    }),
+    /producer bytes differ/u,
   );
+
+  const manuallyEdited = structuredClone(bundle.manifest);
+  manuallyEdited.tag.remote_verified = false;
   assert.throws(
-    () => parseFinalSourceCliArguments(["--manifest", "--expected-source-commit", COMMIT]),
-    /requires one value/u,
-  );
-  assert.throws(
-    () => parseFinalSourceCliArguments(["--manifest", "one", "--future"]),
-    /unsupported/u,
-  );
-  assert.throws(
-    () => parseFinalSourceCliArguments([
-      "--manifest",
-      "one",
-      "--discord-catalog-sync-report",
-      "catalog-sync.json",
-      "--production-observation-report",
-      "observation.json",
-      "--expected-source-commit",
-      "abc",
-    ]),
-    /full lowercase SHA-1/u,
+    () => validateFinalSourceRevalidationFromStages(manuallyEdited, {
+      expectedSourceCommit: COMMIT,
+      ...stages.options,
+    }),
+    /differs from the exact three producer stages/u,
   );
 });
+
+function stageAuthorities(bundle) {
+  const syncFileSha256 = "d".repeat(64);
+  const observationFileSha256 = "e".repeat(64);
+  const makeStage = (stage, roles, events) => sealCanonicalReport({
+    schema_id: "clearra.final-source-stage-evidence.v1",
+    stage,
+    source_commit: COMMIT,
+    producer_inputs: roles.map((role) => ({
+      role,
+      schema_id: `clearra.test.${role}.v1`,
+      evidence_sha256: role === "discord-catalog-sync"
+        ? bundle.discordCatalogSyncReport.report_sha256
+        : role === "production-observation"
+          ? bundle.productionObservationReport.report_sha256
+          : HASH,
+      file_sha256: role === "discord-catalog-sync"
+        ? syncFileSha256
+        : role === "production-observation"
+          ? observationFileSha256
+          : HASH,
+    })),
+    events,
+    status: "passed",
+  });
+  const manifest = bundle.manifest;
+  const acceptance = makeStage("acceptance", [
+    "canonical-acceptance",
+    "implementation-start-audit",
+    "legacy-alias-contract",
+    "product-registry",
+    "release-freeze-audit",
+    "search-option-contract",
+  ], [
+    { kind: "source", payload: manifest.source },
+    { kind: "contracts", payload: manifest.contracts },
+    { kind: "toolchains", payload: manifest.toolchains },
+    ...manifest.drift_audits.map((payload) => ({ kind: "drift-audit", payload })),
+    { kind: "canonical-gate", payload: manifest.canonical_gate },
+    ...manifest.surface_reports.map((payload) => ({ kind: "surface-report", payload })),
+    ...manifest.release_artifacts.map((payload) => ({ kind: "release-artifact", payload })),
+  ]);
+  const deployment = makeStage("deployment", [
+    "cloud-candidate-smoke",
+    "discord-canonical-catalog",
+    "discord-catalog-sync",
+    "discord-command-sync-authority",
+    "discord-prior-snapshot",
+    "oracle-candidate-observation",
+    "oracle-rollback-capture",
+    "pages-deployment",
+    "production-observation",
+    "production-probe-spec",
+    "rollback-snapshot",
+  ], [
+    { kind: "deployment-pages", payload: manifest.deployment.pages },
+    { kind: "deployment-discord", payload: manifest.deployment.discord },
+    { kind: "rollback-snapshot", payload: manifest.deployment.rollback_snapshot },
+    { kind: "observation", payload: manifest.observation },
+  ]);
+  const publication = makeStage("publication", [
+    "release-publication",
+    "release-publication-authority",
+    "release-publication-receipt",
+  ], [
+    { kind: "tag", payload: manifest.tag },
+    { kind: "immutable-release", payload: manifest.immutable_release },
+  ]);
+  return {
+    options: {
+      acceptanceStageEvidence: acceptance,
+      acceptanceStageEvidenceFileSha256: "1".repeat(64),
+      deploymentStageEvidence: deployment,
+      deploymentStageEvidenceFileSha256: "2".repeat(64),
+      publicationStageEvidence: publication,
+      publicationStageEvidenceFileSha256: "3".repeat(64),
+      discordCatalogSyncReport: bundle.discordCatalogSyncReport,
+      discordCatalogSyncReportFileSha256: syncFileSha256,
+      productionObservationReport: bundle.productionObservationReport,
+      productionObservationReportFileSha256: observationFileSha256,
+    },
+  };
+}

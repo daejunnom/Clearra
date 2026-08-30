@@ -28,6 +28,7 @@ param(
     [string] $PriorRuntimeAuthorityKind,
     [string] $PriorRuntimeAuthoritySha256,
     [string] $PriorJobUrl,
+    [string] $EvidenceOutput,
     [string] $IdentityFile,
 
     [switch] $AuditOnly
@@ -143,15 +144,22 @@ function Get-CanonicalJobUrl {
 }
 
 function Get-CanonicalTimestamp {
-    param([AllowEmptyString()][string] $Value)
+    param($Value)
     $parsed = [DateTimeOffset]::MinValue
-    if ([string]::IsNullOrEmpty($Value) -or
-        -not [DateTimeOffset]::TryParse(
+    if ($Value -is [DateTimeOffset]) {
+        $parsed = [DateTimeOffset]$Value
+    } elseif ($Value -is [DateTime]) {
+        $parsed = [DateTimeOffset]([DateTime]$Value)
+    } elseif ($Value -is [string] -and
+        -not [string]::IsNullOrEmpty($Value) -and
+        [DateTimeOffset]::TryParse(
             $Value,
             [Globalization.CultureInfo]::InvariantCulture,
             [Globalization.DateTimeStyles]::RoundtripKind,
             [ref]$parsed
         )) {
+        # Parsed above.
+    } else {
         throw 'Verified-after timestamp is invalid.'
     }
     return $parsed.ToUniversalTime().ToString(
@@ -169,6 +177,99 @@ function Assert-UnusedArguments {
         if ($entry.Key -notin $Allowed -and -not [string]::IsNullOrEmpty([string]$entry.Value)) {
             throw "Argument $($entry.Key) is not valid for operation $Operation."
         }
+    }
+}
+
+function Assert-EvidenceOutputPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    if (-not [IO.Path]::IsPathFullyQualified($Path)) {
+        throw 'Oracle evidence output must be an absolute path.'
+    }
+    $target = [IO.Path]::GetFullPath($Path)
+    if (Test-Path -LiteralPath $target) {
+        throw 'Oracle evidence output must be a new path.'
+    }
+    $current = [IO.Path]::GetDirectoryName($target)
+    if ([string]::IsNullOrWhiteSpace($current)) {
+        throw 'Oracle evidence output parent is invalid.'
+    }
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $current -PathType Container)) {
+            throw 'Oracle evidence output parent must already exist.'
+        }
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Oracle evidence output path must not traverse a reparse point.'
+        }
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrEmpty($parent) -or $parent -ceq $current) {
+            break
+        }
+        $current = $parent
+    }
+    return $target
+}
+
+function ConvertTo-CanonicalJson {
+    param($Value)
+    if ($null -eq $Value) {
+        return 'null'
+    }
+    if ($Value -is [bool]) {
+        if ($Value) { return 'true' }
+        return 'false'
+    }
+    if ($Value -is [string]) {
+        return ($Value | ConvertTo-Json -Compress)
+    }
+    if (($Value -is [int]) -or ($Value -is [long])) {
+        return ([Convert]::ToString([long]$Value, [Globalization.CultureInfo]::InvariantCulture))
+    }
+    if ($Value -is [Array]) {
+        $items = @($Value | ForEach-Object { ConvertTo-CanonicalJson -Value $_ })
+        return '[' + ($items -join ',') + ']'
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        [string[]]$names = @($Value.Keys | ForEach-Object { [string]$_ })
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $fields = @($names | ForEach-Object {
+            (ConvertTo-CanonicalJson -Value $_) + ':' +
+                (ConvertTo-CanonicalJson -Value $Value[$_])
+        })
+        return '{' + ($fields -join ',') + '}'
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        [string[]]$names = @($Value.PSObject.Properties.Name)
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $fields = @($names | ForEach-Object {
+            (ConvertTo-CanonicalJson -Value $_) + ':' +
+                (ConvertTo-CanonicalJson -Value $Value.$_)
+        })
+        return '{' + ($fields -join ',') + '}'
+    }
+    throw 'Oracle evidence contains an unsupported JSON value type.'
+}
+
+function Write-CanonicalEvidenceOutput {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)] $Value
+    )
+    $json = ConvertTo-CanonicalJson -Value $Value
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes("$json`n")
+    $stream = [IO.FileStream]::new(
+        $Path,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None,
+        4096,
+        [IO.FileOptions]::WriteThrough
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally {
+        $stream.Dispose()
     }
 }
 
@@ -358,6 +459,17 @@ switch ($Operation) {
     }
 }
 
+$evidenceOutputPath = $null
+if (-not [string]::IsNullOrWhiteSpace($EvidenceOutput)) {
+    if ($Operation -notin @('capture-rollback-authority', 'observe-candidate')) {
+        throw 'Oracle evidence output is only valid for capture or observation.'
+    }
+    if ($AuditOnly) {
+        throw 'Oracle evidence output is unavailable in AuditOnly.'
+    }
+    $evidenceOutputPath = Assert-EvidenceOutputPath -Path $EvidenceOutput
+}
+
 foreach ($argument in $remoteArguments) {
     if ($argument -cnotmatch '^[A-Za-z0-9_./:%=@+-]{1,2048}$') {
         throw 'Oracle deployment argument is outside the non-secret token grammar.'
@@ -423,6 +535,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Oracle deployment command failed with exit code $LASTEXITCODE."
 }
 
+$validatedEvidence = $null
 switch ($Operation) {
     'capture-rollback-authority' {
         if ($output.Count -ne 1) {
@@ -447,6 +560,7 @@ switch ($Operation) {
             $capture.deploymentNonce -cne $DeploymentNonce) {
             throw 'Oracle rollback authority capture returned an invalid closed result.'
         }
+        $validatedEvidence = $capture
     }
     'verify-candidate' {
         if ($output.Count -ne 1 -or $output[0] -cne 'oracle_candidate=verified') {
@@ -489,13 +603,19 @@ switch ($Operation) {
             $observation.readyRecordObserved -cne $true) {
             throw 'Oracle candidate observation returned an invalid closed result.'
         }
-        [void](Get-CanonicalTimestamp -Value ([string]$observation.freshOperationAt))
-        [void](Get-CanonicalTimestamp -Value ([string]$observation.observedAt))
+        $observation.freshOperationAt = Get-CanonicalTimestamp `
+            -Value $observation.freshOperationAt
+        $observation.observedAt = Get-CanonicalTimestamp `
+            -Value $observation.observedAt
+        $validatedEvidence = $observation
     }
     'restore-prior-and-verify' {
         if ($output.Count -ne 1 -or $output[0] -cne 'oracle_rollback=verified') {
             throw 'Oracle rollback verification did not return the exact success attestation.'
         }
     }
+}
+if ($null -ne $evidenceOutputPath) {
+    Write-CanonicalEvidenceOutput -Path $evidenceOutputPath -Value $validatedEvidence
 }
 $output

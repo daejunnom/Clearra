@@ -551,12 +551,15 @@ function Invoke-ArchitectureValidationAuthorityPolicy {
 
 function Invoke-ReleaseIdentityGateValidation {
     $release = Read-Text '.github/workflows/release-cli.yml'
+    $releasePublicationFinalizer = Read-Text '.github/workflows/finalize-release-publication.yml'
     $pages = Read-Text '.github/workflows/pages.yml'
     $pagesRollback = Read-Text '.github/workflows/pages-rollback.yml'
     $pagesRollbackAuthority = Read-Text 'scripts/release/pages-rollback-authority.mjs'
     $pagesRollbackAuthorityTest = Read-Text 'scripts/release/pages-rollback-authority.test.mjs'
     $pagesRollbackPackage = Read-Text 'scripts/release/pages-rollback-package.mjs'
     $pagesRollbackPackageTest = Read-Text 'scripts/release/pages-rollback-package.test.mjs'
+    $pagesDeploymentAuthority = Read-Text 'scripts/release/pages-deployment-authority.mjs'
+    $pagesDeploymentAuthorityTest = Read-Text 'scripts/release/pages-deployment-authority.test.mjs'
     $cloudBuild = Read-Text 'apps/clearra-discord-bot/cloudbuild-current-job-service.yaml'
     $currentDocker = Read-Text 'apps/clearra-discord-bot/Dockerfile.current-job-service'
     $legacyCloudBuild = Read-Text 'apps/clearra-discord-bot/cloudbuild-job-service.yaml'
@@ -629,6 +632,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $canonicalAcceptanceEvidence = Read-Text 'scripts/release/canonical-acceptance-evidence.mjs'
     $canonicalAcceptanceEvidenceTest = Read-Text 'scripts/release/canonical-acceptance-evidence.test.mjs'
     $canonicalReleaseEvidence = Read-Text 'scripts/release/canonical-release-evidence.mjs'
+    $discordCommandSyncAuthority = Read-Text 'scripts/release/discord-command-sync-authority.mjs'
+    $discordCommandSyncAuthorityTest = Read-Text 'scripts/release/discord-command-sync-authority.test.mjs'
     $discordCatalogRelease = Read-Text 'apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs'
     $discordCatalogReleaseTest = Read-Text 'apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs'
     $productionObservation = Read-Text 'scripts/release/observe-production-surfaces.mjs'
@@ -642,6 +647,12 @@ function Invoke-ReleaseIdentityGateValidation {
     $finalSourceValidatorTest = Read-Text 'scripts/release/validate-final-source-revalidation.test.mjs'
     $finalSourceJournal = Read-Text 'scripts/release/final-source-attempt-journal.mjs'
     $finalSourceJournalTest = Read-Text 'scripts/release/final-source-attempt-journal.test.mjs'
+    $finalSourceEventContract = Read-Text 'scripts/release/final-source-event-contract.mjs'
+    $finalSourceEventContractTest = Read-Text 'scripts/release/final-source-event-contract.test.mjs'
+    $finalSourceStageEvidence = Read-Text 'scripts/release/final-source-stage-evidence.mjs'
+    $finalSourceStageEvidenceTest = Read-Text 'scripts/release/final-source-stage-evidence.test.mjs'
+    $releasePublicationEvidence = Read-Text 'scripts/release/release-publication-evidence.mjs'
+    $releasePublicationEvidenceTest = Read-Text 'scripts/release/release-publication-evidence.test.mjs'
     $remainingWorkPlan = Read-Text 'docs/v0.8.0-remaining-work-plan.md'
 
     foreach ($required in @(
@@ -670,7 +681,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'canonical-evidence:',
         'canonical-acceptance-evidence.mjs collect',
         'canonical-acceptance-evidence.mjs verify',
-        'published versions are immutable',
+        'release-publication-evidence.mjs recover',
+        'release-publication-evidence.mjs capture',
+        'release-publication-receipt-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}',
+        'retention-days: 90',
         'node scripts/release/verify-remote-annotated-tag.mjs',
         '--tag "$GITHUB_REF_NAME"',
         '--expected-commit "$GITHUB_SHA"',
@@ -696,6 +710,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'tagged_health_sha256',
         'probePagesProductionSurface',
         'clearra-build-identity.json',
+        'deployment_readback_sha256',
         'identity_readback_sha256',
         'file changed after probe-spec materialization'
     )) {
@@ -707,7 +722,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'Discord adapter performs one independent GET and binds the sealed catalog reports',
         'Cloud adapter binds service/revision control plane and both existing health URLs',
         'Cloud adapter rejects a smoke report without managed execution authority',
-        'Pages adapter cache-busts and validates the closed accepted-build identity'
+        'Pages adapter validates the sealed report, live deployment status, and accepted-build identity'
     )) {
         if ($productionProbeAdapterTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Production surface adapter regression is missing '$required'"
@@ -860,8 +875,13 @@ function Invoke-ReleaseIdentityGateValidation {
         'rejects Pages rebuilding the already accepted GUI',
         'rejects Pages without closed artifact verification',
         'rejects Pages deploy without the bound acceptance authority',
+        'rejects Pages upload without external artifact ID propagation',
+        'rejects manually transcribed Pages rollback artifact authority',
+        'rejects Pages rollback admission without sealed report resolution',
+        'rejects Pages deployment without the tracked sealed authority producer',
+        'rejects short-lived Pages deployment authority evidence',
         'rejects Pages download of a differently named accepted artifact',
-        'rejects deployed Pages identity without exact base-path readback'
+        'rejects deployed Pages authority without exact base-path binding'
     )) {
         if ($releaseCliSmokeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Release CLI smoke gate regression coverage is missing '$required'"
@@ -1682,10 +1702,10 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'accepted_sha',
-        'clearra-build-identity.json',
-        'clearra.pages.identity.v2',
         'node scripts/release/canonical-acceptance-run.mjs',
         '--format github-output >> "$GITHUB_OUTPUT"',
+        'pages-deployment-authority.mjs',
+        'PAGES_AUTHORITY_REPORT_PATH:',
         'Pages source is no longer the exact current main commit'
     )) {
         if ($pages -notlike "*$required*") {
@@ -1740,19 +1760,16 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}',
         'accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}',
-        'name: accepted-pages-build-${{ inputs.accepted_sha }}',
+        'name: accepted-pages-build-${{ inputs.accepted_sha }}-run-${{ needs.accepted-source.outputs.accepted_run_id }}-attempt-${{ needs.accepted-source.outputs.accepted_run_attempt }}',
         'run-id: ${{ needs.accepted-source.outputs.accepted_run_id }}',
         'node scripts/release/accepted-pages-build.mjs',
         '--accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT"',
         '--base-path "$EXPECTED_BASE_PATH"',
-        '.acceptedRunId == $runId',
-        '.acceptedRunAttempt == $runAttempt',
-        '.basePath == $basePath',
-        '${PAGE_URL%/}/wasm/clearra_wasm.manifest.json?source=${EXPECTED_SHA}',
-        '.build.runtime_identity.source_commit == $sha',
-        '.build.runtime_identity.engine_build_id == $sha',
-        'clearra.supply.projected-terminal-lookahead.v1',
-        'clearra.solution-data.v1'
+        'pages_artifact_id: ${{ steps.pages-artifact.outputs.artifact_id }}',
+        'PAGES_ARTIFACT_ID: ${{ needs.build.outputs.pages_artifact_id }}',
+        'run: node authority-source/scripts/release/pages-deployment-authority.mjs',
+        'name: clearra-pages-deployment-authority-${{ inputs.accepted_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}',
+        'retention-days: 90'
     )) {
         if ($pages.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages workflow is missing exact product build identity '$required'"
@@ -1791,14 +1808,16 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'rollback_snapshot_sha:',
         'rollback_capture_run_id:',
-        'rollback_artifact_id:',
-        'rollback_artifact_name:',
-        'rollback_artifact_digest:',
-        'rollback_tar_sha256:',
+        'Resolve sealed rollback capture report before Pages build',
+        'PAGES_AUTHORITY_MODE: resolve-forward',
+        'Download sealed rollback capture report before Pages build',
         'Verify durable rollback capture before Pages build',
+        'CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json',
+        'CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}',
         'Download durable rollback capture before Pages build',
         'Verify exact rollback package before Pages build',
         'Redownload durable rollback capture immediately before deployment',
+        'Redownload sealed rollback capture report immediately before deployment',
         'Revalidate exact rollback package immediately before deployment',
         'Revalidate durable rollback capture immediately before deployment',
         'scripts/release/pages-rollback-authority.mjs',
@@ -1810,9 +1829,19 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Pages forward workflow is missing durable rollback admission '$required'"
         }
     }
-    if (([regex]::Matches($pages, 'pages-rollback-authority\.mjs')).Count -ne 2 -or
+    foreach ($forbiddenManualAuthority in @(
+        'rollback_artifact_id:',
+        'rollback_artifact_name:',
+        'rollback_artifact_digest:',
+        'rollback_tar_sha256:'
+    )) {
+        if ($pages.IndexOf($forbiddenManualAuthority, [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError "Pages forward workflow must derive rollback authority from the sealed capture report, not manual input '$forbiddenManualAuthority'"
+        }
+    }
+    if (([regex]::Matches($pages, 'pages-rollback-authority\.mjs')).Count -ne 3 -or
         ([regex]::Matches($pages, 'pages-rollback-package\.mjs')).Count -ne 2) {
-        Add-ArchitectureError 'Pages forward workflow must verify rollback metadata and package both before build and immediately before deployment'
+        Add-ArchitectureError 'Pages forward workflow must resolve one sealed report and verify rollback metadata and package before build and immediately before deployment'
     }
     foreach ($required in @(
         'name: Preserve or Restore GitHub Pages',
@@ -1823,10 +1852,6 @@ function Invoke-ReleaseIdentityGateValidation {
         'expected_current_main:',
         'current_pages_sha:',
         'snapshot_run_id:',
-        'snapshot_artifact_id:',
-        'snapshot_artifact_name:',
-        'snapshot_artifact_digest:',
-        'snapshot_tar_sha256:',
         'restore_authorization:',
         'group: pages',
         'cancel-in-progress: false',
@@ -1834,8 +1859,14 @@ function Invoke-ReleaseIdentityGateValidation {
         'clearra-pages-rollback-${SNAPSHOT_SHA}-authority-${AUTHORITY_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}',
         'actions/upload-pages-artifact@v3',
         'retention-days: 90',
-        '$RUNNER_TEMP/artifact.tar',
-        'Pages rollback artifact API readback did not prove ID, digest, run, and 90-day retention',
+        'Seal exact rollback capture authority',
+        'PAGES_AUTHORITY_MODE: capture-report',
+        'CAPTURE_TAR_PATH: ${{ runner.temp }}/artifact.tar',
+        'Upload sealed rollback capture authority',
+        'Resolve sealed rollback capture report',
+        'PAGES_AUTHORITY_MODE: resolve-restore',
+        'Download sealed rollback capture report',
+        'CAPTURE_REPORT_PATH: rollback-capture-report/pages-rollback-capture-authority.json',
         'actions/download-artifact@v4',
         'github-token: ${{ github.token }}',
         'run-id: ${{ inputs.snapshot_run_id }}',
@@ -1845,10 +1876,22 @@ function Invoke-ReleaseIdentityGateValidation {
         'compression-level: 0',
         'Revalidate rollback artifact immediately before deployment',
         'actions/deploy-pages@v4',
-        'restored Pages identity did not converge to the rollback SHA'
+        'Seal restored Pages authority from API and public readback',
+        'pages-deployment-authority.mjs',
+        'Upload sealed Pages restore authority'
     )) {
         if ($pagesRollback.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages rollback workflow is missing fail-closed authority '$required'"
+        }
+    }
+    foreach ($forbiddenManualAuthority in @(
+        'snapshot_artifact_id:',
+        'snapshot_artifact_name:',
+        'snapshot_artifact_digest:',
+        'snapshot_tar_sha256:'
+    )) {
+        if ($pagesRollback.IndexOf($forbiddenManualAuthority, [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError "Pages rollback workflow must derive capture authority from the sealed report, not manual input '$forbiddenManualAuthority'"
         }
     }
     if ($pagesRollback -match '(?ms)^\s*push:\s*\r?\n\s*branches:') {
@@ -1869,6 +1912,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'MINIMUM_RETENTION_MS',
         'forward and restore mutations require a fresh workflow dispatch, not a rerun',
         'clearra-pages-rollback-${snapshot}-authority-${authority}-run-${runId}-attempt-${attempt}',
+        'clearra.pages.rollback-capture-authority.v1',
+        'resolveCaptureReportArtifact',
+        'readRollbackCaptureReport',
+        'capture run must contain exactly one sealed report artifact',
         'validatePagesIdentity(identity, manifest, currentPagesSha)',
         'ROLLBACK:${currentPagesSha}:TO:${snapshotSha}',
         '/git/ref/tags/${RELEASE_TAG}',
@@ -1899,7 +1946,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'canonical acceptance query pins the main branch and a non-truncating exact SHA page',
         'capture authority binds the run attempt, job, artifact, retention, and consumer order',
         'capture names are unique per authority, run, and rerun attempt',
-        'capture reruns are unique while forward and restore require a fresh dispatch'
+        'capture reruns are unique while forward and restore require a fresh dispatch',
+        'capture report seals actual artifact ID, digest, run attempt, tar hash, and retention',
+        'capture report rejects short retention and wrong active run attempt',
+        'resolves exactly one durable sealed report artifact from the completed capture attempt'
     )) {
         if ($pagesRollbackAuthorityTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages rollback authority regression is missing adversarial case '$required'"
@@ -1923,13 +1973,18 @@ function Invoke-ReleaseIdentityGateValidation {
         [System.StringComparison]::Ordinal
     )
     $captureReadbackIndex = $pagesRollback.IndexOf(
-        'Record exact rollback artifact authorities',
+        'Seal exact rollback capture authority',
+        [System.StringComparison]::Ordinal
+    )
+    $captureReportUploadIndex = $pagesRollback.IndexOf(
+        'Upload sealed rollback capture authority',
         [System.StringComparison]::Ordinal
     )
     if ($captureValidationIndex -lt 0 -or
         $captureUploadIndex -le $captureValidationIndex -or
-        $captureReadbackIndex -le $captureUploadIndex) {
-        Add-ArchitectureError 'Pages rollback capture must revalidate, create the exact Pages tar, and read back durable authorities in order'
+        $captureReadbackIndex -le $captureUploadIndex -or
+        $captureReportUploadIndex -le $captureReadbackIndex) {
+        Add-ArchitectureError 'Pages rollback capture must revalidate, create the exact Pages tar, seal actual authorities, and upload the sealed report in order'
     }
     $rollbackDownloadIndex = $pagesRollback.IndexOf(
         'Download exact rollback package',
@@ -1952,7 +2007,11 @@ function Invoke-ReleaseIdentityGateValidation {
         [System.StringComparison]::Ordinal
     )
     $rollbackReadbackIndex = $pagesRollback.IndexOf(
-        'Verify restored Pages source identity',
+        'Seal restored Pages authority from API and public readback',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackAuthorityUploadIndex = $pagesRollback.IndexOf(
+        'Upload sealed Pages restore authority',
         [System.StringComparison]::Ordinal
     )
     if ($rollbackDownloadIndex -lt 0 -or
@@ -1960,8 +2019,32 @@ function Invoke-ReleaseIdentityGateValidation {
         $rollbackUploadIndex -le $rollbackPackageValidationIndex -or
         $rollbackLateValidationIndex -le $rollbackUploadIndex -or
         $rollbackDeployIndex -le $rollbackLateValidationIndex -or
-        $rollbackReadbackIndex -le $rollbackDeployIndex) {
-        Add-ArchitectureError 'Pages rollback must download, validate, re-upload, revalidate, deploy, and read back the exact snapshot in order'
+        $rollbackReadbackIndex -le $rollbackDeployIndex -or
+        $rollbackAuthorityUploadIndex -le $rollbackReadbackIndex) {
+        Add-ArchitectureError 'Pages rollback must download, validate, re-upload, revalidate, deploy, seal, and upload the exact snapshot authority in order'
+    }
+    foreach ($required in @(
+        'clearra.pages.deployment-authority.v1',
+        'validateWorkflowRun',
+        '/pages/deployments/${encodeURIComponent(deploymentId)}',
+        'artifact_api_readback_sha256',
+        'deployment_api_readback_sha256',
+        'live_identity_sha256',
+        'open(target, "wx", 0o600)'
+    )) {
+        if ($pagesDeploymentAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages deployment authority producer is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'seals forward artifact, run-attempt, deployment status, and live identity API readbacks',
+        'restore authority derives accepted identity and queries the deploy action workflow SHA',
+        'rejects artifact digest, run attempt, deployment status, and public identity drift',
+        'writes one canonical exclusive report file and rejects tampering'
+    )) {
+        if ($pagesDeploymentAuthorityTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages deployment authority regression is missing '$required'"
+        }
     }
     foreach ($package in @(
         @{ Name = 'UI'; Text = $uiPackage; Config = $uiContractTypecheck },
@@ -2412,6 +2495,45 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Discord catalog release producer is missing fail-closed marker '$required'"
         }
     }
+    foreach ($required in @(
+        'clearra.discord.command-sync-authority.v1',
+        'verifyAcceptedCtk3Dist',
+        'validateCanonicalAcceptanceEvidence',
+        'validateCanonicalDiscordCatalog',
+        'accepted_ctk3_manifest_sha256',
+        'canonical_acceptance_evidence_sha256',
+        'canonical_acceptance_evidence_file_sha256',
+        'command_catalog_file_sha256',
+        'Discord command sync authority file SHA-256 differs',
+        'open(target, "wx", 0o600)'
+    )) {
+        if ($discordCommandSyncAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord command sync authority is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'materializes one canonical authority from accepted CTK3, acceptance, and catalog',
+        'rejects any divergence among CTK3, canonical acceptance, and catalog authorities',
+        'authority validation is closed, hash-bound, and source/run-bound',
+        'authority CLI requires every exact named argument once'
+    )) {
+        if ($discordCommandSyncAuthorityTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord command sync authority regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        '--sync-authority',
+        '--sync-authority-file-sha256',
+        'accepted_run_id: syncAuthority.accepted_run_id',
+        'accepted_ctk3_manifest_sha256',
+        'canonical_acceptance_evidence_sha256',
+        'command_sync_authority_sha256',
+        'command_sync_authority_file_sha256'
+    )) {
+        if ($discordCatalogRelease.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord catalog sync is missing accepted authority binding '$required'"
+        }
+    }
     if ($discordCatalogRelease -match '(?i)--(?:token|secret|password|credential)') {
         Add-ArchitectureError 'Discord catalog release producer must accept credentials from the environment only'
     }
@@ -2419,11 +2541,31 @@ function Invoke-ReleaseIdentityGateValidation {
         'persists the exact prior snapshot before one sync write and seals readback',
         'restore is conditional on the exact current digest and verifies the prior readback',
         'sync and restore reports reject canonical-content tampering',
+        'sync rejects missing or mismatched accepted authority before any Discord read',
         'forbidden secret material'
     )) {
         if ($discordCatalogReleaseTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Discord catalog release mutation regression is missing '$required'"
         }
+    }
+    foreach ($required in @(
+        '$acceptedCtk3ArtifactName = "ctk3-accepted-$sourceCommit-run-$acceptedRunId-attempt-$acceptedRunAttempt"',
+        '$canonicalAcceptanceArtifactName = "canonical-acceptance-evidence-$sourceCommit-run-$acceptedRunId-attempt-$acceptedRunAttempt"',
+        'node scripts/tools/accepted-ctk3-dist.mjs',
+        '--expected-source-commit $sourceCommit',
+        '--expected-run-id $acceptedRunId',
+        '--expected-run-attempt $acceptedRunAttempt',
+        'npm ci --ignore-scripts',
+        'node scripts/release/discord-command-sync-authority.mjs',
+        '--sync-authority $syncAuthorityPath',
+        '--sync-authority-file-sha256 $syncAuthorityFileSha256'
+    )) {
+        if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord command-sync runbook is missing accepted authority marker '$required'"
+        }
+    }
+    if ($cloudDeploy.IndexOf('npm run build --workspace ctk3', [System.StringComparison]::Ordinal) -ge 0) {
+        Add-ArchitectureError 'Discord command-sync runbook must not rebuild the accepted CTK3 distribution'
     }
     foreach ($required in @(
         'clearra.production-observation.v1',
@@ -2467,33 +2609,47 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        '--discord-catalog-sync-report',
-        '--production-observation-report',
+        'validateFinalSourceRevalidationFromStages',
         'validateDiscordCatalogSyncReport',
         'validateProductionObservationReport',
         'Discord deployment differs from the actual catalog sync producer report',
         'observed Oracle identity differs from the Discord deployment',
         'observed Cloud identity differs from the Discord deployment',
-        'observed Pages identity differs from the Pages deployment'
+        'observed Pages identity differs from the Pages deployment',
+        'final-source revalidation is library-only',
+        'use final-source-attempt-journal.mjs materialize with every original producer authority'
     )) {
         if ($finalSourceValidator.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Final-source validator is missing producer binding '$required'"
         }
     }
     foreach ($required in @(
+        'direct execution fails closed because journal materialization is the sole production entrypoint',
         'requires actual catalog and observation producer reports and exact bindings',
         'actual Discord command catalog sync producer report is required',
         'differs from the actual catalog sync producer report',
-        'observed Pages identity differs'
+        'observed Pages identity differs',
+        'library validation requires the exact acceptance deployment and publication stages'
     )) {
         if ($finalSourceValidatorTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Final-source producer-binding regression is missing '$required'"
         }
     }
     foreach ($required in @(
-        '--discord-catalog-sync-report',
-        '--production-observation-report',
-        'readCanonicalProducerReport',
+        'append-stage',
+        '--stage-evidence',
+        '--stage-evidence-file-sha256',
+        '--acceptance-stage-evidence',
+        '--deployment-stage-evidence',
+        '--publication-stage-evidence',
+        '--canonical-acceptance-evidence-file-sha256',
+        '--pages-deployment-authority-file-sha256',
+        '--discord-command-sync-authority-file-sha256',
+        '--discord-catalog-sync-report-file-sha256',
+        '--oracle-rollback-capture-file-sha256',
+        '--production-observation-report-file-sha256',
+        '--release-publication-final-authority-file-sha256',
+        'replaceJournalAtomically',
         'bytes are not canonical producer JSON'
     )) {
         if ($finalSourceJournal.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2501,9 +2657,12 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        '--discord-catalog-sync-report',
-        '--production-observation-report',
-        'createProducerReports'
+        'atomically appends three producer stages and materializes the exact final source',
+        'rejects out-of-order, duplicate, and wrong-raw-SHA stage append',
+        'a failed atomic replacement leaves the journal byte-for-byte unchanged',
+        'materialization rejects incomplete or substituted stage authorities',
+        'materialization rejects a substituted reopened producer behind unchanged stage JSON',
+        'CLI exposes only stage-batch append and closed materialization inputs'
     )) {
         if ($finalSourceJournalTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Final-source journal regression is missing producer input '$required'"
@@ -2513,14 +2672,177 @@ function Invoke-ReleaseIdentityGateValidation {
         'discord-command-catalog-release.mjs',
         'observe-production-surfaces.mjs',
         '1,200',
-        'current digest',
-        '--discord-catalog-sync-report',
-        '--production-observation-report'
+        'current digest'
     )) {
         if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0 -or
             $remainingWorkPlan.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Release runbook and plan must both require producer evidence '$required'"
         }
+    }
+    foreach ($required in @(
+        'FINAL_SOURCE_STAGE_ORDER',
+        'FINAL_SOURCE_STAGE_CARDINALITY',
+        'validateFinalSourceEventPayload',
+        'clearra.final-source-event-evidence.v1'
+    )) {
+        if ($finalSourceEventContract.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source event contract is missing closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'every final-source kind is accepted only through its closed source-bound payload',
+        'event evidence rejects extra fields, source drift, and unapproved producer identity',
+        'event payloads fail closed on secrets, prior authority, and kind/source mutation'
+    )) {
+        if ($finalSourceEventContractTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source event mutation regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.final-source-stage-evidence.v1',
+        'STAGE_PRODUCER_ROLES',
+        'createAcceptanceStageEvidence',
+        'createDeploymentStageEvidence',
+        'createPublicationStageEvidence',
+        'selectCanonicalDriftEvidencePaths',
+        'discord-command-sync-authority',
+        'oracle-rollback-capture',
+        'pages-deployment',
+        'release-publication-receipt'
+    )) {
+        if ($finalSourceStageEvidence.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source stage producer is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'deployment stage projects only fieldwise-validated actual producer authorities',
+        'deployment stage rejects Pages, Discord, Cloud, and Oracle cross-producer drift',
+        'Oracle capture and observation adapters are closed, source-bound, and secret-free',
+        'release-freeze selection uses the final registry evidence entry without retry hardcoding',
+        'acceptance stage hashes LF Git blobs rather than core.autocrlf worktree bytes'
+    )) {
+        if ($finalSourceStageEvidenceTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source stage regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.release-publication-receipt.v1',
+        'clearra.release-publication-evidence.v1',
+        'clearra.release-publication-final-authority.v1',
+        'expectedReleasePublicationReceiptArtifactName',
+        'expectedReleasePublicationEvidenceArtifactName',
+        'resolveReleasePublicationFinalAuthority',
+        'createGithubCliPublicationDependencies',
+        'downloaded publication receipt ZIP differs from the artifact API digest',
+        'publication evidence workflow run did not complete successfully'
+    )) {
+        if ($releasePublicationEvidence.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Release publication authority is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'local resolver uses closed gh api argv without reading a token environment variable',
+        'failed tag attempts recover only an exact accepted partial draft before publication',
+        'finalizer rerun creates evidence only when every prior attempt is non-success',
+        'global resolver admits exactly one completed successful finalizer artifact'
+    )) {
+        if ($releasePublicationEvidenceTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Release publication authority regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'workflow_run:',
+        'workflows: ["Publish Product Release"]',
+        "github.event.workflow_run.conclusion == 'success'",
+        "github.event.workflow_run.event == 'push'",
+        "github.event.workflow_run.head_branch == 'v0.8.0'",
+        'release-publication-evidence.mjs finalize',
+        '--finalizer-workflow-run-id "$GITHUB_RUN_ID"',
+        '--finalizer-workflow-run-attempt "$GITHUB_RUN_ATTEMPT"',
+        "if: steps.finalization.outputs.upload_required == 'true'",
+        'retention-days: 90'
+    )) {
+        if ($releasePublicationFinalizer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Release publication finalizer is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'final-source-stage-evidence.mjs acceptance',
+        'final-source-stage-evidence.mjs deployment',
+        'final-source-stage-evidence.mjs publication',
+        'final-source-attempt-journal.mjs initialize',
+        'final-source-attempt-journal.mjs append-stage',
+        'release-publication-evidence.mjs resolve',
+        '--source-root $sourceRoot',
+        '--acceptance-stage-evidence-file-sha256 $acceptanceStageEvidenceFileSha256',
+        '--deployment-stage-evidence-file-sha256 $deploymentStageEvidenceFileSha256',
+        '--publication-stage-evidence-file-sha256 $publicationStageEvidenceFileSha256',
+        '--canonical-acceptance-evidence-file-sha256 $canonicalAcceptanceEvidenceFileSha256',
+        '--pages-deployment-authority-file-sha256 $pagesDeploymentAuthorityFileSha256',
+        '--pages-rollback-capture-file-sha256 $pagesRollbackCaptureFileSha256',
+        '--discord-catalog-file-sha256 $catalogFileSha256',
+        '--discord-prior-snapshot-file-sha256 $priorCatalogFileSha256',
+        '--discord-command-sync-authority-file-sha256 $syncAuthorityFileSha256',
+        '--discord-catalog-sync-report-file-sha256 $syncReportFileSha256',
+        '--cloud-candidate-smoke-report-file-sha256 $candidateSmokeReportFileSha256',
+        '--oracle-rollback-capture-file-sha256 $oracleRollbackCaptureEvidenceFileSha256',
+        '--oracle-observation-file-sha256 $oracleObservationEvidenceFileSha256',
+        '--production-probe-spec-file-sha256 $probeSpecFileSha256',
+        '--production-observation-report-file-sha256 $observationReportFileSha256',
+        '--release-publication-evidence-file-sha256 $releasePublicationEvidenceFileSha256',
+        '--release-publication-final-authority-file-sha256 $releasePublicationFinalAuthorityFileSha256',
+        '--release-publication-receipt-file-sha256 $releasePublicationReceiptFileSha256'
+    )) {
+        if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud release runbook is missing closed final-source marker '$required'"
+        }
+    }
+    if ($cloudDeploy.IndexOf('node scripts/release/validate-final-source-revalidation.mjs', [System.StringComparison]::Ordinal) -ge 0) {
+        Add-ArchitectureError 'Cloud release runbook must not invoke the library-only final-source validator directly'
+    }
+    foreach ($required in @(
+        '$oracleRollbackCaptureEvidencePath',
+        '$oracleObservationEvidencePath',
+        '-EvidenceOutput $oracleRollbackCaptureEvidencePath',
+        '-EvidenceOutput $oracleObservationEvidencePath',
+        'durable Oracle observation failed'
+    )) {
+        if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud release runbook is missing durable Oracle evidence marker '$required'"
+        }
+    }
+    if (([regex]::Matches($cloudDeploy, '-EvidenceOutput \$oracle(?:RollbackCapture|Observation)EvidencePath')).Count -ne 2) {
+        Add-ArchitectureError 'Cloud release runbook must persist exactly one rollback capture and one direct Oracle observation evidence file'
+    }
+    $evidenceInitializationIndex = $cloudDeploy.IndexOf(
+        '## Initialize exact-source evidence before mutation',
+        [System.StringComparison]::Ordinal
+    )
+    $acceptanceStageIndex = $cloudDeploy.IndexOf(
+        'final-source-stage-evidence.mjs acceptance',
+        [System.StringComparison]::Ordinal
+    )
+    $acceptanceAppendIndex = $cloudDeploy.IndexOf(
+        '--stage-evidence $acceptanceStageEvidencePath',
+        [System.StringComparison]::Ordinal
+    )
+    $currentSourceBuildIndex = $cloudDeploy.IndexOf(
+        '## Build the current-source image',
+        [System.StringComparison]::Ordinal
+    )
+    $deploymentTemplateIndex = $cloudDeploy.IndexOf(
+        '## Deployment template',
+        [System.StringComparison]::Ordinal
+    )
+    if ($evidenceInitializationIndex -lt 0 -or
+        $acceptanceStageIndex -le $evidenceInitializationIndex -or
+        $acceptanceAppendIndex -le $acceptanceStageIndex -or
+        $currentSourceBuildIndex -le $acceptanceAppendIndex -or
+        $deploymentTemplateIndex -le $currentSourceBuildIndex -or
+        ([regex]::Matches($cloudDeploy, 'final-source-stage-evidence\.mjs acceptance')).Count -ne 1 -or
+        ([regex]::Matches($cloudDeploy, 'final-source-attempt-journal\.mjs initialize')).Count -ne 1 -or
+        ([regex]::Matches($cloudDeploy, '--name \$canonicalAcceptanceArtifactName')).Count -ne 1) {
+        Add-ArchitectureError 'Cloud release runbook must initialize and append the exact acceptance stage once before build and public deployment mutation'
     }
 
     $cloudBuildSubmissionCount = [regex]::Matches(
@@ -2712,6 +3034,11 @@ function Invoke-ReleaseIdentityGateValidation {
             $deploymentDoc.Text,
             [regex]::Escape($scriptReleaseDigestMarker)
         ).Count
+        $expectedScriptReleaseDigestBindingCount = if ($deploymentDoc.Name -eq 'Cloud Run deployment contract') {
+            5
+        } else {
+            4
+        }
         $priorRevisionCaptureIndex = $deploymentDoc.Text.IndexOf(
             '$priorRevision = [string]$priorTraffic[0].revisionName',
             [System.StringComparison]::Ordinal
@@ -2775,7 +3102,7 @@ function Invoke-ReleaseIdentityGateValidation {
             $priorRevisionCaptureIndex -lt 0 -or
             $captureIndex -le $priorRevisionCaptureIndex -or
             $captureIndex -lt 0 -or
-            $scriptReleaseDigestBindingCount -ne 4 -or
+            $scriptReleaseDigestBindingCount -ne $expectedScriptReleaseDigestBindingCount -or
             $captureScriptDigestIndex -le $captureIndex -or
             $captureScriptDigestIndex -ge $deployIndex -or
             $captureIndex -ge $deployIndex -or
@@ -2941,7 +3268,17 @@ function Invoke-ReleaseIdentityGateValidation {
         "'-i', `$IdentityFile",
         'oracle_release_deploy_invoker=audit-ok',
         'Test-JsonSafePositiveInteger',
-        'clearra.oracle.candidate-observation.v1'
+        'clearra.oracle.candidate-observation.v1',
+        'EvidenceOutput',
+        'Assert-EvidenceOutputPath',
+        'ConvertTo-CanonicalJson',
+        'Write-CanonicalEvidenceOutput',
+        '[IO.FileMode]::CreateNew',
+        '[IO.FileShare]::None',
+        '[Text.UTF8Encoding]::new($false)',
+        '$stream.Flush($true)',
+        '$observation.freshOperationAt = Get-CanonicalTimestamp',
+        '$observation.observedAt = Get-CanonicalTimestamp'
     )) {
         if ($oracleDeployInvoker.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Typed Oracle release deploy invoker is missing '$required'"
@@ -2954,6 +3291,11 @@ function Invoke-ReleaseIdentityGateValidation {
         "Assert-AuditResult -Output `$observation -Operation 'observe-candidate'",
         'Test-Path -LiteralPath `$IdentityFile -PathType Leaf',
         'Get-Item -LiteralPath `$IdentityFile -Force',
+        'Read-CanonicalEvidenceFile',
+        'locked-identity',
+        'Oracle observation evidence did not preserve canonical UTC timestamps and source identity.',
+        'Oracle evidence output changed after a rejected overwrite.',
+        'Oracle evidence output accepted a linked parent path.',
         'oracle_release_deploy_wrapper_test=pass'
     )) {
         if ($oracleDeployInvokerTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {

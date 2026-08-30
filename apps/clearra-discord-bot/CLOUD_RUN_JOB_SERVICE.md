@@ -53,6 +53,71 @@ gcloud services enable policytroubleshooter.googleapis.com --project=$projectId
 if ($LASTEXITCODE -ne 0) { throw "Policy Troubleshooter API prerequisite failed" }
 ```
 
+## Initialize exact-source evidence before mutation
+
+After the one canonical `workflow_dispatch` acceptance succeeds, initialize one
+new evidence directory from the clean exact-main checkout. This must finish
+before any Pages, Cloud, Oracle, or Discord public mutation. It downloads the
+run/attempt-bound canonical acceptance report, makes the source-bound acceptance
+stage, and atomically appends that whole stage to the new journal. The directory
+and journal are reused by every later section; neither is recreated for a
+deployment retry.
+
+```powershell
+$sourceCommit = "<full-40-character-accepted-main-commit>"
+$repository = "daejunnom/Clearra"
+$acceptedRunId = "<canonical-successful-workflow-dispatch-run-id>"
+$acceptedRunAttempt = "<exact-positive-run-attempt>"
+$attemptId = "<new-release-attempt-id>"
+$evidenceDirectory = Join-Path `
+  $env:LOCALAPPDATA `
+  "Clearra/reports/release-v0.8.0/$attemptId"
+$sourceRoot = (Get-Location).Path
+$canonicalAcceptanceDirectory = Join-Path $evidenceDirectory "canonical-acceptance-evidence"
+$canonicalAcceptanceEvidencePath = Join-Path `
+  $canonicalAcceptanceDirectory `
+  "clearra-canonical-acceptance-evidence.v1.json"
+$canonicalAcceptanceArtifactName = "canonical-acceptance-evidence-$sourceCommit-run-$acceptedRunId-attempt-$acceptedRunAttempt"
+$acceptanceStageEvidencePath = Join-Path `
+  $evidenceDirectory `
+  "final-source-acceptance-stage.json"
+$attemptJournal = Join-Path $evidenceDirectory "final-source-attempt.jsonl"
+
+if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+    $acceptedRunId -cnotmatch '^[1-9][0-9]{0,19}$' -or
+    $acceptedRunAttempt -cnotmatch '^[1-9][0-9]{0,19}$' -or
+    (Test-Path -LiteralPath $evidenceDirectory)) {
+  throw "final-source acceptance authority or new evidence directory is invalid"
+}
+New-Item -ItemType Directory -Path $canonicalAcceptanceDirectory | Out-Null
+gh run download $acceptedRunId `
+  --repo $repository `
+  --name $canonicalAcceptanceArtifactName `
+  --dir $canonicalAcceptanceDirectory
+if ($LASTEXITCODE -ne 0) { throw "canonical acceptance evidence download failed" }
+
+node scripts/release/final-source-stage-evidence.mjs acceptance `
+  --expected-source-commit $sourceCommit `
+  --source-root $sourceRoot `
+  --canonical-acceptance-evidence $canonicalAcceptanceEvidencePath `
+  --output $acceptanceStageEvidencePath
+if ($LASTEXITCODE -ne 0) { throw "acceptance stage evidence failed" }
+$acceptanceStageEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $acceptanceStageEvidencePath
+).Hash.ToLowerInvariant()
+
+node scripts/release/final-source-attempt-journal.mjs initialize `
+  --journal $attemptJournal `
+  --attempt-id $attemptId `
+  --source-commit $sourceCommit
+if ($LASTEXITCODE -ne 0) { throw "final-source journal initialization failed" }
+node scripts/release/final-source-attempt-journal.mjs append-stage `
+  --journal $attemptJournal `
+  --stage-evidence $acceptanceStageEvidencePath `
+  --stage-evidence-file-sha256 $acceptanceStageEvidenceFileSha256
+if ($LASTEXITCODE -ne 0) { throw "acceptance stage journal append failed" }
+```
+
 ## Build the current-source image
 
 Build in Tokyo and use an immutable source-revision tag. The build context must
@@ -304,6 +369,8 @@ $sourceCommit = "<same-full-40-character-accepted-commit>"
 $serviceName = "clearra-current-job"
 $jobBearerSecretVersion = "<numeric-enabled-Secret-version>"
 $candidateSmokeReportPath = "<new-absolute-canonical-candidate-smoke-report-path>"
+$oracleRollbackCaptureEvidencePath = "<new-absolute-Oracle-rollback-capture-evidence-path>"
+$oracleObservationEvidencePath = "<new-absolute-Oracle-observation-evidence-path>"
 $priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
 $oracleCandidateReleaseId = "<immutable-candidate-Oracle-release-ID>"
 $oracleCandidateReleaseSha256 = "<candidate-Oracle-release-tree-SHA-256>"
@@ -367,6 +434,7 @@ $priorCaptureJson = & $oracleRemoteWrapper `
   -PriorRevision $priorRevision `
   -PriorRuntimeAuthorityKind $priorRuntimeAuthorityKind `
   -DeploymentNonce $deploymentNonce `
+  -EvidenceOutput $oracleRollbackCaptureEvidencePath `
   -IdentityFile $oracleIdentityFile
 if ($LASTEXITCODE -ne 0) { throw "prior Oracle rollback authority capture failed" }
 try { $priorCapture = $priorCaptureJson | ConvertFrom-Json } catch {
@@ -654,9 +722,13 @@ tracked producer writes the canonical source catalog first, persists and
 before its one possible bulk PUT, and seals an independent post-write GET.
 The retired `cloudbuild-command-sync.yaml` path is not release-authoritative
 because it cannot return this durable prior snapshot and producer report.
+The fresh extraction downloads the exact run/attempt-bound accepted CTK3
+distribution and canonical acceptance evidence, verifies both against the
+source commit, and seals them with the canonical catalog in one non-secret
+command-sync authority. It never rebuilds CTK3 during command synchronization.
 Perform this only after the runtime identity and bounded smoke job checks have
-passed. The evidence directory must be a new directory outside the source tree
-and must remain available through final manifest validation:
+passed. Reuse the already initialized evidence directory outside the source tree;
+it must remain available through final manifest validation:
 
 ```powershell
 $projectId = gcloud config get-value project
@@ -664,18 +736,27 @@ $sourceCommit = "<same-full-40-character-accepted-commit>"
 $repository = "daejunnom/Clearra"
 $serviceName = "clearra-current-job"
 $applicationId = "1533373054309371924"
-$evidenceDirectory = "<new-absolute-release-evidence-directory>"
+$acceptedRunId = "<canonical-successful-workflow-dispatch-run-id>"
+$acceptedRunAttempt = "<exact-positive-run-attempt>"
+$evidenceDirectory = "<same-retained-absolute-release-evidence-directory>"
 $archiveRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("clearra-command-sync-" + [Guid]::NewGuid().ToString("N"))
 $archivePath = Join-Path $archiveRoot "source.tar.gz"
 $sourceContext = Join-Path $archiveRoot "source"
 $catalogPath = Join-Path $evidenceDirectory "discord-command-catalog.json"
 $priorCatalogPath = Join-Path $evidenceDirectory "discord-command-catalog-prior.json"
 $syncReportPath = Join-Path $evidenceDirectory "discord-command-catalog-sync.json"
+$syncAuthorityPath = Join-Path $evidenceDirectory "discord-command-sync-authority.json"
+$acceptedCtk3ArtifactName = "ctk3-accepted-$sourceCommit-run-$acceptedRunId-attempt-$acceptedRunAttempt"
+$acceptedCtk3Dist = Join-Path $sourceContext "packages/ctk3/dist"
+$canonicalAcceptanceDirectory = Join-Path $evidenceDirectory "canonical-acceptance-evidence"
+$canonicalAcceptanceEvidencePath = Join-Path $canonicalAcceptanceDirectory "clearra-canonical-acceptance-evidence.v1.json"
 
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+    $acceptedRunId -cnotmatch '^[1-9][0-9]{0,19}$' -or
+    $acceptedRunAttempt -cnotmatch '^[1-9][0-9]{0,19}$' -or
     $applicationId -notmatch '^\d{17,20}$' -or
     -not (Test-Path -LiteralPath $evidenceDirectory -PathType Container)) {
-  throw "sourceCommit must be the full lowercase accepted commit SHA"
+  throw "command-sync source/run/application/evidence authority is invalid"
 }
 $resolvedCommit = (git rev-parse "$sourceCommit`^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or $resolvedCommit -cne $sourceCommit) {
@@ -696,6 +777,17 @@ try {
   tar -xzf $archivePath -C $sourceContext
   if ($LASTEXITCODE -ne 0) { throw "command-sync source extraction failed" }
 
+  if ((Test-Path -LiteralPath $acceptedCtk3Dist) -or
+      -not (Test-Path -LiteralPath $canonicalAcceptanceEvidencePath -PathType Leaf)) {
+    throw "command-sync accepted CTK3 output must be absent and acceptance authority must already exist"
+  }
+  New-Item -ItemType Directory -Path $acceptedCtk3Dist | Out-Null
+  gh run download $acceptedRunId `
+    --repo $repository `
+    --name $acceptedCtk3ArtifactName `
+    --dir $acceptedCtk3Dist
+  if ($LASTEXITCODE -ne 0) { throw "accepted CTK3 artifact download failed" }
+
   Push-Location $sourceContext
   try {
     node apps/clearra-discord-bot/scripts/verify-accepted-source.mjs `
@@ -704,14 +796,34 @@ try {
       --active-health-url ([string]$activeService.status.url)
     if ($LASTEXITCODE -ne 0) { throw "accepted runtime preflight failed before command sync" }
 
-    npm ci
+    npm ci --ignore-scripts
     if ($LASTEXITCODE -ne 0) { throw "command-sync dependency install failed" }
-    npm run build --workspace ctk3
-    if ($LASTEXITCODE -ne 0) { throw "command-sync CTK3 build failed" }
+    node scripts/tools/accepted-ctk3-dist.mjs `
+      --verify $acceptedCtk3Dist `
+      --expected-source-commit $sourceCommit `
+      --expected-run-id $acceptedRunId `
+      --expected-run-attempt $acceptedRunAttempt
+    if ($LASTEXITCODE -ne 0) { throw "command-sync accepted CTK3 authority failed" }
 
     node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs `
       canonical --source-commit $sourceCommit --output $catalogPath
     if ($LASTEXITCODE -ne 0) { throw "canonical Discord catalog production failed" }
+
+    node scripts/release/discord-command-sync-authority.mjs `
+      --source-commit $sourceCommit `
+      --repository $repository `
+      --version 0.8.0 `
+      --base-path /Clearra `
+      --accepted-run-id $acceptedRunId `
+      --accepted-run-attempt $acceptedRunAttempt `
+      --accepted-ctk3-dist $acceptedCtk3Dist `
+      --canonical-acceptance-evidence $canonicalAcceptanceEvidencePath `
+      --catalog $catalogPath `
+      --output $syncAuthorityPath
+    if ($LASTEXITCODE -ne 0) { throw "Discord command sync authority production failed" }
+    $syncAuthorityFileSha256 = (Get-FileHash `
+      -Algorithm SHA256 `
+      -LiteralPath $syncAuthorityPath).Hash.ToLowerInvariant()
 
     # DISCORD_TOKEN must already exist only in this process environment, injected
     # by the approved Secret Manager wrapper or masked prompt. Never pass it as
@@ -719,6 +831,8 @@ try {
     node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs `
       sync --source-commit $sourceCommit --application-id $applicationId `
       --catalog $catalogPath --prior-output $priorCatalogPath `
+      --sync-authority $syncAuthorityPath `
+      --sync-authority-file-sha256 $syncAuthorityFileSha256 `
       --output $syncReportPath
     if ($LASTEXITCODE -ne 0) { throw "Discord catalog sync or readback failed" }
   } finally {
@@ -775,7 +889,10 @@ spec, adapter output, observation report, journal, and manifest.
 
 - Discord performs a new localized global-command GET and returns the exact
   application, source-catalog digest, readback digest, sync-report digest,
-  sorted `type:name` set, and count.
+  sorted `type:name` set, and count. Its identity also preserves the accepted
+  run ID/attempt, accepted CTK3 manifest SHA-256, canonical acceptance report
+  and raw-file SHA-256, command-catalog raw-file SHA-256, and command-sync
+  authority report and raw-file SHA-256.
 - Oracle uses the approved SSH read-only ops wrapper, not an invented public
   health endpoint. It returns active release/tree/settings SHA-256, pinned PID,
   boot ID, unchanged monotonic process-start value, READY state, and strictly
@@ -786,15 +903,20 @@ spec, adapter output, observation report, journal, and manifest.
   consume the sealed `clearra.cloud.candidate-smoke.v1` report that independently
   proved this same image/revision/tag at zero traffic and ran one managed-secret
   authenticated bounded `/jobs` smoke without recording the bearer or result.
-- Pages performs cache-busted HTTP reads of `clearra-build-identity.json` and
-  returns exact source/engine/version, deployment ID, artifact SHA-256, base
-  path, and credential-free URL.
+- Pages accepts only a sealed deployment-report path, its raw-file SHA-256, and
+  a timeout. The adapter derives source/engine/version, deployment ID, artifact
+  authority, base path, and URL from that report, then performs cache-busted
+  public identity reads and an authenticated Pages deployment-status API read
+  for every sample. Both readbacks are sealed independently.
 
 Create the non-secret `clearra.production-observation-probe-authority.v1` JSON
-from the exact deployment journal values. It contains the Discord catalog/sync
-paths and raw file hashes, the Cloud project/region/service/revision/tag/image
-plus candidate-smoke path/hash, the Pages URL/deployment/artifact/base-path and
-accepted run identity, and the Oracle wrapper path/hash with exact release,
+from the exact deployment journal values. Its Discord authority contains the
+catalog, sync report, command-sync authority paths and all three raw file hashes.
+Its Cloud authority contains project/region/service/revision/tag/image plus the
+candidate-smoke path/hash. Its Pages authority contains only
+`deployment_report_path`, `deployment_report_file_sha256`, and
+`timeout_seconds`; every other Pages value is derived from the sealed report.
+Its Oracle authority contains the wrapper path/hash with exact release,
 settings, URL, revision, nonce, and verified-after values. It never contains
 `DISCORD_TOKEN` or `CLEARRA_ORACLE_IDENTITY_FILE`; those are runtime environment
 inputs only. The tracked materializer verifies every local regular non-link
@@ -814,6 +936,25 @@ node scripts/release/observe-production-surfaces.mjs `
   --probe-spec $probeSpecPath `
   --output $observationReportPath
 if ($LASTEXITCODE -ne 0) { throw "four-surface production observation failed" }
+
+# Persist one additional typed Oracle read-only observation for direct
+# deployment-stage consumption. The output path must be absolute, new, and
+# beneath a regular non-link directory chain.
+$oracleObservationJson = & $oracleRemoteWrapper `
+  -Operation observe-candidate `
+  -ScriptReleaseId $oracleCandidateReleaseId `
+  -ScriptReleaseSha256 $oracleCandidateReleaseSha256 `
+  -SourceCommit $sourceCommit `
+  -CandidateUrl $candidateUrl `
+  -CandidateRevision $candidateRevision `
+  -OracleReleaseId $oracleCandidateReleaseId `
+  -OracleReleaseSha256 $oracleCandidateReleaseSha256 `
+  -OracleSettingsSha256 $oracleCandidateSettingsSha256 `
+  -DeploymentNonce $deploymentNonce `
+  -VerifiedAfter $deploymentVerifiedAfter `
+  -EvidenceOutput $oracleObservationEvidencePath `
+  -IdentityFile $oracleIdentityFile
+if ($LASTEXITCODE -ne 0) { throw "durable Oracle observation failed" }
 ```
 
 The production observation CLI has no duration override; it always observes
@@ -822,22 +963,215 @@ SHA-256 values, rehashes every adapter before every invocation, and closes the
 last sample at the report end time. Tests use injected probes and a short fake
 clock instead.
 
-Final journal materialization and direct validation must consume the actual two
-producer files; copying their hashes into hand-written payloads is insufficient:
+## Final-source staged evidence and publication closure
+
+The final journal accepts no hand-written event payloads. It admits exactly
+three source-bound stage reports, in `acceptance`, `deployment`, `publication`
+order, and appends each complete stage as one atomic replacement batch. The
+acceptance phase above has already run before mutation. Phase 2 runs only after
+command synchronization, the full 1,200-second observation, and the durable
+Oracle observation have succeeded. Phase 3 runs
+only after the exact annotated tag workflow and its separate publication
+finalizer have both completed successfully.
+
+All remaining output paths below are new regular non-link files under the one
+retained evidence directory. The Pages capture and deployment reports are the exact downloaded
+run/attempt-bound workflow artifacts; they are not operator-transcribed JSON.
+The publication resolver uses the authenticated `gh` CLI internally and accepts
+no token, artifact ID, artifact name, or digest argument.
 
 ```powershell
-node scripts/release/final-source-attempt-journal.mjs materialize `
-  --journal $attemptJournal --output $finalManifest `
-  --discord-catalog-sync-report $syncReportPath `
-  --production-observation-report $observationReportPath
-if ($LASTEXITCODE -ne 0) { throw "final-source materialization failed" }
+$releaseTag = "v0.8.0"
+$sourceRoot = (Get-Location).Path
+$attemptJournal = Join-Path $evidenceDirectory "final-source-attempt.jsonl"
+$finalManifest = Join-Path $evidenceDirectory "final-source-revalidation.json"
+$acceptanceStageEvidencePath = Join-Path $evidenceDirectory "final-source-acceptance-stage.json"
+$deploymentStageEvidencePath = Join-Path $evidenceDirectory "final-source-deployment-stage.json"
+$publicationStageEvidencePath = Join-Path $evidenceDirectory "final-source-publication-stage.json"
+$pagesDeploymentAuthorityPath = Join-Path $evidenceDirectory "pages-deployment-authority.json"
+$pagesRollbackCapturePath = Join-Path $evidenceDirectory "pages-rollback-capture-authority.json"
+$publicationResolutionDirectory = Join-Path $evidenceDirectory "release-publication-final"
 
-node scripts/release/validate-final-source-revalidation.mjs `
-  --manifest $finalManifest --expected-source-commit $sourceCommit `
+# Re-read the already appended acceptance-stage bytes after the long deployment
+# window instead of relying on an in-memory digest.
+$acceptanceStageEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $acceptanceStageEvidencePath
+).Hash.ToLowerInvariant()
+
+# Phase 2: execute after the full observation and durable Oracle observation.
+$pagesDeploymentAuthorityFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $pagesDeploymentAuthorityPath
+).Hash.ToLowerInvariant()
+$pagesRollbackCaptureFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $pagesRollbackCapturePath
+).Hash.ToLowerInvariant()
+$catalogFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $catalogPath
+).Hash.ToLowerInvariant()
+$priorCatalogFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $priorCatalogPath
+).Hash.ToLowerInvariant()
+$syncAuthorityFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $syncAuthorityPath
+).Hash.ToLowerInvariant()
+$syncReportFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $syncReportPath
+).Hash.ToLowerInvariant()
+$candidateSmokeReportFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $candidateSmokeReportPath
+).Hash.ToLowerInvariant()
+$oracleRollbackCaptureEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $oracleRollbackCaptureEvidencePath
+).Hash.ToLowerInvariant()
+$oracleObservationEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $oracleObservationEvidencePath
+).Hash.ToLowerInvariant()
+$probeSpecFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $probeSpecPath
+).Hash.ToLowerInvariant()
+$observationReportFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $observationReportPath
+).Hash.ToLowerInvariant()
+
+node scripts/release/final-source-stage-evidence.mjs deployment `
+  --expected-source-commit $sourceCommit `
+  --pages-deployment-authority $pagesDeploymentAuthorityPath `
+  --pages-deployment-authority-file-sha256 $pagesDeploymentAuthorityFileSha256 `
+  --pages-rollback-capture $pagesRollbackCapturePath `
+  --pages-rollback-capture-file-sha256 $pagesRollbackCaptureFileSha256 `
+  --discord-catalog $catalogPath `
+  --discord-catalog-file-sha256 $catalogFileSha256 `
+  --discord-prior-snapshot $priorCatalogPath `
+  --discord-prior-snapshot-file-sha256 $priorCatalogFileSha256 `
+  --discord-command-sync-authority $syncAuthorityPath `
+  --discord-command-sync-authority-file-sha256 $syncAuthorityFileSha256 `
   --discord-catalog-sync-report $syncReportPath `
-  --production-observation-report $observationReportPath
-if ($LASTEXITCODE -ne 0) { throw "final-source producer binding failed" }
+  --discord-catalog-sync-report-file-sha256 $syncReportFileSha256 `
+  --cloud-candidate-smoke-report $candidateSmokeReportPath `
+  --cloud-candidate-smoke-report-file-sha256 $candidateSmokeReportFileSha256 `
+  --oracle-rollback-capture $oracleRollbackCaptureEvidencePath `
+  --oracle-rollback-capture-file-sha256 $oracleRollbackCaptureEvidenceFileSha256 `
+  --oracle-observation $oracleObservationEvidencePath `
+  --oracle-observation-file-sha256 $oracleObservationEvidenceFileSha256 `
+  --production-probe-spec $probeSpecPath `
+  --production-probe-spec-file-sha256 $probeSpecFileSha256 `
+  --production-observation-report $observationReportPath `
+  --production-observation-report-file-sha256 $observationReportFileSha256 `
+  --output $deploymentStageEvidencePath
+if ($LASTEXITCODE -ne 0) { throw "deployment stage evidence failed" }
+$deploymentStageEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $deploymentStageEvidencePath
+).Hash.ToLowerInvariant()
+
+node scripts/release/final-source-attempt-journal.mjs append-stage `
+  --journal $attemptJournal `
+  --stage-evidence $deploymentStageEvidencePath `
+  --stage-evidence-file-sha256 $deploymentStageEvidenceFileSha256
+if ($LASTEXITCODE -ne 0) { throw "deployment stage journal append failed" }
+
+# Phase 3: fill these from the one successful v0.8.0 tag workflow attempt.
+$publicationRunId = "<successful-tag-workflow-run-id>"
+$publicationRunAttempt = "<successful-tag-workflow-run-attempt>"
+node scripts/release/release-publication-evidence.mjs resolve `
+  --repository $repository `
+  --tag $releaseTag `
+  --source-commit $sourceCommit `
+  --workflow-run-id $publicationRunId `
+  --workflow-run-attempt $publicationRunAttempt `
+  --output-directory $publicationResolutionDirectory
+if ($LASTEXITCODE -ne 0) { throw "publication final authority resolution failed" }
+
+$releasePublicationReceiptPath = Join-Path `
+  $publicationResolutionDirectory `
+  "clearra-release-publication-receipt.v1.json"
+$releasePublicationEvidencePath = Join-Path `
+  $publicationResolutionDirectory `
+  "clearra-release-publication-evidence.v1.json"
+$releasePublicationFinalAuthorityPath = Join-Path `
+  $publicationResolutionDirectory `
+  "clearra-release-publication-final-authority.v1.json"
+$releasePublicationReceiptFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $releasePublicationReceiptPath
+).Hash.ToLowerInvariant()
+$releasePublicationEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $releasePublicationEvidencePath
+).Hash.ToLowerInvariant()
+$releasePublicationFinalAuthorityFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $releasePublicationFinalAuthorityPath
+).Hash.ToLowerInvariant()
+$canonicalAcceptanceEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $canonicalAcceptanceEvidencePath
+).Hash.ToLowerInvariant()
+
+node scripts/release/final-source-stage-evidence.mjs publication `
+  --expected-source-commit $sourceCommit `
+  --release-publication-evidence $releasePublicationEvidencePath `
+  --release-publication-evidence-file-sha256 $releasePublicationEvidenceFileSha256 `
+  --release-publication-final-authority $releasePublicationFinalAuthorityPath `
+  --release-publication-final-authority-file-sha256 $releasePublicationFinalAuthorityFileSha256 `
+  --release-publication-receipt $releasePublicationReceiptPath `
+  --release-publication-receipt-file-sha256 $releasePublicationReceiptFileSha256 `
+  --canonical-acceptance-evidence $canonicalAcceptanceEvidencePath `
+  --output $publicationStageEvidencePath
+if ($LASTEXITCODE -ne 0) { throw "publication stage evidence failed" }
+$publicationStageEvidenceFileSha256 = (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $publicationStageEvidencePath
+).Hash.ToLowerInvariant()
+
+node scripts/release/final-source-attempt-journal.mjs append-stage `
+  --journal $attemptJournal `
+  --stage-evidence $publicationStageEvidencePath `
+  --stage-evidence-file-sha256 $publicationStageEvidenceFileSha256
+if ($LASTEXITCODE -ne 0) { throw "publication stage journal append failed" }
+
+node scripts/release/final-source-attempt-journal.mjs materialize `
+  --journal $attemptJournal `
+  --output $finalManifest `
+  --source-root $sourceRoot `
+  --acceptance-stage-evidence $acceptanceStageEvidencePath `
+  --acceptance-stage-evidence-file-sha256 $acceptanceStageEvidenceFileSha256 `
+  --deployment-stage-evidence $deploymentStageEvidencePath `
+  --deployment-stage-evidence-file-sha256 $deploymentStageEvidenceFileSha256 `
+  --publication-stage-evidence $publicationStageEvidencePath `
+  --publication-stage-evidence-file-sha256 $publicationStageEvidenceFileSha256 `
+  --canonical-acceptance-evidence $canonicalAcceptanceEvidencePath `
+  --canonical-acceptance-evidence-file-sha256 $canonicalAcceptanceEvidenceFileSha256 `
+  --pages-deployment-authority $pagesDeploymentAuthorityPath `
+  --pages-deployment-authority-file-sha256 $pagesDeploymentAuthorityFileSha256 `
+  --pages-rollback-capture $pagesRollbackCapturePath `
+  --pages-rollback-capture-file-sha256 $pagesRollbackCaptureFileSha256 `
+  --discord-catalog $catalogPath `
+  --discord-catalog-file-sha256 $catalogFileSha256 `
+  --discord-prior-snapshot $priorCatalogPath `
+  --discord-prior-snapshot-file-sha256 $priorCatalogFileSha256 `
+  --discord-command-sync-authority $syncAuthorityPath `
+  --discord-command-sync-authority-file-sha256 $syncAuthorityFileSha256 `
+  --discord-catalog-sync-report $syncReportPath `
+  --discord-catalog-sync-report-file-sha256 $syncReportFileSha256 `
+  --cloud-candidate-smoke-report $candidateSmokeReportPath `
+  --cloud-candidate-smoke-report-file-sha256 $candidateSmokeReportFileSha256 `
+  --oracle-rollback-capture $oracleRollbackCaptureEvidencePath `
+  --oracle-rollback-capture-file-sha256 $oracleRollbackCaptureEvidenceFileSha256 `
+  --oracle-observation $oracleObservationEvidencePath `
+  --oracle-observation-file-sha256 $oracleObservationEvidenceFileSha256 `
+  --production-probe-spec $probeSpecPath `
+  --production-probe-spec-file-sha256 $probeSpecFileSha256 `
+  --production-observation-report $observationReportPath `
+  --production-observation-report-file-sha256 $observationReportFileSha256 `
+  --release-publication-evidence $releasePublicationEvidencePath `
+  --release-publication-evidence-file-sha256 $releasePublicationEvidenceFileSha256 `
+  --release-publication-final-authority $releasePublicationFinalAuthorityPath `
+  --release-publication-final-authority-file-sha256 $releasePublicationFinalAuthorityFileSha256 `
+  --release-publication-receipt $releasePublicationReceiptPath `
+  --release-publication-receipt-file-sha256 $releasePublicationReceiptFileSha256
+if ($LASTEXITCODE -ne 0) { throw "final-source materialization failed" }
 ```
+
+`materialize` reopens every original producer, verifies every supplied raw-file
+SHA-256, reconstructs all three stage reports, compares their event bytes with
+the journal, and invokes the final validator as a library before it creates the
+manifest. `validate-final-source-revalidation.mjs` is intentionally not an
+operator CLI; direct execution is non-authoritative and must fail closed.
 
 ## Compatibility negative test
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   lstat,
   open,
@@ -207,10 +208,16 @@ export async function synchronizeDiscordCatalogRelease({
   applicationId,
   sourceCommit,
   catalog,
+  catalogFileSha256,
+  syncAuthority,
+  syncAuthorityFileSha256,
   persistPriorSnapshot,
   now = () => new Date().toISOString(),
   synchronizationOptions,
 }) {
+  const { validateDiscordCommandSyncAuthority } = await import(
+    "../../../scripts/release/discord-command-sync-authority.mjs"
+  );
   const {
     synchronizeGlobalCommandRegistrationFromObserved,
     verifyGlobalCommandRegistration,
@@ -218,6 +225,19 @@ export async function synchronizeDiscordCatalogRelease({
   const application = requireApplicationId(applicationId);
   const commit = requireSourceCommit(sourceCommit);
   validateCanonicalDiscordCatalog(catalog, commit);
+  const catalogFileHash = requireSha256(
+    catalogFileSha256,
+    "Discord canonical catalog file SHA-256",
+  );
+  const authorityFileHash = requireSha256(
+    syncAuthorityFileSha256,
+    "Discord command sync authority file SHA-256",
+  );
+  validateDiscordCommandSyncAuthority(syncAuthority, {
+    sourceCommit: commit,
+    catalog,
+    catalogFileSha256: catalogFileHash,
+  });
   if (typeof persistPriorSnapshot !== "function") {
     throw new Error("Discord sync requires durable prior-snapshot persistence");
   }
@@ -256,6 +276,17 @@ export async function synchronizeDiscordCatalogRelease({
     changed: synchronization.changed,
     command_count: catalog.command_count,
     expected_catalog_sha256: catalog.catalog_sha256,
+    accepted_run_id: syncAuthority.accepted_run_id,
+    accepted_run_attempt: syncAuthority.accepted_run_attempt,
+    accepted_ctk3_manifest_sha256:
+      syncAuthority.accepted_ctk3_manifest_sha256,
+    canonical_acceptance_evidence_sha256:
+      syncAuthority.canonical_acceptance_evidence_sha256,
+    canonical_acceptance_evidence_file_sha256:
+      syncAuthority.canonical_acceptance_evidence_file_sha256,
+    command_catalog_file_sha256: catalogFileHash,
+    command_sync_authority_sha256: syncAuthority.report_sha256,
+    command_sync_authority_file_sha256: authorityFileHash,
     prior_snapshot_sha256: priorSnapshot.snapshot_sha256,
     prior_catalog_sha256: priorSnapshot.catalog_sha256,
     current_before_sha256: priorSnapshot.catalog_sha256,
@@ -265,6 +296,9 @@ export async function synchronizeDiscordCatalogRelease({
     expectedSourceCommit: commit,
     expectedApplicationId: application,
     expectedCatalog: catalog,
+    expectedCatalogFileSha256: catalogFileHash,
+    expectedSyncAuthority: syncAuthority,
+    expectedSyncAuthorityFileSha256: authorityFileHash,
   });
   return Object.freeze({ priorSnapshot, report });
 }
@@ -275,6 +309,9 @@ export function validateDiscordCatalogSyncReport(
     expectedSourceCommit,
     expectedApplicationId,
     expectedCatalog,
+    expectedCatalogFileSha256,
+    expectedSyncAuthority,
+    expectedSyncAuthorityFileSha256,
   } = {},
 ) {
   requireExactKeys(value, [
@@ -287,6 +324,14 @@ export function validateDiscordCatalogSyncReport(
     "changed",
     "command_count",
     "expected_catalog_sha256",
+    "accepted_run_id",
+    "accepted_run_attempt",
+    "accepted_ctk3_manifest_sha256",
+    "canonical_acceptance_evidence_sha256",
+    "canonical_acceptance_evidence_file_sha256",
+    "command_catalog_file_sha256",
+    "command_sync_authority_sha256",
+    "command_sync_authority_file_sha256",
     "prior_snapshot_sha256",
     "prior_catalog_sha256",
     "current_before_sha256",
@@ -322,8 +367,22 @@ export function validateDiscordCatalogSyncReport(
   if (!Number.isSafeInteger(value.command_count) || value.command_count < 1) {
     throw new Error("Discord sync command count is invalid");
   }
+  for (const [field, label] of [
+    ["accepted_run_id", "accepted run ID"],
+    ["accepted_run_attempt", "accepted run attempt"],
+  ]) {
+    if (typeof value[field] !== "string" || !/^[1-9][0-9]{0,19}$/u.test(value[field])) {
+      throw new Error(`Discord sync ${label} is invalid`);
+    }
+  }
   for (const key of [
     "expected_catalog_sha256",
+    "accepted_ctk3_manifest_sha256",
+    "canonical_acceptance_evidence_sha256",
+    "canonical_acceptance_evidence_file_sha256",
+    "command_catalog_file_sha256",
+    "command_sync_authority_sha256",
+    "command_sync_authority_file_sha256",
     "prior_snapshot_sha256",
     "prior_catalog_sha256",
     "current_before_sha256",
@@ -342,6 +401,48 @@ export function validateDiscordCatalogSyncReport(
     ) {
       throw new Error("Discord sync report differs from the canonical catalog producer");
     }
+  }
+  if (
+    expectedCatalogFileSha256 !== undefined &&
+    value.command_catalog_file_sha256 !== requireSha256(
+      expectedCatalogFileSha256,
+      "expected Discord catalog file SHA-256",
+    )
+  ) {
+    throw new Error("Discord sync report differs from the canonical catalog file bytes");
+  }
+  if (expectedSyncAuthority !== undefined) {
+    const expectedFields = new Map([
+      ["accepted_run_id", "accepted_run_id"],
+      ["accepted_run_attempt", "accepted_run_attempt"],
+      ["accepted_ctk3_manifest_sha256", "accepted_ctk3_manifest_sha256"],
+      [
+        "canonical_acceptance_evidence_sha256",
+        "canonical_acceptance_evidence_sha256",
+      ],
+      [
+        "canonical_acceptance_evidence_file_sha256",
+        "canonical_acceptance_evidence_file_sha256",
+      ],
+      ["command_catalog_file_sha256", "command_catalog_file_sha256"],
+      ["command_sync_authority_sha256", "report_sha256"],
+    ]);
+    for (const [reportField, authorityField] of expectedFields) {
+      if (value[reportField] !== expectedSyncAuthority[authorityField]) {
+        throw new Error(
+          `Discord sync report ${reportField} differs from its command sync authority`,
+        );
+      }
+    }
+  }
+  if (
+    expectedSyncAuthorityFileSha256 !== undefined &&
+    value.command_sync_authority_file_sha256 !== requireSha256(
+      expectedSyncAuthorityFileSha256,
+      "expected Discord command sync authority file SHA-256",
+    )
+  ) {
+    throw new Error("Discord sync report differs from the command sync authority file bytes");
   }
   return value;
 }
@@ -500,6 +601,10 @@ export function normalizeDiscordCatalog(commands, options = {}) {
 }
 
 async function readCanonicalJson(path, label) {
+  return (await readCanonicalJsonWithFileSha256(path, label)).value;
+}
+
+async function readCanonicalJsonWithFileSha256(path, label) {
   const target = resolve(requireNonEmptyString(path, `${label} path`));
   await assertSafeDirectoryChain(dirname(target));
   const metadata = await lstat(target);
@@ -516,7 +621,10 @@ async function readCanonicalJson(path, label) {
   if (raw !== `${canonicalJson(value)}\n`) {
     throw new Error(`${label} bytes are not canonical JSON`);
   }
-  return value;
+  return Object.freeze({
+    value,
+    fileSha256: createHash("sha256").update(raw, "utf8").digest("hex"),
+  });
 }
 
 async function writeCanonicalJsonNew(path, value) {
@@ -666,6 +774,8 @@ function parseCliArguments(args) {
         "--source-commit",
         "--application-id",
         "--catalog",
+        "--sync-authority",
+        "--sync-authority-file-sha256",
         "--prior-output",
         "--output",
       ],
@@ -673,6 +783,8 @@ function parseCliArguments(args) {
         "--source-commit",
         "--application-id",
         "--catalog",
+        "--sync-authority",
+        "--sync-authority-file-sha256",
         "--prior-output",
         "--output",
       ],
@@ -740,16 +852,32 @@ async function main() {
   });
   const rest = new DiscordRestClient(credentials.token);
   if (command === "sync") {
-    const catalog = await readCanonicalJson(
+    const catalogInput = await readCanonicalJsonWithFileSha256(
       values["--catalog"],
       "Discord canonical catalog",
     );
+    const catalog = catalogInput.value;
     validateCanonicalDiscordCatalog(catalog, sourceCommit);
+    const { readDiscordCommandSyncAuthority } = await import(
+      "../../../scripts/release/discord-command-sync-authority.mjs"
+    );
+    const authorityInput = await readDiscordCommandSyncAuthority(
+      values["--sync-authority"],
+      values["--sync-authority-file-sha256"],
+      {
+        sourceCommit,
+        catalog,
+        catalogFileSha256: catalogInput.fileSha256,
+      },
+    );
     const { report } = await synchronizeDiscordCatalogRelease({
       rest,
       applicationId,
       sourceCommit,
       catalog,
+      catalogFileSha256: catalogInput.fileSha256,
+      syncAuthority: authorityInput.authority,
+      syncAuthorityFileSha256: authorityInput.fileSha256,
       async persistPriorSnapshot(snapshot) {
         await writeCanonicalJsonNew(values["--prior-output"], snapshot);
       },

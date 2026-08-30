@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +10,12 @@ import {
 import {
   validateProductionObservationReport,
 } from "./observe-production-surfaces.mjs";
+import {
+  validateFinalSourceStageEvidence,
+} from "./final-source-stage-evidence.mjs";
+import {
+  FINAL_SOURCE_STAGE_ORDER,
+} from "./final-source-event-contract.mjs";
 
 export const FINAL_SOURCE_SCHEMA_ID = "clearra.final-source-revalidation.v1";
 
@@ -86,50 +91,130 @@ export function validateFinalSourceRevalidation(
   return true;
 }
 
-export function parseFinalSourceCliArguments(args) {
-  const parsed = {
-    manifestPath: "",
-    expectedSourceCommit: undefined,
-    discordCatalogSyncReportPath: "",
-    productionObservationReportPath: "",
+export function validateFinalSourceRevalidationFromStages(
+  manifest,
+  {
+    expectedSourceCommit,
+    expectedRelease = "v0.8.0",
+    acceptanceStageEvidence,
+    acceptanceStageEvidenceFileSha256,
+    deploymentStageEvidence,
+    deploymentStageEvidenceFileSha256,
+    publicationStageEvidence,
+    publicationStageEvidenceFileSha256,
+    discordCatalogSyncReport,
+    discordCatalogSyncReportFileSha256,
+    productionObservationReport,
+    productionObservationReportFileSha256,
+  } = {},
+) {
+  const stages = [
+    ["acceptance", acceptanceStageEvidence, acceptanceStageEvidenceFileSha256],
+    ["deployment", deploymentStageEvidence, deploymentStageEvidenceFileSha256],
+    ["publication", publicationStageEvidence, publicationStageEvidenceFileSha256],
+  ];
+  for (const [index, [stage, value, fileSha256]] of stages.entries()) {
+    if (stage !== FINAL_SOURCE_STAGE_ORDER[index]) {
+      throw new Error("final-source library stage order differs from the contract");
+    }
+    validateFinalSourceStageEvidence(value, {
+      expectedStage: stage,
+      expectedSourceCommit,
+    });
+    assertMatch(fileSha256, SHA256, `${stage} stage raw file SHA-256`);
+  }
+  assertMatch(
+    discordCatalogSyncReportFileSha256,
+    SHA256,
+    "Discord sync raw file SHA-256",
+  );
+  assertMatch(
+    productionObservationReportFileSha256,
+    SHA256,
+    "production observation raw file SHA-256",
+  );
+  requireStageProducerBinding(
+    deploymentStageEvidence,
+    "discord-catalog-sync",
+    discordCatalogSyncReport?.report_sha256,
+    discordCatalogSyncReportFileSha256,
+  );
+  requireStageProducerBinding(
+    deploymentStageEvidence,
+    "production-observation",
+    productionObservationReport?.report_sha256,
+    productionObservationReportFileSha256,
+  );
+  const projected = projectManifestFromStages(
+    stages.map(([, value]) => value),
+    expectedRelease,
+  );
+  if (canonicalJson(projected) !== canonicalJson(manifest)) {
+    throw new Error("final-source manifest differs from the exact three producer stages");
+  }
+  return validateFinalSourceRevalidation(manifest, {
+    expectedSourceCommit,
+    expectedRelease,
+    discordCatalogSyncReport,
+    productionObservationReport,
+  });
+}
+
+if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  process.stderr.write(
+    "final-source revalidation is library-only; use final-source-attempt-journal.mjs materialize with every original producer authority\n",
+  );
+  process.exitCode = 2;
+}
+
+function requireStageProducerBinding(stage, role, evidenceSha256, fileSha256) {
+  const matches = stage.producer_inputs.filter((input) => input.role === role);
+  if (
+    matches.length !== 1 ||
+    matches[0].evidence_sha256 !== evidenceSha256 ||
+    matches[0].file_sha256 !== fileSha256
+  ) {
+    throw new Error(`${role} producer bytes differ from the deployment stage authority`);
+  }
+}
+
+function projectManifestFromStages(stages, release) {
+  const grouped = new Map();
+  for (const stage of stages) {
+    for (const event of stage.events) {
+      const entries = grouped.get(event.kind) ?? [];
+      entries.push(event.payload);
+      grouped.set(event.kind, entries);
+    }
+  }
+  const only = (kind) => {
+    const values = grouped.get(kind) ?? [];
+    if (values.length !== 1) {
+      throw new Error(`${kind} stage projection must resolve exactly once`);
+    }
+    return values[0];
   };
-  const seen = new Set();
-  for (let index = 0; index < args.length; index += 1) {
-    const option = args[index];
-    if (!new Set([
-      "--manifest",
-      "--expected-source-commit",
-      "--discord-catalog-sync-report",
-      "--production-observation-report",
-    ]).has(option)) {
-      throw new Error(`unsupported final-source validator argument: ${String(option)}`);
-    }
-    if (seen.has(option)) throw new Error(`duplicate final-source validator argument: ${option}`);
-    seen.add(option);
-    const value = args[index + 1];
-    if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
-      throw new Error(`${option} requires one value`);
-    }
-    index += 1;
-    if (option === "--manifest") parsed.manifestPath = value;
-    else if (option === "--expected-source-commit") parsed.expectedSourceCommit = value;
-    else if (option === "--discord-catalog-sync-report") {
-      parsed.discordCatalogSyncReportPath = value;
-    } else {
-      parsed.productionObservationReportPath = value;
-    }
-  }
-  if (!parsed.manifestPath) throw new Error("--manifest PATH is required");
-  if (!parsed.discordCatalogSyncReportPath) {
-    throw new Error("--discord-catalog-sync-report PATH is required");
-  }
-  if (!parsed.productionObservationReportPath) {
-    throw new Error("--production-observation-report PATH is required");
-  }
-  if (parsed.expectedSourceCommit !== undefined && !SHA1.test(parsed.expectedSourceCommit)) {
-    throw new Error("--expected-source-commit must be a full lowercase SHA-1 commit");
-  }
-  return parsed;
+  const sorted = (kind, key) => [...(grouped.get(kind) ?? [])]
+    .sort((left, right) => left[key].localeCompare(right[key], "en"));
+  return {
+    schema_id: FINAL_SOURCE_SCHEMA_ID,
+    release,
+    source: only("source"),
+    contracts: only("contracts"),
+    toolchains: only("toolchains"),
+    drift_audits: sorted("drift-audit", "phase"),
+    canonical_gate: only("canonical-gate"),
+    surface_reports: sorted("surface-report", "surface"),
+    release_artifacts: sorted("release-artifact", "role"),
+    deployment: {
+      pages: only("deployment-pages"),
+      discord: only("deployment-discord"),
+      rollback_snapshot: only("rollback-snapshot"),
+    },
+    observation: only("observation"),
+    tag: only("tag"),
+    immutable_release: only("immutable-release"),
+  };
 }
 
 function validateSource(source, expectedSourceCommit) {
@@ -583,47 +668,4 @@ function isoTime(value, label) {
   const time = Date.parse(value);
   if (!Number.isFinite(time)) throw new Error(`${label} is invalid`);
   return time;
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  try {
-    const {
-      manifestPath,
-      expectedSourceCommit,
-      discordCatalogSyncReportPath,
-      productionObservationReportPath,
-    } = parseFinalSourceCliArguments(process.argv.slice(2));
-    const manifest = JSON.parse(readFileSync(resolve(manifestPath), "utf8"));
-    const discordCatalogSyncReport = readCanonicalProducerReport(
-      discordCatalogSyncReportPath,
-      "Discord command catalog sync report",
-    );
-    const productionObservationReport = readCanonicalProducerReport(
-      productionObservationReportPath,
-      "production observation report",
-    );
-    validateFinalSourceRevalidation(manifest, {
-      expectedSourceCommit,
-      discordCatalogSyncReport,
-      productionObservationReport,
-    });
-    process.stdout.write(`${FINAL_SOURCE_SCHEMA_ID}\n`);
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 2;
-  }
-}
-
-function readCanonicalProducerReport(path, label) {
-  const raw = readFileSync(resolve(path), "utf8");
-  let value;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error(`${label} is not valid JSON`);
-  }
-  if (raw !== `${canonicalJson(value)}\n`) {
-    throw new Error(`${label} bytes are not canonical producer JSON`);
-  }
-  return value;
 }

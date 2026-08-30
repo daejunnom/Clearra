@@ -221,7 +221,17 @@ const pagesDeployJob = finalJobSection(pagesWorkflow, "\n  deploy:");
 const pagesAcceptedRunStep = section(
   pagesAcceptedSourceJob,
   "\n      - name: Verify exact main and canonical acceptance identity",
+  "\n      - name: Resolve sealed rollback capture report before Pages build",
+);
+const pagesRollbackReportResolveStep = section(
+  pagesAcceptedSourceJob,
+  "\n      - name: Resolve sealed rollback capture report before Pages build",
+  "\n      - name: Download sealed rollback capture report before Pages build",
+);
+const pagesRollbackAuthorityStep = section(
+  pagesAcceptedSourceJob,
   "\n      - name: Verify durable rollback capture before Pages build",
+  "\n      - name: Download durable rollback capture before Pages build",
 );
 const pagesDownloadStep = section(
   pagesBuildJob,
@@ -238,11 +248,22 @@ const pagesVerifyEnvironment = section(
   "\n        env:",
   "\n        run:",
 );
+const pagesUploadStep = pagesBuildJob.slice(
+  pagesBuildJob.indexOf("\n      - name: Upload Pages artifact"),
+);
 const pagesDeployHeader = section(pagesDeployJob, "\n  deploy:", "\n    steps:");
 const pagesLateAcceptedRunStep = section(
   pagesDeployJob,
   "\n      - name: Revalidate accepted source immediately before deployment",
   "\n      - name: Redownload durable rollback capture immediately before deployment",
+);
+const pagesDeploymentAuthorityStep = section(
+  pagesDeployJob,
+  "\n      - name: Seal deployed Pages authority from API and public readback",
+  "\n      - name: Upload sealed Pages deployment authority",
+);
+const pagesDeploymentAuthorityUploadStep = pagesDeployJob.slice(
+  pagesDeployJob.indexOf("\n      - name: Upload sealed Pages deployment authority"),
 );
 const productAuthorityStep = section(
   workflow,
@@ -312,7 +333,7 @@ requireExactNormalizedText(
     "      - name: Validate final-source evidence contract regression coverage",
     "        if: github.event_name == 'workflow_dispatch'",
     "        shell: bash",
-    "        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
+    "        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
   ].join("\n"),
   "final-source evidence contract regression step",
 );
@@ -1303,7 +1324,15 @@ const pagesAcceptedOutputs = section(
 requireExactYamlKeySet(
   pagesAcceptedOutputs,
   6,
-  ["accepted_run_id", "accepted_run_attempt"],
+  [
+    "accepted_run_id",
+    "accepted_run_attempt",
+    "rollback_report_artifact_id",
+    "rollback_report_artifact_name",
+    "rollback_report_artifact_digest",
+    "rollback_capture_artifact_name",
+    "rollback_capture_tar_sha256",
+  ],
   "Pages accepted-run outputs",
 );
 requireExactYamlScalar(
@@ -1313,6 +1342,21 @@ requireExactYamlScalar(
   "Pages bound accepted run ID output",
   6,
 );
+for (const [key, value] of [
+  ["rollback_report_artifact_id", "${{ steps.rollback-report.outputs.report_artifact_id }}"],
+  ["rollback_report_artifact_name", "${{ steps.rollback-report.outputs.report_artifact_name }}"],
+  ["rollback_report_artifact_digest", "${{ steps.rollback-report.outputs.report_artifact_digest }}"],
+  ["rollback_capture_artifact_name", "${{ steps.rollback-authority.outputs.capture_artifact_name }}"],
+  ["rollback_capture_tar_sha256", "${{ steps.rollback-authority.outputs.capture_tar_sha256 }}"],
+]) {
+  requireExactYamlScalar(
+    pagesAcceptedOutputs,
+    key,
+    value,
+    `Pages sealed rollback output ${key}`,
+    6,
+  );
+}
 requireExactYamlScalar(
   pagesAcceptedOutputs,
   "accepted_run_attempt",
@@ -1337,10 +1381,79 @@ for (const marker of [
   requireText(pagesAcceptedRunStep, marker, `Pages accepted-run binding ${marker}`);
 }
 requireExactYamlKeySet(
+  pagesRollbackReportResolveStep,
+  8,
+  ["id", "env", "run"],
+  "Pages sealed rollback report resolver step",
+);
+for (const marker of [
+  "id: rollback-report",
+  "PAGES_AUTHORITY_MODE: resolve-forward",
+  "CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}",
+  "node scripts/release/pages-rollback-authority.mjs",
+]) {
+  requireText(
+    pagesRollbackReportResolveStep,
+    marker,
+    `Pages sealed rollback report resolver ${marker}`,
+  );
+}
+requireExactYamlKeySet(
+  pagesRollbackAuthorityStep,
+  8,
+  ["id", "env", "run"],
+  "Pages sealed rollback report consumer step",
+);
+for (const marker of [
+  "id: rollback-authority",
+  "CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json",
+  "CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}",
+  "CAPTURE_REPORT_ARTIFACT_NAME: ${{ steps.rollback-report.outputs.report_artifact_name }}",
+  "CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ steps.rollback-report.outputs.report_artifact_digest }}",
+]) {
+  requireText(
+    pagesRollbackAuthorityStep,
+    marker,
+    `Pages sealed rollback report consumer ${marker}`,
+  );
+}
+for (const forbidden of [
+  "rollback_artifact_id:",
+  "rollback_artifact_name:",
+  "rollback_artifact_digest:",
+  "rollback_tar_sha256:",
+  "inputs.rollback_artifact_id",
+  "inputs.rollback_artifact_name",
+  "inputs.rollback_artifact_digest",
+  "inputs.rollback_tar_sha256",
+]) {
+  if (pagesWorkflow.includes(forbidden)) {
+    throw new Error(`Pages workflow must not accept manually transcribed rollback authority: ${forbidden}`);
+  }
+}
+requireExactYamlKeySet(
   pagesBuildJob,
   4,
-  ["needs", "runs-on", "steps"],
+  ["needs", "outputs", "runs-on", "steps"],
   "Pages artifact reuse job",
+);
+const pagesBuildOutputs = section(
+  pagesBuildJob,
+  "\n    outputs:",
+  "\n    runs-on:",
+);
+requireExactYamlKeySet(
+  pagesBuildOutputs,
+  6,
+  ["pages_artifact_id"],
+  "Pages uploaded artifact output",
+);
+requireExactYamlScalar(
+  pagesBuildOutputs,
+  "pages_artifact_id",
+  "${{ steps.pages-artifact.outputs.artifact_id }}",
+  "Pages uploaded artifact ID output",
+  6,
 );
 requireExactYamlScalar(
   pagesBuildJob,
@@ -1417,6 +1530,26 @@ requireExactYamlKeySet(
   "Pages accepted build verification step",
 );
 requireExactYamlKeySet(
+  pagesUploadStep,
+  8,
+  ["id", "uses", "with"],
+  "Pages artifact upload step",
+);
+requireExactYamlScalar(
+  pagesUploadStep,
+  "id",
+  "pages-artifact",
+  "Pages artifact upload step ID",
+  8,
+);
+requireExactYamlScalar(
+  pagesUploadStep,
+  "uses",
+  "actions/upload-pages-artifact@v3",
+  "Pages artifact upload action",
+  8,
+);
+requireExactYamlKeySet(
   pagesVerifyEnvironment,
   10,
   ["EXPECTED_SHA", "ACCEPTED_RUN_ID", "ACCEPTED_RUN_ATTEMPT", "EXPECTED_BASE_PATH"],
@@ -1463,18 +1596,50 @@ for (const marker of [
 ]) {
   requireText(pagesLateAcceptedRunStep, marker, `Pages late accepted-run validation ${marker}`);
 }
+requireExactYamlKeySet(
+  pagesDeploymentAuthorityStep,
+  8,
+  ["id", "env", "run"],
+  "sealed Pages deployment authority step",
+);
 for (const marker of [
-  "ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}",
-  "ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}",
+  "id: deployment-authority",
+  "GH_TOKEN: ${{ github.token }}",
+  "PAGES_DEPLOYMENT_MODE: forward",
+  "SOURCE_COMMIT: ${{ inputs.accepted_sha }}",
+  "PAGES_ARTIFACT_ID: ${{ needs.build.outputs.pages_artifact_id }}",
+  "PAGES_ARTIFACT_NAME: github-pages",
+  "EXPECTED_ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}",
+  "EXPECTED_ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}",
   "EXPECTED_BASE_PATH: /${{ github.event.repository.name }}",
-  '--arg runId "$ACCEPTED_RUN_ID"',
-  '--arg runAttempt "$ACCEPTED_RUN_ATTEMPT"',
-  '--arg basePath "$EXPECTED_BASE_PATH"',
-  ".acceptedRunId == $runId",
-  ".acceptedRunAttempt == $runAttempt",
-  ".basePath == $basePath",
+  "PAGE_URL: ${{ steps.deployment.outputs.page_url }}",
+  "PAGES_AUTHORITY_REPORT_PATH: ${{ runner.temp }}/pages-deployment-authority.json",
+  "node authority-source/scripts/release/pages-deployment-authority.mjs",
 ]) {
-  requireText(pagesDeployJob, marker, `deployed accepted Pages identity ${marker}`);
+  requireText(
+    pagesDeploymentAuthorityStep,
+    marker,
+    `sealed Pages deployment authority ${marker}`,
+  );
+}
+requireExactYamlKeySet(
+  pagesDeploymentAuthorityUploadStep,
+  8,
+  ["uses", "with"],
+  "Pages deployment authority upload step",
+);
+for (const marker of [
+  "actions/upload-artifact@v4",
+  "clearra-pages-deployment-authority-${{ inputs.accepted_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}",
+  "path: ${{ runner.temp }}/pages-deployment-authority.json",
+  "if-no-files-found: error",
+  "retention-days: 90",
+]) {
+  requireText(
+    pagesDeploymentAuthorityUploadStep,
+    marker,
+    `Pages deployment authority evidence ${marker}`,
+  );
 }
 if (
   (pagesWorkflow.match(/accepted-pages-build-\$\{\{ inputs\.accepted_sha \}\}-run-/gu) ?? [])
@@ -1500,6 +1665,18 @@ for (const marker of [
   "--products dist",
 ]) {
   requireText(publishReleaseStep, marker, `late accepted-run validation ${marker}`);
+}
+requireText(
+  publishReleaseStep,
+  '--base-path "/${{ github.event.repository.name }}" \\\n            --products dist',
+  "canonical acceptance verification product byte binding",
+);
+for (const marker of [
+  "node scripts/release/release-publication-evidence.mjs recover \\",
+  "--workflow-run-attempt \"$GITHUB_RUN_ATTEMPT\" \\",
+  "--acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \\",
+]) {
+  requireText(publishReleaseStep, marker, `publication partial-draft recovery ${marker}`);
 }
 requireText(
   workflow,

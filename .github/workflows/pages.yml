@@ -15,22 +15,6 @@ on:
         description: Successful Pages rollback capture workflow run ID
         required: true
         type: string
-      rollback_artifact_id:
-        description: Exact durable rollback artifact ID
-        required: true
-        type: string
-      rollback_artifact_name:
-        description: Exact run-attempt-bound durable rollback artifact name
-        required: true
-        type: string
-      rollback_artifact_digest:
-        description: Exact sha256-prefixed durable rollback artifact digest
-        required: true
-        type: string
-      rollback_tar_sha256:
-        description: Exact SHA-256 of the captured Pages artifact.tar
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -47,6 +31,11 @@ jobs:
     outputs:
       accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}
       accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}
+      rollback_report_artifact_id: ${{ steps.rollback-report.outputs.report_artifact_id }}
+      rollback_report_artifact_name: ${{ steps.rollback-report.outputs.report_artifact_name }}
+      rollback_report_artifact_digest: ${{ steps.rollback-report.outputs.report_artifact_digest }}
+      rollback_capture_artifact_name: ${{ steps.rollback-authority.outputs.capture_artifact_name }}
+      rollback_capture_tar_sha256: ${{ steps.rollback-authority.outputs.capture_tar_sha256 }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +67,25 @@ jobs:
             --source-commit "$checked_sha" \
             --require one \
             --format github-output >> "$GITHUB_OUTPUT"
+      - name: Resolve sealed rollback capture report before Pages build
+        id: rollback-report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: resolve-forward
+          AUTHORITY_SHA: ${{ inputs.accepted_sha }}
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
+        run: node scripts/release/pages-rollback-authority.mjs
+      - name: Download sealed rollback capture report before Pages build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.rollback-report.outputs.report_artifact_name }}
+          path: rollback-report-initial
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rollback_capture_run_id }}
       - name: Verify durable rollback capture before Pages build
+        id: rollback-authority
         env:
           GH_TOKEN: ${{ github.token }}
           PAGES_AUTHORITY_MODE: forward
@@ -87,16 +94,16 @@ jobs:
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
           CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
-          CAPTURE_ARTIFACT_ID: ${{ inputs.rollback_artifact_id }}
-          CAPTURE_ARTIFACT_NAME: ${{ inputs.rollback_artifact_name }}
-          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.rollback_artifact_digest }}
-          CAPTURE_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json
+          CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}
+          CAPTURE_REPORT_ARTIFACT_NAME: ${{ steps.rollback-report.outputs.report_artifact_name }}
+          CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ steps.rollback-report.outputs.report_artifact_digest }}
           RESTORE_AUTHORIZATION: ""
         run: node scripts/release/pages-rollback-authority.mjs
       - name: Download durable rollback capture before Pages build
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.rollback_artifact_name }}
+          name: ${{ steps.rollback-authority.outputs.capture_artifact_name }}
           path: rollback-capture-initial
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -104,12 +111,14 @@ jobs:
       - name: Verify exact rollback package before Pages build
         env:
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
-          SNAPSHOT_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          SNAPSHOT_TAR_SHA256: ${{ steps.rollback-authority.outputs.capture_tar_sha256 }}
           PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-initial
         run: node scripts/release/pages-rollback-package.mjs
 
   build:
     needs: accepted-source
+    outputs:
+      pages_artifact_id: ${{ steps.pages-artifact.outputs.artifact_id }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +152,7 @@ jobs:
             --base-path "$EXPECTED_BASE_PATH" \
             --version "$(node scripts/release/validate-release-metadata.mjs)"
       - name: Upload Pages artifact
+        id: pages-artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: apps/clearra-web/build
@@ -180,7 +190,7 @@ jobs:
       - name: Redownload durable rollback capture immediately before deployment
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.rollback_artifact_name }}
+          name: ${{ needs.accepted-source.outputs.rollback_capture_artifact_name }}
           path: rollback-capture-predeploy
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -188,9 +198,17 @@ jobs:
       - name: Revalidate exact rollback package immediately before deployment
         env:
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
-          SNAPSHOT_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          SNAPSHOT_TAR_SHA256: ${{ needs.accepted-source.outputs.rollback_capture_tar_sha256 }}
           PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-predeploy
         run: node authority-source/scripts/release/pages-rollback-package.mjs
+      - name: Redownload sealed rollback capture report immediately before deployment
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.accepted-source.outputs.rollback_report_artifact_name }}
+          path: rollback-report-predeploy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rollback_capture_run_id }}
       - name: Revalidate durable rollback capture immediately before deployment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -200,50 +218,33 @@ jobs:
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
           CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
-          CAPTURE_ARTIFACT_ID: ${{ inputs.rollback_artifact_id }}
-          CAPTURE_ARTIFACT_NAME: ${{ inputs.rollback_artifact_name }}
-          CAPTURE_ARTIFACT_DIGEST: ${{ inputs.rollback_artifact_digest }}
-          CAPTURE_TAR_SHA256: ${{ inputs.rollback_tar_sha256 }}
+          CAPTURE_REPORT_PATH: rollback-report-predeploy/pages-rollback-capture-authority.json
+          CAPTURE_REPORT_ARTIFACT_ID: ${{ needs.accepted-source.outputs.rollback_report_artifact_id }}
+          CAPTURE_REPORT_ARTIFACT_NAME: ${{ needs.accepted-source.outputs.rollback_report_artifact_name }}
+          CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ needs.accepted-source.outputs.rollback_report_artifact_digest }}
           RESTORE_AUTHORIZATION: ""
         run: node authority-source/scripts/release/pages-rollback-authority.mjs
       - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4
-      - name: Verify deployed exact accepted build identity
+      - name: Seal deployed Pages authority from API and public readback
+        id: deployment-authority
         env:
-          EXPECTED_SHA: ${{ inputs.accepted_sha }}
-          ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}
-          ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PAGES_DEPLOYMENT_MODE: forward
+          SOURCE_COMMIT: ${{ inputs.accepted_sha }}
+          PAGES_ARTIFACT_ID: ${{ needs.build.outputs.pages_artifact_id }}
+          PAGES_ARTIFACT_NAME: github-pages
+          EXPECTED_ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}
+          EXPECTED_ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}
           EXPECTED_BASE_PATH: /${{ github.event.repository.name }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-        run: |
-          for attempt in {1..12}; do
-            if body="$(curl --fail --silent --show-error \
-              "${PAGE_URL%/}/clearra-build-identity.json?source=${EXPECTED_SHA}")" && \
-               manifest="$(curl --fail --silent --show-error \
-              "${PAGE_URL%/}/wasm/clearra_wasm.manifest.json?source=${EXPECTED_SHA}")" && \
-              jq -e --arg sha "$EXPECTED_SHA" \
-                --arg runId "$ACCEPTED_RUN_ID" \
-                --arg runAttempt "$ACCEPTED_RUN_ATTEMPT" \
-                --arg basePath "$EXPECTED_BASE_PATH" \
-                '.schema == "clearra.pages.identity.v2" and
-                 .sourceCommit == $sha and .engineBuildId == $sha and
-                 .acceptedRunId == $runId and .acceptedRunAttempt == $runAttempt and
-                 .basePath == $basePath and
-                 .contractSchemaVersion == "clearra.search.contract.v2" and
-                 .supplySemanticsId == "clearra.supply.projected-terminal-lookahead.v1" and
-                 .artifactSchemaVersion == "clearra.solution-data.v1"' \
-                <<<"$body" >/dev/null && \
-               jq -e --arg sha "$EXPECTED_SHA" '
-                 .build.runtime_identity.source_commit == $sha and
-                 .build.runtime_identity.engine_build_id == $sha and
-                 .build.runtime_identity.contract_schema_version == "clearra.search.contract.v2" and
-                 .build.runtime_identity.supply_semantics_id == "clearra.supply.projected-terminal-lookahead.v1" and
-                 .build.runtime_identity.artifact_schema_version == "clearra.solution-data.v1"
-               ' <<<"$manifest" >/dev/null; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo 'deployed Pages identity did not converge to the accepted SHA' >&2
-          exit 2
+          PAGES_AUTHORITY_REPORT_PATH: ${{ runner.temp }}/pages-deployment-authority.json
+        run: node authority-source/scripts/release/pages-deployment-authority.mjs
+      - name: Upload sealed Pages deployment authority
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearra-pages-deployment-authority-${{ inputs.accepted_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pages-deployment-authority.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { canonicalSha256 } from "../../../scripts/release/canonical-release-evidence.mjs";
+import {
+  canonicalSha256,
+  sealCanonicalReport,
+} from "../../../scripts/release/canonical-release-evidence.mjs";
 
 import {
   createCanonicalDiscordCatalog,
@@ -16,6 +19,8 @@ import {
 
 const COMMIT = "1".repeat(40);
 const APPLICATION_ID = "223456789012345678";
+const CATALOG_FILE_SHA256 = "c".repeat(64);
+const AUTHORITY_FILE_SHA256 = "d".repeat(64);
 
 test("creates a deterministic canonical catalog without Discord response identity", () => {
   const catalog = createCanonicalDiscordCatalog({
@@ -67,11 +72,15 @@ test("persists the exact prior snapshot before one sync write and seals readback
     "2026-08-30T00:00:00.000Z",
     "2026-08-30T00:00:01.000Z",
   ];
+  const authority = createSyncAuthority(expected);
   const { priorSnapshot, report } = await synchronizeDiscordCatalogRelease({
     rest,
     applicationId: APPLICATION_ID,
     sourceCommit: COMMIT,
     catalog: expected,
+    catalogFileSha256: CATALOG_FILE_SHA256,
+    syncAuthority: authority,
+    syncAuthorityFileSha256: AUTHORITY_FILE_SHA256,
     async persistPriorSnapshot(snapshot) { persisted = structuredClone(snapshot); },
     now: () => times.shift(),
     synchronizationOptions: { retryDelayMs: 0, async wait() {} },
@@ -91,11 +100,24 @@ test("persists the exact prior snapshot before one sync write and seals readback
       expectedSourceCommit: COMMIT,
       expectedApplicationId: APPLICATION_ID,
       expectedCatalog: expected,
+      expectedCatalogFileSha256: CATALOG_FILE_SHA256,
+      expectedSyncAuthority: authority,
+      expectedSyncAuthorityFileSha256: AUTHORITY_FILE_SHA256,
     }),
     report,
   );
   assert.equal(report.current_before_sha256, report.prior_catalog_sha256);
   assert.notEqual(report.current_after_sha256, report.prior_catalog_sha256);
+  assert.equal(report.accepted_run_id, authority.accepted_run_id);
+  assert.equal(
+    report.accepted_ctk3_manifest_sha256,
+    authority.accepted_ctk3_manifest_sha256,
+  );
+  assert.equal(report.command_sync_authority_sha256, authority.report_sha256);
+  assert.equal(
+    report.command_sync_authority_file_sha256,
+    AUTHORITY_FILE_SHA256,
+  );
   assert.equal(report.changed, true);
   assert.doesNotMatch(JSON.stringify({ priorSnapshot, report }), /token|secret/iu);
 });
@@ -178,6 +200,7 @@ test("sync and restore reports reject canonical-content tampering", async () => 
     commands: [{ name: "help", type: 1, description: "Help" }],
   });
   const state = serverCatalog(expected.commands, 1);
+  const authority = createSyncAuthority(expected);
   const { report } = await synchronizeDiscordCatalogRelease({
     rest: {
       async getGlobalCommands() { return structuredClone(state); },
@@ -186,6 +209,9 @@ test("sync and restore reports reject canonical-content tampering", async () => 
     applicationId: APPLICATION_ID,
     sourceCommit: COMMIT,
     catalog: expected,
+    catalogFileSha256: CATALOG_FILE_SHA256,
+    syncAuthority: authority,
+    syncAuthorityFileSha256: AUTHORITY_FILE_SHA256,
     async persistPriorSnapshot() {},
     now: () => "2026-08-30T00:00:00.000Z",
   });
@@ -194,6 +220,58 @@ test("sync and restore reports reject canonical-content tampering", async () => 
     () => validateDiscordCatalogSyncReport(tampered),
     /SHA-256 differs/u,
   );
+});
+
+test("sync rejects missing or mismatched accepted authority before any Discord read", async () => {
+  const expected = createCanonicalDiscordCatalog({
+    sourceCommit: COMMIT,
+    commands: [{ name: "help", type: 1, description: "Help" }],
+  });
+  let reads = 0;
+  const rest = {
+    async getGlobalCommands() {
+      reads += 1;
+      return [];
+    },
+    async registerGlobalCommands() {
+      throw new Error("unexpected write");
+    },
+  };
+  await assert.rejects(
+    synchronizeDiscordCatalogRelease({
+      rest,
+      applicationId: APPLICATION_ID,
+      sourceCommit: COMMIT,
+      catalog: expected,
+      catalogFileSha256: CATALOG_FILE_SHA256,
+      syncAuthority: undefined,
+      syncAuthorityFileSha256: AUTHORITY_FILE_SHA256,
+      async persistPriorSnapshot() {},
+    }),
+    /must be an object/u,
+  );
+  assert.equal(reads, 0);
+
+  const wrongCatalogAuthority = createSyncAuthority(
+    createCanonicalDiscordCatalog({
+      sourceCommit: COMMIT,
+      commands: [{ name: "other", type: 1, description: "Other" }],
+    }),
+  );
+  await assert.rejects(
+    synchronizeDiscordCatalogRelease({
+      rest,
+      applicationId: APPLICATION_ID,
+      sourceCommit: COMMIT,
+      catalog: expected,
+      catalogFileSha256: CATALOG_FILE_SHA256,
+      syncAuthority: wrongCatalogAuthority,
+      syncAuthorityFileSha256: AUTHORITY_FILE_SHA256,
+      async persistPriorSnapshot() {},
+    }),
+    /differs from the canonical catalog/u,
+  );
+  assert.equal(reads, 0);
 });
 
 function serverCatalog(commands, versionSeed) {
@@ -211,4 +289,21 @@ function catalogDigest(commands) {
     commands,
   });
   return catalog.catalog_sha256;
+}
+
+function createSyncAuthority(catalog) {
+  return sealCanonicalReport({
+    schema_id: "clearra.discord.command-sync-authority.v1",
+    source_commit: COMMIT,
+    repository: "daejunnom/Clearra",
+    release_version: "0.8.0",
+    pages_base_path: "/Clearra",
+    accepted_run_id: "12345",
+    accepted_run_attempt: "1",
+    accepted_ctk3_manifest_sha256: "8".repeat(64),
+    canonical_acceptance_evidence_sha256: "9".repeat(64),
+    canonical_acceptance_evidence_file_sha256: "a".repeat(64),
+    command_catalog_sha256: catalog.catalog_sha256,
+    command_catalog_file_sha256: CATALOG_FILE_SHA256,
+  });
 }

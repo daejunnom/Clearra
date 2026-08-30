@@ -17,6 +17,16 @@ import {
   PRODUCTION_PROBE_SPEC_SCHEMA_ID,
   validateProductionProbeSpec,
 } from "./observe-production-surfaces.mjs";
+import {
+  validatePagesDeploymentAuthorityReport,
+} from "./pages-deployment-authority.mjs";
+import {
+  readDiscordCommandSyncAuthority,
+} from "./discord-command-sync-authority.mjs";
+import {
+  validateCanonicalDiscordCatalog,
+  validateDiscordCatalogSyncReport,
+} from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 
 export const PRODUCTION_PROBE_AUTHORITY_SCHEMA_ID =
   "clearra.production-observation-probe-authority.v1";
@@ -26,8 +36,6 @@ const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const PROJECT_ID = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u;
 const REGION = /^[a-z]+(?:-[a-z0-9]+)+[0-9]$/u;
-const DECIMAL_ID = /^[1-9][0-9]*$/u;
-const BASE_PATH = /^\/[A-Za-z0-9._-]+$/u;
 const ORACLE_NONCE = /^[0-9a-f]{64}$/u;
 const SHARED_ADAPTER_PATH = fileURLToPath(
   new URL("./production-surface-probe-adapter.mjs", import.meta.url),
@@ -51,12 +59,15 @@ export async function createProductionProbeSpec(
   if (oracleSha256 !== authority.oracle.adapter_sha256) {
     throw new Error("tracked Oracle probe adapter differs from its approved SHA-256");
   }
+  const catalogPath = resolve(authority.discord.catalog_path);
   const catalogFileSha256 = await hashRegularNonLinkFile(
-    resolve(authority.discord.catalog_path),
+    catalogPath,
     "Discord canonical catalog input",
   );
+  const syncAuthorityPath = resolve(authority.discord.sync_authority_path);
+  const syncReportPath = resolve(authority.discord.sync_report_path);
   const syncReportFileSha256 = await hashRegularNonLinkFile(
-    resolve(authority.discord.sync_report_path),
+    syncReportPath,
     "Discord sync report input",
   );
   const smokeReportFileSha256 = await hashRegularNonLinkFile(
@@ -69,8 +80,55 @@ export async function createProductionProbeSpec(
   ) {
     throw new Error("Discord producer evidence file SHA-256 changed");
   }
+  const catalog = await readCanonicalJson(
+    catalogPath,
+    "Discord canonical catalog input",
+  );
+  validateCanonicalDiscordCatalog(catalog, authority.source_commit);
+  const syncAuthorityInput = await readDiscordCommandSyncAuthority(
+    syncAuthorityPath,
+    authority.discord.sync_authority_file_sha256,
+    {
+      sourceCommit: authority.source_commit,
+      catalog,
+      catalogFileSha256,
+    },
+  );
+  const syncReport = await readCanonicalJson(
+    syncReportPath,
+    "Discord sync report input",
+  );
+  validateDiscordCatalogSyncReport(syncReport, {
+    expectedSourceCommit: authority.source_commit,
+    expectedApplicationId: authority.discord.application_id,
+    expectedCatalog: catalog,
+    expectedCatalogFileSha256: catalogFileSha256,
+    expectedSyncAuthority: syncAuthorityInput.authority,
+    expectedSyncAuthorityFileSha256: syncAuthorityInput.fileSha256,
+  });
   if (smokeReportFileSha256 !== authority.cloud.smoke_report_file_sha256) {
     throw new Error("Cloud candidate smoke evidence file SHA-256 changed");
+  }
+  const pagesDeploymentReportPath = resolve(authority.pages.deployment_report_path);
+  const pagesDeploymentReportFileSha256 = await hashRegularNonLinkFile(
+    pagesDeploymentReportPath,
+    "Pages deployment authority report",
+  );
+  if (
+    pagesDeploymentReportFileSha256 !==
+      authority.pages.deployment_report_file_sha256
+  ) {
+    throw new Error("Pages deployment authority report file SHA-256 changed");
+  }
+  const pagesDeploymentReport = await readCanonicalJson(
+    pagesDeploymentReportPath,
+    "Pages deployment authority report",
+  );
+  validatePagesDeploymentAuthorityReport(pagesDeploymentReport, {
+    expectedSourceCommit: authority.source_commit,
+  });
+  if (pagesDeploymentReport.mode !== "forward") {
+    throw new Error("production observation requires a forward Pages deployment report");
   }
 
   const commit = authority.source_commit;
@@ -103,9 +161,11 @@ export async function createProductionProbeSpec(
         "discord",
         "--source-commit", commit,
         "--application-id", authority.discord.application_id,
-        "--catalog", resolve(authority.discord.catalog_path),
+        "--catalog", catalogPath,
         "--catalog-file-sha256", catalogFileSha256,
-        "--sync-report", resolve(authority.discord.sync_report_path),
+        "--sync-authority", syncAuthorityPath,
+        "--sync-authority-file-sha256", syncAuthorityInput.fileSha256,
+        "--sync-report", syncReportPath,
         "--sync-report-file-sha256", syncReportFileSha256,
       ],
       timeout_seconds: authority.discord.timeout_seconds,
@@ -138,12 +198,8 @@ export async function createProductionProbeSpec(
       arguments: [
         "pages",
         "--source-commit", commit,
-        "--url", authority.pages.url,
-        "--deployment-id", authority.pages.deployment_id,
-        "--artifact-sha256", authority.pages.artifact_sha256,
-        "--base-path", authority.pages.base_path,
-        "--accepted-run-id", authority.pages.accepted_run_id,
-        "--accepted-run-attempt", authority.pages.accepted_run_attempt,
+        "--deployment-report", pagesDeploymentReportPath,
+        "--deployment-report-file-sha256", pagesDeploymentReportFileSha256,
       ],
       timeout_seconds: authority.pages.timeout_seconds,
     },
@@ -186,6 +242,8 @@ function validateDiscordAuthority(value) {
     "application_id",
     "catalog_path",
     "catalog_file_sha256",
+    "sync_authority_path",
+    "sync_authority_file_sha256",
     "sync_report_path",
     "sync_report_file_sha256",
     "timeout_seconds",
@@ -193,6 +251,11 @@ function validateDiscordAuthority(value) {
   requirePattern(value.application_id, DISCORD_SNOWFLAKE, "Discord application ID");
   requireAbsolutePath(value.catalog_path, "Discord canonical catalog path");
   requireSha256(value.catalog_file_sha256, "Discord canonical catalog file SHA-256");
+  requireAbsolutePath(value.sync_authority_path, "Discord command sync authority path");
+  requireSha256(
+    value.sync_authority_file_sha256,
+    "Discord command sync authority file SHA-256",
+  );
   requireAbsolutePath(value.sync_report_path, "Discord sync report path");
   requireSha256(value.sync_report_file_sha256, "Discord sync report file SHA-256");
   requireTimeout(value.timeout_seconds, "Discord probe timeout");
@@ -268,24 +331,16 @@ function validateOracleAuthority(value, sourceCommit) {
 
 function validatePagesAuthority(value) {
   requireExactKeys(value, [
-    "url",
-    "deployment_id",
-    "artifact_sha256",
-    "base_path",
-    "accepted_run_id",
-    "accepted_run_attempt",
+    "deployment_report_path",
+    "deployment_report_file_sha256",
     "timeout_seconds",
   ], "Pages probe authority");
-  const url = requireCredentialFreeHttps(value.url, "Pages URL");
-  requireNonEmptyString(value.deployment_id, "Pages deployment ID");
-  requireSha256(value.artifact_sha256, "Pages artifact SHA-256");
-  requirePattern(value.base_path, BASE_PATH, "Pages base path");
-  requirePattern(value.accepted_run_id, DECIMAL_ID, "Pages accepted run ID");
-  requirePattern(value.accepted_run_attempt, DECIMAL_ID, "Pages accepted run attempt");
+  requireAbsolutePath(value.deployment_report_path, "Pages deployment report path");
+  requireSha256(
+    value.deployment_report_file_sha256,
+    "Pages deployment report file SHA-256",
+  );
   requireTimeout(value.timeout_seconds, "Pages probe timeout");
-  if (new URL(url).pathname !== `${value.base_path}/`) {
-    throw new Error("Pages URL path differs from the exact base path");
-  }
 }
 
 async function hashRegularNonLinkFile(path, label) {
