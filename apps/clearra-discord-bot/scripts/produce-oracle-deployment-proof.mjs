@@ -187,7 +187,7 @@ export function produceOracleRollbackProof(options, dependencies = {}) {
   return proof;
 }
 
-function inspectActiveOracle(options, dependencies) {
+export function inspectActiveOracle(options, dependencies = {}) {
   const run = dependencies.run ?? runCommand;
   const readText =
     dependencies.readText ?? ((path) => readFileSync(path, "utf8"));
@@ -201,9 +201,10 @@ function inspectActiveOracle(options, dependencies) {
   }
   const computeReleaseDigest =
     dependencies.releaseTreeSha256 ?? releaseTreeSha256;
+  const actualReleaseSha256 = computeReleaseDigest(activeRelease);
   if (
     options.oracleReleaseSha256 !== undefined &&
-    computeReleaseDigest(activeRelease) !== options.oracleReleaseSha256
+    actualReleaseSha256 !== options.oracleReleaseSha256
   ) {
     throw new Error(
       "active Oracle release tree digest does not match the expected artifact",
@@ -270,6 +271,14 @@ function inspectActiveOracle(options, dependencies) {
       "Oracle Gateway has no fresh successful bounded end-to-end operation",
     );
   }
+  return Object.freeze({
+    activeReleasePath: activeRelease,
+    activeReleaseSha256: actualReleaseSha256,
+    activeSettingsSha256: actualSettingsSha256,
+    gatewayPid: pid,
+    readyRecordObserved: true,
+    freshOperationAt: String(operation.at),
+  });
 }
 
 function assertExactSettings(serialized, expected) {

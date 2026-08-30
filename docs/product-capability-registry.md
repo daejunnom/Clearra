@@ -134,9 +134,15 @@ the repaired-candidate observations retained in
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry4.v1.json`, and
 `tests/fixtures/contracts/upstream_drift_release_freeze_retry5.v1.json`, with
 the deployment-admission repair retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry6.v1.json`, and the
-Pages rollback repair is retained in
-`tests/fixtures/contracts/upstream_drift_release_freeze_retry7.v1.json`.
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry6.v1.json`, the
+Pages rollback repair retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry7.v1.json`, and the
+final multi-candidate/UI/release-pipeline repair retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry8.v1.json`. The
+closed canonical-attempt/deployment-observation authority is retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry9.v1.json`, and the
+Desktop next-page abort-to-release closure retained in
+`tests/fixtures/contracts/upstream_drift_release_freeze_retry10.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -156,8 +162,23 @@ Pages `artifact.tar` for 90 days, and binds the exact capture run/attempt, artif
 ID/name/REST digest, and inner-tar SHA-256 to one authority-main bracket. Both the
 normal Pages workflow and restore path fresh-download and validate the complete tar
 before mutation, reject expired, corrupt, unsafe, mismatched, or drifted authorities,
-and revalidate the bracket immediately before deployment. The stack, admission, and
-rollback repairs do not alter search or result semantics. Every release observation
+and revalidate the bracket immediately before deployment. Retry 8 follows the
+production-like multi-candidate smoke that exposed incomplete `pc.minimals` audit
+coverage and premature Core reduction of `pc.score-minimals` identities. It freezes
+the complete source-row evidence, coordinator-owned score-only portfolio selection,
+bounded GUI/explicit-CLI alternative paging, Discord's single smallest positive
+canonical candidate, the v0.7.5 Pages surface with Render folded into local CTK, and
+the one-full-gate exact-SHA release pipeline. The stack, admission, rollback, UI, and
+pipeline repairs do not broaden the product capability inventory. Retry 9 freezes the
+main-branch historical-attempt exact-one resolver, fresh-attempt-only acceptance,
+downloaded-product byte revalidation, accepted CTK3 v2 reuse, immutable-digest Cloud
+candidate with numeric managed-Secret execution smoke, typed read-only Oracle boundary,
+hash-bound four-surface observation, and append-only final journal. These deployment
+authority closures likewise add no product capability.
+Retry 10 closes the final Desktop paging cancellation gap: aborting an in-flight
+next-page prefetch now reaches `product_page_release` and the active Tauri cancel
+token, while every completion path removes its listener. This lifecycle repair also
+adds no product capability. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new

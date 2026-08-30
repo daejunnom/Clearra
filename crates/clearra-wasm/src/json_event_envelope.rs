@@ -53,8 +53,32 @@ pub fn serialize_coverage_portfolio_page(
     outer_page_number: usize,
     member_page_number: usize,
 ) -> Result<String, WasmCommandRuntimeError> {
+    let alternative_index_decimal = outer_page_number.to_string();
+    let retained_slot = store
+        .retained_page_slot(&alternative_index_decimal)
+        .ok_or_else(|| product_page_error(PortfolioAlternativeError::PageNotLoaded))?;
+    serialize_coverage_portfolio_retained_page(store, retained_slot, member_page_number)
+}
+
+pub fn serialize_coverage_portfolio_page_exact(
+    store: &mut CoveragePortfolioPageStore,
+    alternative_index_decimal: &str,
+    member_page_number: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<String, WasmCommandRuntimeError> {
+    let retained_slot = store
+        .load_page_by_alternative_index(alternative_index_decimal, cancelled)
+        .map_err(product_page_error)?;
+    serialize_coverage_portfolio_retained_page(store, retained_slot, member_page_number)
+}
+
+pub fn serialize_coverage_portfolio_retained_page(
+    store: &CoveragePortfolioPageStore,
+    retained_slot: usize,
+    member_page_number: usize,
+) -> Result<String, WasmCommandRuntimeError> {
     let page = store
-        .page(outer_page_number)
+        .retained_page(retained_slot)
         .ok_or_else(|| product_page_error(PortfolioAlternativeError::PageNotLoaded))?;
     let candidate_ids = page.portfolio().candidate_ids();
     let total_member_pages = candidate_ids
@@ -2923,26 +2947,40 @@ mod exact_json_tests {
         .and_then(|set| set.with_public_candidate_ids(vec![101, 205, 309, 401, 505, 609]))
         .expect("mapped score portfolio");
         let mut store = CoveragePortfolioPageStore::new(Arc::new(set)).expect("page store");
-        while !store
-            .page(store.loaded_page_count())
-            .expect("latest loaded page")
-            .enumeration_complete()
-        {
+        let mut alternative_indices = vec!["1".to_owned()];
+        loop {
             let advance = store
                 .next_page(u64::MAX, &mut || false)
                 .expect("advance exact score tie page");
+            if let Some(page) = advance.page() {
+                alternative_indices.push(page.alternative_index_decimal().to_owned());
+            }
             assert!(
                 advance.page().is_some() || advance.checkpoint().enumeration_complete(),
                 "an unbounded exact advance must load a page or seal enumeration"
             );
+            if advance.checkpoint().enumeration_complete() {
+                break;
+            }
         }
 
-        assert_eq!(store.loaded_page_count(), 8, "all 2^3 optimal ties");
+        assert_eq!(alternative_indices.len(), 8, "all 2^3 optimal ties");
+        assert_eq!(
+            store.loaded_page_count(),
+            clearra_app::PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT,
+            "runtime cache remains bounded"
+        );
         let public_ids = [101_u64, 205, 309, 401, 505, 609];
-        for outer_page in 1..=store.loaded_page_count() {
-            let json = serialize_coverage_portfolio_page(&store, outer_page, 1)
-                .expect("serialize score portfolio page");
+        for alternative_index in alternative_indices {
+            let json = serialize_coverage_portfolio_page_exact(
+                &mut store,
+                &alternative_index,
+                1,
+                &mut || false,
+            )
+            .expect("serialize score portfolio page");
             let value: serde_json::Value = serde_json::from_str(&json).expect("page JSON");
+            assert_eq!(value["page"]["alternative_index"], alternative_index);
             let members = value["page"]["members"].as_array().expect("page members");
             assert_eq!(members.len(), 3);
             assert!(members.iter().all(|member| {

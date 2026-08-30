@@ -9,7 +9,8 @@ use clearra_app::{
 };
 use clearra_host_contract::{
     BuildCoveragePortfolioV2Payload, BuildSetupFamilyV1Payload, BuildV2PayloadKind,
-    BuildV2ProductPayload, CoveragePortfolioPagePayload, PcPathFamilyPayload, ProductResultPayload,
+    BuildV2ProductPayload, CoveragePortfolioPagePayload, ExecutionAvailabilityState,
+    ExecutionCompletenessState, PcPathFamilyPayload, ProductResultPayload,
     ProductResultPayloadContent, ScorePatternWinnerFamilyPayload, SetupRankedFamilyPayload,
     SetupScoreRankingPayload, SpinStructureFamilyPayload,
 };
@@ -363,20 +364,29 @@ fn render_success(
     explicit_portfolio: Option<&ExplicitPortfolioOutput>,
     include_score_winner_family: bool,
 ) -> CliOutput {
-    if let Some(payload) = response.public_result_payload() {
-        if let Some(output) = render_public_build_result(payload, format, explicit_portfolio) {
-            return output;
-        }
-    }
-    if let Some(payload) = response
-        .product_capability_result()
-        .and_then(ProductCapabilityResult::public_result_payload)
-    {
-        if let Some(output) = render_public_build_result(&payload, format, explicit_portfolio) {
-            return output;
-        }
-    }
     let product_result = response.product_capability_result();
+    if let Some(payload) = response.public_result_payload() {
+        if let Some(output) = render_public_build_result(
+            payload,
+            format,
+            explicit_portfolio,
+            product_result,
+            default_error,
+        ) {
+            return output;
+        }
+    }
+    if let Some(payload) = product_result.and_then(ProductCapabilityResult::public_result_payload) {
+        if let Some(output) = render_public_build_result(
+            &payload,
+            format,
+            explicit_portfolio,
+            product_result,
+            default_error,
+        ) {
+            return output;
+        }
+    }
     let product_identity = product_result.map(|result| (result.contract(), result.result_kind()));
     let Some(model) = response.render_model() else {
         return CliOutput::error(default_error, "app response did not include a render model");
@@ -1255,6 +1265,8 @@ fn render_public_build_result(
     payload: &ProductResultPayload,
     format: RenderFormat,
     explicit_portfolio: Option<&ExplicitPortfolioOutput>,
+    product_result: Option<&ProductCapabilityResult>,
+    default_error: CliErrorCode,
 ) -> Option<CliOutput> {
     let mut fields = match payload.content() {
         ProductResultPayloadContent::CoveragePortfolio(page) => {
@@ -1282,14 +1294,61 @@ fn render_public_build_result(
         ProductResultPayloadContent::PcPathFamily(family) => pc_path_fields(family),
         _ => return None,
     };
+    if let Err(reason) = append_pc_score_minimals_resource_report(&mut fields, product_result) {
+        return Some(CliOutput::error(default_error, reason));
+    }
     if let Some(portfolio) = explicit_portfolio {
         fields.push(explicit_portfolio_field(portfolio));
+    }
+    if let Err(reason) = append_pc_score_minimals_fields(&mut fields, product_result) {
+        return Some(CliOutput::error(default_error, reason));
     }
     Some(CommandRenderer::render_output(
         payload.result_kind(),
         fields,
         format,
     ))
+}
+
+fn append_pc_score_minimals_resource_report(
+    fields: &mut Vec<RenderField>,
+    product: Option<&ProductCapabilityResult>,
+) -> Result<(), &'static str> {
+    let Some(product) = product else {
+        return Ok(());
+    };
+    if (product.contract(), product.result_kind())
+        != (
+            ProductCapabilityContract::PcScoreMinimals,
+            ProductCapabilityResultKind::PcScorePortfolioV2,
+        )
+    {
+        return Ok(());
+    }
+    let resources = product.resource_evidence();
+    if !resources.solver_executed()
+        || resources.availability() != ExecutionAvailabilityState::Available
+        || resources.completeness() != ExecutionCompletenessState::Complete
+        || resources.truncated()
+        || !resources.probability_complete()
+    {
+        return Err("pc score-minimals resource report was incomplete");
+    }
+    fields.push(RenderField::new(
+        "resource_report",
+        RenderFieldValue::object([
+            (
+                "probability_complete",
+                RenderFieldValue::bool(resources.probability_complete()),
+            ),
+            ("count_complete", RenderFieldValue::bool(true)),
+            ("truncated", RenderFieldValue::bool(resources.truncated())),
+            ("truncation_reason", RenderFieldValue::Null),
+            ("count_truncated_reason", RenderFieldValue::Null),
+            ("renormalized", RenderFieldValue::bool(false)),
+        ]),
+    ));
+    Ok(())
 }
 
 fn score_pattern_winner_family_fields(

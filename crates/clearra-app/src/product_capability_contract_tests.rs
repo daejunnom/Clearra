@@ -20,7 +20,7 @@ use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
     PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
 };
-use clearra_problem::SearchProblem;
+use clearra_problem::{PcChanceEvidencePolicy, SearchProblem};
 use clearra_replay::ExactScoringExecutionBatch;
 use clearra_rules::profile::{
     builtin_rules::{srs, srs_plus},
@@ -303,6 +303,30 @@ fn minimals_request() -> AppRequest {
         .expect("valid pc minimals product capability")
 }
 
+fn multi_candidate_minimals_request() -> AppRequest {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+        ])),
+        PieceWindow::new(5),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(5))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_objective(ObjectivePolicy::minimum_cover());
+    let command = ScenarioAppCommand::new(query).with_result_projection(
+        PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals),
+    );
+    AppRequest::new(AppCommand::Scenario(command))
+        .with_product_capability_contract(ProductCapabilityContract::PcMinimals)
+        .expect("valid multi-candidate pc minimals product capability")
+}
+
 fn path_request() -> AppRequest {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(1, 0x3f0),
@@ -455,6 +479,51 @@ fn direct_wasm_pc_minimals_returns_one_query_bound_exact_minimum_cover_wrapper()
 }
 
 #[test]
+fn direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let response = context.run(multi_candidate_minimals_request());
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+
+    let result = response
+        .product_capability_result()
+        .expect("typed multi-candidate pc minimum-cover wrapper");
+    let report = result
+        .pc_minimum_cover_v2()
+        .expect("multi-candidate pc-minimum-cover.v2 report");
+    assert!(report.completeness().complete());
+    assert_eq!(report.selected_solution_count(), 1);
+    assert_eq!(report.source_solution_count(), 4);
+    assert_eq!(report.portfolio_alternatives().candidates().len(), 4);
+    assert!(result.public_page_source_owner().is_some());
+
+    let mut store = report
+        .portfolio_alternatives()
+        .open_store()
+        .expect("IIOOO exact alternative store");
+    let mut portfolios = vec![report
+        .portfolio_alternatives()
+        .canonical_page()
+        .portfolio()
+        .candidate_ids()
+        .to_vec()];
+    for _ in 0..4 {
+        let advance = store
+            .next_page(u64::MAX, &mut || false)
+            .expect("next IIOOO exact alternative");
+        if let Some(page) = advance.page() {
+            portfolios.push(page.portfolio().candidate_ids().to_vec());
+        }
+        if advance.checkpoint().enumeration_complete() {
+            break;
+        }
+    }
+    assert_eq!(portfolios, [vec![1], vec![2], vec![3], vec![4]]);
+}
+
+#[test]
 fn pc_minimals_rejects_unaccounted_caps_and_distribution_but_uses_cooperative_worker_binding() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let base = minimals_command().query().clone();
@@ -602,18 +671,33 @@ fn score_finder_request(piece: PieceKind) -> AppRequest {
         .expect("valid fixed-queue pc score-finder product capability")
 }
 
-fn score_minimals_command(piece: PieceKind) -> ScenarioAppCommand {
-    let query = score_command(PcScoreIngressOrigin::CanonicalPcScore, piece)
-        .query()
-        .clone()
-        .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
+fn multi_candidate_score_minimals_command() -> ScenarioAppCommand {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+        ])),
+        PieceWindow::new(5),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(5))
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_retained_trace_limit(1)
+    .with_execution_policy(pc_score_execution_policy())
+    .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
     ScenarioAppCommand::new(query).with_score_minimals_result()
 }
 
-fn score_minimals_request(piece: PieceKind) -> AppRequest {
-    AppRequest::new(AppCommand::Scenario(score_minimals_command(piece)))
-        .with_product_capability_contract(ProductCapabilityContract::PcScoreMinimals)
-        .expect("valid pc score-minimals product capability")
+fn multi_candidate_score_minimals_request() -> AppRequest {
+    AppRequest::new(AppCommand::Scenario(
+        multi_candidate_score_minimals_command(),
+    ))
+    .with_product_capability_contract(ProductCapabilityContract::PcScoreMinimals)
+    .expect("valid pc score-minimals product capability")
 }
 
 fn opening_score_request(origin: PcScoreIngressOrigin) -> AppRequest {
@@ -1796,6 +1880,31 @@ fn pc_score_compiled_authority_retains_exclusive_parent_capacity_until_drop() {
 }
 
 #[test]
+fn pc_score_compiled_authority_binds_the_purpose_separated_evidence_policy() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let portfolio = PcScoreCompiledAuthority::compile_score_minimals_scenario(
+        multi_candidate_score_minimals_command().query_arc(),
+        crate::PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals,
+    )
+    .expect("score-minimals authority installs its private evidence policy");
+    assert_eq!(
+        portfolio.problem_arc().pc_chance_evidence_policy(),
+        PcChanceEvidencePolicy::PcScorePortfolioV2
+    );
+    drop(portfolio);
+
+    let summary = PcScoreCompiledAuthority::compile_scenario(
+        score_command(PcScoreIngressOrigin::CanonicalPcScore, PieceKind::I).query_arc(),
+        PcScoreIngressOrigin::CanonicalPcScore,
+    )
+    .expect("score-summary authority keeps the generic score evidence contract");
+    assert_eq!(
+        summary.problem_arc().pc_chance_evidence_policy(),
+        PcChanceEvidencePolicy::Disabled
+    );
+}
+
+#[test]
 fn pc_score_external_authority_base_is_fieldwise_and_phase_additions_fail_closed() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let tiny_query = score_command(PcScoreIngressOrigin::CanonicalPcScore, PieceKind::I)
@@ -2069,7 +2178,7 @@ fn direct_wasm_pc_score_finder_returns_the_complete_score_only_witness_family() 
 #[test]
 fn direct_wasm_pc_score_minimals_finalizes_distinct_original_id_portfolio() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
-    let command = score_minimals_command(PieceKind::I);
+    let command = multi_candidate_score_minimals_command();
     assert!(command.score_minimals_requested());
     assert_eq!(
         command.result_projection(),
@@ -2087,7 +2196,7 @@ fn direct_wasm_pc_score_minimals_finalizes_distinct_original_id_portfolio() {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
-    let response = context.run(score_minimals_request(PieceKind::I));
+    let response = context.run(multi_candidate_score_minimals_request());
     assert_eq!(response.status(), AppStatus::Success, "{response:?}");
     assert!(response.pc_score_execution_evidence().is_none());
     assert!(response.pc_score_portfolio_execution_evidence().is_none());
@@ -2112,7 +2221,11 @@ fn direct_wasm_pc_score_minimals_finalizes_distinct_original_id_portfolio() {
         crate::PcScoreMinimalsIngressOrigin::CanonicalPcScoreMinimals
     );
     assert!(report.completeness().complete());
-    assert!(!report.eligible_candidates().is_empty());
+    assert!(
+        report.eligible_candidates().len() > 1,
+        "fixture must exercise the full score candidate dictionary"
+    );
+    assert!(report.selected_score_candidate_ids().len() <= report.eligible_candidates().len());
     for candidate in report.eligible_candidates() {
         assert_eq!(
             report

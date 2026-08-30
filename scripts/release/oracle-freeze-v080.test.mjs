@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,6 +17,12 @@ import { fileURLToPath } from "node:url";
 const oracleRoot = fileURLToPath(new URL("./oracle/", import.meta.url));
 const layerBuilder = join(oracleRoot, "create-local-layers-v080.sh");
 const freezeHelper = join(oracleRoot, "clearra-oracle-freeze-v080");
+const acceptedCtk3Verifier = fileURLToPath(
+  new URL("../tools/accepted-ctk3-dist.mjs", import.meta.url),
+);
+const sourceCommit = "0123456789abcdef0123456789abcdef01234567";
+const acceptedRunId = "33180374868";
+const acceptedRunAttempt = "2";
 
 const overlayEntries = [
   "apps/clearra-discord-bot/src/admin",
@@ -92,13 +99,50 @@ print(json.dumps(entries, separators=(",", ":")))
 test("v0.8 Oracle local layer builder freezes only the closed runtime set", () => {
   const temporaryRoot = mkdtempSync(join(tmpdir(), "clearra-oracle-layers-test-"));
   const repository = join(temporaryRoot, "repository");
+  const acceptedCtk3Dist = join(temporaryRoot, "accepted-ctk3-dist");
   const output = join(temporaryRoot, "output");
   try {
     mkdirSync(output, { recursive: true });
+    mkdirSync(acceptedCtk3Dist, { recursive: true });
     writeFixtureFile(repository, "apps/clearra-discord-bot/package.json", "{}\n");
     writeFixtureFile(repository, "packages/ctk3/package.json", "{}\n");
-    writeFixtureFile(repository, "packages/ctk3/dist/index.js");
-    writeFixtureFile(repository, "packages/ctk3/dist/index.d.ts");
+    writeFixtureFile(repository, "packages/ctk3/dist/repo-local-poison.js");
+    const repositoryVerifier = join(
+      repository,
+      "scripts",
+      "tools",
+      "accepted-ctk3-dist.mjs",
+    );
+    mkdirSync(dirname(repositoryVerifier), { recursive: true });
+    copyFileSync(acceptedCtk3Verifier, repositoryVerifier);
+    const acceptedFiles = [
+      ["decodeWorker.js", "worker\n"],
+      ["index.cjs", "cjs\n"],
+      ["index.d.ts", "types\n"],
+      ["index.js", "accepted\n"],
+    ];
+    for (const [relative, contents] of acceptedFiles) {
+      writeFixtureFile(acceptedCtk3Dist, relative, contents);
+    }
+    writeFixtureFile(
+      acceptedCtk3Dist,
+      "clearra-accepted-ctk3.v2.json",
+      `${JSON.stringify(
+        {
+          contract: "clearra.accepted-ctk3-dist.v2",
+          source_commit: sourceCommit,
+          run_id: acceptedRunId,
+          run_attempt: acceptedRunAttempt,
+          files: acceptedFiles.map(([path, contents]) => ({
+            path,
+            size: Buffer.byteLength(contents),
+            sha256: createHash("sha256").update(contents).digest("hex"),
+          })),
+        },
+        null,
+        2,
+      )}\n`,
+    );
     writeFixtureFile(repository, "node_modules/tetris-fumen/package.json", "{}\n");
     writeFixtureFile(repository, "node_modules/tetris-fumen/index.js");
     for (const relative of overlayEntries) {
@@ -122,13 +166,21 @@ test("v0.8 Oracle local layer builder freezes only the closed runtime set", () =
     const first = runUnix("bash", [
       toUnixPath(layerBuilder),
       toUnixPath(repository),
+      toUnixPath(acceptedCtk3Dist),
+      sourceCommit,
+      acceptedRunId,
+      acceptedRunAttempt,
       toUnixPath(output),
     ]);
     assert.equal(first.status, 0, first.stderr);
     assert.equal(
       first.stdout.trim().split(/\r?\n/u).filter(Boolean).length,
-      3,
+      4,
       first.stdout,
+    );
+    assert.equal(
+      first.stdout.trim().split(/\r?\n/u)[0],
+      `oracle_ctk3_authority=accepted source_commit=${sourceCommit} run_id=${acceptedRunId} run_attempt=${acceptedRunAttempt}`,
     );
 
     const overlay = inspectTar(join(output, "private-overlay-no-config.tar"));
@@ -146,6 +198,10 @@ test("v0.8 Oracle local layer builder freezes only the closed runtime set", () =
           name === "packages/ctk3/dist" || name.startsWith("packages/ctk3/dist/"),
       ),
     );
+    assert.ok(
+      dist.some(({ name }) => name.endsWith("/clearra-accepted-ctk3.v2.json")),
+    );
+    assert.ok(!dist.some(({ name }) => name.includes("repo-local-poison")));
 
     const dependencies = inspectTar(join(output, "node_modules.tar"));
     assert.deepEqual(
@@ -174,6 +230,10 @@ test("v0.8 Oracle local layer builder freezes only the closed runtime set", () =
     const duplicate = runUnix("bash", [
       toUnixPath(layerBuilder),
       toUnixPath(repository),
+      toUnixPath(acceptedCtk3Dist),
+      sourceCommit,
+      acceptedRunId,
+      acceptedRunAttempt,
       toUnixPath(output),
     ]);
     assert.notEqual(duplicate.status, 0);

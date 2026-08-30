@@ -2,13 +2,25 @@
 set -euo pipefail
 
 usage() {
-  printf '%s\n' 'usage: create-local-layers-v080.sh <repository-root> <new-output-directory>' >&2
+  printf '%s\n' 'usage: create-local-layers-v080.sh <repository-root> <accepted-ctk3-dist-directory> <source-commit> <accepted-run-id> <accepted-run-attempt> <new-output-directory>' >&2
   exit 64
 }
 
-[[ "$#" -eq 2 ]] || usage
+[[ "$#" -eq 6 ]] || usage
 repository_root="$(cd "$1" && pwd -P)"
-output_root="$2"
+accepted_ctk3_root="$2"
+source_commit="$3"
+accepted_run_id="$4"
+accepted_run_attempt="$5"
+output_root="$6"
+[[ "$accepted_ctk3_root" = /* && -d "$accepted_ctk3_root" && ! -L "$accepted_ctk3_root" ]] || {
+  printf '%s\n' 'accepted CTK3 distribution must be an absolute regular directory' >&2
+  exit 64
+}
+accepted_ctk3_root="$(cd "$accepted_ctk3_root" && pwd -P)"
+[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || usage
+[[ "$accepted_run_id" =~ ^[1-9][0-9]{0,19}$ ]] || usage
+[[ "$accepted_run_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || usage
 [[ "$output_root" = /* ]] || usage
 [[ -d "$output_root" && ! -L "$output_root" ]] || {
   printf '%s\n' 'output directory must already exist and must not be a symlink' >&2
@@ -16,8 +28,27 @@ output_root="$2"
 }
 output_root="$(cd "$output_root" && pwd -P)"
 
+[[ "$accepted_ctk3_root" != "$repository_root/packages/ctk3/dist" ]] || {
+  printf '%s\n' 'repo-local packages/ctk3/dist is not accepted artifact authority' >&2
+  exit 64
+}
+case "$output_root/" in
+  "$accepted_ctk3_root/"*)
+    printf '%s\n' 'output directory must be disjoint from accepted CTK3 authority' >&2
+    exit 64
+    ;;
+esac
+case "$accepted_ctk3_root/" in
+  "$output_root/"*)
+    printf '%s\n' 'accepted CTK3 authority must be disjoint from the output directory' >&2
+    exit 64
+    ;;
+esac
+
 [[ -f "$repository_root/apps/clearra-discord-bot/package.json" ]] || usage
 [[ -f "$repository_root/packages/ctk3/package.json" ]] || usage
+accepted_ctk3_verifier="$repository_root/scripts/tools/accepted-ctk3-dist.mjs"
+[[ -f "$accepted_ctk3_verifier" && ! -L "$accepted_ctk3_verifier" ]] || usage
 
 overlay_archive="$output_root/private-overlay-no-config.tar"
 dist_archive="$output_root/ctk3-dist.tar"
@@ -80,17 +111,12 @@ if [[ -e "$repository_root/apps/clearra-discord-bot/src/admin/config.mjs" ]]; th
   }
 fi
 
-dist_root="$repository_root/packages/ctk3/dist"
 dependency_root="$repository_root/node_modules/tetris-fumen"
-[[ -d "$dist_root" && ! -L "$dist_root" ]] || {
-  printf '%s\n' 'the frozen CTK3 distribution has not been built' >&2
-  exit 66
-}
 [[ -d "$dependency_root" && ! -L "$dependency_root" ]] || {
   printf '%s\n' 'the production tetris-fumen dependency is unavailable' >&2
   exit 66
 }
-for input_root in "$dist_root" "$dependency_root"; do
+for input_root in "$accepted_ctk3_root" "$dependency_root"; do
   unsupported="$(find "$input_root" -xdev ! -type f ! -type d -print -quit)"
   [[ -z "$unsupported" ]] || {
     printf 'unsupported frozen layer entry: %s\n' "$unsupported" >&2
@@ -112,6 +138,13 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$temporary_root/node_modules/@clearra"
+mkdir -p "$temporary_root/packages/ctk3"
+cp -a -- "$accepted_ctk3_root" "$temporary_root/packages/ctk3/dist"
+node "$accepted_ctk3_verifier" \
+  --verify "$temporary_root/packages/ctk3/dist" \
+  --expected-source-commit "$source_commit" \
+  --expected-run-id "$accepted_run_id" \
+  --expected-run-attempt "$accepted_run_attempt" >/dev/null
 cp -a -- "$dependency_root" "$temporary_root/node_modules/tetris-fumen"
 ln -s ../packages/ctk3 "$temporary_root/node_modules/ctk3"
 ln -s ../../apps/clearra-discord-bot "$temporary_root/node_modules/@clearra/discord-bot"
@@ -142,8 +175,11 @@ publish_archive() {
 }
 
 publish_archive "$overlay_archive" --no-recursion --directory="$repository_root" "${overlay_paths[@]}"
-publish_archive "$dist_archive" --directory="$repository_root" packages/ctk3/dist
+publish_archive "$dist_archive" --directory="$temporary_root" packages/ctk3/dist
 publish_archive "$dependencies_archive" --directory="$temporary_root" node_modules
+
+printf 'oracle_ctk3_authority=accepted source_commit=%s run_id=%s run_attempt=%s\n' \
+  "$source_commit" "$accepted_run_id" "$accepted_run_attempt"
 
 for output in "$overlay_archive" "$dist_archive" "$dependencies_archive"; do
   [[ -f "$output" && ! -L "$output" ]] || exit 73

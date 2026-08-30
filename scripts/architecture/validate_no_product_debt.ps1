@@ -411,4 +411,55 @@ function Invoke-NoProductDebtStaticValidation {
             Add-ArchitectureError "NoProductDebt execution gate is missing evidence '$required'"
         }
     }
+    $rustExactGate = Read-PhysicalText 'scripts/lib/rust-exact-tests.ps1'
+    $renderGoldenGate = Read-PhysicalText 'scripts/lib/render-golden-gate.ps1'
+    foreach ($required in @(
+        'complete_required_keeps_candidate status=deferred owner=RustExactTests reason=single-release-suite',
+        'renderer_png_artifact status=deferred owner=RenderGolden reason=single-release-suite',
+        'renderer_gif_artifact status=deferred owner=RenderGolden reason=single-release-suite',
+        'desktop_real_app_request status=deferred owner=DesktopHost reason=single-release-suite'
+    )) {
+        if ($executionGate -notlike "*$required*") {
+            Add-ArchitectureError "NoProductDebt release delegation is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'complete_required_keeps_candidate status=passed source=rust-test owner=RustExactTests',
+        'adversarial_rust_tests=executed owner=RustExactTests'
+    )) {
+        if ($rustExactGate -notlike "*$required*") {
+            Add-ArchitectureError "RustExactTests delegated NoProductDebt owner is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'renderer_png_artifact status=passed source=rust-test owner=RenderGolden',
+        'renderer_gif_artifact status=passed source=rust-test owner=RenderGolden'
+    )) {
+        if ($renderGoldenGate -notlike "*$required*") {
+            Add-ArchitectureError "RenderGolden delegated NoProductDebt owner is missing '$required'"
+        }
+    }
+    $desktopHostGate = Read-PhysicalText 'scripts/desktop-host-check.ps1'
+    foreach ($required in @(
+        'case_tauri_command_calls_clearra_gui_host_only::tauri_command_calls_clearra_gui_host_only',
+        "-EvidenceId 'desktop_real_app_request'",
+        'no_product_debt_evidence=$EvidenceId status=passed source=rust-test owner=DesktopHost',
+        'ArchitectureValidatedByNoProductDebt',
+        'desktop_architecture=deferred owner=NoProductDebt reason=single-release-suite'
+    )) {
+        if ($desktopHostGate -notlike "*$required*") {
+            Add-ArchitectureError "DesktopHost delegated NoProductDebt owner is missing '$required'"
+        }
+    }
+    foreach ($requiredSingleOwnerMarker in @(
+        '$script:ClearraNoProductDebtArchitecturePassed = $true',
+        '$desktopHostArgs["ArchitectureValidatedByNoProductDebt"] = $true'
+    )) {
+        if (-not $taskDispatch.Contains($requiredSingleOwnerMarker)) {
+            Add-ArchitectureError "NoProductDebt release dispatcher is missing DesktopHost delegation marker '$requiredSingleOwnerMarker'"
+        }
+    }
+    if (-not $clearra.Contains('$script:ClearraNoProductDebtArchitecturePassed = $false')) {
+        Add-ArchitectureError 'NoProductDebt architecture evidence must reset for every runner invocation'
+    }
 }

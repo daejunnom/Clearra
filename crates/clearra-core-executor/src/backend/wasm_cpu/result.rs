@@ -3430,8 +3430,18 @@ impl WasmExactSearchSession {
         let visible_seven_policy = observation_policy.requires_observation_policy();
         let minimum_cover_requested =
             self.problem.objective().kind() == ObjectiveKind::MinimumCover;
-        let minimum_cover_product_reduction =
-            minimum_cover_requested && include_normalized_keys && !visible_seven_policy;
+        let score_portfolio_deferred_to_coordinator = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_score_portfolio_v2_evidence();
+        // Score portfolios need the complete buildable candidate dictionary.
+        // Their score-only eligibility rows and exact minimum cover are derived
+        // by the typed App postprocessor; reducing here would instead choose a
+        // coverage-only cover and orphan the exact scoring batch identities.
+        let minimum_cover_product_reduction = minimum_cover_requested
+            && !score_portfolio_deferred_to_coordinator
+            && include_normalized_keys
+            && !visible_seven_policy;
         let mut minimum_cover_complete = false;
         let mut minimum_cover_proven = false;
         let mut minimum_cover_reason = if minimum_cover_requested {
@@ -3477,8 +3487,10 @@ impl WasmExactSearchSession {
         } else if minimum_cover_requested {
             minimum_cover_reason = if visible_seven_policy {
                 "visible-seven-policy-minimum-cover-not-materialized"
-            } else {
+            } else if score_portfolio_deferred_to_coordinator {
                 "deferred-to-coordinator"
+            } else {
+                "minimum-cover-not-materialized"
             };
         }
         let normalized_hash = if !solution_set_materialized {
@@ -3553,8 +3565,14 @@ impl WasmExactSearchSession {
             .as_ref()
             .is_some_and(ExactScoringExecutionBatch::complete);
         let score_objective_requested = score_policy.requested();
+        // Coverage evidence certifies the complete producer rows, not whether
+        // the score-aware coordinator has already selected its portfolio. For
+        // score-minimals the latter is deliberately deferred while the former
+        // must remain complete so App can derive the exact score-only cover.
         let non_score_objective_complete = count_complete
-            && (!minimum_cover_requested || (minimum_cover_complete && minimum_cover_proven));
+            && (score_portfolio_deferred_to_coordinator
+                || !minimum_cover_requested
+                || (minimum_cover_complete && minimum_cover_proven));
         let solution_count = if !solution_set_materialized {
             0
         } else if minimum_cover_requested {
@@ -4572,10 +4590,14 @@ mod tests {
             WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
                 .expect("score-portfolio producer");
 
-        assert_eq!(result.bool_field("minimum_cover_complete"), Some(true));
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
         assert_eq!(
             result.bool_field("minimum_cover_proven_minimum"),
-            Some(true)
+            Some(false)
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("deferred-to-coordinator")
         );
         let coverage = result
             .pc_chance_coverage_evidence()
@@ -4590,6 +4612,95 @@ mod tests {
         assert!(result
             .exact_scoring_execution_batch()
             .is_some_and(|batch| batch.complete()));
+    }
+
+    #[test]
+    fn score_portfolio_retains_every_exact_scoring_candidate_before_app_reduction() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])),
+            PieceWindow::new(5),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(5))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
+        let generic_problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("generic score plus minimum-cover problem");
+        let generic_result = WasmCpuSearchBackend::execute_with_control(
+            &generic_problem,
+            &ExecutionControl::default(),
+        )
+        .expect("generic score plus minimum-cover producer");
+        assert_eq!(
+            generic_result.bool_field("minimum_cover_complete"),
+            Some(true)
+        );
+        assert_eq!(
+            generic_result.bool_field("minimum_cover_proven_minimum"),
+            Some(true)
+        );
+        assert_eq!(
+            generic_result.field("minimum_cover_incomplete_reason"),
+            Some("none")
+        );
+        assert!(
+            generic_result
+                .usize_field("minimum_cover_source_solution_count")
+                .is_some_and(
+                    |source| source > generic_result.normalized_solution_identities().len()
+                ),
+            "generic min-cover plus score must retain the historical Core reduction"
+        );
+
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("multi-candidate score-portfolio problem")
+            .with_pc_score_portfolio_v2_evidence();
+
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("multi-candidate score-portfolio producer");
+        let identities = result.normalized_solution_identities();
+        let batch = result
+            .exact_scoring_execution_batch()
+            .expect("complete exact scoring candidate dictionary");
+
+        assert!(
+            identities.len() > 1,
+            "fixture must exercise the reduction boundary"
+        );
+        assert_eq!(
+            result.usize_field("minimum_cover_source_solution_count"),
+            Some(identities.len())
+        );
+        assert_eq!(
+            result.usize_field("minimum_cover_selected_solution_count"),
+            Some(identities.len())
+        );
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("deferred-to-coordinator")
+        );
+        assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(batch.graphs().len(), identities.len());
+        assert!(result
+            .pc_chance_coverage_evidence()
+            .is_some_and(|evidence| evidence.complete()));
+        assert!(batch.graphs().iter().enumerate().all(|(index, graph)| {
+            graph.candidate_id() == (index + 1) as u64 && graph.identity() == identities[index]
+        }));
+        assert_eq!(result.solution_coverages().len(), identities.len());
+        assert_eq!(
+            result.normalized_solution_coverages().len(),
+            identities.len()
+        );
     }
 
     #[test]

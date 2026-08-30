@@ -2,15 +2,19 @@ import assert from 'node:assert/strict';
 
 import type {
   ClearraBuildV2ProductPayload,
+  ClearraCoveragePortfolioRuntimePage,
+  ClearraProductPageWorkerPayload,
   ClearraProductResultPayload,
   ClearraSolutionSetArtifactFormatPayload,
   ClearraSolutionSetArtifactPayload
 } from '../src/lib/wasm/wasmCommandClient';
 import {
+  CoveragePortfolioPagerController,
   PRODUCT_MEMBER_PAGE_SIZE,
   isCanonicalDecimal,
   isCanonicalProbability,
   productResultIdentity,
+  validateCoveragePortfolioRuntimePage,
   validateProductResultPayload,
   validateSolutionSetArtifactPayload
 } from '../src/lib/workspace/productResultPager';
@@ -29,6 +33,12 @@ assert.equal(isCanonicalDecimal('184467440737095516160'), true);
 assert.equal(isCanonicalDecimal('00'), false);
 assert.equal(isCanonicalProbability('0.14285714285714285'), true);
 assert.equal(isCanonicalProbability('1.2'), false);
+
+await verifyCoveragePortfolioPagerNavigation();
+await verifyCoveragePortfolioPagerPrunesAdjacentPrefetchOnBacktrack();
+await verifyCoveragePortfolioPagerResetIgnoresStaleGet();
+await verifyCoveragePortfolioPagerUsesCanonicalLargeIndices();
+verifyCoveragePortfolioPageValidator();
 
 const buildV2Capabilities = [
   'build.congruent',
@@ -988,6 +998,384 @@ function saveGroup(index: number) {
       }
     ]
   };
+}
+
+async function verifyCoveragePortfolioPagerNavigation(): Promise<void> {
+  const nextResponses = [
+    deferred<ClearraProductPageWorkerPayload>(),
+    deferred<ClearraProductPageWorkerPayload>(),
+    deferred<ClearraProductPageWorkerPayload>()
+  ];
+  const pageThreeGet = deferred<ClearraProductPageWorkerPayload>();
+  const getCalls: Array<readonly [string, string]> = [];
+  let loadNextCallCount = 0;
+  const controller = new CoveragePortfolioPagerController({
+    loadNextPage: () => {
+      const response = nextResponses[loadNextCallCount];
+      loadNextCallCount += 1;
+      if (!response) throw new Error('unexpected loadNextPage call');
+      return response.promise;
+    },
+    loadMemberPage: (alternativeNumber, memberPageNumber) => {
+      getCalls.push([alternativeNumber, memberPageNumber]);
+      if (alternativeNumber === '1' && memberPageNumber === '1') {
+        return Promise.resolve(coveragePageResponse(runtimeCoveragePage(1)));
+      }
+      if (alternativeNumber === '3' && memberPageNumber === '1') {
+        return pageThreeGet.promise;
+      }
+      if (alternativeNumber === '4' && memberPageNumber === '1') {
+        return Promise.resolve(
+          coveragePageResponse(runtimeCoveragePage(4, { complete: true }))
+        );
+      }
+      throw new Error(`unexpected member page request ${alternativeNumber}:${memberPageNumber}`);
+    },
+    onChange: (snapshot) => assertCoveragePagerWindow(snapshot)
+  });
+
+  controller.reset('portfolio-old', runtimeCoveragePage(1));
+  assert.equal(loadNextCallCount, 1, 'reset starts exactly one page-2 prefetch');
+  nextResponses[0]!.resolve(coveragePageResponse(runtimeCoveragePage(2)));
+  await settlePromises();
+  assert.equal(controller.snapshot().prefetchedPage?.alternative_index, '2');
+
+  assert.equal((await controller.next())?.alternative_index, '2');
+  assert.equal(loadNextCallCount, 2, 'showing page 2 starts exactly one page-3 prefetch');
+  nextResponses[1]!.resolve(coveragePageResponse(runtimeCoveragePage(3)));
+  await settlePromises();
+  assert.equal((await controller.next())?.alternative_index, '3');
+  assert.equal(loadNextCallCount, 3, 'showing page 3 starts exactly one page-4 prefetch');
+  assert.equal(controller.snapshot().prefetchInFlight, true);
+  assert.deepEqual(
+    controller.snapshot().pages.map((page) => page.alternative_index),
+    ['2', '3'],
+    'the outer cache remains bounded while page 4 is in flight'
+  );
+
+  assert.equal((await controller.previous())?.alternative_index, '2');
+  assert.equal((await controller.previous())?.alternative_index, '1');
+  assert.deepEqual(getCalls, [['1', '1']], 'only evicted page 1 is reloaded on 3 -> 2 -> 1');
+
+  nextResponses[2]!.resolve(coveragePageResponse(runtimeCoveragePage(4, { complete: true })));
+  await settlePromises();
+  const discardedPrefetchSnapshot = controller.snapshot();
+  assert.equal(discardedPrefetchSnapshot.currentPage?.alternative_index, '1');
+  assert.deepEqual(
+    discardedPrefetchSnapshot.pages.map((page) => page.alternative_index),
+    ['1', '2']
+  );
+  assert.equal(
+    discardedPrefetchSnapshot.prefetchedPage,
+    null,
+    'page 4 is not retained while only current page 1 and next page 2 are in-window'
+  );
+  assert.equal(discardedPrefetchSnapshot.highestMaterializedAlternativeIndex, '4');
+  assert.equal(discardedPrefetchSnapshot.enumerationSealed, true);
+  assert.equal(discardedPrefetchSnapshot.prefetchInFlight, false);
+
+  assert.equal((await controller.next())?.alternative_index, '2');
+  assert.equal(loadNextCallCount, 3, 'backtracking never advances the enumerator');
+
+  const forwardToThree = controller.next();
+  const duplicateForward = controller.next();
+  assert.equal(await duplicateForward, null, 'a double-click joins no second navigation');
+  assert.equal(controller.snapshot().navigating, true, 'the first reload remains single-flight');
+  assert.deepEqual(
+    getCalls,
+    [
+      ['1', '1'],
+      ['3', '1']
+    ],
+    'the evicted page 3 is requested exactly once'
+  );
+  pageThreeGet.resolve(coveragePageResponse(runtimeCoveragePage(3)));
+  assert.equal((await forwardToThree)?.alternative_index, '3');
+  assert.equal(controller.snapshot().navigating, false);
+  assert.equal(loadNextCallCount, 3);
+
+  assert.equal(
+    (await controller.next())?.alternative_index,
+    '4',
+    'the discarded high-water page is recovered through exact replay'
+  );
+  const finalSnapshot = controller.snapshot();
+  assert.equal(finalSnapshot.currentPage?.alternative_index, '4');
+  assert.equal(finalSnapshot.prefetchedPage, null);
+  assert.equal(finalSnapshot.prefetchInFlight, false);
+  assert.equal(finalSnapshot.enumerationSealed, true);
+  assert.deepEqual(getCalls, [
+    ['1', '1'],
+    ['3', '1'],
+    ['4', '1']
+  ]);
+  assert.equal(loadNextCallCount, 3, 'exact replay never duplicates the completed next request');
+  controller.dispose();
+}
+
+async function verifyCoveragePortfolioPagerPrunesAdjacentPrefetchOnBacktrack(): Promise<void> {
+  const getCalls: Array<readonly [string, string]> = [];
+  let loadNextCallCount = 0;
+  const controller = new CoveragePortfolioPagerController({
+    loadNextPage: () => {
+      loadNextCallCount += 1;
+      return Promise.resolve(coveragePageResponse(runtimeCoveragePage(3, { complete: true })));
+    },
+    loadMemberPage: (alternativeIndex, memberPageNumber) => {
+      getCalls.push([alternativeIndex, memberPageNumber]);
+      return Promise.resolve(
+        coveragePageResponse(
+          runtimeCoveragePage(alternativeIndex, {
+            complete: alternativeIndex === '3'
+          })
+        )
+      );
+    },
+    onChange: (snapshot) => assertCoveragePagerWindow(snapshot)
+  });
+
+  controller.reset('portfolio-prune', runtimeCoveragePage(2));
+  await settlePromises();
+  assert.equal(controller.snapshot().prefetchedPage?.alternative_index, '3');
+  assert.equal((await controller.previous())?.alternative_index, '1');
+  assert.equal(controller.snapshot().prefetchedPage, null);
+  assert.equal(controller.snapshot().highestMaterializedAlternativeIndex, '3');
+  assert.equal((await controller.next())?.alternative_index, '2');
+  assert.equal((await controller.next())?.alternative_index, '3');
+  assert.equal(loadNextCallCount, 1);
+  assert.deepEqual(getCalls, [
+    ['1', '1'],
+    ['3', '1']
+  ]);
+  controller.dispose();
+}
+
+async function verifyCoveragePortfolioPagerResetIgnoresStaleGet(): Promise<void> {
+  const staleGet = deferred<ClearraProductPageWorkerPayload>();
+  const getSignals: AbortSignal[] = [];
+  let getCallCount = 0;
+  const controller = new CoveragePortfolioPagerController({
+    loadNextPage: null,
+    loadMemberPage: (_alternativeNumber, _memberPageNumber, signal) => {
+      getCallCount += 1;
+      if (signal) getSignals.push(signal);
+      return staleGet.promise;
+    }
+  });
+  controller.reset('portfolio-old', runtimeCoveragePage(2), {
+    autoPrefetch: false
+  });
+  const pendingPrevious = controller.previous();
+  assert.equal(getCallCount, 1);
+  assert.equal(controller.snapshot().navigating, true);
+
+  const replacement = runtimeCoveragePage(1, {
+    setIdentitySha256: 'e'.repeat(64),
+    candidateMapSha256: 'f'.repeat(64)
+  });
+  controller.reset('portfolio-new', replacement, { autoPrefetch: false });
+  assert.equal(getSignals[0]?.aborted, true, 'reset aborts the in-flight get signal');
+  staleGet.resolve(coveragePageResponse(runtimeCoveragePage(1)));
+  assert.equal(await pendingPrevious, null);
+  await settlePromises();
+
+  const snapshot = controller.snapshot();
+  assert.equal(snapshot.identity, 'portfolio-new');
+  assert.equal(snapshot.currentPage?.set_identity_sha256, 'e'.repeat(64));
+  assert.equal(snapshot.currentPage?.alternative_index, '1');
+  assert.equal(snapshot.error, '');
+  assert.equal(snapshot.navigating, false);
+  assert.equal(getCallCount, 1, 'the stale completion does not retry or mutate the new pager');
+  controller.dispose();
+}
+
+async function verifyCoveragePortfolioPagerUsesCanonicalLargeIndices(): Promise<void> {
+  const largeAlternativeIndex = '900719925474099312345678901234567890';
+  const nextAlternativeIndex = (BigInt(largeAlternativeIndex) + 1n).toString();
+  const previousAlternativeIndex = (BigInt(largeAlternativeIndex) - 1n).toString();
+  const memberRequests: Array<readonly [string, string]> = [];
+  let nextCallCount = 0;
+  const controller = new CoveragePortfolioPagerController({
+    loadNextPage: () => {
+      nextCallCount += 1;
+      return Promise.resolve(
+        coveragePageResponse(runtimeCoveragePage(nextAlternativeIndex, { complete: true }))
+      );
+    },
+    loadMemberPage: (alternativeIndex, memberPageNumber) => {
+      memberRequests.push([alternativeIndex, memberPageNumber]);
+      return Promise.resolve(coveragePageResponse(runtimeCoveragePage(previousAlternativeIndex)));
+    },
+    onChange: (snapshot) => assertCoveragePagerWindow(snapshot)
+  });
+
+  controller.reset('portfolio-large', runtimeCoveragePage(largeAlternativeIndex));
+  await settlePromises();
+  assert.equal(nextCallCount, 1);
+  assert.equal(controller.snapshot().prefetchedPage?.alternative_index, nextAlternativeIndex);
+  assert.equal((await controller.next())?.alternative_index, nextAlternativeIndex);
+  assert.equal(nextCallCount, 1, 'a complete large-index page does not request a successor');
+  assert.equal((await controller.previous())?.alternative_index, largeAlternativeIndex);
+  assert.equal((await controller.previous())?.alternative_index, previousAlternativeIndex);
+  assert.deepEqual(
+    memberRequests,
+    [[previousAlternativeIndex, '1']],
+    'large alternative identity reaches the loader as an exact decimal string'
+  );
+  controller.dispose();
+}
+
+function verifyCoveragePortfolioPageValidator(): void {
+  const valid = runtimeCoveragePage(1);
+  const expectation = {
+    setIdentitySha256: valid.set_identity_sha256,
+    candidateMapSha256: valid.candidate_map_sha256,
+    alternativeIndex: '1',
+    memberPageNumber: '1'
+  };
+  assert.equal(validateCoveragePortfolioRuntimePage(valid, expectation), null);
+
+  const mutations: Array<(page: ClearraCoveragePortfolioRuntimePage) => void> = [
+    (page) => {
+      page.page_contract = 'forged-page-contract';
+    },
+    (page) => {
+      page.member_page_contract = 'forged-member-contract';
+    },
+    (page) => {
+      page.set_identity_sha256 = '0'.repeat(64);
+    },
+    (page) => {
+      page.candidate_map_sha256 = '0'.repeat(64);
+    },
+    (page) => {
+      page.alternative_index = '2';
+    },
+    (page) => {
+      page.optimal_cardinality = '2';
+    },
+    (page) => {
+      page.known_alternative_count = '0';
+    },
+    (page) => {
+      page.total_alternative_count = '1';
+    },
+    (page) => {
+      page.enumeration_complete = true;
+    },
+    (page) => {
+      page.members[0]!.candidate_id = '0';
+    }
+  ];
+  for (const mutate of mutations) {
+    const forged = structuredClone(valid);
+    mutate(forged);
+    assert.notEqual(
+      validateCoveragePortfolioRuntimePage(forged, expectation),
+      null,
+      'every navigation path rejects forged page identity, count, or member metadata'
+    );
+  }
+}
+
+function assertCoveragePagerWindow(
+  snapshot: ReturnType<CoveragePortfolioPagerController['snapshot']>
+): void {
+  const currentPage = snapshot.currentPage;
+  if (!currentPage) {
+    assert.equal(snapshot.pages.length, 0);
+    assert.equal(snapshot.prefetchedPage, null);
+    return;
+  }
+  const currentIndex = BigInt(currentPage.alternative_index);
+  const retainedPages = [
+    ...snapshot.pages,
+    ...(snapshot.prefetchedPage ? [snapshot.prefetchedPage] : [])
+  ];
+  assert.ok(retainedPages.length <= 3, 'the pager retains at most previous/current/next');
+  assert.equal(
+    new Set(retainedPages.map((page) => page.alternative_index)).size,
+    retainedPages.length,
+    'the pager does not retain duplicate page states'
+  );
+  for (const page of retainedPages) {
+    const distance = BigInt(page.alternative_index) - currentIndex;
+    assert.ok(
+      distance >= -1n && distance <= 1n,
+      `retained page ${page.alternative_index} is outside current ${currentPage.alternative_index}`
+    );
+  }
+  if (snapshot.prefetchedPage) {
+    assert.equal(
+      BigInt(snapshot.prefetchedPage.alternative_index),
+      currentIndex + 1n,
+      'a prefetched body is retained only when it is the immediate next page'
+    );
+  }
+}
+
+function runtimeCoveragePage(
+  alternativeNumber: number | string,
+  {
+    complete = false,
+    setIdentitySha256 = 'a'.repeat(64),
+    candidateMapSha256 = 'b'.repeat(64)
+  }: {
+    complete?: boolean;
+    setIdentitySha256?: string;
+    candidateMapSha256?: string;
+  } = {}
+): ClearraCoveragePortfolioRuntimePage {
+  const alternativeIndex = alternativeNumber.toString();
+  return {
+    page_contract: 'portfolio-alternative-page.v1',
+    member_page_contract: 'portfolio-member-page.v1',
+    set_identity_sha256: setIdentitySha256,
+    candidate_map_sha256: candidateMapSha256,
+    alternative_index: alternativeIndex,
+    optimal_cardinality: '1',
+    known_alternative_count: alternativeIndex,
+    total_alternative_count: complete ? alternativeIndex : null,
+    enumeration_complete: complete,
+    member_page_number: '1',
+    total_member_pages: '1',
+    members: [
+      {
+        candidate_id: alternativeIndex,
+        normalized_solution_key: `alternative-${alternativeIndex}`
+      }
+    ]
+  };
+}
+
+function coveragePageResponse(
+  page: ClearraCoveragePortfolioRuntimePage
+): ClearraProductPageWorkerPayload {
+  return {
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    product_page_kind: 'coverage-portfolio',
+    state: 'page',
+    page
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
+async function settlePromises(): Promise<void> {
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
 
 console.log(JSON.stringify({

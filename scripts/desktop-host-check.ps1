@@ -4,6 +4,7 @@ param(
     [string]$PowerShellPath = "powershell",
     [int]$Workers = 1,
     [string]$ExecutionSurface = "",
+    [switch]$ArchitectureValidatedByNoProductDebt,
     [switch]$VerboseLog
 )
 
@@ -26,7 +27,11 @@ function Invoke-DesktopHostCommand {
         [string]$FileName,
 
         [Parameter(Mandatory)]
-        [string[]]$Arguments
+        [string[]]$Arguments,
+
+        [string]$RequiredTest = '',
+
+        [string]$EvidenceId = ''
     )
 
     Invoke-ClearraProgressCase -Scope $script:Scope -Name $Label -Body {
@@ -45,12 +50,21 @@ function Invoke-DesktopHostCommand {
             }
             throw "$Label failed with exit $($result.ExitCode)`n$($result.Output)"
         }
+        if (-not [string]::IsNullOrWhiteSpace($RequiredTest)) {
+            $testPattern = '(?m)^test ' + [regex]::Escape($RequiredTest) + ' \.\.\. ok\s*$'
+            if ($result.Output -notmatch $testPattern) {
+                throw "$Label did not execute required test '$RequiredTest'"
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($EvidenceId)) {
+            Write-Output "no_product_debt_evidence=$EvidenceId status=passed source=rust-test owner=DesktopHost"
+        }
     }
 }
 
 $applicationControl = Get-ClearraApplicationControlStatus
 $script:ApplicationControl = $applicationControl
-$stepCount = 5
+$stepCount = if ($ArchitectureValidatedByNoProductDebt.IsPresent) { 4 } else { 5 }
 $script:Scope = New-ClearraProgressScope `
     -Name "desktop-host" `
     -Total $stepCount `
@@ -80,14 +94,18 @@ Invoke-DesktopHostCommand `
     -FileName $NodePath `
     -Arguments @((Join-Path $Root "scripts/desktop-ui-compile-check.mjs"))
 
-Invoke-DesktopHostCommand `
-    -Label "architecture U6 Tauri Desktop Host" `
-    -FileName $PowerShellPath `
-    -Arguments @(
-        "-NoProfile",
-        "-File", (Join-Path $Root "scripts/validate_architecture.ps1"),
-        "-TaskName", "U6 Tauri Svelte Desktop Host"
-    )
+if ($ArchitectureValidatedByNoProductDebt.IsPresent) {
+    Write-Output 'desktop_architecture=deferred owner=NoProductDebt reason=single-release-suite'
+} else {
+    Invoke-DesktopHostCommand `
+        -Label "architecture U6 Tauri Desktop Host" `
+        -FileName $PowerShellPath `
+        -Arguments @(
+            "-NoProfile",
+            "-File", (Join-Path $Root "scripts/validate_architecture.ps1"),
+            "-TaskName", "U6 Tauri Svelte Desktop Host"
+        )
+}
 
 $previousCargoTargetDir = $env:CARGO_TARGET_DIR
 Push-Location $Root
@@ -105,7 +123,9 @@ try {
             "--features", "wasm-cpu-runtime,webgpu-search",
             "--lib",
             "--", "--test-threads=1"
-        )
+        ) `
+        -RequiredTest 'gui_host_contract_tests::case_tauri_command_calls_clearra_gui_host_only::tauri_command_calls_clearra_gui_host_only' `
+        -EvidenceId 'desktop_real_app_request'
 
     Invoke-DesktopHostCommand `
         -Label "cargo check Tauri desktop" `

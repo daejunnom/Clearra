@@ -6,12 +6,14 @@ bootstrap and invoker remain historical one-shots. Their release ID, archive
 hashes, entry counts, active baseline, and temporary paths must not be reused
 for v0.8.0.
 
-The v0.8 path has five boundaries:
+The v0.8 path has six boundaries:
 
 1. `create-local-layers-v080.sh` creates the private no-config overlay, the
-   current CTK3 distribution, and the minimal production dependency layer from
-   explicit allowlists. It publishes each archive once without overwriting an
-   existing path.
+   accepted CTK3 distribution, and the minimal production dependency layer
+   from explicit allowlists. It verifies and consumes an explicit accepted
+   artifact directory bound to one source commit, canonical run ID, and run
+   attempt; repo-local `packages/ctk3/dist` is never an input. It publishes each
+   archive once without overwriting an existing path.
 2. `invoke-freeze-v080.ps1` and the root-owned
    `clearra-oracle-freeze-v080` verify the local bytes and pinned host, seal the
    uploaded inputs against further deployment-account writes, snapshot only
@@ -32,6 +34,13 @@ The v0.8 path has five boundaries:
    `/opt/clearra/releases/v0.8.0-<sha7>`, transactionally updates the canonical
    launcher and tree digester, and verifies that the active link, settings,
    service process, active tree, and active private config did not change.
+6. `candidate-settings-v080.mjs` renders the exact non-secret 13-line candidate
+   settings contract and exposes only its SHA-256 through the CLI.
+   `invoke-release-deploy-v080.ps1` is the typed local boundary for rollback
+   capture, candidate activation/proof, and exact prior restoration/proof. It
+   reuses the pinned host-key authority and only checks that the approved
+   identity path is a regular non-reparse leaf; it never opens or hashes that
+   identity file.
 
 Successful freezing removes its remote upload, root helper, and independent
 candidate assembly after returning the manifest. Successful staging removes
@@ -55,8 +64,12 @@ assemble a substitute manifest:
   `apps/clearra-discord-bot/src/admin/`. It must not contain
   `apps/clearra-discord-bot/src/admin/config.mjs`, settings, `.env` files,
   credentials, or keys. Do not build it with a broad directory glob.
-- `ctk3-dist.tar`: the frozen CTK3 distribution, rooted only at
-  `packages/ctk3/dist`.
+- `ctk3-dist.tar`: the canonical accepted CTK3 artifact, rooted only at
+  `packages/ctk3/dist`. Its
+  `clearra-accepted-ctk3.v2.json` binds the exact source commit, canonical
+  workflow run ID, run attempt, sorted file set, sizes, and SHA-256 values.
+  Rebuilding CTK3 locally or reading repo-local `packages/ctk3/dist` is not an
+  authorized substitute.
 - `node_modules.tar`: the frozen production dependency layer, rooted only at
   `node_modules`. Its only links must be
   `node_modules/ctk3 -> ../packages/ctk3` and
@@ -165,20 +178,41 @@ node scripts/release/create-exact-source-archive.mjs `
 if ($LASTEXITCODE -ne 0) { throw 'exact source archive failed' }
 ```
 
-Build the CTK3 distribution and create the three local layers in a new evidence
-directory. The output directory must already exist and every output filename
-must be absent:
+Download the one accepted CTK3 artifact from the already resolved canonical
+acceptance run, verify its embedded source/run/attempt authority, and create the
+three local layers in a new evidence directory. Both directories must already
+exist, the accepted directory must be empty before download, and every layer
+output filename must be absent. Do not run a local CTK3 build:
 
 ```powershell
-npm run build --workspace ctk3
-if ($LASTEXITCODE -ne 0) { throw 'CTK3 production build failed' }
-
 $repository = (Get-Location).Path
+$acceptedRunId = '<canonical-successful-workflow-dispatch-run-id>'
+$acceptedRunAttempt = '<exact-positive-run-attempt>'
+$acceptedCtk3ArtifactName = "ctk3-accepted-$sourceCommit-run-$acceptedRunId-attempt-$acceptedRunAttempt"
+$acceptedCtk3Directory = '<new-absolute-accepted-ctk3-directory>'
 $evidenceDirectory = '<new-absolute-evidence-directory>'
+
+gh run download $acceptedRunId `
+  --name $acceptedCtk3ArtifactName `
+  --dir $acceptedCtk3Directory
+if ($LASTEXITCODE -ne 0) { throw 'accepted CTK3 artifact download failed' }
+node scripts/tools/accepted-ctk3-dist.mjs `
+  --verify $acceptedCtk3Directory `
+  --expected-source-commit $sourceCommit `
+  --expected-run-id $acceptedRunId `
+  --expected-run-attempt $acceptedRunAttempt
+if ($LASTEXITCODE -ne 0) { throw 'accepted CTK3 artifact authority failed' }
+
 $repositoryWsl = (& wsl.exe -e wslpath -a -- $repository).Trim()
+$acceptedCtk3Wsl = (& wsl.exe -e wslpath -a -- $acceptedCtk3Directory).Trim()
 $evidenceWsl = (& wsl.exe -e wslpath -a -- $evidenceDirectory).Trim()
 & wsl.exe -e bash "$repositoryWsl/scripts/release/oracle/create-local-layers-v080.sh" `
-  $repositoryWsl $evidenceWsl
+  $repositoryWsl `
+  $acceptedCtk3Wsl `
+  $sourceCommit `
+  $acceptedRunId `
+  $acceptedRunAttempt `
+  $evidenceWsl
 if ($LASTEXITCODE -ne 0) { throw 'Oracle local layer freeze failed' }
 
 $overlayArchive = Join-Path $evidenceDirectory 'private-overlay-no-config.tar'
@@ -289,13 +323,94 @@ This result proves an inactive staged release and installed deployment tools.
 It does not prove candidate activation, Discord behavior, Cloud Run traffic,
 the observation window, tagging, or immutable release publication.
 
+## Typed activation and rollback boundary
+
+After Cloud Run has produced the exact tagged zero-traffic candidate URL, derive
+the Oracle candidate settings authority from the canonical 13-line renderer.
+The CLI writes only one lowercase SHA-256 line; it never writes the settings:
+
+```powershell
+$candidateUrl = '<exact-credential-free-HTTPS-candidate-origin>'
+$oracleCandidateSettingsSha256 = (& node `
+  scripts/release/oracle/candidate-settings-v080.mjs `
+  --source-commit $sourceCommit `
+  --candidate-url $candidateUrl `
+  --hash-only).Trim()
+if ($LASTEXITCODE -ne 0 -or
+    $oracleCandidateSettingsSha256 -cnotmatch '^[0-9a-f]{64}$') {
+  throw 'canonical Oracle candidate settings authority failed'
+}
+```
+
+Use `invoke-release-deploy-v080.ps1` for all four remote operations. Its
+operation-specific argument sets fail closed when a capture, candidate, or
+restore field crosses into another operation. `-AuditOnly` validates the pinned
+host authority, launcher syntax, typed values, canonical URLs/timestamp, proof
+path, and exact remote argv without opening SSH or inspecting an identity file:
+
+```powershell
+$oracleWrapper = Join-Path (Get-Location) `
+  'scripts/release/oracle/invoke-release-deploy-v080.ps1'
+$oracleIdentityFile = '<approved-Oracle-identity-file>'
+$oracleCommon = @{
+  ScriptReleaseId = $oracleCandidateReleaseId
+  ScriptReleaseSha256 = $oracleCandidateReleaseSha256
+  DeploymentNonce = $deploymentNonce
+}
+
+& $oracleWrapper @oracleCommon `
+  -Operation capture-rollback-authority `
+  -PriorRevision $priorRevision `
+  -PriorRuntimeAuthorityKind $priorRuntimeAuthorityKind `
+  -AuditOnly
+if ($LASTEXITCODE -ne 0) { throw 'Oracle capture invocation audit failed' }
+
+& $oracleWrapper @oracleCommon `
+  -Operation verify-candidate `
+  -Proof $oracleCandidateProofPath `
+  -SourceCommit $sourceCommit `
+  -CandidateUrl $candidateUrl `
+  -CandidateRevision $candidateRevision `
+  -OracleReleaseId $oracleCandidateReleaseId `
+  -OracleReleaseSha256 $oracleCandidateReleaseSha256 `
+  -OracleSettingsSha256 $oracleCandidateSettingsSha256 `
+  -VerifiedAfter $deploymentVerifiedAfter `
+  -AuditOnly
+if ($LASTEXITCODE -ne 0) { throw 'Oracle candidate invocation audit failed' }
+```
+
+Record both audit attestations, then rerun each exact operation without
+`-AuditOnly` and with `-IdentityFile $oracleIdentityFile`. The capture returns
+one closed JSON object. Candidate success is exactly
+`oracle_candidate=verified`; restore success is exactly
+`oracle_rollback=verified`. The Cloud Run deployment runbook supplies the
+captured prior release/settings/runtime fields to
+`restore-prior-and-verify`. Never bypass this wrapper with a local `sudo`, a
+free-form SSH command, or direct execution of a release helper.
+
+For the 20-minute production observation, invoke the same typed wrapper with
+`-Operation observe-candidate`. The approved runtime may supply the identity
+path through `CLEARRA_ORACLE_IDENTITY_FILE` so it is never materialized in a
+probe specification or report. The operation is read-only: it does not create
+a proof file, change settings/current, or restart the service. Success is one
+`clearra.oracle.candidate-observation.v1` JSON line binding the source,
+candidate URL/revision, active release path/tree, settings digest, deployment
+nonce, PID, systemd monotonic process start, boot ID, READY evidence, fresh
+operation timestamp, observation timestamp, and runtime identity. Across the
+window, require all identity/process fields to remain unchanged and require
+`observedAt >= freshOperationAt >= VerifiedAfter`.
+
 ## Regression commands
 
 ```powershell
 node --test scripts/release/oracle-freeze-v080.test.mjs
 node --test scripts/release/oracle-inactive-stage-v080.test.mjs
+node --test scripts/release/oracle/candidate-settings-v080.test.mjs
+node --test scripts/tools/accepted-ctk3-dist.test.mjs
+node --test apps/clearra-discord-bot/test/oracle-candidate-observation.test.mjs
 pwsh -NoProfile -File scripts/release/oracle/invoke-freeze-v080.test.ps1
 pwsh -NoProfile -File scripts/release/oracle/invoke-inactive-stage-v080.test.ps1
+pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.test.ps1
 $wslRepository = (wsl.exe -e wslpath -a -- (Get-Location).Path).Trim()
 wsl.exe -e bash -n "$wslRepository/scripts/release/oracle/create-local-layers-v080.sh"
 wsl.exe -e dash -n "$wslRepository/scripts/release/oracle/clearra-oracle-freeze-v080"

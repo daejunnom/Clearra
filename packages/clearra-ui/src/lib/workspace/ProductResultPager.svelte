@@ -7,15 +7,23 @@
     ClearraProductResultPayload
   } from '../wasm/wasmCommandClient';
   import {
+    CoveragePortfolioPagerController,
     PRODUCT_MEMBER_PAGE_SIZE,
-    isCanonicalDecimal,
+    compareCanonicalDecimals,
+    coveragePortfolioPageReference,
+    decrementCanonicalDecimal,
+    incrementCanonicalDecimal,
     productResultIdentity,
+    requireCoveragePortfolioPageResponse,
     validateProductResultPayload,
+    type CoveragePortfolioPagerSnapshot,
     type ProductMemberPageLoader,
     type ProductNextPageLoader,
     type ProductPageRelease
   } from './productResultPager';
   import type { WorkspaceLanguage } from './workspaceI18n';
+
+  const MAX_RETAINED_MEMBER_PAGES = 3;
 
   export let payload: ClearraProductResultPayload | null | undefined = null;
   export let language: WorkspaceLanguage = 'en';
@@ -28,10 +36,12 @@
   let coveragePages: ClearraCoveragePortfolioRuntimePage[] = [];
   let outerPageIndex = 0;
   let currentMembers: ClearraCoveragePortfolioRuntimePage['members'] = [];
-  let memberPageNumber = 1;
+  let memberPageNumber = '1';
   let prefetchedPage: ClearraCoveragePortfolioRuntimePage | null = null;
-  let prefetchPromise: Promise<void> | null = null;
+  let prefetchInFlight = false;
   let enumerationSealed = false;
+  let highestMaterializedAlternativeIndex: string | null = null;
+  let navigatingOuter = false;
   let loadingMember = false;
   let error = '';
   let handleOwned = false;
@@ -43,11 +53,33 @@
   let setupRankedPageIndex = 0;
   let setupScorePageIndex = 0;
   let spinStructurePageIndex = 0;
+  let outerPager: CoveragePortfolioPagerController | null = null;
   const memberCache = new Map<string, ClearraCoveragePortfolioRuntimePage['members']>();
 
   $: nextIdentity = productResultIdentity(payload);
   $: if (nextIdentity !== activeIdentity) resetForPayload(payload ?? null, nextIdentity);
   $: coveragePage = coveragePages[outerPageIndex] ?? null;
+  $: currentAlternativeIndex = coveragePage?.alternative_index ?? null;
+  $: nextAlternativeIndex = currentAlternativeIndex === null
+    ? null
+    : incrementCanonicalDecimal(currentAlternativeIndex);
+  $: previousOuterAvailable = outerPageIndex > 0 || (
+    currentAlternativeIndex !== null &&
+    currentAlternativeIndex !== '1' &&
+    Boolean(loadMemberPage)
+  );
+  $: nextOuterAvailable =
+    outerPageIndex + 1 < coveragePages.length ||
+    (currentAlternativeIndex !== null &&
+      highestMaterializedAlternativeIndex !== null &&
+      compareCanonicalDecimals(
+        currentAlternativeIndex,
+        highestMaterializedAlternativeIndex
+      ) < 0 &&
+      Boolean(loadMemberPage)) ||
+    (nextAlternativeIndex !== null &&
+      prefetchedPage?.alternative_index === nextAlternativeIndex) ||
+    (!enumerationSealed && Boolean(loadNextPage));
   $: pathFamily = payload?.content.payload_kind === 'pc-path-family'
     ? payload.content.payload
     : null;
@@ -178,10 +210,12 @@
     coveragePages = [];
     outerPageIndex = 0;
     currentMembers = [];
-    memberPageNumber = 1;
+    memberPageNumber = '1';
     prefetchedPage = null;
-    prefetchPromise = null;
+    prefetchInFlight = false;
     enumerationSealed = false;
+    highestMaterializedAlternativeIndex = null;
+    navigatingOuter = false;
     loadingMember = false;
     error = '';
     pathPageIndex = 0;
@@ -198,14 +232,14 @@
       return;
     }
     if (nextPayload.content.payload_kind === 'coverage-portfolio') {
+      abortController = new AbortController();
       const { set_contract: _, page_handle_available, ...canonical } =
         nextPayload.content.payload;
       coveragePages = [canonical];
       currentMembers = canonical.members;
-      memberCache.set('1:1', canonical.members);
+      memberCache.set(`${canonical.alternative_index}:1`, canonical.members);
       handleOwned = page_handle_available && Boolean(releasePages);
-      enumerationSealed = canonical.enumeration_complete;
-      if (page_handle_available && loadNextPage && !enumerationSealed) startPrefetch();
+      initializeOuterPager(identity, canonical, page_handle_available && Boolean(loadNextPage));
       return;
     }
     const pageSourceIdentity = buildPageSourceIdentity(nextPayload);
@@ -241,34 +275,55 @@
     return null;
   }
 
+  function initializeOuterPager(
+    identity: string,
+    initialPage: ClearraCoveragePortfolioRuntimePage,
+    autoPrefetch: boolean
+  ) {
+    const pager = new CoveragePortfolioPagerController({
+      loadNextPage,
+      loadMemberPage,
+      onChange: (snapshot) => syncOuterPager(pager, identity, snapshot)
+    });
+    outerPager = pager;
+    pager.reset(identity, initialPage, { autoPrefetch });
+  }
+
+  function syncOuterPager(
+    pager: CoveragePortfolioPagerController,
+    identity: string,
+    snapshot: CoveragePortfolioPagerSnapshot
+  ) {
+    if (outerPager !== pager || activeIdentity !== identity) return;
+    coveragePages = [...snapshot.pages];
+    outerPageIndex = snapshot.outerPageIndex;
+    prefetchedPage = snapshot.prefetchedPage;
+    prefetchInFlight = snapshot.prefetchInFlight;
+    enumerationSealed = snapshot.enumerationSealed;
+    highestMaterializedAlternativeIndex = snapshot.highestMaterializedAlternativeIndex;
+    navigatingOuter = snapshot.navigating;
+    if (snapshot.error) error = snapshot.error;
+  }
+
   async function loadInitialBuildPortfolioPage(
     pageSourceIdentity: string,
     payloadIdentity: string,
     signal: AbortSignal
   ) {
     try {
-      const response = await loadMemberPage?.(1, 1, signal);
-      if (
-        !response ||
-        response.product_page_kind !== 'coverage-portfolio' ||
-        response.state !== 'page' ||
-        response.page.set_identity_sha256 !== pageSourceIdentity ||
-        response.page.alternative_index !== '1' ||
-        response.page.member_page_number !== '1' ||
-        response.page.members.length > PRODUCT_MEMBER_PAGE_SIZE ||
-        response.page.members.some(
-          (member) =>
-            !isCanonicalDecimal(member.candidate_id) || !member.normalized_solution_key
-        )
-      ) {
+      const response = await loadMemberPage?.('1', '1', signal);
+      if (!response) {
         throw new Error('Build portfolio page does not match the active result');
       }
+      const initialPage = requireCoveragePortfolioPageResponse(response, {
+        setIdentitySha256: pageSourceIdentity,
+        alternativeIndex: '1',
+        memberPageNumber: '1'
+      });
       if (signal.aborted || activeIdentity !== payloadIdentity) return;
-      coveragePages = [response.page];
-      currentMembers = response.page.members;
-      memberCache.set('1:1', response.page.members);
-      enumerationSealed = response.page.enumeration_complete;
-      if (!enumerationSealed) startPrefetch();
+      currentMembers = initialPage.members;
+      memberCache.set(`${initialPage.alternative_index}:1`, initialPage.members);
+      initializeOuterPager(payloadIdentity, initialPage, !initialPage.enumeration_complete);
     } catch (reason) {
       if (!signal.aborted && activeIdentity === payloadIdentity) error = errorMessage(reason);
     } finally {
@@ -277,6 +332,8 @@
   }
 
   function releaseHandle() {
+    outerPager?.dispose();
+    outerPager = null;
     abortController?.abort();
     abortController = null;
     if (handleOwned) {
@@ -287,135 +344,98 @@
     handleOwned = false;
   }
 
-  function startPrefetch() {
-    if (
-      prefetchPromise ||
-      prefetchedPage ||
-      enumerationSealed ||
-      !loadNextPage ||
-      !coveragePages.length
-    ) return;
-    const controller = abortController ?? new AbortController();
-    abortController = controller;
-    prefetchPromise = prefetchNextExactPage(controller.signal)
-      .then((page) => {
-        if (!controller.signal.aborted && page) prefetchedPage = page;
-      })
-      .catch((reason) => {
-        if (!controller.signal.aborted) error = errorMessage(reason);
-      })
-      .finally(() => {
-        prefetchPromise = null;
-      });
-  }
-
-  async function prefetchNextExactPage(
-    signal: AbortSignal
-  ): Promise<ClearraCoveragePortfolioRuntimePage | null> {
-    if (!loadNextPage) return null;
-    while (!signal.aborted) {
-      const response = await loadNextPage(signal);
-      if (response.product_page_kind !== 'coverage-portfolio') {
-        throw new Error('product page kind does not match the active coverage result');
-      }
-      if (response.state === 'work-budget-exhausted') continue;
-      if (response.state === 'sealed' || response.state === 'cancelled') {
-        enumerationSealed = true;
-        return null;
-      }
-      const page = response.page;
-      const first = coveragePages[0];
-      const previous = coveragePages[coveragePages.length - 1];
-      if (
-        page.set_identity_sha256 !== first.set_identity_sha256 ||
-        page.candidate_map_sha256 !== first.candidate_map_sha256 ||
-        !isCanonicalDecimal(page.alternative_index) ||
-        page.alternative_index !== incrementDecimal(previous.alternative_index) ||
-        page.members.length > PRODUCT_MEMBER_PAGE_SIZE ||
-        page.member_page_number !== '1' ||
-        page.members.some((member) => !isCanonicalDecimal(member.candidate_id))
-      ) {
-        throw new Error('product page response does not match the active result');
-      }
-      if (page.enumeration_complete) enumerationSealed = true;
-      return page;
-    }
-    return null;
-  }
-
   async function nextOuterPage() {
-    if (outerPageIndex + 1 < coveragePages.length) {
-      outerPageIndex += 1;
-      await showMemberPage(1);
-      startPrefetch();
-      return;
-    }
-    startPrefetch();
-    if (prefetchPromise) await prefetchPromise;
-    if (!prefetchedPage) return;
-    coveragePages = [...coveragePages, prefetchedPage];
-    prefetchedPage = null;
-    outerPageIndex += 1;
-    await showMemberPage(1);
-    startPrefetch();
+    if (loadingMember) return;
+    const pager = outerPager;
+    if (!pager) return;
+    const payloadIdentity = activeIdentity;
+    const page = await pager.next();
+    if (!page || outerPager !== pager || activeIdentity !== payloadIdentity) return;
+    await showMemberPage('1');
   }
 
   async function previousOuterPage() {
-    if (outerPageIndex === 0) return;
-    outerPageIndex -= 1;
-    await showMemberPage(1);
+    if (loadingMember) return;
+    const pager = outerPager;
+    if (!pager) return;
+    const payloadIdentity = activeIdentity;
+    const page = await pager.previous();
+    if (!page || outerPager !== pager || activeIdentity !== payloadIdentity) return;
+    await showMemberPage('1');
   }
 
-  async function showMemberPage(nextMemberPage: number) {
+  async function showMemberPage(nextMemberPage: string) {
+    if (loadingMember) return;
     const page = coveragePages[outerPageIndex];
     if (!page) return;
-    const total = Number(page.total_member_pages);
-    if (!Number.isSafeInteger(total) || nextMemberPage < 1 || nextMemberPage > total) return;
-    const cacheKey = `${outerPageIndex + 1}:${nextMemberPage}`;
+    if (
+      !isPositiveCanonicalDecimal(nextMemberPage) ||
+      compareCanonicalDecimals(nextMemberPage, page.total_member_pages) > 0
+    ) {
+      return;
+    }
+    const cacheKey = `${page.alternative_index}:${nextMemberPage}`;
+    if (nextMemberPage === '1' && !memberCache.has(cacheKey)) {
+      memberCache.set(cacheKey, page.members);
+    }
     const cached = memberCache.get(cacheKey);
     if (cached) {
       memberPageNumber = nextMemberPage;
       currentMembers = cached;
+      pruneMemberCache(page.alternative_index, nextMemberPage);
       return;
     }
     if (!loadMemberPage) return;
+    const alternativeIndex = page.alternative_index;
+    const referencePage = coveragePortfolioPageReference(page);
+    const payloadIdentity = activeIdentity;
+    const requestSignal = abortController?.signal;
     loadingMember = true;
     error = '';
     try {
       const response = await loadMemberPage(
-        outerPageIndex + 1,
+        alternativeIndex,
         nextMemberPage,
-        abortController?.signal
+        requestSignal
       );
-      if (
-        response.product_page_kind !== 'coverage-portfolio' ||
-        response.state !== 'page' ||
-        response.page.alternative_index !== page.alternative_index ||
-        response.page.member_page_number !== nextMemberPage.toString() ||
-        response.page.members.length > PRODUCT_MEMBER_PAGE_SIZE
-      ) {
-        throw new Error('product member page response does not match its request');
-      }
-      memberCache.set(cacheKey, response.page.members);
+      if (requestSignal?.aborted || activeIdentity !== payloadIdentity) return;
+      const loadedPage = requireCoveragePortfolioPageResponse(response, {
+        setIdentitySha256: referencePage.set_identity_sha256,
+        candidateMapSha256: referencePage.candidate_map_sha256,
+        alternativeIndex,
+        memberPageNumber: nextMemberPage,
+        referencePage,
+        requireSameAlternativeMetadata: true
+      });
+      memberCache.set(cacheKey, loadedPage.members);
       memberPageNumber = nextMemberPage;
-      currentMembers = response.page.members;
+      currentMembers = loadedPage.members;
+      pruneMemberCache(alternativeIndex, nextMemberPage);
     } catch (reason) {
-      error = errorMessage(reason);
+      if (activeIdentity === payloadIdentity) error = errorMessage(reason);
     } finally {
-      loadingMember = false;
+      if (activeIdentity === payloadIdentity) loadingMember = false;
     }
   }
 
-  function incrementDecimal(value: string): string {
-    const digits = value.split('');
-    for (let index = digits.length - 1; index >= 0; index -= 1) {
-      if (digits[index] !== '9') {
-        digits[index] = String(Number(digits[index]) + 1);
-        return digits.join('');
-      }
-      digits[index] = '0';
+  function pruneMemberCache(activeAlternativeIndex: string, activeMemberPage: string) {
+    const retainedMemberPages = new Set(
+      [
+        activeMemberPage === '1' ? null : decrementCanonicalDecimal(activeMemberPage),
+        activeMemberPage,
+        incrementCanonicalDecimal(activeMemberPage)
+      ]
+        .filter((pageNumber): pageNumber is string => pageNumber !== null)
+        .slice(0, MAX_RETAINED_MEMBER_PAGES)
+        .map((pageNumber) => `${activeAlternativeIndex}:${pageNumber}`)
+    );
+    for (const cacheKey of memberCache.keys()) {
+      if (!retainedMemberPages.has(cacheKey)) memberCache.delete(cacheKey);
     }
-    return `1${digits.join('')}`;
+  }
+
+  function isPositiveCanonicalDecimal(value: string): boolean {
+    return /^[1-9][0-9]*$/u.test(value);
   }
 
   function errorMessage(value: unknown): string {
@@ -437,22 +457,22 @@
           {/if}
         </div>
         <nav aria-label={korean ? '해법 페이지 이동' : 'Solution page navigation'}>
-          <button type="button" disabled={outerPageIndex === 0} on:click={previousOuterPage} aria-label={korean ? '이전 해법' : 'Previous solution'}><ChevronLeft size={16} /></button>
-          <button type="button" disabled={enumerationSealed && outerPageIndex + 1 >= coveragePages.length && !prefetchedPage} on:click={nextOuterPage} aria-label={korean ? '다음 해법' : 'Next solution'}>{#if prefetchPromise && outerPageIndex + 1 >= coveragePages.length}<LoaderCircle class="spin" size={16} />{:else}<ChevronRight size={16} />{/if}</button>
+          <button type="button" disabled={loadingMember || navigatingOuter || !previousOuterAvailable} on:click={previousOuterPage} aria-label={korean ? '이전 해법' : 'Previous solution'}><ChevronLeft size={16} /></button>
+          <button type="button" disabled={loadingMember || navigatingOuter || !nextOuterAvailable} on:click={nextOuterPage} aria-label={korean ? '다음 해법' : 'Next solution'}>{#if prefetchInFlight && outerPageIndex + 1 >= coveragePages.length}<LoaderCircle class="spin" size={16} />{:else}<ChevronRight size={16} />{/if}</button>
         </nav>
       </header>
       <div class="member-meta">
         <span>{korean ? '최소 해법 크기' : 'Minimum cardinality'}: {coveragePage.optimal_cardinality}</span>
         <span>{korean ? '구성원 페이지' : 'Member page'}: {memberPageNumber} / {coveragePage.total_member_pages}</span>
       </div>
-      <ol start={(memberPageNumber - 1) * PRODUCT_MEMBER_PAGE_SIZE + 1}>
+      <ol>
         {#each currentMembers as member (member.candidate_id)}
           <li><code>{member.normalized_solution_key}</code><span>ID {member.candidate_id}</span></li>
         {/each}
       </ol>
       <footer>
-        <button type="button" disabled={loadingMember || memberPageNumber <= 1} on:click={() => showMemberPage(memberPageNumber - 1)}><ChevronLeft size={15} />{korean ? '이전 100개' : 'Previous 100'}</button>
-        <button type="button" disabled={loadingMember || memberPageNumber >= Number(coveragePage.total_member_pages)} on:click={() => showMemberPage(memberPageNumber + 1)}>{korean ? '다음 100개' : 'Next 100'}<ChevronRight size={15} /></button>
+        <button type="button" disabled={loadingMember || navigatingOuter || memberPageNumber === '1'} on:click={() => showMemberPage(decrementCanonicalDecimal(memberPageNumber))}><ChevronLeft size={15} />{korean ? '이전 100개' : 'Previous 100'}</button>
+        <button type="button" disabled={loadingMember || navigatingOuter || compareCanonicalDecimals(memberPageNumber, coveragePage.total_member_pages) >= 0} on:click={() => showMemberPage(incrementCanonicalDecimal(memberPageNumber))}>{korean ? '다음 100개' : 'Next 100'}<ChevronRight size={15} /></button>
       </footer>
       {#if buildV2?.kind === 'score-portfolio'}
         <div class="build-score-evidence">

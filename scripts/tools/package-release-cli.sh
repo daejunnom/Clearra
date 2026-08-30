@@ -157,6 +157,13 @@ run_json_smoke() {
         printf 'Clearra CLI %s smoke violated the terminal-supply product contract\n' "$name" >&2
         exit 2
     fi
+    if [[ "$name" == "pc-score-minimals" ]] && ! printf '%s' "$json" | \
+        node "$ROOT/scripts/tools/validate-release-cli-smokes.mjs" \
+            --validate-discord-score-minimals-json
+    then
+        printf 'Clearra CLI %s smoke violated the Discord canonical projection contract\n' "$name" >&2
+        exit 2
+    fi
 }
 
 run_json_smoke rules '{}' \
@@ -181,6 +188,38 @@ run_json_smoke pc-srs-x \
     '{"rule_profile":"srs-x","effective_kick_model":"srs-x","solution_found":true}' \
     --format json pc --lines 2 --queue IIOOO --fixed --no-hold \
     --rule srs-x --backend cpu --workers 1
+run_json_smoke pc-score-minimals \
+    '{"kind":"pc-score-portfolio.v2","summary":{"capability_id":"pc.score-minimals","result_contract":"pc-score-portfolio.v2","payload_kind":"coverage-portfolio","alternative_index":"1","member_page_number":"1","page_handle_available":true,"score_minimals_score_equality":"score-only","score_minimals_attack_role":"informational-only","score_minimals_canonical_selection":"smallest-canonical-candidate-id"},"resource_report":{"probability_complete":true,"count_complete":true,"truncated":false,"truncation_reason":null,"count_truncated_reason":null,"renormalized":false}}' \
+    --format json pc score-minimals \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --queue I
+
+score_minimals_tie_dir="$(mktemp -d "$BUILD_ROOT/discord-score-minimals.XXXXXX")"
+score_minimals_tie_snapshot="$score_minimals_tie_dir/portfolio.jsonl"
+if ! score_minimals_tie_json="$("$RELEASE_BINARY" \
+    --format json pc score-minimals \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --queue I \
+    --ties --tie-snapshot "$score_minimals_tie_snapshot")"
+then
+    printf 'Clearra CLI explicit score-minimals portfolio smoke failed\n' >&2
+    exit 2
+fi
+if ! printf '%s' "$score_minimals_tie_json" | node -e '
+    const fs = require("node:fs");
+    const structured = JSON.parse(fs.readFileSync(0, "utf8"));
+    if (!structured?.summary?.portfolio_alternative_page) {
+        throw new Error("explicit score-minimals output omitted its portfolio page");
+    }
+'; then
+    printf 'Clearra CLI explicit score-minimals portfolio smoke omitted its opt-in page\n' >&2
+    exit 2
+fi
+if printf '%s' "$score_minimals_tie_json" | \
+    node "$ROOT/scripts/tools/validate-release-cli-smokes.mjs" \
+        --validate-discord-score-minimals-json >/dev/null 2>&1
+then
+    printf 'Discord accepted explicit score-minimals tie metadata\n' >&2
+    exit 2
+fi
 run_json_smoke terminal-supply-p0 \
     '{"summary":{"actual_backend":"wasm-cpu","unique_solution_count":18,"normalized_unique_solution_count":18,"solution_count_calculated":true,"solution_set_materialized":true,"solution_keys_materialized_count":18,"solution_keys_complete":true,"count_complete":true,"supply_window_resolution":"projected-terminal-lookahead","projects_unplaced_lookahead":true,"projects_standard_bag_lookahead":false,"source_sequence_length":7,"total_possible_pattern_count":"1","normalized_solution_set_hash":"cts1:8a7fc484d9b49994","actual_normalized_solution_set_hash":"cts1:8a7fc484d9b49994"}}' \
     --format json --include-solution-data pc-scenario \

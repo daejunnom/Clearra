@@ -7,6 +7,8 @@ function Invoke-TestPolicyArchitectureValidation() {
     $productProcess = Read-PhysicalText "scripts/lib/product-process-surface.ps1"
     $applicationControl = Read-PhysicalText "scripts/lib/clearra-application-control.ps1"
     $testPolicy = Read-PhysicalText "docs/test-policy.md"
+    $focusedJsRunner = Read-PhysicalText "scripts/tools/run-focused-js-tests.mjs"
+    $focusedJsRunnerTests = Read-PhysicalText "scripts/tools/run-focused-js-tests.test.mjs"
     $readme = Read-PhysicalText "README.md"
 
     foreach ($required in @(
@@ -176,6 +178,89 @@ function Invoke-TestPolicyArchitectureValidation() {
     )) {
         if ("$testPolicy`n$readme" -notlike "*$requiredDoc*") {
             Add-ArchitectureError "test policy documentation is missing '$requiredDoc'"
+        }
+    }
+
+    $focusedSection = [regex]::Match(
+        $testPolicy,
+        '(?ms)^## Focused Development Loop\s*(?<body>.*?)(?=^##\s)'
+    )
+    if (-not $focusedSection.Success) {
+        Add-ArchitectureError 'test policy is missing the Focused Development Loop section'
+    } else {
+        $focusedBody = $focusedSection.Groups['body'].Value
+        foreach ($requiredFocusedDoc in @(
+            'node scripts/tools/run-focused-js-tests.mjs',
+            'explicit',
+            'repository-relative',
+            '.test.mjs',
+            '.contract.ts',
+            'boundary-wide',
+            'canonical exact-SHA full gate'
+        )) {
+            if (-not $focusedBody.Contains($requiredFocusedDoc)) {
+                Add-ArchitectureError "focused test policy is missing '$requiredFocusedDoc'"
+            }
+        }
+        if ($focusedBody -match '(?i)npm\s+test\s+--workspace') {
+            Add-ArchitectureError 'focused development policy must not prescribe a workspace-wide npm test'
+        }
+    }
+
+    $singleFullGateSection = [regex]::Match(
+        $testPolicy,
+        '(?ms)^## Single Full Gate Per Exact Commit\s*(?<body>.*?)(?=^##\s)'
+    )
+    if (-not $singleFullGateSection.Success) {
+        Add-ArchitectureError 'test policy is missing the Single Full Gate Per Exact Commit section'
+    } else {
+        $singleFullGateBody = $singleFullGateSection.Groups['body'].Value
+        foreach ($requiredSingleGateDoc in @(
+            'workflow_dispatch',
+            'canonical predeployment acceptance run',
+            'tag run is publication only',
+            'does not reinstall the workspace',
+            'successful exact-SHA dispatch run ID',
+            'dedicated `ctk3` job',
+            '`RustExactTests` owns the single full Rust library suite',
+            '`NoProductDebt` keeps its unique probes',
+            'exact Pages-ready Web/WASM build',
+            'does not',
+            'rebuild WASM'
+        )) {
+            if (-not $singleFullGateBody.Contains($requiredSingleGateDoc)) {
+                Add-ArchitectureError "single full gate policy is missing '$requiredSingleGateDoc'"
+            }
+        }
+    }
+
+    foreach ($requiredFocusedRunnerContract in @(
+        '.test.mjs',
+        '.contract.ts',
+        'win32.isAbsolute',
+        'posix.isAbsolute',
+        'GLOB_META',
+        'HEAVY_PATH_SEGMENTS',
+        'SECRET_PATH_SEGMENTS',
+        'entry.isSymbolicLink()',
+        'entry.isFile()',
+        'scripts/tools/run-typescript-contracts.mjs',
+        'args: Object.freeze(["--test", "--"',
+        'shell: false'
+    )) {
+        if (-not $focusedJsRunner.Contains($requiredFocusedRunnerContract)) {
+            Add-ArchitectureError "focused JavaScript runner is missing '$requiredFocusedRunnerContract'"
+        }
+    }
+    foreach ($requiredFocusedRunnerTest in @(
+        'groups each runner once',
+        'rejects absolute paths, traversal, globs, and noncanonical paths',
+        'rejects heavy and secret locations before reading them',
+        'rejects file and directory symlink aliases',
+        'rejects unsupported suffixes, directories, missing files, and duplicates'
+    )) {
+        if (-not $focusedJsRunnerTests.Contains($requiredFocusedRunnerTest)) {
+            Add-ArchitectureError "focused JavaScript runner tests are missing '$requiredFocusedRunnerTest'"
         }
     }
 

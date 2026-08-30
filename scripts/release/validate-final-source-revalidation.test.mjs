@@ -5,6 +5,10 @@ import {
   parseFinalSourceCliArguments,
   validateFinalSourceRevalidation,
 } from "./validate-final-source-revalidation.mjs";
+import {
+  canonicalSha256,
+  sealCanonicalReport,
+} from "./canonical-release-evidence.mjs";
 
 const COMMIT = "1".repeat(40);
 const HASH = "a".repeat(64);
@@ -13,8 +17,26 @@ function evidence(id, extra = {}) {
   return { id, sha256: HASH, source_commit: COMMIT, ...extra };
 }
 
-function validManifest() {
-  return {
+function validBundle() {
+  const discordCatalogSyncReport = sealCanonicalReport({
+    schema_id: "clearra.discord.command-catalog-sync.v1",
+    source_commit: COMMIT,
+    application_id: "223456789012345678",
+    started_at: "2026-08-27T00:00:00.000Z",
+    ended_at: "2026-08-27T00:00:01.000Z",
+    status: "synchronized",
+    changed: true,
+    command_count: 2,
+    expected_catalog_sha256: HASH,
+    prior_catalog_sha256: "b".repeat(64),
+    prior_snapshot_sha256: "8".repeat(64),
+    current_before_sha256: "b".repeat(64),
+    current_after_sha256: "c".repeat(64),
+  });
+  const productionObservationReport = productionObservation(
+    discordCatalogSyncReport.report_sha256,
+  );
+  const manifest = {
     schema_id: "clearra.final-source-revalidation.v1",
     release: "v0.8.0",
     source: {
@@ -68,23 +90,32 @@ function validManifest() {
       },
       discord: {
         source_commit: COMMIT,
+        application_id: "223456789012345678",
         image_digest: `sha256:${HASH}`,
         job_revision: "job-1",
         oracle_revision: "oracle-1",
+        oracle_release_sha256: "d".repeat(64),
+        oracle_settings_sha256: "e".repeat(64),
         traffic_percent: 100,
         command_catalog_sha256: HASH,
+        command_catalog_prior_snapshot_sha256: "8".repeat(64),
+        command_catalog_readback_sha256: "c".repeat(64),
+        command_catalog_sync_report_sha256:
+          discordCatalogSyncReport.report_sha256,
         catalog_synced: true,
         status: "active",
       },
       rollback_snapshot: evidence("rollback", { status: "captured" }),
     },
     observation: {
+      report_schema_id: "clearra.production-observation.v1",
       source_commit: COMMIT,
       started_at: "2026-08-27T00:00:00.000Z",
       ended_at: "2026-08-27T00:20:00.000Z",
       duration_seconds: 1200,
+      probe_spec_sha256: "6".repeat(64),
       status: "passed",
-      report_sha256: HASH,
+      report_sha256: productionObservationReport.report_sha256,
     },
     tag: {
       name: "v0.8.0",
@@ -101,65 +132,226 @@ function validManifest() {
       status: "published",
     },
   };
+  return { manifest, discordCatalogSyncReport, productionObservationReport };
+}
+
+function validateBundle(bundle, options = {}) {
+  return validateFinalSourceRevalidation(bundle.manifest, {
+    discordCatalogSyncReport: bundle.discordCatalogSyncReport,
+    productionObservationReport: bundle.productionObservationReport,
+    ...options,
+  });
+}
+
+function productionObservation(catalogSyncReportSha256) {
+  const identities = {
+    cloud: {
+      source_commit: COMMIT,
+      engine_build_id: COMMIT,
+      revision: "job-1",
+      image_digest: `sha256:${HASH}`,
+      traffic_percent: 100,
+      cpu: "8",
+      memory: "16Gi",
+      concurrency: 1,
+      min_instances: 0,
+      max_instances: 4,
+      startup_cpu_boost: true,
+      contract_schema_version: "clearra.search.contract.v2",
+      supply_semantics_id: "clearra.supply.projected-terminal-lookahead.v1",
+      artifact_schema_version: "clearra.solution-data.v1",
+      job_smoke_report_sha256: "7".repeat(64),
+      stable_url: "https://clearra-current-job.example.run.app/",
+      tagged_url: "https://v080---clearra-current-job.example.run.app/",
+      status: "active",
+    },
+    discord: {
+      source_commit: COMMIT,
+      application_id: "223456789012345678",
+      command_catalog_sha256: HASH,
+      command_catalog_prior_snapshot_sha256: "8".repeat(64),
+      command_catalog_readback_sha256: "c".repeat(64),
+      command_catalog_sync_report_sha256: catalogSyncReportSha256,
+      command_count: 2,
+      command_names: ["1:help", "3:Get original GIF"],
+      status: "active",
+    },
+    oracle: {
+      source_commit: COMMIT,
+      release_id: "oracle-1",
+      release_tree_sha256: "d".repeat(64),
+      settings_sha256: "e".repeat(64),
+      candidate_revision: "job-1",
+      candidate_url: "https://v080---clearra-current-job.example.run.app/",
+      job_url: "https://v080---clearra-current-job.example.run.app/jobs",
+      deployment_nonce: "9".repeat(64),
+      gateway_pid: 1234,
+      gateway_start_monotonic_usec: 123456789,
+      boot_id: "12345678-1234-1234-1234-123456789abc",
+      ready_record_observed: true,
+      status: "active",
+    },
+    pages: {
+      source_commit: COMMIT,
+      engine_build_id: COMMIT,
+      version: "0.8.0",
+      deployment_id: "pages-1",
+      artifact_sha256: HASH,
+      base_path: "/Clearra",
+      url: "https://daejunnom.github.io/Clearra/",
+      status: "active",
+    },
+  };
+  return sealCanonicalReport({
+    schema_id: "clearra.production-observation.v1",
+    source_commit: COMMIT,
+    started_at: "2026-08-27T00:00:00.000Z",
+    ended_at: "2026-08-27T00:20:00.000Z",
+    duration_seconds: 1200,
+    interval_seconds: 1200,
+    probe_spec_sha256: "6".repeat(64),
+    probe_adapters: ["cloud", "discord", "oracle", "pages"].map((surface) => ({
+      surface,
+      sha256: "5".repeat(64),
+    })),
+    status: "passed",
+    surfaces: ["cloud", "discord", "oracle", "pages"].map((surface) => {
+      const identity = identities[surface];
+      const identitySha256 = canonicalSha256(identity);
+      return {
+        surface,
+        identity,
+        identity_sha256: identitySha256,
+        observation_count: 2,
+        observations: [0, 1].map((sequence) => ({
+          sequence,
+          observed_at: sequence === 0
+            ? "2026-08-27T00:00:00.000Z"
+            : "2026-08-27T00:20:00.000Z",
+          identity_sha256: identitySha256,
+          freshness: observationFreshness(surface, identity, sequence),
+        })),
+      };
+    }),
+  });
+}
+
+function observationFreshness(surface, identity, sequence) {
+  const observedAt = sequence === 0
+    ? "2026-08-27T00:00:00.000Z"
+    : "2026-08-27T00:20:00.000Z";
+  const probeId = (sequence + 1).toString(16).padStart(64, "0");
+  if (surface === "oracle") {
+    return {
+      operation_marker: canonicalSha256({
+        contract: "clearra.oracle.candidate-observation.v1",
+        source_commit: identity.source_commit,
+        candidate_revision: identity.candidate_revision,
+        fresh_operation_at: observedAt,
+        observed_at: observedAt,
+      }),
+      fresh_operation_at: observedAt,
+      observed_at: observedAt,
+    };
+  }
+  if (surface === "discord") {
+    return { probe_id: probeId, readback_sha256: "c".repeat(64) };
+  }
+  if (surface === "cloud") {
+    return {
+      probe_id: probeId,
+      service_readback_sha256: "1".repeat(64),
+      revision_readback_sha256: "2".repeat(64),
+      stable_health_sha256: "3".repeat(64),
+      tagged_health_sha256: "4".repeat(64),
+    };
+  }
+  return { probe_id: probeId, identity_readback_sha256: "8".repeat(64) };
 }
 
 test("accepts exactly one fully observed v0.8.0 source identity", () => {
+  const bundle = validBundle();
   assert.equal(
-    validateFinalSourceRevalidation(validManifest(), { expectedSourceCommit: COMMIT }),
+    validateBundle(bundle, { expectedSourceCommit: COMMIT }),
     true,
   );
 });
 
 test("rejects mixed source identities and nonzero readiness", () => {
-  const mixed = validManifest();
-  mixed.surface_reports[2].source_commit = "3".repeat(40);
-  assert.throws(() => validateFinalSourceRevalidation(mixed), /source commit differs/u);
+  const mixed = validBundle();
+  mixed.manifest.surface_reports[2].source_commit = "3".repeat(40);
+  assert.throws(() => validateBundle(mixed), /source commit differs/u);
 
-  const open = validManifest();
-  open.contracts.readiness_open_count = 1;
-  assert.throws(() => validateFinalSourceRevalidation(open), /zero readiness/u);
+  const open = validBundle();
+  open.manifest.contracts.readiness_open_count = 1;
+  assert.throws(() => validateBundle(open), /zero readiness/u);
 });
 
 test("requires exactly three named release artifacts and twenty observed minutes", () => {
-  const missingArtifact = validManifest();
-  missingArtifact.release_artifacts.pop();
-  assert.throws(() => validateFinalSourceRevalidation(missingArtifact), /exactly three/u);
+  const missingArtifact = validBundle();
+  missingArtifact.manifest.release_artifacts.pop();
+  assert.throws(() => validateBundle(missingArtifact), /exactly three/u);
 
-  const renamedArtifact = validManifest();
-  renamedArtifact.release_artifacts[2].name = "Clearra-GUI-v0.8.0-windows-x86_64.zip";
+  const renamedArtifact = validBundle();
+  renamedArtifact.manifest.release_artifacts[2].name = "Clearra-GUI-v0.8.0-windows-x86_64.zip";
   assert.throws(
-    () => validateFinalSourceRevalidation(renamedArtifact),
+    () => validateBundle(renamedArtifact),
     /canonical release asset/u,
   );
 
-  const shortObservation = validManifest();
-  shortObservation.observation.ended_at = "2026-08-27T00:19:59.000Z";
-  shortObservation.observation.duration_seconds = 1199;
-  assert.throws(() => validateFinalSourceRevalidation(shortObservation), /at least 1200/u);
+  const shortObservation = validBundle();
+  shortObservation.manifest.observation.ended_at = "2026-08-27T00:19:59.000Z";
+  shortObservation.manifest.observation.duration_seconds = 1199;
+  assert.throws(() => validateBundle(shortObservation), /at least 1200/u);
 });
 
 test("rejects prior release authority and secret-shaped fields recursively", () => {
-  const stale = validManifest();
-  stale.canonical_gate.id = "v0.7.5-release-acceptance";
-  assert.throws(() => validateFinalSourceRevalidation(stale), /v0\.7\.5 authority/u);
+  const stale = validBundle();
+  stale.manifest.canonical_gate.id = "v0.7.5-release-acceptance";
+  assert.throws(() => validateBundle(stale), /v0\.7\.5 authority/u);
 
-  const secret = validManifest();
-  secret.deployment.discord.api_token = "forbidden";
-  assert.throws(() => validateFinalSourceRevalidation(secret), /forbidden secret material/u);
+  const secret = validBundle();
+  secret.manifest.deployment.discord.api_token = "forbidden";
+  assert.throws(() => validateBundle(secret), /forbidden secret material/u);
 });
 
 test("requires active deployments, catalog sync, exact tag, and immutable release", () => {
-  const inactive = validManifest();
-  inactive.deployment.discord.traffic_percent = 99;
-  assert.throws(() => validateFinalSourceRevalidation(inactive), /100 percent/u);
+  const inactive = validBundle();
+  inactive.manifest.deployment.discord.traffic_percent = 99;
+  assert.throws(() => validateBundle(inactive), /100 percent/u);
 
-  const tag = validManifest();
-  tag.tag.target_commit = "4".repeat(40);
-  assert.throws(() => validateFinalSourceRevalidation(tag), /source commit differs/u);
+  const tag = validBundle();
+  tag.manifest.tag.target_commit = "4".repeat(40);
+  assert.throws(() => validateBundle(tag), /source commit differs/u);
 
-  const mutable = validManifest();
-  mutable.immutable_release.immutable = false;
-  assert.throws(() => validateFinalSourceRevalidation(mutable), /not recorded as immutable/u);
+  const mutable = validBundle();
+  mutable.manifest.immutable_release.immutable = false;
+  assert.throws(() => validateBundle(mutable), /not recorded as immutable/u);
+});
+
+test("requires actual catalog and observation producer reports and exact bindings", () => {
+  const missingCatalog = validBundle();
+  assert.throws(
+    () => validateFinalSourceRevalidation(missingCatalog.manifest, {
+      productionObservationReport: missingCatalog.productionObservationReport,
+    }),
+    /actual Discord command catalog sync producer report is required/u,
+  );
+
+  const driftedCatalog = validBundle();
+  driftedCatalog.manifest.deployment.discord.command_catalog_readback_sha256 =
+    "9".repeat(64);
+  assert.throws(
+    () => validateBundle(driftedCatalog),
+    /differs from the actual catalog sync producer report/u,
+  );
+
+  const driftedObservation = validBundle();
+  driftedObservation.manifest.deployment.pages.deployment_id = "pages-drift";
+  assert.throws(
+    () => validateBundle(driftedObservation),
+    /observed Pages identity differs/u,
+  );
 });
 
 test("validator CLI rejects unknown duplicate missing and malformed arguments", () => {
@@ -167,10 +359,19 @@ test("validator CLI rejects unknown duplicate missing and malformed arguments", 
     parseFinalSourceCliArguments([
       "--manifest",
       "report.json",
+      "--discord-catalog-sync-report",
+      "catalog-sync.json",
+      "--production-observation-report",
+      "observation.json",
       "--expected-source-commit",
       COMMIT,
     ]),
-    { manifestPath: "report.json", expectedSourceCommit: COMMIT },
+    {
+      manifestPath: "report.json",
+      expectedSourceCommit: COMMIT,
+      discordCatalogSyncReportPath: "catalog-sync.json",
+      productionObservationReportPath: "observation.json",
+    },
   );
   assert.throws(() => parseFinalSourceCliArguments([]), /--manifest PATH is required/u);
   assert.throws(
@@ -189,6 +390,10 @@ test("validator CLI rejects unknown duplicate missing and malformed arguments", 
     () => parseFinalSourceCliArguments([
       "--manifest",
       "one",
+      "--discord-catalog-sync-report",
+      "catalog-sync.json",
+      "--production-observation-report",
+      "observation.json",
       "--expected-source-commit",
       "abc",
     ]),

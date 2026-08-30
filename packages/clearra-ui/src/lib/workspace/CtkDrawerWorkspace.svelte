@@ -10,6 +10,7 @@
     Download,
     FileUp,
     HelpCircle,
+    Image,
     LoaderCircle,
     Plus,
     Trash2,
@@ -20,7 +21,12 @@
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     automaticWorkerAuthority,
+    clearWasmTerminalResult,
     sharedBrowserHostCapabilitySnapshot,
+    updateWasmCommandText,
+    wasmWorkerState,
+    WasmTerminalWorkerController,
+    type ClearraProductResultPayload,
     type HostCapabilitySnapshot
   } from '../wasm';
   import { writeClipboardText } from './clipboardText';
@@ -50,7 +56,12 @@
     encodeFieldDocumentAsync,
     openFieldDocument
   } from './fieldInterchange';
+  import {
+    decodeValidatedRenderArtifact,
+    quoteWebCommandToken
+  } from './documentUtilityModel';
   import { fieldImportFailureMessageKey } from './fieldImportFailure';
+  import { validateProductResultPayload } from './productResultPager';
   import {
     CTK3_FILE_ACCEPT,
     installGlobalDocumentDrop,
@@ -65,10 +76,12 @@
     type WorkspaceLanguage,
     type WorkspaceMessageKey
   } from './workspaceI18n';
+  import { workspaceViewFromWasm } from './workspaceRuntime';
 
   type CopyState = 'idle' | 'loading' | 'copied' | 'failed';
   export let initialDocument: string | undefined = undefined;
   export let viewerMode = false;
+  export let workerFactory: (() => Worker) | null = null;
 
   const hostCapabilitySnapshot =
     getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
@@ -76,6 +89,10 @@
   const documentWorkerCount = automaticWorkerAuthority(
     hostCapabilitySnapshot
   ).workersEffective;
+  const renderWorkerController = new WasmTerminalWorkerController(
+    workerFactory,
+    hostCapabilitySnapshot
+  );
 
   let language: WorkspaceLanguage = 'en';
   let currentPage = blankPage(8);
@@ -107,8 +124,28 @@
   let closed = false;
   let documentDragActive = false;
   let pageStripElement: HTMLDivElement;
+  let renderFormat: 'png' | 'gif' = 'png';
+  let renderPreparing = false;
+  let renderObservedPayload: ClearraProductResultPayload | null = null;
+  let renderArtifact: Extract<
+    ClearraProductResultPayload,
+    { content: { payload_kind: 'render-artifact' } }
+  >['content']['payload'] | null = null;
+  let renderArtifactUrl = '';
+  let renderError = '';
+  let renderGeneration = 0;
+  let renderEncodeController: AbortController | null = null;
+  let renderDocumentRevision = 0;
+  let renderRequestedRevision = -1;
 
   $: currentHeight = Math.max(1, currentPage?.height ?? 1);
+  $: renderWorkerController.setWorkerFactory(workerFactory);
+  $: renderRuntimeView = workspaceViewFromWasm($wasmWorkerState);
+  $: renderActive = renderPreparing ||
+    renderRuntimeView.status === 'running' ||
+    renderRuntimeView.status === 'cancelling';
+  $: renderPayload = renderRuntimeView.response?.product_result_payload ?? null;
+  $: if (renderPayload !== renderObservedPayload) acceptRenderPayload(renderPayload);
   $: hasImport = pendingImportSource !== null || importValue.trim().length > 0;
   $: pageStrip = ctkPageStripItems(pageCount, pageIndex);
   $: {
@@ -131,6 +168,7 @@
     language = preferredWorkspaceLanguage(
       localStorage.getItem('clearra-language') ?? navigator.language
     );
+    if (workerFactory) clearWasmTerminalResult();
     const viewerDocument = initialDocument ?? documentFromLocation();
     if (viewerDocument) {
       const source = viewerDocument;
@@ -194,6 +232,7 @@
   }
 
   function updateCurrent(page: Ctk3Page) {
+    invalidateRenderResult();
     documentModel.updatePage(pageIndex, page);
     currentPage = page;
     previewPages = new Map(previewPages).set(pageIndex, clonePage(page));
@@ -238,6 +277,7 @@
   }
 
   function addLineClearedPage(grayscale: boolean) {
+    invalidateRenderResult();
     const next = createLineClearedPage(currentPage, grayscale);
     documentModel.insertPage(pageIndex + 1, next);
     pageCount = documentModel.pageCount;
@@ -298,6 +338,7 @@
   }
 
   function addPage() {
+    invalidateRenderResult();
     const next = blankPage(currentHeight);
     documentModel.insertPage(pageIndex + 1, next);
     pageCount = documentModel.pageCount;
@@ -306,6 +347,7 @@
   }
 
   function duplicatePage() {
+    invalidateRenderResult();
     const duplicate = clonePage(currentPage);
     documentModel.insertPage(pageIndex + 1, duplicate);
     pageCount = documentModel.pageCount;
@@ -314,6 +356,7 @@
   }
 
   function removePage() {
+    invalidateRenderResult();
     if (pageCount === 1) {
       const next = blankPage(currentHeight);
       replaceDocument(CtkDrawerDocument.fromPages(10, [next]), next);
@@ -329,6 +372,7 @@
     if (closed) return;
     const nextIndex = Math.max(0, Math.min(pageCount - 1, index));
     if (!force && nextIndex === pageIndex) return;
+    invalidateRenderResult();
     const token = ++pageLoadToken;
     pageLoading = true;
     try {
@@ -350,6 +394,7 @@
 
   async function importDocument(sourceOverride?: string) {
     if ((!sourceOverride && !hasImport) || importLoading || closed) return;
+    invalidateRenderResult();
     importLoading = true;
     importFailed = false;
     await nextPaint();
@@ -457,6 +502,116 @@
     }
   }
 
+  async function renderDocument() {
+    if (!workerFactory || renderActive || closed) return;
+    clearRenderResult();
+    clearWasmTerminalResult();
+    const controller = new AbortController();
+    renderEncodeController = controller;
+    renderPreparing = true;
+    try {
+      const source = await encodeDocument('ctk', controller.signal);
+      throwIfAborted(controller.signal);
+      updateWasmCommandText([
+        'clearra utility render',
+        '--format',
+        'ctk3',
+        '--document',
+        quoteWebCommandToken(source),
+        '--artifact-format',
+        renderFormat,
+        ...(renderFormat === 'png' ? ['--page', String(pageIndex + 1)] : [])
+      ].join(' '));
+      renderRequestedRevision = renderDocumentRevision;
+      if (!renderWorkerController.run()) {
+        throw new Error('the local browser render worker could not start');
+      }
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbortError(error)) {
+        renderError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      if (renderEncodeController === controller) renderEncodeController = null;
+      renderPreparing = false;
+    }
+  }
+
+  function cancelRender() {
+    if (renderEncodeController && !renderEncodeController.signal.aborted) {
+      renderEncodeController.abort(abortError('CTK render preparation was cancelled.'));
+    }
+    renderWorkerController.cancel();
+  }
+
+  function acceptRenderPayload(payload: ClearraProductResultPayload | null) {
+    renderObservedPayload = payload;
+    renderArtifact = null;
+    renderError = '';
+    revokeRenderArtifact();
+    if (!payload) return;
+    if (renderRequestedRevision !== renderDocumentRevision) return;
+    const validationError = validateProductResultPayload(payload);
+    if (validationError) {
+      renderError = validationError;
+      return;
+    }
+    if (payload.content.payload_kind !== 'render-artifact') {
+      renderError = 'typed result does not match the CTK render utility';
+      return;
+    }
+    renderArtifact = payload.content.payload;
+    void prepareRenderArtifact(payload.content.payload, ++renderGeneration);
+  }
+
+  async function prepareRenderArtifact(
+    payload: NonNullable<typeof renderArtifact>,
+    generation: number
+  ) {
+    try {
+      const bytes = await decodeValidatedRenderArtifact(payload);
+      if (generation !== renderGeneration || closed) return;
+      renderArtifactUrl = URL.createObjectURL(
+        new Blob([bytes], { type: payload.media_type })
+      );
+    } catch (error) {
+      if (generation === renderGeneration && !closed) {
+        renderError = error instanceof Error ? error.message : String(error);
+        renderArtifact = null;
+      }
+    }
+  }
+
+  function downloadRenderArtifact() {
+    if (!renderArtifact || !renderArtifactUrl) return;
+    const anchor = document.createElement('a');
+    anchor.href = renderArtifactUrl;
+    anchor.download = renderArtifact.filename;
+    anchor.rel = 'noopener';
+    anchor.click();
+  }
+
+  function clearRenderResult() {
+    renderObservedPayload = null;
+    renderRequestedRevision = -1;
+    renderArtifact = null;
+    renderError = '';
+    revokeRenderArtifact();
+  }
+
+  function invalidateRenderResult() {
+    renderDocumentRevision += 1;
+    if (!workerFactory) return;
+    if (renderActive) cancelRender();
+    clearWasmTerminalResult();
+    clearRenderResult();
+  }
+
+  function revokeRenderArtifact() {
+    renderGeneration += 1;
+    if (renderArtifactUrl) URL.revokeObjectURL(renderArtifactUrl);
+    renderArtifactUrl = '';
+  }
+
   async function encodeDocument(
     format: 'fumen' | 'ctk',
     signal: AbortSignal
@@ -500,6 +655,7 @@
 
   function replaceDocument(next: CtkDrawerDocument, page: Ctk3Page) {
     throwIfAborted(lifecycleController.signal);
+    invalidateRenderResult();
     documentModel.close();
     documentModel = next;
     pageCount = next.pageCount;
@@ -527,6 +683,12 @@
     if (downloadController && !downloadController.signal.aborted) {
       downloadController.abort(error);
     }
+    if (renderEncodeController && !renderEncodeController.signal.aborted) {
+      renderEncodeController.abort(error);
+    }
+    renderWorkerController.dispose();
+    revokeRenderArtifact();
+    if (workerFactory) clearWasmTerminalResult();
     pendingImportModel?.close();
     pendingImportModel = null;
     documentModel.close();
@@ -534,6 +696,7 @@
     pageLoading = false;
     copyState = 'idle';
     downloadState = 'idle';
+    renderPreparing = false;
   }
 
   function throwIfAborted(signal: AbortSignal) {
@@ -956,6 +1119,64 @@
         <p class="error" role="alert">{label('documentCopyFailed')}</p>
       {/if}
     </div>
+
+    {#if workerFactory}
+      <div class="control-section render-section">
+        <h2>{label('utilityRender')}</h2>
+        <p class="render-help">
+          {language === 'ko'
+            ? `브라우저의 로컬 WASM에서만 실행합니다. PNG는 현재 ${pageIndex + 1}페이지, GIF는 전체 문서를 렌더합니다.`
+            : `Runs only in local browser WASM. PNG renders current page ${pageIndex + 1}; GIF renders the full document.`}
+        </p>
+        <div class="export-row">
+          <div class="segments" role="group" aria-label={language === 'ko' ? '렌더 형식' : 'Render format'}>
+            <button type="button" class:active={renderFormat === 'png'} disabled={renderActive} on:click={() => (renderFormat = 'png')}>PNG</button>
+            <button type="button" class:active={renderFormat === 'gif'} disabled={renderActive} on:click={() => (renderFormat = 'gif')}>GIF</button>
+          </div>
+          <button
+            type="button"
+            class="copy-document"
+            disabled={importLoading || pageLoading}
+            aria-busy={renderActive}
+            on:click={() => renderActive ? cancelRender() : void renderDocument()}
+          >
+            {#if renderActive}
+              <span class="spinner"><LoaderCircle size={15} /></span>
+              {label('cancel')}
+            {:else}
+              <Image size={15} />
+              {label('utilityRender')}
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/if}
+  </section>
+
+  <section
+    slot="result"
+    class="render-result"
+    class:hidden={!workerFactory || !(renderActive || renderArtifact || renderError || renderRuntimeView.error)}
+    aria-live="polite"
+  >
+    {#if workerFactory}
+      <h2>{label('utilityRender')}</h2>
+      {#if renderArtifact && renderArtifactUrl}
+        <figure>
+          <img src={renderArtifactUrl} alt={language === 'ko' ? 'CTK 로컬 렌더 결과' : 'Local CTK render result'} />
+          <figcaption>
+            {renderArtifact.filename} · {renderArtifact.byte_length} bytes · SHA-256 {renderArtifact.sha256}
+          </figcaption>
+        </figure>
+        <button class="render-download" type="button" on:click={downloadRenderArtifact}>
+          <Download size={15} />{language === 'ko' ? '렌더 다운로드' : 'Download render'}
+        </button>
+      {:else if renderError || renderRuntimeView.error}
+        <p class="error" role="alert">{renderError || renderRuntimeView.error}</p>
+      {:else}
+        <p class="render-pending">{language === 'ko' ? '로컬 렌더를 준비하고 있습니다.' : 'Preparing the local render.'}</p>
+      {/if}
+    {/if}
   </section>
 </WorkspaceShell>
 
@@ -1006,6 +1227,33 @@
     width: 34px;
   }
   button:disabled { cursor: default; opacity: .4; }
+  .render-help { color: #65716c; font-size: 11px; line-height: 1.5; margin: 0; }
+  .render-result { margin: 0 auto; max-width: 1460px; padding: 8px 24px 40px; }
+  .render-result.hidden { display: none; }
+  .render-result h2 { font-size: 17px; margin: 0 0 14px; }
+  .render-result figure, .render-pending, .render-result > .error {
+    background: #fff;
+    border: 1px solid #d5dcd7;
+    border-radius: 7px;
+    margin: 0;
+    padding: 14px 18px;
+  }
+  .render-result figure { display: grid; gap: 12px; justify-items: center; }
+  .render-result img { image-rendering: pixelated; max-height: 620px; max-width: 100%; }
+  .render-result figcaption { color: #65716c; font-size: 11px; overflow-wrap: anywhere; }
+  .render-download {
+    align-items: center;
+    background: #fff;
+    border: 1px solid #cbd3ce;
+    border-radius: 5px;
+    color: #26322e;
+    cursor: pointer;
+    display: inline-flex;
+    gap: 6px;
+    margin-top: 12px;
+    min-height: 34px;
+    padding: 6px 10px;
+  }
   .page-strip {
     display: grid;
     gap: 8px;
@@ -1224,6 +1472,7 @@
     .section-heading { align-items: flex-start; }
     .page-actions { display: grid; grid-template-columns: repeat(5, 32px); }
     .page-actions button { height: 32px; width: 32px; }
+    .render-result { padding-left: 16px; padding-right: 16px; }
     .flag-grid { grid-template-columns: 1fr; }
     .export-row { align-items: stretch; display: grid; }
     .copy-document { width: 100%; }

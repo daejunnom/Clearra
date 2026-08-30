@@ -98,6 +98,9 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $npmCommand.Source @(
             'exec', '--workspace', '@clearra/web', '--', 'vite', 'build'
         ) 'clearra-web frontend build'
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')
+        ) 'clearra-web Pages fallback'
         Write-Output 'wasm_build_test=passed host_tests=executed runtime_tests=executed wasm32=compiled bindgen_runtime=staged frontend=built'
     }
     finally {

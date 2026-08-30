@@ -32,6 +32,84 @@ Library-only consumers share `core-c-library-cache`. Executed CTest owns the
 separate `core-c-test-cache` (or an explicitly named sanitizer/split cache), so
 a library build cannot refresh or accidentally reuse a CTest executable graph.
 
+## Focused Development Loop
+
+Development verification is path-scoped. A small change must run the narrowest
+owned test surface first; it must not invoke `ReleaseAcceptance`, `Acceptance`,
+`Strict`, or an unrelated workspace test as a convenience fallback. When a
+change crosses boundaries, combine the corresponding focused rows. An unknown
+or genuinely global boundary is resolved explicitly by the developer instead
+of silently expanding to the full release suite.
+
+JavaScript and TypeScript focused checks use
+`node scripts/tools/run-focused-js-tests.mjs` followed only by explicit,
+repository-relative `.test.mjs` or `.contract.ts` file paths. The runner rejects
+directories, globs, generated/heavy paths, secret paths, and repository escape.
+Workspace-wide package test scripts are reserved for a deliberate boundary-wide
+change or the canonical exact-SHA full gate; they are not the default response
+to a small source edit.
+
+| Changed path or contract | Focused developer verification |
+| --- | --- |
+| `.github/workflows/release-cli.yml`, release publication helpers, or their release policy docs | `node scripts/tools/validate-release-cli-smokes.mjs` and `node scripts/tools/run-focused-js-tests.mjs scripts/tools/validate-release-cli-smokes.test.mjs`; append only named sibling files owned by the changed helper, for example `scripts/release/pages-rollback-authority.test.mjs` |
+| One Rust crate or one named Rust integration test | `scripts/run-rust-test.ps1 -Package <package> -Lib -ExecutionSurface Trusted` or `-Test <target>`; use `-Filter <name>` when one regression owns the change |
+| `packages/clearra-ui/**` | Run the exact owning files, for example `node scripts/tools/run-focused-js-tests.mjs packages/clearra-ui/test/uiRuntimeContracts.test.mjs packages/clearra-ui/test/productResultPager.contract.ts` |
+| `apps/clearra-web/**` | Run the exact owning contracts, for example `node scripts/tools/run-focused-js-tests.mjs apps/clearra-web/test/ClearraWasmRuntime.contract.ts` |
+| `packages/ctk3/**` | Run `npm run build --workspace ctk3` once only when changed source must refresh its generated module, then run exact files such as `node scripts/tools/run-focused-js-tests.mjs packages/ctk3/test/compatibility.test.mjs`; do not add its other tests automatically |
+| `apps/clearra-discord-bot/**` | Run the exact owning files, for example `node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/pc-score-minimals-result.test.mjs` |
+| `core-c/**` or the C ABI | `scripts/run-c-core-tests.ps1` with the required aggregate, split, or sanitizer option; do not add Rust/UI suites unless that boundary also changed |
+| Static architecture ownership only | `powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "<owned architecture task>" -QuietProgress` |
+
+Focused passes are development feedback, not release authority. They may be
+repeated while a patch is changing. The full matrix remains intact but runs at
+the frozen predeployment boundary described below.
+
+## Single Full Gate Per Exact Commit
+
+The `Publish Product Release` workflow has two deliberately different modes:
+
+1. `workflow_dispatch` is the canonical predeployment acceptance run. It runs
+   release metadata tests, `ReleaseAcceptance`, Discord contracts, release
+   product builds, and packaged-product smokes once for that exact source SHA.
+2. A `v*` tag run is publication only. It does not reinstall the workspace,
+   rerun the full test matrix, or rebuild release products. Metadata binds one
+   successful exact-SHA dispatch run ID, and publication downloads that run's
+   retained Linux and Windows product artifacts.
+
+The dispatch matrix also assigns one execution owner to every expensive or
+overlapping surface. The dedicated `ctk3` job builds and tests CTK3 once, seals
+the source-bound distribution, and lets Discord and Windows product acceptance
+consume those exact bytes through built-only tests and probes. During
+`ReleaseAcceptance`, `AdversarialCorrectness` owns the C adversarial target while
+`RustExactTests` owns the single full Rust library suite and verifies the
+delegated adversarial and complete-required test names from that same output.
+`RenderGolden` owns the renderer suite, and `DesktopHost` owns the GUI-host
+library suite. `NoProductDebt` owns the one complete static architecture matrix;
+the later `DesktopHost` does not repeat U6 validation in that same release run.
+`NoProductDebt` keeps its unique probes but delegates other overlapping cases
+to the later owners. The public standalone tasks remain self-contained and
+still execute their historical evidence when they are run outside
+`ReleaseAcceptance`.
+
+The successful dispatch also retains its exact Pages-ready Web/WASM build. A
+later Pages deployment verifies and reuses that accepted artifact; it does not
+reinstall Rust or JavaScript dependencies, rerun UI/Web tests, or rebuild WASM
+and Vite output. Reconstructing the older active source for the durable rollback
+capture is a different source-bound recovery operation and remains explicit.
+
+Immediately before publication, the tag run revalidates current `main`, the
+annotated tag, and the bound run's event, completed/success state, head SHA, and
+workflow path. The lookup is scoped to `branch=main`, enumerates every attempt
+of every exact-SHA dispatch, and counts historical successful attempts instead
+of trusting the mutable conclusion on only the latest attempt. Missing or
+expired artifacts, a mismatched run, or source drift fails closed. A failed
+dispatch may be followed by a fresh dispatch because it created no accepted
+success; GitHub's workflow **Re-run** operation is forbidden for canonical
+acceptance. After the one successful first-attempt dispatch, the same SHA cannot
+be accepted again. If its retained evidence expires or is lost, that source is
+no longer publishable: a new source commit and its single full gate are required.
+Publication never substitutes a partial or different run.
+
 ## Trusted
 
 `Trusted` requests repository-built process execution on a host that permits

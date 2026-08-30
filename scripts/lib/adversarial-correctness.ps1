@@ -77,6 +77,22 @@ function Invoke-AdversarialCargoProcessOnce {
     return Invoke-AdversarialCargoProcess $CargoPath $Arguments
 }
 
+function Assert-AdversarialRustCasesInOutput {
+    param(
+        [string]$Output,
+        [object[]]$RequiredCases,
+        [string]$Owner
+    )
+
+    foreach ($case in $RequiredCases) {
+        $executedCasePattern = '(?m)^test ' + [regex]::Escape($case.Test) + ' \.\.\. ok\s*$'
+        if ($Output -notmatch $executedCasePattern) {
+            throw "Rust test owner '$Owner' did not execute required adversarial case '$($case.Id)'"
+        }
+        Write-Output "adversarial_case=$($case.Id) status=passed source=rust owner=$Owner"
+    }
+}
+
 function Invoke-AdversarialRustSuite {
     param(
         [string]$CargoPath,
@@ -120,14 +136,11 @@ function Invoke-AdversarialRustSuite {
         throw 'adversarial Rust suite did not execute any tests'
     }
 
-    foreach ($case in $RequiredCases) {
-        $executedCasePattern = '(?m)^test ' + [regex]::Escape($case.Test) + ' \.\.\. ok\s*$'
-        if ($output -notmatch $executedCasePattern) {
-            throw "adversarial Rust suite '$Package' did not execute required case '$($case.Id)'"
-        }
-        Write-Output "adversarial_case=$($case.Id) status=passed source=rust"
-    }
-    Write-Output "adversarial_suite=$($packages -join ',') status=passed tests=$passed"
+    Assert-AdversarialRustCasesInOutput `
+        -Output $output `
+        -RequiredCases $RequiredCases `
+        -Owner 'AdversarialCorrectness'
+    Write-Output "adversarial_suite=$($packages -join ',') status=passed tests=$passed owner=AdversarialCorrectness"
 }
 
 function Invoke-AdversarialCorrectnessGate {
@@ -151,45 +164,56 @@ function Invoke-AdversarialCorrectnessGate {
     Write-Output "adversarial_case=alternate_successful_buildup_order status=passed source=c"
     Write-Output "adversarial_case=ledger_complete_required status=passed source=c"
 
-    $nativeBuildDir = Get-StartTestsPersistentBuildDir 'core-c-adversarial-cache'
-    $nativeLibDir = Find-CoreCLibraryDir $nativeBuildDir
-    if ([string]::IsNullOrWhiteSpace($nativeLibDir)) {
-        throw "adversarial Rust suites could not find clearra_core under $nativeBuildDir"
-    }
-
-    $previousCargoTargetDir = $env:CARGO_TARGET_DIR
-    $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
-    New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
-    try {
-        $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir
-        Sync-ClearraNativeCargoLinkState `
-            -LibraryDirectory $nativeLibDir `
-            -CargoTargetDirectory $env:CARGO_TARGET_DIR `
-            -CargoPath $CargoPath `
-            -WorkspaceRoot $Root
-        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS =
-            Add-ClearraWindowsNativeRustLinkFlags $previousWindowsRustFlags $nativeLibDir
-        Write-Output "[adversarial] rust execution surface | package-process-parallelism=1 | test-threads=1 | target-dir=$CargoTargetDir"
-        $rustCases = @(Get-AdversarialRustCases)
-        Invoke-AdversarialRustSuite `
-            -CargoPath $CargoPath `
-            -RequiredCases $rustCases `
-            -FeatureArguments @('--features', 'clearra-core-executor/native-c-core')
-    }
-    finally {
-        if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-            Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+    $releaseAcceptance = Get-Variable `
+        -Name ClearraReleaseAcceptanceMode `
+        -Scope Script `
+        -ErrorAction SilentlyContinue
+    $isReleaseAcceptance = $null -ne $releaseAcceptance -and [bool]$releaseAcceptance.Value
+    if ($isReleaseAcceptance) {
+        Write-Output 'adversarial_rust_tests=deferred owner=RustExactTests reason=single-release-suite'
+    } else {
+        $nativeBuildDir = Get-StartTestsPersistentBuildDir 'core-c-adversarial-cache'
+        $nativeLibDir = Find-CoreCLibraryDir $nativeBuildDir
+        if ([string]::IsNullOrWhiteSpace($nativeLibDir)) {
+            throw "adversarial Rust suites could not find clearra_core under $nativeBuildDir"
         }
-        if ([string]::IsNullOrWhiteSpace($previousWindowsRustFlags)) {
-            Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousWindowsRustFlags
+
+        $previousCargoTargetDir = $env:CARGO_TARGET_DIR
+        $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+        New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
+        try {
+            $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir
+            Sync-ClearraNativeCargoLinkState `
+                -LibraryDirectory $nativeLibDir `
+                -CargoTargetDirectory $env:CARGO_TARGET_DIR `
+                -CargoPath $CargoPath `
+                -WorkspaceRoot $Root
+            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS =
+                Add-ClearraWindowsNativeRustLinkFlags $previousWindowsRustFlags $nativeLibDir
+            Write-Output "[adversarial] rust execution surface | package-process-parallelism=1 | test-threads=1 | target-dir=$CargoTargetDir"
+            $rustCases = @(Get-AdversarialRustCases)
+            Invoke-AdversarialRustSuite `
+                -CargoPath $CargoPath `
+                -RequiredCases $rustCases `
+                -FeatureArguments @('--features', 'clearra-core-executor/native-c-core')
+        }
+        finally {
+            if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
+                Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+            } else {
+                $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+            }
+            if ([string]::IsNullOrWhiteSpace($previousWindowsRustFlags)) {
+                Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
+            } else {
+                $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousWindowsRustFlags
+            }
         }
     }
 
     Write-Output "adversarial_correctness=passed"
     Write-Output "adversarial_c_tests=executed"
-    Write-Output "adversarial_rust_tests=executed"
+    if (-not $isReleaseAcceptance) {
+        Write-Output "adversarial_rust_tests=executed owner=AdversarialCorrectness"
+    }
 }

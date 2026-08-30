@@ -19,6 +19,10 @@ import {
   parseFinalSourceAttemptCliArguments,
 } from "./final-source-attempt-journal.mjs";
 import { validateFinalSourceRevalidation } from "./validate-final-source-revalidation.mjs";
+import {
+  canonicalSha256,
+  sealCanonicalReport,
+} from "./canonical-release-evidence.mjs";
 
 const COMMIT = "1".repeat(40);
 const TREE = "2".repeat(40);
@@ -29,17 +33,24 @@ test("materializes one complete hash-chained release attempt without overwriting
     for (const event of completeEvents()) {
       await appendFinalSourceAttemptEvent({ journalPath: journal, ...event });
     }
+    const producerReports = createProducerReports();
     const output = join(root, "final-source.json");
     const manifest = await materializeFinalSourceManifest({
       journalPath: journal,
       outputPath: output,
+      ...producerReports,
     });
     assert.equal(validateFinalSourceRevalidation(manifest, {
       expectedSourceCommit: COMMIT,
+      ...producerReports,
     }), true);
     assert.deepEqual(JSON.parse(await readFile(output, "utf8")), manifest);
     await assert.rejects(
-      materializeFinalSourceManifest({ journalPath: journal, outputPath: output }),
+      materializeFinalSourceManifest({
+        journalPath: journal,
+        outputPath: output,
+        ...producerReports,
+      }),
       (error) => error?.code === "EEXIST",
     );
   });
@@ -160,6 +171,24 @@ test("CLI parser accepts only exact command-specific argument sets", () => {
     () => parseFinalSourceAttemptCliArguments(["future", "--journal", "x"]),
     /unsupported final-source attempt command/u,
   );
+  assert.deepEqual(
+    parseFinalSourceAttemptCliArguments([
+      "materialize",
+      "--journal", "attempt.jsonl",
+      "--output", "final-source.json",
+      "--discord-catalog-sync-report", "catalog-sync.json",
+      "--production-observation-report", "observation.json",
+    ]),
+    {
+      command: "materialize",
+      values: {
+        "--journal": "attempt.jsonl",
+        "--output": "final-source.json",
+        "--discord-catalog-sync-report": "catalog-sync.json",
+        "--production-observation-report": "observation.json",
+      },
+    },
+  );
   assert.throws(
     () => parseFinalSourceAttemptCliArguments([
       "append", "--journal", "x", "--kind", "source", "--kind", "contracts",
@@ -190,6 +219,8 @@ async function withAttempt(body) {
 }
 
 function completeEvents() {
+  const { discordCatalogSyncReport, productionObservationReport } =
+    createProducerReports();
   return [
     event("source", sourcePayload()),
     event("contracts", {
@@ -249,22 +280,31 @@ function completeEvents() {
     }),
     event("deployment-discord", {
       source_commit: COMMIT,
+      application_id: "223456789012345678",
       image_digest: `sha256:${HASH}`,
       job_revision: "job-1",
       oracle_revision: "oracle-1",
+      oracle_release_sha256: "d".repeat(64),
+      oracle_settings_sha256: "e".repeat(64),
       traffic_percent: 100,
       command_catalog_sha256: HASH,
+      command_catalog_prior_snapshot_sha256: "8".repeat(64),
+      command_catalog_readback_sha256: "c".repeat(64),
+      command_catalog_sync_report_sha256:
+        discordCatalogSyncReport.report_sha256,
       catalog_synced: true,
       status: "active",
     }),
     event("rollback-snapshot", evidence("rollback", { status: "captured" })),
     event("observation", {
+      report_schema_id: "clearra.production-observation.v1",
       source_commit: COMMIT,
       started_at: "2026-08-27T00:00:00.000Z",
       ended_at: "2026-08-27T00:20:00.000Z",
       duration_seconds: 1200,
+      probe_spec_sha256: "6".repeat(64),
       status: "passed",
-      report_sha256: HASH,
+      report_sha256: productionObservationReport.report_sha256,
     }),
     event("tag", {
       name: "v0.8.0",
@@ -309,4 +349,147 @@ function artifact(role, name, sizeBytes) {
     size_bytes: sizeBytes,
     source_commit: COMMIT,
   };
+}
+
+function createProducerReports() {
+  const discordCatalogSyncReport = sealCanonicalReport({
+    schema_id: "clearra.discord.command-catalog-sync.v1",
+    source_commit: COMMIT,
+    application_id: "223456789012345678",
+    started_at: "2026-08-27T00:00:00.000Z",
+    ended_at: "2026-08-27T00:00:01.000Z",
+    status: "synchronized",
+    changed: true,
+    command_count: 2,
+    expected_catalog_sha256: HASH,
+    prior_catalog_sha256: "b".repeat(64),
+    prior_snapshot_sha256: "8".repeat(64),
+    current_before_sha256: "b".repeat(64),
+    current_after_sha256: "c".repeat(64),
+  });
+  const identities = {
+    cloud: {
+      source_commit: COMMIT,
+      engine_build_id: COMMIT,
+      revision: "job-1",
+      image_digest: `sha256:${HASH}`,
+      traffic_percent: 100,
+      cpu: "8",
+      memory: "16Gi",
+      concurrency: 1,
+      min_instances: 0,
+      max_instances: 4,
+      startup_cpu_boost: true,
+      contract_schema_version: "clearra.search.contract.v2",
+      supply_semantics_id: "clearra.supply.projected-terminal-lookahead.v1",
+      artifact_schema_version: "clearra.solution-data.v1",
+      job_smoke_report_sha256: "7".repeat(64),
+      stable_url: "https://clearra-current-job.example.run.app/",
+      tagged_url: "https://v080---clearra-current-job.example.run.app/",
+      status: "active",
+    },
+    discord: {
+      source_commit: COMMIT,
+      application_id: "223456789012345678",
+      command_catalog_sha256: HASH,
+      command_catalog_prior_snapshot_sha256: "8".repeat(64),
+      command_catalog_readback_sha256: "c".repeat(64),
+      command_catalog_sync_report_sha256:
+        discordCatalogSyncReport.report_sha256,
+      command_count: 2,
+      command_names: ["1:help", "3:Get original GIF"],
+      status: "active",
+    },
+    oracle: {
+      source_commit: COMMIT,
+      release_id: "oracle-1",
+      release_tree_sha256: "d".repeat(64),
+      settings_sha256: "e".repeat(64),
+      candidate_revision: "job-1",
+      candidate_url: "https://v080---clearra-current-job.example.run.app/",
+      job_url: "https://v080---clearra-current-job.example.run.app/jobs",
+      deployment_nonce: "9".repeat(64),
+      gateway_pid: 1234,
+      gateway_start_monotonic_usec: 123456789,
+      boot_id: "12345678-1234-1234-1234-123456789abc",
+      ready_record_observed: true,
+      status: "active",
+    },
+    pages: {
+      source_commit: COMMIT,
+      engine_build_id: COMMIT,
+      version: "0.8.0",
+      deployment_id: "pages-1",
+      artifact_sha256: HASH,
+      base_path: "/Clearra",
+      url: "https://daejunnom.github.io/Clearra/",
+      status: "active",
+    },
+  };
+  const productionObservationReport = sealCanonicalReport({
+    schema_id: "clearra.production-observation.v1",
+    source_commit: COMMIT,
+    started_at: "2026-08-27T00:00:00.000Z",
+    ended_at: "2026-08-27T00:20:00.000Z",
+    duration_seconds: 1200,
+    interval_seconds: 1200,
+    probe_spec_sha256: "6".repeat(64),
+    probe_adapters: ["cloud", "discord", "oracle", "pages"].map((surface) => ({
+      surface,
+      sha256: "5".repeat(64),
+    })),
+    status: "passed",
+    surfaces: ["cloud", "discord", "oracle", "pages"].map((surface) => {
+      const identity = identities[surface];
+      const identitySha256 = canonicalSha256(identity);
+      return {
+        surface,
+        identity,
+        identity_sha256: identitySha256,
+        observation_count: 2,
+        observations: [0, 1].map((sequence) => ({
+          sequence,
+          observed_at: sequence === 0
+            ? "2026-08-27T00:00:00.000Z"
+            : "2026-08-27T00:20:00.000Z",
+          identity_sha256: identitySha256,
+          freshness: observationFreshness(surface, identity, sequence),
+        })),
+      };
+    }),
+  });
+  return { discordCatalogSyncReport, productionObservationReport };
+}
+
+function observationFreshness(surface, identity, sequence) {
+  const observedAt = sequence === 0
+    ? "2026-08-27T00:00:00.000Z"
+    : "2026-08-27T00:20:00.000Z";
+  const probeId = (sequence + 1).toString(16).padStart(64, "0");
+  if (surface === "oracle") {
+    return {
+      operation_marker: canonicalSha256({
+        contract: "clearra.oracle.candidate-observation.v1",
+        source_commit: identity.source_commit,
+        candidate_revision: identity.candidate_revision,
+        fresh_operation_at: observedAt,
+        observed_at: observedAt,
+      }),
+      fresh_operation_at: observedAt,
+      observed_at: observedAt,
+    };
+  }
+  if (surface === "discord") {
+    return { probe_id: probeId, readback_sha256: "c".repeat(64) };
+  }
+  if (surface === "cloud") {
+    return {
+      probe_id: probeId,
+      service_readback_sha256: "1".repeat(64),
+      revision_readback_sha256: "2".repeat(64),
+      stable_health_sha256: "3".repeat(64),
+      tagged_health_sha256: "4".repeat(64),
+    };
+  }
+  return { probe_id: probeId, identity_readback_sha256: "8".repeat(64) };
 }

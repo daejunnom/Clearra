@@ -98,34 +98,93 @@ function Invoke-ProductE2EBuiltTask([string]$Root) {
     }
     & (Join-Path $Root "scripts/product-e2e.ps1") @productE2EArgs
 
-    $npmName = if ($env:OS -eq "Windows_NT") { "npm.cmd" } else { "npm" }
-    $npmCommand = Get-Command $npmName -ErrorAction SilentlyContinue
-    if ($null -eq $npmCommand) {
-        throw "Discord terminal-supply product acceptance requires npm on PATH."
+    $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        throw "Discord terminal-supply product acceptance requires node on PATH."
     }
+    $acceptedCtk3Dist = $env:CLEARRA_ACCEPTED_CTK3_DIST
+    $releaseModeVariable = Get-Variable `
+        -Name ClearraReleaseAcceptanceMode `
+        -Scope Script `
+        -ErrorAction SilentlyContinue
+    $releaseMode = $null -ne $releaseModeVariable -and [bool]$releaseModeVariable.Value
     $terminalSupplyScope = New-ClearraProgressScope `
         -Name "terminal-supply-product" `
         -Total 3 `
         -Workers 1 `
         -VerboseLog:$VerboseLog.IsPresent
     try {
-        Invoke-ClearraProgressCase `
-            -Scope $terminalSupplyScope `
-            -Name "npm build ctk3" `
-            -Body {
-                $ctk3BuildResult = Invoke-NativeWithProgress `
-                    -Scope $terminalSupplyScope `
-                    -Label "npm build ctk3" `
-                    -FileName $npmCommand.Source `
-                    -Arguments @("run", "build", "--workspace", "ctk3")
-                if ($ctk3BuildResult.ExitCode -ne 0) {
-                    throw "Discord terminal-supply product acceptance could not build ctk3 with exit $($ctk3BuildResult.ExitCode)`n$($ctk3BuildResult.Output)"
-                }
+        if (-not [string]::IsNullOrWhiteSpace($acceptedCtk3Dist)) {
+            if (-not $releaseMode) {
+                throw "Accepted CTK3 artifacts may only be consumed by ReleaseAcceptance."
             }
-
-        $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
-        if ($null -eq $nodeCommand) {
-            throw "Discord terminal-supply product acceptance requires node on PATH."
+            if ($env:CLEARRA_SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$') {
+                throw "Accepted CTK3 release consumption requires an exact lowercase source commit."
+            }
+            if ($env:CLEARRA_ACCEPTED_RUN_ID -notmatch '^[1-9][0-9]{0,19}$') {
+                throw "Accepted CTK3 release consumption requires the canonical acceptance run ID."
+            }
+            if ($env:CLEARRA_ACCEPTED_RUN_ATTEMPT -notmatch '^[1-9][0-9]{0,19}$') {
+                throw "Accepted CTK3 release consumption requires the canonical acceptance run attempt."
+            }
+            $resolvedAcceptedCtk3Dist = (Resolve-Path -LiteralPath $acceptedCtk3Dist -ErrorAction Stop).Path
+            $expectedAcceptedCtk3Dist = (Resolve-Path `
+                -LiteralPath (Join-Path $Root "packages/ctk3/dist") `
+                -ErrorAction Stop).Path
+            $pathComparison = if ($env:OS -eq "Windows_NT") {
+                [System.StringComparison]::OrdinalIgnoreCase
+            } else {
+                [System.StringComparison]::Ordinal
+            }
+            if (-not $resolvedAcceptedCtk3Dist.Equals($expectedAcceptedCtk3Dist, $pathComparison)) {
+                throw "Accepted CTK3 distribution must be downloaded to packages/ctk3/dist."
+            }
+            $acceptedCtk3Verifier = Join-Path $Root "scripts/tools/accepted-ctk3-dist.mjs"
+            if (-not (Test-Path -LiteralPath $acceptedCtk3Verifier -PathType Leaf)) {
+                throw "Accepted CTK3 verifier is missing: $acceptedCtk3Verifier"
+            }
+            Invoke-ClearraProgressCase `
+                -Scope $terminalSupplyScope `
+                -Name "Verify accepted CTK3 distribution" `
+                -Body {
+                    $ctk3VerifyResult = Invoke-NativeWithProgress `
+                        -Scope $terminalSupplyScope `
+                        -Label "Verify accepted CTK3 distribution" `
+                        -FileName $nodeCommand.Source `
+                        -Arguments @(
+                            $acceptedCtk3Verifier,
+                            "--verify",
+                            $resolvedAcceptedCtk3Dist,
+                            "--expected-source-commit",
+                            $env:CLEARRA_SOURCE_COMMIT,
+                            "--expected-run-id",
+                            $env:CLEARRA_ACCEPTED_RUN_ID,
+                            "--expected-run-attempt",
+                            $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+                        )
+                    if ($ctk3VerifyResult.ExitCode -ne 0) {
+                        throw "ReleaseAcceptance rejected the accepted CTK3 distribution with exit $($ctk3VerifyResult.ExitCode)`n$($ctk3VerifyResult.Output)"
+                    }
+                }
+        } else {
+            $npmName = if ($env:OS -eq "Windows_NT") { "npm.cmd" } else { "npm" }
+            $npmCommand = Get-Command $npmName -ErrorAction SilentlyContinue
+            if ($null -eq $npmCommand) {
+                throw "Discord terminal-supply product acceptance requires npm on PATH."
+            }
+            Invoke-ClearraProgressCase `
+                -Scope $terminalSupplyScope `
+                -Name "npm build ctk3" `
+                -Body {
+                    $ctk3BuildResult = Invoke-NativeWithProgress `
+                        -Scope $terminalSupplyScope `
+                        -Label "npm build ctk3" `
+                        -FileName $npmCommand.Source `
+                        -Arguments @("run", "build", "--workspace", "ctk3")
+                    if ($ctk3BuildResult.ExitCode -ne 0) {
+                        throw "Discord terminal-supply product acceptance could not build ctk3 with exit $($ctk3BuildResult.ExitCode)`n$($ctk3BuildResult.Output)"
+                    }
+                }
         }
         $probePath = Join-Path $Root "apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs"
         # Release identity pins the exact artifact probe argv: $probePath "--clearra" $builtExePath

@@ -200,6 +200,11 @@ export class WasmTerminalWorkerController {
   cancel() {
     const worker = this.worker;
     if (!worker || this.cancelFallback !== null) return;
+    if (!this.runInFlight && this.productPageRequests.size > 0) {
+      this.rejectProductPages(new Error('product page runtime was cancelled'));
+      this.releaseWorker(worker, 'owner-disposed');
+      return;
+    }
     this.rejectProductPages(new Error('product page runtime was cancelled'));
     try {
       postReleaseProductPages(worker);
@@ -272,8 +277,8 @@ export class WasmTerminalWorkerController {
   }
 
   loadProductMemberPage(
-    outerPageNumber: number,
-    memberPageNumber: number,
+    alternativeIndex: string,
+    memberPageNumber: string,
     signal?: AbortSignal
   ): Promise<ClearraProductPageWorkerPayload> {
     return this.requestProductPage(
@@ -281,7 +286,7 @@ export class WasmTerminalWorkerController {
         postLoadProductMemberPage(
           worker,
           requestId,
-          outerPageNumber,
+          alternativeIndex,
           memberPageNumber
         ),
       signal
@@ -289,8 +294,12 @@ export class WasmTerminalWorkerController {
   }
 
   releaseProductPages() {
-    this.rejectProductPages(new Error('product page runtime was released'));
     const worker = this.worker;
+    if (worker && this.productPageRequests.size > 0) {
+      this.releaseWorker(worker, 'owner-disposed');
+      return;
+    }
+    this.rejectProductPages(new Error('product page runtime was released'));
     if (!worker) return;
     postReleaseProductPages(worker);
   }
@@ -311,6 +320,7 @@ export class WasmTerminalWorkerController {
         if (!this.productPageRequests.delete(requestId)) return;
         cleanup();
         reject(productPageAbortError(signal));
+        if (this.worker === worker) this.releaseWorker(worker, 'owner-disposed');
       };
       this.productPageRequests.set(requestId, {
         resolve: (value) => {

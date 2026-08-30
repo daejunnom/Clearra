@@ -199,6 +199,11 @@ function Invoke-NoProductDebtGate {
     New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
     try {
         $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir
+        $releaseAcceptance = Get-Variable `
+            -Name ClearraReleaseAcceptanceMode `
+            -Scope Script `
+            -ErrorAction SilentlyContinue
+        $isReleaseAcceptance = $null -ne $releaseAcceptance -and [bool]$releaseAcceptance.Value
         Invoke-NoProductDebtRustCase $CargoPath 'clearra-core-executor' @('--lib') `
             'default_build_reports_native_runtime_unavailable' `
             'default_build_reports_native_runtime_unavailable' `
@@ -207,21 +212,31 @@ function Invoke-NoProductDebtGate {
             'wasm_output_keys_are_not_localized' `
             'wasm_output_keys_are_not_localized' `
             'wasm_real_app_response'
-        Invoke-NoProductDebtRustCase $CargoPath 'clearra-core-domain' @('--lib') `
-            'complete_required_capacity_keeps_candidate' `
-            'complete_required_capacity_keeps_candidate' `
-            'complete_required_keeps_candidate'
-        Invoke-NoProductDebtRustCase $CargoPath 'clearra-render' @('--lib') `
-            'png_board_render_golden' `
-            'png_board_render_golden' `
-            'renderer_png_artifact'
-        Invoke-NoProductDebtRustCase $CargoPath 'clearra-render' @('--lib') `
-            'gif_timeline_render_golden' `
-            'gif_timeline_render_golden' `
-            'renderer_gif_artifact'
+        if ($isReleaseAcceptance) {
+            Write-Output 'no_product_debt_evidence=complete_required_keeps_candidate status=deferred owner=RustExactTests reason=single-release-suite'
+            Write-Output 'no_product_debt_evidence=renderer_png_artifact status=deferred owner=RenderGolden reason=single-release-suite'
+            Write-Output 'no_product_debt_evidence=renderer_gif_artifact status=deferred owner=RenderGolden reason=single-release-suite'
+        } else {
+            Invoke-NoProductDebtRustCase $CargoPath 'clearra-core-domain' @('--lib') `
+                'complete_required_capacity_keeps_candidate' `
+                'complete_required_capacity_keeps_candidate' `
+                'complete_required_keeps_candidate'
+            Invoke-NoProductDebtRustCase $CargoPath 'clearra-render' @('--lib') `
+                'png_board_render_golden' `
+                'png_board_render_golden' `
+                'renderer_png_artifact'
+            Invoke-NoProductDebtRustCase $CargoPath 'clearra-render' @('--lib') `
+                'gif_timeline_render_golden' `
+                'gif_timeline_render_golden' `
+                'renderer_gif_artifact'
+        }
 
         Invoke-NoProductDebtHoldLanguageProofProbe $Root $CargoPath $CargoTargetDir
-        Invoke-NoProductDebtDesktopProbe $CargoPath
+        if ($isReleaseAcceptance) {
+            Write-Output 'no_product_debt_evidence=desktop_real_app_request status=deferred owner=DesktopHost reason=single-release-suite'
+        } else {
+            Invoke-NoProductDebtDesktopProbe $CargoPath
+        }
         Invoke-NoProductDebtMaxScoreProbe $Root $CargoPath $Workers
     }
     finally {

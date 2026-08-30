@@ -181,6 +181,8 @@ validate_script_release() {
   require_root_regular_readonly \
     "$script_release/apps/clearra-discord-bot/src/job-service/runtime-identity.mjs"
   require_root_regular_readonly \
+    "$script_release/apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs"
+  require_root_regular_readonly \
     "$script_release/apps/clearra-discord-bot/src/admin/main.mjs"
 
   unsafe=$(/usr/bin/find "$script_release" -xdev \
@@ -302,6 +304,7 @@ is_sha256 "$deployment_nonce" || fail 64
 
 capture_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs"
 producer_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs"
+observer_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs"
 candidate_verifier="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs"
 rollback_verifier="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs"
 restore_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/restore-oracle-release"
@@ -358,20 +361,23 @@ case "$operation" in
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    /usr/bin/printf '%s\n' \
-      'NODE_ENV=production' \
-      "CLEARRA_JOB_URL=$candidate_url/jobs" \
-      "CLEARRA_EXPECTED_JOB_SOURCE_COMMIT=$source_commit" \
-      "CLEARRA_EXPECTED_ENGINE_BUILD_ID=$source_commit" \
-      'CLEARRA_EXPECTED_JOB_CONTRACT_REVISION=clearra.search.contract.v2' \
-      'CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1' \
-      'CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1' \
-      'CLEARRA_WORKER_AUTHORITY=remote' \
-      'CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1' \
-      'CLEARRA_SEARCH_TIMEOUT_MS=180000' \
-      'CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000' \
-      'CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000' \
-      'CLEARRA_INTERACTION_DEADLINE_MS=840000' > "$temporary_settings"
+    # candidate-settings-v080: begin
+/usr/bin/cat > "$temporary_settings" <<CLEARRA_CANDIDATE_SETTINGS_V080
+NODE_ENV=production
+CLEARRA_JOB_URL=$candidate_url/jobs
+CLEARRA_EXPECTED_JOB_SOURCE_COMMIT=$source_commit
+CLEARRA_EXPECTED_ENGINE_BUILD_ID=$source_commit
+CLEARRA_EXPECTED_JOB_CONTRACT_REVISION=clearra.search.contract.v2
+CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1
+CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1
+CLEARRA_WORKER_AUTHORITY=remote
+CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
+CLEARRA_SEARCH_TIMEOUT_MS=180000
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_INTERACTION_DEADLINE_MS=840000
+CLEARRA_CANDIDATE_SETTINGS_V080
+    # candidate-settings-v080: end
     /usr/bin/chown root:root "$temporary_settings"
     /usr/bin/chmod 0600 "$temporary_settings"
     actual_settings_sha256=$(/usr/bin/sha256sum "$temporary_settings" | /usr/bin/cut -d ' ' -f 1)
@@ -414,6 +420,31 @@ case "$operation" in
       --deployment-nonce "$deployment_nonce" >/dev/null
     verification_complete=1
     printf '%s\n' "oracle_candidate=verified"
+    ;;
+
+  observe-candidate)
+    [ -z "$proof$prior_revision$prior_release$prior_release_id$prior_release_sha256$prior_settings_backup$prior_settings_sha256$prior_runtime_authority_kind$prior_runtime_authority_sha256$prior_job_url" ] || fail 64
+    is_commit "$source_commit" || fail 64
+    is_release_id "$candidate_revision" || fail 64
+    is_release_id "$oracle_release_id" || fail 64
+    is_sha256 "$oracle_release_sha256" || fail 64
+    is_sha256 "$oracle_settings_sha256" || fail 64
+    [ "$oracle_release_id" = "$script_release_id" ] || fail 64
+    [ "$oracle_release_sha256" = "$script_release_sha256" ] || fail 64
+    candidate_url=$(canonical_origin "$candidate_url") || fail 64
+    verified_after=$(canonical_timestamp "$verified_after") || fail 64
+    commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
+    [ "$oracle_release_id" = "v0.8.0-$commit_prefix" ] || fail 64
+    [ "$candidate_revision" = "clearra-current-job-v080-$commit_prefix" ] || fail 64
+    exec "$node_path" "$observer_script" \
+      --source-commit "$source_commit" \
+      --candidate-url "$candidate_url" \
+      --candidate-revision "$candidate_revision" \
+      --oracle-release-id "$oracle_release_id" \
+      --oracle-release-sha256 "$oracle_release_sha256" \
+      --oracle-settings-sha256 "$oracle_settings_sha256" \
+      --deployment-nonce "$deployment_nonce" \
+      --verified-after "$verified_after"
     ;;
 
   restore-prior-and-verify)

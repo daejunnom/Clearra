@@ -1220,14 +1220,14 @@ export function postLoadNextProductPage(
 export function postLoadProductMemberPage(
   worker: Worker,
   requestId: number,
-  outerPageNumber: number,
-  memberPageNumber: number
+  alternativeIndex: string,
+  memberPageNumber: string
 ) {
   worker.postMessage({
     type: 'load_product_page',
     requestId,
     action: 'get',
-    outerPageNumber,
+    alternativeIndex,
     memberPageNumber
   });
 }

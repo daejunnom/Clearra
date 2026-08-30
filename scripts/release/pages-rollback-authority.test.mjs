@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  canonicalAcceptanceQuery,
   expectedCaptureArtifactName,
   validateCanonicalRuns,
   validateCaptureAuthority,
@@ -40,9 +41,12 @@ function pagesIdentity(sha = SNAPSHOT) {
 
 function canonicalRun(overrides = {}) {
   return {
+    id: 1,
+    run_attempt: 1,
     event: "workflow_dispatch",
     status: "completed",
     conclusion: "success",
+    head_branch: "main",
     head_sha: SNAPSHOT,
     path: ".github/workflows/release-cli.yml",
     ...overrides,
@@ -144,25 +148,45 @@ test("full Pages and WASM identity contract is required", () => {
   }
 });
 
-test("canonical acceptance permits multiple exact successes and rejects wrong authority", () => {
+test("canonical acceptance requires one exact success and rejects duplicate or wrong authority", () => {
   validateCanonicalRuns(
-    { workflow_runs: [canonicalRun(), canonicalRun({ id: 2 })] },
+    { total_count: 1, workflow_runs: [canonicalRun()] },
     SNAPSHOT,
   );
   assert.throws(
     () => validateCanonicalRuns(
-      { workflow_runs: [canonicalRun({ event: "push" })] },
+      {
+        total_count: 2,
+        workflow_runs: [canonicalRun(), canonicalRun({ id: 2 })],
+      },
       SNAPSHOT,
     ),
-    /no successful exact-SHA/u,
+    /exactly 1/u,
   );
   assert.throws(
     () => validateCanonicalRuns(
-      { workflow_runs: [canonicalRun({ head_sha: AUTHORITY })] },
+      { total_count: 1, workflow_runs: [canonicalRun({ event: "push" })] },
       SNAPSHOT,
     ),
-    /no successful exact-SHA/u,
+    /exact canonical run identity/u,
   );
+  assert.throws(
+    () => validateCanonicalRuns(
+      { total_count: 1, workflow_runs: [canonicalRun({ head_sha: AUTHORITY })] },
+      SNAPSHOT,
+    ),
+    /exact canonical run identity/u,
+  );
+});
+
+test("canonical acceptance query pins the main branch and a non-truncating exact SHA page", () => {
+  const query = new URLSearchParams(canonicalAcceptanceQuery(SNAPSHOT));
+  assert.deepEqual(Object.fromEntries(query), {
+    event: "workflow_dispatch",
+    branch: "main",
+    head_sha: SNAPSHOT,
+    per_page: "100",
+  });
 });
 
 test("capture authority binds the run attempt, job, artifact, retention, and consumer order", () => {

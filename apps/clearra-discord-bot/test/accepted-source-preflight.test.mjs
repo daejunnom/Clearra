@@ -8,6 +8,27 @@ const SOURCE_COMMIT = "7".repeat(40);
 const REPOSITORY = "daejunnom/Clearra";
 const TEST_RUNTIME_IDENTITY = currentRuntimeIdentityForCommit(SOURCE_COMMIT);
 
+function canonicalAcceptance(...runs) {
+  return JSON.stringify({
+    total_count: runs.length,
+    workflow_runs: runs,
+  });
+}
+
+function canonicalRun(overrides = {}) {
+  return {
+    id: 123,
+    run_attempt: 1,
+    event: "workflow_dispatch",
+    status: "completed",
+    conclusion: "success",
+    head_branch: "main",
+    head_sha: SOURCE_COMMIT,
+    path: ".github/workflows/release-cli.yml",
+    ...overrides,
+  };
+}
+
 test("accepted-source preflight requires exact main, canonical acceptance, and active runtime", async () => {
   const calls = [];
   const result = await verifyAcceptedSource(
@@ -21,7 +42,7 @@ test("accepted-source preflight requires exact main, canonical acceptance, and a
         calls.push([command, arguments_]);
         if (command === "git" && arguments_[0] === "fetch") return "";
         if (command === "git") return `${SOURCE_COMMIT}\n`;
-        return JSON.stringify({ workflow_runs: [{ head_sha: SOURCE_COMMIT }] });
+        return canonicalAcceptance(canonicalRun());
       },
       async fetchImpl(url, options) {
         calls.push(["fetch", url.href, options]);
@@ -52,11 +73,11 @@ test("accepted-source preflight requires exact main, canonical acceptance, and a
       "-f",
       "event=workflow_dispatch",
       "-f",
-      "status=success",
+      "branch=main",
       "-f",
       `head_sha=${SOURCE_COMMIT}`,
       "-f",
-      "per_page=1",
+      "per_page=100",
     ],
   ]);
   assert.equal(calls[4][0], "fetch");
@@ -88,11 +109,25 @@ test("accepted-source preflight fails closed on stale source, missing acceptance
         run(command, arguments_) {
           if (command === "git" && arguments_[0] === "fetch") return "";
           if (command === "git") return `${SOURCE_COMMIT}\n`;
-          return JSON.stringify({ workflow_runs: [] });
+          return canonicalAcceptance();
         },
       },
     ),
-    /no successful canonical acceptance/,
+    /exactly 1 successful exact-SHA canonical run/u,
+  );
+
+  await assert.rejects(
+    verifyAcceptedSource(
+      { sourceCommit: SOURCE_COMMIT, repository: REPOSITORY },
+      {
+        run(command, arguments_) {
+          if (command === "git" && arguments_[0] === "fetch") return "";
+          if (command === "git") return `${SOURCE_COMMIT}\n`;
+          return canonicalAcceptance(canonicalRun(), canonicalRun({ id: 124 }));
+        },
+      },
+    ),
+    /exactly 1 successful exact-SHA canonical run/u,
   );
 
   await assert.rejects(
@@ -106,7 +141,7 @@ test("accepted-source preflight fails closed on stale source, missing acceptance
         run(command, arguments_) {
           if (command === "git" && arguments_[0] === "fetch") return "";
           if (command === "git") return `${SOURCE_COMMIT}\n`;
-          return JSON.stringify({ workflow_runs: [{}] });
+          return canonicalAcceptance(canonicalRun());
         },
         async fetchImpl() {
           return {

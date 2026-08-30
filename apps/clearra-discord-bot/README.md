@@ -377,20 +377,23 @@ deployment's secret manager rather than a literal environment value.
 token. Discord interaction IDs/tokens and both secret values are never part of a
 job request.
 
-For release automation, use `cloudbuild-command-sync.yaml` only after the new
-runtime is deployed, healthy, and serving traffic. It reads `DISCORD_TOKEN`
-from the latest `discord-bot-token` Secret Manager version in that isolated
-build step. Dependency installation and the CTK3 package build run in preceding
-secret-free steps; only the final registration process receives the token. Run
-the config with the dedicated `clearra-command-sync` service account; do not
-grant that account Cloud Run deployment or Artifact Registry write access. A
-command-sync build must come from a fresh temporary commit-byte archive context
-of the same full accepted commit as the verified runtime. The canonical archive
-helper forces deterministic LF/modes and verifies every tar path, blob byte,
-mode, and safe symlink against that commit before producing a `.tar.gz`; never
-submit the working tree, `.`, or a Windows-extracted copy. The verified archive
-itself is the Cloud Build source. The exact command and cleanup procedure are
-pinned in `CLOUD_RUN_JOB_SERVICE.md`. A release must preserve this order:
+For a release, the old `cloudbuild-command-sync.yaml` registration entry point
+is not sufficient release evidence because its ephemeral build discards the
+exact pre-mutation catalog. Use the tracked
+`scripts/discord-command-catalog-release.mjs` path from a fresh extraction of
+the canonical commit-byte archive only after the new runtime is deployed,
+healthy, and serving traffic. It writes a canonical source catalog, persists an
+independent prior GET before the one possible PUT, and seals an independent
+readback report. `DISCORD_TOKEN` is environment-only; never pass it as an
+argument or persist it. A conditional restore is authorized only when a fresh
+GET still equals the exact post-sync digest and must itself seal the restored
+readback. The complete sync, restore, 1,200-second four-surface observation,
+and final manifest commands are pinned in `CLOUD_RUN_JOB_SERVICE.md`. The
+observation spec must come from
+`scripts/release/materialize-production-probe-spec.mjs`; it hash-binds the
+Discord/Cloud/Pages adapter, the separate Oracle read-only owner, and the sealed
+zero-traffic managed-secret `/jobs` candidate-smoke report without placing
+either credential in the spec or report. A release must preserve this order:
 
 ```text
 Oracle release -> Gateway/Modal/job verification -> command sync
@@ -708,17 +711,14 @@ A deployment template is:
 ```powershell
 $projectId = gcloud config get-value project
 $sourceCommit = "<same-full-40-character-accepted-commit>"
-$image = "asia-northeast1-docker.pkg.dev/$projectId/clearra/clearra-current-job:source-$sourceCommit"
 $serviceName = "clearra-current-job"
-$revisionSuffix = "v080-" + $sourceCommit.Substring(0, 7)
-$candidateTag = "candidate-" + $sourceCommit.Substring(0, 7)
-$runtimeServiceAccount = "clearra-current-job@$projectId.iam.gserviceaccount.com"
-$jobBearerSecret = "clearra-job-token"
+$jobBearerSecretVersion = "<numeric-enabled-Secret-version>"
+$candidateSmokeReportPath = "<new-absolute-canonical-candidate-smoke-report-path>"
 $priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
 $oracleCandidateReleaseId = "<immutable-candidate-Oracle-release-ID>"
 $oracleCandidateReleaseSha256 = "<candidate-Oracle-release-tree-SHA-256>"
-$oracleCandidateSettingsSha256 = "<candidate-non-secret-settings-SHA-256>"
-$oracleRemoteWrapper = "<approved authenticated Oracle remote wrapper>"
+$oracleRemoteWrapper = Join-Path (Get-Location) 'scripts/release/oracle/invoke-release-deploy-v080.ps1'
+$oracleIdentityFile = '<approved-Oracle-identity-file>'
 $deploymentVerifiedAfter = [DateTime]::UtcNow.ToString("o")
 $deploymentNonce = [Convert]::ToHexString(
   [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
@@ -771,12 +771,13 @@ $priorRevision = [string]$priorTraffic[0].revisionName
 # digests, explicit prior runtime-authority kind/digest, prior job URL, and
 # backup path.
 $priorCaptureJson = & $oracleRemoteWrapper `
-  --operation capture-rollback-authority `
-  --script-release-id $oracleCandidateReleaseId `
-  --script-release-sha256 $oracleCandidateReleaseSha256 `
-  --prior-revision $priorRevision `
-  --prior-runtime-authority-kind $priorRuntimeAuthorityKind `
-  --deployment-nonce $deploymentNonce
+  -Operation capture-rollback-authority `
+  -ScriptReleaseId $oracleCandidateReleaseId `
+  -ScriptReleaseSha256 $oracleCandidateReleaseSha256 `
+  -PriorRevision $priorRevision `
+  -PriorRuntimeAuthorityKind $priorRuntimeAuthorityKind `
+  -DeploymentNonce $deploymentNonce `
+  -IdentityFile $oracleIdentityFile
 if ($LASTEXITCODE -ne 0) { throw "prior Oracle rollback authority capture failed" }
 try { $priorCapture = $priorCaptureJson | ConvertFrom-Json } catch {
   throw "prior Oracle rollback authority capture returned invalid JSON"
@@ -814,44 +815,46 @@ if ($priorTrafficAfterCapture.Count -ne 1 -or
   throw "prior Cloud revision changed during rollback authority capture"
 }
 
-gcloud run deploy $serviceName `
-  --project=$projectId `
-  --region=asia-northeast1 `
-  --image=$image `
-  --revision-suffix=$revisionSuffix `
-  --tag=$candidateTag `
-  --no-traffic `
-  --service-account=$runtimeServiceAccount `
-  --ingress=all `
-  --no-invoker-iam-check `
-  --port=8080 `
-  --concurrency=1 `
-  --min=0 `
-  --min-instances=0 `
-  --max=4 `
-  --max-instances=4 `
-  --cpu=8 `
-  --memory=16Gi `
-  --no-cpu-throttling `
-  --cpu-boost `
-  --timeout=900s `
-  --set-secrets="CLEARRA_JOB_TOKEN=${jobBearerSecret}:latest" `
-  --set-env-vars="CLEARRA_EXECUTABLE=/usr/local/bin/clearra,CLEARRA_MAX_CONCURRENT_JOBS=1,CLEARRA_SEARCH_TIMEOUT_MS=170000,CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000,CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000,CLEARRA_EXPECTED_VCPUS=8,CLEARRA_SEARCH_WORKERS_PER_SESSION=8,CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1,CLEARRA_MAX_OUTPUT_BYTES=4194304"
-if ($LASTEXITCODE -ne 0) { throw "no-traffic candidate deployment failed" }
-
-$candidateRevision = "$serviceName-$revisionSuffix"
-$serviceCandidate = gcloud run services describe $serviceName `
-  --project=$projectId --region=asia-northeast1 --format=json | ConvertFrom-Json
-$candidateTraffic = @($serviceCandidate.status.traffic | Where-Object {
-  $_.tag -eq $candidateTag -and $_.revisionName -eq $candidateRevision
-})
-$stillActive = @($serviceCandidate.status.traffic | Where-Object { [int]$_.percent -eq 100 })
-if ($serviceCandidate.status.latestCreatedRevisionName -ne $candidateRevision -or
-    $candidateTraffic.Count -ne 1 -or -not $candidateTraffic[0].url -or
-    $stillActive.Count -ne 1 -or $stillActive[0].revisionName -ne $priorRevision) {
-  throw "candidate identity or zero-traffic isolation check failed"
+# The tracked helper resolves the mutable source tag to one Artifact Registry
+# image@sha256 before mutation, deploys only that digest, pins the numeric Secret
+# version, and independently reads back service/revision identity, resources,
+# Secret reference, and exact tagged zero-traffic isolation.
+$candidateJson = & node scripts/release/cloud/candidate-release-v080.mjs deploy `
+  --project $projectId `
+  --source-commit $sourceCommit `
+  --prior-revision $priorRevision `
+  --job-bearer-secret-version $jobBearerSecretVersion
+if ($LASTEXITCODE -ne 0) { throw "canonical zero-traffic candidate deployment failed" }
+try { $candidate = $candidateJson | ConvertFrom-Json } catch {
+  throw "canonical zero-traffic candidate deployment returned invalid JSON"
 }
-$candidateUrl = [string]$candidateTraffic[0].url
+$candidateRevision = "clearra-current-job-v080-$($sourceCommit.Substring(0, 7))"
+$candidateTag = "candidate-$($sourceCommit.Substring(0, 7))"
+if ($candidate.contract -cne 'clearra.cloud.zero-traffic-candidate.v1' -or
+    $candidate.sourceCommit -cne $sourceCommit -or
+    $candidate.projectId -cne $projectId -or
+    $candidate.region -cne 'asia-northeast1' -or
+    $candidate.service -cne $serviceName -or
+    $candidate.priorRevision -cne $priorRevision -or
+    $candidate.candidateRevision -cne $candidateRevision -or
+    $candidate.candidateTag -cne $candidateTag -or
+    $candidate.candidateUrl -cnotmatch '^https://[^/]+\.run\.app$' -or
+    $candidate.imageDigest -cnotmatch '^asia-northeast1-docker\.pkg\.dev/[^/]+/clearra/clearra-current-job@sha256:[0-9a-f]{64}$' -or
+    [string]$candidate.jobBearerSecretVersion -cne $jobBearerSecretVersion) {
+  throw "canonical zero-traffic candidate authority is incomplete"
+}
+$candidateUrl = [string]$candidate.candidateUrl
+$candidateImage = [string]$candidate.imageDigest
+$candidateImageDigest = $candidateImage.Substring($candidateImage.LastIndexOf('@') + 1)
+$oracleCandidateSettingsSha256 = (& node `
+  scripts/release/oracle/candidate-settings-v080.mjs `
+  --source-commit $sourceCommit `
+  --candidate-url $candidateUrl `
+  --hash-only).Trim()
+if ($LASTEXITCODE -ne 0 -or
+    $oracleCandidateSettingsSha256 -cnotmatch '^[0-9a-f]{64}$') {
+  throw "canonical Oracle candidate settings authority failed"
+}
 $health = Invoke-RestMethod -Method Get -Uri "$candidateUrl/health"
 if ($health.runtime.sourceCommit -cne $sourceCommit -or
     $health.runtime.engineBuildId -cne $sourceCommit -or
@@ -861,22 +864,20 @@ if ($health.runtime.sourceCommit -cne $sourceCommit -or
   throw "candidate health runtime identity mismatch"
 }
 
-# Have the approved secret wrapper inject CLEARRA_CANDIDATE_JOB_TOKEN into this
-# process environment only. The verifier uses the production executor to send
-# one bounded authenticated request to "$candidateUrl/jobs", checks the exact
-# source/engine/contract identity and result shape, and never prints the bearer,
-# request body, or result.
-if ([string]::IsNullOrWhiteSpace($env:CLEARRA_CANDIDATE_JOB_TOKEN)) {
-  throw "candidate job bearer was not injected by the managed secret wrapper"
-}
-try {
-  node apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs `
-    --base-url $candidateUrl `
-    --source-commit $sourceCommit
-  if ($LASTEXITCODE -ne 0) { throw "candidate authenticated job smoke failed" }
-} finally {
-  Remove-Item Env:CLEARRA_CANDIDATE_JOB_TOKEN -ErrorAction SilentlyContinue
-}
+# The same helper now creates one ephemeral Cloud Run Job with the same immutable
+# image, injects only the same numeric managed Secret version, invokes the tagged
+# zero-traffic `/jobs` endpoint, binds the completed execution-specific log
+# attestation, seals the control-plane hashes, and removes the Job. No bearer is
+# read by or exported to the operator process.
+node scripts/release/cloud/candidate-release-v080.mjs smoke `
+  --project $projectId `
+  --source-commit $sourceCommit `
+  --prior-revision $priorRevision `
+  --job-bearer-secret-version $jobBearerSecretVersion `
+  --image-digest $candidateImage `
+  --candidate-url $candidateUrl `
+  --output $candidateSmokeReportPath
+if ($LASTEXITCODE -ne 0) { throw "managed zero-traffic candidate smoke failed" }
 
 # Confirm Ready/startup/error logs, resource/spec parity, and an unchanged IAM
 # policy. This is an authenticated remote boundary, not a local `sudo`: the
@@ -886,39 +887,41 @@ try {
 # producer observes the active symlink/tree digest, settings digest and all-five
 # configuration, current PID/cwd, READY record, and fresh successful operation.
 & $oracleRemoteWrapper `
-  --operation verify-candidate `
-  --script-release-id $oracleCandidateReleaseId `
-  --script-release-sha256 $oracleCandidateReleaseSha256 `
-  --proof $oracleCandidateProofPath `
-  --source-commit $sourceCommit `
-  --candidate-url $candidateUrl `
-  --candidate-revision $candidateRevision `
-  --oracle-release-id $oracleCandidateReleaseId `
-  --oracle-release-sha256 $oracleCandidateReleaseSha256 `
-  --oracle-settings-sha256 $oracleCandidateSettingsSha256 `
-  --deployment-nonce $deploymentNonce `
-  --verified-after $deploymentVerifiedAfter
+  -Operation verify-candidate `
+  -ScriptReleaseId $oracleCandidateReleaseId `
+  -ScriptReleaseSha256 $oracleCandidateReleaseSha256 `
+  -Proof $oracleCandidateProofPath `
+  -SourceCommit $sourceCommit `
+  -CandidateUrl $candidateUrl `
+  -CandidateRevision $candidateRevision `
+  -OracleReleaseId $oracleCandidateReleaseId `
+  -OracleReleaseSha256 $oracleCandidateReleaseSha256 `
+  -OracleSettingsSha256 $oracleCandidateSettingsSha256 `
+  -DeploymentNonce $deploymentNonce `
+  -VerifiedAfter $deploymentVerifiedAfter `
+  -IdentityFile $oracleIdentityFile
 $candidateOracleExit = $LASTEXITCODE
 if ($candidateOracleExit -ne 0) {
   # Cloud still serves the prior revision. Restore and freshly verify the exact
   # captured Oracle authority before aborting this deployment.
   $preCutoverRollbackVerifiedAfter = [DateTime]::UtcNow.ToString("o")
   & $oracleRemoteWrapper `
-    --operation restore-prior-and-verify `
-    --script-release-id $oracleCandidateReleaseId `
-    --script-release-sha256 $oracleCandidateReleaseSha256 `
-    --prior-release $priorOracleRelease `
-    --prior-release-id $priorOracleReleaseId `
-    --prior-release-sha256 $priorOracleReleaseSha256 `
-    --prior-settings-backup $priorOracleSettingsBackup `
-    --prior-settings-sha256 $priorOracleSettingsSha256 `
-    --prior-runtime-authority-kind $priorRuntimeAuthorityKind `
-    --prior-runtime-authority-sha256 $priorRuntimeAuthoritySha256 `
-    --prior-job-url $priorJobUrl `
-    --prior-revision $priorRevision `
-    --proof $oracleRollbackProofPath `
-    --deployment-nonce $deploymentNonce `
-    --verified-after $preCutoverRollbackVerifiedAfter
+    -Operation restore-prior-and-verify `
+    -ScriptReleaseId $oracleCandidateReleaseId `
+    -ScriptReleaseSha256 $oracleCandidateReleaseSha256 `
+    -PriorRelease $priorOracleRelease `
+    -PriorReleaseId $priorOracleReleaseId `
+    -PriorReleaseSha256 $priorOracleReleaseSha256 `
+    -PriorSettingsBackup $priorOracleSettingsBackup `
+    -PriorSettingsSha256 $priorOracleSettingsSha256 `
+    -PriorRuntimeAuthorityKind $priorRuntimeAuthorityKind `
+    -PriorRuntimeAuthoritySha256 $priorRuntimeAuthoritySha256 `
+    -PriorJobUrl $priorJobUrl `
+    -PriorRevision $priorRevision `
+    -Proof $oracleRollbackProofPath `
+    -DeploymentNonce $deploymentNonce `
+    -VerifiedAfter $preCutoverRollbackVerifiedAfter `
+    -IdentityFile $oracleIdentityFile
   if ($LASTEXITCODE -ne 0) {
     throw "candidate Oracle failed and exact prior Oracle restore was not verified; keep the service stopped for manual recovery"
   }
@@ -973,21 +976,22 @@ if ($activeRolledBack.Count -ne 1 -or $activeRolledBack[0].revisionName -ne $pri
 # proof. Failure leaves the Oracle service stopped instead of running mixed or
 # unverified state.
 & $oracleRemoteWrapper `
-  --operation restore-prior-and-verify `
-  --script-release-id $oracleCandidateReleaseId `
-  --script-release-sha256 $oracleCandidateReleaseSha256 `
-  --prior-release $priorOracleRelease `
-  --prior-release-id $priorOracleReleaseId `
-  --prior-release-sha256 $priorOracleReleaseSha256 `
-  --prior-settings-backup $priorOracleSettingsBackup `
-  --prior-settings-sha256 $priorOracleSettingsSha256 `
-  --prior-runtime-authority-kind $priorRuntimeAuthorityKind `
-  --prior-runtime-authority-sha256 $priorRuntimeAuthoritySha256 `
-  --prior-job-url $priorJobUrl `
-  --prior-revision $priorRevision `
-  --proof $oracleRollbackProofPath `
-  --deployment-nonce $deploymentNonce `
-  --verified-after $rollbackVerifiedAfter
+  -Operation restore-prior-and-verify `
+  -ScriptReleaseId $oracleCandidateReleaseId `
+  -ScriptReleaseSha256 $oracleCandidateReleaseSha256 `
+  -PriorRelease $priorOracleRelease `
+  -PriorReleaseId $priorOracleReleaseId `
+  -PriorReleaseSha256 $priorOracleReleaseSha256 `
+  -PriorSettingsBackup $priorOracleSettingsBackup `
+  -PriorSettingsSha256 $priorOracleSettingsSha256 `
+  -PriorRuntimeAuthorityKind $priorRuntimeAuthorityKind `
+  -PriorRuntimeAuthoritySha256 $priorRuntimeAuthoritySha256 `
+  -PriorJobUrl $priorJobUrl `
+  -PriorRevision $priorRevision `
+  -Proof $oracleRollbackProofPath `
+  -DeploymentNonce $deploymentNonce `
+  -VerifiedAfter $rollbackVerifiedAfter `
+  -IdentityFile $oracleIdentityFile
 if ($LASTEXITCODE -ne 0) {
   throw "prior Oracle rollback was not freshly verified; keep the service stopped for manual recovery"
 }

@@ -82,11 +82,27 @@ export async function synchronizeGlobalCommandRegistration(
   expected,
   options = {},
 ) {
+  const current = await rest.getGlobalCommands(applicationId);
+  return synchronizeGlobalCommandRegistrationFromObserved(
+    rest,
+    applicationId,
+    expected,
+    current,
+    options,
+  );
+}
+
+export async function synchronizeGlobalCommandRegistrationFromObserved(
+  rest,
+  applicationId,
+  expected,
+  current,
+  options = {},
+) {
   const readbackAttempts = options.readbackAttempts ?? 3;
   const retryDelayMs = options.retryDelayMs ?? 250;
   const wait = options.wait ?? sleep;
 
-  const current = await rest.getGlobalCommands(applicationId);
   const currentVerification = tryVerify(expected, current);
   if (currentVerification.ok) {
     verifyCommandIdentities(applicationId, current);

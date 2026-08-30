@@ -3163,6 +3163,14 @@ mod product_pages {
             &mut self,
             maximum_work_steps: u64,
         ) -> Result<String, DesktopTauriCommandError> {
+            self.product_page_next_with_cancel(maximum_work_steps, &mut || false)
+        }
+
+        pub fn product_page_next_with_cancel(
+            &mut self,
+            maximum_work_steps: u64,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<String, DesktopTauriCommandError> {
             if let Some(store) = self
                 .product_page_store
                 .as_mut()
@@ -3176,29 +3184,49 @@ mod product_pages {
                 })?;
                 return next.map_or_else(parity_exhausted_json, parity_page_json);
             }
-            let (advance, loaded_page_number) = {
+            let (advance, retained_slot) = {
                 let store = coverage_store_mut(self)?;
                 let advance = store
-                    .next_page(maximum_work_steps.max(1), &mut || false)
+                    .next_page(maximum_work_steps.max(1), cancelled)
                     .map_err(|error| {
                         DesktopTauriCommandError::job(format!(
                             "advance desktop product page: {}",
                             error.as_str()
                         ))
                     })?;
-                (advance, store.loaded_page_count())
+                let retained_slot = advance
+                    .page()
+                    .and_then(|page| store.retained_page_slot(page.alternative_index_decimal()));
+                (advance, retained_slot)
             };
-            if advance.page().is_some() {
-                return page_json(coverage_store(self)?, loaded_page_number, 1);
+            if let Some(retained_slot) = retained_slot {
+                return page_json(coverage_store(self)?, retained_slot, 1);
             }
             advance_json(&advance)
         }
 
         pub fn product_page_get(
-            &self,
-            outer_page_number: usize,
-            member_page_number: usize,
+            &mut self,
+            alternative_index_decimal: &str,
+            member_page_number_decimal: &str,
         ) -> Result<String, DesktopTauriCommandError> {
+            self.product_page_get_with_cancel(
+                alternative_index_decimal,
+                member_page_number_decimal,
+                &mut || false,
+            )
+        }
+
+        pub fn product_page_get_with_cancel(
+            &mut self,
+            alternative_index_decimal: &str,
+            member_page_number_decimal: &str,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<String, DesktopTauriCommandError> {
+            let member_page_number = parse_canonical_positive_usize(
+                member_page_number_decimal,
+                "desktop member page number",
+            )?;
             if let Some(store) = self
                 .product_page_store
                 .as_ref()
@@ -3209,6 +3237,10 @@ mod product_pages {
                         "desktop parity pages have exactly one member page",
                     ));
                 }
+                let outer_page_number = parse_canonical_positive_usize(
+                    alternative_index_decimal,
+                    "desktop parity alternative index",
+                )?;
                 let page = store.page(outer_page_number).map_err(|error| {
                     DesktopTauriCommandError::job(format!(
                         "load desktop parity page: {}",
@@ -3217,7 +3249,15 @@ mod product_pages {
                 })?;
                 return parity_page_json(page);
             }
-            page_json(coverage_store(self)?, outer_page_number, member_page_number)
+            let retained_slot = coverage_store_mut(self)?
+                .load_page_by_alternative_index(alternative_index_decimal, cancelled)
+                .map_err(|error| {
+                    DesktopTauriCommandError::job(format!(
+                        "load desktop product page: {}",
+                        error.as_str()
+                    ))
+                })?;
+            page_json(coverage_store(self)?, retained_slot, member_page_number)
         }
 
         pub fn product_page_release(&mut self) {
@@ -3247,14 +3287,15 @@ mod product_pages {
 
     fn page_json(
         store: &CoveragePortfolioPageStore,
-        outer_page_number: usize,
+        retained_slot: usize,
         member_page_number: usize,
     ) -> Result<String, DesktopTauriCommandError> {
         let page = store
-            .page(outer_page_number)
+            .retained_page(retained_slot)
             .ok_or_else(|| DesktopTauriCommandError::job("desktop product page not loaded"))?;
         let members = store
-            .member_page(outer_page_number, member_page_number)
+            .source()
+            .member_page(page, member_page_number)
             .map_err(|error| {
                 DesktopTauriCommandError::job(format!(
                     "load desktop product member page: {}",
@@ -3286,6 +3327,25 @@ mod product_pages {
         }))
         .map_err(|error| {
             DesktopTauriCommandError::job(format!("serialize desktop product page: {error}"))
+        })
+    }
+
+    fn parse_canonical_positive_usize(
+        value: &str,
+        coordinate: &str,
+    ) -> Result<usize, DesktopTauriCommandError> {
+        if value.is_empty()
+            || value.starts_with('0')
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "{coordinate} must be a canonical positive decimal string"
+            )));
+        }
+        value.parse::<usize>().map_err(|_| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "{coordinate} exceeds the supported in-memory page range"
+            ))
         })
     }
 
@@ -4254,7 +4314,7 @@ mod tests {
 
         let first_page: Value = serde_json::from_str(
             &bridge
-                .product_page_get(1, 1)
+                .product_page_get("1", "1")
                 .expect("load first desktop parity page"),
         )
         .expect("first parity JSON");
@@ -4279,7 +4339,7 @@ mod tests {
         assert_eq!(exhausted["state"], "exhausted");
 
         bridge.product_page_release();
-        assert!(bridge.product_page_get(1, 1).is_err());
+        assert!(bridge.product_page_get("1", "1").is_err());
     }
 
     #[test]
@@ -5555,7 +5615,7 @@ mod tests {
 
         let page: Value = serde_json::from_str(
             &bridge
-                .product_page_get(1, 1)
+                .product_page_get("1", "1")
                 .expect("load canonical desktop product page"),
         )
         .expect("desktop product page JSON");
@@ -5577,11 +5637,11 @@ mod tests {
         let replacement_job = bridge
             .start_job(REQUEST)
             .expect("new desktop search replaces the page owner");
-        assert!(bridge.product_page_get(1, 1).is_err());
+        assert!(bridge.product_page_get("1", "1").is_err());
         bridge
             .cancel_job(replacement_job)
             .expect("cancel replacement desktop search");
-        assert!(bridge.product_page_get(1, 1).is_err());
+        assert!(bridge.product_page_get("1", "1").is_err());
         let cancel_deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let terminal = bridge
@@ -5603,9 +5663,91 @@ mod tests {
             .start_job(REQUEST)
             .expect("start desktop pc minimals for explicit release");
         let _ = wait_for_completion(&mut bridge, release_job);
-        assert!(bridge.product_page_get(1, 1).is_ok());
+        assert!(bridge.product_page_get("1", "1").is_ok());
         bridge.product_page_release();
-        assert!(bridge.product_page_get(1, 1).is_err());
+        assert!(bridge.product_page_get("1", "1").is_err());
+    }
+
+    #[cfg(feature = "wasm-cpu-runtime")]
+    #[test]
+    fn desktop_exact_page_replay_observes_the_host_cancellation_token() {
+        use crate::GuiJobEvent;
+
+        const REQUEST: &str = r#"{
+            "app_request_model": "clearra-app/AppRequest",
+            "command": "pc",
+            "lines": 2,
+            "queue": "IIOOO",
+            "hold_enabled": false,
+            "count_policy": "unique",
+            "score_mode": "minimum-cover",
+            "backend": "cpu",
+            "workers": 1,
+            "allow_backend_fallback": false
+        }"#;
+
+        let mut bridge = DesktopTauriCommandBridge::default();
+        let job_id = bridge
+            .start_job(REQUEST)
+            .expect("start tied desktop minimals");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let terminal = bridge
+                .drain_job_events(job_id)
+                .expect("drain tied desktop minimals events")
+                .into_iter()
+                .find(GuiJobEvent::is_terminal);
+            match terminal {
+                Some(GuiJobEvent::Completed { .. }) => break,
+                Some(GuiJobEvent::Failed { code, .. }) => {
+                    panic!("tied desktop minimals failed: {code}")
+                }
+                Some(GuiJobEvent::Cancelled { .. }) => {
+                    panic!("tied desktop minimals was cancelled")
+                }
+                Some(GuiJobEvent::Started { .. })
+                | Some(GuiJobEvent::Progress { .. })
+                | Some(GuiJobEvent::Diagnostic { .. })
+                | None => {}
+            }
+            assert!(Instant::now() < deadline, "tied desktop minimals timed out");
+            std::thread::yield_now();
+        }
+
+        let second_page = loop {
+            let response: Value = serde_json::from_str(
+                &bridge
+                    .product_page_next(u64::MAX)
+                    .expect("advance tied desktop portfolio"),
+            )
+            .expect("tied desktop portfolio JSON");
+            match response["state"].as_str() {
+                Some("page") => break response,
+                Some("work-budget-exhausted") => continue,
+                state => panic!("expected a second tied portfolio page, received {state:?}"),
+            }
+        };
+        assert_eq!(second_page["page"]["alternative_index"], "2");
+
+        let mut cancellation_checks = 0;
+        let error = bridge
+            .product_page_get_with_cancel("2", "1", &mut || {
+                cancellation_checks += 1;
+                true
+            })
+            .expect_err("cancelled exact replay must not publish a page");
+        assert!(cancellation_checks > 0);
+        assert!(error.message().contains("portfolio-page-replay-cancelled"));
+
+        let replayed: Value = serde_json::from_str(
+            &bridge
+                .product_page_get("2", "1")
+                .expect("retry exact desktop replay"),
+        )
+        .expect("retried desktop replay JSON");
+        assert_eq!(replayed["state"], "page");
+        assert_eq!(replayed["page"]["alternative_index"], "2");
+        bridge.product_page_release();
     }
 
     #[test]

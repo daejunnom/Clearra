@@ -9,6 +9,10 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: canonical-release-${{ github.sha }}
+  cancel-in-progress: false
+
 env:
   CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
   CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
@@ -18,15 +22,42 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}
+      accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Validate exact source archive regression coverage
+      - name: Require exact main and zero prior canonical success
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: node --test scripts/release/create-exact-source-archive.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs
+        run: |
+          if [[ "$GITHUB_RUN_ATTEMPT" != '1' ]]; then
+            echo 'canonical release acceptance forbids workflow reruns; dispatch a fresh run after a failure' >&2
+            exit 2
+          fi
+          if [[ "$GITHUB_REF" != 'refs/heads/main' || "$GITHUB_REF_TYPE" != 'branch' ]]; then
+            echo 'canonical release acceptance must be dispatched from main' >&2
+            exit 2
+          fi
+          git fetch --no-tags --depth=1 origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo 'canonical release acceptance must target the exact current main commit' >&2
+            exit 2
+          fi
+          node scripts/release/canonical-acceptance-run.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --require zero
+      - name: Validate exact source archive regression coverage
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: node --test scripts/release/create-exact-source-archive.test.mjs scripts/release/accepted-pages-build.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs
       - name: Archive the exact accepted source on Linux
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           archive_path="$RUNNER_TEMP/clearra-exact-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
@@ -56,60 +87,86 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Validate Pages rollback authority regression coverage
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
-        run: node --test scripts/release/pages-rollback-authority.test.mjs scripts/release/pages-rollback-package.test.mjs
+        run: node --test scripts/release/canonical-acceptance-run.test.mjs scripts/release/pages-rollback-authority.test.mjs scripts/release/pages-rollback-package.test.mjs
       - name: Validate final-source evidence contract regression coverage
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
-        run: node --test scripts/release/final-source-attempt-journal.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
-      - name: Install JavaScript workspace for product authority
-        run: npm ci --ignore-scripts
-      - name: Build CTK3 workspace for product authority
-        run: npm run build --workspace ctk3
+        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
+      - name: Validate focused test selection regression coverage
+        if: github.event_name == 'workflow_dispatch'
+        run: node --test scripts/tools/run-focused-js-tests.test.mjs
       - name: Validate every product version and changelog surface
+        if: github.event_name == 'workflow_dispatch'
         env:
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          RELEASE_TAG: ""
         shell: bash
-        run: |
-          if [[ -n "$RELEASE_TAG" ]]; then
-            node scripts/release/validate-release-metadata.mjs --tag "$RELEASE_TAG"
-          else
-            node scripts/release/validate-release-metadata.mjs
-          fi
+        run: node scripts/release/validate-release-metadata.mjs
       - name: Validate release metadata regression coverage
+        if: github.event_name == 'workflow_dispatch'
         run: node --test scripts/release/validate-release-metadata.test.mjs
       - name: Require the product capability and alias parser authority
+        if: github.event_name == 'workflow_dispatch'
         run: |
           node --test tests/contracts/product_capability_registry.test.mjs
-          node --test apps/clearra-discord-bot/test/capability-registry.test.mjs
           node --test scripts/tools/audit-upstream-drift.test.mjs
       - name: Validate remote annotated tag regression coverage
+        if: github.event_name == 'workflow_dispatch'
         run: node --test scripts/release/verify-remote-annotated-tag.test.mjs
-      - name: Validate release CLI smoke wiring
-        run: node scripts/tools/validate-release-cli-smokes.mjs
-      - name: Require the exact accepted main commit before tag publication
-        if: github.ref_type == 'tag'
+      - name: Bind the exact canonical acceptance run
+        id: accepted_run
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
+            echo "accepted_run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "accepted_run_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$GITHUB_REF_TYPE" != 'tag' ]]; then
+            echo 'release workflow only accepts canonical dispatch or tag publication events' >&2
+            exit 2
+          fi
           git fetch --no-tags --depth=1 origin main
           if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
             echo 'release tag must point at the exact current main commit' >&2
             exit 2
           fi
-          accepted="$(gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/release-cli.yml/runs" \
-            -f event=workflow_dispatch \
-            -f status=success \
-            -f head_sha="$GITHUB_SHA" \
-            -f per_page=1 \
-            --jq '.workflow_runs | length')"
-          if [[ "$accepted" -lt 1 ]]; then
-            echo 'release tag commit has no successful canonical workflow_dispatch acceptance run' >&2
-            exit 2
-          fi
+          node scripts/release/canonical-acceptance-run.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --require one \
+            --format github-output >> "$GITHUB_OUTPUT"
+
+  ctk3:
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install JavaScript workspace
+        run: npm ci --ignore-scripts
+      - name: Validate accepted CTK3 artifact contract
+        run: node --test scripts/tools/accepted-ctk3-dist.test.mjs
+      - name: Build and test CTK3 once
+        run: npm test --workspace ctk3
+      - name: Seal the accepted CTK3 distribution
+        run: node scripts/tools/accepted-ctk3-dist.mjs --seal packages/ctk3/dist --source-commit "$CLEARRA_SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Upload accepted CTK3 distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: packages/ctk3/dist
+          if-no-files-found: error
 
   linux-cli:
+    if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: ubuntu-latest
     steps:
@@ -131,12 +188,13 @@ jobs:
       - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clearra-linux-cli-v${{ needs.metadata.outputs.version }}
+          name: clearra-linux-cli-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
           path: dist/*
           if-no-files-found: error
 
   discord-bot:
-    needs: metadata
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, ctk3]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -144,13 +202,21 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Download accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: packages/ctk3/dist
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
+      - name: Verify accepted CTK3 distribution
+        run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Verify Clearrabot contracts
-        run: npm test --workspace @clearra/discord-bot
+        run: npm run test:built --workspace @clearra/discord-bot
 
   release-acceptance:
-    needs: metadata
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, ctk3]
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -160,9 +226,6 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: Validate Windows exact source archive regression coverage
-        shell: pwsh
-        run: node --test scripts/release/create-exact-source-archive.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs
       - name: Archive the exact accepted source on Windows
         shell: pwsh
         run: |
@@ -181,6 +244,11 @@ jobs:
               Remove-Item -LiteralPath $archivePath -Force
             }
           }
+      - name: Download accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: packages/ctk3/dist
       - uses: actions/cache@v4
         with:
           path: |
@@ -204,9 +272,56 @@ jobs:
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Run canonical release acceptance
+        env:
+          CLEARRA_ACCEPTED_CTK3_DIST: ${{ github.workspace }}/packages/ctk3/dist
+          CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
+          CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CLEARRA_WEB_BASE_PATH: /${{ github.event.repository.name }}
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ExecutionSurface Trusted
+      - name: Stamp and verify the accepted Pages build
+        shell: pwsh
+        run: |
+          node scripts/release/accepted-pages-build.mjs `
+            --stamp apps/clearra-web/build `
+            --source-commit $env:CLEARRA_SOURCE_COMMIT `
+            --accepted-run-id $env:GITHUB_RUN_ID `
+            --accepted-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --base-path "/${{ github.event.repository.name }}" `
+            --version "${{ needs.metadata.outputs.version }}"
+          if ($LASTEXITCODE -ne 0) { throw "accepted Pages build stamp failed" }
+          node scripts/release/accepted-pages-build.mjs `
+            --verify apps/clearra-web/build `
+            --source-commit $env:CLEARRA_SOURCE_COMMIT `
+            --accepted-run-id $env:GITHUB_RUN_ID `
+            --accepted-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --base-path "/${{ github.event.repository.name }}" `
+            --version "${{ needs.metadata.outputs.version }}"
+          if ($LASTEXITCODE -ne 0) { throw "accepted Pages build verification failed" }
+      - name: Produce canonical release gate evidence
+        shell: pwsh
+        run: |
+          node scripts/release/canonical-acceptance-evidence.mjs gate `
+            --source-commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --output release-gate-evidence
+          if ($LASTEXITCODE -ne 0) { throw "canonical release gate evidence failed" }
+      - name: Upload accepted Pages build
+        uses: actions/upload-artifact@v4
+        with:
+          name: accepted-pages-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: apps/clearra-web/build
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload canonical release gate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-evidence-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: release-gate-evidence
+          if-no-files-found: error
 
   windows-products:
+    if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: windows-latest
     steps:
@@ -372,12 +487,79 @@ jobs:
       - name: Upload Windows product artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: clearra-windows-products-v${{ needs.metadata.outputs.version }}
+          name: clearra-windows-products-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
           path: dist/*
           if-no-files-found: error
 
+  canonical-evidence:
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      [metadata, ctk3, linux-cli, discord-bot, release-acceptance, windows-products]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download canonical release gate evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-gate-evidence-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: acceptance-inputs/gate
+      - name: Download accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: acceptance-inputs/ctk3
+      - name: Download accepted Pages build
+        uses: actions/download-artifact@v4
+        with:
+          name: accepted-pages-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: acceptance-inputs/pages
+      - name: Download Linux product
+        uses: actions/download-artifact@v4
+        with:
+          name: clearra-linux-cli-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: acceptance-inputs/products
+      - name: Download Windows products
+        uses: actions/download-artifact@v4
+        with:
+          name: clearra-windows-products-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: acceptance-inputs/products
+      - name: Read exact workflow job evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            -f filter=latest \
+            -f per_page=100 > "$RUNNER_TEMP/release-jobs.json"
+      - name: Create canonical acceptance evidence
+        shell: bash
+        run: |
+          node scripts/release/canonical-acceptance-evidence.mjs collect \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --base-path "/${{ github.event.repository.name }}" \
+            --jobs "$RUNNER_TEMP/release-jobs.json" \
+            --gate-evidence acceptance-inputs/gate \
+            --ctk3 acceptance-inputs/ctk3 \
+            --pages acceptance-inputs/pages \
+            --products acceptance-inputs/products \
+            --output canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json
+      - name: Upload canonical acceptance evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-acceptance-evidence-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: canonical-acceptance-evidence
+          if-no-files-found: error
+
   publish:
-    if: github.ref_type == 'tag'
+    if: always() && github.ref_type == 'tag' && needs.metadata.result == 'success'
     needs:
       [metadata, release-acceptance, linux-cli, windows-products, discord-bot]
     runs-on: ubuntu-latest
@@ -385,12 +567,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: clearra-*-v${{ needs.metadata.outputs.version }}
+          pattern: clearra-*-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
           path: dist
           merge-multiple: true
+          run-id: ${{ needs.metadata.outputs.accepted_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download canonical acceptance evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-acceptance-evidence-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: canonical-acceptance-evidence
+          run-id: ${{ needs.metadata.outputs.accepted_run_id }}
+          github-token: ${{ github.token }}
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          ACCEPTED_RUN_ID: ${{ needs.metadata.outputs.accepted_run_id }}
+          ACCEPTED_RUN_ATTEMPT: ${{ needs.metadata.outputs.accepted_run_attempt }}
           RELEASE_IMMUTABILITY_CONFIRMED: ${{ vars.CLEARRA_IMMUTABLE_RELEASES_ENABLED }}
         shell: bash
         run: |
@@ -399,17 +592,21 @@ jobs:
             echo 'release tag is no longer the exact current main commit' >&2
             exit 2
           fi
-          accepted="$(gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/release-cli.yml/runs" \
-            -f event=workflow_dispatch \
-            -f status=success \
-            -f head_sha="$GITHUB_SHA" \
-            -f per_page=1 \
-            --jq '.workflow_runs | length')"
-          if [[ "$accepted" -lt 1 ]]; then
-            echo 'release tag no longer has a successful exact-SHA canonical acceptance run' >&2
-            exit 2
-          fi
+          node scripts/release/canonical-acceptance-run.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --require one \
+            --expected-run-id "$ACCEPTED_RUN_ID" \
+            --expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"
+          node scripts/release/canonical-acceptance-evidence.mjs verify \
+            --report canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-commit "$GITHUB_SHA" \
+            --run-id "$ACCEPTED_RUN_ID" \
+            --run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --base-path "/${{ github.event.repository.name }}" \
+            --products dist
           if [[ "$RELEASE_IMMUTABILITY_CONFIRMED" != 'true' ]]; then
             echo 'repository release immutability has not been confirmed by the approved administrator' >&2
             exit 2

@@ -318,12 +318,28 @@ fn checked_audit_input_construction_projection(result: &CoreExecutionResult) -> 
     )?;
     let candidate_dimensions =
         dimension_payload.checked_mul((candidate_count as u128).checked_add(1)?)?;
-    let normalized_slots = (result.normalized_solution_keys().len() as u128)
-        .checked_mul(core::mem::size_of::<String>() as u128)?;
-    let normalized_payload = result
-        .normalized_solution_keys()
-        .iter()
-        .try_fold(0_u128, |bytes, key| bytes.checked_add(key.len() as u128))?;
+    let (normalized_key_count, normalized_payload) =
+        if selection_policy(result) == SolutionPortfolioSelectionPolicy::ExactMinimumCover {
+            (
+                result.normalized_solution_coverages().len(),
+                result
+                    .normalized_solution_coverages()
+                    .iter()
+                    .try_fold(0_u128, |bytes, coverage| {
+                        bytes.checked_add(coverage.solution_key().len() as u128)
+                    })?,
+            )
+        } else {
+            (
+                result.normalized_solution_keys().len(),
+                result
+                    .normalized_solution_keys()
+                    .iter()
+                    .try_fold(0_u128, |bytes, key| bytes.checked_add(key.len() as u128))?,
+            )
+        };
+    let normalized_slots =
+        (normalized_key_count as u128).checked_mul(core::mem::size_of::<String>() as u128)?;
     let pattern_count = result.usize_field("coverage_pattern_count").unwrap_or(0);
     let pattern_owners = (candidate_count as u128).checked_add(2)?;
     let pattern_bytes = PatternBitSet::checked_shared_construction_upper_bound(
@@ -349,6 +365,7 @@ fn checked_audit_input_construction_projection(result: &CoreExecutionResult) -> 
         "solution-set-not-materialized",
         "solution-key-materialization-incomplete",
         "solution-key-count-mismatch",
+        "minimum-cover-source-solution-count-mismatch",
         "b2b-filter-not-materialized",
         "b2b-filter-count-incomplete",
         "build-spin-evidence-incomplete",
@@ -392,9 +409,20 @@ fn audit_input(
         .usize_field("coverage_pattern_count")
         .ok_or("solution-set-audit-pattern-universe-missing")?;
     let dimensions = semantic_dimensions(result, product_family);
+    let selection_policy = selection_policy(result);
     let candidates = audit_candidates(result, pattern_count, &dimensions)?;
     let required_patterns = required_patterns(result, pattern_count, &candidates)?;
-    let mut normalized_keys = try_clone_strings(result.normalized_solution_keys())?;
+    // Exact minimum-cover results expose only the canonical selected cover in
+    // `normalized_solution_keys`, while retaining the complete pass-1 source
+    // matrix in `normalized_solution_coverages`. The generic audit owns the
+    // pass-2 selection, so its normalized universe must be reconstructed from
+    // those source rows rather than from the already-selected public keys.
+    let mut normalized_keys =
+        if selection_policy == SolutionPortfolioSelectionPolicy::ExactMinimumCover {
+            try_clone_coverage_keys(result.normalized_solution_coverages())?
+        } else {
+            try_clone_strings(result.normalized_solution_keys())?
+        };
     normalized_keys.sort_unstable();
     let normalized_identity_hash = normalized_key_hash(&normalized_keys);
     let count_complete = result.bool_field("count_complete").unwrap_or(false);
@@ -403,7 +431,10 @@ fn audit_input(
         && availability.contract_valid()
         && availability.solution_set_materialized()
         && availability.solution_keys_complete()
-        && availability.materialized_key_count_matches(normalized_keys.len());
+        && availability.materialized_key_count_matches(result.normalized_solution_keys().len());
+    let minimum_cover_source_complete = selection_policy
+        != SolutionPortfolioSelectionPolicy::ExactMinimumCover
+        || result.usize_field("minimum_cover_source_solution_count") == Some(normalized_keys.len());
 
     let mut normalized_reasons = Vec::new();
     if !count_complete {
@@ -420,9 +451,12 @@ fn audit_input(
         if !availability.solution_keys_complete() {
             normalized_reasons.push("solution-key-materialization-incomplete".to_owned());
         }
-        if !availability.materialized_key_count_matches(normalized_keys.len()) {
+        if !availability.materialized_key_count_matches(result.normalized_solution_keys().len()) {
             normalized_reasons.push("solution-key-count-mismatch".to_owned());
         }
+    }
+    if !minimum_cover_source_complete {
+        normalized_reasons.push("minimum-cover-source-solution-count-mismatch".to_owned());
     }
 
     let preserve_b2b = result.bool_field("execution_constraint_preserve_b2b") == Some(true);
@@ -430,7 +464,7 @@ fn audit_input(
         && result.bool_field("postprocess_build_spin_requested") == Some(true);
     let materialized_solution_checkpoint = SolutionAuditCheckpoint::new(
         Some(normalized_keys.len()),
-        count_complete && availability_complete,
+        count_complete && availability_complete && minimum_cover_source_complete,
         Some(normalized_identity_hash.clone()),
         normalized_reasons.clone(),
     );
@@ -456,7 +490,8 @@ fn audit_input(
     };
 
     let mut filter_reasons = normalized_reasons.clone();
-    let mut filter_complete = count_complete && availability_complete;
+    let mut filter_complete =
+        count_complete && availability_complete && minimum_cover_source_complete;
     if preserve_b2b {
         if result.bool_field("execution_constraint_materialized") != Some(true) {
             filter_complete = false;
@@ -478,7 +513,6 @@ fn audit_input(
         filter_reasons.clone(),
     );
 
-    let selection_policy = selection_policy(result);
     Ok(
         SolutionSetAuditInput::new(product_family, required_patterns, selection_policy)
             .with_source_checkpoints(produced, execution_validated, spin_b2b_filtered)
@@ -633,6 +667,19 @@ fn try_clone_strings(values: &[String]) -> Result<Vec<String>, &'static str> {
     Ok(cloned)
 }
 
+fn try_clone_coverage_keys(
+    values: &[clearra_core_executor::NormalizedSolutionCoverage],
+) -> Result<Vec<String>, &'static str> {
+    let mut cloned = Vec::new();
+    cloned
+        .try_reserve_exact(values.len())
+        .map_err(|_| "solution-set-audit-string-allocation-failed")?;
+    for value in values {
+        cloned.push(try_owned_audit_string(value.solution_key())?);
+    }
+    Ok(cloned)
+}
+
 fn try_owned_audit_string(value: &str) -> Result<String, &'static str> {
     let mut owned = String::new();
     owned
@@ -777,6 +824,109 @@ mod tests {
         )]);
         let expected = setup.clone();
         assert_eq!(attach_solution_set_audit(setup), expected);
+    }
+
+    #[test]
+    fn minimum_cover_audits_complete_source_rows_before_canonical_selection() {
+        let input = materialized_result(SolutionProductFamily::Pc)
+            .with_replaced_fields(vec![
+                ("objective".to_owned(), "minimum-cover".to_owned()),
+                ("minimum_cover_requested".to_owned(), "true".to_owned()),
+                ("minimum_cover_complete".to_owned(), "true".to_owned()),
+                ("minimum_cover_proven_minimum".to_owned(), "true".to_owned()),
+                (
+                    "minimum_cover_source_solution_count".to_owned(),
+                    "2".to_owned(),
+                ),
+                (
+                    "minimum_cover_selected_solution_count".to_owned(),
+                    "1".to_owned(),
+                ),
+                ("unique_solution_count".to_owned(), "1".to_owned()),
+                (
+                    "normalized_unique_solution_count".to_owned(),
+                    "1".to_owned(),
+                ),
+                (
+                    "solution_keys_materialized_count".to_owned(),
+                    "1".to_owned(),
+                ),
+            ])
+            .with_normalized_solution_keys(vec!["solution-a".to_owned()])
+            .with_normalized_solution_coverages(vec![
+                NormalizedSolutionCoverage::new("solution-a", bits(2, &[0, 1])),
+                NormalizedSolutionCoverage::new("solution-b", bits(2, &[0])),
+            ]);
+
+        let result = attach_solution_set_audit(input);
+        let report = result.solution_set_audit_report().expect("typed audit");
+
+        assert!(report.complete());
+        assert_eq!(
+            result.normalized_solution_keys(),
+            &["solution-a".to_owned()]
+        );
+        assert_eq!(
+            report
+                .stage(SolutionSetAuditStageKind::Normalized)
+                .output_count(),
+            Some(2)
+        );
+        assert_eq!(
+            report
+                .stage(SolutionSetAuditStageKind::PortfolioSelected)
+                .output_count(),
+            Some(1)
+        );
+        assert_eq!(report.portfolio_families().len(), 1);
+        assert_eq!(
+            report.portfolio_families()[0].representative_keys(),
+            &["solution-a".to_owned()]
+        );
+    }
+
+    #[test]
+    fn minimum_cover_source_solution_count_mismatch_fails_closed() {
+        let input = materialized_result(SolutionProductFamily::Pc)
+            .with_replaced_fields(vec![
+                ("objective".to_owned(), "minimum-cover".to_owned()),
+                ("minimum_cover_requested".to_owned(), "true".to_owned()),
+                ("minimum_cover_complete".to_owned(), "true".to_owned()),
+                ("minimum_cover_proven_minimum".to_owned(), "true".to_owned()),
+                (
+                    "minimum_cover_source_solution_count".to_owned(),
+                    "1".to_owned(),
+                ),
+                (
+                    "minimum_cover_selected_solution_count".to_owned(),
+                    "1".to_owned(),
+                ),
+                ("unique_solution_count".to_owned(), "1".to_owned()),
+                (
+                    "normalized_unique_solution_count".to_owned(),
+                    "1".to_owned(),
+                ),
+                (
+                    "solution_keys_materialized_count".to_owned(),
+                    "1".to_owned(),
+                ),
+            ])
+            .with_normalized_solution_keys(vec!["solution-a".to_owned()])
+            .with_normalized_solution_coverages(vec![
+                NormalizedSolutionCoverage::new("solution-a", bits(2, &[0, 1])),
+                NormalizedSolutionCoverage::new("solution-b", bits(2, &[0])),
+            ]);
+
+        let result = attach_solution_set_audit(input);
+        let report = result.solution_set_audit_report().expect("typed audit");
+
+        assert!(!report.complete());
+        let normalized = report.stage(SolutionSetAuditStageKind::Normalized);
+        assert!(!normalized.complete());
+        assert!(normalized
+            .rejection_reasons()
+            .iter()
+            .any(|reason| reason == "minimum-cover-source-solution-count-mismatch"));
     }
 
     #[test]

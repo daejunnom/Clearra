@@ -66,6 +66,10 @@ test('score-minimals UI exposes the closed mode and pages every exact portfolio 
     new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
     'utf8'
   );
+  const pagerModel = readFileSync(
+    new URL('../src/lib/workspace/productResultPager.ts', import.meta.url),
+    'utf8'
+  );
 
   assert.match(controls, /<option value="score-minimals">/u);
   assert.match(standalone, /scoreMode: 'score-minimals'/u);
@@ -75,6 +79,12 @@ test('score-minimals UI exposes the closed mode and pages every exact portfolio 
   assert.match(pager, /async function showMemberPage\(nextMemberPage/u);
   assert.match(pager, /loadNextPage/u);
   assert.match(pager, /loadMemberPage/u);
+  assert.match(pager, /CoveragePortfolioPagerController/u);
+  assert.match(pagerModel, /const MAX_RETAINED_PORTFOLIO_PAGES = 2/u);
+  assert.match(pagerModel, /this\.pages\.slice\(1\)/u);
+  assert.match(pagerModel, /validateCoveragePortfolioRuntimePage/u);
+  assert.match(pager, /const MAX_RETAINED_MEMBER_PAGES = 3/u);
+  assert.match(pager, /pruneMemberCache\(page\.alternative_index, nextMemberPage\)/u);
 });
 
 test('PC path and score-finder are reachable on both Web PC entry surfaces', () => {

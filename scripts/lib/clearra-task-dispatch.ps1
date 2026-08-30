@@ -70,6 +70,13 @@ function Invoke-ClearraTask([string]$TaskName, [string]$Root) {
                 Workers = $Workers
                 ExecutionSurface = $ExecutionSurface
             }
+            $noProductDebtArchitecture = Get-Variable `
+                -Name ClearraNoProductDebtArchitecturePassed `
+                -Scope Script `
+                -ErrorAction SilentlyContinue
+            if ($null -ne $noProductDebtArchitecture -and [bool]$noProductDebtArchitecture.Value) {
+                $desktopHostArgs["ArchitectureValidatedByNoProductDebt"] = $true
+            }
             if ($VerboseLog.IsPresent) {
                 $desktopHostArgs["VerboseLog"] = $true
             }
@@ -113,6 +120,7 @@ function Invoke-ClearraTask([string]$TaskName, [string]$Root) {
                 $PowerShellPath `
                 (Get-ClearraCargoTargetDir) `
                 $Workers
+            $script:ClearraNoProductDebtArchitecturePassed = $true
         }
         "AdversarialCorrectness" {
             Invoke-AdversarialCorrectnessGate `

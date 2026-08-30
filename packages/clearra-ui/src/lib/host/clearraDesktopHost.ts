@@ -694,25 +694,63 @@ export async function loadNextProductPage(
   signal?: AbortSignal
 ): Promise<ClearraProductPageWorkerPayload> {
   if (signal?.aborted) throw abortError(signal);
-  const response = await invoke<string>('product_page_next', {
-    maximumWorkSteps
-  });
-  if (signal?.aborted) throw abortError(signal);
-  return JSON.parse(response) as ClearraProductPageWorkerPayload;
+  const releaseOnAbort = () => {
+    void releaseProductPages().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', releaseOnAbort, { once: true });
+  try {
+    if (signal?.aborted) {
+      releaseOnAbort();
+      throw abortError(signal);
+    }
+    const response = await invoke<string>('product_page_next', {
+      maximumWorkSteps
+    });
+    if (signal?.aborted) throw abortError(signal);
+    return JSON.parse(response) as ClearraProductPageWorkerPayload;
+  } catch (error) {
+    if (signal?.aborted) throw abortError(signal);
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', releaseOnAbort);
+  }
 }
 
 export async function loadProductMemberPage(
-  outerPageNumber: number,
-  memberPageNumber: number,
+  alternativeIndex: string,
+  memberPageNumber: string,
   signal?: AbortSignal
 ): Promise<ClearraProductPageWorkerPayload> {
   if (signal?.aborted) throw abortError(signal);
-  const response = await invoke<string>('product_page_get', {
-    outerPageNumber,
-    memberPageNumber
-  });
-  if (signal?.aborted) throw abortError(signal);
-  return JSON.parse(response) as ClearraProductPageWorkerPayload;
+  requireCanonicalProductPageCoordinate(alternativeIndex, 'alternative index');
+  requireCanonicalProductPageCoordinate(memberPageNumber, 'member page number');
+  const releaseOnAbort = () => {
+    void releaseProductPages().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', releaseOnAbort, { once: true });
+  try {
+    if (signal?.aborted) {
+      releaseOnAbort();
+      throw abortError(signal);
+    }
+    const response = await invoke<string>('product_page_get', {
+      alternativeIndex,
+      memberPageNumber
+    });
+    if (signal?.aborted) throw abortError(signal);
+    return JSON.parse(response) as ClearraProductPageWorkerPayload;
+  } catch (error) {
+    if (signal?.aborted) throw abortError(signal);
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', releaseOnAbort);
+  }
+}
+
+function requireCanonicalProductPageCoordinate(value: string, label: string): void {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error(`${label} must be a canonical positive decimal string`);
+  }
 }
 
 export async function releaseProductPages(): Promise<void> {

@@ -119,6 +119,8 @@ export async function appendFinalSourceAttemptEvent({
 export async function materializeFinalSourceManifest({
   journalPath,
   outputPath,
+  discordCatalogSyncReport,
+  productionObservationReport,
 }) {
   const path = requirePath(journalPath, "journalPath");
   const target = outputPath === undefined
@@ -154,6 +156,8 @@ export async function materializeFinalSourceManifest({
     validateFinalSourceRevalidation(manifest, {
       expectedSourceCommit: header.source_commit,
       expectedRelease: header.release,
+      discordCatalogSyncReport,
+      productionObservationReport,
     });
     if (target !== undefined) {
       await writeNewFile(target, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -179,8 +183,18 @@ export function parseFinalSourceAttemptCliArguments(args) {
       required: ["--journal", "--kind", "--payload"],
     }],
     ["materialize", {
-      allowed: ["--journal", "--output"],
-      required: ["--journal", "--output"],
+      allowed: [
+        "--journal",
+        "--output",
+        "--discord-catalog-sync-report",
+        "--production-observation-report",
+      ],
+      required: [
+        "--journal",
+        "--output",
+        "--discord-catalog-sync-report",
+        "--production-observation-report",
+      ],
     }],
   ]);
   const specification = specifications.get(command);
@@ -513,9 +527,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         payload,
       });
     } else {
+      const discordCatalogSyncReport = await readCanonicalProducerReport(
+        values["--discord-catalog-sync-report"],
+        "Discord command catalog sync report",
+      );
+      const productionObservationReport = await readCanonicalProducerReport(
+        values["--production-observation-report"],
+        "production observation report",
+      );
       await materializeFinalSourceManifest({
         journalPath: values["--journal"],
         outputPath: values["--output"],
+        discordCatalogSyncReport,
+        productionObservationReport,
       });
     }
     process.stdout.write(`${FINAL_SOURCE_ATTEMPT_SCHEMA_ID}\n`);
@@ -523,4 +547,21 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 2;
   }
+}
+
+async function readCanonicalProducerReport(path, label) {
+  const target = resolve(requirePath(path, `${label} path`));
+  await assertSafePathChain(dirname(target));
+  await assertRegularNonLinkFile(target);
+  const raw = await readFile(target, "utf8");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  if (raw !== `${canonicalJson(value)}\n`) {
+    throw new Error(`${label} bytes are not canonical producer JSON`);
+  }
+  return value;
 }

@@ -2,6 +2,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  validateDiscordCatalogSyncReport,
+} from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
+import {
+  canonicalJson,
+} from "./canonical-release-evidence.mjs";
+import {
+  validateProductionObservationReport,
+} from "./observe-production-surfaces.mjs";
+
 export const FINAL_SOURCE_SCHEMA_ID = "clearra.final-source-revalidation.v1";
 
 const SHA1 = /^[0-9a-f]{40}$/u;
@@ -16,7 +26,12 @@ const REQUIRED_ARTIFACT_ROLES = Object.freeze(["linux-cli", "windows-cli", "wind
 
 export function validateFinalSourceRevalidation(
   manifest,
-  { expectedSourceCommit, expectedRelease = "v0.8.0" } = {},
+  {
+    expectedSourceCommit,
+    expectedRelease = "v0.8.0",
+    discordCatalogSyncReport,
+    productionObservationReport,
+  } = {},
 ) {
   requirePlainObject(manifest, "manifest");
   rejectSecretMaterial(manifest);
@@ -60,17 +75,33 @@ export function validateFinalSourceRevalidation(
   validateReleaseArtifacts(manifest.release_artifacts, source.commit, expectedRelease);
   validateDeployment(manifest.deployment, source.commit);
   validateObservation(manifest.observation, source.commit);
+  validateProducerEvidence(
+    manifest,
+    discordCatalogSyncReport,
+    productionObservationReport,
+    source.commit,
+  );
   validateTag(manifest.tag, source.commit, expectedRelease);
   validateImmutableRelease(manifest.immutable_release, source.commit, expectedRelease);
   return true;
 }
 
 export function parseFinalSourceCliArguments(args) {
-  const parsed = { manifestPath: "", expectedSourceCommit: undefined };
+  const parsed = {
+    manifestPath: "",
+    expectedSourceCommit: undefined,
+    discordCatalogSyncReportPath: "",
+    productionObservationReportPath: "",
+  };
   const seen = new Set();
   for (let index = 0; index < args.length; index += 1) {
     const option = args[index];
-    if (option !== "--manifest" && option !== "--expected-source-commit") {
+    if (!new Set([
+      "--manifest",
+      "--expected-source-commit",
+      "--discord-catalog-sync-report",
+      "--production-observation-report",
+    ]).has(option)) {
       throw new Error(`unsupported final-source validator argument: ${String(option)}`);
     }
     if (seen.has(option)) throw new Error(`duplicate final-source validator argument: ${option}`);
@@ -81,9 +112,20 @@ export function parseFinalSourceCliArguments(args) {
     }
     index += 1;
     if (option === "--manifest") parsed.manifestPath = value;
-    else parsed.expectedSourceCommit = value;
+    else if (option === "--expected-source-commit") parsed.expectedSourceCommit = value;
+    else if (option === "--discord-catalog-sync-report") {
+      parsed.discordCatalogSyncReportPath = value;
+    } else {
+      parsed.productionObservationReportPath = value;
+    }
   }
   if (!parsed.manifestPath) throw new Error("--manifest PATH is required");
+  if (!parsed.discordCatalogSyncReportPath) {
+    throw new Error("--discord-catalog-sync-report PATH is required");
+  }
+  if (!parsed.productionObservationReportPath) {
+    throw new Error("--production-observation-report PATH is required");
+  }
   if (parsed.expectedSourceCommit !== undefined && !SHA1.test(parsed.expectedSourceCommit)) {
     throw new Error("--expected-source-commit must be a full lowercase SHA-1 commit");
   }
@@ -253,20 +295,52 @@ function validateDeployment(deployment, sourceCommit) {
   requirePlainObject(discord, "deployment.discord");
   requireExactKeys(discord, [
     "source_commit",
+    "application_id",
     "image_digest",
     "job_revision",
     "oracle_revision",
+    "oracle_release_sha256",
+    "oracle_settings_sha256",
     "traffic_percent",
     "command_catalog_sha256",
+    "command_catalog_prior_snapshot_sha256",
+    "command_catalog_readback_sha256",
+    "command_catalog_sync_report_sha256",
     "catalog_synced",
     "status",
   ], "deployment.discord");
   assertSameCommit(discord.source_commit, sourceCommit, "Discord deployment");
+  assertMatch(discord.application_id, /^\d{17,20}$/u, "deployment.discord.application_id");
   assertMatch(discord.image_digest, IMAGE_DIGEST, "deployment.discord.image_digest");
   requireNonEmptyString(discord.job_revision, "deployment.discord.job_revision");
   requireNonEmptyString(discord.oracle_revision, "deployment.discord.oracle_revision");
+  assertMatch(
+    discord.oracle_release_sha256,
+    SHA256,
+    "deployment.discord.oracle_release_sha256",
+  );
+  assertMatch(
+    discord.oracle_settings_sha256,
+    SHA256,
+    "deployment.discord.oracle_settings_sha256",
+  );
   if (discord.traffic_percent !== 100) throw new Error("Discord traffic is not at 100 percent");
   assertMatch(discord.command_catalog_sha256, SHA256, "Discord command catalog sha256");
+  assertMatch(
+    discord.command_catalog_prior_snapshot_sha256,
+    SHA256,
+    "Discord command catalog prior snapshot sha256",
+  );
+  assertMatch(
+    discord.command_catalog_readback_sha256,
+    SHA256,
+    "Discord command catalog readback sha256",
+  );
+  assertMatch(
+    discord.command_catalog_sync_report_sha256,
+    SHA256,
+    "Discord command catalog sync report sha256",
+  );
   if (discord.catalog_synced !== true) throw new Error("Discord command catalog was not synced");
   if (discord.status !== "active") throw new Error("Discord deployment is not active");
 
@@ -281,13 +355,18 @@ function validateDeployment(deployment, sourceCommit) {
 function validateObservation(observation, sourceCommit) {
   requirePlainObject(observation, "observation");
   requireExactKeys(observation, [
+    "report_schema_id",
     "source_commit",
     "started_at",
     "ended_at",
     "duration_seconds",
+    "probe_spec_sha256",
     "status",
     "report_sha256",
   ], "observation");
+  if (observation.report_schema_id !== "clearra.production-observation.v1") {
+    throw new Error("production observation schema is invalid");
+  }
   assertSameCommit(observation.source_commit, sourceCommit, "observation");
   const started = isoTime(observation.started_at, "observation.started_at");
   const ended = isoTime(observation.ended_at, "observation.ended_at");
@@ -299,7 +378,96 @@ function validateObservation(observation, sourceCommit) {
     throw new Error("production observation duration is inconsistent with its timestamps");
   }
   if (observation.status !== "passed") throw new Error("production observation did not pass");
+  assertMatch(observation.probe_spec_sha256, SHA256, "observation.probe_spec_sha256");
   assertMatch(observation.report_sha256, SHA256, "observation.report_sha256");
+}
+
+function validateProducerEvidence(
+  manifest,
+  discordCatalogSyncReport,
+  productionObservationReport,
+  sourceCommit,
+) {
+  if (discordCatalogSyncReport === undefined) {
+    throw new Error("actual Discord command catalog sync producer report is required");
+  }
+  if (productionObservationReport === undefined) {
+    throw new Error("actual four-surface production observation producer report is required");
+  }
+  validateDiscordCatalogSyncReport(discordCatalogSyncReport, {
+    expectedSourceCommit: sourceCommit,
+    expectedApplicationId: manifest.deployment.discord.application_id,
+  });
+  validateProductionObservationReport(productionObservationReport, {
+    expectedSourceCommit: sourceCommit,
+  });
+
+  const discord = manifest.deployment.discord;
+  if (
+    discord.command_catalog_sha256 !==
+      discordCatalogSyncReport.expected_catalog_sha256 ||
+    discord.command_catalog_prior_snapshot_sha256 !==
+      discordCatalogSyncReport.prior_snapshot_sha256 ||
+    discord.command_catalog_readback_sha256 !==
+      discordCatalogSyncReport.current_after_sha256 ||
+    discord.command_catalog_sync_report_sha256 !==
+      discordCatalogSyncReport.report_sha256
+  ) {
+    throw new Error("Discord deployment differs from the actual catalog sync producer report");
+  }
+
+  const observation = manifest.observation;
+  for (const key of ["source_commit", "started_at", "ended_at", "duration_seconds", "probe_spec_sha256", "status", "report_sha256"]) {
+    if (observation[key] !== productionObservationReport[key]) {
+      throw new Error(`final observation ${key} differs from the actual producer report`);
+    }
+  }
+  if (observation.report_schema_id !== productionObservationReport.schema_id) {
+    throw new Error("final observation schema differs from the actual producer report");
+  }
+
+  const identities = new Map(
+    productionObservationReport.surfaces.map((surface) => [
+      surface.surface,
+      surface.identity,
+    ]),
+  );
+  const discordIdentity = identities.get("discord");
+  if (
+    discordIdentity.application_id !== discord.application_id ||
+    discordIdentity.command_catalog_sha256 !== discord.command_catalog_sha256 ||
+    discordIdentity.command_catalog_prior_snapshot_sha256 !==
+      discord.command_catalog_prior_snapshot_sha256 ||
+    discordIdentity.command_catalog_readback_sha256 !==
+      discord.command_catalog_readback_sha256 ||
+    discordIdentity.command_catalog_sync_report_sha256 !==
+      discord.command_catalog_sync_report_sha256
+  ) {
+    throw new Error("observed Discord identity differs from the synced deployment");
+  }
+  const oracleIdentity = identities.get("oracle");
+  if (
+    oracleIdentity.release_id !== discord.oracle_revision ||
+    oracleIdentity.release_tree_sha256 !== discord.oracle_release_sha256 ||
+    oracleIdentity.settings_sha256 !== discord.oracle_settings_sha256
+  ) {
+    throw new Error("observed Oracle identity differs from the Discord deployment");
+  }
+  const cloudIdentity = identities.get("cloud");
+  if (
+    cloudIdentity.revision !== discord.job_revision ||
+    cloudIdentity.image_digest !== discord.image_digest ||
+    cloudIdentity.traffic_percent !== discord.traffic_percent
+  ) {
+    throw new Error("observed Cloud identity differs from the Discord deployment");
+  }
+  const pagesIdentity = identities.get("pages");
+  if (
+    pagesIdentity.deployment_id !== manifest.deployment.pages.deployment_id ||
+    pagesIdentity.artifact_sha256 !== manifest.deployment.pages.artifact_sha256
+  ) {
+    throw new Error("observed Pages identity differs from the Pages deployment");
+  }
 }
 
 function validateTag(tag, sourceCommit, release) {
@@ -419,14 +587,43 @@ function isoTime(value, label) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
-    const { manifestPath, expectedSourceCommit } = parseFinalSourceCliArguments(
-      process.argv.slice(2),
-    );
+    const {
+      manifestPath,
+      expectedSourceCommit,
+      discordCatalogSyncReportPath,
+      productionObservationReportPath,
+    } = parseFinalSourceCliArguments(process.argv.slice(2));
     const manifest = JSON.parse(readFileSync(resolve(manifestPath), "utf8"));
-    validateFinalSourceRevalidation(manifest, { expectedSourceCommit });
+    const discordCatalogSyncReport = readCanonicalProducerReport(
+      discordCatalogSyncReportPath,
+      "Discord command catalog sync report",
+    );
+    const productionObservationReport = readCanonicalProducerReport(
+      productionObservationReportPath,
+      "production observation report",
+    );
+    validateFinalSourceRevalidation(manifest, {
+      expectedSourceCommit,
+      discordCatalogSyncReport,
+      productionObservationReport,
+    });
     process.stdout.write(`${FINAL_SOURCE_SCHEMA_ID}\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 2;
   }
+}
+
+function readCanonicalProducerReport(path, label) {
+  const raw = readFileSync(resolve(path), "utf8");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  if (raw !== `${canonicalJson(value)}\n`) {
+    throw new Error(`${label} bytes are not canonical producer JSON`);
+  }
+  return value;
 }

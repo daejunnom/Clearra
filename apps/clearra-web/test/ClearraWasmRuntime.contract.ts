@@ -8,6 +8,7 @@ import {
   CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS,
   ClearraWasmRuntimeError,
   normalizeWasmU32,
+  requireProductPageDecimal,
   withArtifactDeadline
 } from '../src/workers/clearraWasmRuntime.ts';
 import type { ClearraProductBuildIdentity } from '@clearra/ui/wasm';
@@ -145,6 +146,29 @@ assert.doesNotThrow(() =>
   assertClearraWasmAvailabilityExactnessExports(completeExports)
 );
 assert.equal(normalizeWasmU32(-1), 0xffff_ffff);
+assert.equal(requireProductPageDecimal('1', 'alternative index'), '1');
+assert.equal(
+  requireProductPageDecimal('184467440737095516160', 'alternative index'),
+  '184467440737095516160'
+);
+for (const invalidPageNumber of [
+  '',
+  '0',
+  '-1',
+  '01',
+  '1.5',
+  'NaN',
+  ' 1',
+  '1\n2'
+]) {
+  assert.throws(
+    () => requireProductPageDecimal(invalidPageNumber, 'alternative index'),
+    (error) =>
+      error instanceof ClearraWasmRuntimeError &&
+      error.diagnosticCode === 'E_WASM_PRODUCT_PAGE_RANGE',
+    `invalid product page coordinate ${invalidPageNumber}`
+  );
+}
 
 for (const name of CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS) {
   const incompleteExports = { ...completeExports };
@@ -208,4 +232,20 @@ assert.match(
   runtimeSource,
   /if \(status === ABI_OUTPUT_NOT_RELEASED\) \{[\s\S]*?raw\.clearra_wasm_output_release\(\);[\s\S]*?E_WASM_OUTPUT_NOT_RELEASED/u,
   'the host maps the allocation-free outstanding-owner status without decoding stale output'
+);
+assert.doesNotMatch(
+  runtimeSource.slice(
+    runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber) {'),
+    runtimeSource.indexOf('product_page_release() {')
+  ),
+  />>>\s*0/u,
+  'product page coordinates must never be silently truncated or wrapped'
+);
+assert.match(
+  runtimeSource.slice(
+    runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber) {'),
+    runtimeSource.indexOf('product_page_release() {')
+  ),
+  /clearra_wasm_product_page_get_exact\(\)/u,
+  'product page requests cross the WASM boundary through exact decimal text'
 );

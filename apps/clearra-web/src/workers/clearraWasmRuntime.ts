@@ -32,8 +32,8 @@ export type ClearraWasmModule = {
   product_page_available: () => boolean;
   product_page_next: (maximumWorkSteps: number) => ClearraProductPageWorkerPayload;
   product_page_get: (
-    outerPageNumber: number,
-    memberPageNumber: number
+    alternativeIndex: string,
+    memberPageNumber: string
   ) => ClearraProductPageWorkerPayload;
   product_page_release: () => void;
   distributed_cancel: () => void;
@@ -161,6 +161,7 @@ type ClearraRawWasmExports = {
   ) => number;
   clearra_wasm_input_resize: (byteLen: number) => number;
   clearra_wasm_input_ptr: () => number;
+  clearra_wasm_product_page_request_resize: (byteLen: number) => number;
   clearra_wasm_transfer_resize: (byteLen: number) => number;
   clearra_wasm_transfer_ptr: () => number;
   clearra_wasm_tablebase_install: () => number;
@@ -212,10 +213,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_tiling_solution_release: () => number;
   clearra_wasm_product_page_available: () => number;
   clearra_wasm_product_page_next: (maximumWorkSteps: number) => number;
-  clearra_wasm_product_page_get: (
-    outerPageNumber: number,
-    memberPageNumber: number
-  ) => number;
+  clearra_wasm_product_page_get_exact: () => number;
   clearra_wasm_product_page_release: () => number;
   clearra_wasm_distributed_cancel: () => number;
   clearra_wasm_distributed_reset: () => number;
@@ -272,6 +270,8 @@ export const CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS = Object.freeze([
   'clearra_wasm_tiling_solution_count_available',
   'clearra_wasm_tiling_solution_count_exact',
   'clearra_wasm_product_page_available',
+  'clearra_wasm_product_page_request_resize',
+  'clearra_wasm_product_page_get_exact',
   'clearra_wasm_distributed_verifier_last_candidate_count_available',
   'clearra_wasm_distributed_verifier_last_candidate_count_exact',
   'clearra_wasm_distributed_verifier_progress_available',
@@ -613,6 +613,20 @@ export function normalizeWasmU32(value: number): number {
   return value >>> 0;
 }
 
+/**
+ * Product-page coordinates are semantic decimal identities. Never coerce them
+ * through JavaScript Number or a scalar WASM `u32` boundary.
+ */
+export function requireProductPageDecimal(value: string, coordinate: string): string {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new ClearraWasmRuntimeError(
+      'E_WASM_PRODUCT_PAGE_RANGE',
+      `${coordinate} must be a canonical positive decimal string`
+    );
+  }
+  return value;
+}
+
 export function assertClearraWasmAvailabilityExactnessExports(
   raw: unknown
 ): void {
@@ -908,6 +922,13 @@ function wrapRawModule(
     const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
   };
+  const setProductPageRequest = (alternativeIndex: string, memberPageNumber: string) => {
+    const request = `portfolio-page-request.v1\n${alternativeIndex}\n${memberPageNumber}`;
+    const bytes = encoder.encode(request);
+    requireOk(raw.clearra_wasm_product_page_request_resize(bytes.byteLength));
+    const ptr = raw.clearra_wasm_input_ptr() >>> 0;
+    new Uint8Array(raw.memory.buffer, ptr, bytes.byteLength).set(bytes);
+  };
   let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
@@ -1147,13 +1168,12 @@ function wrapRawModule(
       requireOk(raw.clearra_wasm_product_page_next(Math.max(1, maximumWorkSteps) >>> 0));
       return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;
     },
-    product_page_get(outerPageNumber, memberPageNumber) {
-      requireOk(
-        raw.clearra_wasm_product_page_get(
-          Math.max(0, outerPageNumber) >>> 0,
-          Math.max(0, memberPageNumber) >>> 0
-        )
+    product_page_get(alternativeIndex, memberPageNumber) {
+      setProductPageRequest(
+        requireProductPageDecimal(alternativeIndex, 'alternative index'),
+        requireProductPageDecimal(memberPageNumber, 'member page number')
       );
+      requireOk(raw.clearra_wasm_product_page_get_exact());
       return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;
     },
     product_page_release() {

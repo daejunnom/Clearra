@@ -118,6 +118,37 @@ function Assert-ReleaseYamlExactScalar {
     }
 }
 
+function Assert-ReleaseYamlExactFlowSequence {
+    param(
+        [string]$Text,
+        [string]$Key,
+        [string[]]$ExpectedValues,
+        [string]$Contract
+    )
+
+    $keyPattern = '(?m)^    ' + [regex]::Escape($Key) + '\s*:'
+    if ([regex]::Matches($Text, $keyPattern).Count -ne 1) {
+        Add-ArchitectureError "$Contract must have exactly one '$Key' key"
+        return
+    }
+    $sequencePattern = '(?m)^    ' + [regex]::Escape($Key) +
+        ':\s*(?:\r?\n\s*)?\[([^\]]*)\]\s*$'
+    $match = [regex]::Match($Text, $sequencePattern)
+    if (-not $match.Success) {
+        Add-ArchitectureError "$Contract must use a canonical YAML flow sequence"
+        return
+    }
+    $actualValues = @($match.Groups[1].Value.Split(',') |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $actualUnique = @($actualValues | Sort-Object -Unique)
+    if ($actualValues.Count -ne $ExpectedValues.Count -or
+        $actualUnique.Count -ne $ExpectedValues.Count -or
+        @($ExpectedValues | Where-Object { $actualValues -notcontains $_ }).Count -ne 0) {
+        Add-ArchitectureError "$Contract must be exactly [$($ExpectedValues -join ', ')], got [$($actualValues -join ', ')]"
+    }
+}
+
 function Assert-ReleaseYamlExactLiteralScript {
     param(
         [string]$Text,
@@ -393,6 +424,11 @@ function Invoke-AdversarialReleaseGateWiringValidation {
         Read-Text 'scripts/lib/clearra-task-ui-helpers.ps1'
     ) -join "`n"
     $adversarial = Read-PhysicalText 'scripts/lib/adversarial-correctness.ps1'
+    $rustExact = Read-PhysicalText 'scripts/lib/rust-exact-tests.ps1'
+    $noProductDebt = Read-PhysicalText 'scripts/lib/no-product-debt.ps1'
+    $renderGolden = Read-PhysicalText 'scripts/lib/render-golden-gate.ps1'
+    $desktopHost = Read-PhysicalText 'scripts/desktop-host-check.ps1'
+    $coreCTestHelper = Read-PhysicalText 'scripts/lib/clearra-core-c-task-helpers.ps1'
     $cMake = Read-Text 'core-c/CMakeLists.txt'
 
     foreach ($required in @(
@@ -405,7 +441,6 @@ function Invoke-AdversarialReleaseGateWiringValidation {
     }
     foreach ($required in @(
         'CLEARRA_CORE_ADVERSARIAL_TESTS=ON', 'clearra_adversarial_tests',
-        'RequireExecution',
         'operation_set_hash_collision_does_not_merge_candidates',
         'alternate_success_order_replay_is_legal',
         'objective_uses_nonuniform_pattern_weights',
@@ -420,6 +455,14 @@ function Invoke-AdversarialReleaseGateWiringValidation {
             Add-ArchitectureError "Adversarial correctness runner is missing execution contract '$required'"
         }
     }
+    foreach ($requiredExecutionMarker in @(
+        '$trustedExecution',
+        'requires executed CTest evidence'
+    )) {
+        if ($coreCTestHelper -notlike "*$requiredExecutionMarker*") {
+            Add-ArchitectureError "Adversarial CTest helper is missing execution contract '$requiredExecutionMarker'"
+        }
+    }
     foreach ($removedExecutionSurface in @(
         'ledger_complete_required_executor',
         "'clearra-core-ffi',`n            'clearra-coverage',`n            'clearra-postprocess-gpu'"
@@ -427,6 +470,65 @@ function Invoke-AdversarialReleaseGateWiringValidation {
         if ($adversarial -like "*$removedExecutionSurface*") {
             Add-ArchitectureError "Adversarial correctness runner retains removed or empty execution surface '$removedExecutionSurface'"
         }
+    }
+    foreach ($requiredSingleOwnerMarker in @(
+        'ClearraReleaseAcceptanceMode',
+        'adversarial_rust_tests=deferred owner=RustExactTests reason=single-release-suite'
+    )) {
+        if ($adversarial -notlike "*$requiredSingleOwnerMarker*") {
+            Add-ArchitectureError "Adversarial release gate is missing single-owner marker '$requiredSingleOwnerMarker'"
+        }
+    }
+    foreach ($requiredSingleOwnerMarker in @(
+        'Assert-AdversarialRustCasesInOutput',
+        'adversarial_rust_tests=executed owner=RustExactTests',
+        'complete_required_keeps_candidate status=passed source=rust-test owner=RustExactTests'
+    )) {
+        if ($rustExact -notlike "*$requiredSingleOwnerMarker*") {
+            Add-ArchitectureError "RustExactTests is missing delegated release evidence '$requiredSingleOwnerMarker'"
+        }
+    }
+    foreach ($requiredSingleOwnerMarker in @(
+        'complete_required_keeps_candidate status=deferred owner=RustExactTests reason=single-release-suite',
+        'renderer_png_artifact status=deferred owner=RenderGolden reason=single-release-suite',
+        'renderer_gif_artifact status=deferred owner=RenderGolden reason=single-release-suite',
+        'desktop_real_app_request status=deferred owner=DesktopHost reason=single-release-suite'
+    )) {
+        if ($noProductDebt -notlike "*$requiredSingleOwnerMarker*") {
+            Add-ArchitectureError "NoProductDebt is missing delegated release evidence '$requiredSingleOwnerMarker'"
+        }
+    }
+    foreach ($requiredSingleOwnerMarker in @(
+        'renderer_png_artifact status=passed source=rust-test owner=RenderGolden',
+        'renderer_gif_artifact status=passed source=rust-test owner=RenderGolden'
+    )) {
+        if ($renderGolden -notlike "*$requiredSingleOwnerMarker*") {
+            Add-ArchitectureError "RenderGolden is missing delegated release evidence '$requiredSingleOwnerMarker'"
+        }
+    }
+    foreach ($requiredSingleOwnerMarker in @(
+        'case_tauri_command_calls_clearra_gui_host_only::tauri_command_calls_clearra_gui_host_only',
+        "-EvidenceId 'desktop_real_app_request'",
+        'no_product_debt_evidence=$EvidenceId status=passed source=rust-test owner=DesktopHost',
+        'ArchitectureValidatedByNoProductDebt',
+        'desktop_architecture=deferred owner=NoProductDebt reason=single-release-suite'
+    )) {
+        if ($desktopHost -notlike "*$requiredSingleOwnerMarker*") {
+            Add-ArchitectureError "DesktopHost is missing delegated release evidence '$requiredSingleOwnerMarker'"
+        }
+    }
+    $taskDispatch = Read-PhysicalText 'scripts/lib/clearra-task-dispatch.ps1'
+    foreach ($requiredSingleOwnerMarker in @(
+        'ClearraNoProductDebtArchitecturePassed',
+        '$script:ClearraNoProductDebtArchitecturePassed = $true',
+        '$desktopHostArgs["ArchitectureValidatedByNoProductDebt"] = $true'
+    )) {
+        if (-not $taskDispatch.Contains($requiredSingleOwnerMarker)) {
+            Add-ArchitectureError "Release task dispatch is missing DesktopHost single-owner marker '$requiredSingleOwnerMarker'"
+        }
+    }
+    if (-not $clearra.Contains('$script:ClearraNoProductDebtArchitecturePassed = $false')) {
+        Add-ArchitectureError 'Release runner must reset NoProductDebt architecture evidence before task execution'
     }
     foreach ($required in @(
         'CLEARRA_CORE_ADVERSARIAL_TESTS', 'tests/adversarial_tests.c',
@@ -466,14 +568,24 @@ function Invoke-ReleaseIdentityGateValidation {
     $acceptedSourcePreflightTest = Read-Text 'apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs'
     $runtimeServiceAccountBootstrap = Read-Text 'apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs'
     $runtimeServiceAccountBootstrapTest = Read-Text 'apps/clearra-discord-bot/test/cloud-runtime-service-account.test.mjs'
-    $candidateSmoke = Read-Text 'apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs'
-    $candidateSmokeTest = Read-Text 'apps/clearra-discord-bot/test/cloud-run-candidate-smoke.test.mjs'
+    $managedCandidateSmoke = Read-Text 'apps/clearra-discord-bot/scripts/run-cloud-candidate-smoke-job.mjs'
+    $managedCandidateSmokeTest = Read-Text 'apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs'
+    $cloudCandidateRelease = Read-Text 'scripts/release/cloud/candidate-release-v080.mjs'
+    $cloudCandidateReleaseTest = Read-Text 'scripts/release/cloud/candidate-release-v080.test.mjs'
     $oracleProofProducer = Read-Text 'apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs'
     $oracleRuntimeAuthority = Read-Text 'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs'
     $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
     $oracleRollbackProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs'
     $oracleRestore = Read-Text 'apps/clearra-discord-bot/scripts/restore-oracle-release'
     $oracleDeployLauncher = Read-Text 'scripts/release/oracle/clearra-oracle-release-deploy-v080'
+    $oracleDeployInvoker = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.ps1'
+    $oracleDeployInvokerTest = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.test.ps1'
+    $oracleCandidateSettings = Read-Text 'scripts/release/oracle/candidate-settings-v080.mjs'
+    $oracleCandidateSettingsTest = Read-Text 'scripts/release/oracle/candidate-settings-v080.test.mjs'
+    $oracleAcceptedLayerBuilder = Read-Text 'scripts/release/oracle/create-local-layers-v080.sh'
+    $oracleFreezeTest = Read-Text 'scripts/release/oracle-freeze-v080.test.mjs'
+    $oracleObservation = Read-Text 'apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs'
+    $oracleObservationTest = Read-Text 'apps/clearra-discord-bot/test/oracle-candidate-observation.test.mjs'
     $oracleRollbackCapture = Read-Text 'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
     $oracleReleaseDigest = Read-Text 'apps/clearra-discord-bot/scripts/release-tree-digest.mjs'
     $oracleProofProducerTest = Read-Text 'apps/clearra-discord-bot/test/oracle-deployment-proof-producer.test.mjs'
@@ -494,11 +606,17 @@ function Invoke-ReleaseIdentityGateValidation {
     $wasmProductTerminalContractTest = Read-Text 'scripts/tools/wasm-product-terminal-contract.test.mjs'
     $webWasmRuntime = Read-Text 'apps/clearra-web/src/workers/clearraWasmRuntime.ts'
     $releasePackage = Read-Text 'scripts/tools/package-release-cli.sh'
+    $acceptedCtk3Dist = Read-Text 'scripts/tools/accepted-ctk3-dist.mjs'
+    $acceptedCtk3DistTest = Read-Text 'scripts/tools/accepted-ctk3-dist.test.mjs'
+    $acceptedPagesBuild = Read-Text 'scripts/release/accepted-pages-build.mjs'
+    $acceptedPagesBuildTest = Read-Text 'scripts/release/accepted-pages-build.test.mjs'
+    $discordPackage = Read-Text 'apps/clearra-discord-bot/package.json'
     $uiPackage = Read-Text 'packages/clearra-ui/package.json'
     $webPackage = Read-Text 'apps/clearra-web/package.json'
     $uiContractTypecheck = Read-Text 'packages/clearra-ui/tsconfig.contract.json'
     $webContractTypecheck = Read-Text 'apps/clearra-web/tsconfig.contract.json'
     $productProcessSurface = Read-Text 'scripts/lib/product-process-surface.ps1'
+    $productProcessContractTest = Read-Text 'scripts/test_product_process_contract.ps1'
     $remoteTagVerifier = Read-Text 'scripts/release/verify-remote-annotated-tag.mjs'
     $remoteTagVerifierTest = Read-Text 'scripts/release/verify-remote-annotated-tag.test.mjs'
     $gitAttributes = Read-Text '.gitattributes'
@@ -506,18 +624,52 @@ function Invoke-ReleaseIdentityGateValidation {
     $exactSourceTarContract = Read-Text 'scripts/release/exact-source-tar-contract.mjs'
     $exactSourceArchiveTest = Read-Text 'scripts/release/create-exact-source-archive.test.mjs'
     $releaseCliSmokeTest = Read-Text 'scripts/tools/validate-release-cli-smokes.test.mjs'
+    $canonicalAcceptanceRun = Read-Text 'scripts/release/canonical-acceptance-run.mjs'
+    $canonicalAcceptanceRunTest = Read-Text 'scripts/release/canonical-acceptance-run.test.mjs'
+    $canonicalAcceptanceEvidence = Read-Text 'scripts/release/canonical-acceptance-evidence.mjs'
+    $canonicalAcceptanceEvidenceTest = Read-Text 'scripts/release/canonical-acceptance-evidence.test.mjs'
+    $canonicalReleaseEvidence = Read-Text 'scripts/release/canonical-release-evidence.mjs'
+    $discordCatalogRelease = Read-Text 'apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs'
+    $discordCatalogReleaseTest = Read-Text 'apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs'
+    $productionObservation = Read-Text 'scripts/release/observe-production-surfaces.mjs'
+    $productionObservationTest = Read-Text 'scripts/release/observe-production-surfaces.test.mjs'
+    $productionProbeAdapter = Read-Text 'scripts/release/production-surface-probe-adapter.mjs'
+    $productionProbeAdapterTest = Read-Text 'scripts/release/production-surface-probe-adapter.test.mjs'
+    $productionProbeMaterializer = Read-Text 'scripts/release/materialize-production-probe-spec.mjs'
+    $productionProbeMaterializerTest = Read-Text 'scripts/release/materialize-production-probe-spec.test.mjs'
+    $cloudCandidateSmokeReport = Read-Text 'scripts/release/cloud-candidate-smoke-report.mjs'
+    $finalSourceValidator = Read-Text 'scripts/release/validate-final-source-revalidation.mjs'
+    $finalSourceValidatorTest = Read-Text 'scripts/release/validate-final-source-revalidation.test.mjs'
+    $finalSourceJournal = Read-Text 'scripts/release/final-source-attempt-journal.mjs'
+    $finalSourceJournalTest = Read-Text 'scripts/release/final-source-attempt-journal.test.mjs'
+    $remainingWorkPlan = Read-Text 'docs/v0.8.0-remaining-work-plan.md'
 
     foreach ($required in @(
         'validate-release-metadata.mjs',
         'node --test scripts/release/validate-release-metadata.test.mjs',
         'node --test scripts/release/verify-remote-annotated-tag.test.mjs',
         'node --test scripts/release/create-exact-source-archive.test.mjs',
-        'node --test scripts/release/pages-rollback-authority.test.mjs',
+        'scripts/release/pages-rollback-authority.test.mjs',
         'scripts/release/pages-rollback-package.test.mjs',
         'validate-release-cli-smokes.mjs',
         'release tag must point at the exact current main commit',
         'release tag is no longer the exact current main commit',
-        '-f event=workflow_dispatch',
+        'group: canonical-release-${{ github.sha }}',
+        'Require exact main and zero prior canonical success',
+        'canonical release acceptance forbids workflow reruns',
+        'node scripts/release/canonical-acceptance-run.mjs',
+        '--require zero',
+        '--require one',
+        'accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}',
+        'accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}',
+        'if: github.event_name == ''workflow_dispatch''',
+        'run-id: ${{ needs.metadata.outputs.accepted_run_id }}',
+        'github-token: ${{ github.token }}',
+        '--expected-run-id "$ACCEPTED_RUN_ID"',
+        '--expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"',
+        'canonical-evidence:',
+        'canonical-acceptance-evidence.mjs collect',
+        'canonical-acceptance-evidence.mjs verify',
         'published versions are immutable',
         'node scripts/release/verify-remote-annotated-tag.mjs',
         '--tag "$GITHUB_REF_NAME"',
@@ -535,72 +687,302 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
+        'probeDiscordProductionSurface',
+        'getGlobalCommands',
+        'probeCloudProductionSurface',
+        'validateCloudCandidateSmokeReport',
+        'job_smoke_report_sha256',
+        'stable_health_sha256',
+        'tagged_health_sha256',
+        'probePagesProductionSurface',
+        'clearra-build-identity.json',
+        'identity_readback_sha256',
+        'file changed after probe-spec materialization'
+    )) {
+        if ($productionProbeAdapter.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production surface adapter is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'Discord adapter performs one independent GET and binds the sealed catalog reports',
+        'Cloud adapter binds service/revision control plane and both existing health URLs',
+        'Cloud adapter rejects a smoke report without managed execution authority',
+        'Pages adapter cache-busts and validates the closed accepted-build identity'
+    )) {
+        if ($productionProbeAdapterTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production surface adapter regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.production-observation-probe-authority.v1',
+        'production-surface-probe-adapter.mjs',
+        'runtime: "powershell"',
+        'smoke_report_file_sha256',
+        'catalog_file_sha256',
+        'sync_report_file_sha256',
+        'tracked Oracle probe adapter differs from its approved SHA-256'
+    )) {
+        if ($productionProbeMaterializer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production probe-spec materializer is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'materializes three tracked Node adapters and one explicit Oracle owner boundary',
+        'probe authority rejects hash drift, secret fields, and mixed source identity',
+        'CLEARRA_ORACLE_IDENTITY_FILE',
+        'DISCORD_TOKEN'
+    )) {
+        if ($productionProbeMaterializerTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production probe-spec materializer regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.cloud.candidate-smoke.v1',
+        'zero_traffic_verified',
+        'service_readback_sha256',
+        'revision_readback_sha256',
+        'smoke_job',
+        'execution_name',
+        'execution_readback_sha256',
+        'Cloud candidate smoke report did not pass its bounded job contract'
+    )) {
+        if ($cloudCandidateSmokeReport.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Cloud candidate smoke report contract is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.cloud.zero-traffic-candidate.v1',
+        'candidate-${commitPrefix}',
+        'image@sha256',
+        '--no-traffic',
+        '--set-secrets=CLEARRA_JOB_TOKEN=',
+        '${authority.jobBearerSecretVersion}',
+        'run", "jobs", "deploy',
+        '--tasks=1',
+        '--parallelism=1',
+        '--max-retries=0',
+        '--set-secrets=CLEARRA_CANDIDATE_JOB_TOKEN=',
+        '--candidate-url',
+        'labels.execution_name',
+        'execution_readback_sha256',
+        'validateCloudCandidateSmokeReport',
+        'writeCanonicalReportNew'
+    )) {
+        if ($cloudCandidateRelease.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Managed Cloud candidate producer is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'deploy resolves one tag to image@sha256 and independently seals zero traffic readback',
+        'deploy and readback reject tag, traffic, image, and Secret-reference drift',
+        'smoke deploys one digest-bound managed-secret Job against the zero-traffic URL',
+        'managed smoke log readback retries boundedly and rejects ambiguous attestations',
+        'helper never reads a Secret payload or accepts a bearer value'
+    )) {
+        if ($cloudCandidateReleaseTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Managed Cloud candidate producer regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'ClearraJobExecutor',
+        'expectedRuntimeIdentity',
+        'deadlineUnixMs',
+        'CLEARRA_CANDIDATE_JOB_TOKEN',
+        'normalized_solution_set_hash',
+        'candidate_smoke_job=failed'
+    )) {
+        if ($managedCandidateSmoke.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Managed Cloud candidate smoke Job is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'managed-secret smoke Job submits one bounded exact-runtime /jobs request',
+        'managed-secret smoke Job fails closed without authority or an exact PC result',
+        'managed-secret smoke Job source never prints or serializes its bearer'
+    )) {
+        if ($managedCandidateSmokeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Managed Cloud candidate smoke Job regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'materialize-production-probe-spec.mjs',
+        'clearra.cloud.candidate-smoke.v1',
+        'probe-spec',
+        'managed-secret'
+    )) {
+        if ($cloudDeploy.IndexOf($required, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $remainingWorkPlan.IndexOf($required, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Add-ArchitectureError "Release runbook and plan are missing observation adapter marker '$required'"
+        }
+    }
+    foreach ($required in @(
         'rejects workflow defaults that can replace protected shells',
         'rejects a preceding step that can poison protected executable resolution',
         'rejects a skipped dependency injected into the metadata root job',
         'rejects a wrong runner whose comment contains the expected runner',
         'rejects a custom shell that only echoes the protected script path',
         'rejects a parent-commit archive hidden behind the expected SHA comment',
+        'rejects Linux product builds on tag publication runs',
+        'rejects release acceptance on tag publication runs',
+        'rejects release metadata tests on tag publication runs',
+        'rejects publication without always handling expected skipped jobs',
+        'rejects metadata that binds publication to the tag run itself',
+        'rejects tag publication that downloads artifacts from its own run',
+        'rejects accepted-run lookup without the exact head SHA binding',
+        'rejects late validation without the bound run attempt',
         'rejects publication dependencies spoofed in a later job',
-        'rejects ownership transfer moved before the archive helper succeeds'
+        'rejects removal of exact-source release concurrency',
+        'rejects a canonical dispatch that permits a prior success',
+        'rejects a canonical dispatch that permits workflow reruns',
+        'rejects metadata without the accepted run attempt',
+        'rejects canonical evidence without every accepted producer dependency',
+        'rejects a truncated canonical job-evidence lookup',
+        'rejects release gate evidence with a fixed run attempt',
+        'rejects tag publication without canonical evidence verification',
+        'rejects tag publication without downloaded product byte verification',
+        'rejects ownership transfer moved before the archive helper succeeds',
+        'rejects duplicate Windows exact-source archive unit coverage',
+        'rejects removal of the dedicated CTK3 build and test owner',
+        'rejects a publish-pattern name for the internal CTK3 artifact',
+        'rejects a Discord suite that rebuilds CTK3',
+        'rejects Discord consumption of a different CTK3 artifact',
+        'rejects canonical acceptance consumption of a different CTK3 artifact',
+        'rejects canonical acceptance without the accepted CTK3 release path',
+        'rejects duplicate Discord capability registry coverage in metadata',
+        'rejects a standalone release smoke validation outside its mutation owner',
+        'rejects Discord without the accepted CTK3 dependency',
+        'rejects canonical acceptance without the exact Pages base path',
+        'rejects an accepted Pages build without run-attempt binding',
+        'rejects a publication-pattern accepted Pages artifact name',
+        'rejects Pages acceptance lookup without GitHub-output binding',
+        'rejects Pages accepted-run resolver drift',
+        'rejects Pages download from an unbound workflow run',
+        'rejects Pages rebuilding the already accepted GUI',
+        'rejects Pages without closed artifact verification',
+        'rejects Pages deploy without the bound acceptance authority',
+        'rejects Pages download of a differently named accepted artifact',
+        'rejects deployed Pages identity without exact base-path readback'
     )) {
         if ($releaseCliSmokeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Release CLI smoke gate regression coverage is missing '$required'"
         }
     }
-    foreach ($workflow in @(
-        @{
-            Name = 'Product release'
-            Text = $release
-            HeadShaMarkers = @(
-                '-f head_sha="$GITHUB_SHA"',
-                '-f head_sha="$GITHUB_SHA"'
-            )
-        },
-        @{
-            Name = 'Pages'
-            Text = $pages
-            HeadShaMarkers = @(
-                '-f head_sha="$checked_sha"',
-                '-f head_sha="$EXPECTED_SHA"'
-            )
-        }
+    foreach ($requiredPagesAcceptedRunMarker in @(
+        'node scripts/release/canonical-acceptance-run.mjs',
+        '--source-commit "$checked_sha"',
+        '--require one',
+        '--format github-output >> "$GITHUB_OUTPUT"',
+        'node authority-source/scripts/release/canonical-acceptance-run.mjs',
+        '--expected-run-id "$ACCEPTED_RUN_ID"',
+        '--expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"',
+        'accepted-pages-build-${{ inputs.accepted_sha }}-run-${{ needs.accepted-source.outputs.accepted_run_id }}-attempt-${{ needs.accepted-source.outputs.accepted_run_attempt }}'
     )) {
-        $acceptedAtLeastOne = [regex]::Matches(
-            $workflow.Text,
-            '(?m)^\s*if \[\[ "\$accepted" -lt 1 \]\]; then\s*$'
-        ).Count
-        if ($acceptedAtLeastOne -lt 2) {
-            Add-ArchitectureError "$($workflow.Name) must accept one or more successful exact-SHA acceptance runs at both identity gates"
+        if ($pages.IndexOf($requiredPagesAcceptedRunMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages exact accepted-run binding is missing '$requiredPagesAcceptedRunMarker'"
         }
-        if ($workflow.Text -match '(?m)^\s*if \[\[ "\$accepted" -(?:ne|eq) 1 \]\]; then\s*$') {
-            Add-ArchitectureError "$($workflow.Name) must not deadlock re-acceptance by requiring exactly one successful acceptance run"
+    }
+    if ([regex]::Matches($pages, 'node scripts/release/canonical-acceptance-run\.mjs').Count -ne 1 -or
+        [regex]::Matches($pages, 'node authority-source/scripts/release/canonical-acceptance-run\.mjs').Count -ne 1 -or
+        $pages -match 'workflow_runs|actions/workflows/release-cli\.yml/runs|per_page=') {
+        Add-ArchitectureError 'Pages must use the shared exact-one canonical acceptance resolver for initial and predeploy authority'
+    }
+    foreach ($requiredReleaseAcceptanceMarker in @(
+        'group: canonical-release-${{ github.sha }}',
+        'cancel-in-progress: false',
+        'Require exact main and zero prior canonical success',
+        '--require zero',
+        'echo "accepted_run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"',
+        'echo "accepted_run_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"',
+        '--format github-output >> "$GITHUB_OUTPUT"',
+        'ACCEPTED_RUN_ID: ${{ needs.metadata.outputs.accepted_run_id }}',
+        'ACCEPTED_RUN_ATTEMPT: ${{ needs.metadata.outputs.accepted_run_attempt }}',
+        '--expected-run-id "$ACCEPTED_RUN_ID"',
+        '--expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"',
+        'canonical-evidence:',
+        'canonical-acceptance-evidence.mjs collect',
+        'canonical-acceptance-evidence.mjs verify',
+        '--products dist'
+    )) {
+        if ($release.IndexOf($requiredReleaseAcceptanceMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Product release canonical acceptance is missing '$requiredReleaseAcceptanceMarker'"
         }
-        if ([regex]::Matches($workflow.Text, '(?m)^\s*accepted="\$\(gh api --method GET \\$').Count -lt 2) {
-            Add-ArchitectureError "$($workflow.Name) acceptance lookup must remain a fail-closed GET query at both identity gates"
+    }
+    if ([regex]::Matches($release, 'node scripts/release/canonical-acceptance-run\.mjs').Count -ne 3 -or
+        [regex]::Matches($release, '(?m)^\s*--require zero\s*$').Count -ne 1 -or
+        [regex]::Matches($release, '(?m)^\s*--format github-output >> "\$GITHUB_OUTPUT"\s*$').Count -ne 1 -or
+        $release -match 'workflow_runs\[0\]|accepted_run_id="\$\(gh api') {
+        Add-ArchitectureError 'Product release must enforce the shared zero-before-dispatch and exact-one-after-success transition'
+    }
+    foreach ($requiredResolverMarker in @(
+        'value.total_count !== expectedCount',
+        'value.workflow_runs.length !== expectedCount',
+        'run.event !== "workflow_dispatch"',
+        'run.status !== "completed"',
+        'run.conclusion !== "success"',
+        'run.head_branch !== "main"',
+        'run.head_sha !== sourceCommit',
+        'run.path !== WORKFLOW_PATH',
+        'attempt !== "1"',
+        'resolveCanonicalAcceptanceHistory',
+        'list.workflow_runs.length !== list.total_count',
+        'dependencies.getAttempt',
+        '/attempts/${runAttempt}',
+        '"branch=main"',
+        '"per_page=100"'
+    )) {
+        if ($canonicalAcceptanceRun.IndexOf($requiredResolverMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical acceptance resolver is missing '$requiredResolverMarker'"
         }
-        if ([regex]::Matches($workflow.Text, '(?m)^\s*-f per_page=1 \\$').Count -lt 2) {
-            Add-ArchitectureError "$($workflow.Name) acceptance lookup must request only one server-filtered run at both identity gates"
+    }
+    foreach ($requiredResolverTestMarker in @(
+        'requires exact zero before a dispatch',
+        'binds exactly one complete run identity',
+        'rejects duplicate success and malformed counts',
+        'rejects a different bound run or attempt',
+        'rejects every workflow rerun attempt',
+        'preserves a hidden first-attempt success after a failed rerun',
+        'rejects duplicate successes across workflow attempt history',
+        'rejects truncated or cross-owned workflow attempt history',
+        'non-truncating page'
+    )) {
+        if ($canonicalAcceptanceRunTest.IndexOf($requiredResolverTestMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical acceptance resolver regression is missing '$requiredResolverTestMarker'"
         }
-        if ([regex]::Matches($workflow.Text, '(?m)^\s*-f event=workflow_dispatch \\$').Count -lt 2 -or
-            [regex]::Matches($workflow.Text, '(?m)^\s*-f status=success \\$').Count -lt 2 -or
-            [regex]::Matches($workflow.Text, '(?m)^\s*--jq ''\.workflow_runs \| length''\)"\s*$').Count -lt 2) {
-            Add-ArchitectureError "$($workflow.Name) acceptance lookup must server-filter successful canonical dispatch runs at both identity gates"
+    }
+    if ($canonicalAcceptanceRun.IndexOf('status=success', [System.StringComparison]::Ordinal) -ge 0) {
+        Add-ArchitectureError 'Canonical acceptance history must not hide earlier attempts behind the mutable latest-run success filter'
+    }
+    foreach ($requiredEvidenceMarker in @(
+        'clearra.canonical-acceptance-evidence.v1',
+        'verifyAcceptedCtk3Dist',
+        'verifyAcceptedPagesBuild',
+        'verifyCanonicalAcceptanceEvidence',
+        'validateReleaseJobs',
+        'release_version',
+        'pages_base_path',
+        'downloaded release products differ from canonical acceptance evidence',
+        'release-acceptance',
+        'surface_reports',
+        'release_artifacts',
+        'canonical-acceptance-evidence.mjs verify'
+    )) {
+        $evidenceSurface = if ($requiredEvidenceMarker -eq 'canonical-acceptance-evidence.mjs verify') {
+            $release
+        } else {
+            $canonicalAcceptanceEvidence
         }
-        $missingHeadSha = $false
-        foreach ($headShaMarker in @($workflow.HeadShaMarkers)) {
-            $requiredCount = @($workflow.HeadShaMarkers | Where-Object { $_ -eq $headShaMarker }).Count
-            $actualCount = [regex]::Matches($workflow.Text, [regex]::Escape($headShaMarker)).Count
-            if ($actualCount -lt $requiredCount) {
-                $missingHeadSha = $true
-                break
-            }
+        if ($evidenceSurface.IndexOf($requiredEvidenceMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical acceptance evidence is missing '$requiredEvidenceMarker'"
         }
-        if ($missingHeadSha -or [regex]::Matches($workflow.Text, '(?m)^\s*-f head_sha=').Count -lt 2) {
-            Add-ArchitectureError "$($workflow.Name) acceptance lookup must filter the accepted head SHA on the server at both identity gates"
-        }
-        if ($workflow.Text -match 'per_page=100|select\(\.head_sha') {
-            Add-ArchitectureError "$($workflow.Name) must not recover exact-SHA acceptance by client-filtering a bounded run history"
+    }
+    foreach ($requiredEvidenceTestMarker in @(
+        'deterministically bind toolchains and four surfaces',
+        'rejects duplicate jobs and any failed required step',
+        'hashes three real products',
+        'downloaded release products differ'
+    )) {
+        if ($canonicalAcceptanceEvidenceTest.IndexOf($requiredEvidenceTestMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical acceptance evidence regression is missing '$requiredEvidenceTestMarker'"
         }
     }
     foreach ($required in @(
@@ -718,14 +1100,61 @@ function Invoke-ReleaseIdentityGateValidation {
     Assert-ReleaseYamlExactKeySet `
         -Text $release `
         -Indentation 0 `
-        -ExpectedKeys @('name', 'on', 'permissions', 'env', 'jobs') `
+        -ExpectedKeys @('name', 'on', 'permissions', 'concurrency', 'env', 'jobs') `
         -Contract 'Release workflow top level'
+    $releasePermissionsStart = $release.IndexOf("`npermissions:", [System.StringComparison]::Ordinal)
+    $releaseConcurrencyStart = $release.IndexOf("`nconcurrency:", [System.StringComparison]::Ordinal)
     $releaseEnvironmentStart = $release.IndexOf("`nenv:", [System.StringComparison]::Ordinal)
     $releaseJobsStart = $release.IndexOf("`njobs:", [System.StringComparison]::Ordinal)
-    if ($releaseEnvironmentStart -lt 0 -or $releaseJobsStart -le $releaseEnvironmentStart) {
+    if ($releasePermissionsStart -lt 0 -or
+        $releaseConcurrencyStart -le $releasePermissionsStart -or
+        $releaseEnvironmentStart -le $releaseConcurrencyStart -or
+        $releaseJobsStart -le $releaseEnvironmentStart) {
         Add-ArchitectureError 'Release workflow environment boundary is missing'
     }
     else {
+        $releasePermissions = $release.Substring(
+            $releasePermissionsStart,
+            $releaseConcurrencyStart - $releasePermissionsStart
+        )
+        Assert-ReleaseYamlExactKeySet `
+            -Text $releasePermissions `
+            -Indentation 2 `
+            -ExpectedKeys @('contents', 'actions') `
+            -Contract 'Release workflow permissions'
+        Assert-ReleaseYamlExactScalar `
+            -Text $releasePermissions `
+            -Indentation 2 `
+            -Key 'contents' `
+            -ExpectedValue 'write' `
+            -Contract 'Release contents permission'
+        Assert-ReleaseYamlExactScalar `
+            -Text $releasePermissions `
+            -Indentation 2 `
+            -Key 'actions' `
+            -ExpectedValue 'read' `
+            -Contract 'Accepted-run lookup permission'
+        $releaseConcurrency = $release.Substring(
+            $releaseConcurrencyStart,
+            $releaseEnvironmentStart - $releaseConcurrencyStart
+        )
+        Assert-ReleaseYamlExactKeySet `
+            -Text $releaseConcurrency `
+            -Indentation 2 `
+            -ExpectedKeys @('group', 'cancel-in-progress') `
+            -Contract 'Release exact-source concurrency'
+        Assert-ReleaseYamlExactScalar `
+            -Text $releaseConcurrency `
+            -Indentation 2 `
+            -Key 'group' `
+            -ExpectedValue 'canonical-release-${{ github.sha }}' `
+            -Contract 'Release exact-source concurrency group'
+        Assert-ReleaseYamlExactScalar `
+            -Text $releaseConcurrency `
+            -Indentation 2 `
+            -Key 'cancel-in-progress' `
+            -ExpectedValue 'false' `
+            -Contract 'Release exact-source concurrency policy'
         $releaseEnvironment = $release.Substring(
             $releaseEnvironmentStart,
             $releaseJobsStart - $releaseEnvironmentStart
@@ -745,21 +1174,26 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     $metadataJobStart = $release.IndexOf("`n  metadata:", [System.StringComparison]::Ordinal)
+    $ctk3JobStart = $release.IndexOf("`n  ctk3:", [System.StringComparison]::Ordinal)
     $linuxJobStart = $release.IndexOf("`n  linux-cli:", [System.StringComparison]::Ordinal)
     $discordJobStart = $release.IndexOf("`n  discord-bot:", [System.StringComparison]::Ordinal)
     $releaseAcceptanceJobStart = $release.IndexOf("`n  release-acceptance:", [System.StringComparison]::Ordinal)
     $windowsProductsJobStart = $release.IndexOf("`n  windows-products:", [System.StringComparison]::Ordinal)
+    $canonicalEvidenceJobStart = $release.IndexOf("`n  canonical-evidence:", [System.StringComparison]::Ordinal)
     $publishBoundaryStart = $release.IndexOf("`n  publish:", [System.StringComparison]::Ordinal)
     if ($metadataJobStart -lt 0 -or
-        $linuxJobStart -le $metadataJobStart -or
+        $ctk3JobStart -le $metadataJobStart -or
+        $linuxJobStart -le $ctk3JobStart -or
         $discordJobStart -le $linuxJobStart -or
         $releaseAcceptanceJobStart -le $discordJobStart -or
         $windowsProductsJobStart -le $releaseAcceptanceJobStart -or
-        $publishBoundaryStart -le $windowsProductsJobStart) {
+        $canonicalEvidenceJobStart -le $windowsProductsJobStart -or
+        $publishBoundaryStart -le $canonicalEvidenceJobStart) {
         Add-ArchitectureError 'Exact source archive workflow job boundaries are missing'
     }
     else {
-        $metadataJob = $release.Substring($metadataJobStart, $linuxJobStart - $metadataJobStart)
+        $metadataJob = $release.Substring($metadataJobStart, $ctk3JobStart - $metadataJobStart)
+        $ctk3Job = $release.Substring($ctk3JobStart, $linuxJobStart - $ctk3JobStart)
         $linuxJob = $release.Substring($linuxJobStart, $discordJobStart - $linuxJobStart)
         $discordJob = $release.Substring($discordJobStart, $releaseAcceptanceJobStart - $discordJobStart)
         $releaseAcceptanceJob = $release.Substring(
@@ -768,7 +1202,11 @@ function Invoke-ReleaseIdentityGateValidation {
         )
         $windowsProductsJob = $release.Substring(
             $windowsProductsJobStart,
-            $publishBoundaryStart - $windowsProductsJobStart
+            $canonicalEvidenceJobStart - $windowsProductsJobStart
+        )
+        $canonicalEvidenceJob = $release.Substring(
+            $canonicalEvidenceJobStart,
+            $publishBoundaryStart - $canonicalEvidenceJobStart
         )
         Assert-ReleaseYamlExactKeySet `
             -Text $metadataJob `
@@ -778,7 +1216,7 @@ function Invoke-ReleaseIdentityGateValidation {
         Assert-ReleaseYamlExactKeySet `
             -Text $releaseAcceptanceJob `
             -Indentation 4 `
-            -ExpectedKeys @('needs', 'runs-on', 'timeout-minutes', 'steps') `
+            -ExpectedKeys @('if', 'needs', 'runs-on', 'timeout-minutes', 'steps') `
             -Contract 'Windows canonical acceptance job'
         Assert-ReleaseYamlExactScalar `
             -Text $metadataJob `
@@ -789,9 +1227,14 @@ function Invoke-ReleaseIdentityGateValidation {
         Assert-ReleaseYamlExactScalar `
             -Text $releaseAcceptanceJob `
             -Indentation 4 `
+            -Key 'if' `
+            -ExpectedValue 'github.event_name == ''workflow_dispatch''' `
+            -Contract 'Windows canonical acceptance dispatch-only condition'
+        Assert-ReleaseYamlExactFlowSequence `
+            -Text $releaseAcceptanceJob `
             -Key 'needs' `
-            -ExpectedValue 'metadata' `
-            -Contract 'Windows canonical acceptance dependency'
+            -ExpectedValues @('metadata', 'ctk3') `
+            -Contract 'Windows canonical acceptance dependency on metadata and accepted CTK3'
         Assert-ReleaseYamlExactScalar `
             -Text $releaseAcceptanceJob `
             -Indentation 4 `
@@ -799,15 +1242,21 @@ function Invoke-ReleaseIdentityGateValidation {
             -ExpectedValue 'windows-latest' `
             -Contract 'Windows canonical acceptance runner'
         foreach ($job in @(
+            @{ Name = 'CTK3'; Text = $ctk3Job; Runner = 'ubuntu-latest' },
             @{ Name = 'Linux CLI'; Text = $linuxJob; Runner = 'ubuntu-latest' },
-            @{ Name = 'Discord'; Text = $discordJob; Runner = 'ubuntu-latest' },
             @{ Name = 'Windows products'; Text = $windowsProductsJob; Runner = 'windows-latest' }
         )) {
             Assert-ReleaseYamlExactKeySet `
                 -Text $job.Text `
                 -Indentation 4 `
-                -ExpectedKeys @('needs', 'runs-on', 'steps') `
+                -ExpectedKeys @('if', 'needs', 'runs-on', 'steps') `
                 -Contract "$($job.Name) job"
+            Assert-ReleaseYamlExactScalar `
+                -Text $job.Text `
+                -Indentation 4 `
+                -Key 'if' `
+                -ExpectedValue 'github.event_name == ''workflow_dispatch''' `
+                -Contract "$($job.Name) dispatch-only condition"
             Assert-ReleaseYamlExactScalar `
                 -Text $job.Text `
                 -Indentation 4 `
@@ -821,7 +1270,142 @@ function Invoke-ReleaseIdentityGateValidation {
                 -ExpectedValue $job.Runner `
                 -Contract "$($job.Name) runner"
         }
+        Assert-ReleaseYamlExactKeySet `
+            -Text $discordJob `
+            -Indentation 4 `
+            -ExpectedKeys @('if', 'needs', 'runs-on', 'steps') `
+            -Contract 'Discord job'
+        Assert-ReleaseYamlExactScalar `
+            -Text $discordJob `
+            -Indentation 4 `
+            -Key 'if' `
+            -ExpectedValue 'github.event_name == ''workflow_dispatch''' `
+            -Contract 'Discord dispatch-only condition'
+        Assert-ReleaseYamlExactFlowSequence `
+            -Text $discordJob `
+            -Key 'needs' `
+            -ExpectedValues @('metadata', 'ctk3') `
+            -Contract 'Discord dependency on metadata and accepted CTK3'
+        Assert-ReleaseYamlExactScalar `
+            -Text $discordJob `
+            -Indentation 4 `
+            -Key 'runs-on' `
+            -ExpectedValue 'ubuntu-latest' `
+            -Contract 'Discord runner'
+        Assert-ReleaseYamlExactKeySet `
+            -Text $canonicalEvidenceJob `
+            -Indentation 4 `
+            -ExpectedKeys @('if', 'needs', 'runs-on', 'steps') `
+            -Contract 'Canonical acceptance evidence job'
+        Assert-ReleaseYamlExactScalar `
+            -Text $canonicalEvidenceJob `
+            -Indentation 4 `
+            -Key 'if' `
+            -ExpectedValue 'github.event_name == ''workflow_dispatch''' `
+            -Contract 'Canonical acceptance evidence dispatch-only condition'
+        Assert-ReleaseYamlExactFlowSequence `
+            -Text $canonicalEvidenceJob `
+            -Key 'needs' `
+            -ExpectedValues @('metadata', 'ctk3', 'linux-cli', 'discord-bot', 'release-acceptance', 'windows-products') `
+            -Contract 'Canonical acceptance evidence producer dependencies'
+        Assert-ReleaseYamlExactScalar `
+            -Text $canonicalEvidenceJob `
+            -Indentation 4 `
+            -Key 'runs-on' `
+            -ExpectedValue 'ubuntu-latest' `
+            -Contract 'Canonical acceptance evidence runner'
 
+        Assert-ReleaseExactStepSkeleton `
+            -Text $ctk3Job `
+            -ExpectedSteps @(
+                '- uses: actions/checkout@v4',
+                '- uses: actions/setup-node@v4',
+                '- name: Install JavaScript workspace',
+                '- name: Validate accepted CTK3 artifact contract',
+                '- name: Build and test CTK3 once',
+                '- name: Seal the accepted CTK3 distribution',
+                '- name: Upload accepted CTK3 distribution'
+            ) `
+            -Contract 'Accepted CTK3 single owner'
+        foreach ($requiredCtk3OwnerMarker in @(
+            'run: node --test scripts/tools/accepted-ctk3-dist.test.mjs',
+            'run: npm test --workspace ctk3',
+            'run: node scripts/tools/accepted-ctk3-dist.mjs --seal packages/ctk3/dist --source-commit "$CLEARRA_SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"',
+            'uses: actions/upload-artifact@v4',
+            'name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
+            'path: packages/ctk3/dist',
+            'if-no-files-found: error'
+        )) {
+            if ($ctk3Job.IndexOf($requiredCtk3OwnerMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Accepted CTK3 owner is missing '$requiredCtk3OwnerMarker'"
+            }
+        }
+        if ([regex]::Matches($release, '(?m)^        run: npm test --workspace ctk3\s*$').Count -ne 1) {
+            Add-ArchitectureError 'CTK3 package build and test must have exactly one workflow owner'
+        }
+        if ([regex]::Matches($release, 'name: ctk3-accepted-\$\{\{ github\.sha \}\}-run-\$\{\{ needs\.metadata\.outputs\.accepted_run_id \}\}-attempt-\$\{\{ needs\.metadata\.outputs\.accepted_run_attempt \}\}').Count -ne 4) {
+            Add-ArchitectureError 'Accepted CTK3 artifact must have one producer and exactly three same-attempt consumers'
+        }
+        if ($ctk3Job -match 'name:\s*clearra-.*-v') {
+            Add-ArchitectureError 'Internal accepted CTK3 artifact must not match the publication artifact pattern'
+        }
+        Assert-ReleaseExactStepSkeleton `
+            -Text $discordJob `
+            -ExpectedSteps @(
+                '- uses: actions/checkout@v4',
+                '- uses: actions/setup-node@v4',
+                '- name: Download accepted CTK3 distribution',
+                '- name: Install JavaScript workspace',
+                '- name: Verify accepted CTK3 distribution',
+                '- name: Verify Clearrabot contracts'
+            ) `
+            -Contract 'Discord accepted CTK3 consumer'
+        foreach ($requiredDiscordConsumerMarker in @(
+            'uses: actions/download-artifact@v4',
+            'name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
+            'path: packages/ctk3/dist',
+            'run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"',
+            'run: npm run test:built --workspace @clearra/discord-bot'
+        )) {
+            if ($discordJob.IndexOf($requiredDiscordConsumerMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Discord accepted CTK3 consumer is missing '$requiredDiscordConsumerMarker'"
+            }
+        }
+        foreach ($requiredAcceptanceConsumerMarker in @(
+            'uses: actions/download-artifact@v4',
+            'name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
+            'path: packages/ctk3/dist',
+            'CLEARRA_ACCEPTED_CTK3_DIST: ${{ github.workspace }}/packages/ctk3/dist',
+            'CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}',
+            'CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}',
+            'run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ExecutionSurface Trusted'
+        )) {
+            if ($releaseAcceptanceJob.IndexOf($requiredAcceptanceConsumerMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Windows canonical acceptance CTK3 consumer is missing '$requiredAcceptanceConsumerMarker'"
+            }
+        }
+        if ($release -match 'npm test --workspace @clearra/discord-bot') {
+            Add-ArchitectureError 'Release workflow must consume the accepted CTK3 build through the Discord built-only suite'
+        }
+        if ($metadataJob.IndexOf('apps/clearra-discord-bot/test/capability-registry.test.mjs', [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError 'Linux metadata must not duplicate the Discord capability-registry suite'
+        }
+        if ($metadataJob -match '(?m)^        run: node scripts/tools/validate-release-cli-smokes\.mjs\s*$') {
+            Add-ArchitectureError 'Linux metadata must not duplicate the release smoke validator outside its mutation owner'
+        }
+        foreach ($requiredDiscordPackageMarker in @(
+            '"test": "npm run build --workspace ctk3 && npm run test:built"',
+            '"test:built": "node --test ./test/*.test.mjs"'
+        )) {
+            if ($discordPackage.IndexOf($requiredDiscordPackageMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Discord package is missing single-owner script '$requiredDiscordPackageMarker'"
+            }
+        }
+
+        $canonicalPreflightStart = $metadataJob.IndexOf(
+            "`n      - name: Require exact main and zero prior canonical success",
+            [System.StringComparison]::Ordinal
+        )
         $linuxRegressionStart = $metadataJob.IndexOf(
             "`n      - name: Validate exact source archive regression coverage",
             [System.StringComparison]::Ordinal
@@ -834,23 +1418,19 @@ function Invoke-ReleaseIdentityGateValidation {
             "`n      - name: Resolve release version",
             [System.StringComparison]::Ordinal
         )
-        $windowsRegressionStart = $releaseAcceptanceJob.IndexOf(
-            "`n      - name: Validate Windows exact source archive regression coverage",
-            [System.StringComparison]::Ordinal
-        )
         $windowsArchiveStart = $releaseAcceptanceJob.IndexOf(
             "`n      - name: Archive the exact accepted source on Windows",
             [System.StringComparison]::Ordinal
         )
         $windowsArchiveEnd = $releaseAcceptanceJob.IndexOf(
-            "`n      - uses: actions/cache@v4",
+            "`n      - name: Download accepted CTK3 distribution",
             [System.StringComparison]::Ordinal
         )
-        if ($linuxRegressionStart -lt 0 -or
+        if ($canonicalPreflightStart -lt 0 -or
+            $linuxRegressionStart -le $canonicalPreflightStart -or
             $linuxArchiveStart -le $linuxRegressionStart -or
             $linuxArchiveEnd -le $linuxArchiveStart -or
-            $windowsRegressionStart -lt 0 -or
-            $windowsArchiveStart -le $windowsRegressionStart -or
+            $windowsArchiveStart -lt 0 -or
             $windowsArchiveEnd -le $windowsArchiveStart) {
             Add-ArchitectureError 'Exact source archive workflow step boundaries are missing or out of order'
         }
@@ -863,10 +1443,6 @@ function Invoke-ReleaseIdentityGateValidation {
                 $linuxArchiveStart,
                 $linuxArchiveEnd - $linuxArchiveStart
             )
-            $windowsRegressionStep = $releaseAcceptanceJob.Substring(
-                $windowsRegressionStart,
-                $windowsArchiveStart - $windowsRegressionStart
-            )
             $windowsArchiveStep = $releaseAcceptanceJob.Substring(
                 $windowsArchiveStart,
                 $windowsArchiveEnd - $windowsArchiveStart
@@ -876,7 +1452,7 @@ function Invoke-ReleaseIdentityGateValidation {
             if ($linuxStepsStart -lt 0 -or
                 $linuxStepsStart -ge $linuxRegressionStart -or
                 $windowsStepsStart -lt 0 -or
-                $windowsStepsStart -ge $windowsRegressionStart) {
+                $windowsStepsStart -ge $windowsArchiveStart) {
                 Add-ArchitectureError 'Exact source archive protected step preludes are missing'
             }
             else {
@@ -893,6 +1469,7 @@ function Invoke-ReleaseIdentityGateValidation {
                     -ExpectedSteps @(
                         '- uses: actions/checkout@v4',
                         '- uses: actions/setup-node@v4',
+                        '- name: Require exact main and zero prior canonical success',
                         '- name: Validate exact source archive regression coverage',
                         '- name: Archive the exact accepted source on Linux'
                     ) `
@@ -902,36 +1479,42 @@ function Invoke-ReleaseIdentityGateValidation {
                     -ExpectedSteps @(
                         '- uses: actions/checkout@v4',
                         '- uses: actions/setup-node@v4',
-                        '- name: Validate Windows exact source archive regression coverage',
                         '- name: Archive the exact accepted source on Windows'
                     ) `
                     -Contract 'Windows exact source archive protected prelude'
                 Assert-ReleaseExactText `
                     -Text $metadataJob.Substring(
                         $linuxStepsStart,
-                        $linuxRegressionStart - $linuxStepsStart
+                        $canonicalPreflightStart - $linuxStepsStart
                     ) `
                     -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22" `
                     -Contract 'Linux protected checkout and Node setup'
                 Assert-ReleaseExactText `
                     -Text $releaseAcceptanceJob.Substring(
                         $windowsStepsStart,
-                        $windowsRegressionStart - $windowsStepsStart
+                        $windowsArchiveStart - $windowsStepsStart
                     ) `
                     -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22`n          cache: npm`n          cache-dependency-path: package-lock.json" `
                     -Contract 'Windows protected checkout and Node setup'
             }
             foreach ($step in @(
-                @{ Name = 'Linux archive regression'; Text = $linuxRegressionStep; Shell = 'bash' },
-                @{ Name = 'Linux accepted source archive'; Text = $linuxArchiveStep; Shell = 'bash' },
-                @{ Name = 'Windows archive regression'; Text = $windowsRegressionStep; Shell = 'pwsh' },
-                @{ Name = 'Windows accepted source archive'; Text = $windowsArchiveStep; Shell = 'pwsh' }
+                @{ Name = 'Linux archive regression'; Text = $linuxRegressionStep; Shell = 'bash'; Metadata = $true },
+                @{ Name = 'Linux accepted source archive'; Text = $linuxArchiveStep; Shell = 'bash'; Metadata = $true },
+                @{ Name = 'Windows accepted source archive'; Text = $windowsArchiveStep; Shell = 'pwsh'; Metadata = $false }
             )) {
                 Assert-ReleaseYamlExactKeySet `
                     -Text $step.Text `
                     -Indentation 8 `
-                    -ExpectedKeys @('shell', 'run') `
+                    -ExpectedKeys $(if ($step.Metadata) { @('if', 'shell', 'run') } else { @('shell', 'run') }) `
                     -Contract "$($step.Name) step"
+                if ($step.Metadata) {
+                    Assert-ReleaseYamlExactScalar `
+                        -Text $step.Text `
+                        -Indentation 8 `
+                        -Key 'if' `
+                        -ExpectedValue 'github.event_name == ''workflow_dispatch''' `
+                        -Contract "$($step.Name) dispatch-only condition"
+                }
                 Assert-ReleaseYamlExactScalar `
                     -Text $step.Text `
                     -Indentation 8 `
@@ -939,9 +1522,27 @@ function Invoke-ReleaseIdentityGateValidation {
                     -ExpectedValue $step.Shell `
                     -Contract "$($step.Name) shell"
             }
-            if ($linuxRegressionStep -notmatch '(?m)^        run: node --test scripts/release/create-exact-source-archive\.test\.mjs scripts/tools/validate-release-cli-smokes\.test\.mjs\s*$' -or
-                $windowsRegressionStep -notmatch '(?m)^        run: node --test scripts/release/create-exact-source-archive\.test\.mjs scripts/tools/validate-release-cli-smokes\.test\.mjs\s*$') {
-                Add-ArchitectureError 'Exact source archive regression steps must execute the real test command'
+            if ($linuxRegressionStep -notmatch '(?m)^        run: node --test scripts/release/create-exact-source-archive\.test\.mjs scripts/release/accepted-pages-build\.test\.mjs scripts/tools/validate-release-cli-smokes\.test\.mjs\s*$' -or
+                [regex]::Matches($release, 'scripts/release/create-exact-source-archive\.test\.mjs').Count -ne 1) {
+                Add-ArchitectureError 'Exact source archive regression must have one Linux metadata owner while both OS archive paths remain exercised'
+            }
+            if ([regex]::Matches($release, 'scripts/tools/validate-release-cli-smokes\.test\.mjs').Count -ne 1) {
+                Add-ArchitectureError 'Release workflow mutation tests must have exactly one Linux metadata owner'
+            }
+            if ([regex]::Matches($release, 'scripts/release/accepted-pages-build\.test\.mjs').Count -ne 1) {
+                Add-ArchitectureError 'Accepted Pages build regression must have exactly one Linux metadata owner'
+            }
+            if ([regex]::Matches($release, 'scripts/tools/run-focused-js-tests\.test\.mjs').Count -ne 1 -or
+                $metadataJob -notmatch '(?m)^      - name: Validate focused test selection regression coverage\r?\n        if: github\.event_name == ''workflow_dispatch''\r?\n        run: node --test scripts/tools/run-focused-js-tests\.test\.mjs\r?\n(?=      - name: Validate every product version and changelog surface)') {
+                Add-ArchitectureError 'Focused test selection regression must have exactly one dispatch-only Linux metadata owner'
+            }
+            foreach ($duplicateMetadataBuild in @(
+                'Install JavaScript workspace for product authority',
+                'Build CTK3 workspace for product authority'
+            )) {
+                if ($metadataJob.IndexOf($duplicateMetadataBuild, [System.StringComparison]::Ordinal) -ge 0) {
+                    Add-ArchitectureError "Linux metadata must not duplicate product build step '$duplicateMetadataBuild'"
+                }
             }
             Assert-ReleaseYamlExactLiteralScript `
                 -Text $linuxArchiveStep `
@@ -1017,15 +1618,16 @@ function Invoke-ReleaseIdentityGateValidation {
             if ([regex]::Matches($publishHeader, '(?m)^    needs\s*:').Count -ne 1 -or
                 $publishHeader -notmatch '(?m)^    needs:\s*\r?\n      \[metadata, release-acceptance, linux-cli, windows-products, discord-bot\]\s*$' -or
                 [regex]::Matches($publishHeader, '(?m)^    if\s*:').Count -ne 1 -or
-                $publishHeader -notmatch '(?m)^    if: github\.ref_type == ''tag''\s*$') {
-                Add-ArchitectureError 'Release publish must depend on every exact acceptance job and run only for tags'
+                $publishHeader -notmatch '(?m)^    if: always\(\) && github\.ref_type == ''tag'' && needs\.metadata\.result == ''success''\s*$') {
+                Add-ArchitectureError 'Release publish must depend on every exact acceptance job, tolerate expected skips, and require successful metadata on tags'
             }
         }
     }
     foreach ($required in @(
         'apps/clearra-discord-bot/scripts/restore-oracle-release text eol=lf',
         'scripts/release/create-exact-source-archive.mjs text eol=lf',
-        'scripts/release/exact-source-tar-contract.mjs text eol=lf'
+        'scripts/release/exact-source-tar-contract.mjs text eol=lf',
+        'tests/fixtures/contracts/oracle_candidate_settings_v080.v1.txt text eol=lf'
     )) {
         if ($gitAttributes.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Executable release helper LF checkout contract is missing '$required'"
@@ -1036,7 +1638,11 @@ function Invoke-ReleaseIdentityGateValidation {
         [System.StringComparison]::Ordinal
     )
     $lateAcceptanceIndex = $release.LastIndexOf(
-        'release tag no longer has a successful exact-SHA canonical acceptance run',
+        'node scripts/release/canonical-acceptance-run.mjs',
+        [System.StringComparison]::Ordinal
+    )
+    $canonicalEvidenceIndex = $release.LastIndexOf(
+        'node scripts/release/canonical-acceptance-evidence.mjs verify',
         [System.StringComparison]::Ordinal
     )
     $remoteTagIndex = $release.LastIndexOf(
@@ -1061,7 +1667,8 @@ function Invoke-ReleaseIdentityGateValidation {
     )
     if ($lateMainIndex -lt 0 -or
         $lateAcceptanceIndex -le $lateMainIndex -or
-        $immutabilityPreconditionIndex -le $lateAcceptanceIndex -or
+        $canonicalEvidenceIndex -le $lateAcceptanceIndex -or
+        $immutabilityPreconditionIndex -le $canonicalEvidenceIndex -or
         $remoteTagIndex -le $immutabilityPreconditionIndex -or
         $draftCreateIndex -le $remoteTagIndex -or
         $publishDraftIndex -le $draftCreateIndex -or
@@ -1075,7 +1682,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'accepted_sha',
         'clearra-build-identity.json',
         'clearra.pages.identity.v2',
-        'Pages source has no successful canonical workflow_dispatch acceptance run',
+        'node scripts/release/canonical-acceptance-run.mjs',
+        '--format github-output >> "$GITHUB_OUTPUT"',
         'Pages source is no longer the exact current main commit'
     )) {
         if ($pages -notlike "*$required*") {
@@ -1128,9 +1736,16 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        'CLEARRA_SOURCE_COMMIT: ${{ inputs.accepted_sha }}',
-        'CLEARRA_ENGINE_BUILD_ID: ${{ inputs.accepted_sha }}',
-        'apps/clearra-web/build/wasm/clearra_wasm.manifest.json',
+        'accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}',
+        'accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}',
+        'name: accepted-pages-build-${{ inputs.accepted_sha }}',
+        'run-id: ${{ needs.accepted-source.outputs.accepted_run_id }}',
+        'node scripts/release/accepted-pages-build.mjs',
+        '--accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT"',
+        '--base-path "$EXPECTED_BASE_PATH"',
+        '.acceptedRunId == $runId',
+        '.acceptedRunAttempt == $runAttempt',
+        '.basePath == $basePath',
         '${PAGE_URL%/}/wasm/clearra_wasm.manifest.json?source=${EXPECTED_SHA}',
         '.build.runtime_identity.source_commit == $sha',
         '.build.runtime_identity.engine_build_id == $sha',
@@ -1139,6 +1754,36 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($pages.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages workflow is missing exact product build identity '$required'"
+        }
+    }
+    foreach ($required in @(
+        'CLEARRA_WEB_BASE_PATH: /${{ github.event.repository.name }}',
+        'node scripts/release/accepted-pages-build.mjs `',
+        '--accepted-run-id $env:GITHUB_RUN_ID `',
+        '--accepted-run-attempt $env:GITHUB_RUN_ATTEMPT `',
+        'name: accepted-pages-build-${{ github.sha }}',
+        'path: apps/clearra-web/build',
+        'include-hidden-files: true'
+    )) {
+        if ($release.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical release acceptance is missing accepted Pages build owner '$required'"
+        }
+    }
+    foreach ($forbiddenPagesRebuildMarker in @(
+        'actions/cache@',
+        'rustup target add',
+        'cargo install',
+        'npm ci',
+        'npm run build',
+        'vite build'
+    )) {
+        $pagesBuildStart = $pages.IndexOf("`n  build:", [System.StringComparison]::Ordinal)
+        $pagesDeployStart = $pages.IndexOf("`n  deploy:", [System.StringComparison]::Ordinal)
+        if ($pagesBuildStart -ge 0 -and $pagesDeployStart -gt $pagesBuildStart) {
+            $pagesBuildJob = $pages.Substring($pagesBuildStart, $pagesDeployStart - $pagesBuildStart)
+            if ($pagesBuildJob.IndexOf($forbiddenPagesRebuildMarker, [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError "Pages accepted artifact reuse must not rebuild or install '$forbiddenPagesRebuildMarker'"
+            }
         }
     }
     foreach ($required in @(
@@ -1211,7 +1856,11 @@ function Invoke-ReleaseIdentityGateValidation {
         'refs/heads/main',
         '.github/workflows/pages.yml',
         '.github/workflows/pages-rollback.yml',
-        '.github/workflows/release-cli.yml',
+        'validateCanonicalAcceptanceLookup',
+        'resolveCanonicalAcceptanceHistory',
+        'expectedCount: 1',
+        'branch: "main"',
+        '/attempts/${runAttempt}',
         '/compare/${snapshotSha}...${authoritySha}',
         'snapshot SHA must be the authority main SHA or its ancestor',
         'capture run must contain exactly one capture-build job',
@@ -1244,7 +1893,8 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        'canonical acceptance permits multiple exact successes',
+        'canonical acceptance requires one exact success and rejects duplicate or wrong authority',
+        'canonical acceptance query pins the main branch and a non-truncating exact SHA page',
         'capture authority binds the run attempt, job, artifact, retention, and consumer order',
         'capture names are unique per authority, run, and rerun attempt',
         'capture reruns are unique while forward and restore require a fresh dispatch'
@@ -1335,11 +1985,89 @@ function Invoke-ReleaseIdentityGateValidation {
         'apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs',
         'packages/clearra-ui/scripts/verify-terminal-supply-product.mjs',
         '$probePath "--clearra" $builtExePath',
-        '$uiProbePath "--clearra" $builtExePath'
+        '$uiProbePath "--clearra" $builtExePath',
+        'CLEARRA_ACCEPTED_CTK3_DIST',
+        'CLEARRA_ACCEPTED_RUN_ID',
+        'CLEARRA_ACCEPTED_RUN_ATTEMPT',
+        'ClearraReleaseAcceptanceMode',
+        'scripts/tools/accepted-ctk3-dist.mjs',
+        '"--verify"',
+        '"--expected-source-commit"',
+        '"--expected-run-id"',
+        '"--expected-run-attempt"',
+        'packages/ctk3/dist',
+        'npm build ctk3'
     )) {
         if ($productProcessSurface.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Built product acceptance is missing exact terminal-supply artifact probe '$required'"
         }
+    }
+    foreach ($required in @(
+        'release_built_product_verifies_downloaded_ctk3_without_rebuilding',
+        'release_built_product_pins_accepted_ctk3_verifier_arguments',
+        'release_built_product_runs_both_terminal_supply_probes_after_verification',
+        'release_built_product_fails_closed_on_accepted_ctk3_verification'
+    )) {
+        if ($productProcessContractTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Built product accepted CTK3 regression coverage is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra-accepted-ctk3.v2.json',
+        'clearra.accepted-ctk3-dist.v2',
+        '["contract", "files", "run_attempt", "run_id", "source_commit"]',
+        'createHash("sha256")',
+        'stats.isSymbolicLink()',
+        'distribution does not match its sealed file set and hashes',
+        'flag: "wx"',
+        '--expected-source-commit',
+        '--expected-run-id',
+        '--expected-run-attempt'
+    )) {
+        if ($acceptedCtk3Dist.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted CTK3 artifact verifier is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'seals and verifies the exact accepted CTK3 file set',
+        'rejects payload mutation and unsealed extra files',
+        'rejects source or accepted-run drift and malformed manifest authority',
+        'rejects missing runtime surfaces and resealing',
+        'rejects non-canonical run authority and stale manifest residue'
+    )) {
+        if ($acceptedCtk3DistTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted CTK3 artifact regression coverage is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.pages.identity.v2',
+        'acceptedRunId',
+        'acceptedRunAttempt',
+        'basePath',
+        'createHash("sha256")',
+        'closed regular-file set and hashes',
+        'symlink or reparse point',
+        '404 fallback must exactly match index.html',
+        'accepted Pages WASM manifest has a mismatched product identity',
+        'flag: "wx"'
+    )) {
+        if ($acceptedPagesBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted Pages build verifier is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'stamps and verifies a closed accepted Pages build',
+        'rejects extra, missing, and mutated accepted Pages files',
+        'rejects source, run, attempt, base-path, and version drift',
+        'rejects fallback, WASM identity, and symlink or reparse drift'
+    )) {
+        if ($acceptedPagesBuildTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted Pages build regression coverage is missing '$required'"
+        }
+    }
+    if ($wasmReleaseGate.IndexOf('apps/clearra-web/scripts/prepare-pages-fallback.mjs', [System.StringComparison]::Ordinal) -lt 0 -or
+        $wasmReleaseGate.IndexOf('clearra-web Pages fallback', [System.StringComparison]::Ordinal) -lt 0) {
+        Add-ArchitectureError 'WASM release build must finish the accepted Pages artifact with the exact 404 fallback'
     }
     foreach ($required in @(
         "'test', '--workspace', '@clearra/ui'",
@@ -1653,6 +2381,146 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Cloud deployment contract is missing exact-archive marker '$required'"
         }
     }
+
+    foreach ($required in @(
+        'canonicalJson',
+        'canonicalSha256',
+        'sealCanonicalReport',
+        'verifyCanonicalReportHash',
+        'forbidden secret material'
+    )) {
+        if ($canonicalReleaseEvidence.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical release evidence helper is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.discord.command-catalog.v1',
+        'clearra.discord.command-catalog-snapshot.v1',
+        'clearra.discord.command-catalog-sync.v1',
+        'clearra.discord.command-catalog-restore.v1',
+        'persistPriorSnapshot',
+        'synchronizeGlobalCommandRegistrationFromObserved',
+        'current_before_sha256: priorSnapshot.catalog_sha256',
+        'Discord catalog restore refused because the current digest changed',
+        'current_after_sha256: readbackDigest',
+        'loadCommandRegistrationCredentials',
+        'open(target, "wx", 0o600)'
+    )) {
+        if ($discordCatalogRelease.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord catalog release producer is missing fail-closed marker '$required'"
+        }
+    }
+    if ($discordCatalogRelease -match '(?i)--(?:token|secret|password|credential)') {
+        Add-ArchitectureError 'Discord catalog release producer must accept credentials from the environment only'
+    }
+    foreach ($required in @(
+        'persists the exact prior snapshot before one sync write and seals readback',
+        'restore is conditional on the exact current digest and verifies the prior readback',
+        'sync and restore reports reject canonical-content tampering',
+        'forbidden secret material'
+    )) {
+        if ($discordCatalogReleaseTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord catalog release mutation regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.production-observation.v1',
+        'clearra.production-surface-probe.v1',
+        'PRODUCTION_OBSERVATION_SECONDS = 1200',
+        '"cloud"',
+        '"discord"',
+        '"oracle"',
+        '"pages"',
+        'clearra.oracle.candidate-observation.v1',
+        'gatewayStartMonotonicUsec',
+        'bootId',
+        'freshOperationAt',
+        'durationSeconds = PRODUCTION_OBSERVATION_SECONDS',
+        'production identity changed during observation',
+        'Oracle fresh operation time did not increase during observation',
+        'Oracle read-only observation time did not increase',
+        'probe adapter SHA-256 changed',
+        'shell: false',
+        'production surface probe output is not canonical JSON',
+        'actual four-surface production observation producer report is required'
+    )) {
+        $surfaceText = if ($required -eq 'actual four-surface production observation producer report is required') {
+            $finalSourceValidator
+        } else {
+            $productionObservation
+        }
+        if ($surfaceText.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production observation evidence is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'observes Discord, Oracle, Cloud, and Pages through a short injected clock',
+        'fails closed when a surface identity changes during the window',
+        'rejects stale Oracle operation evidence and report hash tampering',
+        'rejects an Oracle probe whose fresh operation predates the claimed window',
+        'probe spec requires four hash-bound adapters and forbids secret fields'
+    )) {
+        if ($productionObservationTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Production observation mutation regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        '--discord-catalog-sync-report',
+        '--production-observation-report',
+        'validateDiscordCatalogSyncReport',
+        'validateProductionObservationReport',
+        'Discord deployment differs from the actual catalog sync producer report',
+        'observed Oracle identity differs from the Discord deployment',
+        'observed Cloud identity differs from the Discord deployment',
+        'observed Pages identity differs from the Pages deployment'
+    )) {
+        if ($finalSourceValidator.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source validator is missing producer binding '$required'"
+        }
+    }
+    foreach ($required in @(
+        'requires actual catalog and observation producer reports and exact bindings',
+        'actual Discord command catalog sync producer report is required',
+        'differs from the actual catalog sync producer report',
+        'observed Pages identity differs'
+    )) {
+        if ($finalSourceValidatorTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source producer-binding regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        '--discord-catalog-sync-report',
+        '--production-observation-report',
+        'readCanonicalProducerReport',
+        'bytes are not canonical producer JSON'
+    )) {
+        if ($finalSourceJournal.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source journal materializer is missing producer input '$required'"
+        }
+    }
+    foreach ($required in @(
+        '--discord-catalog-sync-report',
+        '--production-observation-report',
+        'createProducerReports'
+    )) {
+        if ($finalSourceJournalTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Final-source journal regression is missing producer input '$required'"
+        }
+    }
+    foreach ($required in @(
+        'discord-command-catalog-release.mjs',
+        'observe-production-surfaces.mjs',
+        '1,200',
+        'current digest',
+        '--discord-catalog-sync-report',
+        '--production-observation-report'
+    )) {
+        if ($cloudDeploy.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0 -or
+            $remainingWorkPlan.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Release runbook and plan must both require producer evidence '$required'"
+        }
+    }
+
     $cloudBuildSubmissionCount = [regex]::Matches(
         $cloudDeploy,
         '(?m)^\s*gcloud builds submit\s+`\s*$'
@@ -1665,10 +2533,10 @@ function Invoke-ReleaseIdentityGateValidation {
         $cloudDeploy,
         '(?m)^\s*node scripts/release/create-exact-source-archive\.mjs `\r?\n\s+--source-commit \$sourceCommit `\r?\n\s+--output \$archivePath\s*$'
     ).Count
-    if ($cloudBuildSubmissionCount -lt 3 -or
+    if ($cloudBuildSubmissionCount -lt 2 -or
         $archiveSourceArgumentCount -ne $cloudBuildSubmissionCount -or
-        $exactArchiveCount -ne $cloudBuildSubmissionCount) {
-        Add-ArchitectureError 'Every documented Cloud Build submission, including command sync, must submit the verified exact .tar.gz directly'
+        $exactArchiveCount -lt $cloudBuildSubmissionCount) {
+        Add-ArchitectureError 'Every remaining documented Cloud Build submission must submit the verified exact .tar.gz directly'
     }
     if ($cloudDeploy -match '(?m)^\s*git(?:\s+-c\s+core\.autocrlf=false)?\s+archive\b') {
         Add-ArchitectureError 'Cloud deployment documentation must use the tested exact source archive helper, not a raw Git archive command'
@@ -1678,15 +2546,17 @@ function Invoke-ReleaseIdentityGateValidation {
         Add-ArchitectureError 'Cloud deployment documentation must never submit the mutable current directory as a build context'
     }
     foreach ($required in @(
-        'command-sync build must come from a fresh temporary commit-byte archive context',
+        'discord-command-catalog-release.mjs',
+        'fresh extraction of',
+        'independent prior GET before',
+        'conditional restore is authorized only when',
         'node scripts/release/create-exact-source-archive.mjs',
         '--source-commit $sourceCommit',
         '--output $archivePath',
         'source.tar.gz',
         'tar -xzf $archivePath -C $configContext',
         'Join-Path $configContext "apps/clearra-discord-bot/cloudbuild-current-job-service.yaml"',
-        '$configContext',
-        'The verified archive'
+        '$configContext'
     )) {
         if ($cloudReadme.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Discord deployment README is missing exact-archive marker '$required'"
@@ -1722,7 +2592,7 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         foreach ($required in @(
             'node apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs',
-            '$jobBearerSecret = "clearra-job-token"',
+            '$jobBearerSecretVersion = "<numeric-enabled-Secret-version>"',
             'zero project-level roles',
             'never a Secret version payload',
             'Service Account User',
@@ -1754,42 +2624,49 @@ function Invoke-ReleaseIdentityGateValidation {
             'before any Secret binding write',
             'freshly re-enumerates',
             'catalog drift',
-            '--revision-suffix=$revisionSuffix',
-            '--tag=$candidateTag',
-            '--no-traffic',
+            'scripts/release/cloud/candidate-release-v080.mjs deploy',
+            '--job-bearer-secret-version $jobBearerSecretVersion',
+            '$candidate.imageDigest -cnotmatch',
             '$candidateUrl/health',
-            'node apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs',
-            'CLEARRA_CANDIDATE_JOB_TOKEN',
+            'scripts/release/cloud/candidate-release-v080.mjs smoke',
+            '--image-digest $candidateImage',
+            '--candidate-url $candidateUrl',
+            'No bearer is',
             '--to-revisions="$candidateRevision=100"',
             '--to-revisions="$priorRevision=100"',
-            'candidate identity or zero-traffic isolation check failed',
+            'canonical zero-traffic candidate authority is incomplete',
             'contractSchemaVersion',
             'supplySemanticsId',
             'artifactSchemaVersion',
             'CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1',
             'CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1',
             '$oracleRemoteWrapper',
-            '--operation capture-rollback-authority',
+            'scripts/release/oracle/invoke-release-deploy-v080.ps1',
+            '$oracleIdentityFile',
+            '-IdentityFile $oracleIdentityFile',
+            '-Operation capture-rollback-authority',
             'capture-oracle-rollback-authority.mjs',
             'independently computes the exact',
             'root:root mode 0755 regular non-symlink files',
             'mode-0666 launcher is stale authority',
-            '--script-release-sha256 $oracleCandidateReleaseSha256',
-            '--operation verify-candidate',
+            'scripts/release/oracle/candidate-settings-v080.mjs',
+            '--hash-only',
+            '-ScriptReleaseSha256 $oracleCandidateReleaseSha256',
+            '-Operation verify-candidate',
             'produce-oracle-deployment-proof.mjs candidate',
             'verify-oracle-candidate-proof.mjs',
-            '--oracle-release-sha256 $oracleCandidateReleaseSha256',
+            '-OracleReleaseSha256 $oracleCandidateReleaseSha256',
             '/run/clearra-deploy/clearra-oracle-candidate-$deploymentNonce.json',
             '$priorCapture.priorOracleReleaseId -cnotmatch',
             '$priorCapture.priorOracleRelease -cne "/opt/clearra/releases/$($priorCapture.priorOracleReleaseId)"',
             'if ($candidateOracleExit -ne 0)',
-            '--operation restore-prior-and-verify',
+            '-Operation restore-prior-and-verify',
             'candidate Oracle verification failed; exact prior Oracle authority was restored and Cloud traffic was not changed',
             'restore-oracle-release',
             'produce-oracle-deployment-proof.mjs rollback',
             'verify-oracle-rollback-proof.mjs',
-            '--prior-runtime-authority-kind $priorRuntimeAuthorityKind',
-            '--prior-runtime-authority-sha256 $priorRuntimeAuthoritySha256',
+            '-PriorRuntimeAuthorityKind $priorRuntimeAuthorityKind',
+            '-PriorRuntimeAuthoritySha256 $priorRuntimeAuthoritySha256',
             'clearra.rollback.legacy-health-no-runtime.v1',
             'missing identity never falls back',
             'prior Cloud revision changed during rollback authority capture',
@@ -1805,11 +2682,11 @@ function Invoke-ReleaseIdentityGateValidation {
             }
         }
         $deployIndex = $deploymentDoc.Text.IndexOf(
-            'gcloud run deploy $serviceName',
+            'scripts/release/cloud/candidate-release-v080.mjs deploy',
             [System.StringComparison]::Ordinal
         )
         $noTrafficIndex = $deploymentDoc.Text.IndexOf(
-            '--no-traffic',
+            'canonical zero-traffic candidate authority is incomplete',
             [System.StringComparison]::Ordinal
         )
         $healthIndex = $deploymentDoc.Text.IndexOf(
@@ -1817,7 +2694,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $smokeIndex = $deploymentDoc.Text.IndexOf(
-            'node apps/clearra-discord-bot/scripts/verify-cloud-run-candidate.mjs',
+            'scripts/release/cloud/candidate-release-v080.mjs smoke',
             [System.StringComparison]::Ordinal
         )
         $cutoverIndex = $deploymentDoc.Text.IndexOf(
@@ -1825,10 +2702,10 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $captureIndex = $deploymentDoc.Text.IndexOf(
-            '--operation capture-rollback-authority',
+            '-Operation capture-rollback-authority',
             [System.StringComparison]::Ordinal
         )
-        $scriptReleaseDigestMarker = '--script-release-sha256 $oracleCandidateReleaseSha256'
+        $scriptReleaseDigestMarker = '-ScriptReleaseSha256 $oracleCandidateReleaseSha256'
         $scriptReleaseDigestBindingCount = [regex]::Matches(
             $deploymentDoc.Text,
             [regex]::Escape($scriptReleaseDigestMarker)
@@ -1838,7 +2715,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $oracleCandidateProofIndex = $deploymentDoc.Text.IndexOf(
-            '--operation verify-candidate',
+            '-Operation verify-candidate',
             [System.StringComparison]::Ordinal
         )
         $candidateFailureIndex = $deploymentDoc.Text.IndexOf(
@@ -1846,7 +2723,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $preCutoverRestoreIndex = $deploymentDoc.Text.IndexOf(
-            '--operation restore-prior-and-verify',
+            '-Operation restore-prior-and-verify',
             [System.StringComparison]::Ordinal
         )
         $preCutoverAbortIndex = $deploymentDoc.Text.IndexOf(
@@ -1870,7 +2747,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $oracleRestoreIndex = $deploymentDoc.Text.LastIndexOf(
-            '--operation restore-prior-and-verify',
+            '-Operation restore-prior-and-verify',
             [System.StringComparison]::Ordinal
         )
         $captureScriptDigestIndex = $deploymentDoc.Text.IndexOf(
@@ -1934,7 +2811,7 @@ function Invoke-ReleaseIdentityGateValidation {
         [System.StringComparison]::Ordinal
     )
     $cloudPostRollbackRestoreIndex = $cloudDeploy.LastIndexOf(
-        '--operation restore-prior-and-verify',
+        '-Operation restore-prior-and-verify',
         [System.StringComparison]::Ordinal
     )
     $cloudSyncHeadingIndex = $cloudDeploy.IndexOf(
@@ -1960,6 +2837,16 @@ function Invoke-ReleaseIdentityGateValidation {
             ) -ge 0) {
             Add-ArchitectureError "$($deploymentDoc.Name) must use the v0.8.0 Oracle settings backup namespace"
         }
+        foreach ($forbiddenCloudPath in @(
+            'gcloud run deploy $serviceName',
+            'verify-cloud-run-candidate.mjs',
+            'CLEARRA_CANDIDATE_JOB_TOKEN',
+            '${jobBearerSecret}:latest'
+        )) {
+            if ($deploymentDoc.Text.IndexOf($forbiddenCloudPath, [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError "$($deploymentDoc.Name) retains stale local Cloud candidate path '$forbiddenCloudPath'"
+            }
+        }
     }
     foreach ($required in @(
         'settings.pre-v0.8.0-$deployment_nonce',
@@ -1977,6 +2864,140 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($oracleDeployLauncher.IndexOf($forbidden, [System.StringComparison]::Ordinal) -ge 0) {
             Add-ArchitectureError "Oracle release launcher retains stale v0.7.5 identity marker '$forbidden'"
+        }
+    }
+    foreach ($required in @(
+        'renderCandidateSettingsV080',
+        'lines.length !== 13',
+        'Buffer.from(`${lines.join("\n")}\n`, "utf8")',
+        'createHash("sha256").update(bytes).digest("hex")',
+        '--hash-only',
+        'process.stdout.write(`${authority.sha256}\n`)'
+    )) {
+        if ($oracleCandidateSettings.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical Oracle candidate settings renderer is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'renders the canonical 13-line Oracle candidate settings fixture',
+        'remote launcher emits bytes identical to the canonical fixture',
+        'hash-only CLI prints only the canonical SHA-256',
+        'rejects non-canonical URLs and source commits',
+        'oracle_candidate_settings_v080.v1.txt',
+        'a14111258028ad8d0ec3449720bc803895f346e3a92a5e2d30e9861ff1c5c61e'
+    )) {
+        if ($oracleCandidateSettingsTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Canonical Oracle candidate settings regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        '# candidate-settings-v080: begin',
+        'CLEARRA_CANDIDATE_SETTINGS_V080',
+        '# candidate-settings-v080: end'
+    )) {
+        if ($oracleDeployLauncher.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle release launcher is missing canonical candidate-settings marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        '<accepted-ctk3-dist-directory>',
+        'repo-local packages/ctk3/dist is not accepted artifact authority',
+        'cp -a -- "$accepted_ctk3_root" "$temporary_root/packages/ctk3/dist"',
+        '--expected-source-commit "$source_commit"',
+        '--expected-run-id "$accepted_run_id"',
+        '--expected-run-attempt "$accepted_run_attempt"',
+        'publish_archive "$dist_archive" --directory="$temporary_root" packages/ctk3/dist',
+        'oracle_ctk3_authority=accepted source_commit=%s run_id=%s run_attempt=%s'
+    )) {
+        if ($oracleAcceptedLayerBuilder.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle local layer builder is missing accepted CTK3 authority marker '$required'"
+        }
+    }
+    if ($oracleAcceptedLayerBuilder.IndexOf(
+            'dist_root="$repository_root/packages/ctk3/dist"',
+            [System.StringComparison]::Ordinal
+        ) -ge 0) {
+        Add-ArchitectureError 'Oracle local layer builder must not consume repo-local CTK3 dist as accepted authority'
+    }
+    foreach ($required in @(
+        'v0.8 Oracle local layer builder freezes only the closed runtime set',
+        'repo-local-poison',
+        'oracle_ctk3_authority=accepted source_commit='
+    )) {
+        if ($oracleFreezeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle accepted CTK3 layer regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        "[ValidateSet('capture-rollback-authority', 'verify-candidate', 'observe-candidate', 'restore-prior-and-verify')]",
+        'SHA256:mdw7bdzZOBrd6sCebPmMVuTaps+ct2OaOle/gaZMBKU',
+        '2f7f658642c2dec4f9ad9e34d959b0215bdcf877e5636daebb003888434a8fd0',
+        '157.151.254.175',
+        'CLEARRA_ORACLE_IDENTITY_FILE',
+        'Test-Path -LiteralPath $IdentityFile -PathType Leaf',
+        'Get-Item -LiteralPath $IdentityFile -Force',
+        "'-i', `$IdentityFile",
+        'oracle_release_deploy_invoker=audit-ok',
+        'Test-JsonSafePositiveInteger',
+        'clearra.oracle.candidate-observation.v1'
+    )) {
+        if ($oracleDeployInvoker.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Typed Oracle release deploy invoker is missing '$required'"
+        }
+    }
+    if ($oracleDeployInvoker -match '(?im)(Get-Content|Get-FileHash|ReadAllBytes|ReadAllText)[^\r\n]*\$IdentityFile') {
+        Add-ArchitectureError 'Typed Oracle release deploy invoker must never read or hash identity-file contents'
+    }
+    foreach ($required in @(
+        "Assert-AuditResult -Output `$observation -Operation 'observe-candidate'",
+        'Test-Path -LiteralPath `$IdentityFile -PathType Leaf',
+        'Get-Item -LiteralPath `$IdentityFile -Force',
+        'oracle_release_deploy_wrapper_test=pass'
+    )) {
+        if ($oracleDeployInvokerTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Typed Oracle release deploy invoker regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.oracle.candidate-observation.v1',
+        'inspectActiveOracle',
+        'requireExactObjectKeys',
+        'positiveSafeInteger',
+        'Number.isSafeInteger',
+        'ExecMainStartTimestampMonotonic',
+        '/proc/sys/kernel/random/boot_id',
+        'readyRecordObserved',
+        'freshOperationAt',
+        'observedAt',
+        'runtimeIdentity',
+        'shell: false'
+    )) {
+        if ($oracleObservation.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Read-only Oracle candidate observer is missing '$required'"
+        }
+    }
+    if ($oracleProofProducer.IndexOf('export function inspectActiveOracle', [System.StringComparison]::Ordinal) -lt 0) {
+        Add-ArchitectureError 'Trusted Oracle proof producer must export its read-only active observation boundary'
+    }
+    foreach ($required in @(
+        'observe-candidate)',
+        'require_root_regular_readonly',
+        'apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs',
+        'exec "$node_path" "$observer_script"'
+    )) {
+        if ($oracleDeployLauncher.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle release launcher is missing read-only observation marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'produces a closed read-only Oracle candidate observation',
+        'rejects stale operation, process, release, settings, and key drift',
+        'rejects process-instance and observation freshness drift',
+        'remote observation launcher operation remains read-only',
+        '9007199254740992'
+    )) {
+        if ($oracleObservationTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Read-only Oracle candidate observation regression is missing '$required'"
         }
     }
     foreach ($required in @(
@@ -2095,27 +3116,6 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
 
-    foreach ($required in @(
-        'ClearraJobExecutor',
-        'expectedRuntimeIdentity',
-        'deadlineUnixMs',
-        'CLEARRA_CANDIDATE_JOB_TOKEN',
-        'normalized_solution_set_hash',
-        'candidate_smoke=failed'
-    )) {
-        if ($candidateSmoke.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "Cloud Run candidate smoke is missing production contract marker '$required'"
-        }
-    }
-    foreach ($required in @(
-        'candidate smoke submits one bounded exact-runtime job',
-        'expectedRuntimeIdentity',
-        'invalid PC result contract'
-    )) {
-        if ($candidateSmokeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "Cloud Run candidate smoke regression is missing '$required'"
-        }
-    }
     foreach ($required in @('"idempotency-key"', 'Bearer ${this.authorizationToken}')) {
         if ($productionJobExecutor.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Production job executor is missing authenticated smoke transport marker '$required'"
@@ -2125,10 +3125,9 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         '"fetch", "--no-tags"',
         'origin/main',
-        'event=workflow_dispatch',
-        'status=success',
-        'head_sha=',
-        'per_page=1',
+        'resolveCanonicalAcceptanceRun',
+        'expectedCount: 1',
+        '../../../scripts/release/canonical-acceptance-run.mjs',
         'active runtime identity does not match the accepted source'
     )) {
         if ($acceptedSourcePreflight.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2167,7 +3166,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $deployIndex = $deploymentDoc.Text.IndexOf(
-            'gcloud run deploy $serviceName',
+            'scripts/release/cloud/candidate-release-v080.mjs deploy',
             [System.StringComparison]::Ordinal
         )
         $deploymentBootstrapIndex = if ($deployIndex -ge 0) {
@@ -2181,7 +3180,7 @@ function Invoke-ReleaseIdentityGateValidation {
         }
         $jobSecretIndex = if ($deployIndex -ge 0) {
             $deploymentDoc.Text.LastIndexOf(
-                '$jobBearerSecret = "clearra-job-token"',
+                '$jobBearerSecretVersion = "<numeric-enabled-Secret-version>"',
                 $deployIndex,
                 [System.StringComparison]::Ordinal
             )
@@ -2214,13 +3213,21 @@ function Invoke-ReleaseIdentityGateValidation {
             $deploymentDoc.Text,
             'CLEARRA_EXPECTED_VCPUS=8'
         ).Count
-        if ($explicitEightWorkerCount -lt 2 -or
-            $explicitEightVcpuAuthorityCount -lt 2 -or
+        if ($explicitEightWorkerCount -lt 1 -or
+            $explicitEightVcpuAuthorityCount -lt 1 -or
+            $cloudCandidateRelease.IndexOf(
+                'CLEARRA_SEARCH_WORKERS_PER_SESSION: "8"',
+                [System.StringComparison]::Ordinal
+            ) -lt 0 -or
+            $cloudCandidateRelease.IndexOf(
+                'CLEARRA_EXPECTED_VCPUS: "8"',
+                [System.StringComparison]::Ordinal
+            ) -lt 0 -or
             $deploymentDoc.Text.IndexOf(
                 'CLEARRA_SEARCH_WORKERS_PER_SESSION=auto',
                 [System.StringComparison]::Ordinal
             ) -ge 0 -or
-            $deploymentDoc.Text.IndexOf(
+            $cloudCandidateRelease.IndexOf(
                 '--cpu=8',
                 [System.StringComparison]::Ordinal
             ) -lt 0 -or
@@ -2243,15 +3250,21 @@ function Invoke-ReleaseIdentityGateValidation {
         [Math]::Max(0, $syncHeadingIndex),
         [System.StringComparison]::Ordinal
     )
-    $syncBuildIndex = $cloudDeploy.IndexOf(
-        'gcloud builds submit',
+    $syncCanonicalCatalogIndex = $cloudDeploy.IndexOf(
+        'canonical --source-commit $sourceCommit --output $catalogPath',
+        [Math]::Max(0, $syncHeadingIndex),
+        [System.StringComparison]::Ordinal
+    )
+    $syncMutationIndex = $cloudDeploy.IndexOf(
+        'sync --source-commit $sourceCommit --application-id $applicationId',
         [Math]::Max(0, $syncHeadingIndex),
         [System.StringComparison]::Ordinal
     )
     if ($syncHeadingIndex -lt 0 -or
         $syncPreflightIndex -le $syncHeadingIndex -or
         $syncActiveHealthIndex -le $syncPreflightIndex -or
-        $syncBuildIndex -le $syncActiveHealthIndex) {
+        $syncCanonicalCatalogIndex -le $syncActiveHealthIndex -or
+        $syncMutationIndex -le $syncCanonicalCatalogIndex) {
         Add-ArchitectureError 'Command sync must verify current main, canonical acceptance, and active runtime identity before its mutation'
     }
 

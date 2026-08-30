@@ -24,15 +24,28 @@ $script:TestExePath = Join-Path $script:TestCargoTargetDir 'debug/clearra.exe'
 $script:TestNativeLibraryDir = Join-Path $testRoot 'native'
 $previousCargoTargetDir = $env:CARGO_TARGET_DIR
 $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+$previousAcceptedCtk3Dist = $env:CLEARRA_ACCEPTED_CTK3_DIST
+$previousSourceCommit = $env:CLEARRA_SOURCE_COMMIT
+$previousAcceptedRunId = $env:CLEARRA_ACCEPTED_RUN_ID
+$previousAcceptedRunAttempt = $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+$previousReleaseAcceptanceMode = Get-Variable `
+    -Name ClearraReleaseAcceptanceMode `
+    -Scope Script `
+    -ErrorAction SilentlyContinue
 
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:TestExePath) | Out-Null
     New-Item -ItemType Directory -Force -Path $script:TestNativeLibraryDir | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'scripts') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'scripts/tools') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'packages/ctk3/dist') | Out-Null
     Set-Content -LiteralPath $script:TestExePath -Value 'test executable placeholder'
     Set-Content `
         -LiteralPath (Join-Path $testRoot 'scripts/product-e2e.ps1') `
         -Value "Write-Output 'product_e2e_fixture=passed'"
+    Set-Content `
+        -LiteralPath (Join-Path $testRoot 'scripts/tools/accepted-ctk3-dist.mjs') `
+        -Value "// accepted CTK3 verifier fixture"
 
     function Write-ClearraProgressLine {
         param($Scope, [string]$Label)
@@ -207,6 +220,8 @@ try {
     $script:ProductE2EProgressScope = [pscustomobject]@{ Name = 'product-e2e' }
     $script:ProductE2ECurrentCaseName = 'contract probe'
     $script:TerminalSupplyScope = $null
+    $script:ClearraReleaseAcceptanceMode = $false
+    Remove-Item Env:\CLEARRA_ACCEPTED_CTK3_DIST -ErrorAction SilentlyContinue
 
     function Assert-ClearraTrustedExecutionSurface {
         param([string]$Surface, [string]$Label)
@@ -267,6 +282,65 @@ try {
         ($capturedBuildFailure.Contains('exit 19') -and
             $capturedBuildFailure.Contains('native-stderr-failure')) `
         'built_product_reports_captured_output_only_for_nonzero_exit'
+
+    $acceptedCtk3Dist = Join-Path $testRoot 'packages/ctk3/dist'
+    $sourceCommit = '0123456789abcdef0123456789abcdef01234567'
+    $acceptedRunId = '33180374868'
+    $acceptedRunAttempt = '2'
+    $env:CLEARRA_ACCEPTED_CTK3_DIST = $acceptedCtk3Dist
+    $env:CLEARRA_SOURCE_COMMIT = $sourceCommit
+    $env:CLEARRA_ACCEPTED_RUN_ID = $acceptedRunId
+    $env:CLEARRA_ACCEPTED_RUN_ATTEMPT = $acceptedRunAttempt
+    $script:ClearraReleaseAcceptanceMode = $true
+    $nativeCallCountBeforeAcceptedProduct = $script:NativeProgressCalls.Count
+    $acceptedProductOutput = @(Invoke-ProductE2EBuiltTask $testRoot)
+    $acceptedProductCalls = @($script:NativeProgressCalls |
+        Select-Object -Skip $nativeCallCountBeforeAcceptedProduct)
+    $acceptedTerminalSupplyCalls = @($acceptedProductCalls | Where-Object {
+        $_.Label -in @(
+            'Verify accepted CTK3 distribution',
+            'Discord terminal-supply product probe',
+            'UI terminal-supply product probe'
+        )
+    })
+    Assert-ProductProcessCondition `
+        ($acceptedTerminalSupplyCalls.Count -eq 3 -and
+            @($acceptedProductCalls | Where-Object { $_.Label -eq 'npm build ctk3' }).Count -eq 0) `
+        'release_built_product_verifies_downloaded_ctk3_without_rebuilding'
+    $acceptedVerifierCall = @($acceptedProductCalls | Where-Object {
+        $_.Label -eq 'Verify accepted CTK3 distribution'
+    })
+    $expectedVerifierPath = Join-Path $testRoot 'scripts/tools/accepted-ctk3-dist.mjs'
+    Assert-ProductProcessCondition `
+        ($acceptedVerifierCall.Count -eq 1 -and
+            $acceptedVerifierCall[0].Arguments.Count -eq 9 -and
+            $acceptedVerifierCall[0].Arguments[0] -eq $expectedVerifierPath -and
+            $acceptedVerifierCall[0].Arguments[1] -eq '--verify' -and
+            $acceptedVerifierCall[0].Arguments[2] -eq $acceptedCtk3Dist -and
+            $acceptedVerifierCall[0].Arguments[3] -eq '--expected-source-commit' -and
+            $acceptedVerifierCall[0].Arguments[4] -eq $sourceCommit -and
+            $acceptedVerifierCall[0].Arguments[5] -eq '--expected-run-id' -and
+            $acceptedVerifierCall[0].Arguments[6] -eq $acceptedRunId -and
+            $acceptedVerifierCall[0].Arguments[7] -eq '--expected-run-attempt' -and
+            $acceptedVerifierCall[0].Arguments[8] -eq $acceptedRunAttempt) `
+        'release_built_product_pins_accepted_ctk3_verifier_arguments'
+    Assert-ProductProcessCondition `
+        ($acceptedProductOutput -contains 'native-stderr-success') `
+        'release_built_product_runs_both_terminal_supply_probes_after_verification'
+
+    $script:NativeProgressFailureLabel = 'Verify accepted CTK3 distribution'
+    $capturedVerifyFailure = ''
+    try {
+        Invoke-ProductE2EBuiltTask $testRoot | Out-Null
+    } catch {
+        $capturedVerifyFailure = $_.Exception.Message
+    } finally {
+        $script:NativeProgressFailureLabel = ''
+    }
+    Assert-ProductProcessCondition `
+        ($capturedVerifyFailure.Contains('exit 19') -and
+            $capturedVerifyFailure.Contains('native-stderr-failure')) `
+        'release_built_product_fails_closed_on_accepted_ctk3_verification'
 } finally {
     if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
         Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
@@ -277,6 +351,31 @@ try {
         Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
     } else {
         $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousWindowsRustFlags
+    }
+    if ([string]::IsNullOrWhiteSpace($previousAcceptedCtk3Dist)) {
+        Remove-Item Env:\CLEARRA_ACCEPTED_CTK3_DIST -ErrorAction SilentlyContinue
+    } else {
+        $env:CLEARRA_ACCEPTED_CTK3_DIST = $previousAcceptedCtk3Dist
+    }
+    if ([string]::IsNullOrWhiteSpace($previousSourceCommit)) {
+        Remove-Item Env:\CLEARRA_SOURCE_COMMIT -ErrorAction SilentlyContinue
+    } else {
+        $env:CLEARRA_SOURCE_COMMIT = $previousSourceCommit
+    }
+    if ([string]::IsNullOrWhiteSpace($previousAcceptedRunId)) {
+        Remove-Item Env:\CLEARRA_ACCEPTED_RUN_ID -ErrorAction SilentlyContinue
+    } else {
+        $env:CLEARRA_ACCEPTED_RUN_ID = $previousAcceptedRunId
+    }
+    if ([string]::IsNullOrWhiteSpace($previousAcceptedRunAttempt)) {
+        Remove-Item Env:\CLEARRA_ACCEPTED_RUN_ATTEMPT -ErrorAction SilentlyContinue
+    } else {
+        $env:CLEARRA_ACCEPTED_RUN_ATTEMPT = $previousAcceptedRunAttempt
+    }
+    if ($null -eq $previousReleaseAcceptanceMode) {
+        Remove-Variable -Name ClearraReleaseAcceptanceMode -Scope Script -ErrorAction SilentlyContinue
+    } else {
+        $script:ClearraReleaseAcceptanceMode = $previousReleaseAcceptanceMode.Value
     }
 
     $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)

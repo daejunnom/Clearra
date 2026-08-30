@@ -238,7 +238,7 @@ pub use portfolio_alternative_store::{
     PortfolioCandidate, PortfolioEnumerationStop, PortfolioMember, PortfolioMemberPage,
     ProductPageSourceOwner, ProductPageStore, PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT,
     PORTFOLIO_ALTERNATIVE_SET_CONTRACT, PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
-    PORTFOLIO_SNAPSHOT_CONTRACT,
+    PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, PORTFOLIO_SNAPSHOT_CONTRACT,
 };
 pub use product_capability_contract::{ProductCapabilityContract, ProductCapabilityContractError};
 pub use product_capability_result::{

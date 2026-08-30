@@ -25,6 +25,8 @@ function Invoke-RenderGoldenGate {
                 throw "render golden gate did not execute '$required'"
             }
         }
+        Write-Output 'no_product_debt_evidence=renderer_png_artifact status=passed source=rust-test owner=RenderGolden'
+        Write-Output 'no_product_debt_evidence=renderer_gif_artifact status=passed source=rust-test owner=RenderGolden'
         Write-Output 'render_golden=passed capability=connected-exact artifacts=png,gif'
     }
     finally {

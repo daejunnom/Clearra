@@ -435,6 +435,12 @@ mod tests {
                 );
                 assert!(summary["score_minimals_canonical_candidate_id"].is_string());
                 assert!(summary["score_minimals_canonical_solution_key"].is_string());
+                assert_eq!(summary["alternative_index"], "1");
+                assert!(summary["members"].as_array().is_some_and(|members| !members.is_empty()));
+                assert_eq!(value["resource_report"]["probability_complete"], true);
+                assert_eq!(value["resource_report"]["count_complete"], true);
+                assert_eq!(value["resource_report"]["truncated"], false);
+                assert_eq!(value["resource_report"]["renormalized"], false);
                 assert!(value.get("portfolio_alternative_page").is_none());
                 assert!(!output.stdout().contains("tie_cursor"));
             } else {
@@ -582,6 +588,14 @@ mod tests {
             "smallest-canonical-candidate-id"
         );
         assert!(score_surface["score_minimals_canonical_candidate_id"].is_string());
+        assert_eq!(score_surface["alternative_index"], "1");
+        assert!(score_surface["members"]
+            .as_array()
+            .is_some_and(|members| !members.is_empty()));
+        assert_eq!(
+            score_minimals_json["resource_report"]["count_complete"],
+            true
+        );
         let score_page = score_surface["portfolio_alternative_page"]
             .as_object()
             .expect("explicit score-minimals portfolio page");

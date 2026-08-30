@@ -7,6 +7,7 @@ import {
   currentRuntimeIdentityForCommit,
   runtimeIdentityMatches,
 } from "../src/job-service/runtime-identity.mjs";
+import { resolveCanonicalAcceptanceRun } from "../../../scripts/release/canonical-acceptance-run.mjs";
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -28,29 +29,11 @@ export async function verifyAcceptedSource(options, dependencies = {}) {
     throw new Error("source commit is not the exact current origin/main commit");
   }
 
-  const acceptanceText = run("gh", [
-    "api",
-    "--method",
-    "GET",
-    `repos/${repository}/actions/workflows/release-cli.yml/runs`,
-    "-f",
-    "event=workflow_dispatch",
-    "-f",
-    "status=success",
-    "-f",
-    `head_sha=${sourceCommit}`,
-    "-f",
-    "per_page=1",
-  ]);
-  let acceptance;
-  try {
-    acceptance = JSON.parse(acceptanceText);
-  } catch {
-    throw new Error("canonical acceptance lookup returned invalid JSON");
-  }
-  if (!Array.isArray(acceptance?.workflow_runs) || acceptance.workflow_runs.length < 1) {
-    throw new Error("source commit has no successful canonical acceptance run");
-  }
+  await resolveCanonicalAcceptanceRun({
+    repository,
+    sourceCommit,
+    expectedCount: 1,
+  }, { run });
 
   if (options?.activeHealthUrl !== undefined) {
     const healthUrl = canonicalHealthUrl(options.activeHealthUrl);

@@ -74,6 +74,16 @@ function Invoke-RustExactTestsGate {
         if ($passed -lt 1) {
             throw 'Rust exact test stage executed zero tests'
         }
+        Assert-AdversarialRustCasesInOutput `
+            -Output $output `
+            -RequiredCases @(Get-AdversarialRustCases) `
+            -Owner 'RustExactTests'
+        $completeRequiredCase = 'pruning::pruning_proof_ledger::tests::complete_required_capacity_keeps_candidate'
+        if ($output -notmatch ('(?m)^test ' + [regex]::Escape($completeRequiredCase) + ' \.\.\. ok\s*$')) {
+            throw 'RustExactTests did not execute the delegated NoProductDebt complete-required case'
+        }
+        Write-Output 'adversarial_rust_tests=executed owner=RustExactTests'
+        Write-Output 'no_product_debt_evidence=complete_required_keeps_candidate status=passed source=rust-test owner=RustExactTests'
         Write-Output "rust_exact_tests=passed tests=$passed packages=$($packages.Count)"
     }
     finally {

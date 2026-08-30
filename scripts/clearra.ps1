@@ -130,6 +130,7 @@ try {
     $clearraLocationPushed = $true
     $tasks = @(Expand-ClearraTasks $Task)
     $script:ClearraReleaseAcceptanceMode = $false
+    $script:ClearraNoProductDebtArchitecturePassed = $false
     if ($VerboseLog.IsPresent) {
         Write-Output "==> Clearra task start | task=$($tasks -join ',') | workers=$Workers | root=$Root"
     }

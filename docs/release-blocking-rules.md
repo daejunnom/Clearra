@@ -12,6 +12,28 @@ unsupported-capability, and product-debt surfaces. Runtime correctness is owned
 by executed adversarial and product evidence; marker presence alone cannot make
 a release pass.
 
+## Gate and Publication Separation
+
+The full release path is preserved, but it is executed once at the frozen
+predeployment boundary. A canonical `workflow_dispatch` run owns the exact-SHA
+metadata tests, `ReleaseAcceptance`, product builds, packaged-product smokes,
+and Discord contract evidence. A tag push is not a second acceptance run: all
+full-test and product-build jobs are dispatch-only.
+
+Tag publication binds a successful canonical dispatch run selected by the
+exact tag commit, downloads the Linux and Windows product artifacts from that
+run ID, and then revalidates the same run by ID immediately before creating the
+release. Publication blocks when current `main`, the annotated tag, run event,
+run completion/conclusion, head SHA, workflow path, retained artifacts, or
+release immutability differs from the accepted authority. It never rebuilds or
+reruns tests to manufacture replacement evidence during publication.
+
+Path-scoped developer tests are required for ordinary iteration and may cover
+only the changed crate, workspace, C surface, or release helper. They provide
+fast feedback but do not satisfy this release gate; see `docs/test-policy.md`
+for the focused path map. Cross-boundary changes combine focused scopes, while
+the full matrix remains reserved for canonical predeployment acceptance.
+
 ## Blocking Conditions
 
 The following conditions block release:

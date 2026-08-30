@@ -1,6 +1,11 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
+import {
+  resolveCanonicalAcceptanceHistory,
+  validateCanonicalAcceptanceLookup,
+} from "./canonical-acceptance-run.mjs";
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -91,23 +96,11 @@ export function validatePagesIdentity(identityValue, manifestValue, expectedSha)
 
 export function validateCanonicalRuns(value, expectedSha, label = "canonical runs") {
   const sha = requireSha(expectedSha, `${label} SHA`);
-  const payload = requireObject(value, label);
-  if (!Array.isArray(payload.workflow_runs)) {
-    fail(`${label}.workflow_runs must be an array`);
-  }
-  const accepted = payload.workflow_runs.filter(
-    (run) =>
-      run !== null &&
-      typeof run === "object" &&
-      run.event === "workflow_dispatch" &&
-      run.status === "completed" &&
-      run.conclusion === "success" &&
-      run.head_sha === sha &&
-      run.path === ".github/workflows/release-cli.yml",
-  );
-  if (accepted.length < 1) {
-    fail(`${label} has no successful exact-SHA workflow_dispatch acceptance`);
-  }
+  return validateCanonicalAcceptanceLookup(value, {
+    sourceCommit: sha,
+    expectedCount: 1,
+    label,
+  });
 }
 
 export function expectedCaptureArtifactName({
@@ -291,18 +284,36 @@ async function fetchPublicJson(url, label) {
   return parseJsonResponse(response, label);
 }
 
-async function canonicalRuns(api, sha, label) {
-  const query = new URLSearchParams({
+export function canonicalAcceptanceQuery(sha) {
+  const sourceCommit = requireSha(sha, "canonical acceptance query SHA");
+  return new URLSearchParams({
     event: "workflow_dispatch",
-    status: "success",
-    head_sha: sha,
+    branch: "main",
+    head_sha: sourceCommit,
     per_page: "100",
-  });
-  const runs = await api.get(
-    `/actions/workflows/release-cli.yml/runs?${query.toString()}`,
+  }).toString();
+}
+
+async function canonicalRuns(api, sha, label) {
+  const query = canonicalAcceptanceQuery(sha);
+  await resolveCanonicalAcceptanceHistory({
+    sourceCommit: sha,
+    expectedCount: 1,
     label,
-  );
-  validateCanonicalRuns(runs, sha, label);
+  }, {
+    listRuns() {
+      return api.get(
+        `/actions/workflows/release-cli.yml/runs?${query}`,
+        label,
+      );
+    },
+    getAttempt(runId, runAttempt) {
+      return api.get(
+        `/actions/runs/${runId}/attempts/${runAttempt}`,
+        `${label} historical attempt`,
+      );
+    },
+  });
 }
 
 async function main() {

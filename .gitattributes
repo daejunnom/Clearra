@@ -9,5 +9,6 @@ scripts/release/oracle/*.py text eol=lf
 scripts/release/oracle/*.template text eol=lf
 scripts/release/oracle/*-v080 text eol=lf
 scripts/release/oracle/*known-hosts text eol=lf
+tests/fixtures/contracts/oracle_candidate_settings_v080.v1.txt text eol=lf
 tools/asset-import/*.svg text eol=lf
 assets/skins/**/*.json text eol=lf

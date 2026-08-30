@@ -1,5 +1,6 @@
 // SRP rationale: this module has one change reason: fail-closed paging models for typed product results.
 import type {
+  ClearraCoveragePortfolioRuntimePage,
   ClearraPcBestSavePayload,
   ClearraPcSaveGroupPayload,
   ClearraPcSaveGroupsPayload,
@@ -17,12 +18,527 @@ export type ProductNextPageLoader = (
 ) => Promise<ClearraProductPageWorkerPayload>;
 
 export type ProductMemberPageLoader = (
-  outerPageNumber: number,
-  memberPageNumber: number,
+  alternativeIndex: string,
+  memberPageNumber: string,
   signal?: AbortSignal
 ) => Promise<ClearraProductPageWorkerPayload>;
 
 export type ProductPageRelease = () => void | Promise<void>;
+
+const PORTFOLIO_PAGE_CONTRACT = 'portfolio-alternative-page.v1';
+const PORTFOLIO_MEMBER_PAGE_CONTRACT = 'portfolio-member-page.v1';
+const MAX_RETAINED_PORTFOLIO_PAGES = 2;
+
+export type CoveragePortfolioPageExpectation = {
+  setIdentitySha256: string;
+  candidateMapSha256?: string;
+  alternativeIndex: string;
+  memberPageNumber: string;
+  referencePage?: CoveragePortfolioPageReference;
+  requireSameAlternativeMetadata?: boolean;
+};
+
+export type CoveragePortfolioPageReference = Pick<
+  ClearraCoveragePortfolioRuntimePage,
+  | 'page_contract'
+  | 'member_page_contract'
+  | 'set_identity_sha256'
+  | 'candidate_map_sha256'
+  | 'optimal_cardinality'
+  | 'known_alternative_count'
+  | 'total_alternative_count'
+  | 'enumeration_complete'
+  | 'total_member_pages'
+>;
+
+export function coveragePortfolioPageReference(
+  page: ClearraCoveragePortfolioRuntimePage
+): CoveragePortfolioPageReference {
+  return Object.freeze({
+    page_contract: page.page_contract,
+    member_page_contract: page.member_page_contract,
+    set_identity_sha256: page.set_identity_sha256,
+    candidate_map_sha256: page.candidate_map_sha256,
+    optimal_cardinality: page.optimal_cardinality,
+    known_alternative_count: page.known_alternative_count,
+    total_alternative_count: page.total_alternative_count,
+    enumeration_complete: page.enumeration_complete,
+    total_member_pages: page.total_member_pages
+  });
+}
+
+export function validateCoveragePortfolioRuntimePage(
+  page: ClearraCoveragePortfolioRuntimePage,
+  expectation: CoveragePortfolioPageExpectation
+): string | null {
+  if (
+    page.page_contract !== PORTFOLIO_PAGE_CONTRACT ||
+    page.member_page_contract !== PORTFOLIO_MEMBER_PAGE_CONTRACT ||
+    !/^[0-9a-f]{64}$/u.test(page.set_identity_sha256) ||
+    !/^[0-9a-f]{64}$/u.test(page.candidate_map_sha256) ||
+    page.set_identity_sha256 !== expectation.setIdentitySha256 ||
+    (expectation.candidateMapSha256 !== undefined &&
+      page.candidate_map_sha256 !== expectation.candidateMapSha256) ||
+    page.alternative_index !== expectation.alternativeIndex ||
+    page.member_page_number !== expectation.memberPageNumber ||
+    !positiveCanonicalDecimal(page.alternative_index) ||
+    !positiveCanonicalDecimal(page.optimal_cardinality) ||
+    !positiveCanonicalDecimal(page.known_alternative_count) ||
+    !positiveCanonicalDecimal(page.member_page_number) ||
+    !positiveCanonicalDecimal(page.total_member_pages) ||
+    !(
+      page.total_alternative_count === null ||
+      positiveCanonicalDecimal(page.total_alternative_count)
+    ) ||
+    typeof page.enumeration_complete !== 'boolean' ||
+    !Array.isArray(page.members)
+  ) {
+    return 'coverage portfolio page contract or identity is invalid';
+  }
+
+  const alternativeIndex = BigInt(page.alternative_index);
+  const cardinality = BigInt(page.optimal_cardinality);
+  const knownAlternativeCount = BigInt(page.known_alternative_count);
+  const totalAlternativeCount =
+    page.total_alternative_count === null ? null : BigInt(page.total_alternative_count);
+  const memberPageNumber = BigInt(page.member_page_number);
+  const totalMemberPages = BigInt(page.total_member_pages);
+  const pageSize = BigInt(PRODUCT_MEMBER_PAGE_SIZE);
+  const expectedTotalMemberPages = (cardinality + pageSize - 1n) / pageSize;
+  const memberStart = (memberPageNumber - 1n) * pageSize;
+  const remainingMembers = cardinality - memberStart;
+  const expectedMemberCount = remainingMembers < pageSize ? remainingMembers : pageSize;
+  if (
+    knownAlternativeCount < alternativeIndex ||
+    totalMemberPages !== expectedTotalMemberPages ||
+    memberPageNumber > totalMemberPages ||
+    remainingMembers <= 0n ||
+    BigInt(page.members.length) !== expectedMemberCount ||
+    (page.enumeration_complete
+      ? totalAlternativeCount !== knownAlternativeCount
+      : totalAlternativeCount !== null)
+  ) {
+    return 'coverage portfolio page counts or enumeration metadata are invalid';
+  }
+
+  let previousCandidateId = 0n;
+  for (const member of page.members) {
+    if (
+      !positiveCanonicalDecimal(member.candidate_id) ||
+      typeof member.normalized_solution_key !== 'string' ||
+      member.normalized_solution_key.length === 0
+    ) {
+      return 'coverage portfolio member identity is invalid';
+    }
+    const candidateId = BigInt(member.candidate_id);
+    if (candidateId <= previousCandidateId) {
+      return 'coverage portfolio member IDs are not strictly increasing';
+    }
+    previousCandidateId = candidateId;
+  }
+
+  const reference = expectation.referencePage;
+  if (
+    reference &&
+    (page.page_contract !== reference.page_contract ||
+      page.member_page_contract !== reference.member_page_contract ||
+      page.set_identity_sha256 !== reference.set_identity_sha256 ||
+      page.candidate_map_sha256 !== reference.candidate_map_sha256 ||
+      page.optimal_cardinality !== reference.optimal_cardinality ||
+      page.total_member_pages !== reference.total_member_pages ||
+      (expectation.requireSameAlternativeMetadata === true &&
+        (page.known_alternative_count !== reference.known_alternative_count ||
+          page.total_alternative_count !== reference.total_alternative_count ||
+          page.enumeration_complete !== reference.enumeration_complete)))
+  ) {
+    return 'coverage portfolio page does not match the active portfolio';
+  }
+  return null;
+}
+
+export type CoveragePortfolioPagerSnapshot = {
+  identity: string;
+  pages: readonly ClearraCoveragePortfolioRuntimePage[];
+  outerPageIndex: number;
+  currentPage: ClearraCoveragePortfolioRuntimePage | null;
+  prefetchedPage: ClearraCoveragePortfolioRuntimePage | null;
+  prefetchInFlight: boolean;
+  enumerationSealed: boolean;
+  highestMaterializedAlternativeIndex: string | null;
+  navigating: boolean;
+  error: string;
+};
+
+export type CoveragePortfolioPagerControllerOptions = {
+  loadNextPage: ProductNextPageLoader | null;
+  loadMemberPage: ProductMemberPageLoader | null;
+  onChange?: (snapshot: CoveragePortfolioPagerSnapshot) => void;
+};
+
+export class CoveragePortfolioPagerController {
+  private readonly loadNextPage: ProductNextPageLoader | null;
+  private readonly loadMemberPage: ProductMemberPageLoader | null;
+  private readonly onChange: ((snapshot: CoveragePortfolioPagerSnapshot) => void) | undefined;
+  private identity = '';
+  private pages: ClearraCoveragePortfolioRuntimePage[] = [];
+  private outerPageIndex = 0;
+  private prefetchedPage: ClearraCoveragePortfolioRuntimePage | null = null;
+  private prefetchPromise: Promise<void> | null = null;
+  private enumerationSealed = false;
+  private highestMaterializedAlternativeIndex: string | null = null;
+  private navigating = false;
+  private error = '';
+  private generation = 0;
+  private abortController = new AbortController();
+
+  constructor(options: CoveragePortfolioPagerControllerOptions) {
+    this.loadNextPage = options.loadNextPage;
+    this.loadMemberPage = options.loadMemberPage;
+    this.onChange = options.onChange;
+  }
+
+  snapshot(): CoveragePortfolioPagerSnapshot {
+    return Object.freeze({
+      identity: this.identity,
+      pages: Object.freeze([...this.pages]),
+      outerPageIndex: this.outerPageIndex,
+      currentPage: this.pages[this.outerPageIndex] ?? null,
+      prefetchedPage: this.prefetchedPage,
+      prefetchInFlight: this.prefetchPromise !== null,
+      enumerationSealed: this.enumerationSealed,
+      highestMaterializedAlternativeIndex: this.highestMaterializedAlternativeIndex,
+      navigating: this.navigating,
+      error: this.error
+    });
+  }
+
+  reset(
+    identity: string,
+    initialPage: ClearraCoveragePortfolioRuntimePage | null,
+    { autoPrefetch = true }: { autoPrefetch?: boolean } = {}
+  ): void {
+    this.abortController.abort();
+    this.abortController = new AbortController();
+    this.generation += 1;
+    this.identity = identity;
+    this.pages = [];
+    this.outerPageIndex = 0;
+    this.prefetchedPage = null;
+    this.prefetchPromise = null;
+    this.enumerationSealed = false;
+    this.highestMaterializedAlternativeIndex = null;
+    this.navigating = false;
+    this.error = '';
+    if (initialPage) {
+      const validationError = validateCoveragePortfolioRuntimePage(initialPage, {
+        setIdentitySha256: initialPage.set_identity_sha256,
+        candidateMapSha256: initialPage.candidate_map_sha256,
+        alternativeIndex: initialPage.alternative_index,
+        memberPageNumber: initialPage.member_page_number
+      });
+      if (validationError) {
+        this.error = validationError;
+      } else {
+        this.pages = [initialPage];
+        this.highestMaterializedAlternativeIndex = initialPage.alternative_index;
+        this.enumerationSealed = initialPage.enumeration_complete;
+      }
+    }
+    this.emit();
+    if (autoPrefetch) this.startPrefetch();
+  }
+
+  dispose(): void {
+    this.abortController.abort();
+    this.generation += 1;
+    this.prefetchPromise = null;
+    this.navigating = false;
+  }
+
+  startPrefetch(): void {
+    if (
+      this.prefetchPromise ||
+      this.prefetchedPage ||
+      this.enumerationSealed ||
+      this.error ||
+      !this.loadNextPage ||
+      this.pages.length === 0 ||
+      this.outerPageIndex !== this.pages.length - 1
+    ) {
+      return;
+    }
+    const sourcePage = this.pages[this.outerPageIndex];
+    if (sourcePage.alternative_index !== this.highestMaterializedAlternativeIndex) return;
+
+    const expectedAlternativeIndex = incrementCanonicalDecimal(sourcePage.alternative_index);
+    const sourceReference = coveragePortfolioPageReference(sourcePage);
+    const generation = this.generation;
+    const signal = this.abortController.signal;
+    const pending = this.prefetchNextExactPage(
+      generation,
+      signal,
+      sourceReference,
+      expectedAlternativeIndex
+    )
+      .then((result) => {
+        if (!this.isCurrent(generation, signal)) return;
+        if (result.sealed) this.enumerationSealed = true;
+        if (result.page) {
+          this.highestMaterializedAlternativeIndex = result.page.alternative_index;
+          this.prefetchedPage = this.isImmediateSuccessorOfCurrent(result.page)
+            ? result.page
+            : null;
+          if (result.page.enumeration_complete) this.enumerationSealed = true;
+        }
+        this.emit();
+      })
+      .catch((reason: unknown) => {
+        if (!this.isCurrent(generation, signal)) return;
+        this.error = pagerErrorMessage(reason);
+        this.emit();
+      })
+      .finally(() => {
+        if (this.generation === generation && this.prefetchPromise === pending) {
+          this.prefetchPromise = null;
+          this.emit();
+        }
+      });
+    this.prefetchPromise = pending;
+    this.emit();
+  }
+
+  async next(): Promise<ClearraCoveragePortfolioRuntimePage | null> {
+    if (this.navigating || this.error) return null;
+    const generation = this.generation;
+    this.navigating = true;
+    this.emit();
+    try {
+      return await this.nextUnlocked(generation);
+    } catch (reason) {
+      if (generation === this.generation) {
+        this.error = pagerErrorMessage(reason);
+        this.emit();
+      }
+      return null;
+    } finally {
+      if (generation === this.generation) {
+        this.navigating = false;
+        this.emit();
+      }
+    }
+  }
+
+  async previous(): Promise<ClearraCoveragePortfolioRuntimePage | null> {
+    if (this.navigating || this.error) return null;
+    const generation = this.generation;
+    this.navigating = true;
+    this.emit();
+    try {
+      if (this.outerPageIndex > 0) {
+        this.outerPageIndex -= 1;
+        this.pruneNonAdjacentPrefetchedPage();
+        this.emit();
+        return this.pages[this.outerPageIndex] ?? null;
+      }
+      const currentAlternativeIndex = this.pages[this.outerPageIndex]?.alternative_index ?? null;
+      if (!currentAlternativeIndex || currentAlternativeIndex === '1') return null;
+      return await this.reloadOuterPage(
+        decrementCanonicalDecimal(currentAlternativeIndex),
+        'previous',
+        generation
+      );
+    } catch (reason) {
+      if (generation === this.generation) {
+        this.error = pagerErrorMessage(reason);
+        this.emit();
+      }
+      return null;
+    } finally {
+      if (generation === this.generation) {
+        this.navigating = false;
+        this.emit();
+      }
+    }
+  }
+
+  private async nextUnlocked(
+    generation: number
+  ): Promise<ClearraCoveragePortfolioRuntimePage | null> {
+    if (this.outerPageIndex + 1 < this.pages.length) {
+      this.outerPageIndex += 1;
+      this.pruneNonAdjacentPrefetchedPage();
+      this.emit();
+      this.startPrefetch();
+      return this.pages[this.outerPageIndex] ?? null;
+    }
+    const currentAlternativeIndex = this.pages[this.outerPageIndex]?.alternative_index ?? null;
+    if (!currentAlternativeIndex) {
+      throw new Error('product alternative index exceeds the supported page range');
+    }
+    const nextAlternativeIndex = incrementCanonicalDecimal(currentAlternativeIndex);
+    const prefetchedAlternativeIndex = this.prefetchedPage?.alternative_index ?? null;
+    if (
+      this.highestMaterializedAlternativeIndex !== null &&
+      compareCanonicalDecimals(nextAlternativeIndex, this.highestMaterializedAlternativeIndex) <=
+        0 &&
+      prefetchedAlternativeIndex !== nextAlternativeIndex
+    ) {
+      return await this.reloadOuterPage(nextAlternativeIndex, 'next', generation);
+    }
+
+    this.startPrefetch();
+    const pending = this.prefetchPromise;
+    if (pending) await pending;
+    if (generation !== this.generation) return null;
+    if (!this.prefetchedPage || this.prefetchedPage.alternative_index !== nextAlternativeIndex) {
+      if (
+        this.highestMaterializedAlternativeIndex !== null &&
+        compareCanonicalDecimals(nextAlternativeIndex, this.highestMaterializedAlternativeIndex) <=
+          0
+      ) {
+        return await this.reloadOuterPage(nextAlternativeIndex, 'next', generation);
+      }
+      return null;
+    }
+    const nextPage = this.prefetchedPage;
+    this.prefetchedPage = null;
+    this.pages =
+      this.pages.length >= MAX_RETAINED_PORTFOLIO_PAGES
+        ? [...this.pages.slice(1), nextPage]
+        : [...this.pages, nextPage];
+    this.outerPageIndex = this.pages.length - 1;
+    this.emit();
+    this.startPrefetch();
+    return nextPage;
+  }
+
+  private async reloadOuterPage(
+    alternativeIndex: string,
+    direction: 'previous' | 'next',
+    generation: number
+  ): Promise<ClearraCoveragePortfolioRuntimePage | null> {
+    if (!this.loadMemberPage || !positiveCanonicalDecimal(alternativeIndex)) {
+      return null;
+    }
+    const referencePage = this.pages[0]
+      ? coveragePortfolioPageReference(this.pages[0])
+      : null;
+    if (!referencePage) return null;
+    const signal = this.abortController.signal;
+    const response = await this.loadMemberPage(alternativeIndex, '1', signal);
+    if (!this.isCurrent(generation, signal)) return null;
+    const page = requireCoveragePortfolioPageResponse(response, {
+      setIdentitySha256: referencePage.set_identity_sha256,
+      candidateMapSha256: referencePage.candidate_map_sha256,
+      alternativeIndex,
+      memberPageNumber: '1',
+      referencePage
+    });
+    this.pages =
+      direction === 'previous'
+        ? [page, ...this.pages].slice(0, MAX_RETAINED_PORTFOLIO_PAGES)
+        : [...this.pages, page].slice(-MAX_RETAINED_PORTFOLIO_PAGES);
+    this.outerPageIndex = direction === 'previous' ? 0 : this.pages.length - 1;
+    this.pruneNonAdjacentPrefetchedPage();
+    if (page.enumeration_complete) this.enumerationSealed = true;
+    this.emit();
+    this.startPrefetch();
+    return page;
+  }
+
+  private async prefetchNextExactPage(
+    generation: number,
+    signal: AbortSignal,
+    referencePage: CoveragePortfolioPageReference,
+    expectedAlternativeIndex: string
+  ): Promise<{
+    page: ClearraCoveragePortfolioRuntimePage | null;
+    sealed: boolean;
+  }> {
+    if (!this.loadNextPage) return { page: null, sealed: false };
+    while (this.isCurrent(generation, signal)) {
+      const response = await this.loadNextPage(signal);
+      if (!this.isCurrent(generation, signal)) return { page: null, sealed: false };
+      if (
+        response.schema_version !== 1 ||
+        !['clearra-wasm', 'clearra-desktop'].includes(response.runtime) ||
+        response.product_page_kind !== 'coverage-portfolio'
+      ) {
+        throw new Error('product page kind does not match the active coverage result');
+      }
+      if (response.state === 'work-budget-exhausted') continue;
+      if (response.state === 'sealed' || response.state === 'cancelled') {
+        return { page: null, sealed: true };
+      }
+      return {
+        page: requireCoveragePortfolioPageResponse(response, {
+          setIdentitySha256: referencePage.set_identity_sha256,
+          candidateMapSha256: referencePage.candidate_map_sha256,
+          alternativeIndex: expectedAlternativeIndex,
+          memberPageNumber: '1',
+          referencePage
+        }),
+        sealed: false
+      };
+    }
+    return { page: null, sealed: false };
+  }
+
+  private isCurrent(generation: number, signal: AbortSignal): boolean {
+    return generation === this.generation && !signal.aborted;
+  }
+
+  private isImmediateSuccessorOfCurrent(page: ClearraCoveragePortfolioRuntimePage): boolean {
+    const currentPage = this.pages[this.outerPageIndex];
+    return (
+      currentPage !== undefined &&
+      page.alternative_index === incrementCanonicalDecimal(currentPage.alternative_index)
+    );
+  }
+
+  private pruneNonAdjacentPrefetchedPage(): void {
+    if (this.prefetchedPage && !this.isImmediateSuccessorOfCurrent(this.prefetchedPage)) {
+      this.prefetchedPage = null;
+    }
+  }
+
+  private emit(): void {
+    this.onChange?.(this.snapshot());
+  }
+}
+
+export function requireCoveragePortfolioPageResponse(
+  response: ClearraProductPageWorkerPayload,
+  expectation: CoveragePortfolioPageExpectation
+): ClearraCoveragePortfolioRuntimePage {
+  if (
+    response.schema_version !== 1 ||
+    !['clearra-wasm', 'clearra-desktop'].includes(response.runtime) ||
+    response.product_page_kind !== 'coverage-portfolio' ||
+    response.state !== 'page'
+  ) {
+    throw new Error('product page response is not a coverage portfolio page');
+  }
+  const validationError = validateCoveragePortfolioRuntimePage(response.page, expectation);
+  if (validationError) throw new Error(validationError);
+  return response.page;
+}
+
+function positiveCanonicalDecimal(value: string): boolean {
+  return /^(?:[1-9][0-9]*)$/u.test(value);
+}
+
+export function incrementCanonicalDecimal(value: string): string {
+  return (BigInt(value) + 1n).toString();
+}
+
+export function decrementCanonicalDecimal(value: string): string {
+  return (BigInt(value) - 1n).toString();
+}
+
+function pagerErrorMessage(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
 
 export function productResultIdentity(payload: ClearraProductResultPayload | null | undefined) {
   if (!payload) return '';
@@ -330,20 +846,16 @@ export function validateProductResultPayload(
         payload.result_kind === 'pc-score-portfolio.v2') ||
       (payload.contract === 'spin-structure.cover' &&
         payload.result_kind === 'spin-structure-coverage.v1');
+    const pageValidationError = validateCoveragePortfolioRuntimePage(page, {
+      setIdentitySha256: page.set_identity_sha256,
+      candidateMapSha256: page.candidate_map_sha256,
+      alternativeIndex: '1',
+      memberPageNumber: '1'
+    });
     if (
       !expectedPair ||
-      !/^[0-9a-f]{64}$/.test(page.set_identity_sha256) ||
-      !/^[0-9a-f]{64}$/.test(page.candidate_map_sha256) ||
-      !isCanonicalDecimal(page.alternative_index) ||
-      !isCanonicalDecimal(page.optimal_cardinality) ||
-      !isCanonicalDecimal(page.known_alternative_count) ||
-      !isCanonicalDecimal(page.member_page_number) ||
-      !isCanonicalDecimal(page.total_member_pages) ||
-      page.members.length > PRODUCT_MEMBER_PAGE_SIZE ||
-      page.members.some(
-        (member) =>
-          !isCanonicalDecimal(member.candidate_id) || !member.normalized_solution_key
-      )
+      page.set_contract !== 'portfolio-alternative-set.v1' ||
+      pageValidationError
     ) {
       return 'invalid coverage portfolio payload';
     }
@@ -1139,7 +1651,7 @@ function validatePcSaveMultiset(multiset: ClearraPcSavePieceMultisetPayload): bo
   );
 }
 
-function compareCanonicalDecimals(left: string, right: string): number {
+export function compareCanonicalDecimals(left: string, right: string): number {
   return left.length === right.length
     ? left.localeCompare(right)
     : left.length - right.length;

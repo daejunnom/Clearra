@@ -15,18 +15,20 @@ use clearra_wasm::ExecutorSearchProfileSession;
 use clearra_wasm::WasmWorkerJobStatus;
 use clearra_wasm::{
     install_pc4_compact_tablebase, release_pc4_compact_tablebase,
-    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page,
-    serialize_distributed_final_events, serialize_parity_report_exhausted,
-    serialize_parity_report_page, GovernedWasmJson, GpuSearchWarmupReport, ProductPageSourceOwner,
-    ProductPageStore, TilingSolutionPageStore, WasmCommandRuntimeError, WasmDistributedCoordinator,
-    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
-    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
-    WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmWorkerAdvanceStatus, WasmWorkerJobId,
-    WasmWorkerJobRuntime,
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page_exact,
+    serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
+    serialize_parity_report_exhausted, serialize_parity_report_page, GovernedWasmJson,
+    GpuSearchWarmupReport, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
+    WasmCommandRuntimeError, WasmDistributedCoordinator, WasmDistributedFallbackReason,
+    WasmDistributedMode, WasmDistributedPreparation, WasmDistributedProducerAdvance,
+    WasmDistributedRequestedBackend, WasmDistributedVerifierRuntime, WasmHostCapabilities,
+    WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
+    PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT,
 };
 
 const ABI_VERSION: u32 = 1;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
+const PRODUCT_PAGE_REQUEST_CONTRACT: &str = "portfolio-page-request.v1";
 const MAX_TRANSFER_BYTES: usize = 512 * 1024 * 1024;
 const ABI_OK: i32 = 0;
 const ABI_ERROR: i32 = -1;
@@ -180,6 +182,22 @@ impl AbiProductPageStore {
                 })
                 .and_then(|bytes| bytes.checked_add(core::mem::size_of::<String>() as u128))
                 .and_then(|bytes| bytes.checked_add(output_capacity as u128))
+                .is_some_and(|actual| actual <= *memory_limit_bytes),
+        }
+    }
+
+    fn governed_request_fits(&self, request_capacity: usize) -> bool {
+        match self {
+            Self::Legacy(_) => true,
+            Self::Governed {
+                store,
+                memory_limit_bytes,
+            } => store
+                .checked_retained_capacity_bytes()
+                .and_then(|bytes| {
+                    bytes.checked_add(core::mem::size_of::<Option<AbiProductPageStore>>() as u128)
+                })
+                .and_then(|bytes| bytes.checked_add(request_capacity as u128))
                 .is_some_and(|actual| actual <= *memory_limit_bytes),
         }
     }
@@ -884,6 +902,41 @@ pub extern "C" fn clearra_wasm_input_ptr() -> u32 {
     ABI_STATE.with(|state| state.borrow().input.as_ptr() as usize as u32)
 }
 
+/// Allocates the exact-decimal product-page request buffer without opening the
+/// general command mutation gate while a result-bound page owner is live.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_product_page_request_resize(byte_len: u32) -> i32 {
+    let byte_len = byte_len as usize;
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_released_output() {
+            return status;
+        }
+        if state.runtime.has_active_finite_job()
+            || state.runtime.has_completed_governed_events()
+            || (state.product_page_source_owner.is_none() && state.product_page_store.is_none())
+            || byte_len == 0
+            || byte_len > MAX_COMMAND_BYTES
+        {
+            return ABI_ERROR;
+        }
+        let mut request = Vec::new();
+        if request.try_reserve_exact(byte_len).is_err() {
+            return ABI_ERROR;
+        }
+        request.resize(byte_len, 0);
+        if state
+            .product_page_store
+            .as_ref()
+            .is_some_and(|store| !store.governed_request_fits(request.capacity()))
+        {
+            return ABI_ERROR;
+        }
+        state.input = request;
+        ABI_OK
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn clearra_wasm_transfer_resize(byte_len: u32) -> i32 {
     let byte_len = byte_len as usize;
@@ -1493,7 +1546,7 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
             .as_ref()
             .is_some_and(|store| store.store().parity_report().is_some());
         let output = if coverage_portfolio {
-            let (advance, loaded_page_number) = {
+            let (advance, retained_slot) = {
                 let Some(store) = state
                     .product_page_store
                     .as_mut()
@@ -1513,7 +1566,10 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
                         return ABI_ERROR;
                     }
                 };
-                (advance, store.loaded_page_count())
+                let retained_slot = advance
+                    .page()
+                    .and_then(|page| store.retained_page_slot(page.alternative_index_decimal()));
+                (advance, retained_slot)
             };
             if state
                 .product_page_store
@@ -1528,7 +1584,10 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
                     return ABI_ERROR;
                 };
                 if advance.page().is_some() {
-                    serialize_coverage_portfolio_page(store, loaded_page_number, 1)
+                    let Some(retained_slot) = retained_slot else {
+                        return ABI_ERROR;
+                    };
+                    serialize_coverage_portfolio_retained_page(store, retained_slot, 1)
                 } else {
                     serialize_coverage_portfolio_advance_state(&advance)
                 }
@@ -1602,13 +1661,28 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
     })
 }
 
-/// Loads a member page for any retained outer alternative. The App store
-/// enforces the fixed member-page size of exactly 100.
+/// Legacy numeric compatibility export. Browser/Desktop product code uses the
+/// exact-decimal request export below.
 #[no_mangle]
 pub extern "C" fn clearra_wasm_product_page_get(
     outer_page_number: u32,
     member_page_number: u32,
 ) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        product_page_get_from_state(
+            &mut state,
+            &outer_page_number.to_string(),
+            member_page_number as usize,
+            0,
+        )
+    })
+}
+
+/// Loads a product/member page from canonical positive decimal identities in
+/// the request buffer: `portfolio-page-request.v1\n<outer>\n<member>`.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Err(status) = state.require_released_output() {
@@ -1617,72 +1691,137 @@ pub extern "C" fn clearra_wasm_product_page_get(
         if state.runtime.has_active_finite_job() || state.runtime.has_completed_governed_events() {
             return ABI_ERROR;
         }
-        if let Err(reason) = ensure_product_page_store(&mut state) {
-            state.set_error("E_WASM_PRODUCT_PAGE_STATE", reason);
-            return ABI_ERROR;
-        }
-        let governed = state
-            .product_page_store
-            .as_ref()
-            .is_some_and(AbiProductPageStore::is_governed);
-        let output = if let Some(store) = state
-            .product_page_store
-            .as_ref()
-            .and_then(|store| store.store().coverage_portfolio())
-        {
-            serialize_coverage_portfolio_page(
-                store,
-                outer_page_number as usize,
-                member_page_number as usize,
-            )
-        } else if let Some(store) = state
-            .product_page_store
-            .as_ref()
-            .and_then(|store| store.store().parity_report())
-        {
-            if member_page_number != 1 {
-                Err(WasmCommandRuntimeError::new(
-                    "E_WASM_PRODUCT_PAGE",
-                    "invalid-member-page",
-                ))
-            } else {
-                store
-                    .page(outer_page_number as usize)
-                    .map_err(|error| {
-                        WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", error.as_str())
-                    })
-                    .and_then(|page| serialize_parity_report_page(&page))
-            }
-        } else {
-            if !governed {
-                state.set_error(
-                    "E_WASM_PRODUCT_PAGE_KIND",
-                    "product page kind is unsupported",
-                );
-            }
-            return ABI_ERROR;
+        let request = match String::from_utf8(std::mem::take(&mut state.input)) {
+            Ok(request) => request,
+            Err(_) => return ABI_ERROR,
         };
-        match output {
-            Ok(output) => {
-                if state
-                    .product_page_store
-                    .as_ref()
-                    .is_some_and(|store| !store.governed_output_fits(output.capacity()))
-                {
-                    state.product_page_store = None;
-                    return ABI_ERROR;
-                }
-                state.set_output(output);
-                ABI_OK
-            }
-            Err(error) => {
-                if !governed {
-                    state.set_runtime_error(&error);
-                }
-                ABI_ERROR
-            }
-        }
+        let (alternative_index_decimal, member_page_number) =
+            match parse_product_page_request(&request) {
+                Ok(request) => request,
+                Err(_) => return ABI_ERROR,
+            };
+        product_page_get_from_state(
+            &mut state,
+            alternative_index_decimal,
+            member_page_number,
+            request.capacity(),
+        )
     })
+}
+
+fn product_page_get_from_state(
+    state: &mut WasmAbiState,
+    alternative_index_decimal: &str,
+    member_page_number: usize,
+    additional_live_capacity: usize,
+) -> i32 {
+    if let Err(status) = state.require_released_output() {
+        return status;
+    }
+    if state.runtime.has_active_finite_job() || state.runtime.has_completed_governed_events() {
+        return ABI_ERROR;
+    }
+    if let Err(reason) = ensure_product_page_store(state) {
+        state.set_error("E_WASM_PRODUCT_PAGE_STATE", reason);
+        return ABI_ERROR;
+    }
+    let governed = state
+        .product_page_store
+        .as_ref()
+        .is_some_and(AbiProductPageStore::is_governed);
+    let output = if let Some(store) = state
+        .product_page_store
+        .as_mut()
+        .and_then(|store| store.store_mut().coverage_portfolio_mut())
+    {
+        serialize_coverage_portfolio_page_exact(
+            store,
+            alternative_index_decimal,
+            member_page_number,
+            &mut || false,
+        )
+    } else if let Some(store) = state
+        .product_page_store
+        .as_ref()
+        .and_then(|store| store.store().parity_report())
+    {
+        let outer_page_number = parse_canonical_positive_usize(alternative_index_decimal);
+        if member_page_number != 1 || outer_page_number.is_none() {
+            Err(WasmCommandRuntimeError::new(
+                "E_WASM_PRODUCT_PAGE",
+                "invalid-member-page",
+            ))
+        } else {
+            store
+                .page(outer_page_number.expect("validated positive page"))
+                .map_err(|error| {
+                    WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", error.as_str())
+                })
+                .and_then(|page| serialize_parity_report_page(&page))
+        }
+    } else {
+        if !governed {
+            state.set_error(
+                "E_WASM_PRODUCT_PAGE_KIND",
+                "product page kind is unsupported",
+            );
+        }
+        return ABI_ERROR;
+    };
+    match output {
+        Ok(output) => {
+            let Some(governed_capacity) = output.capacity().checked_add(additional_live_capacity)
+            else {
+                state.product_page_store = None;
+                return ABI_ERROR;
+            };
+            if state
+                .product_page_store
+                .as_ref()
+                .is_some_and(|store| !store.governed_output_fits(governed_capacity))
+            {
+                state.product_page_store = None;
+                return ABI_ERROR;
+            }
+            state.set_output(output);
+            ABI_OK
+        }
+        Err(error) => {
+            if !governed {
+                state.set_runtime_error(&error);
+            }
+            ABI_ERROR
+        }
+    }
+}
+
+fn parse_product_page_request(request: &str) -> Result<(&str, usize), &'static str> {
+    let mut fields = request.split('\n');
+    let contract = fields.next().ok_or("missing-contract")?;
+    let alternative_index_decimal = fields.next().ok_or("missing-alternative-index")?;
+    let member_page_decimal = fields.next().ok_or("missing-member-page")?;
+    if fields.next().is_some()
+        || contract != PRODUCT_PAGE_REQUEST_CONTRACT
+        || !is_canonical_positive_decimal(alternative_index_decimal)
+    {
+        return Err("invalid-product-page-request");
+    }
+    let member_page_number =
+        parse_canonical_positive_usize(member_page_decimal).ok_or("invalid-member-page")?;
+    Ok((alternative_index_decimal, member_page_number))
+}
+
+fn parse_canonical_positive_usize(value: &str) -> Option<usize> {
+    is_canonical_positive_decimal(value)
+        .then(|| value.parse::<usize>().ok())
+        .flatten()
+}
+
+fn is_canonical_positive_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value != "0"
+        && !value.starts_with('0')
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[no_mangle]
@@ -2351,6 +2490,18 @@ mod tests {
         ABI_STATE.with(|state| *state.borrow_mut() = WasmAbiState::default());
     }
 
+    fn install_exact_product_page_request(alternative_index: &str, member_page: &str) {
+        let request =
+            format!("{PRODUCT_PAGE_REQUEST_CONTRACT}\n{alternative_index}\n{member_page}");
+        assert_eq!(
+            clearra_wasm_product_page_request_resize(request.len() as u32),
+            ABI_OK
+        );
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input.copy_from_slice(request.as_bytes());
+        });
+    }
+
     fn complete_finite_job(command: &str) -> u32 {
         reset_abi_state_for_test();
         ABI_STATE.with(|state| {
@@ -2992,22 +3143,65 @@ mod tests {
         });
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
 
-        assert_eq!(clearra_wasm_product_page_next(10_000), ABI_OK);
+        install_exact_product_page_request("1", "1");
+        assert_eq!(clearra_wasm_product_page_get_exact(), ABI_OK);
         ABI_STATE.with(|state| {
             let state = state.borrow();
-            assert!(state.output_outstanding);
-            let store = state
-                .product_page_store
-                .as_ref()
-                .expect("page owner retained");
-            assert!(store.governed_store_fits());
-            assert!(store.governed_output_fits(state.output.capacity()));
+            let wire = String::from_utf8_lossy(state.output_bytes());
+            assert!(wire.contains("\"alternative_index\":\"1\""));
+        });
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+
+        for _ in 0..32 {
+            assert_eq!(clearra_wasm_product_page_next(10_000), ABI_OK);
+            let sealed = ABI_STATE.with(|state| {
+                let state = state.borrow();
+                assert!(state.output_outstanding);
+                let store = state
+                    .product_page_store
+                    .as_ref()
+                    .expect("page owner retained");
+                assert!(store.governed_store_fits());
+                assert!(store.governed_output_fits(state.output.capacity()));
+                assert!(store.store().coverage_portfolio().is_none_or(|coverage| {
+                    coverage.loaded_page_count() <= PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT
+                }));
+                String::from_utf8_lossy(state.output_bytes()).contains("\"state\":\"sealed\"")
+            });
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            if sealed {
+                break;
+            }
+        }
+
+        install_exact_product_page_request("1", "1");
+        assert_eq!(clearra_wasm_product_page_get_exact(), ABI_OK);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            let wire = String::from_utf8_lossy(state.output_bytes());
+            assert!(wire.contains("\"alternative_index\":\"1\""));
         });
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
         assert_eq!(clearra_wasm_product_page_release(), ABI_OK);
         assert_eq!(clearra_wasm_product_page_available(), 0);
         assert_eq!(clearra_wasm_input_resize(1), ABI_OK);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+    }
+
+    #[test]
+    fn exact_product_page_request_preserves_indices_beyond_js_and_u32_ranges() {
+        let request = format!("{PRODUCT_PAGE_REQUEST_CONTRACT}\n184467440737095516160\n1");
+        let (alternative_index, member_page) =
+            parse_product_page_request(&request).expect("exact decimal request");
+        assert_eq!(alternative_index, "184467440737095516160");
+        assert_eq!(member_page, 1);
+        assert!(
+            parse_product_page_request("portfolio-page-request.v1\n9007199254740992\n01").is_err()
+        );
+        assert!(
+            parse_product_page_request("portfolio-page-request.v1\n4294967296\n1\ntrailing")
+                .is_err()
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace } from '@clearra/ui/workspace';
+  import { BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PAGES_ESSENTIAL_WORKSPACE_MODES, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
@@ -17,6 +17,7 @@
   }
 
   setContext(PC_SOLVER_HREF_CONTEXT, `${base}/pc-solver`);
+  setContext(WORKSPACE_MODE_VISIBILITY_CONTEXT, PAGES_ESSENTIAL_WORKSPACE_MODES);
   setContext(
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot()
@@ -55,6 +56,7 @@
   <CtkDrawerWorkspace
     initialDocument={ctkViewer.document ?? undefined}
     viewerMode={ctkViewer.viewer}
+    {workerFactory}
   />
 {:else if selectedTool === 'player'}
   <PlayerWorkspace {workerFactory} />

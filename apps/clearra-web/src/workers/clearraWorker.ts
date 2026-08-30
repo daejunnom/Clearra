@@ -63,8 +63,8 @@ type ClearraWorkerMessage =
       requestId: number;
       action: 'next' | 'get';
       maximumWorkSteps?: number;
-      outerPageNumber?: number;
-      memberPageNumber?: number;
+      alternativeIndex?: string;
+      memberPageNumber?: string;
     }
   | { type: 'release_product_pages' }
   | { type: 'cancel_job'; jobId?: number }
@@ -180,8 +180,8 @@ function loadProductPage(
       request.action === 'next'
         ? loadedWasm.product_page_next(request.maximumWorkSteps ?? 10_000)
         : loadedWasm.product_page_get(
-            request.outerPageNumber ?? 0,
-            request.memberPageNumber ?? 0
+            request.alternativeIndex ?? '',
+            request.memberPageNumber ?? ''
           );
     self.postMessage({
       type: 'product_page',

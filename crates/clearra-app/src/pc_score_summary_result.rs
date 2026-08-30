@@ -12,7 +12,8 @@ use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcScenarioQuery, PcSolutionProbabilityPolicy,
 };
 use clearra_problem::{
-    ProblemCompileError, ProblemCompiler, SearchOutputPolicy, SearchProblem, SearchProblemPreset,
+    PcChanceEvidencePolicy, ProblemCompileError, ProblemCompiler, SearchOutputPolicy,
+    SearchProblem, SearchProblemPreset,
 };
 use clearra_supply::QueueObservationPolicy;
 
@@ -674,6 +675,10 @@ impl PcScoreCompiledAuthority {
                 ProblemCompiler::compile_scenario_pc(query.as_ref())
             }
         }
+        .map(|problem| match product {
+            PcScoreCompiledProduct::Summary(_) => problem,
+            PcScoreCompiledProduct::Portfolio(_) => problem.with_pc_score_portfolio_v2_evidence(),
+        })
         .map(Arc::new)
         .map_err(PcScoreCompiledAuthorityError::ProblemCompile)?;
         Self::new(query, product, problem, terminal_resource_authority)
@@ -702,6 +707,17 @@ impl PcScoreCompiledAuthority {
             || problem.objective() != product.expected_objective(score_policy)
         {
             return Err(rejected("pc_score_compiled_objective_mismatch"));
+        }
+        let evidence_policy_matches_product = match product {
+            PcScoreCompiledProduct::Summary(_) => {
+                problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+            }
+            PcScoreCompiledProduct::Portfolio(_) => problem
+                .pc_chance_evidence_policy()
+                .retains_pc_score_portfolio_v2_evidence(),
+        };
+        if !evidence_policy_matches_product {
+            return Err(rejected("pc_score_compiled_evidence_policy_mismatch"));
         }
         if product == PcScoreCompiledProduct::Summary(PcScoreIngressOrigin::CompatibilityScore)
             && score_policy.profile() != ScoreProfileSelection::JstrisUltra

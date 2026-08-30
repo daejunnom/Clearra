@@ -506,16 +506,39 @@ async function productPageRequestsReleaseOnCancelAndDispose() {
   );
   controller.cancel();
   await assert.rejects(pending, /cancelled/);
-  assert.equal(
-    worker.messages.filter(
-      (message) => (message as { type?: string }).type === 'release_product_pages'
-    ).length,
-    1
-  );
+  assert.equal(worker.terminateCount, 1);
 
-  const member = controller.loadProductMemberPage(1, 1);
-  controller.dispose();
+  const disposeWorker = new FakeWorker();
+  const disposeController = controllerFor(disposeWorker);
+  disposeController.prewarm(1);
+  const member = disposeController.loadProductMemberPage('1', '1');
+  disposeController.dispose();
   await assert.rejects(member, /disposed/);
+  assert.equal(disposeWorker.terminateCount, 1);
+
+  const abortWorker = new FakeWorker();
+  const abortController = controllerFor(abortWorker);
+  abortController.prewarm(1);
+  const signalController = new AbortController();
+  const replay = abortController.loadProductMemberPage(
+    '184467440737095516160',
+    '1',
+    signalController.signal
+  );
+  signalController.abort();
+  await assert.rejects(replay, (error: unknown) => {
+    assert.equal((error as Error).name, 'AbortError');
+    return true;
+  });
+  assert.equal(abortWorker.terminateCount, 1);
+
+  const releaseWorker = new FakeWorker();
+  const releaseController = controllerFor(releaseWorker);
+  releaseController.prewarm(1);
+  const released = releaseController.loadNextProductPage();
+  releaseController.releaseProductPages();
+  await assert.rejects(released, /released/);
+  assert.equal(releaseWorker.terminateCount, 1);
 }
 
 async function productPageResponsesRemainStringExact() {
@@ -523,12 +546,15 @@ async function productPageResponsesRemainStringExact() {
   const worker = new FakeWorker();
   const controller = controllerFor(worker);
   controller.prewarm(1);
-  const request = controller.loadProductMemberPage(2, 1);
+  const exactAlternativeIndex = '184467440737095516160';
+  const request = controller.loadProductMemberPage(exactAlternativeIndex, '1');
   const posted = worker.messages.find(
     (message) =>
       (message as { type?: string; action?: string }).type === 'load_product_page' &&
       (message as { action?: string }).action === 'get'
-  ) as { requestId: number };
+  ) as { requestId: number; alternativeIndex: string; memberPageNumber: string };
+  assert.equal(posted.alternativeIndex, exactAlternativeIndex);
+  assert.equal(posted.memberPageNumber, '1');
   worker.emit({
     type: 'product_page',
     request_id: posted.requestId,
@@ -542,9 +568,9 @@ async function productPageResponsesRemainStringExact() {
         member_page_contract: 'portfolio-member-page.v1',
         set_identity_sha256: 'a'.repeat(64),
         candidate_map_sha256: 'b'.repeat(64),
-        alternative_index: '184467440737095516160',
+        alternative_index: exactAlternativeIndex,
         optimal_cardinality: '1',
-        known_alternative_count: '184467440737095516160',
+        known_alternative_count: exactAlternativeIndex,
         total_alternative_count: null,
         enumeration_complete: false,
         member_page_number: '1',
@@ -556,7 +582,7 @@ async function productPageResponsesRemainStringExact() {
   const response = await request;
   assert.equal(response.state, 'page');
   if (response.product_page_kind === 'coverage-portfolio' && response.state === 'page') {
-    assert.equal(response.page.alternative_index, '184467440737095516160');
+    assert.equal(response.page.alternative_index, exactAlternativeIndex);
     assert.equal(response.page.members[0]?.candidate_id, '18446744073709551615');
   }
   controller.dispose();

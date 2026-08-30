@@ -7,6 +7,7 @@ declare module 'node:assert/strict' {
 
   interface StrictAssert {
     equal(actual: unknown, expected: unknown, message?: string | Error): void;
+    notEqual(actual: unknown, expected: unknown, message?: string | Error): void;
     deepEqual(actual: unknown, expected: unknown, message?: string | Error): void;
     match(actual: string, expected: RegExp, message?: string | Error): void;
     doesNotMatch(actual: string, expected: RegExp, message?: string | Error): void;

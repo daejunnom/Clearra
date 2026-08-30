@@ -16,6 +16,7 @@ pub const PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT: &str = "portfolio-alternative-pag
 pub const PORTFOLIO_MEMBER_PAGE_CONTRACT: &str = "portfolio-member-page.v1";
 pub const PORTFOLIO_SNAPSHOT_CONTRACT: &str = "portfolio-snapshot.v1";
 pub const PORTFOLIO_MEMBER_PAGE_SIZE: usize = 100;
+pub const PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT: usize = 3;
 
 const CANDIDATE_MAP_DIGEST_DOMAIN: &[u8] = b"clearra.portfolio-candidate-map.v1\0";
 const SET_IDENTITY_DIGEST_DOMAIN: &[u8] = b"clearra.portfolio-set-identity.v1\0";
@@ -752,8 +753,9 @@ impl ProductPageSourceOwner {
 }
 
 /// Mutable runtime page handle built from a transferred immutable source.
-/// Loaded outer pages are retained so member navigation remains valid after a
-/// safe one-page prefetch has advanced the exact enumerator.
+/// Only a fixed current/adjacent window is retained. An evicted materialized
+/// page is rebuilt from the immutable enumerator origin when requested by its
+/// exact decimal alternative identity.
 #[derive(Debug)]
 pub enum ProductPageStore {
     CoveragePortfolio(CoveragePortfolioPageStore),
@@ -813,7 +815,9 @@ impl ProductPageStore {
 #[derive(Debug)]
 pub struct CoveragePortfolioPageStore {
     store: CoveragePortfolioAlternativeStore,
+    replay_origin: CoveragePortfolioAlternativeStore,
     loaded_pages: Vec<PortfolioAlternativePage>,
+    focused_slot: usize,
 }
 
 impl CoveragePortfolioPageStore {
@@ -822,14 +826,17 @@ impl CoveragePortfolioPageStore {
     ) -> Result<Self, PortfolioAlternativeError> {
         let canonical_page = set.canonical_page().clone();
         let store = CoveragePortfolioAlternativeSet::open_owned_store(set)?;
+        let replay_origin = store.clone();
         let mut loaded_pages = Vec::new();
         loaded_pages
-            .try_reserve_exact(1)
+            .try_reserve_exact(PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT)
             .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
         loaded_pages.push(canonical_page);
         Ok(Self {
             store,
+            replay_origin,
             loaded_pages,
+            focused_slot: 0,
         })
     }
 
@@ -843,9 +850,103 @@ impl CoveragePortfolioPageStore {
 
     /// Returns a loaded page by its one-based outer page number.
     pub fn page(&self, page_number: usize) -> Option<&PortfolioAlternativePage> {
-        page_number
-            .checked_sub(1)
-            .and_then(|index| self.loaded_pages.get(index))
+        (page_number != 0)
+            .then(|| page_number.to_string())
+            .and_then(|identity| self.page_by_alternative_index(&identity))
+    }
+
+    pub fn page_by_alternative_index(
+        &self,
+        alternative_index_decimal: &str,
+    ) -> Option<&PortfolioAlternativePage> {
+        self.loaded_pages
+            .iter()
+            .find(|page| page.alternative_index_decimal() == alternative_index_decimal)
+    }
+
+    pub fn retained_page(&self, retained_slot: usize) -> Option<&PortfolioAlternativePage> {
+        self.loaded_pages.get(retained_slot)
+    }
+
+    /// Loads an already materialized alternative by exact decimal identity.
+    /// Cache misses replay the immutable source from the canonical origin;
+    /// they never change the high-water enumerator owned by `next_page`.
+    pub fn load_page_by_alternative_index(
+        &mut self,
+        alternative_index_decimal: &str,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<usize, PortfolioAlternativeError> {
+        if !is_canonical_nonzero_decimal(alternative_index_decimal) {
+            return Err(PortfolioAlternativeError::InvalidAlternativeIndex);
+        }
+        if self
+            .loaded_pages
+            .get(self.focused_slot)
+            .is_some_and(|page| page.alternative_index_decimal() == alternative_index_decimal)
+        {
+            return Ok(self.focused_slot);
+        }
+        if compare_canonical_decimals(
+            alternative_index_decimal,
+            &self.store.checkpoint().known_alternative_count_decimal,
+        )
+        .is_gt()
+        {
+            return Err(PortfolioAlternativeError::PageNotLoaded);
+        }
+
+        let known_alternative_count_decimal = self
+            .store
+            .checkpoint()
+            .known_alternative_count_decimal
+            .clone();
+        let mut replay = self.replay_origin.clone();
+        let mut rebuilt_pages = Vec::new();
+        rebuilt_pages
+            .try_reserve_exact(PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT)
+            .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
+
+        if alternative_index_decimal == "1" {
+            rebuilt_pages.push(self.source().canonical_page().clone());
+            if known_alternative_count_decimal != "1" {
+                rebuilt_pages.push(next_replayed_page(&mut replay, cancelled)?);
+            }
+        } else {
+            let mut previous_page = self.source().canonical_page().clone();
+            loop {
+                let page = next_replayed_page(&mut replay, cancelled)?;
+                match compare_canonical_decimals(
+                    page.alternative_index_decimal(),
+                    alternative_index_decimal,
+                ) {
+                    core::cmp::Ordering::Less => previous_page = page,
+                    core::cmp::Ordering::Equal => {
+                        rebuilt_pages.push(previous_page);
+                        rebuilt_pages.push(page);
+                        if compare_canonical_decimals(
+                            alternative_index_decimal,
+                            &known_alternative_count_decimal,
+                        )
+                        .is_lt()
+                        {
+                            rebuilt_pages.push(next_replayed_page(&mut replay, cancelled)?);
+                        }
+                        break;
+                    }
+                    core::cmp::Ordering::Greater => {
+                        return Err(PortfolioAlternativeError::PageNotLoaded);
+                    }
+                }
+            }
+        }
+
+        let focused_slot = rebuilt_pages
+            .iter()
+            .position(|page| page.alternative_index_decimal() == alternative_index_decimal)
+            .ok_or(PortfolioAlternativeError::PageNotLoaded)?;
+        self.loaded_pages = rebuilt_pages;
+        self.focused_slot = focused_slot;
+        Ok(focused_slot)
     }
 
     pub fn next_page(
@@ -853,12 +954,20 @@ impl CoveragePortfolioPageStore {
         maximum_work_steps: u64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PortfolioAlternativeAdvance, PortfolioAlternativeError> {
+        let previous_high_water = self
+            .store
+            .checkpoint()
+            .known_alternative_count_decimal
+            .clone();
+        if let Some(slot) = self.retained_page_slot(&previous_high_water) {
+            self.focused_slot = slot;
+        } else {
+            self.load_page_by_alternative_index(&previous_high_water, cancelled)?;
+        }
         let advance = self.store.next_page(maximum_work_steps, cancelled)?;
         if let Some(page) = advance.page() {
-            self.loaded_pages
-                .try_reserve_exact(1)
-                .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
-            self.loaded_pages.push(page.clone());
+            let retained_slot = self.remember_page(page.clone())?;
+            self.focused_slot = retained_slot.saturating_sub(1);
         }
         Ok(advance)
     }
@@ -874,6 +983,26 @@ impl CoveragePortfolioPageStore {
         self.store
             .alternative_set()
             .member_page(page, member_page_number)
+    }
+
+    pub fn retained_page_slot(&self, alternative_index_decimal: &str) -> Option<usize> {
+        self.loaded_pages
+            .iter()
+            .position(|page| page.alternative_index_decimal() == alternative_index_decimal)
+    }
+
+    fn remember_page(
+        &mut self,
+        page: PortfolioAlternativePage,
+    ) -> Result<usize, PortfolioAlternativeError> {
+        if let Some(slot) = self.retained_page_slot(page.alternative_index_decimal()) {
+            return Ok(slot);
+        }
+        if self.loaded_pages.len() == PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT {
+            self.loaded_pages.remove(0);
+        }
+        self.loaded_pages.push(page);
+        Ok(self.loaded_pages.len() - 1)
     }
 
     /// Encodes the complete selected portfolio, never merely its visible
@@ -899,7 +1028,15 @@ impl CoveragePortfolioPageStore {
         let mut bytes = self
             .source()
             .checked_retained_capacity_bytes()?
-            .checked_add(self.store.checked_enumerator_retained_capacity_bytes()?)?;
+            .checked_add(self.store.checked_enumerator_retained_capacity_bytes()?)?
+            // The replay origin shares immutable enumerator input with the
+            // high-water store. Counting its full retained bytes is a
+            // conservative admission bound which also reserves one transient
+            // replay clone used by a cache miss.
+            .checked_add(
+                self.replay_origin
+                    .checked_enumerator_retained_capacity_bytes()?,
+            )?;
         bytes = bytes.checked_add(
             (self.loaded_pages.capacity() as u128)
                 .checked_mul(core::mem::size_of::<PortfolioAlternativePage>() as u128)?,
@@ -908,6 +1045,27 @@ impl CoveragePortfolioPageStore {
             bytes = bytes.checked_add(checked_page_nested_retained_capacity_bytes(page)?)?;
         }
         Some(bytes)
+    }
+}
+
+fn next_replayed_page(
+    replay: &mut CoveragePortfolioAlternativeStore,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PortfolioAlternativePage, PortfolioAlternativeError> {
+    loop {
+        let advance = replay.next_page(u64::MAX, cancelled)?;
+        if let Some(page) = advance.page() {
+            return Ok(page.clone());
+        }
+        match advance.stop() {
+            PortfolioEnumerationStop::WorkBudgetExhausted => continue,
+            PortfolioEnumerationStop::Cancelled => {
+                return Err(PortfolioAlternativeError::PageReplayCancelled);
+            }
+            PortfolioEnumerationStop::Sealed | PortfolioEnumerationStop::PageFull => {
+                return Err(PortfolioAlternativeError::PageNotLoaded);
+            }
+        }
     }
 }
 
@@ -927,7 +1085,9 @@ pub enum PortfolioAlternativeError {
     PageCardinalityMismatch,
     InvalidCandidateId,
     InvalidMemberPage,
+    InvalidAlternativeIndex,
     PageNotLoaded,
+    PageReplayCancelled,
     AllocationFailed,
     InvalidParityPage,
     ParityPageCountOverflow,
@@ -950,7 +1110,9 @@ impl PortfolioAlternativeError {
             Self::PageCardinalityMismatch => "portfolio-page-cardinality-mismatch",
             Self::InvalidCandidateId => "portfolio-candidate-id-invalid",
             Self::InvalidMemberPage => "portfolio-member-page-invalid",
+            Self::InvalidAlternativeIndex => "portfolio-alternative-index-invalid",
             Self::PageNotLoaded => "portfolio-page-not-loaded",
+            Self::PageReplayCancelled => "portfolio-page-replay-cancelled",
             Self::AllocationFailed => "portfolio-allocation-failed",
             Self::InvalidParityPage => "parity-page-invalid",
             Self::ParityPageCountOverflow => "parity-page-count-overflow",
@@ -1133,6 +1295,12 @@ fn is_canonical_nonzero_decimal(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_digit())
         && value != "0"
         && (!value.starts_with('0') || value == "0")
+}
+
+fn compare_canonical_decimals(left: &str, right: &str) -> core::cmp::Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
 }
 
 #[cfg(test)]
@@ -1467,6 +1635,84 @@ mod tests {
                 .expect("runtime accounting")
                 > source_bytes
         );
+    }
+
+    #[test]
+    fn runtime_page_store_bounds_outer_cache_and_replays_evicted_exact_identity() {
+        let mut store = CoveragePortfolioPageStore::new(Arc::new(tied_set())).expect("page store");
+        let mut observed = vec!["1".to_owned()];
+        loop {
+            let advance = store
+                .next_page(u64::MAX, &mut || false)
+                .expect("advance exact alternatives");
+            if let Some(page) = advance.page() {
+                observed.push(page.alternative_index_decimal().to_owned());
+            }
+            assert!(store.loaded_page_count() <= PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT);
+            if advance.checkpoint().enumeration_complete() {
+                break;
+            }
+        }
+        assert_eq!(
+            observed,
+            (1..=8).map(|value| value.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            store.loaded_page_count(),
+            PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT
+        );
+        let retained_identities = |store: &CoveragePortfolioPageStore| {
+            (0..store.loaded_page_count())
+                .map(|slot| {
+                    store
+                        .retained_page(slot)
+                        .expect("retained outer page")
+                        .alternative_index_decimal()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(retained_identities(&store), ["6", "7", "8"]);
+        assert!(store.page_by_alternative_index("1").is_none());
+
+        let canonical_slot = store
+            .load_page_by_alternative_index("1", &mut || false)
+            .expect("replay canonical page");
+        assert_eq!(
+            store
+                .retained_page(canonical_slot)
+                .expect("canonical retained")
+                .alternative_index_decimal(),
+            "1"
+        );
+        assert_eq!(retained_identities(&store), ["1", "2"]);
+        let replayed_slot = store
+            .load_page_by_alternative_index("6", &mut || false)
+            .expect("replay evicted sixth page");
+        assert_eq!(
+            store
+                .retained_page(replayed_slot)
+                .expect("sixth retained")
+                .alternative_index_decimal(),
+            "6"
+        );
+        assert_eq!(retained_identities(&store), ["5", "6", "7"]);
+        assert_eq!(
+            store.load_page_by_alternative_index("4", &mut || true),
+            Err(PortfolioAlternativeError::PageReplayCancelled)
+        );
+        assert_eq!(retained_identities(&store), ["5", "6", "7"]);
+        assert_eq!(
+            store.load_page_by_alternative_index("4294967297", &mut || false),
+            Err(PortfolioAlternativeError::PageNotLoaded)
+        );
+    }
+
+    #[test]
+    fn canonical_decimal_order_does_not_depend_on_machine_integer_width() {
+        assert!(compare_canonical_decimals("4294967297", "4294967296").is_gt());
+        assert!(compare_canonical_decimals("184467440737095516160", "9007199254740992").is_gt());
+        assert!(compare_canonical_decimals("999", "1000").is_lt());
     }
 
     #[test]
