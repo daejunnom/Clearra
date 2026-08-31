@@ -278,6 +278,11 @@ const upstreamAuthorityStep = section(
 const finalSourceEvidenceStep = section(
   metadataJob,
   "\n      - name: Validate final-source evidence contract regression coverage",
+  "\n      - name: Validate Discord deployment and recovery authority regression coverage",
+);
+const discordDeploymentAuthorityStep = section(
+  metadataJob,
+  "\n      - name: Validate Discord deployment and recovery authority regression coverage",
   "\n      - name: Validate focused test selection regression coverage",
 );
 const focusedTestSelectionStep = section(
@@ -336,6 +341,17 @@ requireExactNormalizedText(
     "        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
   ].join("\n"),
   "final-source evidence contract regression step",
+);
+requireExactNormalizedText(
+  discordDeploymentAuthorityStep,
+  [
+    "",
+    "      - name: Validate Discord deployment and recovery authority regression coverage",
+    "        if: github.event_name == 'workflow_dispatch'",
+    "        shell: bash",
+    "        run: node --test scripts/release/deployment-impact.test.mjs scripts/release/discord-catalog-recovery-authority.test.mjs scripts/release/discord-deploy-workflow.test.mjs scripts/release/discord-deployment-recovery.test.mjs scripts/release/discord-deployment-state.test.mjs scripts/release/discord-production-checkpoint-receipt.test.mjs scripts/release/discord-recovery-debt.test.mjs",
+  ].join("\n"),
+  "Discord deployment and recovery authority regression step",
 );
 requireExactNormalizedText(
   linuxPcTilingEnforcement,
@@ -887,6 +903,7 @@ for (const stepName of [
   "Archive the exact accepted source on Linux",
   "Validate Pages rollback authority regression coverage",
   "Validate final-source evidence contract regression coverage",
+  "Validate Discord deployment and recovery authority regression coverage",
   "Validate focused test selection regression coverage",
   "Validate every product version and changelog surface",
   "Validate release metadata regression coverage",
@@ -1663,6 +1680,12 @@ for (const marker of [
   '--run-attempt "$ACCEPTED_RUN_ATTEMPT" \\',
   '--base-path "/${{ github.event.repository.name }}" \\',
   "--products dist",
+  "node scripts/release/finalize-discord-production-checkpoint.mjs verify-tag \\",
+  "node scripts/release/finalize-discord-production-checkpoint.mjs verify-release \\",
+  '--accepted-run-id "$ACCEPTED_RUN_ID" \\',
+  '--accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \\',
+  "--acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json",
+  '--target "$GITHUB_SHA" \\',
 ]) {
   requireText(publishReleaseStep, marker, `late accepted-run validation ${marker}`);
 }
@@ -1671,6 +1694,32 @@ requireText(
   '--base-path "/${{ github.event.repository.name }}" \\\n            --products dist',
   "canonical acceptance verification product byte binding",
 );
+if (
+  (publishReleaseStep.match(
+    /node scripts\/release\/finalize-discord-production-checkpoint\.mjs verify-(?:tag|release)/gu,
+  ) ?? []).length !== 2
+) {
+  throw new Error("tag publication must verify one checkpoint receipt before and after immutable publication");
+}
+const checkpointVerifyTagIndex = publishReleaseStep.indexOf(
+  "finalize-discord-production-checkpoint.mjs verify-tag",
+);
+const releaseCreateIndex = publishReleaseStep.indexOf(
+  'gh release create "$GITHUB_REF_NAME"',
+);
+const immutableReadbackIndex = publishReleaseStep.indexOf(
+  "published release is not immutable",
+);
+const checkpointVerifyReleaseIndex = publishReleaseStep.indexOf(
+  "finalize-discord-production-checkpoint.mjs verify-release",
+);
+if (
+  checkpointVerifyTagIndex < 0 || releaseCreateIndex <= checkpointVerifyTagIndex ||
+  immutableReadbackIndex <= releaseCreateIndex ||
+  checkpointVerifyReleaseIndex <= immutableReadbackIndex
+) {
+  throw new Error("checkpoint tag and immutable Release verification order is invalid");
+}
 for (const marker of [
   "node scripts/release/release-publication-evidence.mjs recover \\",
   "--workflow-run-attempt \"$GITHUB_RUN_ATTEMPT\" \\",

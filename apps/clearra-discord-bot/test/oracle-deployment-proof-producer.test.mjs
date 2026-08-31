@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  inspectActiveOracle,
   produceOracleCandidateProof,
   produceOracleRollbackProof,
 } from "../scripts/produce-oracle-deployment-proof.mjs";
@@ -72,6 +73,46 @@ test("trusted Oracle producer observes active candidate and fresh bounded operat
   assert.equal(proof.boundedJobSucceeded, true);
   assert.equal(proof.jobUrl, candidateJobUrl);
   assert.equal(written, proof);
+});
+
+test("trusted Oracle producer selects the latest canonical operation regardless of journal order", () => {
+  const releaseId = "v0.8.0-701454b";
+  const releaseSha256 = "a".repeat(64);
+  const latest = "2026-08-20T00:00:03.000Z";
+  const records = [
+    operationRecord("2026-08-19T23:59:59.000Z"),
+    operationRecord("2026-08-20T00:00:01.000Z"),
+    operationRecord("2026-08-20T00:00:02.000Z", { status: "failed" }),
+    operationRecord("2026-08-20T00:00:02.500Z", { command: "help" }),
+    operationRecord(latest),
+    operationRecord("2026-08-20T00:00:04Z"),
+  ];
+  for (const journalRecords of [records, [...records].reverse()]) {
+    const active = inspectActiveOracle(
+      {
+        oracleReleaseId: releaseId,
+        oracleReleaseSha256: releaseSha256,
+        oracleSettingsSha256: candidateSettingsSha256,
+        verifiedAfter,
+        expectedSettings: {
+          CLEARRA_JOB_URL: candidateJobUrl,
+          CLEARRA_EXPECTED_JOB_SOURCE_COMMIT: sourceCommit,
+          CLEARRA_EXPECTED_ENGINE_BUILD_ID: sourceCommit,
+          CLEARRA_EXPECTED_JOB_CONTRACT_REVISION: "clearra.search.contract.v2",
+          CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID:
+            "clearra.supply.projected-terminal-lookahead.v1",
+          CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION: "clearra.solution-data.v1",
+        },
+      },
+      fakeRuntime({
+        releaseId,
+        releaseSha256,
+        settings: candidateSettings,
+        journalRecords,
+      }),
+    );
+    assert.equal(active.freshOperationAt, latest);
+  }
 });
 
 test("trusted Oracle producer rejects stale settings, process, and operation evidence", () => {
@@ -264,6 +305,7 @@ function fakeRuntime({
   releaseSha256 = "a".repeat(64),
   settings,
   operationAt = "2026-08-20T00:00:01.000Z",
+  journalRecords,
   health = { ...legacyHealth, runtime: runtimeIdentity },
   writeProof = () => {},
 }) {
@@ -289,15 +331,8 @@ function fakeRuntime({
       if (command === "/usr/bin/journalctl") {
         return [
           "Oracle Gateway connected as ClearraBot; Gateway slash ingress enabled.",
-          JSON.stringify({
-            event: "clearra.operation",
-            at: operationAt,
-            scope: "gateway",
-            kind: "slash",
-            command: "path",
-            status: "succeeded",
-            durationMs: 42,
-          }),
+          ...(journalRecords ?? [operationRecord(operationAt)]).map((record) =>
+            JSON.stringify(record)),
           "",
         ].join("\n");
       }
@@ -307,5 +342,18 @@ function fakeRuntime({
       throw new Error(`unexpected command ${command}`);
     },
     writeProof,
+  };
+}
+
+function operationRecord(at, overrides = {}) {
+  return {
+    event: "clearra.operation",
+    at,
+    scope: "gateway",
+    kind: "slash",
+    command: "path",
+    status: "succeeded",
+    durationMs: 42,
+    ...overrides,
   };
 }

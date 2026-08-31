@@ -70,6 +70,7 @@ test("produces a closed read-only Oracle candidate observation", () => {
   assert.equal(observation.gatewayStartMonotonicUsec, 987654321);
   assert.equal(observation.bootId, "123e4567-e89b-42d3-a456-426614174000");
   assert.equal(observation.readyRecordObserved, true);
+  assert.equal(observation.verifiedAfter, verifiedAfter);
   assert.equal(observation.freshOperationAt, freshOperationAt);
   assert.equal(observation.observedAt, observedAt);
   assert.deepEqual(Object.keys(observation), [
@@ -83,6 +84,7 @@ test("produces a closed read-only Oracle candidate observation", () => {
     "oracleReleaseSha256",
     "oracleSettingsSha256",
     "deploymentNonce",
+    "verifiedAfter",
     "gatewayPid",
     "gatewayStartMonotonicUsec",
     "bootId",
@@ -94,6 +96,13 @@ test("produces a closed read-only Oracle candidate observation", () => {
 });
 
 test("rejects stale operation, process, release, settings, and key drift", () => {
+  assert.throws(
+    () => observeOracleCandidate(
+      fixture({ verifiedAfter: "2026-08-30T00:00:00Z" }),
+      dependencies(),
+    ),
+    /canonical ISO timestamp/u,
+  );
   assert.throws(
     () => observeOracleCandidate(
       fixture(),

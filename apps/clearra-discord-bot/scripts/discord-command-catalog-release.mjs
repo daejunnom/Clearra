@@ -211,6 +211,7 @@ export async function synchronizeDiscordCatalogRelease({
   catalogFileSha256,
   syncAuthority,
   syncAuthorityFileSha256,
+  expectedPriorSnapshot,
   persistPriorSnapshot,
   now = () => new Date().toISOString(),
   synchronizationOptions,
@@ -244,13 +245,21 @@ export async function synchronizeDiscordCatalogRelease({
 
   const startedAt = canonicalTimestamp(now(), "Discord sync start time");
   const current = await rest.getGlobalCommands(application);
-  const priorSnapshot = await captureDiscordCatalogSnapshot({
-    rest,
-    applicationId: application,
-    sourceCommit: commit,
-    observedAt: startedAt,
-    observedCommands: current,
+  const captured = await captureDiscordCatalogSnapshot({
+    rest, applicationId: application, sourceCommit: commit,
+    observedAt: startedAt, observedCommands: current,
   });
+  const priorSnapshot = expectedPriorSnapshot ?? captured;
+  validateDiscordCatalogSnapshot(priorSnapshot, {
+    expectedSourceCommit: commit,
+    expectedApplicationId: application,
+  });
+  if (
+    priorSnapshot.catalog_sha256 !== captured.catalog_sha256 ||
+    canonicalJson(priorSnapshot.commands) !== canonicalJson(captured.commands)
+  ) {
+    throw new Error("Discord sync current catalog differs from its durable pre-mutation snapshot");
+  }
   await persistPriorSnapshot(priorSnapshot);
 
   const synchronization = await synchronizeGlobalCommandRegistrationFromObserved(
@@ -453,6 +462,7 @@ export async function restoreDiscordCatalogRelease({
   sourceCommit,
   priorSnapshot,
   expectedCurrentDigest,
+  alsoAllowedCurrentDigest,
   now = () => new Date().toISOString(),
   synchronizationOptions,
 }) {
@@ -466,6 +476,13 @@ export async function restoreDiscordCatalogRelease({
     expectedCurrentDigest,
     "Discord restore expected-current digest",
   );
+  const allowedCurrentDigests = new Set([expectedDigest]);
+  if (alsoAllowedCurrentDigest !== undefined) {
+    allowedCurrentDigests.add(requireSha256(
+      alsoAllowedCurrentDigest,
+      "Discord restore additional allowed-current digest",
+    ));
+  }
   validateDiscordCatalogSnapshot(priorSnapshot, {
     expectedSourceCommit: commit,
     expectedApplicationId: application,
@@ -477,7 +494,7 @@ export async function restoreDiscordCatalogRelease({
     allowResponseMetadata: true,
   });
   const currentDigest = canonicalSha256(normalizedCurrent);
-  if (currentDigest !== expectedDigest) {
+  if (!allowedCurrentDigests.has(currentDigest)) {
     throw new Error(
       "Discord catalog restore refused because the current digest changed",
     );
@@ -512,7 +529,7 @@ export async function restoreDiscordCatalogRelease({
     status: "restored",
     changed: synchronization.changed,
     command_count: priorSnapshot.command_count,
-    expected_current_sha256: expectedDigest,
+    expected_current_sha256: currentDigest,
     prior_snapshot_sha256: priorSnapshot.snapshot_sha256,
     prior_catalog_sha256: priorSnapshot.catalog_sha256,
     current_before_sha256: currentDigest,
@@ -776,7 +793,7 @@ function parseCliArguments(args) {
         "--catalog",
         "--sync-authority",
         "--sync-authority-file-sha256",
-        "--prior-output",
+        "--prior-snapshot",
         "--output",
       ],
       allowed: [
@@ -785,9 +802,13 @@ function parseCliArguments(args) {
         "--catalog",
         "--sync-authority",
         "--sync-authority-file-sha256",
-        "--prior-output",
+        "--prior-snapshot",
         "--output",
       ],
+    }],
+    ["capture", {
+      required: ["--source-commit", "--application-id", "--output"],
+      allowed: ["--source-commit", "--application-id", "--output"],
     }],
     ["restore", {
       required: [
@@ -802,6 +823,7 @@ function parseCliArguments(args) {
         "--application-id",
         "--prior-snapshot",
         "--expected-current-digest",
+        "--also-allow-current-digest",
         "--output",
       ],
     }],
@@ -851,6 +873,16 @@ async function main() {
     DISCORD_APPLICATION_ID: applicationId,
   });
   const rest = new DiscordRestClient(credentials.token);
+  if (command === "capture") {
+    const snapshot = await captureDiscordCatalogSnapshot({
+      rest,
+      applicationId,
+      sourceCommit,
+    });
+    await writeCanonicalJsonNew(values["--output"], snapshot);
+    process.stdout.write(`${DISCORD_CATALOG_SNAPSHOT_SCHEMA_ID} ${snapshot.snapshot_sha256}\n`);
+    return;
+  }
   if (command === "sync") {
     const catalogInput = await readCanonicalJsonWithFileSha256(
       values["--catalog"],
@@ -870,6 +902,10 @@ async function main() {
         catalogFileSha256: catalogInput.fileSha256,
       },
     );
+    const expectedPriorSnapshot = await readCanonicalJson(
+      values["--prior-snapshot"],
+      "Discord durable prior command snapshot",
+    );
     const { report } = await synchronizeDiscordCatalogRelease({
       rest,
       applicationId,
@@ -878,8 +914,11 @@ async function main() {
       catalogFileSha256: catalogInput.fileSha256,
       syncAuthority: authorityInput.authority,
       syncAuthorityFileSha256: authorityInput.fileSha256,
+      expectedPriorSnapshot,
       async persistPriorSnapshot(snapshot) {
-        await writeCanonicalJsonNew(values["--prior-output"], snapshot);
+        if (canonicalJson(snapshot) !== canonicalJson(expectedPriorSnapshot)) {
+          throw new Error("Discord sync attempted to replace its durable prior snapshot");
+        }
       },
     });
     await writeCanonicalJsonNew(values["--output"], report);
@@ -897,6 +936,7 @@ async function main() {
     sourceCommit,
     priorSnapshot,
     expectedCurrentDigest: values["--expected-current-digest"],
+    alsoAllowedCurrentDigest: values["--also-allow-current-digest"],
   });
   await writeCanonicalJsonNew(values["--output"], report);
   process.stdout.write(`${DISCORD_CATALOG_RESTORE_SCHEMA_ID} ${report.report_sha256}\n`);

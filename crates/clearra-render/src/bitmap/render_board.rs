@@ -37,6 +37,7 @@ pub struct RenderBoard {
     width: usize,
     height: usize,
     cells: Vec<RenderCell>,
+    connection_groups: Vec<u32>,
 }
 
 impl RenderBoard {
@@ -54,19 +55,55 @@ impl RenderBoard {
         height: usize,
         cells_top_down: &[RenderCell],
     ) -> Result<Self, RenderError> {
+        Self::from_cells_with_optional_connection_groups(width, height, cells_top_down, None)
+    }
+
+    /// Constructs a typed board whose non-empty cells join only when their
+    /// color and connection group both match. Empty cells intentionally retain
+    /// an individual grid boundary regardless of group.
+    pub fn from_cells_with_connection_groups(
+        width: usize,
+        height: usize,
+        cells_top_down: &[RenderCell],
+        connection_groups_top_down: &[u32],
+    ) -> Result<Self, RenderError> {
+        Self::from_cells_with_optional_connection_groups(
+            width,
+            height,
+            cells_top_down,
+            Some(connection_groups_top_down),
+        )
+    }
+
+    fn from_cells_with_optional_connection_groups(
+        width: usize,
+        height: usize,
+        cells_top_down: &[RenderCell],
+        connection_groups_top_down: Option<&[u32]>,
+    ) -> Result<Self, RenderError> {
         let limits = RenderExportLimits::product_default();
         let cell_capacity = limits.board_cell_capacity::<RenderCell>(width, height)?;
-        if cells_top_down.len() != cell_capacity {
+        if cells_top_down.len() != cell_capacity
+            || connection_groups_top_down.is_some_and(|groups| groups.len() != cell_capacity)
+        {
             return Err(RenderError::InvalidBoardRows);
         }
         let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
         let mut cells =
             authority.try_vec_with_capacity::<RenderCell>(cell_capacity, "render_board_cells")?;
         cells.extend_from_slice(cells_top_down);
+        let mut connection_groups = authority
+            .try_vec_with_capacity::<u32>(cell_capacity, "render_board_connection_groups")?;
+        if let Some(groups) = connection_groups_top_down {
+            connection_groups.extend_from_slice(groups);
+        } else {
+            connection_groups.resize(cell_capacity, 0);
+        }
         Ok(Self {
             width,
             height,
             cells,
+            connection_groups,
         })
     }
 
@@ -91,11 +128,15 @@ impl RenderBoard {
         for value in rows.iter().flat_map(|row| row.chars()) {
             cells.push(RenderCell::from_char(value)?);
         }
+        let mut connection_groups = authority
+            .try_vec_with_capacity::<u32>(cell_capacity, "render_board_connection_groups")?;
+        connection_groups.resize(cell_capacity, 0);
 
         Ok(Self {
             width,
             height: rows.len(),
             cells,
+            connection_groups,
         })
     }
 }
@@ -172,6 +213,19 @@ mod tests {
         );
         assert_eq!(allocation_attempts(), 0);
     }
+
+    #[test]
+    fn connection_group_shape_must_match_the_typed_board() {
+        assert_eq!(
+            RenderBoard::from_cells_with_connection_groups(
+                2,
+                1,
+                &[RenderCell::T, RenderCell::T],
+                &[0],
+            ),
+            Err(RenderError::InvalidBoardRows)
+        );
+    }
 }
 impl RenderBoard {
     pub const fn width(&self) -> usize {
@@ -186,6 +240,11 @@ impl RenderBoard {
 impl RenderBoard {
     pub fn cell(&self, x: usize, y: usize) -> RenderCell {
         self.cells[y * self.width + x]
+    }
+}
+impl RenderBoard {
+    pub fn connection_group(&self, x: usize, y: usize) -> u32 {
+        self.connection_groups[y * self.width + x]
     }
 }
 impl RenderBoard {

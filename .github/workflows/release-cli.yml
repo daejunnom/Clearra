@@ -94,6 +94,10 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs
+      - name: Validate Discord deployment and recovery authority regression coverage
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: node --test scripts/release/deployment-impact.test.mjs scripts/release/discord-catalog-recovery-authority.test.mjs scripts/release/discord-deploy-workflow.test.mjs scripts/release/discord-deployment-recovery.test.mjs scripts/release/discord-deployment-state.test.mjs scripts/release/discord-production-checkpoint-receipt.test.mjs scripts/release/discord-recovery-debt.test.mjs
       - name: Validate focused test selection regression coverage
         if: github.event_name == 'workflow_dispatch'
         run: node --test scripts/tools/run-focused-js-tests.test.mjs
@@ -111,7 +115,7 @@ jobs:
         run: node --test scripts/tools/audit-upstream-drift.test.mjs
       - name: Validate remote annotated tag regression coverage
         if: github.event_name == 'workflow_dispatch'
-        run: node --test scripts/release/verify-remote-annotated-tag.test.mjs
+        run: node --test scripts/release/verify-remote-annotated-tag.test.mjs scripts/release/finalize-discord-production-checkpoint.test.mjs
       - name: Bind the exact canonical acceptance run
         id: accepted_run
         env:
@@ -615,6 +619,13 @@ jobs:
           node scripts/release/verify-remote-annotated-tag.mjs \
             --tag "$GITHUB_REF_NAME" \
             --expected-commit "$GITHUB_SHA"
+          node scripts/release/finalize-discord-production-checkpoint.mjs verify-tag \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --source-commit "$GITHUB_SHA" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json
           mapfile -t assets < <(find dist -maxdepth 1 -type f -print | sort)
           if [[ "${#assets[@]}" -ne 3 ]]; then
             printf 'expected three standalone release assets, found %s\n' "${#assets[@]}" >&2
@@ -637,6 +648,7 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --verify-tag \
+              --target "$GITHUB_SHA" \
               --generate-notes \
               --title "Clearra $GITHUB_REF_NAME" \
               --draft
@@ -650,6 +662,13 @@ jobs:
             echo 'published release is not immutable' >&2
             exit 2
           fi
+          node scripts/release/finalize-discord-production-checkpoint.mjs verify-release \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --source-commit "$GITHUB_SHA" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json
           mkdir publication-receipt
           node scripts/release/release-publication-evidence.mjs capture \
             --repository "$GITHUB_REPOSITORY" \

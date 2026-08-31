@@ -1,0 +1,1319 @@
+name: Deploy Discord Production
+
+# ORACLE_SSH_PRIVATE_KEY_B64 is forbidden as a repository or organization secret.
+# Configure it separately as an environment secret in discord-path-confirmation,
+# discord-global-command-sync, and the recovery workflow's reviewer-protected
+# discord-runtime-rollback environment.
+# The approval-free candidate job must never resolve the key.
+
+on:
+  workflow_run:
+    workflows: ["Publish Product Release"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      accepted_sha:
+        description: Exact current main commit with one canonical workflow_dispatch acceptance
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: discord-production
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  authority:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      source_commit: ${{ steps.authority.outputs.source_commit }}
+      accepted_run_id: ${{ steps.authority.outputs.accepted_run_id }}
+      accepted_run_attempt: ${{ steps.authority.outputs.accepted_run_attempt }}
+      deploy_discord: ${{ steps.impact.outputs.deploy_discord }}
+      impact_scope: ${{ steps.impact.outputs.impact_scope }}
+    steps:
+      - name: Check out main for exact authority resolution
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Resolve exact current main and one canonical acceptance
+        id: authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_SHA: ${{ inputs.accepted_sha }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
+          AUTOMATIC_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin main
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            source_commit="$AUTOMATIC_SHA"
+          else
+            source_commit="$MANUAL_SHA"
+          fi
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'accepted_sha must be a full lowercase commit ID' >&2; exit 2; }
+          [[ "$(git rev-parse origin/main)" == "$source_commit" ]] || { echo 'Discord source must be exact current main' >&2; exit 2; }
+          git checkout --detach "$source_commit"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            node scripts/release/canonical-acceptance-run.mjs \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$source_commit" \
+              --require one \
+              --expected-run-id "$AUTOMATIC_RUN_ID" \
+              --expected-run-attempt "$AUTOMATIC_RUN_ATTEMPT" \
+              --format github-output >> "$GITHUB_OUTPUT"
+          else
+            node scripts/release/canonical-acceptance-run.mjs \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$source_commit" \
+              --require one \
+              --format github-output >> "$GITHUB_OUTPUT"
+          fi
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+      - name: Classify deployment impact from the last production tag
+        id: impact
+        env:
+          SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
+        shell: bash
+        run: node scripts/release/deployment-impact.mjs --source-commit "$SOURCE_COMMIT" --format github-output >> "$GITHUB_OUTPUT"
+      - name: Reject unresolved earlier Discord recovery debt before candidate work
+        if: steps.impact.outputs.deploy_discord == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          debt_root="$RUNNER_TEMP/discord-recovery-debt"
+          reports="$debt_root/reports"
+          mkdir -p "$reports"
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
+            > "$debt_root/primary-runs.json"
+          : > "$debt_root/primary-attempts.jsonl"
+          jq -r '.[] | .workflow_runs[] | [(.id | tostring), (.run_attempt | tostring)] | @tsv' \
+            "$debt_root/primary-runs.json" | sort -u | \
+          while IFS=$'\t' read -r run_id max_attempt; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$max_attempt" =~ ^[1-9][0-9]*$ ]]
+            for ((attempt = 1; attempt <= max_attempt; attempt += 1)); do
+              gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt" \
+                >> "$debt_root/primary-attempts.jsonl"
+              printf '\n' >> "$debt_root/primary-attempts.jsonl"
+            done
+          done
+          jq -s '{schema_id:"clearra.discord-primary-attempt-catalog.v1",attempts:.}' \
+            "$debt_root/primary-attempts.jsonl" > "$debt_root/primary-attempts.json"
+          : > "$debt_root/production-tags.jsonl"
+          while IFS= read -r tag; do
+            [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+            encoded_tag="$(jq -rn --arg value "$tag" '$value|@uri')"
+            prefix="$debt_root/tag-$(printf '%s' "$tag" | tr '.' '-')"
+            local_ref_sha="$(git rev-parse "refs/tags/$tag")"
+            local_type="$(git cat-file -t "$local_ref_sha")"
+            local_target_commit="$(git rev-parse "$tag^{commit}")"
+            [[ "$local_ref_sha" =~ ^[0-9a-f]{40}$ && "$local_target_commit" =~ ^[0-9a-f]{40}$ ]]
+            if [[ "$local_type" == tag ]]; then
+              local_tag_object_sha="$local_ref_sha"
+            else
+              local_tag_object_sha=""
+            fi
+            set +e
+            gh api --method GET "repos/$GITHUB_REPOSITORY/git/ref/tags/$encoded_tag" \
+              > "$prefix-ref.json" 2> "$prefix-ref.err"
+            ref_status=$?
+            set -e
+            if [[ "$ref_status" -ne 0 ]]; then
+              grep -Fq '(HTTP 404)' "$prefix-ref.err" || {
+                echo 'production tag ref readback failed for a reason other than exact absence' >&2
+                exit 2
+              }
+              printf 'null\n' > "$prefix-ref.json"
+            fi
+            tag_object_sha="$(jq -r '.object.sha // empty' "$prefix-ref.json")"
+            tag_object_type="$(jq -r '.object.type // empty' "$prefix-ref.json")"
+            if [[ "$tag_object_type" == tag && "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              set +e
+              gh api --method GET "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" \
+                > "$prefix-object.json" 2> "$prefix-object.err"
+              object_status=$?
+              set -e
+              if [[ "$object_status" -ne 0 ]]; then
+                grep -Fq '(HTTP 404)' "$prefix-object.err" || {
+                  echo 'production annotated tag readback failed for a reason other than exact absence' >&2
+                  exit 2
+                }
+                printf 'null\n' > "$prefix-object.json"
+              fi
+            else
+              printf 'null\n' > "$prefix-object.json"
+            fi
+            set +e
+            gh api --method GET "repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag" \
+              > "$prefix-release.json" 2> "$prefix-release.err"
+            release_status=$?
+            set -e
+            if [[ "$release_status" -ne 0 ]]; then
+              grep -Fq '(HTTP 404)' "$prefix-release.err" || {
+                echo 'production Release readback failed for a reason other than exact absence' >&2
+                exit 2
+              }
+              printf 'null\n' > "$prefix-release.json"
+            fi
+            jq -cn --arg name "$tag" --arg local_object "$local_tag_object_sha" \
+              --arg local_target "$local_target_commit" \
+              --slurpfile ref "$prefix-ref.json" --slurpfile object "$prefix-object.json" \
+              --slurpfile release "$prefix-release.json" \
+              '{name:$name,local_tag_object_sha:($local_object|if length > 0 then . else null end),local_target_commit:$local_target,tag_ref:$ref[0],tag_object:$object[0],release:$release[0]}' \
+              >> "$debt_root/production-tags.jsonl"
+            rm -f -- "$prefix-ref.err" "$prefix-object.err" "$prefix-release.err"
+          done < <(git tag --merged "$SOURCE_COMMIT" --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V)
+          jq -s '{schema_id:"clearra.discord-production-tag-authority-catalog.v1",tags:.}' \
+            "$debt_root/production-tags.jsonl" > "$debt_root/production-tags.json"
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+            > "$debt_root/repository-artifacts.json"
+          : > "$debt_root/recovery-attempts.jsonl"
+          : > "$debt_root/recovery-jobs.jsonl"
+          jq -r '
+            .[] | .artifacts[] |
+            select(.name | test("^discord-(recovery-resolution|runtime-recovery)-")) |
+            (.name | capture("recovery-run-(?<run>[1-9][0-9]*)-attempt-(?<attempt>[1-9][0-9]*)$")) |
+            [.run, .attempt] | @tsv
+          ' "$debt_root/repository-artifacts.json" | sort -u | \
+          while IFS=$'\t' read -r recovery_run recovery_attempt; do
+            [[ "$recovery_run" =~ ^[1-9][0-9]*$ && "$recovery_attempt" =~ ^[1-9][0-9]*$ ]]
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$recovery_run/attempts/$recovery_attempt" \
+              >> "$debt_root/recovery-attempts.jsonl"
+            printf '\n' >> "$debt_root/recovery-attempts.jsonl"
+            recovery_jobs="$debt_root/recovery-jobs-$recovery_run-$recovery_attempt.json"
+            gh api --paginate --slurp --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$recovery_run/attempts/$recovery_attempt/jobs?per_page=100" \
+              > "$recovery_jobs"
+            jq -cn --arg run "$recovery_run" --arg attempt "$recovery_attempt" \
+              --slurpfile pages "$recovery_jobs" \
+              '{workflow_run_id:$run,workflow_run_attempt:$attempt,pages:$pages[0]}' \
+              >> "$debt_root/recovery-jobs.jsonl"
+          done
+          jq -s '{schema_id:"clearra.discord-recovery-attempt-catalog.v1",attempts:.}' \
+            "$debt_root/recovery-attempts.jsonl" > "$debt_root/recovery-attempts.json"
+          jq -s '{schema_id:"clearra.discord-recovery-job-catalog.v1",runs:.}' \
+            "$debt_root/recovery-jobs.jsonl" > "$debt_root/recovery-jobs.json"
+          node scripts/release/discord-recovery-debt.mjs plan \
+            --repository "$GITHUB_REPOSITORY" --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --source-commit "$SOURCE_COMMIT" \
+            --run-list "$debt_root/primary-runs.json" \
+            --primary-attempts "$debt_root/primary-attempts.json" \
+            --tag-authority "$debt_root/production-tags.json" \
+            --recovery-attempts "$debt_root/recovery-attempts.json" \
+            --recovery-job-catalog "$debt_root/recovery-jobs.json" \
+            --artifact-list "$debt_root/repository-artifacts.json" \
+            --output "$debt_root/debt-plan.json" > "$debt_root/downloads.tsv"
+          while IFS=$'\t' read -r artifact_id artifact_digest report_name; do
+            [[ "$artifact_id" =~ ^[1-9][0-9]*$ && "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$report_name" == recovery-authority.json || "$report_name" == recovery-result.json ]]
+            archive="$debt_root/$artifact_id.zip"
+            [[ ! -e "$archive" && ! -L "$archive" ]]
+            (umask 077; gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$archive")
+            actual="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+            [[ "sha256:$actual" == "$artifact_digest" ]] || {
+              echo 'recovery-debt artifact bytes differ from their API digest' >&2
+              exit 2
+            }
+            artifact_root="$reports/$artifact_id"
+            [[ ! -e "$artifact_root" && ! -L "$artifact_root" ]]
+            mkdir "$artifact_root"
+            actual_leaves="$debt_root/$artifact_id-leaves.txt"
+            unzip -Z1 "$archive" | sort > "$actual_leaves"
+            if [[ "$report_name" == recovery-authority.json ]]; then
+              printf '%s\n' recovery-authority.json > "$debt_root/$artifact_id-expected.txt"
+              cmp --silent "$debt_root/$artifact_id-expected.txt" "$actual_leaves" || {
+                echo 'recovery resolution artifact differs from its exact closed leaf set' >&2
+                exit 2
+              }
+              (umask 077; unzip -p "$archive" recovery-authority.json > "$artifact_root/recovery-authority.json")
+            else
+              (umask 077; unzip -p "$archive" recovery-result.json > "$artifact_root/recovery-result.json")
+              [[ -s "$artifact_root/recovery-result.json" && ! -L "$artifact_root/recovery-result.json" ]]
+              required="$(jq -r '.catalog_recovery.recovery_required' "$artifact_root/recovery-result.json")"
+              printf '%s\n' \
+                discord-catalog-recovery-disposition.json \
+                protected-recovery-authority.json \
+                recovery-result.json > "$debt_root/$artifact_id-expected.txt"
+              if [[ "$required" == true ]]; then
+                printf '%s\n' \
+                  discord-catalog-recovery-authority.json \
+                  discord-catalog-restore.json \
+                  discord-catalog.json \
+                  discord-prior-catalog.json \
+                  discord-sync-authority.json >> "$debt_root/$artifact_id-expected.txt"
+              elif [[ "$required" != false ]]; then
+                echo 'recovery result catalog disposition requirement is invalid' >&2
+                exit 2
+              fi
+              sort -o "$debt_root/$artifact_id-expected.txt" "$debt_root/$artifact_id-expected.txt"
+              cmp --silent "$debt_root/$artifact_id-expected.txt" "$actual_leaves" || {
+                echo 'recovery result artifact differs from its exact closed leaf set' >&2
+                exit 2
+              }
+              while IFS= read -r leaf; do
+                (umask 077; unzip -p "$archive" "$leaf" > "$artifact_root/$leaf")
+                [[ -s "$artifact_root/$leaf" && ! -L "$artifact_root/$leaf" ]]
+              done < "$debt_root/$artifact_id-expected.txt"
+            fi
+            [[ -s "$artifact_root/$report_name" && ! -L "$artifact_root/$report_name" ]]
+            rm -f -- "$archive"
+          done < "$debt_root/downloads.tsv"
+          node scripts/release/discord-recovery-debt.mjs audit \
+            --repository "$GITHUB_REPOSITORY" --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --source-commit "$SOURCE_COMMIT" \
+            --plan "$debt_root/debt-plan.json" --report-root "$reports" \
+            --output "$debt_root/recovery-debt-clearance.json"
+      - name: Upload exact recovery-debt clearance before candidate work
+        if: steps.impact.outputs.deploy_discord == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-recovery-debt-clearance-${{ steps.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/discord-recovery-debt/recovery-debt-clearance.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Record explicit no-op for changes outside Discord
+        if: steps.impact.outputs.deploy_discord != 'true'
+        run: echo "discord_deployment=no-op impact=${{ steps.impact.outputs.impact_scope }}"
+
+  candidate:
+    name: Prepare immutable Discord candidate inputs
+    if: needs.authority.outputs.deploy_discord == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
+      ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+      ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: asia-northeast1
+    steps:
+      - name: Check out the exact accepted source for candidate preparation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+          fetch-depth: 0
+      - name: Set up Node.js for immutable candidate preparation
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Download the exact pre-candidate recovery-debt clearance
+        uses: actions/download-artifact@v4
+        with:
+          name: discord-recovery-debt-clearance-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: evidence/recovery-debt
+      - name: Authenticate the Cloud-Build-only identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_BUILD_SERVICE_ACCOUNT }}
+      - name: Set up gcloud for Cloud-Build-only preparation
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Download canonical acceptance evidence without rebuilding products
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-acceptance-evidence-${{ needs.authority.outputs.source_commit }}-run-${{ needs.authority.outputs.accepted_run_id }}-attempt-${{ needs.authority.outputs.accepted_run_attempt }}
+          path: evidence/canonical-acceptance
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authority.outputs.accepted_run_id }}
+      - name: Download the already accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ needs.authority.outputs.source_commit }}-run-${{ needs.authority.outputs.accepted_run_id }}-attempt-${{ needs.authority.outputs.accepted_run_attempt }}
+          path: evidence/accepted-ctk3
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authority.outputs.accepted_run_id }}
+      - name: Verify accepted evidence and package only runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,61}[a-z0-9]$ ]] || { echo 'GCP_PROJECT_ID is invalid' >&2; exit 2; }
+          npm ci --ignore-scripts
+          node scripts/tools/accepted-ctk3-dist.mjs \
+            --verify evidence/accepted-ctk3 \
+            --expected-source-commit "$SOURCE_COMMIT" \
+            --expected-run-id "$ACCEPTED_RUN_ID" \
+            --expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"
+          version="$(node scripts/release/validate-release-metadata.mjs)"
+          node scripts/release/validate-discord-accepted-inputs.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$version" \
+            --source-commit "$SOURCE_COMMIT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --accepted-ctk3-dist "$GITHUB_WORKSPACE/evidence/accepted-ctk3" \
+            --canonical-acceptance-evidence "$GITHUB_WORKSPACE/evidence/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json"
+          mkdir -p evidence/oracle-layers
+          bash scripts/release/oracle/create-actions-layers-v080.sh \
+            "$GITHUB_WORKSPACE" \
+            "$GITHUB_WORKSPACE/evidence/accepted-ctk3" \
+            "$SOURCE_COMMIT" "$ACCEPTED_RUN_ID" "$ACCEPTED_RUN_ATTEMPT" \
+            "$GITHUB_WORKSPACE/evidence/oracle-layers"
+          node scripts/release/create-exact-source-archive.mjs \
+            --source-commit "$SOURCE_COMMIT" \
+            --output "$GITHUB_WORKSPACE/evidence/exact-source.tar.gz"
+      - name: Build the exact source archive once in Cloud Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clearra-cloud-build-config"
+          tar -xzf evidence/exact-source.tar.gz \
+            -C "$RUNNER_TEMP/clearra-cloud-build-config" \
+            apps/clearra-discord-bot/cloudbuild-current-job-service.yaml
+          gcloud builds submit evidence/exact-source.tar.gz \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --service-account="projects/$GCP_PROJECT_ID/serviceAccounts/clearra-build@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
+            --config="$RUNNER_TEMP/clearra-cloud-build-config/apps/clearra-discord-bot/cloudbuild-current-job-service.yaml" \
+            --substitutions="_REGION=$GCP_REGION,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-$SOURCE_COMMIT,_SOURCE_COMMIT=$SOURCE_COMMIT" \
+            --quiet --format=json > evidence/cloud-build-readback.json
+          node scripts/release/cloud/cloud-build-image-authority-v080.mjs \
+            --source-commit "$SOURCE_COMMIT" --project "$GCP_PROJECT_ID" \
+            --exact-source-archive "$GITHUB_WORKSPACE/evidence/exact-source.tar.gz" \
+            --build-readback "$GITHUB_WORKSPACE/evidence/cloud-build-readback.json" \
+            --output "$GITHUB_WORKSPACE/evidence/cloud-build-image-authority.json"
+      - name: Seal the approval-free accepted-input and immutable-build state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nonceBytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+          $nonce = [Convert]::ToHexString($nonceBytes).ToLowerInvariant()
+          if ($nonce -cnotmatch '^[0-9a-f]{64}$') { throw 'deployment nonce failed' }
+          [IO.File]::WriteAllText((Join-Path $env:GITHUB_WORKSPACE 'evidence/deployment-nonce.txt'), "$nonce`n", [Text.UTF8Encoding]::new($false))
+          $statePath = Join-Path $env:GITHUB_WORKSPACE 'evidence/prepared-state.json'
+          node scripts/release/discord-deployment-state.mjs seal `
+            --stage prepared --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --deployment-nonce $nonce `
+            --binding "accepted_ctk3_manifest=$env:GITHUB_WORKSPACE/evidence/accepted-ctk3/clearra-accepted-ctk3.v2.json" `
+            --binding "canonical_acceptance_evidence=$env:GITHUB_WORKSPACE/evidence/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json" `
+            --binding "cloud_build_authority=$env:GITHUB_WORKSPACE/evidence/cloud-build-image-authority.json" `
+            --binding "cloud_build_readback=$env:GITHUB_WORKSPACE/evidence/cloud-build-readback.json" `
+            --binding "ctk3_actions_archive=$env:GITHUB_WORKSPACE/evidence/oracle-layers/ctk3-dist.tar" `
+            --binding "dependencies_actions_archive=$env:GITHUB_WORKSPACE/evidence/oracle-layers/node_modules.tar" `
+            --binding "exact_source_archive=$env:GITHUB_WORKSPACE/evidence/exact-source.tar.gz" `
+            --binding "recovery_debt_clearance=$env:GITHUB_WORKSPACE/evidence/recovery-debt/recovery-debt-clearance.json" `
+            --output $statePath
+          if ($LASTEXITCODE -ne 0) { throw 'prepared state sealing failed' }
+      - name: Upload sealed prepared state
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-prepared-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 90
+  promote:
+    # GitHub re-evaluates running jobs during cancellation. The explicit status
+    # function keeps this already-approved job alive long enough for its in-job
+    # cancelled() compensation; normal mutation steps still use success().
+    if: always() && needs.candidate.result == 'success'
+    needs: [authority, candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: discord-path-confirmation
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
+      ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+      ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: asia-northeast1
+      ORACLE_PRIVATE_OVERLAY_ARCHIVE: ${{ vars.ORACLE_PRIVATE_OVERLAY_ARCHIVE }}
+      ORACLE_PRIVATE_OVERLAY_SHA256: ${{ vars.ORACLE_PRIVATE_OVERLAY_SHA256 }}
+    steps:
+      - name: Check out the exact accepted source for protected promotion
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - name: Set up Node.js for protected release validators
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download the exact prepared state
+        uses: actions/download-artifact@v4
+        with:
+          name: discord-prepared-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: prepared
+      - name: Authenticate the protected deployer identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Set up gcloud for protected promotion
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Materialize the protected-environment Oracle key for the real path gate
+        env:
+          ORACLE_SSH_PRIVATE_KEY_B64: ${{ secrets.ORACLE_SSH_PRIVATE_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/clearra-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          [[ "$ORACLE_PRIVATE_OVERLAY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'remote overlay SHA-256 is invalid' >&2; exit 2; }
+          [[ "$ORACLE_PRIVATE_OVERLAY_ARCHIVE" == "/opt/clearra/sealed-release-inputs/private-overlay-no-config-${ORACLE_PRIVATE_OVERLAY_SHA256}.tar" ]] || { echo 'remote overlay authority path is invalid' >&2; exit 2; }
+          [[ -n "$ORACLE_SSH_PRIVATE_KEY_B64" && ! -e "$key_path" && ! -L "$key_path" ]] || { echo 'protected Oracle identity prerequisite is invalid' >&2; exit 2; }
+          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode --strict > "$key_path")
+          [[ -f "$key_path" && ! -L "$key_path" ]] || { echo 'protected Oracle identity materialization failed' >&2; exit 2; }
+          chmod 0600 "$key_path"
+          echo "CLEARRA_ORACLE_IDENTITY_FILE=$key_path" >> "$GITHUB_ENV"
+      - name: Capture and seal prestage recovery authority
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $preparedState = Get-Content prepared/prepared-state.json -Raw | ConvertFrom-Json
+          $nonce = [string]$preparedState.deployment_nonce
+          node scripts/release/discord-deployment-state.mjs verify `
+            --stage prepared --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --deployment-nonce $nonce --report prepared/prepared-state.json `
+            --binding "accepted_ctk3_manifest=$env:GITHUB_WORKSPACE/prepared/accepted-ctk3/clearra-accepted-ctk3.v2.json" `
+            --binding "canonical_acceptance_evidence=$env:GITHUB_WORKSPACE/prepared/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json" `
+            --binding "cloud_build_authority=$env:GITHUB_WORKSPACE/prepared/cloud-build-image-authority.json" `
+            --binding "cloud_build_readback=$env:GITHUB_WORKSPACE/prepared/cloud-build-readback.json" `
+            --binding "ctk3_actions_archive=$env:GITHUB_WORKSPACE/prepared/oracle-layers/ctk3-dist.tar" `
+            --binding "dependencies_actions_archive=$env:GITHUB_WORKSPACE/prepared/oracle-layers/node_modules.tar" `
+            --binding "exact_source_archive=$env:GITHUB_WORKSPACE/prepared/exact-source.tar.gz" `
+            --binding "recovery_debt_clearance=$env:GITHUB_WORKSPACE/prepared/recovery-debt/recovery-debt-clearance.json"
+          if ($LASTEXITCODE -ne 0) { throw 'prepared artifact verification failed' }
+          New-Item -ItemType Directory -Path prestage | Out-Null
+          $servicePath = Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-service-before.json'
+          gcloud run services describe clearra-current-job --project=$env:GCP_PROJECT_ID `
+            --region=$env:GCP_REGION --format=json | Set-Content -LiteralPath $servicePath -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'stable Cloud service readback failed' }
+          $priorPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-prior-authority.json'
+          node scripts/release/cloud/prior-runtime-authority-v080.mjs `
+            --source-commit $env:SOURCE_COMMIT --project $env:GCP_PROJECT_ID `
+            --service-json $servicePath --output $priorPath
+          if ($LASTEXITCODE -ne 0) { throw 'prior Cloud runtime authority failed' }
+          $prior = Get-Content -LiteralPath $priorPath -Raw | ConvertFrom-Json
+          $priorKind = if ([string]$prior.prior_revision -cmatch '^clearra-current-job-v075-') {
+            'clearra.rollback.legacy-health-no-runtime.v1'
+          } elseif ([string]$prior.prior_revision -cmatch '^clearra-current-job-v080-') {
+            'clearra.rollback.runtime-identity.v1'
+          } else { throw 'prior revision is outside the rollback contract' }
+          $rollbackPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/oracle-rollback-capture.json'
+          $backupCaptureAttempted = $false
+          try {
+            $backupCaptureAttempted = $true
+            & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
+              -Operation capture-prestage-authority `
+              -PriorRevision ([string]$prior.prior_revision) -PriorRuntimeAuthorityKind $priorKind `
+              -DeploymentNonce $nonce -EvidenceOutput $rollbackPath `
+              -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE
+            if ($LASTEXITCODE -ne 0) { throw 'fresh Oracle prestage rollback capture failed' }
+            $buildAuthority = Get-Content prepared/cloud-build-image-authority.json -Raw | ConvertFrom-Json
+            $intentPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/intended-candidate-authority.json'
+            node scripts/release/discord-deployment-recovery.mjs seal-intent `
+              --source-commit $env:SOURCE_COMMIT `
+              --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+              --deployment-nonce $nonce --cloud-image-digest ([string]$buildAuthority.image_digest) `
+              --remote-overlay-archive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+              --remote-overlay-sha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256 `
+              --output $intentPath
+            if ($LASTEXITCODE -ne 0) { throw 'prestage candidate intent sealing failed' }
+            node scripts/release/discord-deployment-state.mjs seal `
+              --stage prestage --source-commit $env:SOURCE_COMMIT `
+              --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+              --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+              --deployment-nonce $nonce `
+              --binding "cloud_prior_authority=$priorPath" `
+              --binding "intended_candidate_authority=$intentPath" `
+              --binding "oracle_rollback_capture=$rollbackPath" `
+              --binding "prepared_state=$env:GITHUB_WORKSPACE/prepared/prepared-state.json" `
+              --output prestage/prestage-state.json
+            if ($LASTEXITCODE -ne 0) { throw 'prestage state sealing failed' }
+          } catch {
+            $captureFailure = $_
+            if ($backupCaptureAttempted) {
+              & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
+                -Operation cleanup-prestage-backup -DeploymentNonce $nonce `
+                -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'prestage capture failed and its inert backup cleanup failed closed' }
+            }
+            throw $captureFailure
+          }
+      - name: Upload prestage authority before Oracle freeze or Cloud zero traffic
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-prestage-recovery-authority-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            prepared
+            prestage
+          if-no-files-found: error
+          retention-days: 90
+      - name: Freeze and stage Oracle, deploy and smoke zero traffic, then seal live authority
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prestageState = Get-Content prestage/prestage-state.json -Raw | ConvertFrom-Json
+          $nonce = [string]$prestageState.deployment_nonce
+          node scripts/release/discord-deployment-state.mjs verify `
+            --stage prestage --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --deployment-nonce $nonce --report prestage/prestage-state.json `
+            --binding "cloud_prior_authority=$env:GITHUB_WORKSPACE/prestage/cloud-prior-authority.json" `
+            --binding "intended_candidate_authority=$env:GITHUB_WORKSPACE/prestage/intended-candidate-authority.json" `
+            --binding "oracle_rollback_capture=$env:GITHUB_WORKSPACE/prestage/oracle-rollback-capture.json" `
+            --binding "prepared_state=$env:GITHUB_WORKSPACE/prepared/prepared-state.json"
+          if ($LASTEXITCODE -ne 0) { throw 'prestage recovery authority verification failed' }
+          New-Item -ItemType Directory -Path candidate | Out-Null
+          $source = Join-Path $env:GITHUB_WORKSPACE 'prepared/exact-source.tar.gz'
+          $ctk = Join-Path $env:GITHUB_WORKSPACE 'prepared/oracle-layers/ctk3-dist.tar'
+          $deps = Join-Path $env:GITHUB_WORKSPACE 'prepared/oracle-layers/node_modules.tar'
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'candidate/oracle-inactive-stage-v080.json'
+          $freeze = 'scripts/release/oracle/invoke-freeze-v080.ps1'
+          $stage = 'scripts/release/oracle/invoke-inactive-stage-v080.ps1'
+          & $freeze -SourceCommit $env:SOURCE_COMMIT -SourceArchive $source `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256 `
+            -Ctk3DistArchive $ctk -DependenciesArchive $deps `
+            -ManifestOutput $manifestPath -AuditOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Oracle remote freeze audit failed' }
+          & $freeze -SourceCommit $env:SOURCE_COMMIT -SourceArchive $source `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256 `
+            -Ctk3DistArchive $ctk -DependenciesArchive $deps `
+            -ManifestOutput $manifestPath -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE
+          if ($LASTEXITCODE -ne 0) { throw 'Oracle remote freeze failed' }
+          node scripts/release/oracle/create-inactive-stage-v080.mjs --manifest $manifestPath --audit
+          if ($LASTEXITCODE -ne 0) { throw 'Oracle manifest audit failed' }
+          & $stage -ManifestPath $manifestPath -SourceArchive $source `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256 `
+            -Ctk3DistArchive $ctk -DependenciesArchive $deps -AuditOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Oracle inactive stage audit failed' }
+          & $stage -ManifestPath $manifestPath -SourceArchive $source `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256 `
+            -Ctk3DistArchive $ctk -DependenciesArchive $deps `
+            -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE
+          if ($LASTEXITCODE -ne 0) { throw 'Oracle inactive stage failed' }
+          $priorPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-prior-authority.json'
+          $rollbackPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/oracle-rollback-capture.json'
+          $prior = Get-Content -LiteralPath $priorPath -Raw | ConvertFrom-Json
+          $rollback = Get-Content -LiteralPath $rollbackPath -Raw | ConvertFrom-Json
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          if ([string]$manifest.active.releasePath -cne [string]$rollback.priorOracleRelease -or
+              [string]$manifest.active.treeSha256 -cne [string]$rollback.priorOracleReleaseSha256 -or
+              [string]$manifest.active.settingsSha256 -cne [string]$rollback.priorOracleSettingsSha256) {
+            throw 'Oracle frozen baseline differs from the sealed prestage authority'
+          }
+          $servicePath = Join-Path $env:GITHUB_WORKSPACE 'candidate/cloud-service-before-zero-traffic.json'
+          gcloud run services describe clearra-current-job --project=$env:GCP_PROJECT_ID `
+            --region=$env:GCP_REGION --format=json | Set-Content -LiteralPath $servicePath -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'pre-zero-traffic Cloud readback failed' }
+          $service = Get-Content $servicePath -Raw | ConvertFrom-Json
+          $active = @($service.status.traffic | Where-Object { [int]$_.percent -gt 0 })
+          if ($active.Count -ne 1 -or [int]$active[0].percent -ne 100 -or
+              [string]$active[0].revisionName -cne [string]$prior.prior_revision) {
+            throw 'Cloud runtime drifted after the sealed prestage authority'
+          }
+          $buildAuthority = Get-Content prepared/cloud-build-image-authority.json -Raw | ConvertFrom-Json
+          $candidateJson = & node scripts/release/cloud/candidate-release-v080.mjs deploy `
+            --project $env:GCP_PROJECT_ID --source-commit $env:SOURCE_COMMIT `
+            --prior-revision ([string]$prior.prior_revision) `
+            --job-bearer-secret-version ([string]$prior.job_bearer_secret_version) `
+            --image-digest ([string]$buildAuthority.image_digest)
+          if ($LASTEXITCODE -ne 0) { throw 'zero-traffic candidate deployment failed' }
+          $candidatePath = Join-Path $env:GITHUB_WORKSPACE 'candidate/cloud-candidate-authority.json'
+          [IO.File]::WriteAllText($candidatePath, "$candidateJson`n", [Text.UTF8Encoding]::new($false))
+          $candidate = $candidateJson | ConvertFrom-Json
+          if ([string]$candidate.imageDigest -cne [string]$buildAuthority.image_digest) {
+            throw 'zero-traffic candidate image differs from the sealed Cloud Build digest'
+          }
+          $health = Invoke-RestMethod -Uri "$($candidate.candidateUrl)/health" -Method Get
+          if ($health.runtime.sourceCommit -cne $env:SOURCE_COMMIT -or
+              $health.runtime.engineBuildId -cne $env:SOURCE_COMMIT) {
+            throw 'zero-traffic candidate health identity mismatch'
+          }
+          $smokePath = Join-Path $env:GITHUB_WORKSPACE 'candidate/cloud-candidate-smoke.json'
+          node scripts/release/cloud/candidate-release-v080.mjs smoke `
+            --project $env:GCP_PROJECT_ID --source-commit $env:SOURCE_COMMIT `
+            --prior-revision ([string]$prior.prior_revision) `
+            --job-bearer-secret-version ([string]$prior.job_bearer_secret_version) `
+            --image-digest ([string]$candidate.imageDigest) `
+            --candidate-url ([string]$candidate.candidateUrl) --output $smokePath
+          if ($LASTEXITCODE -ne 0) { throw 'managed-secret candidate smoke failed' }
+          node scripts/release/discord-deployment-state.mjs seal `
+            --stage candidate --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --deployment-nonce $nonce `
+            --binding "cloud_candidate_authority=$candidatePath" `
+            --binding "cloud_candidate_smoke=$smokePath" `
+            --binding "oracle_stage_manifest=$manifestPath" `
+            --binding "prestage_state=$env:GITHUB_WORKSPACE/prestage/prestage-state.json" `
+            --output candidate/candidate-state.json
+          if ($LASTEXITCODE -ne 0) { throw 'candidate state sealing failed' }
+      - name: Upload live-transition authority before Oracle activation or Cloud traffic
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-live-recovery-authority-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            prepared
+            prestage
+            candidate
+          if-no-files-found: error
+          retention-days: 90
+      - name: Activate Oracle, verify the real path, then cut Cloud to 100 percent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path promotion | Out-Null
+          $candidateRoot = Join-Path $env:GITHUB_WORKSPACE 'candidate'
+          $statePath = Join-Path $candidateRoot 'candidate-state.json'
+          $state = Get-Content $statePath -Raw | ConvertFrom-Json
+          $nonce = [string]$state.deployment_nonce
+          node scripts/release/discord-deployment-state.mjs verify `
+            --stage candidate --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --deployment-nonce $nonce --report $statePath `
+            --binding "cloud_candidate_authority=$candidateRoot/cloud-candidate-authority.json" `
+            --binding "cloud_candidate_smoke=$candidateRoot/cloud-candidate-smoke.json" `
+            --binding "oracle_stage_manifest=$candidateRoot/oracle-inactive-stage-v080.json" `
+            --binding "prestage_state=$env:GITHUB_WORKSPACE/prestage/prestage-state.json"
+          if ($LASTEXITCODE -ne 0) { throw 'live transition rejected unsealed recovery authority' }
+          $candidate = Get-Content (Join-Path $candidateRoot 'cloud-candidate-authority.json') -Raw | ConvertFrom-Json
+          $prior = Get-Content prestage/cloud-prior-authority.json -Raw | ConvertFrom-Json
+          $manifest = Get-Content (Join-Path $candidateRoot 'oracle-inactive-stage-v080.json') -Raw | ConvertFrom-Json
+          $rollback = Get-Content prestage/oracle-rollback-capture.json -Raw | ConvertFrom-Json
+          $settingsSha = (& node scripts/release/oracle/candidate-settings-v080.mjs `
+            --source-commit $env:SOURCE_COMMIT --candidate-url ([string]$candidate.candidateUrl) --hash-only).Trim()
+          $verifiedAfter = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+          $candidateProof = "/run/clearra-deploy/clearra-oracle-candidate-$nonce.json"
+          $rollbackProof = "/run/clearra-deploy/clearra-oracle-rollback-$nonce.json"
+          function Restore-PriorOracle {
+            $after = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+            & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
+              -Operation restore-prior-and-verify `
+              -ScriptReleaseId ([string]$manifest.releaseId) `
+              -ScriptReleaseSha256 ([string]$manifest.candidate.treeSha256) `
+              -PriorRelease ([string]$rollback.priorOracleRelease) `
+              -PriorReleaseId ([string]$rollback.priorOracleReleaseId) `
+              -PriorReleaseSha256 ([string]$rollback.priorOracleReleaseSha256) `
+              -PriorSettingsBackup ([string]$rollback.priorOracleSettingsBackup) `
+              -PriorSettingsSha256 ([string]$rollback.priorOracleSettingsSha256) `
+              -PriorRuntimeAuthorityKind ([string]$rollback.priorRuntimeAuthorityKind) `
+              -PriorRuntimeAuthoritySha256 ([string]$rollback.priorRuntimeAuthoritySha256) `
+              -PriorJobUrl ([string]$rollback.priorJobUrl) `
+              -PriorRevision ([string]$prior.prior_revision) -Proof $rollbackProof `
+              -DeploymentNonce $nonce -VerifiedAfter $after `
+              -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE
+            if ($LASTEXITCODE -ne 0) { throw 'exact prior Oracle restore failed' }
+          }
+          $cloudTrafficMutationAttempted = $false
+          try {
+            New-Item -ItemType File -Path promotion/oracle-transition-started.marker -ErrorAction Stop | Out-Null
+            & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
+              -Operation verify-candidate -ScriptReleaseId ([string]$manifest.releaseId) `
+              -ScriptReleaseSha256 ([string]$manifest.candidate.treeSha256) `
+              -Proof $candidateProof -SourceCommit $env:SOURCE_COMMIT `
+              -CandidateUrl ([string]$candidate.candidateUrl) `
+              -CandidateRevision ([string]$candidate.candidateRevision) `
+              -OracleReleaseId ([string]$manifest.releaseId) `
+              -OracleReleaseSha256 ([string]$manifest.candidate.treeSha256) `
+              -OracleSettingsSha256 $settingsSha -DeploymentNonce $nonce `
+              -VerifiedAfter $verifiedAfter -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE `
+              | Set-Content -LiteralPath promotion-oracle-attestation.txt -Encoding utf8NoBOM
+            if ($LASTEXITCODE -ne 0) { throw 'real path candidate verification failed' }
+            $cloudTrafficMutationAttempted = $true
+            gcloud run services update-traffic clearra-current-job `
+              --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION `
+              --to-revisions="$($candidate.candidateRevision)=100" --quiet
+            if ($LASTEXITCODE -ne 0) { throw 'Cloud cutover failed' }
+            gcloud run services describe clearra-current-job `
+              --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION --format=json `
+              | Set-Content -LiteralPath promotion-cloud-traffic.json -Encoding utf8NoBOM
+            if ($LASTEXITCODE -ne 0) { throw 'Cloud cutover readback failed' }
+            $traffic = Get-Content promotion-cloud-traffic.json -Raw | ConvertFrom-Json
+            $active = @($traffic.status.traffic | Where-Object { [int]$_.percent -eq 100 })
+            if ($active.Count -ne 1 -or $active[0].revisionName -cne $candidate.candidateRevision) {
+              throw 'candidate is not the sole 100-percent Cloud revision'
+            }
+            Move-Item promotion-oracle-attestation.txt promotion/oracle-candidate-attestation.txt
+            Move-Item promotion-cloud-traffic.json promotion/cloud-traffic-readback.json
+            node scripts/release/discord-deployment-state.mjs seal `
+              --stage promoted --source-commit $env:SOURCE_COMMIT `
+              --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+              --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+              --deployment-nonce $nonce --verified-after $verifiedAfter `
+              --binding "candidate_state=$env:GITHUB_WORKSPACE/candidate/candidate-state.json" `
+              --binding "cloud_traffic_readback=$env:GITHUB_WORKSPACE/promotion/cloud-traffic-readback.json" `
+              --binding "oracle_candidate_attestation=$env:GITHUB_WORKSPACE/promotion/oracle-candidate-attestation.txt" `
+              --output promotion/promoted-state.json
+            if ($LASTEXITCODE -ne 0) { throw 'promoted state sealing failed' }
+          } catch {
+            $primary = $_
+            $recoveryErrors = [Collections.Generic.List[string]]::new()
+            try {
+              Restore-PriorOracle
+            } catch {
+              $recoveryErrors.Add('Oracle restore failed')
+            }
+            if ($cloudTrafficMutationAttempted) {
+              try {
+                gcloud run services update-traffic clearra-current-job `
+                  --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION `
+                  --to-revisions="$($prior.prior_revision)=100" --quiet
+                if ($LASTEXITCODE -ne 0) { throw 'Cloud restore returned nonzero' }
+              } catch {
+                $recoveryErrors.Add('Cloud restore failed')
+              }
+            }
+            try {
+              $recoveryService = gcloud run services describe clearra-current-job `
+                --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION --format=json | ConvertFrom-Json
+              if ($LASTEXITCODE -ne 0) { throw 'Cloud restore readback returned nonzero' }
+              $recoveryTraffic = @(
+                $recoveryService.status.traffic | Where-Object { [int]$_.percent -gt 0 }
+              )
+              if ($recoveryTraffic.Count -ne 1 -or
+                  [int]$recoveryTraffic[0].percent -ne 100 -or
+                  [string]$recoveryTraffic[0].revisionName -cne [string]$prior.prior_revision) {
+                throw 'Cloud restore readback differs from the exact prior revision'
+              }
+            } catch {
+              $recoveryErrors.Add('Cloud restore readback failed')
+            }
+            if ($recoveryErrors.Count -eq 0) {
+              try {
+                New-Item -ItemType File -Path promotion/rollback-complete.marker -ErrorAction Stop | Out-Null
+              } catch {
+                $recoveryErrors.Add('rollback marker creation failed')
+              }
+            }
+            if ($recoveryErrors.Count -ne 0) {
+              throw "promotion rollback failed closed after '$($primary.Exception.Message)': $($recoveryErrors -join ', ')"
+            }
+            throw $primary
+          }
+      - name: Upload sealed promoted state
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-promoted-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            prepared
+            candidate
+            promotion
+          if-no-files-found: error
+          retention-days: 90
+      - name: Compensate any protected-path failure after Oracle transition began
+        if: failure() || cancelled()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $transitionMarker = Join-Path $env:GITHUB_WORKSPACE 'promotion/oracle-transition-started.marker'
+          $rollbackMarker = Join-Path $env:GITHUB_WORKSPACE 'promotion/rollback-complete.marker'
+          if (-not (Test-Path -LiteralPath $transitionMarker -PathType Leaf)) {
+            Write-Output 'promotion_compensation=no-live-oracle-transition'
+            exit 0
+          }
+          if (Test-Path -LiteralPath $rollbackMarker -PathType Leaf) {
+            Write-Output 'promotion_compensation=already-restored'
+            exit 0
+          }
+          $candidateRoot = Join-Path $env:GITHUB_WORKSPACE 'candidate'
+          $required = @(
+            (Join-Path $candidateRoot 'candidate-state.json'),
+            (Join-Path $candidateRoot 'cloud-candidate-authority.json'),
+            (Join-Path $candidateRoot 'cloud-candidate-smoke.json'),
+            (Join-Path $candidateRoot 'oracle-inactive-stage-v080.json'),
+            (Join-Path $env:GITHUB_WORKSPACE 'prestage/prestage-state.json'),
+            (Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-prior-authority.json'),
+            (Join-Path $env:GITHUB_WORKSPACE 'prestage/oracle-rollback-capture.json')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "promotion compensation lacks sealed input: $([IO.Path]::GetFileName($path))"
+            }
+            $item = Get-Item -LiteralPath $path -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'promotion compensation input traverses a reparse point'
+            }
+          }
+          $statePath = Join-Path $candidateRoot 'candidate-state.json'
+          $state = Get-Content $statePath -Raw | ConvertFrom-Json
+          $nonce = [string]$state.deployment_nonce
+          node scripts/release/discord-deployment-state.mjs verify `
+            --stage candidate --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --accepted-run-id $env:ACCEPTED_RUN_ID --accepted-run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --deployment-nonce $nonce --report $statePath `
+            --binding "cloud_candidate_authority=$candidateRoot/cloud-candidate-authority.json" `
+            --binding "cloud_candidate_smoke=$candidateRoot/cloud-candidate-smoke.json" `
+            --binding "oracle_stage_manifest=$candidateRoot/oracle-inactive-stage-v080.json" `
+            --binding "prestage_state=$env:GITHUB_WORKSPACE/prestage/prestage-state.json"
+          if ($LASTEXITCODE -ne 0) { throw 'promotion compensation rejected unsealed state' }
+          $prior = Get-Content prestage/cloud-prior-authority.json -Raw | ConvertFrom-Json
+          $manifest = Get-Content (Join-Path $candidateRoot 'oracle-inactive-stage-v080.json') -Raw | ConvertFrom-Json
+          $rollback = Get-Content prestage/oracle-rollback-capture.json -Raw | ConvertFrom-Json
+          gcloud run services update-traffic clearra-current-job `
+            --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION `
+            --to-revisions="$($prior.prior_revision)=100" --quiet
+          if ($LASTEXITCODE -ne 0) { throw 'promotion compensation Cloud restore failed' }
+          $service = gcloud run services describe clearra-current-job `
+            --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION --format=json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'promotion compensation Cloud readback failed' }
+          $active = @($service.status.traffic | Where-Object { [int]$_.percent -gt 0 })
+          if ($active.Count -ne 1 -or [int]$active[0].percent -ne 100 -or
+              [string]$active[0].revisionName -cne [string]$prior.prior_revision) {
+            throw 'promotion compensation did not restore one exact prior Cloud revision'
+          }
+          $after = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+          & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
+            -Operation restore-prior-and-verify -ScriptReleaseId ([string]$manifest.releaseId) `
+            -ScriptReleaseSha256 ([string]$manifest.candidate.treeSha256) `
+            -PriorRelease ([string]$rollback.priorOracleRelease) `
+            -PriorReleaseId ([string]$rollback.priorOracleReleaseId) `
+            -PriorReleaseSha256 ([string]$rollback.priorOracleReleaseSha256) `
+            -PriorSettingsBackup ([string]$rollback.priorOracleSettingsBackup) `
+            -PriorSettingsSha256 ([string]$rollback.priorOracleSettingsSha256) `
+            -PriorRuntimeAuthorityKind ([string]$rollback.priorRuntimeAuthorityKind) `
+            -PriorRuntimeAuthoritySha256 ([string]$rollback.priorRuntimeAuthoritySha256) `
+            -PriorJobUrl ([string]$rollback.priorJobUrl) `
+            -PriorRevision ([string]$prior.prior_revision) `
+            -Proof "/run/clearra-deploy/clearra-oracle-rollback-$nonce.json" `
+            -DeploymentNonce $nonce -VerifiedAfter $after `
+            -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE
+          if ($LASTEXITCODE -ne 0) { throw 'promotion compensation Oracle restore failed' }
+          New-Item -ItemType File -Path $rollbackMarker -ErrorAction Stop | Out-Null
+          Write-Output 'promotion_compensation=restored-cloud-and-oracle'
+      - name: Always remove the temporary Oracle key
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          key_path="$RUNNER_TEMP/clearra-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          if [[ -f "$key_path" && ! -L "$key_path" ]]; then chmod 0600 "$key_path"; rm -f -- "$key_path" || true; fi
+          exit 0
+
+  sync-observe:
+    # Preserve the running protected job on ordinary cancellation so its
+    # TERM/INT trap and cancelled() catalog compensation can finish.
+    if: always() && needs.promote.result == 'success'
+    needs: [authority, candidate, promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment: discord-global-command-sync
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
+      ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+      ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: asia-northeast1
+      DISCORD_APPLICATION_ID: ${{ vars.DISCORD_APPLICATION_ID }}
+    steps:
+      - name: Check out the exact accepted source for global synchronization
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - name: Set up Node.js for global synchronization
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install the frozen runtime dependencies for synchronization
+        run: npm ci --ignore-scripts
+      - name: Download the exact protected promotion evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: discord-promoted-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: promoted
+      - name: Resolve one successful exact-SHA Pages deployment before global mutation
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/pages-deployment-run.mjs resolve \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --format github-output >> "$GITHUB_OUTPUT"
+      - name: Download the exact Pages deployment authority
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pages.outputs.pages_artifact_name }}
+          path: pages-authority
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pages.outputs.pages_run_id }}
+      - name: Verify Pages authority before Discord global mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/pages-deployment-run.mjs verify-report \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "${{ steps.pages.outputs.pages_run_id }}" \
+            --workflow-run-attempt "${{ steps.pages.outputs.pages_run_attempt }}" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --report "$GITHUB_WORKSPACE/pages-authority/pages-deployment-authority.json"
+      - name: Authenticate command sync without Cloud mutation authority
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_COMMAND_SYNC_SERVICE_ACCOUNT }}
+      - name: Set up gcloud for command synchronization
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Materialize the Oracle key for read-only observation
+        env:
+          ORACLE_SSH_PRIVATE_KEY_B64: ${{ secrets.ORACLE_SSH_PRIVATE_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/clearra-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          [[ -n "$ORACLE_SSH_PRIVATE_KEY_B64" && ! -e "$key_path" && ! -L "$key_path" ]]
+          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode --strict > "$key_path")
+          [[ -f "$key_path" && ! -L "$key_path" ]]
+          chmod 0600 "$key_path"
+          echo "CLEARRA_ORACLE_IDENTITY_FILE=$key_path" >> "$GITHUB_ENV"
+      - name: Capture and seal Discord catalog recovery authority before mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sync
+          cp --no-clobber --no-dereference \
+            "$GITHUB_WORKSPACE/pages-authority/pages-deployment-authority.json" \
+            "$GITHUB_WORKSPACE/sync/pages-deployment-authority.json"
+          cmp --silent \
+            "$GITHUB_WORKSPACE/pages-authority/pages-deployment-authority.json" \
+            "$GITHUB_WORKSPACE/sync/pages-deployment-authority.json"
+          prepared_root="$GITHUB_WORKSPACE/promoted/prepared"
+          candidate_root="$GITHUB_WORKSPACE/promoted/candidate"
+          promotion_root="$GITHUB_WORKSPACE/promoted/promotion"
+          candidate_state="$candidate_root/candidate-state.json"
+          promoted_state="$promotion_root/promoted-state.json"
+          nonce="$(jq -r .deployment_nonce "$promoted_state")"
+          verified_after="$(jq -r .verified_after "$promoted_state")"
+          node scripts/release/discord-deployment-state.mjs verify \
+            --stage promoted --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --deployment-nonce "$nonce" --verified-after "$verified_after" --report "$promoted_state" \
+            --binding "candidate_state=$candidate_state" \
+            --binding "cloud_traffic_readback=$promotion_root/cloud-traffic-readback.json" \
+            --binding "oracle_candidate_attestation=$promotion_root/oracle-candidate-attestation.txt"
+          version="$(node scripts/release/validate-release-metadata.mjs)"
+          node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs canonical \
+            --source-commit "$SOURCE_COMMIT" --output "$GITHUB_WORKSPACE/sync/discord-catalog.json"
+          node scripts/release/discord-command-sync-authority.mjs \
+            --source-commit "$SOURCE_COMMIT" --repository "$GITHUB_REPOSITORY" \
+            --version "$version" --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --accepted-ctk3-dist "$prepared_root/accepted-ctk3" \
+            --canonical-acceptance-evidence "$prepared_root/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json" \
+            --catalog "$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --output "$GITHUB_WORKSPACE/sync/discord-sync-authority.json"
+          token="$(gcloud secrets versions access latest --secret=discord-bot-token --project="$GCP_PROJECT_ID")"
+          [[ -n "$token" ]] || { echo 'Discord token access returned empty' >&2; exit 2; }
+          echo "::add-mask::$token"
+          trap 'unset token' EXIT INT TERM
+          DISCORD_TOKEN="$token" node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs capture \
+            --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
+            --output "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json"
+          unset token
+          trap - EXIT INT TERM
+          node scripts/release/discord-catalog-recovery-authority.mjs seal \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --application-id "$DISCORD_APPLICATION_ID" \
+            --prior-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+            --desired-catalog "$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --sync-authority "$GITHUB_WORKSPACE/sync/discord-sync-authority.json" \
+            --output "$GITHUB_WORKSPACE/sync/discord-catalog-recovery-authority.json"
+      - name: Upload Discord catalog recovery authority before global mutation
+        id: catalog_recovery_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-catalog-recovery-authority-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            sync/discord-catalog-recovery-authority.json
+            sync/discord-prior-catalog.json
+            sync/discord-catalog.json
+            sync/discord-sync-authority.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Authority-bound global sync and sole canonical four-surface observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="$GITHUB_WORKSPACE/promoted/prepared"
+          candidate_root="$GITHUB_WORKSPACE/promoted/candidate"
+          promotion_root="$GITHUB_WORKSPACE/promoted/promotion"
+          candidate_state="$candidate_root/candidate-state.json"
+          promoted_state="$promotion_root/promoted-state.json"
+          nonce="$(jq -r .deployment_nonce "$promoted_state")"
+          verified_after="$(jq -r .verified_after "$promoted_state")"
+          candidate_url="$(jq -r .candidateUrl "$candidate_root/cloud-candidate-authority.json")"
+          candidate_revision="$(jq -r .candidateRevision "$candidate_root/cloud-candidate-authority.json")"
+          candidate_tag="$(jq -r .candidateTag "$candidate_root/cloud-candidate-authority.json")"
+          image_digest="$(jq -r .imageDigest "$candidate_root/cloud-candidate-authority.json")"
+          release_id="$(jq -r .releaseId "$candidate_root/oracle-inactive-stage-v080.json")"
+          release_sha="$(jq -r .candidate.treeSha256 "$candidate_root/oracle-inactive-stage-v080.json")"
+          settings_sha="$(node scripts/release/oracle/candidate-settings-v080.mjs --source-commit "$SOURCE_COMMIT" --candidate-url "$candidate_url" --hash-only)"
+          node scripts/release/discord-catalog-recovery-authority.mjs verify \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --application-id "$DISCORD_APPLICATION_ID" \
+            --prior-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+            --desired-catalog "$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --sync-authority "$GITHUB_WORKSPACE/sync/discord-sync-authority.json" \
+            --report "$GITHUB_WORKSPACE/sync/discord-catalog-recovery-authority.json"
+          sync_authority_sha="$(sha256sum sync/discord-sync-authority.json | cut -d ' ' -f 1)"
+          token="$(gcloud secrets versions access latest --secret=discord-bot-token --project="$GCP_PROJECT_ID")"
+          [[ -n "$token" ]] || { echo 'Discord token access returned empty' >&2; exit 2; }
+          echo "::add-mask::$token"
+          restore_catalog_and_exit() {
+            status="$1"
+            trap - ERR INT TERM
+            set +e
+            restore_status=0
+            if [[ -f sync/discord-prior-catalog.json ]]; then
+              expected="$(jq -r '.current_after_sha256 // empty' sync/discord-sync-report.json 2>/dev/null)"
+              [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || expected="$(jq -r .catalog_sha256 sync/discord-catalog.json)"
+              prior_digest="$(jq -r .catalog_sha256 sync/discord-prior-catalog.json)"
+              DISCORD_TOKEN="$token" node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs restore \
+                --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
+                --prior-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+                --expected-current-digest "$expected" \
+                --also-allow-current-digest "$prior_digest" \
+                --output "$GITHUB_WORKSPACE/sync/discord-catalog-restore.json" || restore_status=$?
+            fi
+            unset token
+            if [[ "$restore_status" -ne 0 ]]; then
+              echo 'digest-guarded Discord catalog restore failed closed' >&2
+            fi
+            exit "$status"
+          }
+          trap 'status=$?; restore_catalog_and_exit "$status"' ERR
+          trap 'restore_catalog_and_exit 130' INT
+          trap 'restore_catalog_and_exit 143' TERM
+          DISCORD_TOKEN="$token" node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs sync \
+            --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
+            --catalog "$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --sync-authority "$GITHUB_WORKSPACE/sync/discord-sync-authority.json" \
+            --sync-authority-file-sha256 "$sync_authority_sha" \
+            --prior-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+            --output "$GITHUB_WORKSPACE/sync/discord-sync-report.json"
+          node scripts/release/create-production-probe-authority-v080.mjs \
+            --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
+            --project-id "$GCP_PROJECT_ID" \
+            --pages-deployment-report "$GITHUB_WORKSPACE/sync/pages-deployment-authority.json" \
+            --discord-catalog "$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --discord-sync-authority "$GITHUB_WORKSPACE/sync/discord-sync-authority.json" \
+            --discord-sync-report "$GITHUB_WORKSPACE/sync/discord-sync-report.json" \
+            --cloud-candidate-authority "$candidate_root/cloud-candidate-authority.json" \
+            --cloud-smoke-report "$candidate_root/cloud-candidate-smoke.json" \
+            --oracle-manifest "$candidate_root/oracle-inactive-stage-v080.json" \
+            --oracle-attestation "$promotion_root/oracle-candidate-attestation.txt" \
+            --oracle-adapter "$GITHUB_WORKSPACE/scripts/release/oracle/invoke-release-deploy-v080.ps1" \
+            --candidate-state "$candidate_state" --promoted-state "$promoted_state" \
+            --output "$GITHUB_WORKSPACE/sync/production-probe-authority.json"
+          node scripts/release/materialize-production-probe-spec.mjs \
+            --authority "$GITHUB_WORKSPACE/sync/production-probe-authority.json" \
+            --output "$GITHUB_WORKSPACE/sync/production-probe-spec.json"
+          DISCORD_TOKEN="$token" node scripts/release/observe-production-surfaces.mjs \
+            --source-commit "$SOURCE_COMMIT" \
+            --probe-spec "$GITHUB_WORKSPACE/sync/production-probe-spec.json" \
+            --output "$GITHUB_WORKSPACE/sync/production-observation.json"
+          pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.ps1 \
+            -Operation observe-candidate -ScriptReleaseId "$release_id" -ScriptReleaseSha256 "$release_sha" \
+            -SourceCommit "$SOURCE_COMMIT" -CandidateUrl "$candidate_url" -CandidateRevision "$candidate_revision" \
+            -OracleReleaseId "$release_id" -OracleReleaseSha256 "$release_sha" -OracleSettingsSha256 "$settings_sha" \
+            -DeploymentNonce "$nonce" -VerifiedAfter "$verified_after" \
+            -EvidenceOutput "$GITHUB_WORKSPACE/sync/oracle-end-observation.json" -IdentityFile "$CLEARRA_ORACLE_IDENTITY_FILE" >/dev/null
+          node scripts/release/discord-deployment-state.mjs seal \
+            --stage synchronized --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --deployment-nonce "$nonce" --verified-after "$verified_after" \
+            --binding "discord_catalog=$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --binding "discord_prior_catalog=$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+            --binding "discord_sync_authority=$GITHUB_WORKSPACE/sync/discord-sync-authority.json" \
+            --binding "discord_sync_report=$GITHUB_WORKSPACE/sync/discord-sync-report.json" \
+            --binding "oracle_end_observation=$GITHUB_WORKSPACE/sync/oracle-end-observation.json" \
+            --binding "pages_deployment_authority=$GITHUB_WORKSPACE/sync/pages-deployment-authority.json" \
+            --binding "production_observation=$GITHUB_WORKSPACE/sync/production-observation.json" \
+            --binding "production_probe_authority=$GITHUB_WORKSPACE/sync/production-probe-authority.json" \
+            --binding "production_probe_spec=$GITHUB_WORKSPACE/sync/production-probe-spec.json" \
+            --binding "promoted_state=$promoted_state" --output sync/synchronized-state.json
+          trap - ERR INT TERM
+          unset token
+      - name: Upload durable sync and sole canonical observation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-sync-inputs-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: sync
+          if-no-files-found: error
+          retention-days: 90
+      - name: Capture exact completed deployment prerequisites for the checkpoint candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="$RUNNER_TEMP/discord-production-checkpoint-candidate"
+          job_list="$candidate_root/checkpoint-prerequisite-jobs.json"
+          mkdir -p "$candidate_root"
+          [[ ! -e "$job_list" && ! -L "$job_list" ]]
+          verified=false
+          for poll in $(seq 1 30); do
+            temporary="$candidate_root/checkpoint-prerequisite-jobs.$poll.json"
+            gh api --paginate --slurp \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?filter=all&per_page=100" \
+              > "$temporary"
+            if node scripts/release/discord-production-checkpoint-receipt.mjs verify-prerequisites \
+              --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+              --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --job-list "$temporary"; then
+              mv --no-clobber -- "$temporary" "$job_list"
+              verified=true
+              break
+            fi
+            rm -f -- "$temporary"
+            sleep 2
+          done
+          [[ "$verified" == true && -f "$job_list" && ! -L "$job_list" ]] || {
+            echo 'exact completed checkpoint prerequisites were not observable' >&2
+            exit 2
+          }
+      - name: Seal canonical Discord production checkpoint candidate
+        env:
+          CATALOG_ARTIFACT_ID: ${{ steps.catalog_recovery_artifact.outputs.artifact-id }}
+          CATALOG_ARTIFACT_DIGEST: ${{ steps.catalog_recovery_artifact.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="$GITHUB_WORKSPACE/checkpoint-candidate"
+          prepared_root="$GITHUB_WORKSPACE/promoted/prepared"
+          job_list="$RUNNER_TEMP/discord-production-checkpoint-candidate/checkpoint-prerequisite-jobs.json"
+          candidate="$candidate_root/discord-production-checkpoint-candidate.json"
+          [[ "$CATALOG_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          if [[ "$CATALOG_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            CATALOG_ARTIFACT_DIGEST="sha256:$CATALOG_ARTIFACT_DIGEST"
+          fi
+          [[ "$CATALOG_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$candidate_root"
+          [[ ! -e "$candidate" && ! -L "$candidate" ]]
+          version="$(node scripts/release/validate-release-metadata.mjs)"
+          node scripts/release/discord-production-checkpoint-receipt.mjs seal-candidate \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --version "$version" --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --application-id "$DISCORD_APPLICATION_ID" \
+            --catalog-artifact-id "$CATALOG_ARTIFACT_ID" \
+            --catalog-artifact-digest "$CATALOG_ARTIFACT_DIGEST" \
+            --canonical-acceptance-evidence "$prepared_root/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json" \
+            --recovery-debt-clearance "$prepared_root/recovery-debt/recovery-debt-clearance.json" \
+            --catalog-recovery-authority "$GITHUB_WORKSPACE/sync/discord-catalog-recovery-authority.json" \
+            --prior-catalog-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+            --desired-catalog "$GITHUB_WORKSPACE/sync/discord-catalog.json" \
+            --sync-authority "$GITHUB_WORKSPACE/sync/discord-sync-authority.json" \
+            --sync-report "$GITHUB_WORKSPACE/sync/discord-sync-report.json" \
+            --production-observation "$GITHUB_WORKSPACE/sync/production-observation.json" \
+            --job-list "$job_list" --output "$candidate"
+          node scripts/release/discord-production-checkpoint-receipt.mjs verify-candidate \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --report "$candidate"
+      - name: Upload canonical Discord production checkpoint candidate
+        id: checkpoint_candidate_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-production-checkpoint-candidate-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: checkpoint-candidate/discord-production-checkpoint-candidate.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Compensate catalog mutation if any later sync job step failed
+        if: failure() || cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f sync/discord-prior-catalog.json ]]; then
+            echo 'discord_catalog_compensation=no-prior-snapshot-no-mutation-authority'
+            exit 0
+          fi
+          [[ -f sync/discord-catalog.json ]] || { echo 'catalog compensation lacks desired catalog' >&2; exit 2; }
+          desired_digest="$(jq -r .catalog_sha256 sync/discord-catalog.json)"
+          prior_digest="$(jq -r .catalog_sha256 sync/discord-prior-catalog.json)"
+          [[ "$desired_digest" =~ ^[0-9a-f]{64}$ && "$prior_digest" =~ ^[0-9a-f]{64}$ ]] || {
+            echo 'catalog compensation digest authority is invalid' >&2
+            exit 2
+          }
+          token="$(gcloud secrets versions access latest --secret=discord-bot-token --project="$GCP_PROJECT_ID")"
+          [[ -n "$token" ]] || { echo 'Discord token access returned empty during compensation' >&2; exit 2; }
+          echo "::add-mask::$token"
+          trap 'unset token' EXIT INT TERM
+          [[ ! -e sync/discord-catalog-compensation.json && ! -L sync/discord-catalog-compensation.json ]] || {
+            echo 'catalog compensation evidence output is already occupied' >&2
+            exit 2
+          }
+          DISCORD_TOKEN="$token" node apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs restore \
+            --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
+            --prior-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
+            --expected-current-digest "$desired_digest" \
+            --also-allow-current-digest "$prior_digest" \
+            --output "$GITHUB_WORKSPACE/sync/discord-catalog-compensation.json"
+          unset token
+          trap - EXIT INT TERM
+      - name: Upload durable catalog compensation evidence
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-catalog-compensation-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: sync/discord-catalog-compensation.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Always remove the temporary Oracle key
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          key_path="$RUNNER_TEMP/clearra-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          if [[ -f "$key_path" && ! -L "$key_path" ]]; then chmod 0600 "$key_path"; rm -f -- "$key_path" || true; fi
+          exit 0

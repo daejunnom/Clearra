@@ -5,6 +5,7 @@ import {
   linkSync,
   lstatSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -23,6 +24,9 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const RELEASE_ROOT = "/opt/clearra/releases";
 const CURRENT_LINK = "/opt/clearra/current";
 const SETTINGS_PATH = "/etc/clearra-gateway/settings";
+const SETTINGS_DIRECTORY = "/etc/clearra-gateway";
+const BACKUP_NAME_PATTERN = /^settings\.pre-v0\.8\.0-([0-9a-f]{64})(?:\.tmp)?$/;
+const MAX_STALE_BACKUPS = 16;
 
 export function captureOracleRollbackAuthority(options, dependencies = {}) {
   const priorRevision = requiredMatch(
@@ -44,6 +48,7 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     dependencies.releaseTreeSha256 ?? releaseTreeSha256;
   const run = dependencies.run ?? runCommand;
   const writeBackup = dependencies.writeBackup ?? writeSettingsBackup;
+  const cleanupBackups = dependencies.cleanupBackups ?? cleanupStaleSettingsBackups;
 
   const priorOracleRelease = normalizePath(resolvePath(CURRENT_LINK));
   const priorOracleReleaseId = basename(priorOracleRelease);
@@ -97,6 +102,7 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     health,
   });
   const priorOracleSettingsBackup = `/etc/clearra-gateway/settings.pre-v0.8.0-${deploymentNonce}`;
+  cleanupBackups(priorOracleSettingsBackup);
   writeBackup(priorOracleSettingsBackup, settingsBytes);
 
   return Object.freeze({
@@ -125,6 +131,8 @@ function writeSettingsBackup(path, bytes) {
   }
   const temporaryPath = `${backupPath}.tmp`;
   let descriptor;
+  let finalCreated = false;
+  let complete = false;
   try {
     descriptor = openSync(temporaryPath, "wx", 0o600);
     writeFileSync(descriptor, bytes);
@@ -132,9 +140,98 @@ function writeSettingsBackup(path, bytes) {
     closeSync(descriptor);
     descriptor = undefined;
     linkSync(temporaryPath, backupPath);
+    finalCreated = true;
     unlinkSync(temporaryPath);
+    const metadata = lstatSync(backupPath);
+    if (
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      metadata.uid !== 0 ||
+      metadata.nlink !== 1 ||
+      (metadata.mode & 0o777) !== 0o600
+    ) {
+      throw new Error("Oracle settings backup authority is invalid");
+    }
+    fsyncDirectory(SETTINGS_DIRECTORY);
+    complete = true;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+    if (!complete) {
+      tryUnlink(temporaryPath);
+      if (finalCreated) tryUnlink(backupPath);
+    }
+  }
+}
+
+function cleanupStaleSettingsBackups(currentBackupPath) {
+  const stale = readdirSync(SETTINGS_DIRECTORY, { withFileTypes: true })
+    .filter((entry) => BACKUP_NAME_PATTERN.test(entry.name))
+    .map((entry) => resolve(SETTINGS_DIRECTORY, entry.name))
+    .filter((path) => path !== currentBackupPath)
+    .sort();
+  if (stale.length > MAX_STALE_BACKUPS) {
+    throw new Error("Oracle stale settings backup inventory exceeds its bound");
+  }
+  for (const path of stale) {
+    const metadata = lstatSync(path);
+    if (
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      metadata.uid !== 0 ||
+      metadata.nlink !== 1 ||
+      (metadata.mode & 0o777) !== 0o600
+    ) {
+      throw new Error("Oracle stale settings backup authority is invalid");
+    }
+    unlinkSync(path);
+  }
+  if (stale.length > 0) fsyncDirectory(SETTINGS_DIRECTORY);
+}
+
+export function cleanupOracleRollbackBackup(deploymentNonce) {
+  const nonce = requiredMatch(
+    deploymentNonce,
+    SHA256_PATTERN,
+    "deployment nonce",
+  );
+  const backupPath = `${SETTINGS_DIRECTORY}/settings.pre-v0.8.0-${nonce}`;
+  let metadata;
+  try {
+    metadata = lstatSync(backupPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return Object.freeze({ deploymentNonce: nonce, backupRemoved: false });
+    }
+    throw error;
+  }
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.uid !== 0 ||
+    metadata.nlink !== 1 ||
+    (metadata.mode & 0o777) !== 0o600
+  ) {
+    throw new Error("Oracle settings backup cleanup authority is invalid");
+  }
+  unlinkSync(backupPath);
+  fsyncDirectory(SETTINGS_DIRECTORY);
+  return Object.freeze({ deploymentNonce: nonce, backupRemoved: true });
+}
+
+function fsyncDirectory(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function tryUnlink(path) {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
 }
 
@@ -201,12 +298,20 @@ async function main() {
       "prior-revision": { type: "string" },
       "prior-runtime-authority-kind": { type: "string" },
       "deployment-nonce": { type: "string" },
+      "cleanup-deployment-nonce": { type: "string" },
     },
     strict: true,
   });
   try {
     if (typeof process.getuid !== "function" || process.getuid() !== 0) {
       throw new Error("Oracle rollback authority capture must run as root");
+    }
+    if (values["cleanup-deployment-nonce"]) {
+      if (values["prior-revision"] || values["prior-runtime-authority-kind"] || values["deployment-nonce"]) {
+        throw new Error("Oracle backup cleanup rejects capture arguments");
+      }
+      console.log(JSON.stringify(cleanupOracleRollbackBackup(values["cleanup-deployment-nonce"])));
+      return;
     }
     const captured = captureOracleRollbackAuthority({
       priorRevision: values["prior-revision"],

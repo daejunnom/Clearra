@@ -14,6 +14,92 @@ $candidateUrl = 'https://candidate.example.test'
 $verifiedAfter = '2026-08-30T00:00:00.000Z'
 $dummyIdentity = Join-Path $PSScriptRoot 'identity-must-not-be-read'
 
+function Invoke-ExtractedWrapperFunction {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $FunctionName,
+        [Parameter(Mandatory = $true)][object[]] $Arguments
+    )
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $Path,
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        throw "Wrapper parse failed while extracting $FunctionName."
+    }
+    $definitions = @($ast.FindAll({
+        param($node)
+        return $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq $FunctionName
+    }, $true))
+    if ($definitions.Count -ne 1) {
+        throw "Wrapper must define $FunctionName exactly once."
+    }
+    $invocation = [scriptblock]::Create(
+        $definitions[0].Extent.Text + "`n& $FunctionName @args"
+    )
+    return & $invocation @Arguments
+}
+
+function Assert-ExactStringSequence {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    [string[]]$actualStrings = @($Actual | ForEach-Object { [string]$_ })
+    if ($actualStrings.Count -ne $Expected.Count -or
+        (Compare-Object -CaseSensitive -SyncWindow 0 $Expected $actualStrings)) {
+        throw "$Label argument sequence drifted."
+    }
+}
+
+$windowsTarget = 'C:\accepted\clearra-oracle-release-deploy-v080'
+$windowsContract = Invoke-ExtractedWrapperFunction `
+    -Path $wrapper `
+    -FunctionName 'Get-OraclePosixSyntaxAuditContract' `
+    -Arguments @('windows', $windowsTarget)
+if ($windowsContract.ProjectionCommand -cne 'wsl.exe' -or
+    $windowsContract.SyntaxCommand -cne 'wsl.exe') {
+    throw 'Windows release-deploy syntax-audit command contract drifted.'
+}
+Assert-ExactStringSequence `
+    -Actual @($windowsContract.ProjectionArguments) `
+    -Expected @('-e', '/usr/bin/wslpath', '-a', '--', $windowsTarget) `
+    -Label 'Windows release-deploy projection'
+Assert-ExactStringSequence `
+    -Actual @($windowsContract.SyntaxArguments) `
+    -Expected @('-e', '/usr/bin/dash', '-n', '--') `
+    -Label 'Windows release-deploy syntax audit'
+$windowsSshConfig = Invoke-ExtractedWrapperFunction `
+    -Path $wrapper -FunctionName 'Get-OracleSshConfigPath' -Arguments @('windows')
+if ($windowsSshConfig -cne 'NUL') {
+    throw 'Windows release-deploy SSH config path drifted.'
+}
+
+$linuxTarget = '/tmp/accepted/clearra-oracle-release-deploy-v080'
+$linuxContract = Invoke-ExtractedWrapperFunction `
+    -Path $wrapper `
+    -FunctionName 'Get-OraclePosixSyntaxAuditContract' `
+    -Arguments @('linux', $linuxTarget)
+if ($null -ne $linuxContract.ProjectionCommand -or
+    @($linuxContract.ProjectionArguments).Count -ne 0 -or
+    $linuxContract.SyntaxCommand -cne '/usr/bin/dash') {
+    throw 'Linux release-deploy syntax-audit command contract drifted.'
+}
+Assert-ExactStringSequence `
+    -Actual @($linuxContract.SyntaxArguments) `
+    -Expected @('-n', '--', $linuxTarget) `
+    -Label 'Linux release-deploy syntax audit'
+$linuxSshConfig = Invoke-ExtractedWrapperFunction `
+    -Path $wrapper -FunctionName 'Get-OracleSshConfigPath' -Arguments @('linux')
+if ($linuxSshConfig -cne '/dev/null') {
+    throw 'Linux release-deploy SSH config path drifted.'
+}
+
 function Assert-AuditResult {
     param(
         [Parameter(Mandatory = $true)][string[]] $Output,
@@ -38,6 +124,20 @@ $capture = @(& $wrapper `
     -IdentityFile $dummyIdentity `
     -AuditOnly)
 Assert-AuditResult -Output $capture -Operation 'capture-rollback-authority'
+
+$prestageCapture = @(& $wrapper `
+    -Operation capture-prestage-authority `
+    -PriorRevision 'clearra-current-job-v075-042ec21' `
+    -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
+    -DeploymentNonce $deploymentNonce `
+    -AuditOnly)
+Assert-AuditResult -Output $prestageCapture -Operation 'capture-prestage-authority'
+
+$prestageCleanup = @(& $wrapper `
+    -Operation cleanup-prestage-backup `
+    -DeploymentNonce $deploymentNonce `
+    -AuditOnly)
+Assert-AuditResult -Output $prestageCleanup -Operation 'cleanup-prestage-backup'
 
 $candidate = @(& $wrapper `
     -Operation verify-candidate `
@@ -69,6 +169,23 @@ $observation = @(& $wrapper `
     -VerifiedAfter $verifiedAfter `
     -AuditOnly)
 Assert-AuditResult -Output $observation -Operation 'observe-candidate'
+
+$classification = @(& $wrapper `
+    -Operation classify-current-authority `
+    -ScriptReleaseId $scriptReleaseId `
+    -ScriptReleaseSha256 $scriptReleaseSha256 `
+    -SourceCommit $sourceCommit -CandidateUrl $candidateUrl `
+    -CandidateRevision $candidateRevision -OracleReleaseId $scriptReleaseId `
+    -OracleReleaseSha256 $scriptReleaseSha256 -OracleSettingsSha256 ('c' * 64) `
+    -PriorRelease '/opt/clearra/releases/v0.7.5-042ec21' `
+    -PriorReleaseId 'v0.7.5-042ec21' -PriorReleaseSha256 ('d' * 64) `
+    -PriorSettingsSha256 ('e' * 64) `
+    -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
+    -PriorRuntimeAuthoritySha256 ('f' * 64) `
+    -PriorJobUrl 'https://prior.example.test/jobs' `
+    -PriorRevision 'clearra-current-job-v075-042ec21' `
+    -DeploymentNonce $deploymentNonce -AuditOnly)
+Assert-AuditResult -Output $classification -Operation 'classify-current-authority'
 
 $rollback = @(& $wrapper `
     -Operation restore-prior-and-verify `
@@ -147,7 +264,7 @@ try {
         -EvidenceOutput $evidencePath `
         -AuditOnly)
 } catch {
-    $rejected = $_.Exception.Message -like '*only valid for capture or observation*'
+    $rejected = $_.Exception.Message -like '*only valid for capture, observation, or classification*'
 }
 if (-not $rejected -or (Test-Path -LiteralPath $evidencePath)) {
     throw 'A non-evidence Oracle operation accepted EvidenceOutput.'
@@ -172,7 +289,7 @@ foreach ($required in @(
     '[IO.FileShare]::None',
     '[Text.UTF8Encoding]::new($false)',
     '$stream.Flush($true)',
-    "if (`$Operation -notin @('capture-rollback-authority', 'observe-candidate')) {"
+    "if (`$Operation -notin @('capture-prestage-authority', 'capture-rollback-authority', 'observe-candidate', 'classify-current-authority')) {"
 )) {
     if ($source.IndexOf($required, [StringComparison]::Ordinal) -lt 0) {
         throw "Typed invoker is missing pinned identity/SSH marker: $required"
@@ -245,17 +362,28 @@ function ssh-keygen {
 
 function wsl.exe {
     $global:LASTEXITCODE = 0
-    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq 'wslpath') {
+    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/wslpath') {
         '/tmp/clearra-oracle-release-deploy-v080'
         return
     }
-    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq 'dash') {
+    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/dash') {
         return
     }
     throw 'Unexpected WSL invocation in Oracle evidence boundary test.'
 }
 
 function ssh {
+    $sshConfigArgumentIndex = [Array]::IndexOf([object[]]$args, '-F')
+    $expectedSshConfigPath = if (
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [Runtime.InteropServices.OSPlatform]::Windows
+        )
+    ) { 'NUL' } else { '/dev/null' }
+    if ($sshConfigArgumentIndex -lt 0 -or
+        $sshConfigArgumentIndex + 1 -ge $args.Count -or
+        [string]$args[$sshConfigArgumentIndex + 1] -cne $expectedSshConfigPath) {
+        throw 'Oracle wrapper did not assemble the host-specific SSH config path.'
+    }
     $identityArgumentIndex = [Array]::IndexOf([object[]]$args, '-i')
     if ($identityArgumentIndex -lt 0 -or
         $identityArgumentIndex + 1 -ge $args.Count -or
@@ -345,6 +473,7 @@ try {
         oracleReleaseSha256 = $scriptReleaseSha256
         oracleSettingsSha256 = ('c' * 64)
         deploymentNonce = $deploymentNonce
+        verifiedAfter = $verifiedAfter
         gatewayPid = 1234
         gatewayStartMonotonicUsec = 5678
         bootId = '12345678-1234-4234-8234-123456789abc'
@@ -374,9 +503,75 @@ try {
     $observationEvidence = Read-CanonicalEvidenceFile -Path $observationEvidencePath
     if ($observationEvidence.freshOperationAt -cne '2026-08-30T00:00:01.000Z' -or
         $observationEvidence.observedAt -cne '2026-08-30T00:00:02.000Z' -or
+        $observationEvidence.verifiedAfter -cne $verifiedAfter -or
         $observationEvidence.sourceCommit -cne $sourceCommit) {
         throw 'Oracle observation evidence did not preserve canonical UTC timestamps and source identity.'
     }
+
+    $observationObject.verifiedAfter = '2026-08-30T00:00:00.001Z'
+    $global:clearraOracleTestMockOutput = $observationObject | ConvertTo-Json -Compress -Depth 4
+    $rejected = $false
+    try {
+        [void]@(& $wrapper `
+            -Operation observe-candidate `
+            -ScriptReleaseId $scriptReleaseId `
+            -ScriptReleaseSha256 $scriptReleaseSha256 `
+            -SourceCommit $sourceCommit `
+            -CandidateUrl $candidateUrl `
+            -CandidateRevision $candidateRevision `
+            -OracleReleaseId $scriptReleaseId `
+            -OracleReleaseSha256 $scriptReleaseSha256 `
+            -OracleSettingsSha256 ('c' * 64) `
+            -DeploymentNonce $deploymentNonce `
+            -VerifiedAfter $verifiedAfter `
+            -IdentityFile $lockedIdentityPath)
+    } catch {
+        $rejected = $_.Exception.Message -like '*invalid closed result*'
+    }
+    if (-not $rejected) {
+        throw 'Oracle observation accepted a mismatched verified-after echo.'
+    }
+    $observationObject.verifiedAfter = $verifiedAfter
+    foreach ($timestampDrift in @(
+        @{
+            Label = 'an operation before verified-after'
+            FreshOperationAt = '2026-08-29T23:59:59.999Z'
+            ObservedAt = '2026-08-30T00:00:02.000Z'
+        },
+        @{
+            Label = 'an observation before its operation'
+            FreshOperationAt = '2026-08-30T00:00:01.000Z'
+            ObservedAt = '2026-08-30T00:00:00.999Z'
+        }
+    )) {
+        $observationObject.freshOperationAt = $timestampDrift.FreshOperationAt
+        $observationObject.observedAt = $timestampDrift.ObservedAt
+        $global:clearraOracleTestMockOutput = $observationObject | ConvertTo-Json -Compress -Depth 4
+        $rejected = $false
+        try {
+            [void]@(& $wrapper `
+                -Operation observe-candidate `
+                -ScriptReleaseId $scriptReleaseId `
+                -ScriptReleaseSha256 $scriptReleaseSha256 `
+                -SourceCommit $sourceCommit `
+                -CandidateUrl $candidateUrl `
+                -CandidateRevision $candidateRevision `
+                -OracleReleaseId $scriptReleaseId `
+                -OracleReleaseSha256 $scriptReleaseSha256 `
+                -OracleSettingsSha256 ('c' * 64) `
+                -DeploymentNonce $deploymentNonce `
+                -VerifiedAfter $verifiedAfter `
+                -IdentityFile $lockedIdentityPath)
+        } catch {
+            $rejected = $_.Exception.Message -like '*timestamps are out of order*'
+        }
+        if (-not $rejected) {
+            throw "Oracle observation accepted $($timestampDrift.Label)."
+        }
+    }
+    $observationObject.freshOperationAt = '2026-08-30T00:00:01.000Z'
+    $observationObject.observedAt = '2026-08-30T00:00:02.000Z'
+    $global:clearraOracleTestMockOutput = $observationObject | ConvertTo-Json -Compress -Depth 4
 
     $captureBytesBeforeRetry = [IO.File]::ReadAllBytes($captureEvidencePath)
     Assert-CaptureEvidencePathRejected `
@@ -413,7 +608,7 @@ try {
     if (Test-Path -LiteralPath $linkedEvidenceTargetPath) {
         throw 'Oracle evidence output accepted a linked parent path.'
     }
-    if ($global:clearraOracleTestMockSshInvocationCount -ne 2) {
+    if ($global:clearraOracleTestMockSshInvocationCount -ne 5) {
         throw 'Oracle evidence boundary test unexpectedly invoked the SSH command path.'
     }
 } finally {

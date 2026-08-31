@@ -150,6 +150,7 @@ export function observeOracleCandidate(options, dependencies = {}) {
     oracleReleaseSha256,
     oracleSettingsSha256,
     deploymentNonce,
+    verifiedAfter,
     gatewayPid,
     gatewayStartMonotonicUsec,
     bootId,

@@ -156,7 +156,9 @@ release-identity static ownership lock retained in
   closed cross-platform Cloud candidate launcher retained in
   `tests/fixtures/contracts/upstream_drift_release_freeze_retry16.v1.json`, and
   the exact Cloud Run zero-minimum default-omission readback retained in
-  `tests/fixtures/contracts/upstream_drift_release_freeze_retry17.v1.json`.
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry17.v1.json`, and
+  the executable Oracle observation-freshness contract retained in
+  `tests/fixtures/contracts/upstream_drift_release_freeze_retry18.v1.json`.
 Retry 1 follows correction of the metadata workflow's missing CTK3 build step;
 retry 2 follows the Node 22 timer-fixture repair and clean-checkout architecture
 authority reconciliation discovered by canonical acceptance; retry 3 freezes
@@ -229,7 +231,17 @@ cohesive product-result pager contract test lacked its permanent behavior-level 
   to be exactly zero, and still requires every present non-default maximum authority to be
   exactly four with at least one maximum observable. Conflicting, null, malformed, or
   nonzero duplicate authorities remain fail-closed. This control-plane normalization repair
-  adds no product capability. Every release observation
+  adds no product capability. Retry 18 follows the final pre-candidate audit exposing that
+  the 20-minute Oracle observer reused the first post-deployment `/path` while the report
+  demanded an operation newer than the observation start and every prior sample. It selects
+  the latest qualifying canonical operation regardless of journal order, binds the fixed
+  `VerifiedAfter` authority into each sample, accepts the confirmed candidate operation as
+  the first baseline, and requires each later sample to observe a successful `/path` newer
+  than the preceding remote observation. The exact 1,200-second authority contains only
+  its start and end samples, binds both endpoints and every adapter SHA to its probe spec,
+  and rejects padded windows. Cross-sample freshness drift now fails on the
+  affected sample instead of after the full window. This release-evidence repair adds no
+  product capability. Every release observation
 reports `phase=release-freeze` and `status=no-drift`, so both halves of
 `REQ-V080-020` are implemented. Explicit output is validated against the exact
 release-freeze phase and current registry identity, written only to a new

@@ -1,4 +1,4 @@
-[CmdletBinding(PositionalBinding = $false)]
+[CmdletBinding(PositionalBinding = $false, DefaultParameterSetName = 'LocalOverlay')]
 param(
     [Parameter(Mandatory = $true)]
     [string] $ManifestPath,
@@ -6,8 +6,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $SourceArchive,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'LocalOverlay')]
     [string] $OverlayArchive,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoteOverlay')]
+    [ValidatePattern('^/opt/clearra/sealed-release-inputs/private-overlay-no-config-[0-9a-f]{64}\.tar$')]
+    [string] $RemoteOverlayArchive,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoteOverlay')]
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string] $RemoteOverlaySha256,
 
     [Parameter(Mandatory = $true)]
     [string] $Ctk3DistArchive,
@@ -16,6 +24,8 @@ param(
     [string] $DependenciesArchive,
 
     [string] $IdentityFile,
+
+    [switch] $CleanupOnly,
 
     [switch] $AuditOnly
 )
@@ -55,6 +65,43 @@ function Get-ExactLeaf {
 function Get-ExactSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-OracleHostPlatform {
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Windows
+    )) {
+        return 'windows'
+    }
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Linux
+    )) {
+        return 'linux'
+    }
+    throw 'Oracle release tooling supports only Windows and Linux hosts.'
+}
+
+function Get-OracleSshConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform
+    )
+    if ($Platform -ceq 'windows') {
+        return 'NUL'
+    }
+    return '/dev/null'
+}
+
+function Assert-CanonicalRemoteOverlayAuthority {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Sha256
+    )
+    if ($Sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Path -cne "/opt/clearra/sealed-release-inputs/private-overlay-no-config-$Sha256.tar") {
+        throw 'Remote Oracle overlay authority is not canonical.'
+    }
 }
 
 function Assert-FrozenInput {
@@ -130,19 +177,21 @@ if ($auditValues.oracle_stage_manifest -cne 'ok' -or
 
 $manifestText = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $ManifestPath))
 $manifest = $manifestText | ConvertFrom-Json
+$remoteOverlayMode = $PSCmdlet.ParameterSetName -ceq 'RemoteOverlay'
+if ($remoteOverlayMode) {
+    Assert-CanonicalRemoteOverlayAuthority `
+        -Path $RemoteOverlayArchive `
+        -Sha256 $RemoteOverlaySha256
+    if ([string]$manifest.layers.overlay.sha256 -cne $RemoteOverlaySha256) {
+        throw 'Remote Oracle overlay authority does not match the frozen manifest.'
+    }
+}
 $uploads = @(
     [pscustomobject]@{
         Local = $SourceArchive
         RemoteName = 'source.tar.gz'
         Sha256 = [string]$manifest.layers.source.sha256
         Length = [long]$manifest.layers.source.size
-        Mode = '600'
-    }
-    [pscustomobject]@{
-        Local = $OverlayArchive
-        RemoteName = 'private-overlay-no-config.tar'
-        Sha256 = [string]$manifest.layers.overlay.sha256
-        Length = [long]$manifest.layers.overlay.size
         Mode = '600'
     }
     [pscustomobject]@{
@@ -174,6 +223,17 @@ $uploads = @(
         Mode = '600'
     }
 )
+if (-not $remoteOverlayMode) {
+    $uploads = @($uploads[0]) + @(
+        [pscustomobject]@{
+            Local = $OverlayArchive
+            RemoteName = 'private-overlay-no-config.tar'
+            Sha256 = [string]$manifest.layers.overlay.sha256
+            Length = [long]$manifest.layers.overlay.size
+            Mode = '600'
+        }
+    ) + @($uploads[1..($uploads.Count - 1)])
+}
 foreach ($upload in $uploads) {
     Assert-FrozenInput -FrozenInput $upload
 }
@@ -193,8 +253,10 @@ if ([string]::IsNullOrWhiteSpace($IdentityFile)) {
 }
 [void](Get-ExactLeaf -Path $IdentityFile -Label 'Oracle identity file')
 
+$hostPlatform = Get-OracleHostPlatform
+$sshConfigPath = Get-OracleSshConfigPath -Platform $hostPlatform
 $commonSshOptions = @(
-    '-F', 'NUL',
+    '-F', $sshConfigPath,
     '-i', $IdentityFile,
     '-o', 'BatchMode=yes',
     '-o', 'IdentitiesOnly=yes',
@@ -306,7 +368,6 @@ try {
             throw "Remote upload digest does not match: $($upload.RemoteName)"
         }
     }
-
     $bootstrapRemoteOutput = @(Invoke-ExactSsh @(
         'sudo', '-n', '/usr/bin/mktemp',
         "/usr/local/sbin/.clearra-oracle-inactive-stage-v080-$commitPrefix.XXXXXXXX"
@@ -336,14 +397,24 @@ try {
         throw 'Root-owned one-shot bootstrap digest does not match.'
     }
 
-    $attestation = @(Invoke-ExactSsh @(
+    $bootstrapArguments = @(
         'sudo', '-n', $bootstrapRemote,
         '--nonce', $stageNonce,
         '--self-sha256', $auditValues.oracle_bootstrap_sha256,
         '--self-path', $bootstrapRemote
-    ))
+    )
+    if ($CleanupOnly) {
+        $bootstrapArguments += '--cleanup-only'
+    }
+    if ($remoteOverlayMode) {
+        $bootstrapArguments += @(
+            '--remote-overlay-archive', $RemoteOverlayArchive,
+            '--remote-overlay-sha256', $RemoteOverlaySha256
+        )
+    }
+    $attestation = @(Invoke-ExactSsh $bootstrapArguments)
     $expectedAttestation = @(
-        'oracle_inactive_stage=ready',
+        $(if ($CleanupOnly) { 'oracle_inactive_stage=cleanup-complete' } else { 'oracle_inactive_stage=ready' }),
         "oracle_source_commit=$($auditValues.oracle_source_commit)",
         "oracle_release_id=$($auditValues.oracle_release_id)",
         "oracle_release_sha256=$($auditValues.oracle_release_sha256)",

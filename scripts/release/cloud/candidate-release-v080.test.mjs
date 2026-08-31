@@ -187,6 +187,28 @@ test("deploy resolves one tag to image@sha256 and independently seals zero traff
   assert.equal(deploy.some((argument) => argument.includes(":latest")), false);
 });
 
+test("deploy consumes an already sealed Cloud Build digest without resolving a mutable tag", async () => {
+  const calls = [];
+  const runJson = async (arguments_) => {
+    calls.push(arguments_);
+    if (arguments_[1] === "deploy") return { metadata: { name: "ignored" } };
+    if (arguments_[1] === "services") return serviceFixture();
+    if (arguments_[1] === "revisions") return revisionFixture();
+    throw new Error(`unexpected gcloud call: ${arguments_.join(" ")}`);
+  };
+  const result = await deployZeroTrafficCandidate({
+    projectId,
+    sourceCommit,
+    priorRevision,
+    jobBearerSecretVersion,
+    imageDigest,
+  }, { runJson });
+
+  assert.equal(result.imageDigest, imageDigest);
+  assert.equal(calls.some((arguments_) => arguments_[0] === "artifacts"), false);
+  assert.ok(calls.find((arguments_) => arguments_[1] === "deploy").includes(`--image=${imageDigest}`));
+});
+
 test("gcloud runner uses a closed Windows command shim and native non-Windows argv", () => {
   const arguments_ = [
     "run",

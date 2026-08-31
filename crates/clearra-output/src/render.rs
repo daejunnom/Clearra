@@ -1,5 +1,6 @@
 use core::fmt;
 
+use clearra_ctk3::operation_cells;
 use clearra_fumen::codec::{FumenLikeTrace, FumenLikeWriter};
 use clearra_fumen::{
     ActualFumenRenderColor, ActualFumenRenderDocument, ActualFumenRenderDocumentError,
@@ -72,6 +73,10 @@ impl ExactFieldDocumentFormat {
 /// The Discord transport limit is a second mandatory product gate. A render
 /// is public only when it satisfies both the renderer limits and this bound.
 pub const PUBLIC_BITMAP_ARTIFACT_MAX_BYTES: usize = 8 * 1024 * 1024;
+// The local CTK/Fumen result page follows the canonical Discord viewer pace.
+const FIELD_DOCUMENT_GIF_FRAME_DELAY_MS: u16 = 500;
+const FIELD_DOCUMENT_MIN_VIEW_ROWS: usize = 4;
+const FIELD_DOCUMENT_MAX_VIEW_ROWS: usize = 31;
 
 impl ExactBitmapOutputFormat {
     pub const fn as_str(self) -> &'static str {
@@ -209,7 +214,7 @@ impl RenderExactOutputGate {
                     },
                 )?;
                 let board = render_board(page, page.height)?;
-                ExactBitmapRenderer::render_board_png(&board, 16, limits)
+                ExactBitmapRenderer::render_connected_board_png(&board, 16, limits)
                     .map_err(FieldDocumentRenderError::Render)?
             }
             ExactBitmapOutputFormat::Gif => {
@@ -237,8 +242,13 @@ impl RenderExactOutputGate {
                 for page in &pages {
                     frames.push(render_board(page, max_height)?);
                 }
-                ExactBitmapRenderer::render_timeline_gif(&frames, 16, 160, limits)
-                    .map_err(FieldDocumentRenderError::Render)?
+                ExactBitmapRenderer::render_connected_timeline_gif(
+                    &frames,
+                    16,
+                    FIELD_DOCUMENT_GIF_FRAME_DELAY_MS,
+                    limits,
+                )
+                .map_err(FieldDocumentRenderError::Render)?
             }
         };
         if bytes.len() > PUBLIC_BITMAP_ARTIFACT_MAX_BYTES {
@@ -265,6 +275,7 @@ struct TypedRenderPage {
     width: usize,
     height: usize,
     cells_bottom_up: Vec<RenderCell>,
+    connection_groups_bottom_up: Vec<u32>,
     pending_garbage: Vec<RenderCell>,
 }
 
@@ -284,15 +295,30 @@ fn decode_render_pages(
                 .try_reserve(document.pages.len())
                 .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
             for (page_index, page) in document.pages.into_iter().enumerate() {
-                if page.height == 0
-                    || page.cells.len()
-                        != document
-                            .width
-                            .checked_mul(page.height)
-                            .ok_or(FieldDocumentRenderError::CapacityExceeded)?
+                if page.cells.len()
+                    != document
+                        .width
+                        .checked_mul(page.height)
+                        .ok_or(FieldDocumentRenderError::CapacityExceeded)?
                 {
                     return Err(FieldDocumentRenderError::InvalidPageShape { page_index });
                 }
+                let operation = page.operation;
+                let occupied = operation.map(operation_cells);
+                let mut render_height = page.height.max(FIELD_DOCUMENT_MIN_VIEW_ROWS);
+                if let Some(cells) = occupied {
+                    for (_, y) in cells {
+                        let Ok(y) = usize::try_from(y) else {
+                            continue;
+                        };
+                        render_height = render_height.max(y.saturating_add(1));
+                    }
+                }
+                render_height = render_height.min(FIELD_DOCUMENT_MAX_VIEW_ROWS);
+                let render_cell_count = document
+                    .width
+                    .checked_mul(render_height)
+                    .ok_or(FieldDocumentRenderError::CapacityExceeded)?;
                 let pending_garbage = match page.garbage {
                     Some(row) if row.len() == document.width => {
                         row.into_iter().map(ctk3_render_cell).collect()
@@ -302,10 +328,37 @@ fn decode_render_pages(
                     }
                     None => vec![RenderCell::Empty; document.width],
                 };
+                let mut cells_bottom_up = Vec::new();
+                cells_bottom_up
+                    .try_reserve_exact(render_cell_count)
+                    .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+                cells_bottom_up.resize(render_cell_count, RenderCell::Empty);
+                for (destination, color) in cells_bottom_up.iter_mut().zip(page.cells) {
+                    *destination = ctk3_render_cell(color);
+                }
+                let mut connection_groups_bottom_up = Vec::new();
+                connection_groups_bottom_up
+                    .try_reserve_exact(render_cell_count)
+                    .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+                connection_groups_bottom_up.resize(render_cell_count, 0);
+                if let (Some(operation), Some(cells)) = (operation, occupied) {
+                    for (x, y) in cells {
+                        let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+                            continue;
+                        };
+                        if x >= document.width || y >= render_height {
+                            continue;
+                        }
+                        let index = y * document.width + x;
+                        cells_bottom_up[index] = ctk3_piece_render_cell(operation.piece);
+                        connection_groups_bottom_up[index] = 1;
+                    }
+                }
                 pages.push(TypedRenderPage {
                     width: document.width,
-                    height: page.height,
-                    cells_bottom_up: page.cells.into_iter().map(ctk3_render_cell).collect(),
+                    height: render_height,
+                    cells_bottom_up,
+                    connection_groups_bottom_up,
                     pending_garbage,
                 });
             }
@@ -328,6 +381,7 @@ fn decode_render_pages(
                         .copied()
                         .map(fumen_render_cell)
                         .collect(),
+                    connection_groups_bottom_up: vec![0; page.width() * page.height()],
                     pending_garbage: page
                         .pending_garbage()
                         .iter()
@@ -360,18 +414,32 @@ fn render_board(
         .try_reserve_exact(cell_count)
         .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
     cells_top_down.resize(cell_count, RenderCell::Empty);
+    let mut connection_groups_top_down = Vec::new();
+    connection_groups_top_down
+        .try_reserve_exact(cell_count)
+        .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
+    connection_groups_top_down.resize(cell_count, 0);
     for source_y in 0..page.height {
         let destination_y = target_field_height - 1 - source_y;
         let source_offset = source_y * page.width;
         let destination_offset = destination_y * page.width;
         cells_top_down[destination_offset..destination_offset + page.width]
             .copy_from_slice(&page.cells_bottom_up[source_offset..source_offset + page.width]);
+        connection_groups_top_down[destination_offset..destination_offset + page.width]
+            .copy_from_slice(
+                &page.connection_groups_bottom_up[source_offset..source_offset + page.width],
+            );
     }
     let garbage_offset = target_field_height * page.width;
     cells_top_down[garbage_offset..garbage_offset + page.width]
         .copy_from_slice(&page.pending_garbage);
-    RenderBoard::from_cells(page.width, board_height, &cells_top_down)
-        .map_err(FieldDocumentRenderError::Render)
+    RenderBoard::from_cells_with_connection_groups(
+        page.width,
+        board_height,
+        &cells_top_down,
+        &connection_groups_top_down,
+    )
+    .map_err(FieldDocumentRenderError::Render)
 }
 
 const fn ctk3_render_cell(color: crate::Ctk3Color) -> RenderCell {
@@ -386,6 +454,10 @@ const fn ctk3_render_cell(color: crate::Ctk3Color) -> RenderCell {
         crate::Ctk3Color::Piece(crate::Ctk3Piece::J) => RenderCell::J,
         crate::Ctk3Color::Piece(crate::Ctk3Piece::L) => RenderCell::L,
     }
+}
+
+const fn ctk3_piece_render_cell(piece: crate::Ctk3Piece) -> RenderCell {
+    ctk3_render_cell(crate::Ctk3Color::Piece(piece))
 }
 
 const fn fumen_render_cell(color: ActualFumenRenderColor) -> RenderCell {

@@ -119,6 +119,17 @@ test("rejects removal of the final-source attempt journal regression", async () 
   assert.notEqual(result.status, 0, diagnostic(result));
 });
 
+test("rejects removal of the durable Discord checkpoint and recovery-debt regressions", async () => {
+  const canonicalCommand = "node --test scripts/release/deployment-impact.test.mjs scripts/release/discord-catalog-recovery-authority.test.mjs scripts/release/discord-deploy-workflow.test.mjs scripts/release/discord-deployment-recovery.test.mjs scripts/release/discord-deployment-state.test.mjs scripts/release/discord-production-checkpoint-receipt.test.mjs scripts/release/discord-recovery-debt.test.mjs";
+  const weakenedWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    canonicalCommand,
+    canonicalCommand.replace(" scripts/release/discord-recovery-debt.test.mjs", ""),
+  );
+  const result = await runValidator(weakenedWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
 test("rejects disabled Linux typed pc.tiling result enforcement", async () => {
   const disabledPackageScript = replaceExactlyOnce(
     canonicalPackageScript,
@@ -570,6 +581,33 @@ for (const [name, mutate] of [
         source,
         '            --base-path "/${{ github.event.repository.name }}" \\\n            --products dist\n',
         '            --base-path "/${{ github.event.repository.name }}"\n',
+      ),
+  ],
+  [
+    "rejects tag publication without checkpoint receipt rematerialization",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          node scripts/release/finalize-discord-production-checkpoint.mjs verify-tag \\\n",
+        "          echo finalize-discord-production-checkpoint.mjs verify-tag \\\n",
+      ),
+  ],
+  [
+    "rejects immutable publication without checkpoint Release readback",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          node scripts/release/finalize-discord-production-checkpoint.mjs verify-release \\\n",
+        "          echo finalize-discord-production-checkpoint.mjs verify-release \\\n",
+      ),
+  ],
+  [
+    "rejects checkpoint Release without the exact source target",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        '              --target "$GITHUB_SHA" \\\n',
+        '              --target main \\\n',
       ),
   ],
   [

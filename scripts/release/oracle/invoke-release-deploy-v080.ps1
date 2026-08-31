@@ -1,13 +1,11 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('capture-rollback-authority', 'verify-candidate', 'observe-candidate', 'restore-prior-and-verify')]
+    [ValidateSet('capture-prestage-authority', 'cleanup-prestage-backup', 'capture-rollback-authority', 'verify-candidate', 'observe-candidate', 'classify-current-authority', 'restore-prior-and-verify')]
     [string] $Operation,
 
-    [Parameter(Mandatory = $true)]
     [string] $ScriptReleaseId,
 
-    [Parameter(Mandatory = $true)]
     [string] $ScriptReleaseSha256,
 
     [string] $PriorRevision,
@@ -72,6 +70,95 @@ function Get-ExactLeaf {
 function Get-ExactSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-OracleHostPlatform {
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Windows
+    )) {
+        return 'windows'
+    }
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Linux
+    )) {
+        return 'linux'
+    }
+    throw 'Oracle release tooling supports only Windows and Linux hosts.'
+}
+
+function Get-OracleSshConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform
+    )
+    if ($Platform -ceq 'windows') {
+        return 'NUL'
+    }
+    return '/dev/null'
+}
+
+function Get-OraclePosixSyntaxAuditContract {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+    if ($Platform -ceq 'windows') {
+        return [pscustomobject]@{
+            ProjectionCommand = 'wsl.exe'
+            ProjectionArguments = [string[]]@(
+                '-e', '/usr/bin/wslpath', '-a', '--', $Path
+            )
+            SyntaxCommand = 'wsl.exe'
+            SyntaxArguments = [string[]]@(
+                '-e', '/usr/bin/dash', '-n', '--'
+            )
+        }
+    }
+    return [pscustomobject]@{
+        ProjectionCommand = $null
+        ProjectionArguments = [string[]]@()
+        SyntaxCommand = '/usr/bin/dash'
+        SyntaxArguments = [string[]]@('-n', '--', $Path)
+    }
+}
+
+function Invoke-OraclePosixSyntaxAudit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ProjectionError,
+
+        [Parameter(Mandatory = $true)]
+        [string] $SyntaxError
+    )
+    $contract = Get-OraclePosixSyntaxAuditContract -Platform $Platform -Path $Path
+    $syntaxArguments = [string[]]@($contract.SyntaxArguments)
+    if ($null -ne $contract.ProjectionCommand) {
+        $projectionCommand = [string]$contract.ProjectionCommand
+        $projectionArguments = [string[]]@($contract.ProjectionArguments)
+        $projectedPath = @(& $projectionCommand @projectionArguments)
+        if ($LASTEXITCODE -ne 0 -or $projectedPath.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace($projectedPath[0])) {
+            throw $ProjectionError
+        }
+        $syntaxArguments += [string]$projectedPath[0]
+    }
+    $syntaxCommand = [string]$contract.SyntaxCommand
+    $null = & $syntaxCommand @syntaxArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw $SyntaxError
+    }
 }
 
 function Get-TextSha256 {
@@ -171,7 +258,7 @@ function Get-CanonicalTimestamp {
 function Assert-UnusedArguments {
     param(
         [Parameter(Mandatory = $true)][hashtable] $Values,
-        [Parameter(Mandatory = $true)][string[]] $Allowed
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Allowed
     )
     foreach ($entry in $Values.GetEnumerator()) {
         if ($entry.Key -notin $Allowed -and -not [string]::IsNullOrEmpty([string]$entry.Value)) {
@@ -287,18 +374,19 @@ $expectedFingerprintLine = "256 $expectedFingerprint 157.151.254.175 (ED25519)"
 if ($LASTEXITCODE -ne 0 -or $fingerprint.Count -ne 1 -or $fingerprint[0] -cne $expectedFingerprintLine) {
     throw 'Pinned Oracle host-key fingerprint does not match.'
 }
-$wslLauncherPath = @(& wsl.exe -e wslpath -a -- $launcherPath)
-if ($LASTEXITCODE -ne 0 -or $wslLauncherPath.Count -ne 1 -or [string]::IsNullOrWhiteSpace($wslLauncherPath[0])) {
-    throw 'The tracked Oracle deployment launcher could not be projected into WSL.'
-}
-& wsl.exe -e dash -n $wslLauncherPath[0]
-if ($LASTEXITCODE -ne 0) {
-    throw 'The tracked Oracle deployment launcher failed its POSIX syntax audit.'
-}
+$hostPlatform = Get-OracleHostPlatform
+$sshConfigPath = Get-OracleSshConfigPath -Platform $hostPlatform
+Invoke-OraclePosixSyntaxAudit `
+    -Platform $hostPlatform `
+    -Path $launcherPath `
+    -ProjectionError 'The tracked Oracle deployment launcher could not be projected into WSL.' `
+    -SyntaxError 'The tracked Oracle deployment launcher failed its POSIX syntax audit.'
 
-[void](Require-Match -Value $ScriptReleaseId -Pattern $candidateReleaseIdPattern -Label 'Script release ID')
-[void](Require-Match -Value $ScriptReleaseSha256 -Pattern $sha256Pattern -Label 'Script release SHA-256')
 [void](Require-Match -Value $DeploymentNonce -Pattern $sha256Pattern -Label 'Deployment nonce')
+if ($Operation -notin @('capture-prestage-authority', 'cleanup-prestage-backup')) {
+    [void](Require-Match -Value $ScriptReleaseId -Pattern $candidateReleaseIdPattern -Label 'Script release ID')
+    [void](Require-Match -Value $ScriptReleaseSha256 -Pattern $sha256Pattern -Label 'Script release SHA-256')
+}
 
 $operationValues = @{
     PriorRevision = $PriorRevision
@@ -319,14 +407,39 @@ $operationValues = @{
     PriorRuntimeAuthoritySha256 = $PriorRuntimeAuthoritySha256
     PriorJobUrl = $PriorJobUrl
 }
-$remoteArguments = @(
-    'sudo', '-n', $remoteLauncherPath,
-    '--operation', $Operation,
-    '--script-release-id', $ScriptReleaseId,
-    '--script-release-sha256', $ScriptReleaseSha256
-)
+$remoteArguments = if ($Operation -in @('capture-prestage-authority', 'cleanup-prestage-backup')) {
+    @(
+        'sudo', '-n', '/usr/bin/node',
+        '/opt/clearra/current/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
+    )
+} else {
+    @(
+        'sudo', '-n', $remoteLauncherPath,
+        '--operation', $Operation,
+        '--script-release-id', $ScriptReleaseId,
+        '--script-release-sha256', $ScriptReleaseSha256
+    )
+}
 
 switch ($Operation) {
+    'capture-prestage-authority' {
+        Assert-UnusedArguments -Values $operationValues -Allowed @(
+            'PriorRevision', 'PriorRuntimeAuthorityKind'
+        )
+        [void](Require-Match -Value $PriorRevision -Pattern $releaseIdPattern -Label 'Prior Cloud revision')
+        if ($PriorRuntimeAuthorityKind -cnotin $runtimeAuthorityKinds) {
+            throw 'Prior runtime authority kind is invalid.'
+        }
+        $remoteArguments += @(
+            '--prior-revision', $PriorRevision,
+            '--prior-runtime-authority-kind', $PriorRuntimeAuthorityKind,
+            '--deployment-nonce', $DeploymentNonce
+        )
+    }
+    'cleanup-prestage-backup' {
+        Assert-UnusedArguments -Values $operationValues -Allowed @()
+        $remoteArguments += @('--cleanup-deployment-nonce', $DeploymentNonce)
+    }
     'capture-rollback-authority' {
         Assert-UnusedArguments -Values $operationValues -Allowed @(
             'PriorRevision', 'PriorRuntimeAuthorityKind'
@@ -414,6 +527,56 @@ switch ($Operation) {
             '--verified-after', $canonicalVerifiedAfter
         )
     }
+    'classify-current-authority' {
+        Assert-UnusedArguments -Values $operationValues -Allowed @(
+            'PriorRevision', 'SourceCommit', 'CandidateUrl', 'CandidateRevision',
+            'OracleReleaseId', 'OracleReleaseSha256', 'OracleSettingsSha256',
+            'PriorRelease', 'PriorReleaseId', 'PriorReleaseSha256',
+            'PriorSettingsSha256', 'PriorRuntimeAuthorityKind',
+            'PriorRuntimeAuthoritySha256', 'PriorJobUrl'
+        )
+        [void](Require-Match -Value $SourceCommit -Pattern $commitPattern -Label 'Source commit')
+        $commitPrefix = $SourceCommit.Substring(0, 7)
+        if ($ScriptReleaseId -cne "v0.8.0-$commitPrefix" -or
+            $OracleReleaseId -cne $ScriptReleaseId -or
+            $OracleReleaseSha256 -cne $ScriptReleaseSha256) {
+            throw 'Candidate Oracle authority does not match the script release.'
+        }
+        $canonicalCandidateUrl = Get-CanonicalOrigin -Value $CandidateUrl
+        if ($CandidateRevision -cne "clearra-current-job-v080-$commitPrefix") {
+            throw 'Candidate revision does not match the source commit.'
+        }
+        [void](Require-Match -Value $OracleSettingsSha256 -Pattern $sha256Pattern -Label 'Oracle settings SHA-256')
+        [void](Require-Match -Value $PriorRevision -Pattern $releaseIdPattern -Label 'Prior Cloud revision')
+        [void](Require-Match -Value $PriorReleaseId -Pattern $releaseIdPattern -Label 'Prior Oracle release ID')
+        if ($PriorRelease -cne "/opt/clearra/releases/$PriorReleaseId") {
+            throw 'Prior Oracle release path does not match its release ID.'
+        }
+        [void](Require-Match -Value $PriorReleaseSha256 -Pattern $sha256Pattern -Label 'Prior Oracle release SHA-256')
+        [void](Require-Match -Value $PriorSettingsSha256 -Pattern $sha256Pattern -Label 'Prior Oracle settings SHA-256')
+        [void](Require-Match -Value $PriorRuntimeAuthoritySha256 -Pattern $sha256Pattern -Label 'Prior runtime authority SHA-256')
+        if ($PriorRuntimeAuthorityKind -cnotin $runtimeAuthorityKinds) {
+            throw 'Prior runtime authority kind is invalid.'
+        }
+        $canonicalPriorJobUrl = Get-CanonicalJobUrl -Value $PriorJobUrl
+        $remoteArguments += @(
+            '--source-commit', $SourceCommit,
+            '--candidate-url', $canonicalCandidateUrl,
+            '--candidate-revision', $CandidateRevision,
+            '--oracle-release-id', $OracleReleaseId,
+            '--oracle-release-sha256', $OracleReleaseSha256,
+            '--oracle-settings-sha256', $OracleSettingsSha256,
+            '--prior-release', $PriorRelease,
+            '--prior-release-id', $PriorReleaseId,
+            '--prior-release-sha256', $PriorReleaseSha256,
+            '--prior-settings-sha256', $PriorSettingsSha256,
+            '--prior-runtime-authority-kind', $PriorRuntimeAuthorityKind,
+            '--prior-runtime-authority-sha256', $PriorRuntimeAuthoritySha256,
+            '--prior-job-url', $canonicalPriorJobUrl,
+            '--prior-revision', $PriorRevision,
+            '--deployment-nonce', $DeploymentNonce
+        )
+    }
     'restore-prior-and-verify' {
         Assert-UnusedArguments -Values $operationValues -Allowed @(
             'PriorRevision', 'Proof', 'VerifiedAfter', 'PriorRelease',
@@ -461,8 +624,8 @@ switch ($Operation) {
 
 $evidenceOutputPath = $null
 if (-not [string]::IsNullOrWhiteSpace($EvidenceOutput)) {
-    if ($Operation -notin @('capture-rollback-authority', 'observe-candidate')) {
-        throw 'Oracle evidence output is only valid for capture or observation.'
+    if ($Operation -notin @('capture-prestage-authority', 'capture-rollback-authority', 'observe-candidate', 'classify-current-authority')) {
+        throw 'Oracle evidence output is only valid for capture, observation, or classification.'
     }
     if ($AuditOnly) {
         throw 'Oracle evidence output is unavailable in AuditOnly.'
@@ -501,7 +664,7 @@ if (($identityItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
 }
 
 $commonSshOptions = @(
-    '-F', 'NUL',
+    '-F', $sshConfigPath,
     '-i', $IdentityFile,
     '-o', 'BatchMode=yes',
     '-o', 'IdentitiesOnly=yes',
@@ -537,6 +700,49 @@ if ($LASTEXITCODE -ne 0) {
 
 $validatedEvidence = $null
 switch ($Operation) {
+    'capture-prestage-authority' {
+        if ($output.Count -ne 1) {
+            throw 'Oracle prestage authority capture returned invalid output cardinality.'
+        }
+        try {
+            $capture = $output[0] | ConvertFrom-Json
+        } catch {
+            throw 'Oracle prestage authority capture returned invalid JSON.'
+        }
+        $expectedKeys = @(
+            'priorRevision', 'priorOracleRelease', 'priorOracleReleaseId',
+            'priorOracleReleaseSha256', 'priorOracleSettingsBackup',
+            'priorOracleSettingsSha256', 'priorRuntimeAuthorityKind',
+            'priorRuntimeAuthoritySha256', 'priorJobUrl', 'deploymentNonce'
+        )
+        $actualKeys = @($capture.PSObject.Properties.Name)
+        if ($actualKeys.Count -ne $expectedKeys.Count -or
+            (Compare-Object -CaseSensitive -SyncWindow 0 $expectedKeys $actualKeys) -or
+            $capture.priorRevision -cne $PriorRevision -or
+            $capture.priorRuntimeAuthorityKind -cne $PriorRuntimeAuthorityKind -or
+            $capture.deploymentNonce -cne $DeploymentNonce) {
+            throw 'Oracle prestage authority capture returned an invalid closed result.'
+        }
+        $validatedEvidence = $capture
+    }
+    'cleanup-prestage-backup' {
+        if ($output.Count -ne 1) {
+            throw 'Oracle prestage backup cleanup returned invalid output cardinality.'
+        }
+        try {
+            $cleanup = $output[0] | ConvertFrom-Json
+        } catch {
+            throw 'Oracle prestage backup cleanup returned invalid JSON.'
+        }
+        $expectedKeys = @('deploymentNonce', 'backupRemoved')
+        $actualKeys = @($cleanup.PSObject.Properties.Name)
+        if ($actualKeys.Count -ne $expectedKeys.Count -or
+            (Compare-Object -CaseSensitive -SyncWindow 0 $expectedKeys $actualKeys) -or
+            $cleanup.deploymentNonce -cne $DeploymentNonce -or
+            $cleanup.backupRemoved -isnot [bool]) {
+            throw 'Oracle prestage backup cleanup returned an invalid closed result.'
+        }
+    }
     'capture-rollback-authority' {
         if ($output.Count -ne 1) {
             throw 'Oracle rollback authority capture returned invalid output cardinality.'
@@ -580,7 +786,7 @@ switch ($Operation) {
             'contract', 'sourceCommit', 'candidateUrl', 'candidateRevision',
             'jobUrl', 'oracleReleaseId', 'activeReleasePath',
             'oracleReleaseSha256', 'oracleSettingsSha256', 'deploymentNonce',
-            'gatewayPid', 'gatewayStartMonotonicUsec', 'bootId',
+            'verifiedAfter', 'gatewayPid', 'gatewayStartMonotonicUsec', 'bootId',
             'readyRecordObserved', 'freshOperationAt', 'observedAt',
             'runtimeIdentity'
         )
@@ -603,11 +809,70 @@ switch ($Operation) {
             $observation.readyRecordObserved -cne $true) {
             throw 'Oracle candidate observation returned an invalid closed result.'
         }
+        $observation.verifiedAfter = Get-CanonicalTimestamp `
+            -Value $observation.verifiedAfter
+        if ($observation.verifiedAfter -cne $canonicalVerifiedAfter) {
+            throw 'Oracle candidate observation returned an invalid closed result.'
+        }
         $observation.freshOperationAt = Get-CanonicalTimestamp `
             -Value $observation.freshOperationAt
         $observation.observedAt = Get-CanonicalTimestamp `
             -Value $observation.observedAt
+        if ([StringComparer]::Ordinal.Compare(
+                $observation.freshOperationAt,
+                $observation.verifiedAfter
+            ) -lt 0 -or
+            [StringComparer]::Ordinal.Compare(
+                $observation.observedAt,
+                $observation.freshOperationAt
+            ) -lt 0) {
+            throw 'Oracle candidate observation timestamps are out of order.'
+        }
         $validatedEvidence = $observation
+    }
+    'classify-current-authority' {
+        if ($output.Count -ne 1) {
+            throw 'Oracle current authority classification returned invalid output cardinality.'
+        }
+        try {
+            $classification = $output[0] | ConvertFrom-Json
+        } catch {
+            throw 'Oracle current authority classification returned invalid JSON.'
+        }
+        $expectedKeys = @(
+            'contract', 'state', 'reason', 'activeReleaseId',
+            'activeReleasePath', 'activeReleaseSha256', 'activeSettingsSha256',
+            'activeJobUrl', 'runtimeAuthorityKind', 'runtimeAuthoritySha256'
+        )
+        $actualKeys = @($classification.PSObject.Properties.Name)
+        if ($actualKeys.Count -ne $expectedKeys.Count -or
+            (Compare-Object -CaseSensitive -SyncWindow 0 $expectedKeys $actualKeys) -or
+            $classification.contract -cne 'clearra.oracle.current-authority-classification.v1' -or
+            $classification.state -cnotin @('prior', 'candidate', 'other') -or
+            [string]::IsNullOrWhiteSpace([string]$classification.reason)) {
+            throw 'Oracle current authority classification returned an invalid closed result.'
+        }
+        if ($classification.state -ceq 'prior' -and (
+                $classification.activeReleaseId -cne $PriorReleaseId -or
+                $classification.activeReleasePath -cne $PriorRelease -or
+                $classification.activeReleaseSha256 -cne $PriorReleaseSha256 -or
+                $classification.activeSettingsSha256 -cne $PriorSettingsSha256 -or
+                $classification.activeJobUrl -cne (Get-CanonicalJobUrl -Value $PriorJobUrl) -or
+                $classification.runtimeAuthorityKind -cne $PriorRuntimeAuthorityKind -or
+                $classification.runtimeAuthoritySha256 -cne $PriorRuntimeAuthoritySha256)) {
+            throw 'Oracle prior classification differs from the sealed authority.'
+        }
+        if ($classification.state -ceq 'candidate' -and (
+                $classification.activeReleaseId -cne $OracleReleaseId -or
+                $classification.activeReleasePath -cne "/opt/clearra/releases/$OracleReleaseId" -or
+                $classification.activeReleaseSha256 -cne $OracleReleaseSha256 -or
+                $classification.activeSettingsSha256 -cne $OracleSettingsSha256 -or
+                $classification.activeJobUrl -cne "$(Get-CanonicalOrigin -Value $CandidateUrl)/jobs" -or
+                $classification.runtimeAuthorityKind -cne 'clearra.rollback.runtime-identity.v1' -or
+                $classification.runtimeAuthoritySha256 -cnotmatch $sha256Pattern)) {
+            throw 'Oracle candidate classification differs from the sealed authority.'
+        }
+        $validatedEvidence = $classification
     }
     'restore-prior-and-verify' {
         if ($output.Count -ne 1 -or $output[0] -cne 'oracle_rollback=verified') {

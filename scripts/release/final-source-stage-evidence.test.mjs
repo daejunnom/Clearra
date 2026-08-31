@@ -187,6 +187,35 @@ test("deployment stage rejects Pages, Discord, Cloud, and Oracle cross-producer 
   }
 });
 
+test("deployment stage binds the exact 1200-second interval and adapter set to its probe spec", () => {
+  {
+    const fixture = deploymentFixture();
+    const options = structuredClone(fixture.options);
+    options.productionProbeSpec.interval_seconds = 1199;
+    assert.throws(
+      () => createDeploymentStageEvidence(options),
+      /probe spec interval is not the exact release window/u,
+    );
+  }
+
+  {
+    const fixture = deploymentFixture();
+    const options = structuredClone(fixture.options);
+    options.productionProbeSpec.probes[0].sha256 = "b".repeat(64);
+    options.productionObservationReport.probe_spec_sha256 = canonicalSha256(
+      options.productionProbeSpec,
+    );
+    const { report_sha256: ignoredReportSha256, ...unsignedObservation } =
+      options.productionObservationReport;
+    void ignoredReportSha256;
+    options.productionObservationReport = sealCanonicalReport(unsignedObservation);
+    assert.throws(
+      () => createDeploymentStageEvidence(options),
+      /observation adapters differ from its exact probe spec/u,
+    );
+  }
+});
+
 test("Oracle capture and observation adapters are closed, source-bound, and secret-free", () => {
   const fixture = deploymentFixture();
   assert.equal(validateOracleRollbackCapture(fixture.options.oracleRollbackCapture), fixture.options.oracleRollbackCapture);
@@ -207,6 +236,43 @@ test("Oracle capture and observation adapters are closed, source-bound, and secr
       sourceCommit: "2".repeat(40),
     }, { expectedSourceCommit: COMMIT }),
     /source differs/u,
+  );
+  assert.throws(
+    () => validateOracleObservation({
+      ...fixture.options.oracleObservation,
+      verifiedAfter: "2026-08-30T00:02:00.001Z",
+    }, { expectedSourceCommit: COMMIT }),
+    /verified-after\/fresh operation authority is out of order/u,
+  );
+});
+
+test("deployment stage binds direct Oracle verified-after authority to production identity", () => {
+  const fixture = deploymentFixture();
+  const options = structuredClone(fixture.options);
+  const oracleSurface = options.productionObservationReport.surfaces.find(
+    ({ surface }) => surface === "oracle",
+  );
+  oracleSurface.identity.verified_after = "2026-08-29T23:59:59.999Z";
+  oracleSurface.identity_sha256 = canonicalSha256(oracleSurface.identity);
+  for (const observation of oracleSurface.observations) {
+    observation.identity_sha256 = oracleSurface.identity_sha256;
+    observation.freshness.verified_after = oracleSurface.identity.verified_after;
+    observation.freshness.operation_marker = canonicalSha256({
+      contract: "clearra.oracle.candidate-observation.v1",
+      source_commit: oracleSurface.identity.source_commit,
+      candidate_revision: oracleSurface.identity.candidate_revision,
+      verified_after: oracleSurface.identity.verified_after,
+      fresh_operation_at: observation.freshness.fresh_operation_at,
+      observed_at: observation.freshness.observed_at,
+    });
+  }
+  const { report_sha256: ignoredReportSha256, ...unsignedObservation } =
+    options.productionObservationReport;
+  void ignoredReportSha256;
+  options.productionObservationReport = sealCanonicalReport(unsignedObservation);
+  assert.throws(
+    () => createDeploymentStageEvidence(options),
+    /observed Oracle identity differs from its direct read-only authority/u,
   );
 });
 
@@ -552,6 +618,7 @@ function oracleObservationAuthority(smoke, nonce) {
     gatewayStartMonotonicUsec: 123456789,
     bootId: "12345678-1234-1234-9234-123456789abc",
     readyRecordObserved: true,
+    verifiedAfter: "2026-08-30T00:00:00.000Z",
     freshOperationAt: "2026-08-30T00:02:00.000Z",
     observedAt: "2026-08-30T00:02:01.000Z",
     runtimeIdentity: {
@@ -639,7 +706,8 @@ function productionObservation({ catalog, prior, sync, smoke, pages, oracleObser
       deployment_nonce: oracleObservation.deploymentNonce,
       gateway_pid: oracleObservation.gatewayPid,
       gateway_start_monotonic_usec: oracleObservation.gatewayStartMonotonicUsec,
-      boot_id: oracleObservation.bootId, ready_record_observed: true, status: "active",
+      boot_id: oracleObservation.bootId, ready_record_observed: true,
+      verified_after: oracleObservation.verifiedAfter, status: "active",
     },
     pages: {
       source_commit: COMMIT, engine_build_id: COMMIT, version: "0.8.0",
@@ -682,9 +750,11 @@ function freshness(surface, identity, sequence) {
         contract: "clearra.oracle.candidate-observation.v1",
         source_commit: identity.source_commit,
         candidate_revision: identity.candidate_revision,
+        verified_after: identity.verified_after,
         fresh_operation_at: observedAt,
         observed_at: observedAt,
       }),
+      verified_after: identity.verified_after,
       fresh_operation_at: observedAt,
       observed_at: observedAt,
     };

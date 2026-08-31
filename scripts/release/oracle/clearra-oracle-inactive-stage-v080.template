@@ -39,6 +39,8 @@ canonical_launcher=/usr/local/sbin/clearra-oracle-release-deploy
 stage_nonce=
 self_sha256=
 self_path=
+remote_overlay_archive=
+remote_overlay_sha256=
 input_root=
 stage_root=
 test_parent=
@@ -49,6 +51,7 @@ launcher_backup=
 digester_installed=0
 launcher_installed=0
 tools_committed=0
+cleanup_only=0
 
 fail() {
   /usr/bin/printf '%s\n' 'oracle_inactive_stage=failed' >&2
@@ -73,6 +76,104 @@ is_hex32() {
 
 sha256_of() {
   /usr/bin/sha256sum -- "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+copy_remote_overlay() {
+  copy_source=$1
+  copy_expected=$2
+  copy_destination=$3
+  /usr/bin/python3 - "$copy_source" "$copy_expected" "$copy_destination" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source, expected, destination = sys.argv[1:]
+test_root = os.environ.get("CLEARRA_REMOTE_OVERLAY_TEST_ROOT") if os.geteuid() != 0 else None
+authority_uid = os.geteuid() if test_root else 0
+authority_gid = os.getegid() if test_root else 0
+sealed_root = test_root or "/opt/clearra/sealed-release-inputs"
+canonical = f"{sealed_root}/private-overlay-no-config-{expected}.tar"
+if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+    raise SystemExit(2)
+if source != canonical or os.path.dirname(destination) == "":
+    raise SystemExit(2)
+parent_paths = [test_root] if test_root else []
+if not test_root:
+    current = "/"
+    for component in source.strip("/").split("/")[:-1]:
+        current = os.path.join(current, component)
+        parent_paths.append(current)
+for current in parent_paths:
+    metadata = os.lstat(current)
+    if (not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != authority_uid or metadata.st_gid != authority_gid
+            or stat.S_IMODE(metadata.st_mode) & 0o022):
+        raise SystemExit(2)
+source_fd = destination_fd = None
+created = False
+try:
+    source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    metadata = os.fstat(source_fd)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != authority_uid
+            or metadata.st_gid != authority_gid or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_size <= 0):
+        raise OSError("sealed overlay metadata rejected")
+    if test_root and os.environ.get("CLEARRA_REMOTE_OVERLAY_TEST_SWAP") == "1":
+        os.replace(source + ".swap", source)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise OSError("sealed overlay digest rejected")
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    destination_fd = os.open(destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    created = True
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        view = memoryview(chunk)
+        while view:
+            written = os.write(destination_fd, view)
+            view = view[written:]
+    os.fsync(destination_fd)
+    os.close(destination_fd)
+    destination_fd = None
+    if test_root and os.environ.get("CLEARRA_REMOTE_OVERLAY_TEST_CORRUPT_COPY") == "1":
+        with open(destination, "ab") as corrupt_copy:
+            corrupt_copy.write(b"drift")
+    destination_fd = os.open(destination, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    copied = os.fstat(destination_fd)
+    if (not stat.S_ISREG(copied.st_mode) or copied.st_uid != authority_uid or copied.st_gid != authority_gid
+            or stat.S_IMODE(copied.st_mode) != 0o600 or copied.st_nlink != 1
+            or copied.st_size != metadata.st_size):
+        raise OSError("copied overlay metadata rejected")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(destination_fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise OSError("copied overlay digest rejected")
+except BaseException:
+    if created:
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
+    raise
+finally:
+    if source_fd is not None:
+        os.close(source_fd)
+    if destination_fd is not None:
+        os.close(destination_fd)
+PY
 }
 
 require_root_regular_mode() {
@@ -311,21 +412,24 @@ copy_root_input() {
   [ -d "$upload_root" ] && [ ! -L "$upload_root" ] || fail 77
   [ "$(/usr/bin/readlink -f -- "$upload_root")" = "$upload_root" ] || fail 77
   [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_root")" = '1001:1001:700' ] || fail 77
-  upload_unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
-    ! -name source.tar.gz \
-    ! -name private-overlay-no-config.tar \
-    ! -name ctk3-dist.tar \
-    ! -name node_modules.tar \
-    ! -name clearra-oracle-release-deploy \
-    ! -name clearra-release-tree-digest.py \
-    ! -name clearra-oracle-inactive-stage-v080 \
-    -print -quit) || fail 77
+  if [ "$overlay_mode" = local ]; then
+    upload_unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
+      ! -name source.tar.gz ! -name private-overlay-no-config.tar ! -name ctk3-dist.tar \
+      ! -name node_modules.tar ! -name clearra-oracle-release-deploy \
+      ! -name clearra-release-tree-digest.py ! -name clearra-oracle-inactive-stage-v080 -print -quit) || fail 77
+    upload_expected_count=7
+  else
+    upload_unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
+      ! -name source.tar.gz ! -name ctk3-dist.tar ! -name node_modules.tar \
+      ! -name clearra-oracle-release-deploy ! -name clearra-release-tree-digest.py \
+      ! -name clearra-oracle-inactive-stage-v080 -print -quit) || fail 77
+    upload_expected_count=6
+  fi
   [ -z "$upload_unexpected" ] || fail 77
-  [ "$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 7 ] || fail 77
+  [ "$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = "$upload_expected_count" ] || fail 77
 
   for upload_name in \
     source.tar.gz \
-    private-overlay-no-config.tar \
     ctk3-dist.tar \
     node_modules.tar \
     clearra-oracle-release-deploy \
@@ -335,6 +439,13 @@ copy_root_input() {
     [ -f "$upload_path" ] && [ ! -L "$upload_path" ] || fail 77
     [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_path")" = '1001:1001:600' ] || fail 77
   done
+  if [ "$overlay_mode" = local ]; then
+    upload_path=$upload_root/private-overlay-no-config.tar
+    [ -f "$upload_path" ] && [ ! -L "$upload_path" ] || fail 77
+    [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_path")" = '1001:1001:600' ] || fail 77
+  else
+    [ ! -e "$upload_root/private-overlay-no-config.tar" ] && [ ! -L "$upload_root/private-overlay-no-config.tar" ] || fail 77
+  fi
   upload_self=$upload_root/clearra-oracle-inactive-stage-v080
   [ -f "$upload_self" ] && [ ! -L "$upload_self" ] || fail 77
   [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_self")" = '1001:1001:700' ] || fail 77
@@ -345,7 +456,11 @@ copy_root_input() {
   [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$input_root")" = '0:0:700' ] || fail 77
 
   /usr/bin/install -o root -g root -m 0600 -- "$upload_root/source.tar.gz" "$input_root/source.tar.gz"
-  /usr/bin/install -o root -g root -m 0600 -- "$upload_root/private-overlay-no-config.tar" "$input_root/private-overlay-no-config.tar"
+  if [ "$overlay_mode" = local ]; then
+    /usr/bin/install -o root -g root -m 0600 -- "$upload_root/private-overlay-no-config.tar" "$input_root/private-overlay-no-config.tar"
+  else
+    copy_remote_overlay "$remote_overlay_archive" "$remote_overlay_sha256" "$input_root/private-overlay-no-config.tar" || fail 65
+  fi
   /usr/bin/install -o root -g root -m 0600 -- "$upload_root/ctk3-dist.tar" "$input_root/ctk3-dist.tar"
   /usr/bin/install -o root -g root -m 0600 -- "$upload_root/node_modules.tar" "$input_root/node_modules.tar"
   /usr/bin/install -o root -g root -m 0600 -- "$upload_root/clearra-oracle-release-deploy" "$input_root/clearra-oracle-release-deploy"
@@ -458,6 +573,7 @@ syntax_check_candidate() {
   /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/scripts/restore-oracle-release"
   /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
   for syntax_module in \
+    "$syntax_root/apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
@@ -594,6 +710,19 @@ remove_success_root() {
   [ ! -e "$remove_root" ] && [ ! -L "$remove_root" ] || fail 73
 }
 
+cleanup_runtime_root() {
+  cleanup_root=$1
+  cleanup_expected=$2
+  [ -n "$cleanup_root" ] || return 0
+  [ "$cleanup_root" = "$cleanup_expected" ] || return 1
+  if [ -e "$cleanup_root" ] || [ -L "$cleanup_root" ]; then
+    [ -d "$cleanup_root" ] && [ ! -L "$cleanup_root" ] || return 1
+    [ "$(/usr/bin/readlink -f -- "$cleanup_root")" = "$cleanup_root" ] || return 1
+    /usr/bin/rm -rf -- "$cleanup_root" || return 1
+    [ ! -e "$cleanup_root" ] && [ ! -L "$cleanup_root" ] || return 1
+  fi
+}
+
 cleanup() {
   cleanup_status=$?
   trap - EXIT HUP INT TERM
@@ -635,6 +764,21 @@ cleanup() {
         ;;
     esac
   fi
+  if [ -n "$stage_root" ]; then
+    cleanup_runtime_root \
+      "$stage_root" \
+      "/opt/clearra/.v080-stage-@COMMIT_PREFIX@-$stage_nonce" || recovery_failed=1
+  fi
+  if [ -n "$input_root" ]; then
+    cleanup_runtime_root \
+      "$input_root" \
+      "/opt/clearra/.v080-input-@COMMIT_PREFIX@-$stage_nonce" || recovery_failed=1
+  fi
+  if [ -n "$upload_root" ]; then
+    cleanup_runtime_root \
+      "$upload_root" \
+      "/home/ubuntu/.clearra-v080-upload-@COMMIT_PREFIX@-$stage_nonce" || recovery_failed=1
+  fi
   if [ "$recovery_failed" -ne 0 ]; then
     /usr/bin/printf '%s\n' 'oracle_inactive_stage=recovery-failed' >&2
     exit 74
@@ -664,12 +808,35 @@ while [ "$#" -gt 0 ]; do
       self_path=$2
       shift 2
       ;;
+    --remote-overlay-archive)
+      [ "$#" -ge 2 ] && [ -z "$remote_overlay_archive" ] || fail 64
+      remote_overlay_archive=$2
+      shift 2
+      ;;
+    --remote-overlay-sha256)
+      [ "$#" -ge 2 ] && [ -z "$remote_overlay_sha256" ] || fail 64
+      remote_overlay_sha256=$2
+      shift 2
+      ;;
+    --cleanup-only)
+      [ "$cleanup_only" -eq 0 ] || fail 64
+      cleanup_only=1
+      shift
+      ;;
     *) fail 64 ;;
   esac
 done
 
 is_sha256 "$stage_nonce" || fail 64
 is_sha256 "$self_sha256" || fail 64
+if [ -n "$remote_overlay_archive" ] || [ -n "$remote_overlay_sha256" ]; then
+  is_sha256 "$remote_overlay_sha256" || fail 64
+  [ "$remote_overlay_sha256" = "$expected_overlay_sha256" ] || fail 65
+  [ "$remote_overlay_archive" = "/opt/clearra/sealed-release-inputs/private-overlay-no-config-$remote_overlay_sha256.tar" ] || fail 64
+  overlay_mode=remote
+else
+  overlay_mode=local
+fi
 case "$self_path" in
   /usr/local/sbin/.clearra-oracle-inactive-stage-v080-@COMMIT_PREFIX@.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9] ) ;;
   * ) fail 64 ;;
@@ -687,6 +854,36 @@ test_parent=$stage_root/test
 
 exec 9>"$lock_path"
 /usr/bin/flock -n 9 || fail 75
+
+if [ "$cleanup_only" -eq 1 ]; then
+  capture_baseline
+  require_baseline_unchanged
+  if [ -e "$candidate_path" ] || [ -L "$candidate_path" ]; then
+    [ ! -L "$candidate_path" ] || fail 73
+    [ "$(/usr/bin/readlink -f -- "$candidate_path")" = "$candidate_path" ] || fail 73
+    [ "$baseline_current_resolved" != "$candidate_path" ] || fail 73
+    validate_candidate "$candidate_path"
+    [ "$(/usr/bin/python3 "$upload_root/clearra-release-tree-digest.py" "$candidate_path")" = "$expected_tree_sha256" ] || fail 65
+    /usr/bin/rm -rf -- "$candidate_path"
+    [ ! -e "$candidate_path" ] && [ ! -L "$candidate_path" ] || fail 73
+  fi
+  require_baseline_unchanged
+  remove_success_root "$upload_root" "/home/ubuntu/.clearra-v080-upload-@COMMIT_PREFIX@-$stage_nonce"
+  require_root_regular_mode "$self_path" 755
+  require_exact_hash "$self_path" "$self_sha256"
+  /usr/bin/rm -f -- "$self_path"
+  [ ! -e "$self_path" ] && [ ! -L "$self_path" ] || fail 77
+  /usr/bin/printf '%s\n' \
+    'oracle_inactive_stage=cleanup-complete' \
+    "oracle_source_commit=$source_commit" \
+    "oracle_release_id=$release_id" \
+    "oracle_release_sha256=$expected_tree_sha256" \
+    "oracle_launcher_sha256=$expected_launcher_sha256" \
+    "oracle_tree_digester_sha256=$expected_digester_sha256" \
+    "oracle_stage_nonce=$stage_nonce"
+  trap - EXIT HUP INT TERM
+  exit 0
+fi
 
 capture_baseline
 harden_release_parents

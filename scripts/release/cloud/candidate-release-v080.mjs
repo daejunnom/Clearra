@@ -48,14 +48,18 @@ const SERVICE_ENVIRONMENT = Object.freeze({
 });
 
 export async function deployZeroTrafficCandidate(options, dependencies = {}) {
-  const authority = candidateAuthority(options);
+  const authority = candidateAuthority(options, {
+    requireImage: options?.imageDigest !== undefined,
+  });
   const runJson = dependencies.runJson ?? runGcloudJson;
-  const imageMetadata = await runJson([
-    "artifacts", "docker", "images", "describe", authority.imageTag,
-    `--project=${authority.projectId}`,
-    "--format=json",
-  ]);
-  const imageDigest = resolveImmutableImage(imageMetadata, authority.imageBase);
+  const imageDigest = authority.imageDigest ?? resolveImmutableImage(
+    await runJson([
+      "artifacts", "docker", "images", "describe", authority.imageTag,
+      `--project=${authority.projectId}`,
+      "--format=json",
+    ]),
+    authority.imageBase,
+  );
   const deployedAuthority = Object.freeze({ ...authority, imageDigest });
 
   await runJson(buildServiceDeployArguments(deployedAuthority));
@@ -769,8 +773,8 @@ async function main() {
     imageDigest: values["image-digest"],
     candidateUrl: values["candidate-url"],
   };
-  if (positionals[0] === "deploy" && (options.imageDigest || options.candidateUrl || values.output)) {
-    throw new Error("deploy does not accept smoke-only authority");
+  if (positionals[0] === "deploy" && (options.candidateUrl || values.output)) {
+    throw new Error("deploy does not accept smoke-only URL or output authority");
   }
   if (positionals[0] === "deploy") {
     process.stdout.write(`${JSON.stringify(await deployZeroTrafficCandidate(options))}\n`);

@@ -554,6 +554,10 @@ function Invoke-ReleaseIdentityGateValidation {
     $releasePublicationFinalizer = Read-Text '.github/workflows/finalize-release-publication.yml'
     $pages = Read-Text '.github/workflows/pages.yml'
     $pagesRollback = Read-Text '.github/workflows/pages-rollback.yml'
+    $discordDeployWorkflow = Read-Text '.github/workflows/discord-deploy.yml'
+    $discordRecoveryWorkflow = Read-Text '.github/workflows/discord-deploy-recovery.yml'
+    $discordRecoveryAuthority = Read-Text 'scripts/release/discord-deployment-recovery.mjs'
+    $discordRuntimeRecovery = Read-Text 'scripts/release/invoke-discord-runtime-recovery-v080.ps1'
     $pagesRollbackAuthority = Read-Text 'scripts/release/pages-rollback-authority.mjs'
     $pagesRollbackAuthorityTest = Read-Text 'scripts/release/pages-rollback-authority.test.mjs'
     $pagesRollbackPackage = Read-Text 'scripts/release/pages-rollback-package.mjs'
@@ -586,6 +590,92 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleCandidateSettings = Read-Text 'scripts/release/oracle/candidate-settings-v080.mjs'
     $oracleCandidateSettingsTest = Read-Text 'scripts/release/oracle/candidate-settings-v080.test.mjs'
     $oracleAcceptedLayerBuilder = Read-Text 'scripts/release/oracle/create-local-layers-v080.sh'
+    $oracleActionsLayerBuilder = Read-Text 'scripts/release/oracle/create-actions-layers-v080.sh'
+    $oracleActionsLayerBuilderTest = Read-Text 'scripts/release/oracle/create-actions-layers-v080.test.mjs'
+
+    foreach ($required in @(
+        'group: discord-production',
+        'cancel-in-progress: false',
+        'queue: max',
+        'environment: discord-path-confirmation',
+        'environment: discord-global-command-sync',
+        'discord-prestage-recovery-authority-',
+        'discord-live-recovery-authority-',
+        'if: always() && needs.candidate.result == ''success''',
+        'if: always() && needs.promote.result == ''success''',
+        '-Operation cleanup-prestage-backup'
+    )) {
+        if ($discordDeployWorkflow.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord deploy cancellation/recovery contract is missing '$required'"
+        }
+    }
+    foreach ($forbidden in @('environment: discord-runtime-rollback', 'rollback-after-sync:')) {
+        if ($discordDeployWorkflow.IndexOf($forbidden, [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError "Primary Discord workflow retains forbidden rollback authority '$forbidden'"
+        }
+    }
+    foreach ($required in @(
+        'workflows: ["Deploy Discord Production"]',
+        'group: discord-production',
+        'cancel-in-progress: false',
+        'queue: max',
+        'environment: discord-runtime-rollback',
+        'ref: ${{ github.sha }}',
+        'GCP_ROLLBACK_WORKLOAD_IDENTITY_PROVIDER',
+        'GCP_ROLLBACK_SERVICE_ACCOUNT',
+        'actions/artifacts/$ARTIFACT_ID/zip',
+        '-RecoveryAuthorityPath',
+        'contains(fromJSON(''["failure","cancelled","timed_out"]''), github.event.workflow_run.conclusion)',
+        'GCP_COMMAND_SYNC_SERVICE_ACCOUNT',
+        'force-cancel path'
+    )) {
+        if ($discordRecoveryWorkflow.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord recovery workflow is missing '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'ref: ${{ github.event.workflow_run.head_sha }}',
+        'GCP_DEPLOY_SERVICE_ACCOUNT'
+    )) {
+        if ($discordRecoveryWorkflow.IndexOf($forbidden, [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError "Discord recovery workflow widens authority with '$forbidden'"
+        }
+    }
+    foreach ($required in @(
+        'entry.run_number',
+        'entry.run_started_at',
+        'entry.updated_at',
+        'entry.repository?.id !== CLEARRA_REPOSITORY_ID',
+        'entry.head_repository?.id !== CLEARRA_REPOSITORY_ID',
+        'verifyDiscordRecoveryResult',
+        'validateRecoveryArtifact(prestageMatches[0]',
+        'job-steps-prove-no-prestage-upload-or-runtime-mutation',
+        'validateNoPrestageArtifactAuthority',
+        'Discord prestage artifact is absent after its upload step succeeded'
+    )) {
+        if ($discordRecoveryAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord recovery authority is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'discord-deployment-recovery.mjs verify-result',
+        'preserved-latest-zero-traffic-tagless',
+        'Cloud residue readback retains candidate traffic or a direct-routing tag',
+        'recovery_authority=$RecoveryAuthorityPath',
+        '--stage prestage',
+        '--stage live'
+    )) {
+        if ($discordRuntimeRecovery.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord runtime recovery is missing '$required'"
+        }
+    }
+    $oracleFreezeHelper = Read-Text 'scripts/release/oracle/clearra-oracle-freeze-v080'
+    $oracleInactiveStageTemplate = Read-Text 'scripts/release/oracle/clearra-oracle-inactive-stage-v080.template'
+    $oracleRemoteOverlayCopyTest = Read-Text 'scripts/release/oracle/remote-overlay-copy-v080.test.py'
+    $oracleFreezeInvoker = Read-Text 'scripts/release/oracle/invoke-freeze-v080.ps1'
+    $oracleFreezeInvokerTest = Read-Text 'scripts/release/oracle/invoke-freeze-v080.test.ps1'
+    $oracleInactiveStageInvoker = Read-Text 'scripts/release/oracle/invoke-inactive-stage-v080.ps1'
+    $oracleInactiveStageInvokerTest = Read-Text 'scripts/release/oracle/invoke-inactive-stage-v080.test.ps1'
     $oracleFreezeTest = Read-Text 'scripts/release/oracle-freeze-v080.test.mjs'
     $oracleObservation = Read-Text 'apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs'
     $oracleObservationTest = Read-Text 'apps/clearra-discord-bot/test/oracle-candidate-observation.test.mjs'
@@ -622,6 +712,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $productProcessContractTest = Read-Text 'scripts/test_product_process_contract.ps1'
     $remoteTagVerifier = Read-Text 'scripts/release/verify-remote-annotated-tag.mjs'
     $remoteTagVerifierTest = Read-Text 'scripts/release/verify-remote-annotated-tag.test.mjs'
+    $discordCheckpointFinalizer = Read-Text 'scripts/release/finalize-discord-production-checkpoint.mjs'
+    $discordCheckpointFinalizerTest = Read-Text 'scripts/release/finalize-discord-production-checkpoint.test.mjs'
     $gitAttributes = Read-Text '.gitattributes'
     $exactSourceArchive = Read-Text 'scripts/release/create-exact-source-archive.mjs'
     $exactSourceTarContract = Read-Text 'scripts/release/exact-source-tar-contract.mjs'
@@ -665,6 +757,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'validate-release-cli-smokes.mjs',
         'release tag must point at the exact current main commit',
         'release tag is no longer the exact current main commit',
+        'finalize-discord-production-checkpoint.mjs verify-tag',
+        'finalize-discord-production-checkpoint.mjs verify-release',
+        '--target "$GITHUB_SHA"',
         'group: canonical-release-${{ github.sha }}',
         'Require exact main and zero prior canonical success',
         'canonical release acceptance forbids workflow reruns',
@@ -698,6 +793,40 @@ function Invoke-ReleaseIdentityGateValidation {
     )) {
         if ($release -notlike "*$required*") {
             Add-ArchitectureError "Product release workflow is missing exact release identity gate '$required'"
+        }
+    }
+    foreach ($required in @(
+        'clearra.discord-production-checkpoint-receipt.v1',
+        'readCompleteRunArtifactCatalog',
+        'validateExactCandidateArtifactCatalog',
+        'validateSuccessfulDiscordDeploymentAuthority',
+        'materializeCompletedJobTopology',
+        'deployment_topology_contract',
+        'extractClosedCanonicalJsonArtifactZip',
+        'checkpoint tag/artifact/observation chronology is invalid',
+        'production observation report is outside its exact completed job window',
+        '"tag", "-a", "--cleanup=verbatim", "-F", "-", tag, sourceCommit',
+        'assertRemoteMainAndAbsentTag(runGit, sourceCommit, tag)',
+        'remote checkpoint tag object differs from the locally verified object',
+        'remote annotated tag message differs from recomputed checkpoint receipt',
+        'github-actions[bot]',
+        'GitHub Release asset differs from accepted bytes'
+    )) {
+        if ($discordCheckpointFinalizer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord checkpoint tag finalizer is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'rejects an in-progress or unsuccessful Discord checkpoint run',
+        'rejects missing, duplicate, foreign, expired, or wrong-attempt candidate artifacts',
+        'rejects a failed candidate upload and artifact timestamps outside its step window',
+        'seals all four completed Discord jobs and every contract step into the receipt topology',
+        'rejects equal or inverted observation, artifact, completion, and tagger chronology',
+        'preserves exact canonical receipt bytes through local and remote annotated tag readback',
+        'rejects a non-bot or noncanonical immutable three-asset Release'
+    )) {
+        if ($discordCheckpointFinalizerTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord checkpoint tag finalizer regression is missing '$required'"
         }
     }
     foreach ($required in @(
@@ -735,7 +864,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'smoke_report_file_sha256',
         'catalog_file_sha256',
         'sync_report_file_sha256',
-        'tracked Oracle probe adapter differs from its approved SHA-256'
+        'tracked Oracle probe adapter differs from its approved SHA-256',
+        'production probe interval must be exactly'
     )) {
         if ($productionProbeMaterializer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Production probe-spec materializer is missing '$required'"
@@ -744,6 +874,7 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'materializes three tracked Node adapters and one explicit Oracle owner boundary',
         'probe authority rejects hash drift, secret fields, and mixed source identity',
+        'interval must be exactly 1200 seconds',
         'CLEARRA_ORACLE_IDENTITY_FILE',
         'DISCORD_TOKEN'
     )) {
@@ -1686,6 +1817,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'node scripts/release/verify-remote-annotated-tag.mjs',
         [System.StringComparison]::Ordinal
     )
+    $checkpointTagIndex = $release.LastIndexOf(
+        'node scripts/release/finalize-discord-production-checkpoint.mjs verify-tag',
+        [System.StringComparison]::Ordinal
+    )
     $immutabilityPreconditionIndex = $release.LastIndexOf(
         'repository release immutability has not been confirmed by the approved administrator',
         [System.StringComparison]::Ordinal
@@ -1702,14 +1837,20 @@ function Invoke-ReleaseIdentityGateValidation {
         "--jq '.immutable'",
         [System.StringComparison]::Ordinal
     )
+    $checkpointReleaseIndex = $release.LastIndexOf(
+        'node scripts/release/finalize-discord-production-checkpoint.mjs verify-release',
+        [System.StringComparison]::Ordinal
+    )
     if ($lateMainIndex -lt 0 -or
         $lateAcceptanceIndex -le $lateMainIndex -or
         $canonicalEvidenceIndex -le $lateAcceptanceIndex -or
         $immutabilityPreconditionIndex -le $canonicalEvidenceIndex -or
         $remoteTagIndex -le $immutabilityPreconditionIndex -or
-        $draftCreateIndex -le $remoteTagIndex -or
+        $checkpointTagIndex -le $remoteTagIndex -or
+        $draftCreateIndex -le $checkpointTagIndex -or
         $publishDraftIndex -le $draftCreateIndex -or
-        $immutableCheckIndex -le $publishDraftIndex) {
+        $immutableCheckIndex -le $publishDraftIndex -or
+        $checkpointReleaseIndex -le $immutableCheckIndex) {
         Add-ArchitectureError 'Release publication must rebind the remote annotated tag, build an asset-complete draft, publish it, and verify immutable state in order'
     }
     if ($release -notmatch '(?m)^\s*fi\r?\n\s*node scripts/release/verify-remote-annotated-tag\.mjs \\\s*$') {
@@ -2596,8 +2737,12 @@ function Invoke-ReleaseIdentityGateValidation {
         'freshOperationAt',
         'durationSeconds = PRODUCTION_OBSERVATION_SECONDS',
         'production identity changed during observation',
-        'Oracle fresh operation time did not increase during observation',
+        'Oracle fresh operation did not occur after the prior read-only observation',
         'Oracle read-only observation time did not increase',
+        'Oracle freshness verified-after authority differs from its identity',
+        'production observation interval differs from its probe spec',
+        'initial observation does not open the claimed window',
+        'Oracle fresh operation did not occur inside the observation window',
         'probe adapter SHA-256 changed',
         'shell: false',
         'production surface probe output is not canonical JSON',
@@ -2615,8 +2760,16 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'observes Discord, Oracle, Cloud, and Pages through a short injected clock',
         'fails closed when a surface identity changes during the window',
-        'rejects stale Oracle operation evidence and report hash tampering',
-        'rejects an Oracle probe whose fresh operation predates the claimed window',
+        'rejects stale Oracle operation evidence immediately and report hash tampering',
+        'allows the verified candidate operation as sample zero before the claimed window',
+        'rejects Oracle freshness before verified-after authority',
+        'requires every later Oracle operation to follow the prior remote observation',
+        'requires the later Oracle operation to occur strictly inside the window',
+        'requires Oracle remote observation time to increase strictly',
+        'final report validation rechecks the live Oracle cross-sample contract',
+        'rejects Oracle freshness whose verified-after value differs from identity',
+        'rejects a re-sealed report that pads the window before sample zero',
+        'production validation requires the exact 1200-second two-sample contract',
         'probe spec requires four hash-bound adapters and forbids secret fields'
     )) {
         if ($productionObservationTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2723,6 +2876,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'discord-command-sync-authority',
         'oracle-rollback-capture',
         'pages-deployment',
+        'production observation adapters differ from its exact probe spec',
         'release-publication-receipt'
     )) {
         if ($finalSourceStageEvidence.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2732,6 +2886,7 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'deployment stage projects only fieldwise-validated actual producer authorities',
         'deployment stage rejects Pages, Discord, Cloud, and Oracle cross-producer drift',
+        'deployment stage binds the exact 1200-second interval and adapter set to its probe spec',
         'Oracle capture and observation adapters are closed, source-bound, and secret-free',
         'release-freeze selection uses the final registry evidence entry without retry hardcoding',
         'acceptance stage hashes LF Git blobs rather than core.autocrlf worktree bytes'
@@ -3273,7 +3428,139 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        "[ValidateSet('capture-rollback-authority', 'verify-candidate', 'observe-candidate', 'restore-prior-and-verify')]",
+        'accepted-ctk3-dist.mjs',
+        'node_modules/tetris-fumen',
+        'ctk3-dist.tar',
+        'node_modules.tar',
+        'oracle_actions_ctk3_authority=accepted source_commit=%s run_id=%s run_attempt=%s',
+        '--format=posix',
+        '--sort=name',
+        '--mtime=@0',
+        'ln -- "$temporary_archive" "$destination"'
+    )) {
+        if ($oracleActionsLayerBuilder.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle Actions layer builder is missing '$required'"
+        }
+    }
+    foreach ($forbidden in @('src/admin', 'private-overlay')) {
+        if ($oracleActionsLayerBuilder.IndexOf($forbidden, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Add-ArchitectureError "Oracle Actions layer builder must not probe or consume private overlay marker '$forbidden'"
+        }
+    }
+    foreach ($required in @(
+        'Actions layer freeze consumes accepted CTK3 and only the production dependency',
+        'Actions layer freeze is deterministic and refuses overwrite',
+        'assert.doesNotMatch(script, /src\/admin/u)',
+        'assert.doesNotMatch(script, /private-overlay/u)'
+    )) {
+        if ($oracleActionsLayerBuilderTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle Actions layer regression is missing '$required'"
+        }
+    }
+    foreach ($remoteInvoker in @(
+        @{ Name = 'freeze'; Text = $oracleFreezeInvoker },
+        @{ Name = 'inactive stage'; Text = $oracleInactiveStageInvoker }
+    )) {
+        foreach ($required in @(
+            "DefaultParameterSetName = 'LocalOverlay'",
+            "ParameterSetName = 'RemoteOverlay'",
+            '/opt/clearra/sealed-release-inputs/private-overlay-no-config-$Sha256.tar',
+            'Assert-CanonicalRemoteOverlayAuthority',
+            '$remoteOverlayMode = $PSCmdlet.ParameterSetName -ceq',
+            "'--remote-overlay-archive', `$RemoteOverlayArchive",
+            "'--remote-overlay-sha256', `$RemoteOverlaySha256",
+            "return 'NUL'",
+            "return '/dev/null'"
+        )) {
+            if ($remoteInvoker.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Oracle $($remoteInvoker.Name) remote-overlay invoker is missing '$required'"
+            }
+        }
+        if ($remoteInvoker.Text -match '(?im)(Get-Content|Get-FileHash|ReadAllBytes|ReadAllText)[^\r\n]*\$RemoteOverlayArchive') {
+            Add-ArchitectureError "Oracle $($remoteInvoker.Name) invoker must not read remote private-overlay bytes locally"
+        }
+        foreach ($forbidden in @(
+            'Copy-RemoteSealedOverlay',
+            'install -o 1001',
+            "'private-overlay-no-config.tar', `$RemoteOverlayArchive"
+        )) {
+            if ($remoteInvoker.Text.IndexOf($forbidden, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                Add-ArchitectureError "Oracle $($remoteInvoker.Name) invoker exposes the remote sealed overlay through '$forbidden'"
+            }
+        }
+    }
+    foreach ($rootHelper in @(
+        @{ Name = 'freeze'; Text = $oracleFreezeHelper },
+        @{ Name = 'inactive stage'; Text = $oracleInactiveStageTemplate }
+    )) {
+        foreach ($required in @(
+            'copy_remote_overlay() {',
+            'os.O_NOFOLLOW',
+            'os.O_EXCL',
+            'os.fstat(source_fd)',
+            'metadata.st_nlink != 1',
+            'stat.S_IMODE(metadata.st_mode) != 0o600',
+            'os.fsync(destination_fd)',
+            'os.open(destination, os.O_RDONLY',
+            'digest.hexdigest() != expected',
+            'os.unlink(destination)'
+        )) {
+            if ($rootHelper.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Oracle $($rootHelper.Name) root helper sealed-overlay copy is missing '$required'"
+            }
+        }
+    }
+    foreach ($required in @(
+        'source symlink',
+        'source hardlink',
+        'wrong source mode',
+        'wrong source hash',
+        'canonical filename drift',
+        'writable parent',
+        'symlink parent',
+        'occupied O_EXCL destination',
+        'source path swap was not bound to the opened fd',
+        'post-fsync destination drift',
+        'post-copy failure cleanup left runtime residue'
+    )) {
+        if ($oracleRemoteOverlayCopyTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle remote-overlay dynamic regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'cleanup_runtime_root',
+        '/opt/clearra/.v080-stage-@COMMIT_PREFIX@-$stage_nonce',
+        '/opt/clearra/.v080-input-@COMMIT_PREFIX@-$stage_nonce',
+        '/home/ubuntu/.clearra-v080-upload-@COMMIT_PREFIX@-$stage_nonce'
+    )) {
+        if ($oracleInactiveStageTemplate.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle inactive-stage cleanup is missing '$required'"
+        }
+    }
+    if ($oracleInactiveStageInvoker.IndexOf(
+            '$manifest.layers.overlay.sha256 -cne $RemoteOverlaySha256',
+            [System.StringComparison]::Ordinal
+        ) -lt 0) {
+        Add-ArchitectureError 'Oracle inactive-stage remote overlay must bind the sealed digest to the frozen manifest'
+    }
+    foreach ($remoteInvokerTest in @(
+        @{ Name = 'freeze'; Text = $oracleFreezeInvokerTest },
+        @{ Name = 'inactive stage'; Text = $oracleInactiveStageInvokerTest }
+    )) {
+        foreach ($required in @(
+            'Remote-overlay AuditOnly did not remain a typed local-only audit.',
+            'accepted local and remote overlay inputs together.',
+            '/opt/clearra/sealed-release-inputs/private-overlay-no-config-',
+            "'/dev/null'",
+            "'NUL'"
+        )) {
+            if ($remoteInvokerTest.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Oracle $($remoteInvokerTest.Name) remote-overlay regression is missing '$required'"
+            }
+        }
+    }
+    foreach ($required in @(
+        "[ValidateSet('capture-prestage-authority', 'cleanup-prestage-backup', 'capture-rollback-authority', 'verify-candidate', 'observe-candidate', 'classify-current-authority', 'restore-prior-and-verify')]",
         'SHA256:mdw7bdzZOBrd6sCebPmMVuTaps+ct2OaOle/gaZMBKU',
         '2f7f658642c2dec4f9ad9e34d959b0215bdcf877e5636daebb003888434a8fd0',
         '157.151.254.175',
@@ -3293,7 +3580,8 @@ function Invoke-ReleaseIdentityGateValidation {
         '[Text.UTF8Encoding]::new($false)',
         '$stream.Flush($true)',
         '$observation.freshOperationAt = Get-CanonicalTimestamp',
-        '$observation.observedAt = Get-CanonicalTimestamp'
+        '$observation.observedAt = Get-CanonicalTimestamp',
+        'Oracle candidate observation timestamps are out of order.'
     )) {
         if ($oracleDeployInvoker.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Typed Oracle release deploy invoker is missing '$required'"
@@ -3309,6 +3597,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'Read-CanonicalEvidenceFile',
         'locked-identity',
         'Oracle observation evidence did not preserve canonical UTC timestamps and source identity.',
+        'Oracle observation accepted a mismatched verified-after echo.',
+        'an operation before verified-after',
+        'an observation before its operation',
         'Oracle evidence output changed after a rejected overwrite.',
         'Oracle evidence output accepted a linked parent path.',
         'oracle_release_deploy_wrapper_test=pass'
@@ -3326,6 +3617,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'ExecMainStartTimestampMonotonic',
         '/proc/sys/kernel/random/boot_id',
         'readyRecordObserved',
+        'verifiedAfter',
         'freshOperationAt',
         'observedAt',
         'runtimeIdentity',
@@ -3376,6 +3668,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'active Oracle settings digest does not match the expected snapshot',
         'current Oracle Gateway process has no READY record',
         'Oracle Gateway has no fresh successful bounded end-to-end operation',
+        'canonicalJournalTimestamp',
         'restored prior runtime authority does not match the captured authority',
         '/run/clearra-deploy',
         'directoryMetadata.uid !== 0',
@@ -3385,6 +3678,12 @@ function Invoke-ReleaseIdentityGateValidation {
         if ($oracleProofProducer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Trusted Oracle proof producer is missing observation/security marker '$required'"
         }
+    }
+    if ($oracleProofProducerTest.IndexOf(
+        'trusted Oracle producer selects the latest canonical operation regardless of journal order',
+        [System.StringComparison]::Ordinal
+    ) -lt 0) {
+        Add-ArchitectureError 'Trusted Oracle proof producer regression is missing journal-order-independent latest-operation coverage'
     }
     foreach ($required in @(
         'clearra.rollback.runtime-authority.v1',

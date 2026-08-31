@@ -61,6 +61,9 @@ export async function observeProductionSurfaces({
   const commit = requireSourceCommit(sourceCommit);
   const probeMap = validateProbeFunctions(probes);
   validateProductionProbeSpec(probeSpec, commit);
+  if (intervalSeconds !== probeSpec.interval_seconds) {
+    throw new Error("production observation interval differs from its probe spec");
+  }
   const probeSpecSha256 = canonicalSha256(probeSpec);
   const probeAdapters = Object.freeze(probeSpec.probes.map((adapter) =>
     Object.freeze({ surface: adapter.surface, sha256: adapter.sha256 })));
@@ -77,14 +80,14 @@ export async function observeProductionSurfaces({
     throw new Error("production observation clock is invalid");
   }
 
-  const startedMilliseconds = exactClockMilliseconds(clock.now());
-  const startedAt = new Date(startedMilliseconds).toISOString();
   const observations = new Map(
     REQUIRED_SURFACES.map((surface) => [surface, []]),
   );
   const identities = new Map();
   let sequence = 0;
-  let lastObservedMilliseconds = startedMilliseconds;
+  let startedMilliseconds = null;
+  let startedAt = null;
+  let lastObservedMilliseconds = null;
 
   for (;;) {
     const results = await Promise.all(REQUIRED_SURFACES.map(async (surface) => {
@@ -99,6 +102,10 @@ export async function observeProductionSurfaces({
       });
     }));
     const observedMilliseconds = exactClockMilliseconds(clock.now());
+    if (startedMilliseconds === null) {
+      startedMilliseconds = observedMilliseconds;
+      startedAt = new Date(observedMilliseconds).toISOString();
+    }
     lastObservedMilliseconds = observedMilliseconds;
     if (observedMilliseconds < startedMilliseconds) {
       throw new Error("production observation clock moved backwards");
@@ -123,12 +130,22 @@ export async function observeProductionSurfaces({
           value: result.identity,
         });
       }
-      observations.get(result.surface).push(Object.freeze({
+      const surfaceObservations = observations.get(result.surface);
+      const observation = Object.freeze({
         sequence,
         observed_at: observedAt,
         identity_sha256: identitySha256,
         freshness: result.freshness,
-      }));
+      });
+      if (result.surface === "oracle") {
+        validateOracleObservationSample({
+          identity: result.identity,
+          observation,
+          priorObservation: surfaceObservations.at(-1) ?? null,
+          observationStartedAt: startedAt,
+        });
+      }
+      surfaceObservations.push(observation);
     }
     sequence += 1;
 
@@ -139,8 +156,8 @@ export async function observeProductionSurfaces({
   }
 
   const endedMilliseconds = lastObservedMilliseconds;
-  const duration = Math.floor((endedMilliseconds - startedMilliseconds) / 1000);
-  if (duration < durationSeconds) {
+  const actualDurationMilliseconds = endedMilliseconds - startedMilliseconds;
+  if (actualDurationMilliseconds < durationSeconds * 1000) {
     throw new Error("production observation clock did not reach its duration");
   }
   const report = sealCanonicalReport({
@@ -148,7 +165,7 @@ export async function observeProductionSurfaces({
     source_commit: commit,
     started_at: startedAt,
     ended_at: new Date(endedMilliseconds).toISOString(),
-    duration_seconds: duration,
+    duration_seconds: durationSeconds,
     interval_seconds: intervalSeconds,
     probe_spec_sha256: probeSpecSha256,
     probe_adapters: probeAdapters,
@@ -167,7 +184,9 @@ export async function observeProductionSurfaces({
   });
   validateProductionObservationReport(report, {
     expectedSourceCommit: commit,
-    minimumDurationSeconds: durationSeconds,
+    expectedDurationSeconds: durationSeconds,
+    expectedIntervalSeconds: intervalSeconds,
+    expectedObservationCount: observations.get(REQUIRED_SURFACES[0]).length,
   });
   return report;
 }
@@ -176,7 +195,9 @@ export function validateProductionObservationReport(
   value,
   {
     expectedSourceCommit,
-    minimumDurationSeconds = PRODUCTION_OBSERVATION_SECONDS,
+    expectedDurationSeconds = PRODUCTION_OBSERVATION_SECONDS,
+    expectedIntervalSeconds = PRODUCTION_OBSERVATION_SECONDS,
+    expectedObservationCount = 2,
   } = {},
 ) {
   requireExactKeys(value, [
@@ -205,21 +226,28 @@ export function validateProductionObservationReport(
   }
   const startedAt = canonicalTimestamp(value.started_at, "observation start time");
   const endedAt = canonicalTimestamp(value.ended_at, "observation end time");
-  if (
-    !Number.isSafeInteger(value.duration_seconds) ||
-    value.duration_seconds < minimumDurationSeconds
-  ) {
+  requirePositiveDuration(expectedDurationSeconds, "expected observation duration");
+  requirePositiveDuration(expectedIntervalSeconds, "expected observation interval");
+  if (!Number.isSafeInteger(expectedObservationCount) || expectedObservationCount < 2) {
+    throw new Error("expected production observation count is invalid");
+  }
+  if (value.duration_seconds !== expectedDurationSeconds) {
     throw new Error(
-      `production observation must last at least ${minimumDurationSeconds} seconds`,
+      `production observation duration must be exactly ${expectedDurationSeconds} seconds`,
     );
   }
   if (
-    Math.floor((Date.parse(endedAt) - Date.parse(startedAt)) / 1000) !==
-      value.duration_seconds
+    Date.parse(endedAt) - Date.parse(startedAt) <
+      value.duration_seconds * 1000
   ) {
-    throw new Error("production observation duration differs from its timestamps");
+    throw new Error("production observation timestamps do not span its duration");
   }
   requirePositiveDuration(value.interval_seconds, "observation interval");
+  if (value.interval_seconds !== expectedIntervalSeconds) {
+    throw new Error(
+      `production observation interval must be exactly ${expectedIntervalSeconds} seconds`,
+    );
+  }
   if (value.interval_seconds > value.duration_seconds) {
     throw new Error("production observation interval exceeds its duration");
   }
@@ -259,7 +287,7 @@ export function validateProductionObservationReport(
     }
     if (
       !Number.isSafeInteger(surfaceReport.observation_count) ||
-      surfaceReport.observation_count < 2 ||
+      surfaceReport.observation_count !== expectedObservationCount ||
       !Array.isArray(surfaceReport.observations) ||
       surfaceReport.observations.length !== surfaceReport.observation_count
     ) {
@@ -483,6 +511,7 @@ function validateSurfaceIdentity(surface, identity, sourceCommit) {
       "gateway_start_monotonic_usec",
       "boot_id",
       "ready_record_observed",
+      "verified_after",
       "status",
     ], "Oracle production identity");
     requireNonEmptyString(identity.release_id, "Oracle release ID");
@@ -514,6 +543,7 @@ function validateSurfaceIdentity(surface, identity, sourceCommit) {
     if (identity.ready_record_observed !== true) {
       throw new Error("Oracle process is not READY");
     }
+    canonicalTimestamp(identity.verified_after, "Oracle verified-after identity time");
   } else if (surface === "cloud") {
     requireExactKeys(identity, [
       "source_commit",
@@ -605,8 +635,7 @@ function validateSurfaceSamples(
   identity,
 ) {
   let priorTimestamp = null;
-  let priorOracleOperationAt = null;
-  let priorOracleObservedAt = null;
+  let priorOracleObservation = null;
   const freshnessIdentities = new Set();
   observations.forEach((observation, index) => {
     requireExactKeys(observation, [
@@ -625,7 +654,7 @@ function validateSurfaceSamples(
     if (
       Date.parse(observedAt) < Date.parse(startedAt) ||
       Date.parse(observedAt) > Date.parse(endedAt) ||
-      (priorTimestamp !== null && Date.parse(observedAt) < Date.parse(priorTimestamp))
+      (priorTimestamp !== null && Date.parse(observedAt) <= Date.parse(priorTimestamp))
     ) {
       throw new Error(`${surface} observation timestamps are out of order or range`);
     }
@@ -634,49 +663,113 @@ function validateSurfaceSamples(
       throw new Error(`${surface} identity changed inside the observation samples`);
     }
     validateFreshness(surface, observation.freshness);
+    if (surface === "oracle") {
+      validateOracleObservationSample({
+        identity,
+        observation,
+        priorObservation: priorOracleObservation,
+        observationStartedAt: startedAt,
+      });
+    }
     const freshnessIdentity = canonicalJson(observation.freshness);
     if (freshnessIdentities.has(freshnessIdentity)) {
       throw new Error(`${surface} observation reused stale freshness evidence`);
     }
     freshnessIdentities.add(freshnessIdentity);
     if (surface === "oracle") {
-      const expectedOperationMarker = canonicalSha256({
-        contract: ORACLE_PROBE_SCHEMA_ID,
-        source_commit: identity.source_commit,
-        candidate_revision: identity.candidate_revision,
-        fresh_operation_at: observation.freshness.fresh_operation_at,
-        observed_at: observation.freshness.observed_at,
-      });
-      if (observation.freshness.operation_marker !== expectedOperationMarker) {
-        throw new Error("Oracle operation marker differs from its canonical evidence");
-      }
-      if (
-        Date.parse(observation.freshness.observed_at) > Date.parse(observedAt) ||
-        Date.parse(observation.freshness.fresh_operation_at) < Date.parse(startedAt) ||
-        Date.parse(observation.freshness.fresh_operation_at) >
-          Date.parse(observation.freshness.observed_at)
-      ) {
-        throw new Error("Oracle fresh operation evidence is outside its observation sample");
-      }
-      if (
-        priorOracleOperationAt !== null &&
-        Date.parse(observation.freshness.fresh_operation_at) <=
-          Date.parse(priorOracleOperationAt)
-      ) {
-        throw new Error("Oracle fresh operation time did not increase during observation");
-      }
-      if (
-        priorOracleObservedAt !== null &&
-        Date.parse(observation.freshness.observed_at) <= Date.parse(priorOracleObservedAt)
-      ) {
-        throw new Error("Oracle read-only observation time did not increase");
-      }
-      priorOracleOperationAt = observation.freshness.fresh_operation_at;
-      priorOracleObservedAt = observation.freshness.observed_at;
+      priorOracleObservation = observation;
     }
   });
+  if (observations[0].observed_at !== startedAt) {
+    throw new Error(`${surface} initial observation does not open the claimed window`);
+  }
   if (observations.at(-1).observed_at !== endedAt) {
     throw new Error(`${surface} final observation does not close the claimed window`);
+  }
+}
+
+function validateOracleObservationSample({
+  identity,
+  observation,
+  priorObservation,
+  observationStartedAt,
+}) {
+  const verifiedAfter = canonicalTimestamp(
+    identity.verified_after,
+    "Oracle verified-after identity time",
+  );
+  const freshnessVerifiedAfter = canonicalTimestamp(
+    observation.freshness.verified_after,
+    "Oracle freshness verified-after time",
+  );
+  if (freshnessVerifiedAfter !== verifiedAfter) {
+    throw new Error("Oracle freshness verified-after authority differs from its identity");
+  }
+
+  const startedAt = canonicalTimestamp(
+    observationStartedAt,
+    "production observation start time",
+  );
+  const localObservedAt = canonicalTimestamp(
+    observation.observed_at,
+    "Oracle local observation time",
+  );
+  const freshOperationAt = canonicalTimestamp(
+    observation.freshness.fresh_operation_at,
+    "Oracle fresh operation time",
+  );
+  const remoteObservedAt = canonicalTimestamp(
+    observation.freshness.observed_at,
+    "Oracle read-only observation time",
+  );
+  const expectedOperationMarker = canonicalSha256({
+    contract: ORACLE_PROBE_SCHEMA_ID,
+    source_commit: identity.source_commit,
+    candidate_revision: identity.candidate_revision,
+    verified_after: verifiedAfter,
+    fresh_operation_at: freshOperationAt,
+    observed_at: remoteObservedAt,
+  });
+  if (observation.freshness.operation_marker !== expectedOperationMarker) {
+    throw new Error("Oracle operation marker differs from its canonical evidence");
+  }
+
+  if (Date.parse(verifiedAfter) > Date.parse(startedAt)) {
+    throw new Error("Oracle verified-after authority occurs after the observation start");
+  }
+  if (
+    Date.parse(verifiedAfter) > Date.parse(freshOperationAt) ||
+    Date.parse(freshOperationAt) > Date.parse(remoteObservedAt) ||
+    Date.parse(remoteObservedAt) > Date.parse(localObservedAt)
+  ) {
+    throw new Error("Oracle freshness timestamps are outside their observation authority");
+  }
+
+  if (priorObservation !== null) {
+    const priorVerifiedAfter = canonicalTimestamp(
+      priorObservation.freshness.verified_after,
+      "prior Oracle freshness verified-after time",
+    );
+    const priorRemoteObservedAt = canonicalTimestamp(
+      priorObservation.freshness.observed_at,
+      "prior Oracle read-only observation time",
+    );
+    if (priorVerifiedAfter !== verifiedAfter) {
+      throw new Error("Oracle verified-after authority changed during observation");
+    }
+    if (Date.parse(remoteObservedAt) <= Date.parse(priorRemoteObservedAt)) {
+      throw new Error("Oracle read-only observation time did not increase");
+    }
+    if (Date.parse(freshOperationAt) <= Date.parse(priorRemoteObservedAt)) {
+      throw new Error(
+        "Oracle fresh operation did not occur after the prior read-only observation",
+      );
+    }
+    if (Date.parse(freshOperationAt) <= Date.parse(startedAt)) {
+      throw new Error(
+        "Oracle fresh operation did not occur inside the observation window",
+      );
+    }
   }
 }
 
@@ -684,10 +777,12 @@ function validateFreshness(surface, freshness) {
   if (surface === "oracle") {
     requireExactKeys(freshness, [
       "operation_marker",
+      "verified_after",
       "fresh_operation_at",
       "observed_at",
     ], "Oracle observation freshness");
     requireSha256(freshness.operation_marker, "Oracle operation marker");
+    canonicalTimestamp(freshness.verified_after, "Oracle freshness verified-after time");
     canonicalTimestamp(freshness.fresh_operation_at, "Oracle fresh operation time");
     canonicalTimestamp(freshness.observed_at, "Oracle read-only observation time");
   } else if (surface === "discord") {
@@ -791,6 +886,7 @@ function normalizeOracleProbeResult(value, sourceCommit, arguments_) {
     "gatewayStartMonotonicUsec",
     "bootId",
     "readyRecordObserved",
+    "verifiedAfter",
     "freshOperationAt",
     "observedAt",
     "runtimeIdentity",
@@ -817,6 +913,7 @@ function normalizeOracleProbeResult(value, sourceCommit, arguments_) {
     value.oracleReleaseSha256 !== expected.get("-OracleReleaseSha256") ||
     value.oracleSettingsSha256 !== expected.get("-OracleSettingsSha256") ||
     value.deploymentNonce !== expected.get("-DeploymentNonce") ||
+    value.verifiedAfter !== expected.get("-VerifiedAfter") ||
     candidateUrl !== requireCredentialFreeHttpsUrl(
       expected.get("-CandidateUrl"),
       "Oracle expected candidate URL",
@@ -842,13 +939,17 @@ function normalizeOracleProbeResult(value, sourceCommit, arguments_) {
   ) {
     throw new Error("Oracle observed Gateway PID/start/READY authority is invalid");
   }
+  const verifiedAfter = canonicalTimestamp(
+    value.verifiedAfter,
+    "Oracle observed verified-after time",
+  );
   const freshOperationAt = canonicalTimestamp(
     value.freshOperationAt,
     "Oracle fresh operation time",
   );
   const observedAt = canonicalTimestamp(value.observedAt, "Oracle observation time");
   if (
-    Date.parse(freshOperationAt) < Date.parse(expected.get("-VerifiedAfter")) ||
+    Date.parse(freshOperationAt) < Date.parse(verifiedAfter) ||
     Date.parse(freshOperationAt) > Date.parse(observedAt)
   ) {
     throw new Error("Oracle observation did not include a fresh successful operation");
@@ -876,6 +977,7 @@ function normalizeOracleProbeResult(value, sourceCommit, arguments_) {
     contract: ORACLE_PROBE_SCHEMA_ID,
     source_commit: sourceCommit,
     candidate_revision: value.candidateRevision,
+    verified_after: verifiedAfter,
     fresh_operation_at: freshOperationAt,
     observed_at: observedAt,
   });
@@ -896,10 +998,12 @@ function normalizeOracleProbeResult(value, sourceCommit, arguments_) {
       gateway_start_monotonic_usec: value.gatewayStartMonotonicUsec,
       boot_id: value.bootId,
       ready_record_observed: true,
+      verified_after: verifiedAfter,
       status: "active",
     },
     freshness: {
       operation_marker: operationMarker,
+      verified_after: verifiedAfter,
       fresh_operation_at: freshOperationAt,
       observed_at: observedAt,
     },
@@ -1137,6 +1241,11 @@ async function main() {
     "production observation probe spec",
   );
   validateProductionProbeSpec(spec, sourceCommit);
+  if (spec.interval_seconds !== PRODUCTION_OBSERVATION_SECONDS) {
+    throw new Error(
+      `production observation CLI interval must be exactly ${PRODUCTION_OBSERVATION_SECONDS} seconds`,
+    );
+  }
   const probes = await createCommandProbes(spec);
   const report = await observeProductionSurfaces({
     sourceCommit,

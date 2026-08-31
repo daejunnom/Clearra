@@ -10,13 +10,20 @@ The v0.8 path has six boundaries:
 
 1. `create-local-layers-v080.sh` creates the private no-config overlay, the
    accepted CTK3 distribution, and the minimal production dependency layer
-   from explicit allowlists. It verifies and consumes an explicit accepted
-   artifact directory bound to one source commit, canonical run ID, and run
-   attempt; repo-local `packages/ctk3/dist` is never an input. It publishes each
-   archive once without overwriting an existing path.
+   from explicit allowlists. The hosted-Actions-only
+   `create-actions-layers-v080.sh` creates only the latter two archives and
+   never probes or consumes the ignored private overlay. Both builders verify
+   an explicit accepted artifact directory bound to one source commit,
+   canonical run ID, and run attempt; repo-local `packages/ctk3/dist` is never
+   an input. They publish each archive once without overwriting an existing
+   path.
 2. `invoke-freeze-v080.ps1` and the root-owned
-   `clearra-oracle-freeze-v080` verify the local bytes and pinned host, seal the
-   uploaded inputs against further deployment-account writes, snapshot only
+   `clearra-oracle-freeze-v080` verify the local bytes and pinned host. The
+   wrapper accepts either one local overlay archive or one canonical,
+   root-owned Oracle-only sealed overlay path plus its filename-bound SHA-256;
+   those modes are mutually exclusive. It never returns or copies sealed
+   private bytes to the runner. The root helper seals the assembled inputs
+   against further deployment-account writes, then snapshots only
    hashes/sizes/service identity from the active release, assemble an
    independent candidate with the active private config copied internally, and
    return one canonical manifest. Neither private config nor settings bytes are
@@ -26,9 +33,12 @@ The v0.8 path has six boundaries:
    authority is baked into the generated one-shot before it reaches Oracle.
 4. `invoke-inactive-stage-v080.ps1` verifies all local bytes, the pinned Oracle
    host key, the generated one-shot hash, every remote upload hash and mode,
-   and the exact final attestation. `-AuditOnly` performs only local reads and
-   process execution; it does not open SSH, create a remote directory, or
-   require an identity file.
+   and the exact final attestation. In remote-overlay mode it also binds the
+   sealed authority SHA-256 to `manifest.layers.overlay.sha256`, copies it only
+   inside Oracle, and rechecks the copied owner, mode, size, canonical path,
+   and digest. `-AuditOnly` performs only local typed/path/hash checks and
+   process execution; it does not open SSH, create a remote directory, read the
+   identity file, or claim that the sealed remote file exists.
 5. The root-owned one-shot holds the existing release-deploy lock, independently
    validates all tar members and the assembled tree, stages only
    `/opt/clearra/releases/v0.8.0-<sha7>`, transactionally updates the canonical
@@ -64,6 +74,19 @@ assemble a substitute manifest:
   `apps/clearra-discord-bot/src/admin/`. It must not contain
   `apps/clearra-discord-bot/src/admin/config.mjs`, settings, `.env` files,
   credentials, or keys. Do not build it with a broad directory glob.
+  GitHub-hosted runners must instead use an already sealed Oracle authority at
+  `/opt/clearra/sealed-release-inputs/private-overlay-no-config-<sha256>.tar`.
+  Every parent in that absolute path must be a root-owned, non-link directory
+  with no group/other write authority. The source must be a nonempty root:root
+  regular file at mode `0600` with exactly one link. The root helper opens it
+  with `O_NOFOLLOW`, validates metadata and SHA-256 from that same descriptor,
+  and copies it to a root-only `O_EXCL` temporary file. It then fsyncs and
+  re-hashes the copy before tar validation; the temporary copy is removed on
+  success and failure while the sealed original is never a cleanup target.
+  Its filename SHA-256, configured SHA-256, live digest, and manifest digest
+  must all agree. Creating this authority is a
+  separate root bootstrap. Never store the overlay bytes in a GitHub Secret,
+  workflow artifact, checkout, runner workspace, or log.
 - `ctk3-dist.tar`: the canonical accepted CTK3 artifact, rooted only at
   `packages/ctk3/dist`. Its
   `clearra-accepted-ctk3.v2.json` binds the exact source commit, canonical
@@ -221,6 +244,48 @@ $dependenciesArchive = Join-Path $evidenceDirectory 'node_modules.tar'
 $manifestPath = Join-Path $evidenceDirectory 'oracle-inactive-stage-v080.json'
 ```
 
+GitHub Actions uses the same accepted CTK3 identity but creates only the public
+CTK3 and dependency layers:
+
+```bash
+bash scripts/release/oracle/create-actions-layers-v080.sh \
+  "$GITHUB_WORKSPACE" \
+  "$RUNNER_TEMP/accepted-ctk3" \
+  "$CLEARRA_SOURCE_COMMIT" \
+  "$ACCEPTED_RUN_ID" \
+  "$ACCEPTED_RUN_ATTEMPT" \
+  "$RUNNER_TEMP/oracle-layers"
+```
+
+The workflow supplies the private layer only as two non-secret references. The
+archive path must be exactly derived from the digest; the archive itself stays
+on Oracle:
+
+```powershell
+$remoteOverlayArchive = $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE
+$remoteOverlaySha256 = $env:ORACLE_PRIVATE_OVERLAY_SHA256
+
+pwsh -NoProfile -File scripts/release/oracle/invoke-freeze-v080.ps1 `
+  -SourceCommit $sourceCommit `
+  -SourceArchive $sourceArchive `
+  -RemoteOverlayArchive $remoteOverlayArchive `
+  -RemoteOverlaySha256 $remoteOverlaySha256 `
+  -Ctk3DistArchive $ctk3DistArchive `
+  -DependenciesArchive $dependenciesArchive `
+  -ManifestOutput $manifestPath `
+  -AuditOnly
+```
+
+Removing `-AuditOnly` and adding `-IdentityFile <runner-temporary-key-path>`
+performs the freeze. The wrapper passes only the canonical sealed path and
+expected SHA-256 to the root helper. The sealed archive is absent from the
+uid/gid 1001 upload inventory and neither the wrapper nor deployment account
+opens, hashes, copies, or returns its bytes. The identity file must be created
+from the separately protected GitHub Environment secret in the runner temporary
+directory and removed in an `always()` cleanup step. A repository- or
+organization-scoped SSH secret is forbidden; neither wrapper reads or hashes
+the identity contents.
+
 Audit the local freeze inputs without contacting Oracle. This verifies regular
 non-reparse inputs, computes their size/hash authority, validates the pinned
 host record, and checks the root helper syntax. Tar-member and active-baseline
@@ -284,6 +349,24 @@ pwsh -NoProfile -File scripts/release/oracle/invoke-inactive-stage-v080.ps1 `
   -DependenciesArchive $dependenciesArchive `
   -AuditOnly
 ```
+
+The hosted Actions form substitutes the two remote references for the local
+overlay and is otherwise identical:
+
+```powershell
+pwsh -NoProfile -File scripts/release/oracle/invoke-inactive-stage-v080.ps1 `
+  -ManifestPath $manifestPath `
+  -SourceArchive $sourceArchive `
+  -RemoteOverlayArchive $remoteOverlayArchive `
+  -RemoteOverlaySha256 $remoteOverlaySha256 `
+  -Ctk3DistArchive $ctk3DistArchive `
+  -DependenciesArchive $dependenciesArchive `
+  -AuditOnly
+```
+
+For the real inactive stage, replace `-AuditOnly` with the temporary
+`-IdentityFile` path. The wrapper rejects a remote digest that differs from the
+frozen manifest before contacting Oracle.
 
 The audit must return exactly `oracle_inactive_stage_invoker=audit-ok` followed
 by the source, release, candidate-tree, and generated-bootstrap identities. It
@@ -396,9 +479,17 @@ a proof file, change settings/current, or restart the service. Success is one
 `clearra.oracle.candidate-observation.v1` JSON line binding the source,
 candidate URL/revision, active release path/tree, settings digest, deployment
 nonce, PID, systemd monotonic process start, boot ID, READY evidence, fresh
-operation timestamp, observation timestamp, and runtime identity. Across the
-window, require all identity/process fields to remain unchanged and require
-`observedAt >= freshOperationAt >= VerifiedAfter`.
+operation timestamp, observation timestamp, the exact `VerifiedAfter`, and
+runtime identity. The journal reader chooses the qualifying successful `/path`
+with the greatest canonical timestamp regardless of output order. Across the
+window, require all identity/process/`VerifiedAfter` fields to remain unchanged.
+The first sample accepts the candidate-verification operation as a baseline;
+each later sample requires `freshOperationAt` to be newer than the preceding
+remote `observedAt`, while every remote observation timestamp increases
+strictly. The production authority and report both require an exact 1,200-second
+interval, exactly two samples, sample 0 equal to `started_at`, and sample 1 equal
+to `ended_at`. Perform one confirmed real `/path` strictly after the start
+sample and before the end sample.
 
 ## Regression commands
 
@@ -406,6 +497,7 @@ window, require all identity/process fields to remain unchanged and require
 node --test scripts/release/oracle-freeze-v080.test.mjs
 node --test scripts/release/oracle-inactive-stage-v080.test.mjs
 node --test scripts/release/oracle/candidate-settings-v080.test.mjs
+node --test scripts/release/oracle/create-actions-layers-v080.test.mjs
 node --test scripts/tools/accepted-ctk3-dist.test.mjs
 node --test apps/clearra-discord-bot/test/oracle-candidate-observation.test.mjs
 pwsh -NoProfile -File scripts/release/oracle/invoke-freeze-v080.test.ps1
@@ -413,6 +505,7 @@ pwsh -NoProfile -File scripts/release/oracle/invoke-inactive-stage-v080.test.ps1
 pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.test.ps1
 $wslRepository = (wsl.exe -e wslpath -a -- (Get-Location).Path).Trim()
 wsl.exe -e bash -n "$wslRepository/scripts/release/oracle/create-local-layers-v080.sh"
+wsl.exe -e bash -n "$wslRepository/scripts/release/oracle/create-actions-layers-v080.sh"
 wsl.exe -e dash -n "$wslRepository/scripts/release/oracle/clearra-oracle-freeze-v080"
 wsl.exe -e dash -n "$wslRepository/scripts/release/oracle/clearra-oracle-release-deploy-v080"
 ```

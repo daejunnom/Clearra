@@ -183,6 +183,8 @@ validate_script_release() {
   require_root_regular_readonly \
     "$script_release/apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs"
   require_root_regular_readonly \
+    "$script_release/apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs"
+  require_root_regular_readonly \
     "$script_release/apps/clearra-discord-bot/src/admin/main.mjs"
 
   unsafe=$(/usr/bin/find "$script_release" -xdev \
@@ -305,6 +307,7 @@ is_sha256 "$deployment_nonce" || fail 64
 capture_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs"
 producer_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs"
 observer_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs"
+classifier_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs"
 candidate_verifier="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs"
 rollback_verifier="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs"
 restore_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/restore-oracle-release"
@@ -447,6 +450,43 @@ CLEARRA_CANDIDATE_SETTINGS_V080
       --verified-after "$verified_after"
     ;;
 
+  classify-current-authority)
+    [ -z "$proof$verified_after$prior_settings_backup" ] || fail 64
+    is_commit "$source_commit" || fail 64
+    is_release_id "$candidate_revision" || fail 64
+    is_release_id "$oracle_release_id" || fail 64
+    is_sha256 "$oracle_release_sha256" || fail 64
+    is_sha256 "$oracle_settings_sha256" || fail 64
+    [ "$oracle_release_id" = "$script_release_id" ] || fail 64
+    [ "$oracle_release_sha256" = "$script_release_sha256" ] || fail 64
+    candidate_url=$(canonical_origin "$candidate_url") || fail 64
+    commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
+    [ "$oracle_release_id" = "v0.8.0-$commit_prefix" ] || fail 64
+    [ "$candidate_revision" = "clearra-current-job-v080-$commit_prefix" ] || fail 64
+    is_release_id "$prior_revision" || fail 64
+    is_release_id "$prior_release_id" || fail 64
+    is_sha256 "$prior_release_sha256" || fail 64
+    is_sha256 "$prior_settings_sha256" || fail 64
+    is_runtime_authority_kind "$prior_runtime_authority_kind" || fail 64
+    is_sha256 "$prior_runtime_authority_sha256" || fail 64
+    [ "$prior_release" = "$release_root/$prior_release_id" ] || fail 64
+    prior_job_url=$(canonical_job_url "$prior_job_url") || fail 64
+    exec "$node_path" "$classifier_script" \
+      --source-commit "$source_commit" \
+      --candidate-url "$candidate_url" \
+      --candidate-revision "$candidate_revision" \
+      --candidate-release-id "$oracle_release_id" \
+      --candidate-release-sha256 "$oracle_release_sha256" \
+      --candidate-settings-sha256 "$oracle_settings_sha256" \
+      --prior-revision "$prior_revision" \
+      --prior-release-id "$prior_release_id" \
+      --prior-release-sha256 "$prior_release_sha256" \
+      --prior-settings-sha256 "$prior_settings_sha256" \
+      --prior-runtime-authority-kind "$prior_runtime_authority_kind" \
+      --prior-runtime-authority-sha256 "$prior_runtime_authority_sha256" \
+      --prior-job-url "$prior_job_url"
+    ;;
+
   restore-prior-and-verify)
     [ -z "$source_commit$candidate_url$candidate_revision$oracle_release_id$oracle_release_sha256$oracle_settings_sha256" ] || fail 64
     is_release_id "$prior_revision" || fail 64
@@ -460,7 +500,6 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     prior_job_url=$(canonical_job_url "$prior_job_url") || fail 64
     verified_after=$(canonical_timestamp "$verified_after") || fail 64
     [ "$proof" = "$proof_directory/clearra-oracle-rollback-$deployment_nonce.json" ] || fail 64
-    [ ! -e "$proof" ] || fail 73
     [ -f "$prior_settings_backup" ] && [ ! -L "$prior_settings_backup" ] || fail 66
     [ "$(/usr/bin/stat -c '%u' -- "$prior_settings_backup")" = 0 ] || fail 77
     actual_prior_release_sha256=$("$tree_digest" "$prior_release") || fail 65
@@ -468,6 +507,28 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     actual_prior_settings_sha256=$(/usr/bin/sha256sum "$prior_settings_backup" | /usr/bin/cut -d ' ' -f 1)
     [ "$actual_prior_settings_sha256" = "$prior_settings_sha256" ] || fail 65
     ensure_proof_directory
+
+    if [ -e "$proof" ]; then
+      require_root_regular_readonly "$proof"
+      "$node_path" "$rollback_verifier" \
+        --proof "$proof" \
+        --prior-revision "$prior_revision" \
+        --prior-oracle-release-id "$prior_release_id" \
+        --prior-oracle-release-sha256 "$prior_release_sha256" \
+        --prior-oracle-settings-sha256 "$prior_settings_sha256" \
+        --prior-runtime-authority-kind "$prior_runtime_authority_kind" \
+        --prior-runtime-authority-sha256 "$prior_runtime_authority_sha256" \
+        --prior-job-url "$prior_job_url" \
+        --deployment-nonce "$deployment_nonce" >/dev/null
+      "$restore_script" \
+        "$prior_release" \
+        "$prior_release_sha256" \
+        "$prior_settings_backup" \
+        "$prior_settings_sha256" >/dev/null
+      wait_for_service_release "$prior_release"
+      printf '%s\n' "oracle_rollback=verified"
+      exit 0
+    fi
 
     transition_started=0
     verification_complete=0

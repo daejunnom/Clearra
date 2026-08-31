@@ -120,6 +120,62 @@ fn gif_timeline_render_golden() {
 }
 
 #[test]
+fn connected_board_joins_same_group_and_preserves_the_empty_grid() {
+    let cells = [
+        RenderCell::Empty,
+        RenderCell::T,
+        RenderCell::Empty,
+        RenderCell::Empty,
+        RenderCell::T,
+        RenderCell::T,
+        RenderCell::T,
+        RenderCell::Empty,
+    ];
+    let board = RenderBoard::from_cells_with_connection_groups(4, 2, &cells, &[0; 8])
+        .expect("connected board");
+    let png = ExactBitmapRenderer::render_connected_board_png(
+        &board,
+        8,
+        RenderExportLimits::product_default(),
+    )
+    .expect("connected png");
+    let (width, rgba) = decode_rgba(&png);
+
+    let t = [182, 106, 208, 255];
+    assert_eq!(pixel(&rgba, width, 7, 12), t);
+    assert_eq!(pixel(&rgba, width, 8, 12), t);
+    assert_eq!(pixel(&rgba, width, 12, 7), t);
+    assert_eq!(pixel(&rgba, width, 12, 8), t);
+    assert_eq!(pixel(&rgba, width, 12, 0), [103, 116, 111, 255]);
+    assert_eq!(pixel(&rgba, width, 0, 12), [103, 116, 111, 255]);
+    assert_eq!(pixel(&rgba, width, 23, 12), [38, 50, 46, 255]);
+    assert_eq!(pixel(&rgba, width, 12, 15), [38, 50, 46, 255]);
+    assert_eq!(pixel(&rgba, width, 28, 12), [30, 41, 39, 255]);
+    assert_eq!(pixel(&rgba, width, 24, 8), [63, 74, 72, 255]);
+}
+
+#[test]
+fn connected_board_keeps_a_boundary_between_different_owner_groups() {
+    let board = RenderBoard::from_cells_with_connection_groups(
+        2,
+        1,
+        &[RenderCell::T, RenderCell::T],
+        &[0, 1],
+    )
+    .expect("owner-separated board");
+    let png = ExactBitmapRenderer::render_connected_board_png(
+        &board,
+        8,
+        RenderExportLimits::product_default(),
+    )
+    .expect("owner-separated png");
+    let (width, rgba) = decode_rgba(&png);
+
+    assert_eq!(pixel(&rgba, width, 7, 4), [38, 50, 46, 255]);
+    assert_eq!(pixel(&rgba, width, 8, 4), [103, 116, 111, 255]);
+}
+
+#[test]
 fn renderer_reports_export_limits() {
     let limits = RenderExportLimits::tight_for_tests();
     assert_eq!(limits.max_frame_width(), 64);

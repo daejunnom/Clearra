@@ -1,4 +1,4 @@
-[CmdletBinding(PositionalBinding = $false)]
+[CmdletBinding(PositionalBinding = $false, DefaultParameterSetName = 'LocalOverlay')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-f]{40}$')]
@@ -7,8 +7,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $SourceArchive,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'LocalOverlay')]
     [string] $OverlayArchive,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoteOverlay')]
+    [ValidatePattern('^/opt/clearra/sealed-release-inputs/private-overlay-no-config-[0-9a-f]{64}\.tar$')]
+    [string] $RemoteOverlayArchive,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoteOverlay')]
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string] $RemoteOverlaySha256,
 
     [Parameter(Mandatory = $true)]
     [string] $Ctk3DistArchive,
@@ -58,15 +66,125 @@ function Get-ExactSha256 {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function Get-OracleHostPlatform {
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Windows
+    )) {
+        return 'windows'
+    }
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Linux
+    )) {
+        return 'linux'
+    }
+    throw 'Oracle release tooling supports only Windows and Linux hosts.'
+}
+
+function Get-OracleSshConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform
+    )
+    if ($Platform -ceq 'windows') {
+        return 'NUL'
+    }
+    return '/dev/null'
+}
+
+function Get-OraclePosixSyntaxAuditContract {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+    if ($Platform -ceq 'windows') {
+        return [pscustomobject]@{
+            ProjectionCommand = 'wsl.exe'
+            ProjectionArguments = [string[]]@(
+                '-e', '/usr/bin/wslpath', '-a', '--', $Path
+            )
+            SyntaxCommand = 'wsl.exe'
+            SyntaxArguments = [string[]]@(
+                '-e', '/usr/bin/dash', '-n', '--'
+            )
+        }
+    }
+    return [pscustomobject]@{
+        ProjectionCommand = $null
+        ProjectionArguments = [string[]]@()
+        SyntaxCommand = '/usr/bin/dash'
+        SyntaxArguments = [string[]]@('-n', '--', $Path)
+    }
+}
+
+function Invoke-OraclePosixSyntaxAudit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('windows', 'linux')]
+        [string] $Platform,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ProjectionError,
+
+        [Parameter(Mandatory = $true)]
+        [string] $SyntaxError
+    )
+    $contract = Get-OraclePosixSyntaxAuditContract -Platform $Platform -Path $Path
+    $syntaxArguments = [string[]]@($contract.SyntaxArguments)
+    if ($null -ne $contract.ProjectionCommand) {
+        $projectionCommand = [string]$contract.ProjectionCommand
+        $projectionArguments = [string[]]@($contract.ProjectionArguments)
+        $projectedPath = @(& $projectionCommand @projectionArguments)
+        if ($LASTEXITCODE -ne 0 -or $projectedPath.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace($projectedPath[0])) {
+            throw $ProjectionError
+        }
+        $syntaxArguments += [string]$projectedPath[0]
+    }
+    $syntaxCommand = [string]$contract.SyntaxCommand
+    $null = & $syntaxCommand @syntaxArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw $SyntaxError
+    }
+}
+
+function Assert-CanonicalRemoteOverlayAuthority {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Sha256
+    )
+    if ($Sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Path -cne "/opt/clearra/sealed-release-inputs/private-overlay-no-config-$Sha256.tar") {
+        throw 'Remote Oracle overlay authority is not canonical.'
+    }
+}
+
+$remoteOverlayMode = $PSCmdlet.ParameterSetName -ceq 'RemoteOverlay'
+if ($remoteOverlayMode) {
+    Assert-CanonicalRemoteOverlayAuthority `
+        -Path $RemoteOverlayArchive `
+        -Sha256 $RemoteOverlaySha256
+}
 $localInputs = @(
     [pscustomobject]@{ Local = $SourceArchive; RemoteName = 'source.tar.gz'; Mode = '600'; Label = 'Exact source archive' },
-    [pscustomobject]@{ Local = $OverlayArchive; RemoteName = 'private-overlay-no-config.tar'; Mode = '600'; Label = 'Private overlay archive' },
     [pscustomobject]@{ Local = $Ctk3DistArchive; RemoteName = 'ctk3-dist.tar'; Mode = '600'; Label = 'CTK3 distribution archive' },
     [pscustomobject]@{ Local = $DependenciesArchive; RemoteName = 'node_modules.tar'; Mode = '600'; Label = 'Production dependency archive' },
     [pscustomobject]@{ Local = $launcherPath; RemoteName = 'clearra-oracle-release-deploy'; Mode = '600'; Label = 'Tracked v0.8 launcher' },
     [pscustomobject]@{ Local = $digesterPath; RemoteName = 'clearra-release-tree-digest.py'; Mode = '600'; Label = 'Tracked tree digester' },
     [pscustomobject]@{ Local = $freezePath; RemoteName = 'clearra-oracle-freeze-v080'; Mode = '700'; Label = 'Tracked freeze helper' }
 )
+if (-not $remoteOverlayMode) {
+    $localInputs = @($localInputs[0]) + @(
+        [pscustomobject]@{ Local = $OverlayArchive; RemoteName = 'private-overlay-no-config.tar'; Mode = '600'; Label = 'Private overlay archive' }
+    ) + @($localInputs[1..($localInputs.Count - 1)])
+}
 foreach ($input in $localInputs) {
     $item = Get-ExactLeaf -Path $input.Local -Label $input.Label
     $input | Add-Member -NotePropertyName Length -NotePropertyValue ([long]$item.Length)
@@ -102,14 +220,13 @@ if ($LASTEXITCODE -ne 0 -or $fingerprint.Count -ne 1 -or $fingerprint[0] -cne $e
     throw 'Pinned Oracle host-key fingerprint does not match.'
 }
 
-$wslFreezePath = @(& wsl.exe -e wslpath -a -- $freezePath)
-if ($LASTEXITCODE -ne 0 -or $wslFreezePath.Count -ne 1 -or [string]::IsNullOrWhiteSpace($wslFreezePath[0])) {
-    throw 'The tracked freeze helper could not be projected into WSL.'
-}
-& wsl.exe -e dash -n $wslFreezePath[0]
-if ($LASTEXITCODE -ne 0) {
-    throw 'The tracked freeze helper failed its POSIX syntax audit.'
-}
+$hostPlatform = Get-OracleHostPlatform
+$sshConfigPath = Get-OracleSshConfigPath -Platform $hostPlatform
+Invoke-OraclePosixSyntaxAudit `
+    -Platform $hostPlatform `
+    -Path $freezePath `
+    -ProjectionError 'The tracked freeze helper could not be projected into WSL.' `
+    -SyntaxError 'The tracked freeze helper failed its POSIX syntax audit.'
 
 if ($AuditOnly) {
     'oracle_freeze_invoker=audit-ok'
@@ -125,7 +242,7 @@ if ([string]::IsNullOrWhiteSpace($IdentityFile)) {
 [void](Get-ExactLeaf -Path $IdentityFile -Label 'Oracle identity file')
 
 $commonSshOptions = @(
-    '-F', 'NUL',
+    '-F', $sshConfigPath,
     '-i', $IdentityFile,
     '-o', 'BatchMode=yes',
     '-o', 'IdentitiesOnly=yes',
@@ -205,7 +322,6 @@ try {
             throw "Remote freeze upload digest does not match: $($input.RemoteName)"
         }
     }
-
     $helperRemoteOutput = @(Invoke-ExactSsh @(
         'sudo', '-n', '/usr/bin/mktemp',
         "/usr/local/sbin/.clearra-oracle-freeze-v080-$commitPrefix.XXXXXXXX"
@@ -225,13 +341,20 @@ try {
         throw 'Root-owned Oracle freeze helper metadata does not match.'
     }
 
-    $attestation = @(Invoke-ExactSsh @(
+    $helperArguments = @(
         'sudo', '-n', $helperRemote,
         '--source-commit', $SourceCommit,
         '--nonce', $freezeNonce,
         '--self-sha256', $helperInput.Sha256,
         '--self-path', $helperRemote
-    ))
+    )
+    if ($remoteOverlayMode) {
+        $helperArguments += @(
+            '--remote-overlay-archive', $RemoteOverlayArchive,
+            '--remote-overlay-sha256', $RemoteOverlaySha256
+        )
+    }
+    $attestation = @(Invoke-ExactSsh $helperArguments)
     if ($attestation.Count -ne 7) {
         throw 'Oracle freeze helper returned an invalid attestation cardinality.'
     }

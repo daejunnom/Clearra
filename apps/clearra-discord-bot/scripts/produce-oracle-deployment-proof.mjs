@@ -254,18 +254,29 @@ export function inspectActiveOracle(options, dependencies = {}) {
     throw new Error("current Oracle Gateway process has no READY record");
   }
   const verifiedAfterMs = Date.parse(options.verifiedAfter);
-  const operation = journal
-    .split(/\r?\n/u)
-    .map(parseJsonLine)
-    .find(
-      (record) =>
-        record?.event === "clearra.operation" &&
-        record.scope === "gateway" &&
-        record.kind === "slash" &&
-        record.command === OPERATION_COMMAND &&
-        record.status === "succeeded" &&
-        Date.parse(record.at) >= verifiedAfterMs,
-    );
+  let operation = null;
+  let operationAtMs = Number.NEGATIVE_INFINITY;
+  for (const record of journal.split(/\r?\n/u).map(parseJsonLine)) {
+    if (
+      record?.event !== "clearra.operation" ||
+      record.scope !== "gateway" ||
+      record.kind !== "slash" ||
+      record.command !== OPERATION_COMMAND ||
+      record.status !== "succeeded"
+    ) {
+      continue;
+    }
+    const timestamp = canonicalJournalTimestamp(record.at);
+    if (
+      timestamp === null ||
+      timestamp.milliseconds < verifiedAfterMs ||
+      timestamp.milliseconds <= operationAtMs
+    ) {
+      continue;
+    }
+    operation = { ...record, at: timestamp.text };
+    operationAtMs = timestamp.milliseconds;
+  }
   if (!operation) {
     throw new Error(
       "Oracle Gateway has no fresh successful bounded end-to-end operation",
@@ -406,6 +417,18 @@ function canonicalTimestamp(value) {
     throw new Error("verified-after must be a canonical ISO timestamp");
   }
   return text;
+}
+
+function canonicalJournalTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const milliseconds = Date.parse(value);
+  if (
+    !Number.isFinite(milliseconds) ||
+    new Date(milliseconds).toISOString() !== value
+  ) {
+    return null;
+  }
+  return Object.freeze({ text: value, milliseconds });
 }
 
 function requiredMatch(value, pattern, label) {

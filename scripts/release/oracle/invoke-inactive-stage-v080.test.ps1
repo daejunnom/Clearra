@@ -11,6 +11,86 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'clearra-oracle-wrapper-test-' + [guid]::NewGuid().ToString('N')
 )
 
+function Invoke-ExtractedWrapperFunction {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $FunctionName,
+        [Parameter(Mandatory = $true)][object[]] $Arguments
+    )
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $Path,
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        throw "Wrapper parse failed while extracting $FunctionName."
+    }
+    $definitions = @($ast.FindAll({
+        param($node)
+        return $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq $FunctionName
+    }, $true))
+    if ($definitions.Count -ne 1) {
+        throw "Wrapper must define $FunctionName exactly once."
+    }
+    $invocation = [scriptblock]::Create(
+        $definitions[0].Extent.Text + "`n& $FunctionName @args"
+    )
+    return & $invocation @Arguments
+}
+
+$windowsSshConfig = Invoke-ExtractedWrapperFunction `
+    -Path $wrapper -FunctionName 'Get-OracleSshConfigPath' -Arguments @('windows')
+$linuxSshConfig = Invoke-ExtractedWrapperFunction `
+    -Path $wrapper -FunctionName 'Get-OracleSshConfigPath' -Arguments @('linux')
+if ($windowsSshConfig -cne 'NUL' -or $linuxSshConfig -cne '/dev/null') {
+    throw 'Inactive-stage Windows/Linux SSH config argument contract drifted.'
+}
+$wrapperSource = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $wrapper))
+foreach ($requiredPlatformAssembly in @(
+    '$hostPlatform = Get-OracleHostPlatform',
+    '$sshConfigPath = Get-OracleSshConfigPath -Platform $hostPlatform',
+    "'-F', `$sshConfigPath"
+)) {
+    if ($wrapperSource.IndexOf($requiredPlatformAssembly, [StringComparison]::Ordinal) -lt 0) {
+        throw "Inactive-stage SSH platform assembly is missing: $requiredPlatformAssembly"
+    }
+}
+foreach ($requiredRemoteContract in @(
+    "'--remote-overlay-archive', `$RemoteOverlayArchive",
+    "'--remote-overlay-sha256', `$RemoteOverlaySha256"
+)) {
+    if ($wrapperSource.IndexOf($requiredRemoteContract, [StringComparison]::Ordinal) -lt 0) {
+        throw "Inactive-stage remote root-helper argument contract is missing: $requiredRemoteContract"
+    }
+}
+foreach ($forbiddenRemoteRead in @(
+    'function Copy-RemoteSealedOverlay',
+    "'-o', '1001', '-g', '1001'",
+    "'sudo', '-n', '/usr/bin/sha256sum', '--', `$RemoteOverlayArchive"
+)) {
+    if ($wrapperSource.IndexOf($forbiddenRemoteRead, [StringComparison]::Ordinal) -ge 0) {
+        throw "Inactive-stage wrapper regained private-overlay read authority: $forbiddenRemoteRead"
+    }
+}
+$stageTemplateSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'clearra-oracle-inactive-stage-v080.template'))
+foreach ($sealedCopyMarker in @(
+    'os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW',
+    'metadata.st_nlink != 1 or metadata.st_size <= 0',
+    'stat.S_IMODE(metadata.st_mode) & 0o022',
+    'os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW',
+    'os.fsync(destination_fd)',
+    'os.unlink(destination)',
+    'upload_expected_count=6',
+    'upload_expected_count=7'
+)) {
+    if ($stageTemplateSource.IndexOf($sealedCopyMarker, [StringComparison]::Ordinal) -lt 0) {
+        throw "Inactive-stage sealed-overlay fail-closed contract drifted: $sealedCopyMarker"
+    }
+}
+
 function Get-Sha256([string] $Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
@@ -102,6 +182,57 @@ try {
         $audit[1] -cne 'oracle_source_commit=0123456789abcdef0123456789abcdef01234567' -or
         $audit[2] -cne 'oracle_release_id=v0.8.0-0123456') {
         throw 'AuditOnly attestation did not match.'
+    }
+
+    $remoteOverlaySha256 = Get-Sha256 $overlay
+    $remoteOverlayArchive = "/opt/clearra/sealed-release-inputs/private-overlay-no-config-$remoteOverlaySha256.tar"
+    $remoteAudit = @(& $wrapper `
+        -ManifestPath $manifestPath `
+        -SourceArchive $source `
+        -RemoteOverlayArchive $remoteOverlayArchive `
+        -RemoteOverlaySha256 $remoteOverlaySha256 `
+        -Ctk3DistArchive $dist `
+        -DependenciesArchive $dependencies `
+        -AuditOnly)
+    if ($remoteAudit.Count -ne 6 -or
+        $remoteAudit[0] -cne 'oracle_inactive_stage_invoker=audit-ok') {
+        throw 'Remote-overlay AuditOnly did not remain a typed local-only audit.'
+    }
+
+    $mismatchedRemoteSha256 = 'f' * 64
+    $rejected = $false
+    try {
+        [void]@(& $wrapper `
+            -ManifestPath $manifestPath `
+            -SourceArchive $source `
+            -RemoteOverlayArchive "/opt/clearra/sealed-release-inputs/private-overlay-no-config-$mismatchedRemoteSha256.tar" `
+            -RemoteOverlaySha256 $mismatchedRemoteSha256 `
+            -Ctk3DistArchive $dist `
+            -DependenciesArchive $dependencies `
+            -AuditOnly)
+    } catch {
+        $rejected = $_.Exception.Message -like '*does not match the frozen manifest*'
+    }
+    if (-not $rejected) {
+        throw 'Remote-overlay AuditOnly accepted a manifest/hash authority mismatch.'
+    }
+
+    $rejected = $false
+    try {
+        [void]@(& $wrapper `
+            -ManifestPath $manifestPath `
+            -SourceArchive $source `
+            -OverlayArchive $overlay `
+            -RemoteOverlayArchive $remoteOverlayArchive `
+            -RemoteOverlaySha256 $remoteOverlaySha256 `
+            -Ctk3DistArchive $dist `
+            -DependenciesArchive $dependencies `
+            -AuditOnly)
+    } catch {
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw 'Inactive-stage wrapper accepted local and remote overlay inputs together.'
     }
 
     [IO.File]::AppendAllText($source, 'tampered', [Text.UTF8Encoding]::new($false))

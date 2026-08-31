@@ -82,6 +82,13 @@ test("probe authority rejects hash drift, secret fields, and mixed source identi
       /differs from the accepted source/u,
     );
 
+    const shortInterval = structuredClone(authority);
+    shortInterval.interval_seconds = 1199;
+    assert.throws(
+      () => validateProductionProbeAuthority(shortInterval),
+      /interval must be exactly 1200 seconds/u,
+    );
+
     await writeFile(authority.cloud.smoke_report_path, '{"drift":true}\n', "utf8");
     await assert.rejects(
       createProductionProbeSpec(authority, { sharedAdapterPath }),
@@ -234,7 +241,7 @@ async function withAuthorityFiles(body) {
     const authority = {
       schema_id: PRODUCTION_PROBE_AUTHORITY_SCHEMA_ID,
       source_commit: COMMIT,
-      interval_seconds: 30,
+      interval_seconds: 1200,
       discord: {
         application_id: "223456789012345678",
         catalog_path: catalogPath,

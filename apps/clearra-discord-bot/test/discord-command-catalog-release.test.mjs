@@ -192,6 +192,24 @@ test("restore is conditional on the exact current digest and verifies the prior 
   );
   assert.equal(report.current_before_sha256, candidateDigest);
   assert.equal(report.current_after_sha256, priorSnapshot.catalog_sha256);
+
+  const noOpTimes = [
+    "2026-08-30T00:20:02.000Z",
+    "2026-08-30T00:20:03.000Z",
+  ];
+  const noOp = await restoreDiscordCatalogRelease({
+    rest,
+    applicationId: APPLICATION_ID,
+    sourceCommit: COMMIT,
+    priorSnapshot,
+    expectedCurrentDigest: candidateDigest,
+    alsoAllowedCurrentDigest: priorSnapshot.catalog_sha256,
+    now: () => noOpTimes.shift(),
+    synchronizationOptions: { retryDelayMs: 0, async wait() {} },
+  });
+  assert.equal(noOp.changed, false);
+  assert.equal(noOp.current_before_sha256, priorSnapshot.catalog_sha256);
+  assert.equal(writes, 1);
 });
 
 test("sync and restore reports reject canonical-content tampering", async () => {

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { canonicalSha256 } from "./canonical-release-evidence.mjs";
+import {
+  canonicalSha256,
+  sealCanonicalReport,
+} from "./canonical-release-evidence.mjs";
 import {
   observeProductionSurfaces,
   PRODUCTION_OBSERVATION_SCHEMA_ID,
@@ -46,7 +49,9 @@ test("observes Discord, Oracle, Cloud, and Pages through a short injected clock"
   assert.equal(
     validateProductionObservationReport(report, {
       expectedSourceCommit: COMMIT,
-      minimumDurationSeconds: 2,
+      expectedDurationSeconds: 2,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 3,
     }),
     report,
   );
@@ -77,7 +82,7 @@ test("fails closed when a surface identity changes during the window", async () 
   );
 });
 
-test("rejects stale Oracle operation evidence and report hash tampering", async () => {
+test("rejects stale Oracle operation evidence immediately and report hash tampering", async () => {
   const probes = probeSet(new Map());
   const original = probes.oracle;
   probes.oracle = async (context) => {
@@ -92,22 +97,25 @@ test("rejects stale Oracle operation evidence and report hash tampering", async 
         freshOperationAt,
         observedAt,
       ),
+      verified_after: result.identity.verified_after,
       fresh_operation_at: freshOperationAt,
       observed_at: observedAt,
     };
     return result;
   };
+  const clock = fakeClock("2026-08-30T00:00:00.000Z");
   await assert.rejects(
     observeProductionSurfaces({
       sourceCommit: COMMIT,
-      durationSeconds: 2,
+      durationSeconds: 1200,
       intervalSeconds: 1,
-      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      clock,
       probes,
       probeSpec: validProbeSpec(),
     }),
-    /operation time did not increase/u,
+    /fresh operation did not occur after the prior read-only observation/u,
   );
+  assert.equal(clock.waitCount(), 1);
 
   const report = await observeProductionSurfaces({
     sourceCommit: COMMIT,
@@ -120,28 +128,57 @@ test("rejects stale Oracle operation evidence and report hash tampering", async 
   const tampered = { ...report, duration_seconds: 1200 };
   assert.throws(
     () => validateProductionObservationReport(tampered, {
-      minimumDurationSeconds: 1,
+      expectedDurationSeconds: 1,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 2,
     }),
     /SHA-256 differs/u,
   );
 });
 
-test("rejects an Oracle probe whose fresh operation predates the claimed window", async () => {
+test("allows the verified candidate operation as sample zero before the claimed window", async () => {
   const probes = probeSet(new Map());
   const original = probes.oracle;
   probes.oracle = async (context) => {
     const result = await original(context);
-    const freshOperationAt = "2026-08-29T23:59:59.999Z";
-    const observedAt = "2026-08-30T00:00:00.000Z";
-    result.freshness = {
-      operation_marker: oracleOperationMarker(
+    if (context.sequence === 0) {
+      const freshOperationAt = "2026-08-29T23:59:59.500Z";
+      const observedAt = "2026-08-30T00:00:00.000Z";
+      result.freshness = oracleFreshnessAt(
         result.identity,
         freshOperationAt,
         observedAt,
-      ),
-      fresh_operation_at: freshOperationAt,
-      observed_at: observedAt,
-    };
+      );
+    }
+    return result;
+  };
+  const report = await observeProductionSurfaces({
+    sourceCommit: COMMIT,
+    durationSeconds: 1,
+    intervalSeconds: 1,
+    clock: fakeClock("2026-08-30T00:00:00.000Z"),
+    probes,
+    probeSpec: validProbeSpec(),
+  });
+  assert.equal(
+    report.surfaces.find(({ surface }) => surface === "oracle")
+      .observations[0].freshness.fresh_operation_at,
+    "2026-08-29T23:59:59.500Z",
+  );
+});
+
+test("rejects Oracle freshness before verified-after authority", async () => {
+  const probes = probeSet(new Map());
+  const original = probes.oracle;
+  probes.oracle = async (context) => {
+    const result = await original(context);
+    if (context.sequence === 0) {
+      result.freshness = oracleFreshnessAt(
+        result.identity,
+        "2026-08-29T23:59:58.999Z",
+        "2026-08-30T00:00:00.000Z",
+      );
+    }
     return result;
   };
   await assert.rejects(
@@ -153,7 +190,288 @@ test("rejects an Oracle probe whose fresh operation predates the claimed window"
       probes,
       probeSpec: validProbeSpec(),
     }),
-    /outside its observation sample/u,
+    /freshness timestamps are outside their observation authority/u,
+  );
+});
+
+test("requires every later Oracle operation to follow the prior remote observation", async () => {
+  const probes = probeSet(new Map());
+  const original = probes.oracle;
+  probes.oracle = async (context) => {
+    const result = await original(context);
+    if (context.sequence === 0) {
+      return {
+        ...result,
+        freshness: oracleFreshnessAt(
+          result.identity,
+          "2026-08-29T23:59:59.500Z",
+          "2026-08-30T00:00:00.000Z",
+        ),
+      };
+    }
+    if (context.sequence === 1) {
+      return {
+        ...result,
+        freshness: oracleFreshnessAt(
+          result.identity,
+          "2026-08-30T00:00:00.000Z",
+          "2026-08-30T00:00:01.000Z",
+        ),
+      };
+    }
+    return result;
+  };
+  await assert.rejects(
+    observeProductionSurfaces({
+      sourceCommit: COMMIT,
+      durationSeconds: 2,
+      intervalSeconds: 1,
+      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      probes,
+      probeSpec: validProbeSpec(),
+    }),
+    /fresh operation did not occur after the prior read-only observation/u,
+  );
+});
+
+test("requires the later Oracle operation to occur strictly inside the window", async () => {
+  const probes = probeSet(new Map());
+  const original = probes.oracle;
+  probes.oracle = async (context) => {
+    const result = await original(context);
+    if (context.sequence === 0) {
+      return {
+        ...result,
+        freshness: oracleFreshnessAt(
+          result.identity,
+          "2026-08-29T23:59:59.000Z",
+          "2026-08-29T23:59:59.500Z",
+        ),
+      };
+    }
+    return {
+      ...result,
+      freshness: oracleFreshnessAt(
+        result.identity,
+        "2026-08-30T00:00:00.000Z",
+        "2026-08-30T00:00:01.000Z",
+      ),
+    };
+  };
+  await assert.rejects(
+    observeProductionSurfaces({
+      sourceCommit: COMMIT,
+      durationSeconds: 1,
+      intervalSeconds: 1,
+      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      probes,
+      probeSpec: validProbeSpec(),
+    }),
+    /fresh operation did not occur inside the observation window/u,
+  );
+});
+
+test("requires Oracle remote observation time to increase strictly", async () => {
+  const probes = probeSet(new Map());
+  const original = probes.oracle;
+  probes.oracle = async (context) => {
+    const result = await original(context);
+    if (context.sequence === 1) {
+      result.freshness = oracleFreshnessAt(
+        result.identity,
+        "2026-08-30T00:00:00.000Z",
+        "2026-08-30T00:00:00.000Z",
+      );
+    }
+    return result;
+  };
+  await assert.rejects(
+    observeProductionSurfaces({
+      sourceCommit: COMMIT,
+      durationSeconds: 2,
+      intervalSeconds: 1,
+      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      probes,
+      probeSpec: validProbeSpec(),
+    }),
+    /read-only observation time did not increase/u,
+  );
+});
+
+test("final report validation rechecks the live Oracle cross-sample contract", async () => {
+  const report = await observeProductionSurfaces({
+    sourceCommit: COMMIT,
+    durationSeconds: 1,
+    intervalSeconds: 1,
+    clock: fakeClock("2026-08-30T00:00:00.000Z"),
+    probes: probeSet(new Map()),
+    probeSpec: validProbeSpec(),
+  });
+  const tampered = structuredClone(report);
+  const oracleSurface = tampered.surfaces.find(({ surface }) => surface === "oracle");
+  const priorRemoteObservedAt = oracleSurface.observations[0].freshness.observed_at;
+  const nextFreshness = oracleSurface.observations[1].freshness;
+  nextFreshness.fresh_operation_at = priorRemoteObservedAt;
+  nextFreshness.operation_marker = oracleOperationMarker(
+    oracleSurface.identity,
+    nextFreshness.fresh_operation_at,
+    nextFreshness.observed_at,
+  );
+  const { report_sha256: ignoredReportSha256, ...unsignedReport } = tampered;
+  void ignoredReportSha256;
+  const resealed = sealCanonicalReport(unsignedReport);
+  assert.throws(
+    () => validateProductionObservationReport(resealed, {
+      expectedSourceCommit: COMMIT,
+      expectedDurationSeconds: 1,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 2,
+    }),
+    /fresh operation did not occur after the prior read-only observation/u,
+  );
+});
+
+test("rejects Oracle freshness whose verified-after value differs from identity", async () => {
+  const probes = probeSet(new Map());
+  const original = probes.oracle;
+  probes.oracle = async (context) => {
+    const result = await original(context);
+    if (context.sequence === 0) {
+      result.freshness = {
+        ...result.freshness,
+        verified_after: "2026-08-29T23:59:58.000Z",
+      };
+    }
+    return result;
+  };
+  await assert.rejects(
+    observeProductionSurfaces({
+      sourceCommit: COMMIT,
+      durationSeconds: 1,
+      intervalSeconds: 1,
+      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      probes,
+      probeSpec: validProbeSpec(),
+    }),
+    /verified-after authority differs from its identity/u,
+  );
+});
+
+test("rejects a re-sealed report that pads the window before sample zero", async () => {
+  const report = await observeProductionSurfaces({
+    sourceCommit: COMMIT,
+    durationSeconds: 1,
+    intervalSeconds: 1,
+    clock: fakeClock("2026-08-30T00:00:00.000Z"),
+    probes: probeSet(new Map()),
+    probeSpec: validProbeSpec(),
+  });
+  const tampered = structuredClone(report);
+  tampered.started_at = "2026-08-29T23:59:59.000Z";
+  const resealed = reseal(tampered);
+  assert.throws(
+    () => validateProductionObservationReport(resealed, {
+      expectedSourceCommit: COMMIT,
+      expectedDurationSeconds: 1,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 2,
+    }),
+    /initial observation does not open/u,
+  );
+});
+
+test("production validation requires the exact 1200-second two-sample contract", async () => {
+  const productionClock = fakeClock("2026-08-30T00:00:00.000Z");
+  const productionReport = await observeProductionSurfaces({
+    sourceCommit: COMMIT,
+    durationSeconds: 1200,
+    intervalSeconds: 1200,
+    clock: productionClock,
+    probes: probeSet(new Map()),
+    probeSpec: validProbeSpec(1200),
+  });
+  assert.equal(productionReport.duration_seconds, 1200);
+  assert.equal(productionReport.interval_seconds, 1200);
+  assert.equal(productionClock.waitCount(), 1);
+  for (const surface of productionReport.surfaces) {
+    assert.equal(surface.observation_count, 2);
+    assert.equal(surface.observations[0].observed_at, productionReport.started_at);
+    assert.equal(surface.observations[1].observed_at, productionReport.ended_at);
+  }
+  assert.equal(
+    validateProductionObservationReport(productionReport, {
+      expectedSourceCommit: COMMIT,
+    }),
+    productionReport,
+  );
+
+  const report = await observeProductionSurfaces({
+    sourceCommit: COMMIT,
+    durationSeconds: 1,
+    intervalSeconds: 1,
+    clock: fakeClock("2026-08-30T00:00:00.000Z"),
+    probes: probeSet(new Map()),
+    probeSpec: validProbeSpec(),
+  });
+  assert.throws(
+    () => validateProductionObservationReport(report, {
+      expectedSourceCommit: COMMIT,
+    }),
+    /duration must be exactly 1200/u,
+  );
+
+  const wrongInterval = structuredClone(report);
+  wrongInterval.interval_seconds = 2;
+  assert.throws(
+    () => validateProductionObservationReport(reseal(wrongInterval), {
+      expectedSourceCommit: COMMIT,
+      expectedDurationSeconds: 1,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 2,
+    }),
+    /interval must be exactly 1/u,
+  );
+
+  const wrongCount = structuredClone(report);
+  for (const surface of wrongCount.surfaces) {
+    surface.observation_count = 3;
+    surface.observations.push({
+      ...structuredClone(surface.observations[1]),
+      sequence: 2,
+    });
+  }
+  assert.throws(
+    () => validateProductionObservationReport(reseal(wrongCount), {
+      expectedSourceCommit: COMMIT,
+      expectedDurationSeconds: 1,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 2,
+    }),
+    /observation count is invalid/u,
+  );
+
+  const paddedEnd = structuredClone(report);
+  paddedEnd.ended_at = "2026-08-30T00:00:02.000Z";
+  assert.throws(
+    () => validateProductionObservationReport(reseal(paddedEnd), {
+      expectedSourceCommit: COMMIT,
+      expectedDurationSeconds: 1,
+      expectedIntervalSeconds: 1,
+      expectedObservationCount: 2,
+    }),
+    /final observation does not close/u,
+  );
+
+  await assert.rejects(
+    observeProductionSurfaces({
+      sourceCommit: COMMIT,
+      durationSeconds: 1,
+      intervalSeconds: 1,
+      clock: fakeClock("2026-08-30T00:00:00.000Z"),
+      probes: probeSet(new Map()),
+      probeSpec: validProbeSpec(2),
+    }),
+    /interval differs from its probe spec/u,
   );
 });
 
@@ -195,7 +513,7 @@ test("Discord production identity requires its accepted-run and sync-authority c
   );
 });
 
-function validProbeSpec() {
+function validProbeSpec(intervalSeconds = 1) {
   const probes = ["cloud", "discord", "oracle", "pages"].map((surface) => ({
     surface,
     runtime: surface === "oracle" ? "powershell" : "node",
@@ -220,7 +538,7 @@ function validProbeSpec() {
   return {
     schema_id: "clearra.production-observation-probe-spec.v1",
     source_commit: COMMIT,
-    interval_seconds: 30,
+    interval_seconds: intervalSeconds,
     probes,
   };
 }
@@ -259,6 +577,7 @@ function probeSet(calls) {
       gateway_start_monotonic_usec: 123456789,
       boot_id: "12345678-1234-1234-1234-123456789abc",
       ready_record_observed: true,
+      verified_after: "2026-08-29T23:59:59.000Z",
       status: "active",
     },
     cloud: {
@@ -314,8 +633,13 @@ function oracleFreshness(identity, sequence) {
     Date.parse("2026-08-30T00:00:00.000Z") + sequence * 1000,
   ).toISOString();
   const observedAt = freshOperationAt;
+  return oracleFreshnessAt(identity, freshOperationAt, observedAt);
+}
+
+function oracleFreshnessAt(identity, freshOperationAt, observedAt) {
   return {
     operation_marker: oracleOperationMarker(identity, freshOperationAt, observedAt),
+    verified_after: identity.verified_after,
     fresh_operation_at: freshOperationAt,
     observed_at: observedAt,
   };
@@ -326,6 +650,7 @@ function oracleOperationMarker(identity, freshOperationAt, observedAt) {
     contract: "clearra.oracle.candidate-observation.v1",
     source_commit: identity.source_commit,
     candidate_revision: identity.candidate_revision,
+    verified_after: identity.verified_after,
     fresh_operation_at: freshOperationAt,
     observed_at: observedAt,
   });
@@ -354,8 +679,19 @@ function freshnessFor(surface, sequence) {
 
 function fakeClock(start) {
   let milliseconds = Date.parse(start);
+  let waits = 0;
   return {
     now: () => milliseconds,
-    async wait(delay) { milliseconds += delay; },
+    async wait(delay) {
+      waits += 1;
+      milliseconds += delay;
+    },
+    waitCount: () => waits,
   };
+}
+
+function reseal(value) {
+  const { report_sha256: ignoredReportSha256, ...unsigned } = value;
+  void ignoredReportSha256;
+  return sealCanonicalReport(unsigned);
 }

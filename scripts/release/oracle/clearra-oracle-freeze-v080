@@ -16,6 +16,9 @@ source_commit=
 freeze_nonce=
 self_sha256=
 self_path=
+remote_overlay_archive=
+remote_overlay_sha256=
+overlay_path=
 upload_root=
 freeze_root=
 baseline_current_raw=
@@ -52,6 +55,106 @@ is_source_commit() {
 
 sha256_of() {
   /usr/bin/sha256sum -- "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+copy_remote_overlay() {
+  source_path=$1
+  expected_sha256=$2
+  destination_path=$3
+  /usr/bin/python3 - "$source_path" "$expected_sha256" "$destination_path" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source, expected, destination = sys.argv[1:]
+test_root = os.environ.get("CLEARRA_REMOTE_OVERLAY_TEST_ROOT") if os.geteuid() != 0 else None
+authority_uid = os.geteuid() if test_root else 0
+authority_gid = os.getegid() if test_root else 0
+sealed_root = test_root or "/opt/clearra/sealed-release-inputs"
+canonical = f"{sealed_root}/private-overlay-no-config-{expected}.tar"
+if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+    raise SystemExit(2)
+if source != canonical or os.path.dirname(destination) == "":
+    raise SystemExit(2)
+
+parent_paths = [test_root] if test_root else []
+if not test_root:
+    current = "/"
+    for component in source.strip("/").split("/")[:-1]:
+        current = os.path.join(current, component)
+        parent_paths.append(current)
+for current in parent_paths:
+    metadata = os.lstat(current)
+    if (not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != authority_uid or metadata.st_gid != authority_gid
+            or stat.S_IMODE(metadata.st_mode) & 0o022):
+        raise SystemExit(2)
+
+source_fd = destination_fd = None
+created = False
+try:
+    source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    metadata = os.fstat(source_fd)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != authority_uid
+            or metadata.st_gid != authority_gid or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_size <= 0):
+        raise OSError("sealed overlay metadata rejected")
+    if test_root and os.environ.get("CLEARRA_REMOTE_OVERLAY_TEST_SWAP") == "1":
+        os.replace(source + ".swap", source)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise OSError("sealed overlay digest rejected")
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    destination_fd = os.open(destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    created = True
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        view = memoryview(chunk)
+        while view:
+            written = os.write(destination_fd, view)
+            view = view[written:]
+    os.fsync(destination_fd)
+    os.close(destination_fd)
+    destination_fd = None
+    if test_root and os.environ.get("CLEARRA_REMOTE_OVERLAY_TEST_CORRUPT_COPY") == "1":
+        with open(destination, "ab") as corrupt_copy:
+            corrupt_copy.write(b"drift")
+    destination_fd = os.open(destination, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    copied = os.fstat(destination_fd)
+    if (not stat.S_ISREG(copied.st_mode) or copied.st_uid != authority_uid or copied.st_gid != authority_gid
+            or stat.S_IMODE(copied.st_mode) != 0o600 or copied.st_nlink != 1
+            or copied.st_size != metadata.st_size):
+        raise OSError("copied overlay metadata rejected")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(destination_fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise OSError("copied overlay digest rejected")
+except BaseException:
+    if created:
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
+    raise
+finally:
+    if source_fd is not None:
+        os.close(source_fd)
+    if destination_fd is not None:
+        os.close(destination_fd)
+PY
 }
 
 require_root_regular_mode() {
@@ -158,7 +261,7 @@ require_baseline_unchanged() {
 validate_layers() {
   /usr/bin/python3 - \
     "$upload_root/source.tar.gz" \
-    "$upload_root/private-overlay-no-config.tar" \
+    "$overlay_path" \
     "$upload_root/ctk3-dist.tar" \
     "$upload_root/node_modules.tar" <<'PY'
 import posixpath
@@ -286,7 +389,7 @@ assemble_candidate() {
   [ ! -e "$root" ] && [ ! -L "$root" ] || fail 73
   /usr/bin/mkdir -m 0755 -- "$root"
   /usr/bin/tar --extract --gzip --no-same-owner --file="$upload_root/source.tar.gz" --directory="$root"
-  /usr/bin/tar --extract --no-same-owner --file="$upload_root/private-overlay-no-config.tar" --directory="$root"
+  /usr/bin/tar --extract --no-same-owner --file="$overlay_path" --directory="$root"
   /usr/bin/tar --extract --no-same-owner --file="$upload_root/ctk3-dist.tar" --directory="$root"
   /usr/bin/tar --extract --no-same-owner --file="$upload_root/node_modules.tar" --directory="$root"
   /usr/bin/install -o root -g root -m 0644 -- "$baseline_config_path" "$root/apps/clearra-discord-bot/src/admin/config.mjs"
@@ -352,6 +455,8 @@ while [ "$#" -gt 0 ]; do
     --nonce) [ "$#" -ge 2 ] && [ -z "$freeze_nonce" ] || fail 64; freeze_nonce=$2; shift 2 ;;
     --self-sha256) [ "$#" -ge 2 ] && [ -z "$self_sha256" ] || fail 64; self_sha256=$2; shift 2 ;;
     --self-path) [ "$#" -ge 2 ] && [ -z "$self_path" ] || fail 64; self_path=$2; shift 2 ;;
+    --remote-overlay-archive) [ "$#" -ge 2 ] && [ -z "$remote_overlay_archive" ] || fail 64; remote_overlay_archive=$2; shift 2 ;;
+    --remote-overlay-sha256) [ "$#" -ge 2 ] && [ -z "$remote_overlay_sha256" ] || fail 64; remote_overlay_sha256=$2; shift 2 ;;
     *) fail 64 ;;
   esac
 done
@@ -359,6 +464,13 @@ done
 is_source_commit "$source_commit" || fail 64
 is_sha256 "$freeze_nonce" || fail 64
 is_sha256 "$self_sha256" || fail 64
+if [ -n "$remote_overlay_archive" ] || [ -n "$remote_overlay_sha256" ]; then
+  is_sha256 "$remote_overlay_sha256" || fail 64
+  [ "$remote_overlay_archive" = "/opt/clearra/sealed-release-inputs/private-overlay-no-config-$remote_overlay_sha256.tar" ] || fail 64
+  overlay_mode=remote
+else
+  overlay_mode=local
+fi
 commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
 release_id=v0.8.0-$commit_prefix
 case "$self_path" in /usr/local/sbin/.clearra-oracle-freeze-v080-$commit_prefix.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9] ) ;; * ) fail 64 ;; esac
@@ -372,15 +484,25 @@ freeze_root=/opt/clearra/.v080-freeze-$commit_prefix-$freeze_nonce
 [ -d "$upload_root" ] && [ ! -L "$upload_root" ] || fail 77
 [ "$(/usr/bin/readlink -f -- "$upload_root")" = "$upload_root" ] || fail 77
 [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$upload_root")" = '1001:1001:700' ] || fail 77
-unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
-  ! -name source.tar.gz ! -name private-overlay-no-config.tar ! -name ctk3-dist.tar \
-  ! -name node_modules.tar ! -name clearra-oracle-release-deploy \
-  ! -name clearra-release-tree-digest.py ! -name clearra-oracle-freeze-v080 -print -quit) || fail 77
+if [ "$overlay_mode" = local ]; then
+  unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
+    ! -name source.tar.gz ! -name private-overlay-no-config.tar ! -name ctk3-dist.tar \
+    ! -name node_modules.tar ! -name clearra-oracle-release-deploy \
+    ! -name clearra-release-tree-digest.py ! -name clearra-oracle-freeze-v080 -print -quit) || fail 77
+else
+  unexpected=$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 \
+    ! -name source.tar.gz ! -name ctk3-dist.tar \
+    ! -name node_modules.tar ! -name clearra-oracle-release-deploy \
+    ! -name clearra-release-tree-digest.py ! -name clearra-oracle-freeze-v080 -print -quit) || fail 77
+fi
 [ -z "$unexpected" ] || fail 77
-[ "$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 7 ] || fail 77
-for name in source.tar.gz private-overlay-no-config.tar ctk3-dist.tar node_modules.tar clearra-oracle-release-deploy clearra-release-tree-digest.py; do
+expected_upload_count=6
+[ "$overlay_mode" = local ] && expected_upload_count=7
+[ "$(/usr/bin/find "$upload_root" -xdev -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = "$expected_upload_count" ] || fail 77
+for name in source.tar.gz ctk3-dist.tar node_modules.tar clearra-oracle-release-deploy clearra-release-tree-digest.py; do
   require_upload_regular_mode "$upload_root/$name" 600
 done
+[ "$overlay_mode" = remote ] || require_upload_regular_mode "$upload_root/private-overlay-no-config.tar" 600
 require_upload_regular_mode "$upload_root/clearra-oracle-freeze-v080" 700
 [ "$(sha256_of "$upload_root/clearra-oracle-freeze-v080")" = "$self_sha256" ] || fail 65
 
@@ -389,11 +511,19 @@ require_upload_regular_mode "$upload_root/clearra-oracle-freeze-v080" 700
 # cannot be replaced between the byte checks above and the root-owned freeze.
 /usr/bin/chown root:root -- "$upload_root"
 /usr/bin/chmod 0700 -- "$upload_root"
-for name in source.tar.gz private-overlay-no-config.tar ctk3-dist.tar node_modules.tar clearra-oracle-release-deploy clearra-release-tree-digest.py; do
+for name in source.tar.gz ctk3-dist.tar node_modules.tar clearra-oracle-release-deploy clearra-release-tree-digest.py; do
   /usr/bin/chown root:root -- "$upload_root/$name"
   /usr/bin/chmod 0600 -- "$upload_root/$name"
   require_root_regular_mode "$upload_root/$name" 600
 done
+if [ "$overlay_mode" = local ]; then
+  /usr/bin/chown root:root -- "$upload_root/private-overlay-no-config.tar"
+  /usr/bin/chmod 0600 -- "$upload_root/private-overlay-no-config.tar"
+  require_root_regular_mode "$upload_root/private-overlay-no-config.tar" 600
+  overlay_path=$upload_root/private-overlay-no-config.tar
+else
+  [ ! -e "$upload_root/private-overlay-no-config.tar" ] && [ ! -L "$upload_root/private-overlay-no-config.tar" ] || fail 77
+fi
 /usr/bin/chown root:root -- "$upload_root/clearra-oracle-freeze-v080"
 /usr/bin/chmod 0700 -- "$upload_root/clearra-oracle-freeze-v080"
 require_root_regular_mode "$upload_root/clearra-oracle-freeze-v080" 700
@@ -404,6 +534,14 @@ exec 9>"$lock_path"
 /usr/bin/flock -n 9 || fail 75
 capture_baseline
 require_baseline_unchanged
+
+[ ! -e "$freeze_root" ] && [ ! -L "$freeze_root" ] || fail 73
+/usr/bin/mkdir -m 0700 -- "$freeze_root"
+if [ "$overlay_mode" = remote ]; then
+  overlay_path=$freeze_root/private-overlay-no-config.tar
+  copy_remote_overlay "$remote_overlay_archive" "$remote_overlay_sha256" "$overlay_path" || fail 65
+  require_root_regular_mode "$overlay_path" 600
+fi
 
 layer_counts=$(validate_layers) || fail 65
 old_ifs=$IFS
@@ -419,15 +557,14 @@ shift 9
 dependencies_files=$1; dependencies_directories=$2; dependencies_symlinks=$3
 
 source_sha256=$(sha256_of "$upload_root/source.tar.gz")
-overlay_sha256=$(sha256_of "$upload_root/private-overlay-no-config.tar")
+overlay_sha256=$(sha256_of "$overlay_path")
+[ "$overlay_mode" = local ] || [ "$overlay_sha256" = "$remote_overlay_sha256" ] || fail 65
 dist_sha256=$(sha256_of "$upload_root/ctk3-dist.tar")
 dependencies_sha256=$(sha256_of "$upload_root/node_modules.tar")
 launcher_sha256=$(sha256_of "$upload_root/clearra-oracle-release-deploy")
 digester_sha256=$(sha256_of "$upload_root/clearra-release-tree-digest.py")
 for digest in "$source_sha256" "$overlay_sha256" "$dist_sha256" "$dependencies_sha256" "$launcher_sha256" "$digester_sha256"; do is_sha256 "$digest" || fail 65; done
 
-[ ! -e "$freeze_root" ] && [ ! -L "$freeze_root" ] || fail 73
-/usr/bin/mkdir -m 0700 -- "$freeze_root"
 candidate_root=$freeze_root/$release_id
 assemble_candidate "$candidate_root" "$release_id"
 require_baseline_unchanged
@@ -451,7 +588,7 @@ manifest_path=$freeze_root/oracle-inactive-stage-v080.json
   "$baseline_settings_sha256" "$settings_size" "$config_sha256" "$config_size" \
   "$candidate_tree_sha256" "$candidate_directories" "$candidate_files0644" "$candidate_files0755" "$candidate_symlinks" \
   "$source_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/source.tar.gz")" "$source_files" "$source_directories" "$source_symlinks" \
-  "$overlay_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/private-overlay-no-config.tar")" "$overlay_files" "$overlay_directories" "$overlay_symlinks" \
+  "$overlay_sha256" "$(/usr/bin/stat -c '%s' -- "$overlay_path")" "$overlay_files" "$overlay_directories" "$overlay_symlinks" \
   "$dist_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/ctk3-dist.tar")" "$dist_files" "$dist_directories" "$dist_symlinks" \
   "$dependencies_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/node_modules.tar")" "$dependencies_files" "$dependencies_directories" "$dependencies_symlinks" \
   "$launcher_sha256" "$(/usr/bin/stat -c '%s' -- "$upload_root/clearra-oracle-release-deploy")" "$prior_launcher" \

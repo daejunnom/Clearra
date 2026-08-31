@@ -900,8 +900,13 @@ spec, adapter output, observation report, journal, and manifest.
   authority report and raw-file SHA-256.
 - Oracle uses the approved SSH read-only ops wrapper, not an invented public
   health endpoint. It returns active release/tree/settings SHA-256, pinned PID,
-  boot ID, unchanged monotonic process-start value, READY state, and strictly
-  increasing fresh-operation and observation timestamps.
+  boot ID, unchanged monotonic process-start value, READY state, the fixed
+  `VerifiedAfter` authority, the latest qualifying successful `/path`, and a
+  strictly increasing read-only observation timestamp. The first sample accepts
+  the action-time-confirmed candidate `/path` as its baseline. Every later
+  sample requires a successful `/path` newer than the preceding remote
+  observation, and the observer fails that sample immediately if the operation
+  or observation clock regresses.
 - Cloud reads both stable and tagged `/health` identities and independently
   reads the active revision, immutable image digest, 100-percent traffic, CPU,
   memory, concurrency, min/max instances, and startup CPU boost. It must also
@@ -924,8 +929,13 @@ candidate-smoke path/hash. Its Pages authority contains only
 Its Oracle authority contains the wrapper path/hash with exact release,
 settings, URL, revision, nonce, and verified-after values. It never contains
 `DISCORD_TOKEN` or `CLEARRA_ORACLE_IDENTITY_FILE`; those are runtime environment
-inputs only. The tracked materializer verifies every local regular non-link
-file and emits the only accepted hash-bound spec:
+inputs only. The production authority requires `interval_seconds` to be exactly
+`1200`, and the report requires the same exact 1,200-second duration, exactly
+two samples, sample 0 at `started_at`, and sample 1 at `ended_at`. After the
+start sample succeeds, perform one freshly confirmed real `/path` during the
+window; the end sample must observe that operation. The tracked materializer
+verifies every local regular non-link file and emits the only accepted
+hash-bound spec:
 
 ```powershell
 $probeAuthorityPath = Join-Path $evidenceDirectory "production-observation-authority.json"

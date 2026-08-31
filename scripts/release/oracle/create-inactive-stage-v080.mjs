@@ -351,7 +351,7 @@ export function generateBootstrap(manifest, templateText = readFileSync(TEMPLATE
   for (const [token, replacement] of replacementMap(manifest)) {
     const matches = generated.split(token).length - 1;
     const expectedMatches =
-      token === "@COMMIT_PREFIX@" ? 7 : token === "@EXPECTED_DIGESTER_SIZE@" ? 3 : 1;
+      token === "@COMMIT_PREFIX@" ? 11 : token === "@EXPECTED_DIGESTER_SIZE@" ? 3 : 1;
     if (matches !== expectedMatches) {
       fail(`bootstrap template token cardinality drifted for ${token}`);
     }

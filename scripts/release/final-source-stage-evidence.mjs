@@ -41,6 +41,7 @@ import {
   validateCloudCandidateSmokeReport,
 } from "./cloud-candidate-smoke-report.mjs";
 import {
+  PRODUCTION_OBSERVATION_SECONDS,
   validateProductionObservationReport,
   validateProductionProbeSpec,
 } from "./observe-production-surfaces.mjs";
@@ -326,12 +327,26 @@ export function createDeploymentStageEvidence(options) {
     throw new Error("Oracle capture and observation deployment nonces differ");
   }
   const probeSpec = validateProductionProbeSpec(options.productionProbeSpec, commit);
+  if (probeSpec.interval_seconds !== PRODUCTION_OBSERVATION_SECONDS) {
+    throw new Error("production probe spec interval is not the exact release window");
+  }
   const observation = validateProductionObservationReport(
     options.productionObservationReport,
     { expectedSourceCommit: commit },
   );
   if (observation.probe_spec_sha256 !== canonicalSha256(probeSpec)) {
     throw new Error("production observation differs from the exact canonical probe spec");
+  }
+  if (observation.interval_seconds !== probeSpec.interval_seconds) {
+    throw new Error("production observation interval differs from its exact probe spec");
+  }
+  const expectedProbeAdapters = probeSpec.probes
+    .map(({ surface, sha256 }) => ({ surface, sha256 }))
+    .sort((left, right) => left.surface.localeCompare(right.surface, "en"));
+  const observedProbeAdapters = [...observation.probe_adapters]
+    .sort((left, right) => left.surface.localeCompare(right.surface, "en"));
+  if (canonicalJson(observedProbeAdapters) !== canonicalJson(expectedProbeAdapters)) {
+    throw new Error("production observation adapters differ from its exact probe spec");
   }
   const identities = new Map(observation.surfaces.map((surface) => [
     surface.surface,
@@ -671,6 +686,7 @@ export function validateOracleObservation(
     "gatewayStartMonotonicUsec",
     "bootId",
     "readyRecordObserved",
+    "verifiedAfter",
     "freshOperationAt",
     "observedAt",
     "runtimeIdentity",
@@ -715,13 +731,20 @@ export function validateOracleObservation(
   ) {
     throw new Error("Oracle observation PID/start/READY authority is invalid");
   }
+  const verifiedAfter = canonicalTimestamp(
+    value.verifiedAfter,
+    "Oracle verified-after time",
+  );
   const freshOperationAt = canonicalTimestamp(
     value.freshOperationAt,
     "Oracle fresh operation time",
   );
   const observedAt = canonicalTimestamp(value.observedAt, "Oracle observation time");
-  if (Date.parse(freshOperationAt) > Date.parse(observedAt)) {
-    throw new Error("Oracle fresh operation occurs after its observation");
+  if (
+    Date.parse(verifiedAfter) > Date.parse(freshOperationAt) ||
+    Date.parse(freshOperationAt) > Date.parse(observedAt)
+  ) {
+    throw new Error("Oracle verified-after/fresh operation authority is out of order");
   }
   requireExactKeys(value.runtimeIdentity, [
     "schema",
@@ -766,6 +789,7 @@ function oracleObservationMatchesIdentity(observation, identity) {
       observation.gatewayStartMonotonicUsec &&
     identity.boot_id === observation.bootId &&
     identity.ready_record_observed === observation.readyRecordObserved &&
+    identity.verified_after === observation.verifiedAfter &&
     identity.status === "active";
 }
 

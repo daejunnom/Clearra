@@ -9,7 +9,12 @@ pub(crate) fn operation_rotations(piece: Ctk3Piece) -> &'static [Ctk3Rotation] {
     }
 }
 
-pub(crate) fn operation_cells(operation: Ctk3Operation) -> [(i64, i64); 4] {
+/// Returns the four occupied cells for a canonical CTK3 operation.
+///
+/// Document renderers use this typed geometry seam so an active operation can
+/// keep its own connected-region boundary without duplicating CTK rotation
+/// rules in each host.
+pub fn operation_cells(operation: Ctk3Operation) -> [(i64, i64); 4] {
     operation_offsets(operation.piece, operation.rotation)
         .map(|(x, y)| (i64::from(operation.x) + x, i64::from(operation.y) + y))
 }

@@ -446,12 +446,10 @@ function requireTimeout(value, label) {
 }
 
 function requireInterval(value) {
-  if (
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > PRODUCTION_OBSERVATION_SECONDS
-  ) {
-    throw new Error("production probe interval is invalid");
+  if (value !== PRODUCTION_OBSERVATION_SECONDS) {
+    throw new Error(
+      `production probe interval must be exactly ${PRODUCTION_OBSERVATION_SECONDS} seconds`,
+    );
   }
 }
 

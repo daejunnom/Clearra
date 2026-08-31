@@ -23,6 +23,7 @@ pub use codec::{
 pub use decoder::{
     decode_ctk3, decode_ctk3_exact, decode_ctk3_segment, inspect_ctk3_exact, split_ctk3_segments,
 };
+pub use geometry::operation_cells;
 pub use transform::{TypedCtk3DocumentTransform, TypedCtk3TransformError};
 
 pub const CTK3_PREFIX: &str = "ctk3_";

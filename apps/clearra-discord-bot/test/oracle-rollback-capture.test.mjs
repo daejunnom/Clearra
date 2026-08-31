@@ -88,6 +88,28 @@ test("rollback authority capture preserves the exact runtime-identity path", () 
   assert.equal(captured.priorRuntimeAuthoritySha256, expected.sha256);
 });
 
+test("rollback capture cleans bounded stale authority before writing the nonce-bound backup", () => {
+  const operations = [];
+  captureOracleRollbackAuthority(
+    {
+      priorRevision,
+      priorRuntimeAuthorityKind: PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
+      deploymentNonce: nonce,
+    },
+    captureDependencies({
+      health: legacyHealth,
+      cleanupBackups(path) {
+        operations.push(`cleanup:${path}`);
+      },
+      writeBackup(path) {
+        operations.push(`write:${path}`);
+      },
+    }),
+  );
+  const expected = `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`;
+  assert.deepEqual(operations, [`cleanup:${expected}`, `write:${expected}`]);
+});
+
 test("legacy authority excludes dynamic active-job count but binds worker capacity", () => {
   const observe = (health) =>
     observePriorRuntimeAuthority({
@@ -307,6 +329,7 @@ function captureDependencies({
   health,
   releaseId = priorOracleReleaseId,
   writeBackup = () => {},
+  cleanupBackups = () => {},
 }) {
   return {
     realpath: () => `/opt/clearra/releases/${releaseId}`,
@@ -318,6 +341,7 @@ function captureDependencies({
     }),
     readSettings: () => settings,
     run: () => JSON.stringify(health),
+    cleanupBackups,
     writeBackup,
   };
 }

@@ -1,0 +1,531 @@
+name: Recover Discord Production
+
+# This workflow is the ordinary failure/cancellation recovery owner for
+# Deploy Discord Production. It cannot guarantee recovery after GitHub's
+# force-cancel path. Before a durable prestage authority exists, the primary
+# run may leave only its inert nonce-bound prior-settings backup; it has not
+# staged Oracle, created a Cloud runtime revision, activated Oracle, changed
+# Cloud traffic, or mutated the Discord catalog.
+
+on:
+  workflow_run:
+    workflows: ["Deploy Discord Production"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: discord-production
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  authority:
+    if: >-
+      github.event.workflow_run.status == 'completed' &&
+      contains(fromJSON('["failure","cancelled","timed_out"]'), github.event.workflow_run.conclusion) &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      source_commit: ${{ steps.resolve.outputs.source_commit }}
+      workflow_run_id: ${{ steps.resolve.outputs.workflow_run_id }}
+      workflow_run_attempt: ${{ steps.resolve.outputs.workflow_run_attempt }}
+      recovery_required: ${{ steps.resolve.outputs.recovery_required }}
+      recovery_stage: ${{ steps.resolve.outputs.recovery_stage }}
+      artifact_id: ${{ steps.resolve.outputs.artifact_id }}
+      artifact_name: ${{ steps.resolve.outputs.artifact_name }}
+      artifact_digest: ${{ steps.resolve.outputs.artifact_digest }}
+      catalog_recovery_required: ${{ steps.resolve.outputs.catalog_recovery_required }}
+      catalog_artifact_id: ${{ steps.resolve.outputs.catalog_artifact_id }}
+      catalog_artifact_name: ${{ steps.resolve.outputs.catalog_artifact_name }}
+      catalog_artifact_digest: ${{ steps.resolve.outputs.catalog_artifact_digest }}
+    steps:
+      # workflow_run is privileged. Only execute scripts from the trusted
+      # default-branch commit, never from workflow_run.head_sha.
+      - name: Check out trusted recovery source for authority resolution
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js for recovery authority resolution
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Resolve exact original run attempt, freshness, and staged artifacts
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN_ID: ${{ github.event.workflow_run.id }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority_root="$RUNNER_TEMP/discord-recovery-resolution"
+          mkdir -p "$authority_root"
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT" \
+            > "$authority_root/original-run.json"
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/artifacts?per_page=100" \
+            > "$authority_root/original-artifacts.json"
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$authority_root/original-jobs.json"
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
+            > "$authority_root/primary-run-catalog.json"
+          : > "$authority_root/primary-attempts.jsonl"
+          jq -r '.[] | .workflow_runs[] | [(.id | tostring), (.run_attempt | tostring)] | @tsv' \
+            "$authority_root/primary-run-catalog.json" | sort -u | \
+          while IFS=$'\t' read -r run_id max_attempt; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$max_attempt" =~ ^[1-9][0-9]*$ ]]
+            for ((attempt = 1; attempt <= max_attempt; attempt += 1)); do
+              gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt" \
+                >> "$authority_root/primary-attempts.jsonl"
+              printf '\n' >> "$authority_root/primary-attempts.jsonl"
+            done
+          done
+          jq -s '{schema_id:"clearra.discord-deployment-primary-attempt-catalog.v1",attempts:.}' \
+            "$authority_root/primary-attempts.jsonl" > "$authority_root/primary-attempts.json"
+          entries="$authority_root/run-job-entries.jsonl"
+          : > "$entries"
+          jq -r --slurpfile original "$authority_root/original-run.json" '
+            def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            $original[0] as $o |
+            .attempts[] |
+            select(
+              .status == "completed" and
+              ((.id != $o.id) or (.run_attempt != $o.run_attempt)) and
+              (
+                ((.run_started_at | epoch) >= ($o.run_started_at | epoch)) or
+                ((.updated_at | epoch) >= ($o.updated_at | epoch)) or
+                (.id == $o.id and .run_attempt > $o.run_attempt)
+              )
+            ) |
+            [(.id | tostring), (.run_attempt | tostring)] | @tsv
+          ' \
+            "$authority_root/primary-attempts.json" | sort -u | \
+          while IFS=$'\t' read -r run_id run_attempt; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+            pages="$authority_root/run-jobs-$run_id-attempt-$run_attempt.json"
+            gh api --paginate --slurp --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100" \
+              > "$pages"
+            jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
+              --slurpfile pages "$pages" \
+              '{workflow_run_id:$run_id,workflow_run_attempt:$run_attempt,pages:$pages[0]}' \
+              >> "$entries"
+          done
+          jq -s '{schema_id:"clearra.discord-deployment-run-job-catalog.v1",runs:.}' \
+            "$entries" > "$authority_root/run-job-catalog.json"
+          node scripts/release/discord-deployment-recovery.mjs resolve \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$ORIGINAL_RUN_ID" \
+            --workflow-run-attempt "$ORIGINAL_RUN_ATTEMPT" \
+            --recovery-workflow-run-id "$GITHUB_RUN_ID" \
+            --recovery-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-metadata "$authority_root/original-run.json" \
+            --artifact-list "$authority_root/original-artifacts.json" \
+            --job-list "$authority_root/original-jobs.json" \
+            --run-attempt-catalog "$authority_root/primary-attempts.json" \
+            --run-job-catalog "$authority_root/run-job-catalog.json" \
+            --run-list "$authority_root/primary-run-catalog.json" \
+            --output "$authority_root/recovery-authority.json" \
+            --format github-output >> "$GITHUB_OUTPUT"
+      - name: Record the proven no-Oracle-or-Cloud-runtime-mutation terminal case
+        if: steps.resolve.outputs.recovery_required != 'true'
+        run: echo 'discord_recovery=no-op prestage_authority=absent'
+      - name: Upload exact recovery resolution
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-recovery-resolution-run-${{ github.event.workflow_run.id }}-attempt-${{ github.event.workflow_run.run_attempt }}-recovery-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/discord-recovery-resolution/recovery-authority.json
+          if-no-files-found: error
+          retention-days: 90
+
+  recover:
+    # The explicit status function preserves an already-approved recovery job
+    # long enough for its in-job ordinary-cancellation retry and key cleanup.
+    if: >-
+      always() &&
+      needs.authority.result == 'success' &&
+      needs.authority.outputs.recovery_required == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: discord-runtime-rollback
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
+      ORIGINAL_RUN_ID: ${{ needs.authority.outputs.workflow_run_id }}
+      ORIGINAL_RUN_ATTEMPT: ${{ needs.authority.outputs.workflow_run_attempt }}
+      RECOVERY_STAGE: ${{ needs.authority.outputs.recovery_stage }}
+      ARTIFACT_ID: ${{ needs.authority.outputs.artifact_id }}
+      ARTIFACT_DIGEST: ${{ needs.authority.outputs.artifact_digest }}
+      CATALOG_RECOVERY_REQUIRED: ${{ needs.authority.outputs.catalog_recovery_required }}
+      CATALOG_ARTIFACT_ID: ${{ needs.authority.outputs.catalog_artifact_id }}
+      CATALOG_ARTIFACT_DIGEST: ${{ needs.authority.outputs.catalog_artifact_digest }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: asia-northeast1
+      ORACLE_PRIVATE_OVERLAY_ARCHIVE: ${{ vars.ORACLE_PRIVATE_OVERLAY_ARCHIVE }}
+      ORACLE_PRIVATE_OVERLAY_SHA256: ${{ vars.ORACLE_PRIVATE_OVERLAY_SHA256 }}
+    steps:
+      - name: Check out trusted recovery source for protected restore
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js for protected recovery validation
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Re-resolve exact recovery authority immediately before protected mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority_root="$RUNNER_TEMP/discord-recovery-protected-authority"
+          mkdir -p "$authority_root"
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT" \
+            > "$authority_root/original-run.json"
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/artifacts?per_page=100" \
+            > "$authority_root/original-artifacts.json"
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$authority_root/original-jobs.json"
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
+            > "$authority_root/primary-run-catalog.json"
+          : > "$authority_root/primary-attempts.jsonl"
+          jq -r '.[] | .workflow_runs[] | [(.id | tostring), (.run_attempt | tostring)] | @tsv' \
+            "$authority_root/primary-run-catalog.json" | sort -u | \
+          while IFS=$'\t' read -r run_id max_attempt; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$max_attempt" =~ ^[1-9][0-9]*$ ]]
+            for ((attempt = 1; attempt <= max_attempt; attempt += 1)); do
+              gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt" \
+                >> "$authority_root/primary-attempts.jsonl"
+              printf '\n' >> "$authority_root/primary-attempts.jsonl"
+            done
+          done
+          jq -s '{schema_id:"clearra.discord-deployment-primary-attempt-catalog.v1",attempts:.}' \
+            "$authority_root/primary-attempts.jsonl" > "$authority_root/primary-attempts.json"
+          entries="$authority_root/run-job-entries.jsonl"
+          : > "$entries"
+          jq -r --slurpfile original "$authority_root/original-run.json" '
+            def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            $original[0] as $o |
+            .attempts[] |
+            select(
+              .status == "completed" and
+              ((.id != $o.id) or (.run_attempt != $o.run_attempt)) and
+              (
+                ((.run_started_at | epoch) >= ($o.run_started_at | epoch)) or
+                ((.updated_at | epoch) >= ($o.updated_at | epoch)) or
+                (.id == $o.id and .run_attempt > $o.run_attempt)
+              )
+            ) |
+            [(.id | tostring), (.run_attempt | tostring)] | @tsv
+          ' \
+            "$authority_root/primary-attempts.json" | sort -u | \
+          while IFS=$'\t' read -r run_id run_attempt; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+            pages="$authority_root/run-jobs-$run_id-attempt-$run_attempt.json"
+            gh api --paginate --slurp --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100" \
+              > "$pages"
+            jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
+              --slurpfile pages "$pages" \
+              '{workflow_run_id:$run_id,workflow_run_attempt:$run_attempt,pages:$pages[0]}' \
+              >> "$entries"
+          done
+          jq -s '{schema_id:"clearra.discord-deployment-run-job-catalog.v1",runs:.}' \
+            "$entries" > "$authority_root/run-job-catalog.json"
+          node scripts/release/discord-deployment-recovery.mjs resolve \
+            --repository "$GITHUB_REPOSITORY" --workflow-run-id "$ORIGINAL_RUN_ID" \
+            --workflow-run-attempt "$ORIGINAL_RUN_ATTEMPT" \
+            --recovery-workflow-run-id "$GITHUB_RUN_ID" \
+            --recovery-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-metadata "$authority_root/original-run.json" \
+            --artifact-list "$authority_root/original-artifacts.json" \
+            --job-list "$authority_root/original-jobs.json" \
+            --run-attempt-catalog "$authority_root/primary-attempts.json" \
+            --run-job-catalog "$authority_root/run-job-catalog.json" \
+            --run-list "$authority_root/primary-run-catalog.json" \
+            --output "$authority_root/recovery-authority.json" --format summary
+          [[ "$(jq -r .source_commit "$authority_root/recovery-authority.json")" == "$SOURCE_COMMIT" ]]
+          [[ "$(jq -r .recovery_stage "$authority_root/recovery-authority.json")" == "$RECOVERY_STAGE" ]]
+          [[ "$(jq -r .artifact_id "$authority_root/recovery-authority.json")" == "$ARTIFACT_ID" ]]
+          [[ "$(jq -r .artifact_digest "$authority_root/recovery-authority.json")" == "$ARTIFACT_DIGEST" ]]
+          [[ "$(jq -r .catalog_recovery_required "$authority_root/recovery-authority.json")" == "$CATALOG_RECOVERY_REQUIRED" ]]
+          if [[ "$CATALOG_RECOVERY_REQUIRED" == true ]]; then
+            [[ "$(jq -r .catalog_artifact_id "$authority_root/recovery-authority.json")" == "$CATALOG_ARTIFACT_ID" ]]
+            [[ "$(jq -r .catalog_artifact_digest "$authority_root/recovery-authority.json")" == "$CATALOG_ARTIFACT_DIGEST" ]]
+          fi
+      - name: Hard-verify the exact artifact ZIP digest from the REST authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/discord-recovery-authority.zip"
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ ! -e "$archive" && ! -L "$archive" ]]
+          (umask 077; gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$archive")
+          [[ -f "$archive" && ! -L "$archive" ]]
+          actual="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          [[ "sha256:$actual" == "$ARTIFACT_DIGEST" ]] || {
+            echo 'recovery artifact ZIP digest differs from the exact API authority' >&2
+            exit 2
+          }
+      - name: Download the already hash-verified exact artifact ID into runner temp
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.authority.outputs.artifact_id }}
+          path: ${{ runner.temp }}/discord-recovery-input
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authority.outputs.workflow_run_id }}
+      - name: Hard-verify the exact Discord catalog recovery ZIP and closed leaves
+        if: env.CATALOG_RECOVERY_REQUIRED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/discord-catalog-recovery-authority.zip"
+          [[ "$CATALOG_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CATALOG_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ ! -e "$archive" && ! -L "$archive" ]]
+          (umask 077; gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$CATALOG_ARTIFACT_ID/zip" > "$archive")
+          actual="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          [[ "sha256:$actual" == "$CATALOG_ARTIFACT_DIGEST" ]] || {
+            echo 'catalog recovery artifact ZIP digest differs from exact API authority' >&2
+            exit 2
+          }
+          expected="$RUNNER_TEMP/discord-catalog-recovery-leaves.txt"
+          actual_leaves="$RUNNER_TEMP/discord-catalog-recovery-actual-leaves.txt"
+          printf '%s\n' \
+            discord-catalog-recovery-authority.json \
+            discord-catalog.json \
+            discord-prior-catalog.json \
+            discord-sync-authority.json | sort > "$expected"
+          unzip -Z1 "$archive" | sort > "$actual_leaves"
+          cmp --silent "$expected" "$actual_leaves" || {
+            echo 'catalog recovery artifact leaves are not the exact closed set' >&2
+            exit 2
+          }
+      - name: Download the hash-verified Discord catalog recovery artifact
+        if: env.CATALOG_RECOVERY_REQUIRED == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.authority.outputs.catalog_artifact_id }}
+          path: ${{ runner.temp }}/discord-catalog-recovery-input
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authority.outputs.workflow_run_id }}
+      - name: Authenticate the rollback-only identity through its separate provider
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_ROLLBACK_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_ROLLBACK_SERVICE_ACCOUNT }}
+      - name: Set up gcloud for protected rollback
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Materialize the reviewer-protected Oracle recovery key
+        env:
+          ORACLE_SSH_PRIVATE_KEY_B64: ${{ secrets.ORACLE_SSH_PRIVATE_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/clearra-oracle-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          [[ -n "$ORACLE_SSH_PRIVATE_KEY_B64" && ! -e "$key_path" && ! -L "$key_path" ]]
+          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode --strict > "$key_path")
+          [[ -f "$key_path" && ! -L "$key_path" ]]
+          chmod 0600 "$key_path"
+          echo "CLEARRA_ORACLE_RECOVERY_IDENTITY_FILE=$key_path" >> "$GITHUB_ENV"
+      - name: Restore exact prior Cloud and Oracle authorities before catalog recovery
+        id: runtime_restore
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence'
+          & scripts/release/invoke-discord-runtime-recovery-v080.ps1 `
+            -Stage $env:RECOVERY_STAGE `
+            -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
+            -EvidenceRoot $evidenceRoot -SourceCommit $env:SOURCE_COMMIT `
+            -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
+            -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
+            -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
+            -RecoveryAuthorityPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-protected-authority/recovery-authority.json') `
+            -Repository $env:GITHUB_REPOSITORY -GcpProjectId $env:GCP_PROJECT_ID `
+            -GcpRegion $env:GCP_REGION -IdentityFile $env:CLEARRA_ORACLE_RECOVERY_IDENTITY_FILE `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256 -RestoreOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Discord runtime recovery helper failed' }
+      - name: Authenticate command sync for reviewer-protected catalog recovery
+        if: always() && env.CATALOG_RECOVERY_REQUIRED == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_ROLLBACK_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_COMMAND_SYNC_SERVICE_ACCOUNT }}
+      - name: Restore the exact prior Discord catalog and seal its disposition
+        if: always()
+        id: catalog_restore
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/release/restore-discord-catalog-v080.sh
+      - name: Retry catalog recovery after an ordinary failure or cancellation
+        if: always() && steps.catalog_restore.outcome != 'success'
+        id: catalog_retry
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/release/restore-discord-catalog-v080.sh
+      - name: Re-authenticate rollback-only identity after catalog recovery
+        if: always()
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_ROLLBACK_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_ROLLBACK_SERVICE_ACCOUNT }}
+      - name: Restore exact prior live authorities and seal the canonical result
+        if: always()
+        id: restore
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence'
+          & scripts/release/invoke-discord-runtime-recovery-v080.ps1 `
+            -Stage $env:RECOVERY_STAGE `
+            -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
+            -EvidenceRoot $evidenceRoot -SourceCommit $env:SOURCE_COMMIT `
+            -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
+            -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
+            -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
+            -RecoveryAuthorityPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-protected-authority/recovery-authority.json') `
+            -CatalogDispositionPath (Join-Path $evidenceRoot 'discord-catalog-recovery-disposition.json') `
+            -CatalogRecoveryRequired $env:CATALOG_RECOVERY_REQUIRED `
+            -CatalogArtifactId $env:CATALOG_ARTIFACT_ID -CatalogArtifactDigest $env:CATALOG_ARTIFACT_DIGEST `
+            -Repository $env:GITHUB_REPOSITORY -GcpProjectId $env:GCP_PROJECT_ID `
+            -GcpRegion $env:GCP_REGION -IdentityFile $env:CLEARRA_ORACLE_RECOVERY_IDENTITY_FILE `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256
+          if ($LASTEXITCODE -ne 0) { throw 'Discord final runtime recovery sealing failed' }
+      - name: Retry exact recovery after an ordinary step failure or cancellation
+        if: always() && steps.restore.outcome != 'success'
+        id: retry
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & scripts/release/invoke-discord-runtime-recovery-v080.ps1 `
+            -Stage $env:RECOVERY_STAGE `
+            -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
+            -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence') `
+            -SourceCommit $env:SOURCE_COMMIT -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
+            -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
+            -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
+            -RecoveryAuthorityPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-protected-authority/recovery-authority.json') `
+            -CatalogDispositionPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence/discord-catalog-recovery-disposition.json') `
+            -CatalogRecoveryRequired $env:CATALOG_RECOVERY_REQUIRED `
+            -CatalogArtifactId $env:CATALOG_ARTIFACT_ID -CatalogArtifactDigest $env:CATALOG_ARTIFACT_DIGEST `
+            -Repository $env:GITHUB_REPOSITORY -GcpProjectId $env:GCP_PROJECT_ID `
+            -GcpRegion $env:GCP_REGION -IdentityFile $env:CLEARRA_ORACLE_RECOVERY_IDENTITY_FILE `
+            -RemoteOverlayArchive $env:ORACLE_PRIVATE_OVERLAY_ARCHIVE `
+            -RemoteOverlaySha256 $env:ORACLE_PRIVATE_OVERLAY_SHA256
+          if ($LASTEXITCODE -ne 0) { throw 'ordinary-cancellation recovery retry failed closed' }
+      - name: Preserve and verify the exact terminal recovery evidence as the sole success authority
+        if: always()
+        id: verify_result
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$RUNNER_TEMP/discord-recovery-evidence"
+          terminal_root="$RUNNER_TEMP/discord-recovery-result-artifact"
+          [[ ! -e "$terminal_root" && ! -L "$terminal_root" ]]
+          mkdir "$terminal_root"
+          copy_exact() {
+            source="$1"
+            target="$2"
+            [[ -f "$source" && ! -L "$source" && ! -e "$target" && ! -L "$target" ]]
+            cp --no-clobber --no-dereference "$source" "$target"
+            cmp --silent "$source" "$target"
+          }
+          copy_exact "$source_root/recovery-result.json" "$terminal_root/recovery-result.json"
+          copy_exact \
+            "$RUNNER_TEMP/discord-recovery-protected-authority/recovery-authority.json" \
+            "$terminal_root/protected-recovery-authority.json"
+          copy_exact \
+            "$source_root/discord-catalog-recovery-disposition.json" \
+            "$terminal_root/discord-catalog-recovery-disposition.json"
+          if [[ "$CATALOG_RECOVERY_REQUIRED" == true ]]; then
+            copy_exact \
+              "$RUNNER_TEMP/discord-catalog-recovery-input/discord-catalog-recovery-authority.json" \
+              "$terminal_root/discord-catalog-recovery-authority.json"
+            copy_exact \
+              "$RUNNER_TEMP/discord-catalog-recovery-input/discord-catalog.json" \
+              "$terminal_root/discord-catalog.json"
+            copy_exact \
+              "$RUNNER_TEMP/discord-catalog-recovery-input/discord-prior-catalog.json" \
+              "$terminal_root/discord-prior-catalog.json"
+            copy_exact \
+              "$RUNNER_TEMP/discord-catalog-recovery-input/discord-sync-authority.json" \
+              "$terminal_root/discord-sync-authority.json"
+            copy_exact \
+              "$source_root/discord-catalog-restore.json" \
+              "$terminal_root/discord-catalog-restore.json"
+          fi
+          node scripts/release/discord-deployment-recovery.mjs verify-evidence \
+            --evidence-root "$terminal_root" --stage "$RECOVERY_STAGE" \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --original-workflow-run-id "$ORIGINAL_RUN_ID" \
+            --original-workflow-run-attempt "$ORIGINAL_RUN_ATTEMPT" \
+            --recovery-workflow-run-id "$GITHUB_RUN_ID" \
+            --recovery-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" \
+            --catalog-recovery-required "$CATALOG_RECOVERY_REQUIRED" \
+            --catalog-artifact-id "$CATALOG_ARTIFACT_ID" \
+            --catalog-artifact-digest "$CATALOG_ARTIFACT_DIGEST"
+      - name: Upload durable verified recovery result
+        if: always() && steps.verify_result.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-runtime-recovery-${{ needs.authority.outputs.source_commit }}-source-run-${{ needs.authority.outputs.workflow_run_id }}-attempt-${{ needs.authority.outputs.workflow_run_attempt }}-recovery-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/discord-recovery-result-artifact
+          if-no-files-found: error
+          retention-days: 90
+      - name: Always remove the temporary Oracle recovery key and ZIP
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          key_path="$RUNNER_TEMP/clearra-oracle-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          if [[ -f "$key_path" && ! -L "$key_path" ]]; then chmod 0600 "$key_path"; rm -f -- "$key_path" || true; fi
+          archive="$RUNNER_TEMP/discord-recovery-authority.zip"
+          if [[ -f "$archive" && ! -L "$archive" ]]; then chmod 0600 "$archive"; rm -f -- "$archive" || true; fi
+          catalog_archive="$RUNNER_TEMP/discord-catalog-recovery-authority.zip"
+          if [[ -f "$catalog_archive" && ! -L "$catalog_archive" ]]; then chmod 0600 "$catalog_archive"; rm -f -- "$catalog_archive" || true; fi
+          exit 0
+      - name: Fail closed unless the canonical recovery result was verified and uploaded
+        if: always() && steps.verify_result.outcome != 'success'
+        shell: bash
+        run: |
+          echo 'Discord recovery lacks one terminal verified result authority' >&2
+          exit 2

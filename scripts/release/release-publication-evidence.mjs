@@ -1789,7 +1789,7 @@ export function extractReleasePublicationEvidenceFromArtifactZip(
   archive,
   expectedArtifactDigest,
 ) {
-  const extracted = extractClosedArtifactZip(archive, expectedArtifactDigest, [
+  const extracted = extractClosedCanonicalJsonArtifactZip(archive, expectedArtifactDigest, [
     FINAL_EVIDENCE_FILE_NAME,
     RECEIPT_FILE_NAME,
   ], "publication final evidence");
@@ -1804,7 +1804,12 @@ export function extractReleasePublicationEvidenceFromArtifactZip(
   });
 }
 
-function extractClosedArtifactZip(archive, expectedArtifactDigest, expectedNames, label) {
+export function extractClosedCanonicalJsonArtifactZip(
+  archive,
+  expectedArtifactDigest,
+  expectedNames,
+  label,
+) {
   const bytes = Buffer.isBuffer(archive) ? archive : Buffer.from(archive ?? []);
   if (bytes.length < 22 || bytes.length > MAXIMUM_RECEIPT_ARCHIVE_BYTES) {
     throw new Error(`${label} artifact ZIP size is invalid`);

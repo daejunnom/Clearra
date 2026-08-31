@@ -238,6 +238,7 @@ function productionObservation(catalogSyncReportSha256) {
       gateway_start_monotonic_usec: 123456789,
       boot_id: "12345678-1234-1234-1234-123456789abc",
       ready_record_observed: true,
+      verified_after: "2026-08-26T23:59:59.000Z",
       status: "active",
     },
     pages: {
@@ -296,9 +297,11 @@ function observationFreshness(surface, identity, sequence) {
         contract: "clearra.oracle.candidate-observation.v1",
         source_commit: identity.source_commit,
         candidate_revision: identity.candidate_revision,
+        verified_after: identity.verified_after,
         fresh_operation_at: observedAt,
         observed_at: observedAt,
       }),
+      verified_after: identity.verified_after,
       fresh_operation_at: observedAt,
       observed_at: observedAt,
     };

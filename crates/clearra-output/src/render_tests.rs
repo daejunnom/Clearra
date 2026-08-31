@@ -5,7 +5,8 @@ use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_replay::{BuildVariantOperation, BuildVariantReplayInput, ReplayEngine};
 
 use crate::{
-    encode_ctk3_compact, model::RenderFieldValue, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece,
+    encode_ctk3_compact, model::RenderFieldValue, Ctk3Color, Ctk3Document, Ctk3Operation, Ctk3Page,
+    Ctk3Piece, Ctk3Rotation,
 };
 
 #[test]
@@ -287,8 +288,8 @@ fn typed_ctk3_png_uses_one_based_pages_and_draws_pending_garbage_row() {
     );
     assert_eq!(
         u32::from_be_bytes(rendered.bytes()[20..24].try_into().unwrap()),
-        32,
-        "one field row plus one separate pending-garbage row"
+        80,
+        "four visible field rows plus one separate pending-garbage row"
     );
     assert!(matches!(
         RenderExactOutputGate::render_field_document(
@@ -299,6 +300,118 @@ fn typed_ctk3_png_uses_one_based_pages_and_draws_pending_garbage_row() {
         ),
         Err(FieldDocumentRenderError::PageNumberOutOfRange { .. })
     ));
+}
+
+#[test]
+fn typed_ctk3_gif_uses_one_discord_speed_frame_per_page() {
+    let first = Ctk3Page::new(1, vec![Ctk3Color::Piece(Ctk3Piece::T), Ctk3Color::Empty]);
+    let second = Ctk3Page::new(1, vec![Ctk3Color::Empty, Ctk3Color::Piece(Ctk3Piece::I)]);
+    let source =
+        encode_ctk3_compact(&Ctk3Document::new(2, vec![first, second])).expect("ctk3 document");
+
+    let rendered = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Gif,
+        None,
+    )
+    .expect("document GIF");
+
+    assert_eq!(FIELD_DOCUMENT_GIF_FRAME_DELAY_MS, 500);
+    assert_eq!(gif_graphic_control_delays(rendered.bytes()), vec![50, 50]);
+}
+
+#[test]
+fn typed_ctk3_operation_uses_a_distinct_connected_region() {
+    let mut page = Ctk3Page::new(
+        2,
+        vec![
+            Ctk3Color::Empty,
+            Ctk3Color::Empty,
+            Ctk3Color::Empty,
+            Ctk3Color::Empty,
+            Ctk3Color::Empty,
+            Ctk3Color::Empty,
+            Ctk3Color::Piece(Ctk3Piece::T),
+            Ctk3Color::Empty,
+        ],
+    );
+    page.operation = Some(Ctk3Operation {
+        piece: Ctk3Piece::T,
+        rotation: Ctk3Rotation::Spawn,
+        x: 1,
+        y: 0,
+    });
+    let source = encode_ctk3_compact(&Ctk3Document::new(4, vec![page])).expect("ctk3");
+    let pages = decode_render_pages(&source, ExactFieldDocumentFormat::Ctk3).expect("pages");
+    let board = render_board(&pages[0], pages[0].height).expect("render board");
+
+    assert_eq!(board.cell(1, 2), RenderCell::T);
+    assert_eq!(board.connection_group(1, 2), 1);
+    assert_eq!(board.cell(2, 2), RenderCell::T);
+    assert_eq!(board.connection_group(2, 2), 0);
+    assert_eq!(board.connection_group(1, 3), 1);
+}
+
+#[test]
+fn typed_ctk3_operation_above_a_trimmed_field_expands_the_render_height() {
+    let mut page = Ctk3Page::new(6, vec![Ctk3Color::Empty; 4 * 6]);
+    page.operation = Some(Ctk3Operation {
+        piece: Ctk3Piece::T,
+        rotation: Ctk3Rotation::Spawn,
+        x: 1,
+        y: 4,
+    });
+    let source = encode_ctk3_compact(&Ctk3Document::new(4, vec![page])).expect("ctk3");
+    let decoded = crate::decode_ctk3_exact(&source).expect("decoded ctk3");
+    assert_eq!(
+        decoded.pages[0].height, 0,
+        "the codec trims the empty field"
+    );
+    let decoded_operation = decoded.pages[0].operation.expect("retained operation");
+    assert_eq!(
+        operation_cells(decoded_operation)
+            .into_iter()
+            .map(|(_, y)| y)
+            .max(),
+        Some(5),
+        "the typed operation remains above the trimmed field"
+    );
+
+    let pages = decode_render_pages(&source, ExactFieldDocumentFormat::Ctk3).expect("pages");
+    assert_eq!(pages[0].height, 6);
+    assert_eq!(pages[0].cells_bottom_up.len(), 4 * 6);
+    assert_eq!(pages[0].connection_groups_bottom_up[5 * 4 + 1], 1);
+    let rendered = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Png,
+        Some(1),
+    )
+    .expect("operation PNG");
+    assert_eq!(
+        u32::from_be_bytes(rendered.bytes()[20..24].try_into().unwrap()),
+        112,
+        "six operation-visible rows plus one pending-garbage row"
+    );
+}
+
+#[test]
+fn typed_ctk3_operation_extent_is_capped_at_the_discord_row_limit() {
+    let mut page = Ctk3Page::new(1, vec![Ctk3Color::Empty; 4]);
+    page.operation = Some(Ctk3Operation {
+        piece: Ctk3Piece::O,
+        rotation: Ctk3Rotation::Spawn,
+        x: 1,
+        y: 30,
+    });
+    let source = encode_ctk3_compact(&Ctk3Document::new(4, vec![page])).expect("ctk3");
+    let pages = decode_render_pages(&source, ExactFieldDocumentFormat::Ctk3).expect("pages");
+
+    assert_eq!(pages[0].height, FIELD_DOCUMENT_MAX_VIEW_ROWS);
+    assert_eq!(pages[0].cells_bottom_up.len(), 4 * 31);
+    assert_eq!(pages[0].connection_groups_bottom_up[30 * 4 + 1], 1);
+    assert_eq!(pages[0].connection_groups_bottom_up[30 * 4 + 2], 1);
 }
 
 #[test]
@@ -333,4 +446,12 @@ fn real_fumen_gif_renders_document_pages_without_accepting_a_page_selector() {
         ),
         Err(FieldDocumentRenderError::PageNumberNotAllowedForGif)
     );
+}
+
+fn gif_graphic_control_delays(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .windows(8)
+        .filter(|window| window[..3] == [0x21, 0xf9, 0x04])
+        .map(|window| u16::from_le_bytes([window[4], window[5]]))
+        .collect()
 }
