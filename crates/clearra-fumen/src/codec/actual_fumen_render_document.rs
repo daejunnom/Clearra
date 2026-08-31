@@ -32,6 +32,7 @@ pub struct ActualFumenRenderPage {
     height: usize,
     cells_bottom_up: Vec<ActualFumenRenderColor>,
     pending_garbage: Vec<ActualFumenRenderColor>,
+    comment: String,
 }
 
 impl ActualFumenRenderPage {
@@ -55,6 +56,10 @@ impl ActualFumenRenderPage {
     /// to the decoded field before a Fumen `rise` transition does so.
     pub fn pending_garbage(&self) -> &[ActualFumenRenderColor] {
         &self.pending_garbage
+    }
+
+    pub fn comment(&self) -> &str {
+        &self.comment
     }
 }
 
@@ -119,6 +124,7 @@ impl ActualFumenRenderDocument {
                 height,
                 cells_bottom_up,
                 pending_garbage,
+                comment: page.comment.unwrap_or_default(),
             });
         }
         Ok(Self { pages })
@@ -174,6 +180,7 @@ mod tests {
         page.field[0][0] = CellColor::T;
         page.field[22][9] = CellColor::I;
         page.garbage_row[1] = CellColor::Grey;
+        page.comment = Some("주석 😀".to_owned());
         let source = Fumen {
             pages: vec![page],
             guideline: true,
@@ -189,5 +196,6 @@ mod tests {
             ActualFumenRenderColor::I
         );
         assert_eq!(page.pending_garbage()[1], ActualFumenRenderColor::Garbage);
+        assert_eq!(page.comment(), "주석 😀");
     }
 }

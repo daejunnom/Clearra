@@ -1789,6 +1789,14 @@ render golden bytes. It must not mutate BuildUp result, PackingCandidate,
 CoverageRow, or any solver object. Runtime raw SVG rendering remains forbidden;
 runtime assets remain PNG atlas + manifest + provenance.
 
+Typed CTK3/Fumen document rendering follows the Discord viewer layout policy.
+A bounded inert comment panel is rasterized below the board only when at least
+one page has a normalized non-empty comment; mixed comment/empty-comment GIF
+pages share one fixed frame size. An all-empty pending-garbage row does not
+create a blank rendered line. When any GIF page has occupied pending garbage,
+the document owns one fixed garbage row and pages without garbage fill that row
+with empty cells so timeline dimensions remain stable.
+
 The renderer reports export limits through `RenderExportLimits` and output
 reports through `BitmapExportLimitReport`: renderer reports export limits,
 maximum frame size, maximum GIF frame count, maximum delay, and timeline pixel

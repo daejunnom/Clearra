@@ -189,7 +189,8 @@ impl RenderExactOutputGate {
 
     /// Renders the selected 1-based page as PNG or the document page order as
     /// a GIF. Document pages are observations; no operation replay frames are
-    /// synthesized. Pending garbage is retained as a distinct bottom row.
+    /// synthesized. Occupied pending garbage is retained as a distinct bottom
+    /// row; an all-empty pending row cannot create a blank rendered line.
     pub fn render_field_document(
         source: &str,
         document_format: ExactFieldDocumentFormat,
@@ -213,9 +214,14 @@ impl RenderExactOutputGate {
                         page_count: pages.len(),
                     },
                 )?;
-                let board = render_board(page, page.height)?;
-                ExactBitmapRenderer::render_connected_board_png(&board, 16, limits)
-                    .map_err(FieldDocumentRenderError::Render)?
+                let board = render_board(page, page.height, has_occupied_pending_garbage(page))?;
+                ExactBitmapRenderer::render_connected_board_with_comment_png(
+                    &board,
+                    &page.comment,
+                    16,
+                    limits,
+                )
+                .map_err(FieldDocumentRenderError::Render)?
             }
             ExactBitmapOutputFormat::Gif => {
                 if page_number.is_some() {
@@ -235,15 +241,21 @@ impl RenderExactOutputGate {
                     .map(|page| page.height)
                     .max()
                     .ok_or(FieldDocumentRenderError::EmptyDocument)?;
+                let include_pending_garbage = pages.iter().any(has_occupied_pending_garbage);
                 let mut frames = Vec::new();
                 frames
                     .try_reserve(pages.len())
                     .map_err(|_| FieldDocumentRenderError::CapacityExceeded)?;
                 for page in &pages {
-                    frames.push(render_board(page, max_height)?);
+                    frames.push(render_board(page, max_height, include_pending_garbage)?);
                 }
-                ExactBitmapRenderer::render_connected_timeline_gif(
+                let comments = pages
+                    .iter()
+                    .map(|page| page.comment.clone())
+                    .collect::<Vec<_>>();
+                ExactBitmapRenderer::render_connected_timeline_with_comments_gif(
                     &frames,
+                    &comments,
                     16,
                     FIELD_DOCUMENT_GIF_FRAME_DELAY_MS,
                     limits,
@@ -277,6 +289,7 @@ struct TypedRenderPage {
     cells_bottom_up: Vec<RenderCell>,
     connection_groups_bottom_up: Vec<u32>,
     pending_garbage: Vec<RenderCell>,
+    comment: String,
 }
 
 fn decode_render_pages(
@@ -360,6 +373,7 @@ fn decode_render_pages(
                     cells_bottom_up,
                     connection_groups_bottom_up,
                     pending_garbage,
+                    comment: page.comment,
                 });
             }
             Ok(pages)
@@ -388,6 +402,7 @@ fn decode_render_pages(
                         .copied()
                         .map(fumen_render_cell)
                         .collect(),
+                    comment: page.comment().to_owned(),
                 });
             }
             Ok(pages)
@@ -398,12 +413,13 @@ fn decode_render_pages(
 fn render_board(
     page: &TypedRenderPage,
     target_field_height: usize,
+    include_pending_garbage: bool,
 ) -> Result<RenderBoard, FieldDocumentRenderError> {
     if target_field_height < page.height || page.pending_garbage.len() != page.width {
         return Err(FieldDocumentRenderError::InvalidPageShape { page_index: 0 });
     }
     let board_height = target_field_height
-        .checked_add(1)
+        .checked_add(usize::from(include_pending_garbage))
         .ok_or(FieldDocumentRenderError::CapacityExceeded)?;
     let cell_count = page
         .width
@@ -430,9 +446,11 @@ fn render_board(
                 &page.connection_groups_bottom_up[source_offset..source_offset + page.width],
             );
     }
-    let garbage_offset = target_field_height * page.width;
-    cells_top_down[garbage_offset..garbage_offset + page.width]
-        .copy_from_slice(&page.pending_garbage);
+    if include_pending_garbage {
+        let garbage_offset = target_field_height * page.width;
+        cells_top_down[garbage_offset..garbage_offset + page.width]
+            .copy_from_slice(&page.pending_garbage);
+    }
     RenderBoard::from_cells_with_connection_groups(
         page.width,
         board_height,
@@ -440,6 +458,12 @@ fn render_board(
         &connection_groups_top_down,
     )
     .map_err(FieldDocumentRenderError::Render)
+}
+
+fn has_occupied_pending_garbage(page: &TypedRenderPage) -> bool {
+    page.pending_garbage
+        .iter()
+        .any(|cell| *cell != RenderCell::Empty)
 }
 
 const fn ctk3_render_cell(color: crate::Ctk3Color) -> RenderCell {

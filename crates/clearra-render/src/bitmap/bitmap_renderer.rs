@@ -3,7 +3,8 @@ use clearra_replay::ReplayTrace;
 
 use crate::{
     bitmap::{
-        gif_encoder::GifEncoder, png_encoder::PngEncoder, render_board::RenderBoard, RenderCell,
+        comment_panel::CommentPanelLayout, gif_encoder::GifEncoder, png_encoder::PngEncoder,
+        render_board::RenderBoard, RenderCell,
     },
     export::{render_allocation_authority::RenderAllocationAuthority, RenderExportLimits},
     RenderError, RenderScene, RenderSceneFrame, RenderTile, SkinAtlas,
@@ -32,9 +33,31 @@ impl ExactBitmapRenderer {
         cell_size: u32,
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
-        let plan = board_frame_plan(board, cell_size, limits)?;
+        Self::render_connected_board_with_comment_png(board, "", cell_size, limits)
+    }
+
+    /// Renders one document page and, only when the normalized comment is
+    /// non-empty, rasterizes the bounded comment panel below the board.
+    pub fn render_connected_board_with_comment_png(
+        board: &RenderBoard,
+        comment: &str,
+        cell_size: u32,
+        limits: RenderExportLimits,
+    ) -> Result<Vec<u8>, RenderError> {
+        let board_plan = board_frame_plan(board, cell_size, limits)?;
+        let comments = [comment.to_owned()];
+        let panel = CommentPanelLayout::prepare(&comments, board_plan.width);
+        let plan = document_frame_plan(board_plan, panel.as_ref(), limits)?;
         let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
-        let rgba = render_connected_board_pixels(board, cell_size, plan, &mut authority)?;
+        let rgba = render_connected_document_pixels(
+            board,
+            cell_size,
+            board_plan,
+            plan,
+            panel.as_ref(),
+            0,
+            &mut authority,
+        )?;
         PngEncoder::encode_rgba(plan.width, plan.height, &rgba)
     }
 
@@ -105,28 +128,50 @@ impl ExactBitmapRenderer {
         delay_ms: u16,
         limits: RenderExportLimits,
     ) -> Result<Vec<u8>, RenderError> {
+        let comments = vec![String::new(); frames.len()];
+        Self::render_connected_timeline_with_comments_gif(
+            frames, &comments, cell_size, delay_ms, limits,
+        )
+    }
+
+    /// Renders one document page per GIF frame. Comment layout is fixed for
+    /// the whole timeline, so pages without a comment do not resize a frame.
+    pub fn render_connected_timeline_with_comments_gif(
+        frames: &[RenderBoard],
+        comments: &[String],
+        cell_size: u32,
+        delay_ms: u16,
+        limits: RenderExportLimits,
+    ) -> Result<Vec<u8>, RenderError> {
         let first = frames.first().ok_or(RenderError::EmptyTimeline)?;
-        let first_plan = board_frame_plan(first, cell_size, limits)?;
-        limits.validate_timeline(frames.len(), first_plan.width, first_plan.height, delay_ms)?;
-        validate_board_timeline_shapes(frames, cell_size, limits, first_plan)?;
+        if comments.len() != frames.len() {
+            return Err(RenderError::InvalidBoardRows);
+        }
+        let board_plan = board_frame_plan(first, cell_size, limits)?;
+        validate_board_timeline_shapes(frames, cell_size, limits, board_plan)?;
+        let panel = CommentPanelLayout::prepare(comments, board_plan.width);
+        let plan = document_frame_plan(board_plan, panel.as_ref(), limits)?;
+        limits.validate_timeline(frames.len(), plan.width, plan.height, delay_ms)?;
 
         let mut authority = RenderAllocationAuthority::new(limits.max_materialization_bytes());
         let mut rgba_frames =
             authority.try_vec_with_capacity::<Vec<u8>>(frames.len(), "rgba_frame_carriers")?;
-        for frame in frames {
-            let plan = board_frame_plan(frame, cell_size, limits)?;
-            rgba_frames.push(render_connected_board_pixels(
+        for (page_index, frame) in frames.iter().enumerate() {
+            rgba_frames.push(render_connected_document_pixels(
                 frame,
                 cell_size,
+                board_plan,
                 plan,
+                panel.as_ref(),
+                page_index,
                 &mut authority,
             )?);
         }
         GifEncoder::encode_rgba_frames(
-            u16::try_from(first_plan.width)
-                .map_err(|_| frame_dimension_error("gif_width", first_plan.width))?,
-            u16::try_from(first_plan.height)
-                .map_err(|_| frame_dimension_error("gif_height", first_plan.height))?,
+            u16::try_from(plan.width)
+                .map_err(|_| frame_dimension_error("gif_width", plan.width))?,
+            u16::try_from(plan.height)
+                .map_err(|_| frame_dimension_error("gif_height", plan.height))?,
             &rgba_frames,
             delay_ms,
         )
@@ -255,6 +300,31 @@ fn frame_plan(
     })
 }
 
+fn document_frame_plan(
+    board_plan: RgbaFramePlan,
+    panel: Option<&CommentPanelLayout>,
+    limits: RenderExportLimits,
+) -> Result<RgbaFramePlan, RenderError> {
+    let width = panel.map_or(board_plan.width, |panel| panel.width.max(board_plan.width));
+    let height = board_plan
+        .height
+        .checked_add(panel.map_or(0, |panel| panel.height))
+        .ok_or_else(|| frame_dimension_error("max_frame_height", u32::MAX))?;
+    limits.validate_frame(width, height)?;
+    let capacity = usize::try_from(u64::from(width) * u64::from(height) * 4).map_err(|_| {
+        RenderError::ExportLimitExceeded {
+            limit: "max_materialization_bytes",
+            actual: u64::MAX,
+            max: limits.max_materialization_bytes(),
+        }
+    })?;
+    Ok(RgbaFramePlan {
+        width,
+        height,
+        capacity,
+    })
+}
+
 fn validate_board_timeline_shapes(
     frames: &[RenderBoard],
     cell_size: u32,
@@ -308,25 +378,36 @@ fn render_board_pixels(
     Ok(rgba)
 }
 
-fn render_connected_board_pixels(
+#[allow(clippy::too_many_arguments)]
+fn render_connected_document_pixels(
     board: &RenderBoard,
     cell_size: u32,
-    plan: RgbaFramePlan,
+    board_plan: RgbaFramePlan,
+    output_plan: RgbaFramePlan,
+    panel: Option<&CommentPanelLayout>,
+    page_index: usize,
     authority: &mut RenderAllocationAuthority,
 ) -> Result<Vec<u8>, RenderError> {
-    let mut rgba = allocate_rgba(plan.capacity, authority)?;
+    let mut rgba = allocate_rgba(output_plan.capacity, authority)?;
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[30, 41, 39, 255]);
+    }
+    let board_left = (output_plan.width - board_plan.width) / 2;
     for y in 0..board.height() {
         for x in 0..board.width() {
             paint_connected_cell(
                 &mut rgba,
-                plan.width,
-                cell_origin(x, cell_size, "pixel_x")?,
+                output_plan.width,
+                board_left + cell_origin(x, cell_size, "pixel_x")?,
                 cell_origin(y, cell_size, "pixel_y")?,
                 cell_size,
                 render_cell_tile(board.cell(x, y)),
                 connected_cell_edges(board, x, y),
             );
         }
+    }
+    if let Some(panel) = panel {
+        panel.paint(&mut rgba, output_plan.width, board_plan.height, page_index);
     }
     Ok(rgba)
 }
