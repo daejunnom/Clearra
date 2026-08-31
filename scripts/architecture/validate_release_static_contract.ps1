@@ -677,6 +677,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'environment: discord-global-command-sync',
         'discord-prestage-recovery-authority-',
         'discord-live-recovery-authority-',
+        '--gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source"',
         'if: always() && needs.candidate.result == ''success''',
         'if: always() && needs.promote.result == ''success''',
         '-Operation cleanup-prestage-backup'

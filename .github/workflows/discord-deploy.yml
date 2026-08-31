@@ -393,6 +393,7 @@ jobs:
           gcloud builds submit evidence/exact-source.tar.gz \
             --project="$GCP_PROJECT_ID" \
             --region="$GCP_REGION" \
+            --gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source" \
             --service-account="projects/$GCP_PROJECT_ID/serviceAccounts/clearra-build@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
             --config="$RUNNER_TEMP/clearra-cloud-build-config/apps/clearra-discord-bot/cloudbuild-current-job-service.yaml" \
             --substitutions="_REGION=$GCP_REGION,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-$SOURCE_COMMIT,_SOURCE_COMMIT=$SOURCE_COMMIT" \

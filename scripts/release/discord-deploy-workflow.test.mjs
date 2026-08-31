@@ -70,6 +70,17 @@ test("approval-free preparation uses only builder WIF and never SSH/runtime muta
   assert.doesNotMatch(candidate, /candidate-release-v080\.mjs deploy|run services update-traffic/u);
 });
 
+test("Cloud Build stages the accepted archive in the exact bucket without the default project-wide ownership probe", () => {
+  const candidate = primary.slice(primary.indexOf("  candidate:"), primary.indexOf("  promote:"));
+  const exactStagingArgument =
+    '--gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source"';
+  assert.equal(candidate.split(exactStagingArgument).length - 1, 1);
+  assert.ok(
+    candidate.indexOf(exactStagingArgument) >
+      candidate.indexOf("gcloud builds submit evidence/exact-source.tar.gz"),
+  );
+});
+
 test("prestage and live recovery artifacts bracket every protected runtime transition", () => {
   const prestageUpload = primary.indexOf("Upload prestage authority before Oracle freeze or Cloud zero traffic");
   const freeze = primary.indexOf("invoke-freeze-v080.ps1", prestageUpload);

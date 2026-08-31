@@ -103,7 +103,11 @@ upload/read objects only in `gs://clearra-cloud_cloudbuild`. Those bucket-local
 permissions are exactly `roles/storage.bucketViewer`,
 `roles/storage.objectCreator`, and `roles/storage.objectViewer`; no Storage role
 is granted to the builder at project scope, and no Storage Admin or legacy
-bucket role is used. The builder can also read only the `clearra` Artifact
+bucket role is used. The workflow passes the exact
+`--gcs-source-staging-dir=gs://clearra-cloud_cloudbuild/source` value so gcloud
+does not use its default project-wide bucket ownership-list probe; broad
+project `storage.buckets.list` authority is neither needed nor granted. The
+builder can also read only the `clearra` Artifact
 Registry repository and act as only `clearra-build`. It has no Cloud Run,
 Secret, runtime-account, rollback-account, or Token Creator authority.
 
