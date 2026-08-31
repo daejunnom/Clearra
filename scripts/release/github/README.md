@@ -98,10 +98,14 @@ or registers the Oracle SSH identity.
 ## Closed authority sets
 
 `clearra-github-builder` can submit/read Cloud Build work, read build logs,
-upload/read only the exact `gs://clearra-cloud_cloudbuild` source bucket, read
-only the `clearra` Artifact Registry repository, and act as only
-`clearra-build`. It has no Cloud Run, Secret, runtime-account,
-rollback-account, or Token Creator authority.
+read the exact source-bucket metadata required by `gcloud builds submit`, and
+upload/read objects only in `gs://clearra-cloud_cloudbuild`. Those bucket-local
+permissions are exactly `roles/storage.bucketViewer`,
+`roles/storage.objectCreator`, and `roles/storage.objectViewer`; no Storage role
+is granted to the builder at project scope, and no Storage Admin or legacy
+bucket role is used. The builder can also read only the `clearra` Artifact
+Registry repository and act as only `clearra-build`. It has no Cloud Run,
+Secret, runtime-account, rollback-account, or Token Creator authority.
 
 The effective `clearra-build` execution authority is also audited: project
 `roles/logging.logWriter`, exact repository

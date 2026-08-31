@@ -14,6 +14,10 @@ const release = await readFile(
   new URL("../../.github/workflows/release-cli.yml", import.meta.url),
   "utf8",
 );
+const releaseRegressions = await readFile(
+  new URL("../tools/run-release-regression-tests.mjs", import.meta.url),
+  "utf8",
+);
 
 test("primary has exact automatic/manual authority and explicit impact no-op", () => {
   for (const marker of [
@@ -144,23 +148,31 @@ test("build/test/tag/publication work is absent from Discord deploy workflows", 
   ]) assert.doesNotMatch(combined, forbidden);
 });
 
-test("canonical dispatch runs the focused Discord authority suite once before deployment", () => {
-  const name = "Validate Discord deployment and recovery authority regression coverage";
+test("canonical dispatch owns every Discord authority regression in one bounded pool", () => {
+  const name = "Validate independent release regressions with bounded workers";
   const start = release.indexOf(`- name: ${name}`);
   const end = release.indexOf("\n      - name:", start + 1);
-  assert.ok(start >= 0 && end > start, "focused Discord acceptance step");
+  assert.ok(start >= 0 && end > start, "bounded release regression step");
   const step = release.slice(start, end);
   assert.match(step, /if: github\.event_name == 'workflow_dispatch'/u);
-  assert.match(step, /node --test/u);
+  assert.match(step, /node scripts\/tools\/run-release-regression-tests\.mjs/u);
+  assert.match(releaseRegressions, /ACTIONS_TEST_WORKER_CAP = 4/u);
+  assert.match(releaseRegressions, /--test-concurrency=\$\{workers\}/u);
   for (const file of [
-    "deployment-impact.test.mjs",
-    "discord-catalog-recovery-authority.test.mjs",
-    "discord-deploy-workflow.test.mjs",
-    "discord-deployment-recovery.test.mjs",
-    "discord-deployment-state.test.mjs",
-    "discord-production-checkpoint-receipt.test.mjs",
-    "discord-recovery-debt.test.mjs",
-  ]) assert.ok(step.includes(file), file);
+    "scripts/release/deployment-impact.test.mjs",
+    "scripts/release/discord-catalog-recovery-authority.test.mjs",
+    "scripts/release/discord-deploy-workflow.test.mjs",
+    "scripts/release/discord-deployment-recovery.test.mjs",
+    "scripts/release/discord-deployment-state.test.mjs",
+    "scripts/release/discord-production-checkpoint-receipt.test.mjs",
+    "scripts/release/discord-recovery-debt.test.mjs",
+  ]) {
+    assert.equal(
+      releaseRegressions.split(`\"${file}\"`).length - 1,
+      1,
+      `${file} exact owner`,
+    );
+  }
   assert.equal((release.match(new RegExp(name, "gu")) ?? []).length, 1);
 });
 

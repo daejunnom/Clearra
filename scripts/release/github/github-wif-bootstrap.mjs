@@ -239,6 +239,7 @@ const BUILD_REMOVABLE_LEGACY_PROJECT_ROLES = Object.freeze([
   "roles/storage.objectViewer",
 ]);
 const BUILDER_SOURCE_BUCKET_ROLES = Object.freeze([
+  "roles/storage.bucketViewer",
   "roles/storage.objectCreator",
   "roles/storage.objectViewer",
 ]);

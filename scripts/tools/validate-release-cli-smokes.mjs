@@ -115,7 +115,7 @@ const acceptedRunStep = section(
 const canonicalAcceptancePreflightStep = section(
   metadataJob,
   "\n      - name: Require exact main and zero prior canonical success",
-  "\n      - name: Validate exact source archive regression coverage",
+  "\n      - name: Validate independent release regressions with bounded workers",
 );
 const crossRunDownloadStep = section(
   publishJob,
@@ -127,7 +127,7 @@ const publishReleaseStep = publishJob.slice(
 );
 const linuxArchiveRegressionStep = section(
   metadataJob,
-  "\n      - name: Validate exact source archive regression coverage",
+  "\n      - name: Validate independent release regressions with bounded workers",
   "\n      - name: Archive the exact accepted source on Linux",
 );
 const linuxAcceptedArchiveStep = section(
@@ -273,22 +273,7 @@ const productAuthorityStep = section(
 const upstreamAuthorityStep = section(
   metadataJob,
   "\n      - name: Require the upstream drift audit authority",
-  "\n      - name: Validate remote annotated tag regression coverage",
-);
-const finalSourceEvidenceStep = section(
-  metadataJob,
-  "\n      - name: Validate final-source evidence contract regression coverage",
-  "\n      - name: Validate Discord deployment and recovery authority regression coverage",
-);
-const discordDeploymentAuthorityStep = section(
-  metadataJob,
-  "\n      - name: Validate Discord deployment and recovery authority regression coverage",
-  "\n      - name: Validate focused test selection regression coverage",
-);
-const focusedTestSelectionStep = section(
-  metadataJob,
-  "\n      - name: Validate focused test selection regression coverage",
-  "\n      - name: Validate every product version and changelog surface",
+  "\n      - name: Bind the exact canonical acceptance run",
 );
 const linuxPcTilingEnforcement = section(
   packageScript,
@@ -332,26 +317,15 @@ requireExactNormalizedText(
   "upstream drift audit authority step",
 );
 requireExactNormalizedText(
-  finalSourceEvidenceStep,
+  linuxArchiveRegressionStep,
   [
     "",
-    "      - name: Validate final-source evidence contract regression coverage",
+    "      - name: Validate independent release regressions with bounded workers",
     "        if: github.event_name == 'workflow_dispatch'",
     "        shell: bash",
-    "        run: node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs",
+    "        run: node scripts/tools/run-release-regression-tests.mjs",
   ].join("\n"),
-  "final-source evidence contract regression step",
-);
-requireExactNormalizedText(
-  discordDeploymentAuthorityStep,
-  [
-    "",
-    "      - name: Validate Discord deployment and recovery authority regression coverage",
-    "        if: github.event_name == 'workflow_dispatch'",
-    "        shell: bash",
-    "        run: node --test scripts/release/deployment-impact.test.mjs scripts/release/discord-catalog-recovery-authority.test.mjs scripts/release/discord-deploy-workflow.test.mjs scripts/release/discord-deployment-recovery.test.mjs scripts/release/discord-deployment-state.test.mjs scripts/release/discord-production-checkpoint-receipt.test.mjs scripts/release/discord-recovery-debt.test.mjs",
-  ].join("\n"),
-  "Discord deployment and recovery authority regression step",
+  "bounded independent release regression step",
 );
 requireExactNormalizedText(
   linuxPcTilingEnforcement,
@@ -899,16 +873,10 @@ for (const marker of [
   );
 }
 for (const stepName of [
-  "Validate exact source archive regression coverage",
+  "Validate independent release regressions with bounded workers",
   "Archive the exact accepted source on Linux",
-  "Validate Pages rollback authority regression coverage",
-  "Validate final-source evidence contract regression coverage",
-  "Validate Discord deployment and recovery authority regression coverage",
-  "Validate focused test selection regression coverage",
   "Validate every product version and changelog surface",
-  "Validate release metadata regression coverage",
   "Require the upstream drift audit authority",
-  "Validate remote annotated tag regression coverage",
 ]) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   requireMatch(
@@ -1727,47 +1695,19 @@ for (const marker of [
 ]) {
   requireText(publishReleaseStep, marker, `publication partial-draft recovery ${marker}`);
 }
-requireText(
-  workflow,
-  "node --test scripts/release/validate-release-metadata.test.mjs",
-  "release metadata regression test invocation",
-);
-requireExactNormalizedText(
-  focusedTestSelectionStep,
-  [
-    "",
-    "      - name: Validate focused test selection regression coverage",
-    "        if: github.event_name == 'workflow_dispatch'",
-    "        run: node --test scripts/tools/run-focused-js-tests.test.mjs",
-  ].join("\n"),
-  "focused test selection regression step",
-);
 if (
-  (workflow.match(/scripts\/tools\/run-focused-js-tests\.test\.mjs/gu) ?? [])
+  (workflow.match(/scripts\/tools\/run-release-regression-tests\.mjs/gu) ?? [])
     .length !== 1
 ) {
   throw new Error(
-    "focused test selection regression must have exactly one Linux metadata owner",
+    "bounded release regression pool must have exactly one Linux metadata owner",
   );
 }
-requireText(
-  metadataJob,
-  "node --test scripts/release/create-exact-source-archive.test.mjs",
-  "Linux metadata exact source archive regression test invocation",
-);
 requireMatch(
   linuxArchiveRegressionStep,
-  /^        run: node --test scripts\/release\/create-exact-source-archive\.test\.mjs scripts\/release\/accepted-pages-build\.test\.mjs scripts\/tools\/validate-release-cli-smokes\.test\.mjs\s*$/mu,
-  "executable Linux exact source archive regression command",
+  /^        run: node scripts\/tools\/run-release-regression-tests\.mjs\s*$/mu,
+  "executable bounded release regression pool command",
 );
-if (
-  (workflow.match(/scripts\/release\/accepted-pages-build\.test\.mjs/gu) ?? [])
-    .length !== 1
-) {
-  throw new Error(
-    "accepted Pages build regression must have exactly one Linux metadata owner",
-  );
-}
 requireExactYamlScalar(
   metadataJob,
   "runs-on",
@@ -1794,18 +1734,18 @@ requireExactYamlLiteralScript(
 );
 if (
   (workflow.match(/scripts\/release\/create-exact-source-archive\.test\.mjs/gu) ?? [])
-    .length !== 1
+    .length !== 0
 ) {
   throw new Error(
-    "exact source archive regression must have exactly one Linux metadata owner",
+    "exact source archive regression must remain inside the bounded metadata pool",
   );
 }
 if (
   (workflow.match(/scripts\/tools\/validate-release-cli-smokes\.test\.mjs/gu) ?? [])
-    .length !== 1
+    .length !== 0
 ) {
   throw new Error(
-    "release workflow mutation tests must have exactly one Linux metadata owner",
+    "release workflow mutation tests must remain inside the bounded metadata pool",
   );
 }
 requireExactYamlScalar(
@@ -1900,7 +1840,7 @@ for (const [name, prelude] of [
           "- uses: actions/checkout@v4",
           "- uses: actions/setup-node@v4",
           "- name: Require exact main and zero prior canonical success",
-          "- name: Validate exact source archive regression coverage",
+          "- name: Validate independent release regressions with bounded workers",
           "- name: Archive the exact accepted source on Linux",
         ]
       : [

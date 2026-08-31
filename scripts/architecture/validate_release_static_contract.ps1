@@ -640,6 +640,34 @@ function Invoke-ReleaseIdentityGateValidation {
         ) -ge 0) {
         Add-ArchitectureError 'GitHub WIF bootstrap retains the mutable legacy repository subject prefix'
     }
+    $builderBucketRoles = [regex]::Match(
+        $githubWifBootstrap,
+        '(?s)const BUILDER_SOURCE_BUCKET_ROLES = Object\.freeze\(\[(.*?)\]\);'
+    )
+    if (-not $builderBucketRoles.Success -or
+        $builderBucketRoles.Groups[1].Value -notmatch '(?s)^\s*"roles/storage\.bucketViewer",\s*"roles/storage\.objectCreator",\s*"roles/storage\.objectViewer",\s*$') {
+        Add-ArchitectureError 'GitHub WIF bootstrap must grant builder bucket metadata, upload, and read authority on the exact Cloud Build source bucket'
+    }
+    $builderProjectRoles = [regex]::Match(
+        $githubWifBootstrap,
+        '(?s)const BUILDER_PROJECT_ROLES = Object\.freeze\(\[(.*?)\]\);'
+    )
+    if (-not $builderProjectRoles.Success -or
+        $builderProjectRoles.Groups[1].Value -match 'roles/storage\.') {
+        Add-ArchitectureError 'GitHub WIF builder Storage authority must not be project-wide'
+    }
+    foreach ($forbiddenStorageRole in @(
+        'roles/storage.admin',
+        'roles/storage.legacyBucketReader',
+        'roles/storage.legacyBucketWriter'
+    )) {
+        if ($githubWifBootstrap.IndexOf(
+                $forbiddenStorageRole,
+                [System.StringComparison]::Ordinal
+            ) -ge 0) {
+            Add-ArchitectureError "GitHub WIF bootstrap retains forbidden broad or legacy Storage role '$forbiddenStorageRole'"
+        }
+    }
 
     foreach ($required in @(
         'group: discord-production',
@@ -767,6 +795,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $exactSourceTarContract = Read-Text 'scripts/release/exact-source-tar-contract.mjs'
     $exactSourceArchiveTest = Read-Text 'scripts/release/create-exact-source-archive.test.mjs'
     $releaseCliSmokeTest = Read-Text 'scripts/tools/validate-release-cli-smokes.test.mjs'
+    $releaseRegressionRunner = Read-Text 'scripts/tools/run-release-regression-tests.mjs'
+    $releaseRegressionRunnerTest = Read-Text 'scripts/tools/run-release-regression-tests.test.mjs'
     $canonicalAcceptanceRun = Read-Text 'scripts/release/canonical-acceptance-run.mjs'
     $canonicalAcceptanceRunTest = Read-Text 'scripts/release/canonical-acceptance-run.test.mjs'
     $canonicalAcceptanceEvidence = Read-Text 'scripts/release/canonical-acceptance-evidence.mjs'
@@ -797,11 +827,7 @@ function Invoke-ReleaseIdentityGateValidation {
 
     foreach ($required in @(
         'validate-release-metadata.mjs',
-        'node --test scripts/release/validate-release-metadata.test.mjs',
-        'node --test scripts/release/verify-remote-annotated-tag.test.mjs',
-        'node --test scripts/release/create-exact-source-archive.test.mjs',
-        'scripts/release/pages-rollback-authority.test.mjs',
-        'scripts/release/pages-rollback-package.test.mjs',
+        'node scripts/tools/run-release-regression-tests.mjs',
         'validate-release-cli-smokes.mjs',
         'release tag must point at the exact current main commit',
         'release tag is no longer the exact current main commit',
@@ -1033,7 +1059,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'rejects a parent-commit archive hidden behind the expected SHA comment',
         'rejects Linux product builds on tag publication runs',
         'rejects release acceptance on tag publication runs',
-        'rejects release metadata tests on tag publication runs',
+        'rejects bounded release regressions on tag publication runs',
+        'rejects bypassing the bounded release regression owner',
         'rejects publication without always handling expected skipped jobs',
         'rejects metadata that binds publication to the tag run itself',
         'rejects tag publication that downloads artifacts from its own run',
@@ -1623,7 +1650,7 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         $linuxRegressionStart = $metadataJob.IndexOf(
-            "`n      - name: Validate exact source archive regression coverage",
+            "`n      - name: Validate independent release regressions with bounded workers",
             [System.StringComparison]::Ordinal
         )
         $linuxArchiveStart = $metadataJob.IndexOf(
@@ -1686,7 +1713,7 @@ function Invoke-ReleaseIdentityGateValidation {
                         '- uses: actions/checkout@v4',
                         '- uses: actions/setup-node@v4',
                         '- name: Require exact main and zero prior canonical success',
-                        '- name: Validate exact source archive regression coverage',
+                        '- name: Validate independent release regressions with bounded workers',
                         '- name: Archive the exact accepted source on Linux'
                     ) `
                     -Contract 'Linux exact source archive protected prelude'
@@ -1738,19 +1765,70 @@ function Invoke-ReleaseIdentityGateValidation {
                     -ExpectedValue $step.Shell `
                     -Contract "$($step.Name) shell"
             }
-            if ($linuxRegressionStep -notmatch '(?m)^        run: node --test scripts/release/create-exact-source-archive\.test\.mjs scripts/release/accepted-pages-build\.test\.mjs scripts/tools/validate-release-cli-smokes\.test\.mjs\s*$' -or
-                [regex]::Matches($release, 'scripts/release/create-exact-source-archive\.test\.mjs').Count -ne 1) {
-                Add-ArchitectureError 'Exact source archive regression must have one Linux metadata owner while both OS archive paths remain exercised'
+            if ($linuxRegressionStep -notmatch '(?m)^        run: node scripts/tools/run-release-regression-tests\.mjs\s*$' -or
+                [regex]::Matches($release, 'scripts/tools/run-release-regression-tests\.mjs').Count -ne 1) {
+                Add-ArchitectureError 'Independent release regressions must have one bounded dispatch-only Linux metadata owner'
             }
-            if ([regex]::Matches($release, 'scripts/tools/validate-release-cli-smokes\.test\.mjs').Count -ne 1) {
-                Add-ArchitectureError 'Release workflow mutation tests must have exactly one Linux metadata owner'
+            foreach ($requiredRegression in @(
+                'scripts/release/accepted-pages-build.test.mjs',
+                'scripts/release/canonical-acceptance-evidence.test.mjs',
+                'scripts/release/canonical-acceptance-run.test.mjs',
+                'scripts/release/create-exact-source-archive.test.mjs',
+                'scripts/release/deployment-impact.test.mjs',
+                'scripts/release/discord-catalog-recovery-authority.test.mjs',
+                'scripts/release/discord-deploy-workflow.test.mjs',
+                'scripts/release/discord-deployment-recovery.test.mjs',
+                'scripts/release/discord-deployment-state.test.mjs',
+                'scripts/release/discord-production-checkpoint-receipt.test.mjs',
+                'scripts/release/discord-recovery-debt.test.mjs',
+                'scripts/release/final-source-attempt-journal.test.mjs',
+                'scripts/release/final-source-event-contract.test.mjs',
+                'scripts/release/final-source-stage-evidence.test.mjs',
+                'scripts/release/finalize-discord-production-checkpoint.test.mjs',
+                'scripts/release/observe-production-surfaces.test.mjs',
+                'scripts/release/pages-deployment-authority.test.mjs',
+                'scripts/release/pages-rollback-authority.test.mjs',
+                'scripts/release/pages-rollback-package.test.mjs',
+                'scripts/release/release-publication-evidence.test.mjs',
+                'scripts/release/validate-final-source-revalidation.test.mjs',
+                'scripts/release/validate-release-metadata.test.mjs',
+                'scripts/release/verify-remote-annotated-tag.test.mjs',
+                'scripts/tools/run-focused-js-tests.test.mjs',
+                'scripts/tools/run-release-regression-tests.test.mjs',
+                'scripts/tools/validate-release-cli-smokes.test.mjs'
+            )) {
+                $quotedRegression = '"' + $requiredRegression + '"'
+                if ([regex]::Matches(
+                        $releaseRegressionRunner,
+                        [regex]::Escape($quotedRegression)
+                    ).Count -ne 1) {
+                    Add-ArchitectureError "Bounded release regression manifest must own '$requiredRegression' exactly once"
+                }
             }
-            if ([regex]::Matches($release, 'scripts/release/accepted-pages-build\.test\.mjs').Count -ne 1) {
-                Add-ArchitectureError 'Accepted Pages build regression must have exactly one Linux metadata owner'
+            foreach ($requiredRunnerMarker in @(
+                'export const ACTIONS_TEST_WORKER_CAP = 4;',
+                'availableParallelism()',
+                '`--test-concurrency=${workers}`',
+                'shell: false',
+                'stdio: "inherit"',
+                'release regression runner does not accept arguments'
+            )) {
+                if ($releaseRegressionRunner.IndexOf($requiredRunnerMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                    Add-ArchitectureError "Bounded release regression runner is missing '$requiredRunnerMarker'"
+                }
             }
-            if ([regex]::Matches($release, 'scripts/tools/run-focused-js-tests\.test\.mjs').Count -ne 1 -or
-                $metadataJob -notmatch '(?m)^      - name: Validate focused test selection regression coverage\r?\n        if: github\.event_name == ''workflow_dispatch''\r?\n        run: node --test scripts/tools/run-focused-js-tests\.test\.mjs\r?\n(?=      - name: Validate every product version and changelog surface)') {
-                Add-ArchitectureError 'Focused test selection regression must have exactly one dispatch-only Linux metadata owner'
+            if ($releaseRegressionRunner.IndexOf('audit-upstream-drift.test.mjs', [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError 'Upstream drift authority must remain a serial release step outside the independent regression pool'
+            }
+            foreach ($requiredRunnerTest in @(
+                'derives a positive Actions worker budget capped at four logical processors',
+                'keeps one closed duplicate-free manifest for every independent release regression',
+                'builds one shell-free Node test pool with explicit bounded file concurrency',
+                'runs the complete pool exactly once and propagates its failure'
+            )) {
+                if ($releaseRegressionRunnerTest.IndexOf($requiredRunnerTest, [System.StringComparison]::Ordinal) -lt 0) {
+                    Add-ArchitectureError "Bounded release regression runner coverage is missing '$requiredRunnerTest'"
+                }
             }
             foreach ($duplicateMetadataBuild in @(
                 'Install JavaScript workspace for product authority',

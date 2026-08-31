@@ -108,23 +108,12 @@ test("rejects a skipped upstream drift snapshot contract", async () => {
   assert.notEqual(result.status, 0, diagnostic(result));
 });
 
-test("rejects removal of the final-source attempt journal regression", async () => {
-  const canonicalCommand = "node --test scripts/release/canonical-acceptance-evidence.test.mjs scripts/release/final-source-attempt-journal.test.mjs scripts/release/final-source-event-contract.test.mjs scripts/release/final-source-stage-evidence.test.mjs scripts/release/observe-production-surfaces.test.mjs scripts/release/release-publication-evidence.test.mjs scripts/release/validate-final-source-revalidation.test.mjs";
+test("rejects bypassing the bounded release regression owner", async () => {
+  const canonicalCommand = "node scripts/tools/run-release-regression-tests.mjs";
   const weakenedWorkflow = replaceExactlyOnce(
     normalizedWorkflow,
     canonicalCommand,
-    canonicalCommand.replace("scripts/release/final-source-attempt-journal.test.mjs ", ""),
-  );
-  const result = await runValidator(weakenedWorkflow);
-  assert.notEqual(result.status, 0, diagnostic(result));
-});
-
-test("rejects removal of the durable Discord checkpoint and recovery-debt regressions", async () => {
-  const canonicalCommand = "node --test scripts/release/deployment-impact.test.mjs scripts/release/discord-catalog-recovery-authority.test.mjs scripts/release/discord-deploy-workflow.test.mjs scripts/release/discord-deployment-recovery.test.mjs scripts/release/discord-deployment-state.test.mjs scripts/release/discord-production-checkpoint-receipt.test.mjs scripts/release/discord-recovery-debt.test.mjs";
-  const weakenedWorkflow = replaceExactlyOnce(
-    normalizedWorkflow,
-    canonicalCommand,
-    canonicalCommand.replace(" scripts/release/discord-recovery-debt.test.mjs", ""),
+    "node --test scripts/release/canonical-acceptance-evidence.test.mjs",
   );
   const result = await runValidator(weakenedWorkflow);
   assert.notEqual(result.status, 0, diagnostic(result));
@@ -338,8 +327,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Validate exact source archive regression coverage\n",
-        "      - name: Poison protected executable resolution\n        shell: bash\n        run: echo '/tmp/fake-tools' >> \"$GITHUB_PATH\"\n      - name: Validate exact source archive regression coverage\n",
+        "      - name: Validate independent release regressions with bounded workers\n",
+        "      - name: Poison protected executable resolution\n        shell: bash\n        run: echo '/tmp/fake-tools' >> \"$GITHUB_PATH\"\n      - name: Validate independent release regressions with bounded workers\n",
       ),
   ],
   [
@@ -424,8 +413,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Validate exact source archive regression coverage\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n",
-        "      - name: Validate exact source archive regression coverage\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n        'continue-on-error': true\n",
+        "      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n",
+        "      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n        'continue-on-error': true\n",
       ),
   ],
   [
@@ -433,8 +422,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Validate exact source archive regression coverage\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n",
-        "      - name: Validate exact source archive regression coverage\n        if: github.event_name == 'workflow_dispatch'\n        shell: echo {0}\n",
+        "      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n",
+        "      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == 'workflow_dispatch'\n        shell: echo {0}\n",
       ),
   ],
   [
@@ -442,8 +431,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Validate exact source archive regression coverage\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n        run: node --test scripts/release/create-exact-source-archive.test.mjs scripts/release/accepted-pages-build.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs\n",
-        '      - name: Validate exact source archive regression coverage\n        if: github.event_name == \'workflow_dispatch\'\n        shell: bash\n        run: "# node --test scripts/release/create-exact-source-archive.test.mjs scripts/release/accepted-pages-build.test.mjs scripts/tools/validate-release-cli-smokes.test.mjs"\n',
+        "      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n        run: node scripts/tools/run-release-regression-tests.mjs\n",
+        '      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == \'workflow_dispatch\'\n        shell: bash\n        run: "# node scripts/tools/run-release-regression-tests.mjs"\n',
       ),
   ],
   [
@@ -465,12 +454,12 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects release metadata tests on tag publication runs",
+    "rejects bounded release regressions on tag publication runs",
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Validate release metadata regression coverage\n        if: github.event_name == 'workflow_dispatch'\n",
-        "      - name: Validate release metadata regression coverage\n",
+        "      - name: Validate independent release regressions with bounded workers\n        if: github.event_name == 'workflow_dispatch'\n",
+        "      - name: Validate independent release regressions with bounded workers\n",
       ),
   ],
   [

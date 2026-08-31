@@ -80,8 +80,18 @@ The dispatch matrix also assigns one execution owner to every expensive or
 overlapping surface. The dedicated `ctk3` job builds and tests CTK3 once, seals
 the source-bound distribution, and lets Discord and Windows product acceptance
 consume those exact bytes through built-only tests and probes.
-The metadata root remains dependency-free: it validates source, release, drift,
-rollback, and evidence helpers with Node built-ins only. The Discord job, after
+The metadata root remains dependency-free. Its independent source, release,
+rollback, evidence, workflow-mutation, and focused-runner regression files are
+listed once in `scripts/tools/run-release-regression-tests.mjs` and launched by
+one Node test process. That process derives its file worker count from
+`os.availableParallelism()`, clamps it to the closed range 1..4, and passes the
+budget through Node's explicit `--test-concurrency` option. This removes the
+old serial barrier between independent metadata regression groups without
+starting multiple competing pools or oversubscribing a larger runner. The exact
+source archive operation, release metadata authority, and upstream drift audit
+remain ordered workflow steps outside that pool.
+
+The Discord job, after
 its single workspace install and accepted CTK3 verification, owns the
 runtime-backed product capability and alias parser contract exactly once. During
 `ReleaseAcceptance`, `AdversarialCorrectness` owns the C adversarial target while
@@ -94,6 +104,12 @@ the later `DesktopHost` does not repeat U6 validation in that same release run.
 to the later owners. The public standalone tasks remain self-contained and
 still execute their historical evidence when they are run outside
 `ReleaseAcceptance`.
+
+Native FFI/exact Rust tests, renderer goldens, sanitizer/aggregate C tests, and
+packaged CLI smokes remain serial where their process-global state, shared build
+surface, exact output evidence, or ordered product contract requires it. Their
+Cargo/CMake compilation continues to receive the bounded runner CPU count; this
+metadata optimization does not weaken deterministic execution evidence.
 
 The successful dispatch also retains its exact Pages-ready Web/WASM build. A
 later Pages deployment verifies and reuses that accepted artifact; it does not

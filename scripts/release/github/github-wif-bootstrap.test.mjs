@@ -113,6 +113,11 @@ const DEPLOYER_PROJECT_ROLES = Object.freeze([
   "roles/serviceusage.serviceUsageConsumer",
 ]);
 const BUILD_PROJECT_ROLES = Object.freeze(["roles/logging.logWriter"]);
+const BUILDER_SOURCE_BUCKET_ROLES = Object.freeze([
+  "roles/storage.bucketViewer",
+  "roles/storage.objectCreator",
+  "roles/storage.objectViewer",
+]);
 const ROLLBACK_PROJECT_ROLES = Object.freeze([
   ROLLBACK_RUN_ROLE,
   "roles/serviceusage.serviceUsageConsumer",
@@ -201,6 +206,14 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
     "legacy mutable GitHub OIDC subjects must not remain in the exact binding",
   );
   assert.deepEqual(report.leastPrivilege.builderProjectRoles, [...BUILDER_PROJECT_ROLES]);
+  assert.deepEqual(
+    report.leastPrivilege.builderSourceBucketRoles,
+    [...BUILDER_SOURCE_BUCKET_ROLES],
+  );
+  assert.equal(
+    report.leastPrivilege.builderProjectRoles.some((role) => role.startsWith("roles/storage.")),
+    false,
+  );
   assert.deepEqual(report.leastPrivilege.deployerProjectRoles, [...DEPLOYER_PROJECT_ROLES]);
   assert.deepEqual(report.leastPrivilege.buildProjectRoles, [...BUILD_PROJECT_ROLES]);
   assert.deepEqual(report.leastPrivilege.buildForbiddenProjectRoles, ["roles/storage.objectViewer"]);
@@ -459,10 +472,7 @@ test("apply converges once and the second plan is mutation-free", async () => {
   assert.deepEqual(cli.projectRoles(ROLLBACK_MEMBER), [...ROLLBACK_PROJECT_ROLES].sort());
   assert.deepEqual(cli.projectRoles(COMMAND_MEMBER), ["roles/run.viewer"]);
   assert.deepEqual(cli.bucketRoles(COMMAND_MEMBER), []);
-  assert.deepEqual(cli.bucketRoles(BUILDER_MEMBER), [
-    "roles/storage.objectCreator",
-    "roles/storage.objectViewer",
-  ]);
+  assert.deepEqual(cli.bucketRoles(BUILDER_MEMBER), [...BUILDER_SOURCE_BUCKET_ROLES]);
   assert.deepEqual(cli.bucketRoles(BUILD_MEMBER), ["roles/storage.objectViewer"]);
   assert.deepEqual(cli.bucketRoles(DEPLOYER_MEMBER), []);
   assert.deepEqual(cli.bucketRoles(ROLLBACK_MEMBER), []);
@@ -705,6 +715,32 @@ test("project-wide build storage read is replaced by exact source-bucket read be
   assert.equal(applied.status, "ready");
   assert.deepEqual(cli.bucketRoles(BUILD_MEMBER), ["roles/storage.objectViewer"]);
   assert.deepEqual(cli.projectRoles(BUILD_MEMBER), BUILD_PROJECT_ROLES);
+});
+
+test("Cloud Build submit bucket metadata read is granted only on the exact source bucket", async () => {
+  const cli = new FakeGcloud({ ready: true });
+  removeRole(cli.bucketPolicy, BUILDER_MEMBER, "roles/storage.bucketViewer");
+
+  const migration = await plan(cli);
+  assert.deepEqual(migration.plannedMutations.map(({ id }) => id), [
+    "source-bucket-builder-add-storage-bucketviewer",
+  ]);
+  assert.deepEqual(migration.plannedMutations[0].argv, [
+    "storage",
+    "buckets",
+    "add-iam-policy-binding",
+    SOURCE_BUCKET,
+    `--member=${BUILDER_MEMBER}`,
+    "--role=roles/storage.bucketViewer",
+    "--condition=None",
+    "--quiet",
+  ]);
+  assert.equal(cli.projectRoles(BUILDER_MEMBER).includes("roles/storage.bucketViewer"), false);
+
+  const applied = await applyGitHubWifBootstrap({}, { runGcloud: cli.run.bind(cli) });
+  assert.equal(applied.status, "ready");
+  assert.deepEqual(cli.bucketRoles(BUILDER_MEMBER), [...BUILDER_SOURCE_BUCKET_ROLES]);
+  assert.equal(cli.projectRoles(BUILDER_MEMBER).includes("roles/storage.bucketViewer"), false);
 });
 
 test("legacy cleanup precedes WIF additions and provider activation is always last", async () => {
@@ -1571,6 +1607,7 @@ class FakeGcloud {
     this.addRepositoryRole(BUILDER_MEMBER, "roles/artifactregistry.reader");
     this.addRepositoryRole(DEPLOYER_MEMBER, "roles/artifactregistry.reader");
     this.addBucketRole(BUILD_MEMBER, "roles/storage.objectViewer");
+    this.addBucketRole(BUILDER_MEMBER, "roles/storage.bucketViewer");
     this.addBucketRole(BUILDER_MEMBER, "roles/storage.objectCreator");
     this.addBucketRole(BUILDER_MEMBER, "roles/storage.objectViewer");
   }
