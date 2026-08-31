@@ -130,7 +130,7 @@ test("recovery hard-fails artifact bytes before extraction and binds the resolut
 test("rollback SSH and WIF authority exist only in reviewer-protected recovery", () => {
   assert.match(recovery, /environment: discord-runtime-rollback/u);
   assert.match(recovery, /ORACLE_SSH_PRIVATE_KEY_B64: \$\{\{ secrets\.ORACLE_SSH_PRIVATE_KEY_B64 \}\}/u);
-  assert.match(recovery, /base64 --decode --strict/u);
+  assert.match(recovery, /base64 --decode/u);
   assert.match(recovery, /chmod 0600/u);
   assert.match(recovery, /if: always\(\)[\s\S]*rm -f -- "\$key_path"/u);
   assert.doesNotMatch(recovery, /GCP_DEPLOY_SERVICE_ACCOUNT/u);
@@ -144,6 +144,13 @@ test("rollback SSH and WIF authority exist only in reviewer-protected recovery",
   );
   assert.match(recovery, /if-no-files-found: error/u);
   assert.match(recovery, /force-cancel path/u);
+});
+
+test("Oracle key materialization uses the Ubuntu runner's supported base64 decoder", () => {
+  const combined = `${primary}\n${recovery}`;
+  assert.equal((primary.match(/base64 --decode > "\$key_path"/gu) ?? []).length, 2);
+  assert.equal((recovery.match(/base64 --decode > "\$key_path"/gu) ?? []).length, 1);
+  assert.doesNotMatch(combined, /base64 --decode --strict/u);
 });
 
 test("build/test/tag/publication work is absent from Discord deploy workflows", () => {

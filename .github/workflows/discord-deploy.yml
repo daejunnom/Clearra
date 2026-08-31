@@ -486,7 +486,7 @@ jobs:
           [[ "$ORACLE_PRIVATE_OVERLAY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'remote overlay SHA-256 is invalid' >&2; exit 2; }
           [[ "$ORACLE_PRIVATE_OVERLAY_ARCHIVE" == "/opt/clearra/sealed-release-inputs/private-overlay-no-config-${ORACLE_PRIVATE_OVERLAY_SHA256}.tar" ]] || { echo 'remote overlay authority path is invalid' >&2; exit 2; }
           [[ -n "$ORACLE_SSH_PRIVATE_KEY_B64" && ! -e "$key_path" && ! -L "$key_path" ]] || { echo 'protected Oracle identity prerequisite is invalid' >&2; exit 2; }
-          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode --strict > "$key_path")
+          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode > "$key_path")
           [[ -f "$key_path" && ! -L "$key_path" ]] || { echo 'protected Oracle identity materialization failed' >&2; exit 2; }
           chmod 0600 "$key_path"
           echo "CLEARRA_ORACLE_IDENTITY_FILE=$key_path" >> "$GITHUB_ENV"
@@ -1004,7 +1004,7 @@ jobs:
           set -euo pipefail
           key_path="$RUNNER_TEMP/clearra-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
           [[ -n "$ORACLE_SSH_PRIVATE_KEY_B64" && ! -e "$key_path" && ! -L "$key_path" ]]
-          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode --strict > "$key_path")
+          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode > "$key_path")
           [[ -f "$key_path" && ! -L "$key_path" ]]
           chmod 0600 "$key_path"
           echo "CLEARRA_ORACLE_IDENTITY_FILE=$key_path" >> "$GITHUB_ENV"

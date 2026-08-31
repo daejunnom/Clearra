@@ -355,7 +355,7 @@ jobs:
           set -euo pipefail
           key_path="$RUNNER_TEMP/clearra-oracle-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
           [[ -n "$ORACLE_SSH_PRIVATE_KEY_B64" && ! -e "$key_path" && ! -L "$key_path" ]]
-          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode --strict > "$key_path")
+          (umask 077; printf '%s' "$ORACLE_SSH_PRIVATE_KEY_B64" | base64 --decode > "$key_path")
           [[ -f "$key_path" && ! -L "$key_path" ]]
           chmod 0600 "$key_path"
           echo "CLEARRA_ORACLE_RECOVERY_IDENTITY_FILE=$key_path" >> "$GITHUB_ENV"
