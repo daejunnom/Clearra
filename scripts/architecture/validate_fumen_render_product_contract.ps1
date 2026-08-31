@@ -7,6 +7,7 @@ foreach ($requiredPath in @(
             "crates/clearra-fumen/src/adapter/replay_to_fumen.rs",
             "crates/clearra-fumen/src/adapter/fumen_to_replay.rs",
             "crates/clearra-render/src/bitmap/bitmap_renderer.rs",
+            "crates/clearra-render/src/bitmap/comment_panel.rs",
             "crates/clearra-render/src/bitmap/png_encoder.rs",
             "crates/clearra-render/src/bitmap/gif_encoder.rs",
             "crates/clearra-render/src/scene.rs",
@@ -50,6 +51,7 @@ foreach ($requiredMarker in @(
     }
 $renderSurface = @(
         Read-Text "crates/clearra-render/src/bitmap/bitmap_renderer.rs"
+        Read-Text "crates/clearra-render/src/bitmap/comment_panel.rs"
         Read-Text "crates/clearra-render/src/bitmap/render_board.rs"
         Read-Text "crates/clearra-render/src/bitmap/png_encoder.rs"
         Read-Text "crates/clearra-render/src/bitmap/gif_encoder.rs"
@@ -69,8 +71,10 @@ foreach ($requiredMarker in @(
             "render_timeline_gif",
             "render_replay_png",
             "render_replay_timeline_gif",
+            "render_connected_timeline_with_comments_gif",
+            "CommentPanelLayout",
             "RenderScene::from_replay_trace",
-            "SkinAtlas::from_manifest_and_png",
+            "from_manifest_and_png",
             "RenderExportLimits",
             "RenderCapabilityReport::current",
             "png_board_render_golden",
@@ -110,7 +114,7 @@ foreach ($requiredMarker in @(
             Add-ArchitectureError "docs/architecture.md must document X7 marker '$requiredMarker'"
         }
     }
-$renderSource = Read-Text "crates/clearra-render/src/bitmap/bitmap_renderer.rs"
+$renderSource = Read-PhysicalText "crates/clearra-render/src/bitmap/bitmap_renderer.rs"
 foreach ($forbiddenMarker in @(
             "BuildVariant",
             "PackingCandidate",

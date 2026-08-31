@@ -32,6 +32,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/tools/run-focused-js-tests.test.mjs",
   "scripts/tools/run-release-regression-tests.test.mjs",
   "scripts/tools/validate-release-cli-smokes.test.mjs",
+  "scripts/windows/clearra-local-services-watchdog.test.mjs",
 ]);
 
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));

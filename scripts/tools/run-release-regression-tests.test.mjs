@@ -36,6 +36,7 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/tools/run-focused-js-tests.test.mjs",
   "scripts/tools/run-release-regression-tests.test.mjs",
   "scripts/tools/validate-release-cli-smokes.test.mjs",
+  "scripts/windows/clearra-local-services-watchdog.test.mjs",
 ]);
 
 test("derives a positive Actions worker budget capped at four logical processors", () => {
@@ -60,7 +61,7 @@ test("keeps one closed duplicate-free manifest for every independent release reg
   );
   assert.ok(
     RELEASE_REGRESSION_TEST_FILES.every((path) =>
-      /^(?:scripts\/release|scripts\/tools)\/[a-z0-9./-]+\.test\.mjs$/u.test(path)),
+      /^(?:scripts\/release|scripts\/tools|scripts\/windows)\/[a-z0-9./-]+\.test\.mjs$/u.test(path)),
   );
 });
 

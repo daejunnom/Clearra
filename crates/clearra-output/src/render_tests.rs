@@ -266,7 +266,7 @@ fn renderer_reports_export_limits() {
 }
 
 #[test]
-fn typed_ctk3_png_uses_one_based_pages_and_draws_pending_garbage_row() {
+fn typed_ctk3_png_uses_one_based_pages_and_only_draws_occupied_garbage_rows() {
     let mut first = Ctk3Page::new(1, vec![Ctk3Color::Piece(Ctk3Piece::T), Ctk3Color::Empty]);
     first.garbage = Some(vec![Ctk3Color::Gray, Ctk3Color::Empty]);
     let second = Ctk3Page::new(1, vec![Ctk3Color::Empty, Ctk3Color::Piece(Ctk3Piece::I)]);
@@ -288,8 +288,20 @@ fn typed_ctk3_png_uses_one_based_pages_and_draws_pending_garbage_row() {
     );
     assert_eq!(
         u32::from_be_bytes(rendered.bytes()[20..24].try_into().unwrap()),
+        64,
+        "an empty pending-garbage row must not create a blank rendered line"
+    );
+    let first_page = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Png,
+        Some(1),
+    )
+    .expect("first page PNG");
+    assert_eq!(
+        u32::from_be_bytes(first_page.bytes()[20..24].try_into().unwrap()),
         80,
-        "four visible field rows plus one separate pending-garbage row"
+        "occupied pending garbage remains a distinct semantic row"
     );
     assert!(matches!(
         RenderExactOutputGate::render_field_document(
@@ -344,7 +356,7 @@ fn typed_ctk3_operation_uses_a_distinct_connected_region() {
     });
     let source = encode_ctk3_compact(&Ctk3Document::new(4, vec![page])).expect("ctk3");
     let pages = decode_render_pages(&source, ExactFieldDocumentFormat::Ctk3).expect("pages");
-    let board = render_board(&pages[0], pages[0].height).expect("render board");
+    let board = render_board(&pages[0], pages[0].height, false).expect("render board");
 
     assert_eq!(board.cell(1, 2), RenderCell::T);
     assert_eq!(board.connection_group(1, 2), 1);
@@ -391,8 +403,8 @@ fn typed_ctk3_operation_above_a_trimmed_field_expands_the_render_height() {
     .expect("operation PNG");
     assert_eq!(
         u32::from_be_bytes(rendered.bytes()[20..24].try_into().unwrap()),
-        112,
-        "six operation-visible rows plus one pending-garbage row"
+        96,
+        "an empty pending-garbage row must not extend the operation view"
     );
 }
 
@@ -434,7 +446,8 @@ fn real_fumen_gif_renders_document_pages_without_accepting_a_page_selector() {
     );
     assert_eq!(
         u16::from_le_bytes([rendered.bytes()[8], rendered.bytes()[9]]),
-        384
+        391,
+        "23 field rows plus the Discord-compatible one-line comment panel"
     );
     assert!(rendered.bytes().len() <= PUBLIC_BITMAP_ARTIFACT_MAX_BYTES);
     assert_eq!(
@@ -446,6 +459,99 @@ fn real_fumen_gif_renders_document_pages_without_accepting_a_page_selector() {
         ),
         Err(FieldDocumentRenderError::PageNumberNotAllowedForGif)
     );
+}
+
+#[test]
+fn typed_ctk3_gif_uses_one_fixed_comment_panel_for_mixed_comment_pages() {
+    let commented =
+        Ctk3Page::new(1, vec![Ctk3Color::Piece(Ctk3Piece::T), Ctk3Color::Empty]).with_comment("A");
+    let empty = Ctk3Page::new(1, vec![Ctk3Color::Empty, Ctk3Color::Piece(Ctk3Piece::I)]);
+    let mixed_source = encode_ctk3_compact(&Ctk3Document::new(
+        2,
+        vec![commented.clone(), empty.clone()],
+    ))
+    .expect("mixed comments");
+    let mixed = RenderExactOutputGate::render_field_document(
+        &mixed_source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Gif,
+        None,
+    )
+    .expect("mixed comment GIF");
+    assert_eq!(
+        u16::from_le_bytes([mixed.bytes()[6], mixed.bytes()[7]]),
+        80,
+        "Discord comment panels keep a minimum 80px width"
+    );
+    assert_eq!(
+        u16::from_le_bytes([mixed.bytes()[8], mixed.bytes()[9]]),
+        87,
+        "both frames share four board rows plus one fixed comment panel"
+    );
+
+    let empty_source = encode_ctk3_compact(&Ctk3Document::new(2, vec![empty.clone(), empty]))
+        .expect("empty comments");
+    let all_empty = RenderExactOutputGate::render_field_document(
+        &empty_source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Gif,
+        None,
+    )
+    .expect("board-only GIF");
+    assert_eq!(
+        u16::from_le_bytes([all_empty.bytes()[6], all_empty.bytes()[7]]),
+        32
+    );
+    assert_eq!(
+        u16::from_le_bytes([all_empty.bytes()[8], all_empty.bytes()[9]]),
+        64,
+        "all-empty comments add neither a panel nor a blank garbage line"
+    );
+}
+
+#[test]
+fn typed_ctk3_gif_uses_one_fixed_garbage_row_for_mixed_garbage_pages() {
+    let mut occupied_garbage =
+        Ctk3Page::new(1, vec![Ctk3Color::Piece(Ctk3Piece::T), Ctk3Color::Empty]);
+    occupied_garbage.garbage = Some(vec![Ctk3Color::Gray, Ctk3Color::Empty]);
+    let empty_garbage = Ctk3Page::new(1, vec![Ctk3Color::Empty, Ctk3Color::Piece(Ctk3Piece::I)]);
+    let source = encode_ctk3_compact(&Ctk3Document::new(2, vec![occupied_garbage, empty_garbage]))
+        .expect("mixed garbage");
+    let rendered = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Gif,
+        None,
+    )
+    .expect("mixed garbage GIF");
+
+    assert_eq!(
+        u16::from_le_bytes([rendered.bytes()[8], rendered.bytes()[9]]),
+        80,
+        "all frames share four field rows and the one document-level garbage row"
+    );
+    assert_eq!(gif_graphic_control_delays(rendered.bytes()), vec![50, 50]);
+}
+
+#[test]
+fn typed_ctk3_png_rasterizes_hangul_comment_below_board_without_a_blank_garbage_row() {
+    let page = Ctk3Page::new(1, vec![Ctk3Color::Piece(Ctk3Piece::T), Ctk3Color::Empty])
+        .with_comment("<b>@everyone</b> 한글 주석");
+    let source = encode_ctk3_compact(&Ctk3Document::new(2, vec![page])).expect("ctk3");
+    let rendered = RenderExactOutputGate::render_field_document(
+        &source,
+        ExactFieldDocumentFormat::Ctk3,
+        ExactBitmapOutputFormat::Png,
+        Some(1),
+    )
+    .expect("comment PNG");
+
+    assert_eq!(
+        u32::from_be_bytes(rendered.bytes()[20..24].try_into().unwrap()),
+        115,
+        "four 16px board rows plus the bounded three-line comment panel"
+    );
+    assert!(rendered.bytes().len() <= PUBLIC_BITMAP_ARTIFACT_MAX_BYTES);
 }
 
 fn gif_graphic_control_delays(bytes: &[u8]) -> Vec<u16> {

@@ -1,4 +1,5 @@
 mod bitmap_renderer;
+mod comment_panel;
 mod gif_encoder;
 pub(crate) mod png_encoder;
 mod render_board;

@@ -29,6 +29,12 @@
   color normalization, mirroring, deterministic rendering, parity observation,
   sequence replay, and exact sequence-dependency languages while preserving
   page, operation, comment, garbage, and color identity.
+- Aligned Pages Fumen rendering with Discord by showing normalized comments
+  below the board, omitting empty garbage rows, and keeping mixed-page GIF
+  dimensions stable for both comment panels and garbage rows.
+- Consolidated the Windows local-service watchdog into one hidden, restartable
+  owner that preserves healthy listeners on ports 4194 and 8790 and checks
+  unavailable services at one-minute intervals without opening a console.
 - Added durable native and browser delegation journals with acknowledged
   two-phase publication, hash-chained records, leases, fencing, recovery,
   quarantine, and explicit terminal ownership so partial or uncertain work is
