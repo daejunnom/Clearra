@@ -579,6 +579,9 @@ function Invoke-ReleaseIdentityGateValidation {
     $managedCandidateSmokeTest = Read-Text 'apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs'
     $cloudCandidateRelease = Read-Text 'scripts/release/cloud/candidate-release-v080.mjs'
     $cloudCandidateReleaseTest = Read-Text 'scripts/release/cloud/candidate-release-v080.test.mjs'
+    $githubWifBootstrap = Read-Text 'scripts/release/github/github-wif-bootstrap.mjs'
+    $githubWifReadme = Read-Text 'scripts/release/github/README.md'
+    $remainingWorkPlan = Read-Text 'docs/v0.8.0-remaining-work-plan.md'
     $oracleProofProducer = Read-Text 'apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs'
     $oracleRuntimeAuthority = Read-Text 'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs'
     $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
@@ -592,6 +595,51 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleAcceptedLayerBuilder = Read-Text 'scripts/release/oracle/create-local-layers-v080.sh'
     $oracleActionsLayerBuilder = Read-Text 'scripts/release/oracle/create-actions-layers-v080.sh'
     $oracleActionsLayerBuilderTest = Read-Text 'scripts/release/oracle/create-actions-layers-v080.test.mjs'
+
+    foreach ($required in @(
+        'const GITHUB_IMMUTABLE_REPOSITORY =',
+        'daejunnom@${GITHUB_REPOSITORY_OWNER_ID}/Clearra@${GITHUB_REPOSITORY_ID}',
+        'const GITHUB_SUBJECT_PREFIX = `repo:${GITHUB_IMMUTABLE_REPOSITORY}`;',
+        '`${GITHUB_SUBJECT_PREFIX}:ref:${GITHUB_REF}`',
+        '`${GITHUB_SUBJECT_PREFIX}:environment:discord-path-confirmation`',
+        '`${GITHUB_SUBJECT_PREFIX}:environment:discord-runtime-rollback`',
+        '`${GITHUB_SUBJECT_PREFIX}:environment:discord-global-command-sync`',
+        'const LEGACY_GITHUB_SUBJECT_PREFIX = `repo:${GITHUB_REPOSITORY}`;',
+        'const BUILDER_REMOVABLE_LEGACY_WIF_MEMBERS =',
+        'const DEPLOYER_REMOVABLE_LEGACY_WIF_MEMBERS =',
+        'const ROLLBACK_REMOVABLE_LEGACY_WIF_MEMBERS =',
+        'const COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS =',
+        'removableLegacyMembers:',
+        'remove replaced legacy name-only',
+        'function isWifRemoval(planned)'
+    )) {
+        if ($githubWifBootstrap.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "GitHub WIF bootstrap is missing immutable exact-subject marker '$required'"
+        }
+    }
+    foreach ($publicContract in @(
+        @{ Name = 'GitHub WIF README'; Text = $githubWifReadme },
+        @{ Name = 'v0.8.0 remaining-work plan'; Text = $remainingWorkPlan }
+    )) {
+        if ($publicContract.Text.IndexOf(
+                'repo:daejunnom@271715321/Clearra@1309293231',
+                [System.StringComparison]::Ordinal
+            ) -lt 0) {
+            Add-ArchitectureError "$($publicContract.Name) is missing the immutable GitHub repository subject prefix"
+        }
+        if ($publicContract.Text.IndexOf(
+                'legacy',
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -lt 0) {
+            Add-ArchitectureError "$($publicContract.Name) is missing the bounded legacy WIF migration contract"
+        }
+    }
+    if ($githubWifBootstrap.IndexOf(
+            'repo:${GITHUB_REPOSITORY}:',
+            [System.StringComparison]::Ordinal
+        ) -ge 0) {
+        Add-ArchitectureError 'GitHub WIF bootstrap retains the mutable legacy repository subject prefix'
+    }
 
     foreach ($required in @(
         'group: discord-production',

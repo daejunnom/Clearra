@@ -42,15 +42,25 @@ const ROLLBACK_MEMBER = `serviceAccount:${ROLLBACK_EMAIL}`;
 const COMMAND_MEMBER = `serviceAccount:${COMMAND_EMAIL}`;
 const WIF_PREFIX = `principal://iam.googleapis.com/${POOL_NAME}/subject/`;
 const ROLLBACK_WIF_PREFIX = `principal://iam.googleapis.com/${ROLLBACK_POOL_NAME}/subject/`;
-const BUILDER_WIF_MEMBER = `${WIF_PREFIX}repo:daejunnom/Clearra:ref:refs/heads/main`;
+const IMMUTABLE_REPOSITORY_SUBJECT = "repo:daejunnom@271715321/Clearra@1309293231";
+const LEGACY_REPOSITORY_SUBJECT = "repo:daejunnom/Clearra";
+const BUILDER_WIF_MEMBER = `${WIF_PREFIX}${IMMUTABLE_REPOSITORY_SUBJECT}:ref:refs/heads/main`;
 const PATH_WIF_MEMBER =
-  `${WIF_PREFIX}repo:daejunnom/Clearra:environment:discord-path-confirmation`;
+  `${WIF_PREFIX}${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-path-confirmation`;
 const PRIMARY_RUNTIME_ROLLBACK_WIF_MEMBER =
-  `${WIF_PREFIX}repo:daejunnom/Clearra:environment:discord-runtime-rollback`;
+  `${WIF_PREFIX}${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-runtime-rollback`;
 const RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER =
-  `${ROLLBACK_WIF_PREFIX}repo:daejunnom/Clearra:environment:discord-runtime-rollback`;
+  `${ROLLBACK_WIF_PREFIX}${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-runtime-rollback`;
 const GLOBAL_SYNC_WIF_MEMBER =
-  `${WIF_PREFIX}repo:daejunnom/Clearra:environment:discord-global-command-sync`;
+  `${WIF_PREFIX}${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-global-command-sync`;
+const LEGACY_BUILDER_WIF_MEMBER =
+  `${WIF_PREFIX}${LEGACY_REPOSITORY_SUBJECT}:ref:refs/heads/main`;
+const LEGACY_PATH_WIF_MEMBER =
+  `${WIF_PREFIX}${LEGACY_REPOSITORY_SUBJECT}:environment:discord-path-confirmation`;
+const LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER =
+  `${ROLLBACK_WIF_PREFIX}${LEGACY_REPOSITORY_SUBJECT}:environment:discord-runtime-rollback`;
+const LEGACY_GLOBAL_SYNC_WIF_MEMBER =
+  `${WIF_PREFIX}${LEGACY_REPOSITORY_SUBJECT}:environment:discord-global-command-sync`;
 const SOURCE_BUCKET = `gs://${PROJECT_ID}_cloudbuild`;
 const ACCESSOR = "roles/secretmanager.secretAccessor";
 const SECRET_ENDPOINT_ENV = "CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER";
@@ -136,20 +146,22 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
     rollbackWorkflowRef:
       "daejunnom/Clearra/.github/workflows/discord-deploy-recovery.yml@refs/heads/main",
     subjects: [
-      "repo:daejunnom/Clearra:ref:refs/heads/main",
-      "repo:daejunnom/Clearra:environment:discord-path-confirmation",
-      "repo:daejunnom/Clearra:environment:discord-runtime-rollback",
-      "repo:daejunnom/Clearra:environment:discord-global-command-sync",
+      `${IMMUTABLE_REPOSITORY_SUBJECT}:ref:refs/heads/main`,
+      `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-path-confirmation`,
+      `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-runtime-rollback`,
+      `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-global-command-sync`,
     ],
     subjectBindings: {
-      builderServiceAccount: ["repo:daejunnom/Clearra:ref:refs/heads/main"],
-      deployerServiceAccount: ["repo:daejunnom/Clearra:environment:discord-path-confirmation"],
+      builderServiceAccount: [`${IMMUTABLE_REPOSITORY_SUBJECT}:ref:refs/heads/main`],
+      deployerServiceAccount: [
+        `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-path-confirmation`,
+      ],
       rollbackServiceAccount: [
-        "repo:daejunnom/Clearra:environment:discord-runtime-rollback",
+        `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-runtime-rollback`,
       ],
       commandSyncServiceAccount: [
-        "repo:daejunnom/Clearra:environment:discord-global-command-sync",
-        "repo:daejunnom/Clearra:environment:discord-runtime-rollback",
+        `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-global-command-sync`,
+        `${IMMUTABLE_REPOSITORY_SUBJECT}:environment:discord-runtime-rollback`,
       ],
     },
     principalBindings: {
@@ -183,6 +195,11 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
       },
     },
   });
+  assert.equal(
+    JSON.stringify(report.exactBinding).includes("repo:daejunnom/Clearra:"),
+    false,
+    "legacy mutable GitHub OIDC subjects must not remain in the exact binding",
+  );
   assert.deepEqual(report.leastPrivilege.builderProjectRoles, [...BUILDER_PROJECT_ROLES]);
   assert.deepEqual(report.leastPrivilege.deployerProjectRoles, [...DEPLOYER_PROJECT_ROLES]);
   assert.deepEqual(report.leastPrivilege.buildProjectRoles, [...BUILD_PROJECT_ROLES]);
@@ -823,7 +840,17 @@ test("WIF audit requires five exact service-account tuples across primary and re
     ),
     (cli) => cli.addServiceAccountRole(
       COMMAND_EMAIL,
-      `${WIF_PREFIX}repo:daejunnom/Clearra:environment:unapproved`,
+      `${WIF_PREFIX}${IMMUTABLE_REPOSITORY_SUBJECT}:environment:unapproved`,
+      "roles/iam.workloadIdentityUser",
+    ),
+    (cli) => cli.addServiceAccountRole(
+      COMMAND_EMAIL,
+      `${WIF_PREFIX}${LEGACY_REPOSITORY_SUBJECT}:environment:unapproved`,
+      "roles/iam.workloadIdentityUser",
+    ),
+    (cli) => cli.addServiceAccountRole(
+      BUILDER_EMAIL,
+      `${WIF_PREFIX}${LEGACY_REPOSITORY_SUBJECT}:*`,
       "roles/iam.workloadIdentityUser",
     ),
   ]) {
@@ -875,6 +902,71 @@ test("WIF audit requires five exact service-account tuples across primary and re
       plan(cli),
       /exact trusted tuple|forbidden impersonation role|unexpected federated principal/,
     );
+  }
+});
+
+test("five exact legacy name-only WIF tuples migrate add-before-remove and cannot remain ready", async () => {
+  const cli = new FakeGcloud({ ready: true });
+  for (const [email, immutableMember, legacyMember] of [
+    [BUILDER_EMAIL, BUILDER_WIF_MEMBER, LEGACY_BUILDER_WIF_MEMBER],
+    [DEPLOYER_EMAIL, PATH_WIF_MEMBER, LEGACY_PATH_WIF_MEMBER],
+    [ROLLBACK_EMAIL, RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER,
+      LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER],
+    [COMMAND_EMAIL, GLOBAL_SYNC_WIF_MEMBER, LEGACY_GLOBAL_SYNC_WIF_MEMBER],
+    [COMMAND_EMAIL, RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER,
+      LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER],
+  ]) {
+    removeRole(
+      cli.serviceAccountPolicies.get(email),
+      immutableMember,
+      "roles/iam.workloadIdentityUser",
+    );
+    cli.addServiceAccountRole(email, legacyMember, "roles/iam.workloadIdentityUser");
+  }
+
+  const migration = await plan(cli);
+  const migrationIds = migration.plannedMutations.map(({ id }) => id);
+  assert.deepEqual(migrationIds, [
+    "github-builder-wif-add-branch-main",
+    "github-command-sync-wif-add-environment-global-command-sync",
+    "github-command-sync-wif-add-recovery-environment-runtime-rollback",
+    "github-deployer-wif-add-environment-path-confirmation",
+    "github-rollback-wif-add-recovery-environment-runtime-rollback",
+    "github-builder-wif-remove-legacy-branch-main",
+    "github-command-sync-wif-remove-legacy-environment-global-command-sync",
+    "github-command-sync-wif-remove-legacy-recovery-environment-runtime-rollback",
+    "github-deployer-wif-remove-legacy-environment-path-confirmation",
+    "github-rollback-wif-remove-legacy-recovery-environment-runtime-rollback",
+  ]);
+  const firstRemoval = migration.plannedMutations.findIndex(({ id }) =>
+    id.includes("-remove-legacy-"));
+  assert.equal(firstRemoval, 5);
+  assert.equal(
+    migration.plannedMutations.slice(0, firstRemoval).every(({ argv }) =>
+      argv.some((argument) => argument.includes(IMMUTABLE_REPOSITORY_SUBJECT))),
+    true,
+  );
+  assert.equal(
+    migration.plannedMutations.slice(firstRemoval).every(({ argv }) =>
+      argv.some((argument) => argument.includes(LEGACY_REPOSITORY_SUBJECT))),
+    true,
+  );
+
+  const applied = await applyGitHubWifBootstrap({}, { runGcloud: cli.run.bind(cli) });
+  assert.equal(applied.status, "ready");
+  assert.deepEqual(applied.plannedMutations, []);
+  for (const [email, immutableMember, legacyMember] of [
+    [BUILDER_EMAIL, BUILDER_WIF_MEMBER, LEGACY_BUILDER_WIF_MEMBER],
+    [DEPLOYER_EMAIL, PATH_WIF_MEMBER, LEGACY_PATH_WIF_MEMBER],
+    [ROLLBACK_EMAIL, RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER,
+      LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER],
+    [COMMAND_EMAIL, GLOBAL_SYNC_WIF_MEMBER, LEGACY_GLOBAL_SYNC_WIF_MEMBER],
+    [COMMAND_EMAIL, RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER,
+      LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER],
+  ]) {
+    const policy = cli.serviceAccountPolicies.get(email);
+    assert.deepEqual(roles(policy, immutableMember), ["roles/iam.workloadIdentityUser"]);
+    assert.deepEqual(roles(policy, legacyMember), []);
   }
 });
 
@@ -1253,6 +1345,35 @@ test("Windows gcloud launcher is shell-free and endpoint overrides are subproces
     ],
   ]) {
     assert.throws(() => gcloudProcessInvocation(destructive), /metadata\/IAM-only/);
+  }
+});
+
+test("closed gcloud surface admits only the five exact legacy WIF removals", () => {
+  const exactLegacyRemovals = [
+    [BUILDER_EMAIL, LEGACY_BUILDER_WIF_MEMBER],
+    [DEPLOYER_EMAIL, LEGACY_PATH_WIF_MEMBER],
+    [ROLLBACK_EMAIL, LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER],
+    [COMMAND_EMAIL, LEGACY_GLOBAL_SYNC_WIF_MEMBER],
+    [COMMAND_EMAIL, LEGACY_RECOVERY_RUNTIME_ROLLBACK_WIF_MEMBER],
+  ];
+  const removal = (email, member, role = "roles/iam.workloadIdentityUser") => [
+    "iam", "service-accounts", "remove-iam-policy-binding", email,
+    `--project=${PROJECT_ID}`, `--member=${member}`, `--role=${role}`,
+    "--condition=None", "--quiet",
+  ];
+
+  for (const [email, member] of exactLegacyRemovals) {
+    assert.doesNotThrow(() => gcloudProcessInvocation(removal(email, member), "linux"));
+  }
+  for (const unrelatedRemoval of [
+    removal(BUILDER_EMAIL, BUILDER_WIF_MEMBER),
+    removal(DEPLOYER_EMAIL, LEGACY_BUILDER_WIF_MEMBER),
+    removal(BUILDER_EMAIL, LEGACY_BUILDER_WIF_MEMBER, "roles/iam.serviceAccountTokenCreator"),
+  ]) {
+    assert.throws(
+      () => gcloudProcessInvocation(unrelatedRemoval, "linux"),
+      /metadata\/IAM-only/,
+    );
   }
 });
 

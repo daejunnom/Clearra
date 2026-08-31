@@ -13,13 +13,24 @@ const GITHUB_REPOSITORY = "daejunnom/Clearra";
 const GITHUB_REPOSITORY_ID = "1309293231";
 const GITHUB_REPOSITORY_OWNER_ID = "271715321";
 const GITHUB_REF = "refs/heads/main";
-const GITHUB_MAIN_SUBJECT = `repo:${GITHUB_REPOSITORY}:ref:${GITHUB_REF}`;
+const GITHUB_IMMUTABLE_REPOSITORY =
+  `daejunnom@${GITHUB_REPOSITORY_OWNER_ID}/Clearra@${GITHUB_REPOSITORY_ID}`;
+const GITHUB_SUBJECT_PREFIX = `repo:${GITHUB_IMMUTABLE_REPOSITORY}`;
+const GITHUB_MAIN_SUBJECT = `${GITHUB_SUBJECT_PREFIX}:ref:${GITHUB_REF}`;
 const GITHUB_PATH_CONFIRMATION_SUBJECT =
-  `repo:${GITHUB_REPOSITORY}:environment:discord-path-confirmation`;
+  `${GITHUB_SUBJECT_PREFIX}:environment:discord-path-confirmation`;
 const GITHUB_RUNTIME_ROLLBACK_SUBJECT =
-  `repo:${GITHUB_REPOSITORY}:environment:discord-runtime-rollback`;
+  `${GITHUB_SUBJECT_PREFIX}:environment:discord-runtime-rollback`;
 const GITHUB_COMMAND_SYNC_SUBJECT =
-  `repo:${GITHUB_REPOSITORY}:environment:discord-global-command-sync`;
+  `${GITHUB_SUBJECT_PREFIX}:environment:discord-global-command-sync`;
+const LEGACY_GITHUB_SUBJECT_PREFIX = `repo:${GITHUB_REPOSITORY}`;
+const LEGACY_GITHUB_MAIN_SUBJECT = `${LEGACY_GITHUB_SUBJECT_PREFIX}:ref:${GITHUB_REF}`;
+const LEGACY_GITHUB_PATH_CONFIRMATION_SUBJECT =
+  `${LEGACY_GITHUB_SUBJECT_PREFIX}:environment:discord-path-confirmation`;
+const LEGACY_GITHUB_RUNTIME_ROLLBACK_SUBJECT =
+  `${LEGACY_GITHUB_SUBJECT_PREFIX}:environment:discord-runtime-rollback`;
+const LEGACY_GITHUB_COMMAND_SYNC_SUBJECT =
+  `${LEGACY_GITHUB_SUBJECT_PREFIX}:environment:discord-global-command-sync`;
 const GITHUB_WORKFLOW_REF =
   "daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main";
 const GITHUB_ROLLBACK_WORKFLOW_REF =
@@ -71,6 +82,19 @@ const ROLLBACK_WIF_MEMBERS = Object.freeze([
 const COMMAND_SYNC_WIF_MEMBERS = Object.freeze([
   githubSubjectMember(POOL_NAME, GITHUB_COMMAND_SYNC_SUBJECT),
   githubSubjectMember(ROLLBACK_POOL_NAME, GITHUB_RUNTIME_ROLLBACK_SUBJECT),
+]);
+const BUILDER_REMOVABLE_LEGACY_WIF_MEMBERS = Object.freeze([
+  githubSubjectMember(POOL_NAME, LEGACY_GITHUB_MAIN_SUBJECT),
+]);
+const DEPLOYER_REMOVABLE_LEGACY_WIF_MEMBERS = Object.freeze([
+  githubSubjectMember(POOL_NAME, LEGACY_GITHUB_PATH_CONFIRMATION_SUBJECT),
+]);
+const ROLLBACK_REMOVABLE_LEGACY_WIF_MEMBERS = Object.freeze([
+  githubSubjectMember(ROLLBACK_POOL_NAME, LEGACY_GITHUB_RUNTIME_ROLLBACK_SUBJECT),
+]);
+const COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS = Object.freeze([
+  githubSubjectMember(POOL_NAME, LEGACY_GITHUB_COMMAND_SYNC_SUBJECT),
+  githubSubjectMember(ROLLBACK_POOL_NAME, LEGACY_GITHUB_RUNTIME_ROLLBACK_SUBJECT),
 ]);
 const ALL_WIF_MEMBERS = Object.freeze([
   ...new Set([
@@ -700,7 +724,10 @@ async function createGitHubWifBootstrapPlanInternal(
     managedTuples: COMMAND_SYNC_WIF_MEMBERS.map((member) => [
       member,
       "roles/iam.workloadIdentityUser",
-    ]),
+    ]).concat(COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS.map((member) => [
+      member,
+      "roles/iam.workloadIdentityUser",
+    ])),
     label: "command-sync service-account IAM policy",
   });
   assertNoMemberRoles(
@@ -721,12 +748,16 @@ async function createGitHubWifBootstrapPlanInternal(
       managedTuples: BUILDER_WIF_MEMBERS.map((member) => [
         member,
         "roles/iam.workloadIdentityUser",
-      ]),
+      ]).concat(BUILDER_REMOVABLE_LEGACY_WIF_MEMBERS.map((member) => [
+        member,
+        "roles/iam.workloadIdentityUser",
+      ])),
       label: "GitHub builder service-account IAM policy",
     });
     reconcileWifMembers({
       policy: builderPolicy,
       desiredMembers: BUILDER_WIF_MEMBERS,
+      removableLegacyMembers: BUILDER_REMOVABLE_LEGACY_WIF_MEMBERS,
       email: BUILDER_EMAIL,
       idPrefix: "github-builder-wif",
       label: "GitHub builder Workload Identity authority",
@@ -752,12 +783,16 @@ async function createGitHubWifBootstrapPlanInternal(
       managedTuples: DEPLOYER_WIF_MEMBERS.map((member) => [
         member,
         "roles/iam.workloadIdentityUser",
-      ]),
+      ]).concat(DEPLOYER_REMOVABLE_LEGACY_WIF_MEMBERS.map((member) => [
+        member,
+        "roles/iam.workloadIdentityUser",
+      ])),
       label: "GitHub deployer service-account IAM policy",
     });
     reconcileWifMembers({
       policy: deployerPolicy,
       desiredMembers: DEPLOYER_WIF_MEMBERS,
+      removableLegacyMembers: DEPLOYER_REMOVABLE_LEGACY_WIF_MEMBERS,
       email: DEPLOYER_EMAIL,
       idPrefix: "github-deployer-wif",
       label: "GitHub deployer Workload Identity authority",
@@ -783,12 +818,16 @@ async function createGitHubWifBootstrapPlanInternal(
       managedTuples: ROLLBACK_WIF_MEMBERS.map((member) => [
         member,
         "roles/iam.workloadIdentityUser",
-      ]),
+      ]).concat(ROLLBACK_REMOVABLE_LEGACY_WIF_MEMBERS.map((member) => [
+        member,
+        "roles/iam.workloadIdentityUser",
+      ])),
       label: "GitHub rollback service-account IAM policy",
     });
     reconcileWifMembers({
       policy: rollbackPolicy,
       desiredMembers: ROLLBACK_WIF_MEMBERS,
+      removableLegacyMembers: ROLLBACK_REMOVABLE_LEGACY_WIF_MEMBERS,
       email: ROLLBACK_EMAIL,
       idPrefix: "github-rollback-wif",
       label: "GitHub rollback Workload Identity authority",
@@ -809,6 +848,7 @@ async function createGitHubWifBootstrapPlanInternal(
   reconcileWifMembers({
     policy: commandSyncPolicy,
     desiredMembers: COMMAND_SYNC_WIF_MEMBERS,
+    removableLegacyMembers: COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS,
     email: COMMAND_SYNC_EMAIL,
     idPrefix: "github-command-sync-wif",
     label: "GitHub command-sync Workload Identity authority",
@@ -1563,13 +1603,25 @@ function assertCatalogWideImpersonationBoundary(serviceAccountPolicies) {
   const allowedByTarget = new Map([
     [BUILD_EMAIL, new Set([tupleKey(BUILDER_MEMBER, "roles/iam.serviceAccountUser")])],
     [RUNTIME_EMAIL, new Set([tupleKey(DEPLOYER_MEMBER, "roles/iam.serviceAccountUser")])],
-    [COMMAND_SYNC_EMAIL, new Set(COMMAND_SYNC_WIF_MEMBERS.map((member) =>
+    [COMMAND_SYNC_EMAIL, new Set([
+      ...COMMAND_SYNC_WIF_MEMBERS,
+      ...COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS,
+    ].map((member) =>
       tupleKey(member, "roles/iam.workloadIdentityUser")))],
-    [BUILDER_EMAIL, new Set(BUILDER_WIF_MEMBERS.map((member) =>
+    [BUILDER_EMAIL, new Set([
+      ...BUILDER_WIF_MEMBERS,
+      ...BUILDER_REMOVABLE_LEGACY_WIF_MEMBERS,
+    ].map((member) =>
       tupleKey(member, "roles/iam.workloadIdentityUser")))],
-    [DEPLOYER_EMAIL, new Set(DEPLOYER_WIF_MEMBERS.map((member) =>
+    [DEPLOYER_EMAIL, new Set([
+      ...DEPLOYER_WIF_MEMBERS,
+      ...DEPLOYER_REMOVABLE_LEGACY_WIF_MEMBERS,
+    ].map((member) =>
       tupleKey(member, "roles/iam.workloadIdentityUser")))],
-    [ROLLBACK_EMAIL, new Set(ROLLBACK_WIF_MEMBERS.map((member) =>
+    [ROLLBACK_EMAIL, new Set([
+      ...ROLLBACK_WIF_MEMBERS,
+      ...ROLLBACK_REMOVABLE_LEGACY_WIF_MEMBERS,
+    ].map((member) =>
       tupleKey(member, "roles/iam.workloadIdentityUser")))],
   ]);
   const requiredHumanByTarget = new Map();
@@ -1734,12 +1786,17 @@ function reconcileResourceRoles({
 function reconcileWifMembers({
   policy,
   desiredMembers,
+  removableLegacyMembers,
   email,
   idPrefix,
   label,
   plannedMutations,
 }) {
-  const observedMembers = closedWifMembers(policy, desiredMembers, label);
+  const observedMembers = closedWifMembers(
+    policy,
+    [...desiredMembers, ...removableLegacyMembers],
+    label,
+  );
   for (const member of desiredMembers) {
     const memberRoles = rolesForMember(policy, member, label);
     if (memberRoles.some((role) => role !== "roles/iam.workloadIdentityUser")) {
@@ -1756,9 +1813,21 @@ function reconcileWifMembers({
       }));
     }
   }
+  for (const member of removableLegacyMembers) {
+    if (observedMembers.includes(member)) {
+      plannedMutations.push(serviceAccountBindingMutation({
+        id: `${idPrefix}-remove-legacy-${wifMemberSlug(member)}`,
+        action: "remove",
+        email,
+        member,
+        role: "roles/iam.workloadIdentityUser",
+        reason: `remove replaced legacy name-only ${label} subject`,
+      }));
+    }
+  }
 }
 
-function closedWifMembers(policy, desiredMembers, label) {
+function closedWifMembers(policy, allowedMembers, label) {
   const bindings = Array.isArray(policy?.bindings) ? policy.bindings : [];
   const members = [];
   for (const binding of bindings) {
@@ -1784,8 +1853,11 @@ function closedWifMembers(policy, desiredMembers, label) {
   if (new Set(members).size !== members.length) {
     throw new Error(`${label} contains duplicate federated authority`);
   }
-  const desired = new Set(desiredMembers);
-  if (members.some((member) => !desired.has(member))) {
+  const allowed = new Set(allowedMembers);
+  if (allowed.size !== allowedMembers.length) {
+    throw new Error(`${label} expected federated authority contains duplicates`);
+  }
+  if (members.some((member) => !allowed.has(member))) {
     throw new Error(`${label} contains an unexpected federated principal`);
   }
   return members.sort();
@@ -1819,8 +1891,14 @@ function assertNoMemberRoles(policy, member, label) {
 }
 
 function wifMemberSlug(member) {
-  if (member.endsWith(`/subject/${GITHUB_MAIN_SUBJECT}`)) return "branch-main";
-  if (member.endsWith(`/subject/${GITHUB_PATH_CONFIRMATION_SUBJECT}`)) {
+  if (
+    member.endsWith(`/subject/${GITHUB_MAIN_SUBJECT}`) ||
+    member.endsWith(`/subject/${LEGACY_GITHUB_MAIN_SUBJECT}`)
+  ) return "branch-main";
+  if (
+    member.endsWith(`/subject/${GITHUB_PATH_CONFIRMATION_SUBJECT}`) ||
+    member.endsWith(`/subject/${LEGACY_GITHUB_PATH_CONFIRMATION_SUBJECT}`)
+  ) {
     return "environment-path-confirmation";
   }
   if (member === githubSubjectMember(POOL_NAME, GITHUB_RUNTIME_ROLLBACK_SUBJECT)) {
@@ -1829,9 +1907,18 @@ function wifMemberSlug(member) {
   if (member === githubSubjectMember(ROLLBACK_POOL_NAME, GITHUB_RUNTIME_ROLLBACK_SUBJECT)) {
     return "recovery-environment-runtime-rollback";
   }
-  if (member.endsWith(`/subject/${GITHUB_COMMAND_SYNC_SUBJECT}`)) {
+  if (
+    member.endsWith(`/subject/${GITHUB_COMMAND_SYNC_SUBJECT}`) ||
+    member.endsWith(`/subject/${LEGACY_GITHUB_COMMAND_SYNC_SUBJECT}`)
+  ) {
     return "environment-global-command-sync";
   }
+  if (
+    member === githubSubjectMember(
+      ROLLBACK_POOL_NAME,
+      LEGACY_GITHUB_RUNTIME_ROLLBACK_SUBJECT,
+    )
+  ) return "recovery-environment-runtime-rollback";
   throw new Error("GitHub WIF subject is outside the exact closed set");
 }
 
@@ -2220,8 +2307,15 @@ function orderMutations(mutations) {
   return [...mutations].sort((left, right) => {
     const phaseDifference = mutationPhase(left) - mutationPhase(right);
     if (phaseDifference !== 0) return phaseDifference;
+    const wifRemovalDifference = Number(isWifRemoval(left)) - Number(isWifRemoval(right));
+    if (wifRemovalDifference !== 0) return wifRemovalDifference;
     return left.id.localeCompare(right.id);
   });
+}
+
+function isWifRemoval(planned) {
+  return planned.argv.includes("--role=roles/iam.workloadIdentityUser") &&
+    planned.argv.some((argument) => argument.includes("remove-iam-policy-binding"));
 }
 
 function mutationPhase(planned) {
@@ -2464,6 +2558,19 @@ function isAllowedGcloudArguments(arguments_) {
     for (const member of members) {
       fixed.push(serviceAccountBindingMutation({
         id: "validator", action: "add", email, member,
+        role: "roles/iam.workloadIdentityUser", reason: "validator",
+      }).argv);
+    }
+  }
+  for (const [email, members] of [
+    [BUILDER_EMAIL, BUILDER_REMOVABLE_LEGACY_WIF_MEMBERS],
+    [DEPLOYER_EMAIL, DEPLOYER_REMOVABLE_LEGACY_WIF_MEMBERS],
+    [ROLLBACK_EMAIL, ROLLBACK_REMOVABLE_LEGACY_WIF_MEMBERS],
+    [COMMAND_SYNC_EMAIL, COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS],
+  ]) {
+    for (const member of members) {
+      fixed.push(serviceAccountBindingMutation({
+        id: "validator", action: "remove", email, member,
         role: "roles/iam.workloadIdentityUser", reason: "validator",
       }).argv);
     }

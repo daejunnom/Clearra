@@ -15,11 +15,14 @@ node scripts/release/github/github-wif-bootstrap.mjs audit
 eight closed ordering phases, then re-observes the complete non-Secret
 catalog/IAM boundary before it can enter the next phase. The phases are:
 managed APIs; pools; service accounts and custom roles; exact non-WIF grants;
-legacy authority removals; exact WIF bindings; rollback-provider activation;
-and primary-provider activation. Thus a grant is observed before its
-corresponding legacy removal, every removal is observed before WIF is attached,
-the recovery provider is observed before deployment federation can open, and
-the primary provider is the absolute final mutation. A
+non-WIF legacy authority removals; exact WIF binding and one-time replacement;
+rollback-provider activation; and primary-provider activation. A replacement
+non-WIF grant is observed before its corresponding legacy non-WIF removal.
+Within the WIF phase, all missing immutable bindings are issued before any of
+the five exact legacy WIF removals; the ordered batch is re-observed after the
+phase, not between individual commands. The recovery provider is observed
+before deployment federation can open, and the primary provider is the
+absolute final mutation. A
 clean 34-mutation bootstrap with immediately visible writes performs one
 initial full plan, eight fast phase-boundary plans, and one final full audit,
 instead of 34 complete replans.
@@ -52,6 +55,17 @@ The primary pool/provider is
 It pins repository `daejunnom/Clearra`, repository ID `1309293231`, owner ID
 `271715321`, ref `refs/heads/main`, and workflow ref
 `daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main`.
+Every exact principal uses GitHub's immutable repository subject prefix
+`repo:daejunnom@271715321/Clearra@1309293231`: the builder appends
+`:ref:refs/heads/main`, while protected Environment principals append
+`:environment:<name>`. The mutable legacy prefix `repo:daejunnom/Clearra` is
+not trusted.
+For the one-time transition, the planner recognizes only the five already
+installed legacy name-only tuples on their exact service-account and pool
+targets. It schedules all five immutable tuple additions before the five
+matching removals, remains `changes-required` while any legacy tuple exists,
+and rejects every other legacy subject, wildcard, or principal set. A final
+`ready` audit therefore contains only the immutable exact principals.
 Its only effective service-account bindings are:
 
 - branch-main subject -> `clearra-github-builder`
