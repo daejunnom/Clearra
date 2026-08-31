@@ -15,6 +15,8 @@ param(
     [int]$Minutes = 60,
     [ValidateSet("ManagedLocal", "Trusted")]
     [string]$ExecutionSurface = "ManagedLocal",
+    [ValidateSet("Full", "Foundation", "Sanitizer", "Rust", "Pages")]
+    [string]$ReleaseAcceptanceShard = "Full",
     [ValidateSet("auto", "windows", "wsl", "wasm")]
     [string]$RuntimeEnvironment = "auto",
     [string]$WslDistribution = "Ubuntu",
@@ -128,7 +130,9 @@ try {
 
     Push-Location $Root
     $clearraLocationPushed = $true
-    $tasks = @(Expand-ClearraTasks $Task)
+    $tasks = @(Expand-ClearraTasks `
+        -RequestedTasks $Task `
+        -ReleaseAcceptanceShard $ReleaseAcceptanceShard)
     $script:ClearraReleaseAcceptanceMode = $false
     $script:ClearraNoProductDebtArchitecturePassed = $false
     if ($VerboseLog.IsPresent) {
@@ -141,7 +145,11 @@ try {
             switch ($rawTaskName.Trim().ToLowerInvariant()) {
                 "acceptance" { $progressScopeName = "acceptance" }
                 "releaseacceptance" {
-                    $progressScopeName = "release-acceptance"
+                    $progressScopeName = if ($ReleaseAcceptanceShard -eq "Full") {
+                        "release-acceptance"
+                    } else {
+                        "release-acceptance-$($ReleaseAcceptanceShard.ToLowerInvariant())"
+                    }
                     $script:ClearraReleaseAcceptanceMode = $true
                 }
                 "gpuworkerrelease" {

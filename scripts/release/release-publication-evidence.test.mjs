@@ -558,7 +558,18 @@ function acceptanceEvidence() {
     run_attempt: "1",
     workflow_path: ".github/workflows/release-cli.yml",
     status: "passed",
-    jobs: ["metadata", "ctk3", "linux-cli", "discord-bot", "release-acceptance", "windows-products"]
+    jobs: [
+      "metadata",
+      "ctk3",
+      "linux-cli",
+      "discord-bot",
+      "release-acceptance-foundation",
+      "release-acceptance-sanitizer",
+      "release-acceptance-rust",
+      "release-acceptance-pages",
+      "release-acceptance",
+      "windows-products",
+    ]
       .map((name, index) => ({ name, job_id: String(index + 1), status: "passed" })),
     accepted_inputs: {
       ctk3_manifest_sha256: "6".repeat(64),

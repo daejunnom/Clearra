@@ -87,9 +87,29 @@ const linuxJob = section(workflow, "\n  linux-cli:", "\n  discord-bot:");
 const discordJob = section(
   workflow,
   "\n  discord-bot:",
-  "\n  release-acceptance:",
+  "\n  release-acceptance-foundation:",
 );
 const metadataJob = section(workflow, "\n  metadata:", "\n  ctk3:");
+const releaseAcceptanceFoundationJob = section(
+  workflow,
+  "\n  release-acceptance-foundation:",
+  "\n  release-acceptance-sanitizer:",
+);
+const releaseAcceptanceSanitizerJob = section(
+  workflow,
+  "\n  release-acceptance-sanitizer:",
+  "\n  release-acceptance-rust:",
+);
+const releaseAcceptanceRustJob = section(
+  workflow,
+  "\n  release-acceptance-rust:",
+  "\n  release-acceptance-pages:",
+);
+const releaseAcceptancePagesJob = section(
+  workflow,
+  "\n  release-acceptance-pages:",
+  "\n  release-acceptance:",
+);
 const releaseAcceptanceJob = section(
   workflow,
   "\n  release-acceptance:",
@@ -136,9 +156,9 @@ const linuxAcceptedArchiveStep = section(
   "\n      - name: Resolve release version",
 );
 const windowsAcceptedArchiveStep = section(
-  releaseAcceptanceJob,
+  releaseAcceptanceFoundationJob,
   "\n      - name: Archive the exact accepted source on Windows",
-  "\n      - name: Download accepted CTK3 distribution",
+  "\n      - id: release_toolchain_cache",
 );
 const linuxProtectedPrelude = section(
   metadataJob,
@@ -146,9 +166,9 @@ const linuxProtectedPrelude = section(
   "\n      - name: Resolve release version",
 );
 const windowsProtectedPrelude = section(
-  releaseAcceptanceJob,
+  releaseAcceptanceFoundationJob,
   "\n    steps:",
-  "\n      - name: Download accepted CTK3 distribution",
+  "\n      - id: release_toolchain_cache",
 );
 const linuxCheckoutStep = section(
   linuxProtectedPrelude,
@@ -179,29 +199,34 @@ const discordDownloadStep = section(
   "\n      - name: Install JavaScript workspace",
 );
 const releaseAcceptanceDownloadStep = section(
-  releaseAcceptanceJob,
+  releaseAcceptanceRustJob,
   "\n      - name: Download accepted CTK3 distribution",
-  "\n      - uses: actions/cache@v4",
+  "\n      - id: release_toolchain_cache",
 );
 const releaseAcceptanceRunStep = section(
-  releaseAcceptanceJob,
-  "\n      - name: Run canonical release acceptance",
+  releaseAcceptanceRustJob,
+  "\n      - name: Run canonical release acceptance rust shard",
+  "\n      - name: Seal canonical release acceptance rust shard",
+);
+const releaseAcceptancePagesRunStep = section(
+  releaseAcceptancePagesJob,
+  "\n      - name: Run canonical release acceptance Pages shard",
   "\n      - name: Stamp and verify the accepted Pages build",
 );
 const acceptedPagesStampStep = section(
-  releaseAcceptanceJob,
+  releaseAcceptancePagesJob,
   "\n      - name: Stamp and verify the accepted Pages build",
-  "\n      - name: Produce canonical release gate evidence",
+  "\n      - name: Seal canonical release acceptance Pages shard",
 );
 const acceptedPagesUploadStep = section(
-  releaseAcceptanceJob,
+  releaseAcceptancePagesJob,
   "\n      - name: Upload accepted Pages build",
-  "\n      - name: Upload canonical release gate evidence",
+  "\n      - name: Upload canonical release acceptance Pages shard",
 );
 const releaseGateEvidenceStep = section(
   releaseAcceptanceJob,
   "\n      - name: Produce canonical release gate evidence",
-  "\n      - name: Upload accepted Pages build",
+  "\n      - name: Upload canonical release gate evidence",
 );
 const releaseGateUploadStep = releaseAcceptanceJob.slice(
   releaseAcceptanceJob.indexOf("\n      - name: Upload canonical release gate evidence"),
@@ -268,7 +293,7 @@ const pagesDeploymentAuthorityUploadStep = pagesDeployJob.slice(
 const productAuthorityStep = section(
   workflow,
   "\n      - name: Require the product capability and alias parser authority",
-  "\n\n  release-acceptance:",
+  "\n\n  release-acceptance-foundation:",
 );
 const upstreamAuthorityStep = section(
   metadataJob,
@@ -1018,7 +1043,7 @@ requireExactYamlKeySet(
   releaseAcceptanceRunStep,
   8,
   ["env", "run"],
-  "canonical release acceptance step",
+  "canonical Rust release acceptance shard step",
 );
 requireExactYamlKeySet(
   releaseAcceptanceRunStep,
@@ -1027,63 +1052,175 @@ requireExactYamlKeySet(
     "CLEARRA_ACCEPTED_CTK3_DIST",
     "CLEARRA_ACCEPTED_RUN_ID",
     "CLEARRA_ACCEPTED_RUN_ATTEMPT",
-    "CLEARRA_WEB_BASE_PATH",
   ],
-  "canonical release acceptance environment",
+  "canonical Rust release acceptance shard environment",
 );
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "CLEARRA_ACCEPTED_CTK3_DIST",
   "${{ github.workspace }}/packages/ctk3/dist",
-  "canonical release acceptance accepted CTK3 path",
+  "canonical Rust release acceptance accepted CTK3 path",
   10,
 );
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "CLEARRA_ACCEPTED_RUN_ID",
   "${{ github.run_id }}",
-  "canonical release acceptance accepted run ID",
+  "canonical Rust release acceptance accepted run ID",
   10,
 );
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "CLEARRA_ACCEPTED_RUN_ATTEMPT",
   "${{ github.run_attempt }}",
-  "canonical release acceptance accepted run attempt",
+  "canonical Rust release acceptance accepted run attempt",
   10,
 );
 requireExactYamlScalar(
-  releaseAcceptanceRunStep,
+  releaseAcceptancePagesRunStep,
   "CLEARRA_WEB_BASE_PATH",
   "/${{ github.event.repository.name }}",
-  "canonical release acceptance Pages base path",
+  "canonical Pages release acceptance base path",
   10,
 );
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "run",
-  "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ExecutionSurface Trusted",
-  "canonical release acceptance command",
+  "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Rust -ExecutionSurface Trusted",
+  "canonical Rust release acceptance shard command",
   8,
 );
+requireExactYamlKeySet(
+  releaseAcceptancePagesRunStep,
+  8,
+  ["env", "run"],
+  "canonical Pages release acceptance shard step",
+);
+requireExactYamlKeySet(
+  releaseAcceptancePagesRunStep,
+  10,
+  ["CLEARRA_WEB_BASE_PATH"],
+  "canonical Pages release acceptance shard environment",
+);
+requireExactYamlScalar(
+  releaseAcceptancePagesRunStep,
+  "run",
+  "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Pages -ExecutionSurface Trusted",
+  "canonical Pages release acceptance shard command",
+  8,
+);
+for (const [name, job, skeleton] of [
+  ["foundation", releaseAcceptanceFoundationJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- name: Archive the exact accepted source on Windows",
+    "- id: release_toolchain_cache",
+    "- name: Install JavaScript workspace",
+    "- name: Verify canonical ReleaseAcceptance shard mapping",
+    "- name: Run canonical release acceptance foundation shard",
+    "- name: Seal canonical release acceptance foundation shard",
+    "- name: Upload canonical release acceptance foundation shard",
+  ]],
+  ["sanitizer", releaseAcceptanceSanitizerJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- id: release_toolchain_cache",
+    "- name: Run canonical release acceptance sanitizer shard",
+    "- name: Seal canonical release acceptance sanitizer shard",
+    "- name: Upload canonical release acceptance sanitizer shard",
+  ]],
+  ["rust", releaseAcceptanceRustJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- name: Download accepted CTK3 distribution",
+    "- id: release_toolchain_cache",
+    "- name: Install JavaScript workspace",
+    "- name: Run canonical release acceptance rust shard",
+    "- name: Seal canonical release acceptance rust shard",
+    "- name: Upload canonical release acceptance rust shard",
+  ]],
+  ["pages", releaseAcceptancePagesJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- id: release_toolchain_cache",
+    "- name: Prepare acceptance toolchains",
+    "- name: Install JavaScript workspace",
+    "- name: Run canonical release acceptance Pages shard",
+    "- name: Stamp and verify the accepted Pages build",
+    "- name: Seal canonical release acceptance Pages shard",
+    "- name: Upload accepted Pages build",
+    "- name: Upload canonical release acceptance Pages shard",
+  ]],
+]) {
+  requireExactStepSkeleton(job, skeleton, `canonical ${name} acceptance shard`);
+}
 requireExactStepSkeleton(
   releaseAcceptanceJob,
   [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
-    "- name: Archive the exact accepted source on Windows",
-    "- name: Download accepted CTK3 distribution",
-    "- uses: actions/cache@v4",
-    "- name: Prepare acceptance toolchains",
-    "- name: Install JavaScript workspace",
-    "- name: Run canonical release acceptance",
-    "- name: Stamp and verify the accepted Pages build",
+    "- name: Download all canonical release acceptance shard evidence",
     "- name: Produce canonical release gate evidence",
-    "- name: Upload accepted Pages build",
     "- name: Upload canonical release gate evidence",
   ],
-  "Windows canonical acceptance",
+  "canonical release acceptance fan-in",
 );
+requireText(
+  releaseAcceptanceFoundationJob,
+  "run: pwsh -NoProfile -File scripts/test_release_acceptance_shards.ps1",
+  "canonical ReleaseAcceptance shard mapping regression",
+);
+const releaseShardJobs = [
+  releaseAcceptanceFoundationJob,
+  releaseAcceptanceSanitizerJob,
+  releaseAcceptanceRustJob,
+  releaseAcceptancePagesJob,
+];
+for (const [index, job] of releaseShardJobs.entries()) {
+  if ((job.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
+    throw new Error(`release shard ${index} must have exactly one restore-only cache reader`);
+  }
+  if (job.includes("actions/cache@v4") || job.includes("actions/cache/save@v4")) {
+    throw new Error(`release shard ${index} must not own an automatic or explicit cache writer`);
+  }
+  for (const marker of [
+    "~/.cargo/bin/wasm-bindgen.exe",
+    "~/.cargo/registry",
+    "~/.cargo/git",
+    "~/AppData/Local/Clearra/build",
+    "release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}",
+    "release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-",
+  ]) {
+    requireText(job, marker, `release shard ${index} cache ${marker}`);
+  }
+}
+if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 0) {
+  throw new Error("canonical acceptance must remain restore-only with no explicit cache writer");
+}
+if (
+  releaseAcceptanceFoundationJob.includes("actions/cache/save@v4") ||
+  releaseAcceptanceSanitizerJob.includes("actions/cache/save@v4") ||
+  releaseAcceptanceRustJob.includes("actions/cache/save@v4") ||
+  releaseAcceptancePagesJob.includes("actions/cache/save@v4")
+) {
+  throw new Error("no canonical acceptance shard may write a cache");
+}
+for (const [shard, job, caseName] of [
+  ["foundation", releaseAcceptanceFoundationJob, "Foundation"],
+  ["sanitizer", releaseAcceptanceSanitizerJob, "Sanitizer"],
+  ["rust", releaseAcceptanceRustJob, "Rust"],
+  ["pages", releaseAcceptancePagesJob, "Pages"],
+]) {
+  for (const marker of [
+    `-ReleaseAcceptanceShard ${caseName} -ExecutionSurface Trusted`,
+    "node scripts/release/canonical-acceptance-evidence.mjs shard `",
+    `--shard ${shard} \``,
+    `clearra-release-acceptance-${shard}-shard.v1.json`,
+    `release-acceptance-${shard}-shard-\${{ github.sha }}-run-\${{ needs.metadata.outputs.accepted_run_id }}-attempt-\${{ needs.metadata.outputs.accepted_run_attempt }}`,
+  ]) {
+    requireText(job, marker, `canonical ${shard} shard evidence ${marker}`);
+  }
+}
 requireExactYamlKeySet(
   acceptedPagesStampStep,
   8,
@@ -1164,11 +1301,12 @@ requireExactYamlKeySet(
   "canonical release gate evidence producer step",
 );
 for (const marker of [
-  "shell: pwsh",
-  "node scripts/release/canonical-acceptance-evidence.mjs gate `",
-  "--source-commit $env:GITHUB_SHA `",
-  "--run-id $env:GITHUB_RUN_ID `",
-  "--run-attempt $env:GITHUB_RUN_ATTEMPT `",
+  "shell: bash",
+  "node scripts/release/canonical-acceptance-evidence.mjs gate \\",
+  '--source-commit "$GITHUB_SHA" \\',
+  '--run-id "$GITHUB_RUN_ID" \\',
+  '--run-attempt "$GITHUB_RUN_ATTEMPT" \\',
+  "--shards release-shard-evidence \\",
   "--output release-gate-evidence",
 ]) {
   requireText(
@@ -1749,10 +1887,10 @@ if (
   );
 }
 requireExactYamlScalar(
-  releaseAcceptanceJob,
+  releaseAcceptanceFoundationJob,
   "runs-on",
   "windows-latest",
-  "Windows canonical acceptance runner",
+  "Windows foundation acceptance runner",
 );
 requireExactYamlLiteralScript(
   windowsAcceptedArchiveStep,
@@ -1777,14 +1915,20 @@ requireExactYamlLiteralScript(
 );
 for (const [name, job] of [
   ["Linux metadata", metadataJob],
-  ["Windows canonical acceptance", releaseAcceptanceJob],
+  ["Windows foundation acceptance", releaseAcceptanceFoundationJob],
+  ["Windows sanitizer acceptance", releaseAcceptanceSanitizerJob],
+  ["Windows Rust acceptance", releaseAcceptanceRustJob],
+  ["Windows Pages acceptance", releaseAcceptancePagesJob],
+  ["Linux acceptance fan-in", releaseAcceptanceJob],
 ]) {
   requireExactYamlKeySet(
     job,
     4,
     name === "Linux metadata"
       ? ["outputs", "runs-on", "steps"]
-      : ["if", "needs", "runs-on", "steps", "timeout-minutes"],
+      : name === "Linux acceptance fan-in"
+        ? ["if", "needs", "runs-on", "steps"]
+        : ["if", "needs", "runs-on", "steps", "timeout-minutes"],
     `${name} job`,
   );
   if (/^    continue-on-error\s*:/mu.test(job)) {
@@ -1792,16 +1936,71 @@ for (const [name, job] of [
   }
 }
 requireExactYamlScalar(
-  releaseAcceptanceJob,
+  releaseAcceptanceFoundationJob,
   "if",
   "github.event_name == 'workflow_dispatch'",
-  "Windows canonical acceptance dispatch-only condition",
+  "Windows foundation acceptance dispatch-only condition",
+);
+for (const [name, job] of [
+  ["foundation", releaseAcceptanceFoundationJob],
+  ["sanitizer", releaseAcceptanceSanitizerJob],
+  ["rust", releaseAcceptanceRustJob],
+  ["Pages", releaseAcceptancePagesJob],
+  ["fan-in", releaseAcceptanceJob],
+]) {
+  requireExactYamlScalar(
+    job,
+    "if",
+    "github.event_name == 'workflow_dispatch'",
+    `${name} acceptance dispatch-only condition`,
+    4,
+  );
+}
+requireExactYamlScalar(
+  releaseAcceptanceFoundationJob,
+  "needs",
+  "metadata",
+  "foundation acceptance metadata dependency",
+  4,
+);
+requireExactYamlScalar(
+  releaseAcceptanceSanitizerJob,
+  "needs",
+  "metadata",
+  "sanitizer acceptance metadata dependency",
+  4,
+);
+requireExactYamlFlowSequence(
+  releaseAcceptanceRustJob,
+  "needs",
+  ["metadata", "ctk3"],
+  "Rust acceptance dependency on metadata and accepted CTK3",
+);
+requireExactYamlScalar(
+  releaseAcceptancePagesJob,
+  "needs",
+  "metadata",
+  "Pages acceptance metadata dependency",
+  4,
 );
 requireExactYamlFlowSequence(
   releaseAcceptanceJob,
   "needs",
-  ["metadata", "ctk3"],
-  "Windows canonical acceptance dependency on metadata and accepted CTK3",
+  [
+    "metadata",
+    "release-acceptance-foundation",
+    "release-acceptance-sanitizer",
+    "release-acceptance-rust",
+    "release-acceptance-pages",
+  ],
+  "release acceptance exact four-shard fan-in dependencies",
+);
+requireExactYamlScalar(
+  releaseAcceptanceJob,
+  "runs-on",
+  "ubuntu-latest",
+  "release acceptance fan-in runner",
+  4,
 );
 for (const [name, step, shell] of [
   ["Linux archive regression", linuxArchiveRegressionStep, "bash"],
@@ -1868,7 +2067,7 @@ requireExactNormalizedText(
 );
 requireExactNormalizedText(
   windowsSetupNodeStep,
-  "\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n          cache: npm\n          cache-dependency-path: package-lock.json",
+  "\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22",
   "Windows protected Node setup step",
 );
 requireExactYamlFlowSequence(

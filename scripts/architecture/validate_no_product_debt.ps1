@@ -248,10 +248,10 @@ function Invoke-NoProductDebtStaticValidation {
     $taskExpansion = Read-PhysicalText 'scripts/lib/clearra-task-ui-helpers.ps1'
     $releaseMatch = [regex]::Match(
         $taskExpansion,
-        '(?s)elseif\s*\(\$canonicalTaskName\s+-eq\s+"ReleaseAcceptance"\)\s*\{(?<body>.*?)\}\s*elseif'
+        '(?s)"Full"\s*\{\s*return\s+\[string\[\]\]@\((?<body>.*?)\)\s*\}'
     )
     if (-not $releaseMatch.Success) {
-        Add-ArchitectureError 'NoProductDebt could not locate the ReleaseAcceptance task expansion'
+        Add-ArchitectureError 'NoProductDebt could not locate the full ReleaseAcceptance task contract'
     } else {
         $lastIndex = -1
         foreach ($stage in @(
@@ -264,7 +264,7 @@ function Invoke-NoProductDebtStaticValidation {
             'DesktopHost',
             'RenderGolden'
         )) {
-            $marker = '$expanded.Add("' + $stage + '")'
+            $marker = '"' + $stage + '"'
             $index = $releaseMatch.Groups['body'].Value.IndexOf(
                 $marker,
                 [System.StringComparison]::Ordinal
@@ -276,6 +276,14 @@ function Invoke-NoProductDebtStaticValidation {
             } else {
                 $lastIndex = $index
             }
+        }
+    }
+    foreach ($requiredShardExpansionMarker in @(
+        'Get-ClearraReleaseAcceptanceTasks $ReleaseAcceptanceShard',
+        '$expanded.Add($releaseTask)'
+    )) {
+        if ($taskExpansion.IndexOf($requiredShardExpansionMarker, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "NoProductDebt ReleaseAcceptance shard expansion is missing '$requiredShardExpansionMarker'"
         }
     }
 

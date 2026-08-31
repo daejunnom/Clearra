@@ -111,6 +111,14 @@ retries through another execution surface.
 | `scripts/clearra.ps1 -Task Strict -ExecutionSurface Trusted` | Required Rust, C, native-link, ProductE2E, and desktop execution. |
 | `scripts/clearra.ps1 -Task ReleaseAcceptance -ExecutionSurface Trusted` | Ordered debt, adversarial, sanitizer, Rust exact, product, WASM, desktop, and render release gate. |
 
+The local `ReleaseAcceptance` command remains the complete serial authority.
+The canonical release workflow runs the same eight stages in four physically
+isolated Windows jobs and admits the result only after a closed evidence fan-in:
+Foundation (`NoProductDebt`, `AdversarialCorrectness`, `DesktopHost`), Sanitizer,
+Rust (`RustExactTests`, `ProductE2E`, `RenderGolden`), and Pages
+(`WasmBuildTest`). The split never runs concurrent stages in one workspace and
+does not share mutable Cargo, C, or Pages build directories between jobs.
+
 The gate summary distinguishes `not-built` from `launched`, and distinguishes
 `source-contract`, `library`, and `process` product routes. A Local pass must
 never be presented as release acceptance.
