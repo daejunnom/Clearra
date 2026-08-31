@@ -291,8 +291,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}\n          path: packages/ctk3/dist\n      - uses: actions/cache@v4\n",
-        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-unbound\n          path: packages/ctk3/dist\n      - uses: actions/cache@v4\n",
+        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}\n          path: packages/ctk3/dist\n      - id: release_toolchain_cache\n",
+        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-unbound\n          path: packages/ctk3/dist\n      - id: release_toolchain_cache\n",
       ),
   ],
   [
@@ -350,8 +350,8 @@ for (const [name, mutate] of [
       );
       return replaceExactlyOnce(
         withSkippedJob,
-        "  release-acceptance:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, ctk3]\n",
-        "  release-acceptance:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [skip-acceptance, ctk3]\n",
+        "  release-acceptance-foundation:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n",
+        "  release-acceptance-foundation:\n    if: github.event_name == 'workflow_dispatch'\n    needs: skip-acceptance\n",
       );
     },
   ],
@@ -550,8 +550,53 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "            --run-attempt $env:GITHUB_RUN_ATTEMPT `\n            --output release-gate-evidence\n",
-        "            --run-attempt 1 `\n            --output release-gate-evidence\n",
+        '            --run-attempt "$GITHUB_RUN_ATTEMPT" \\\n            --shards release-shard-evidence \\\n',
+        '            --run-attempt "1" \\\n            --shards release-shard-evidence \\\n',
+      ),
+  ],
+  [
+    "rejects a second canonical acceptance cache writer",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n",
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/save@v4\n",
+      ),
+  ],
+  [
+    "rejects removal of the isolated restore-only build snapshot",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n            ~/AppData/Local/Clearra/build\n          key: release-acceptance-",
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: release-acceptance-",
+      ),
+  ],
+  [
+    "rejects an incomplete four-shard fan-in",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      [metadata, release-acceptance-foundation, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]\n",
+        "      [metadata, release-acceptance-foundation, release-acceptance-rust, release-acceptance-pages]\n",
+      ),
+  ],
+  [
+    "rejects a shard selector that runs the full serial suite",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "-ReleaseAcceptanceShard Foundation -ExecutionSurface Trusted\n",
+        "-ExecutionSurface Trusted\n",
+      ),
+  ],
+  [
+    "rejects fan-in that does not consume the exact shard directory",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "            --shards release-shard-evidence \\\n",
+        "            --shards forged-shard-evidence \\\n",
       ),
   ],
   [

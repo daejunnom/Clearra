@@ -24,6 +24,8 @@ export const CANONICAL_ACCEPTANCE_EVIDENCE_SCHEMA =
 export const RELEASE_GATE_INDEX_FILE = "clearra-release-gate-index.v1.json";
 export const CANONICAL_ACCEPTANCE_EVIDENCE_FILE =
   "clearra-canonical-acceptance-evidence.v1.json";
+export const RELEASE_ACCEPTANCE_SHARD_SCHEMA =
+  "clearra.release-acceptance-shard.v1";
 
 const SOURCE_COMMIT = /^[0-9a-f]{40}$/u;
 const DECIMAL_ID = /^[1-9][0-9]*$/u;
@@ -39,6 +41,86 @@ const RELEASE_STAGES = Object.freeze([
   "WasmBuildTest",
   "DesktopHost",
   "RenderGolden",
+]);
+export const RELEASE_ACCEPTANCE_SHARDS = Object.freeze(new Map([
+  ["foundation", Object.freeze({
+    job: "release-acceptance-foundation",
+    stages: Object.freeze([
+      "NoProductDebt",
+      "AdversarialCorrectness",
+      "DesktopHost",
+    ]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Foundation -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["rust", "cargo", "node", "npm", "cmake", "powershell"]),
+  })],
+  ["sanitizer", Object.freeze({
+    job: "release-acceptance-sanitizer",
+    stages: Object.freeze(["CSanitizer"]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Sanitizer -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["cmake", "powershell"]),
+  })],
+  ["rust", Object.freeze({
+    job: "release-acceptance-rust",
+    stages: Object.freeze(["RustExactTests", "ProductE2E", "RenderGolden"]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Rust -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["rust", "cargo", "node", "cmake", "powershell"]),
+  })],
+  ["pages", Object.freeze({
+    job: "release-acceptance-pages",
+    stages: Object.freeze(["WasmBuildTest"]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Pages -ExecutionSurface Trusted",
+    toolchains: Object.freeze([
+      "rust",
+      "cargo",
+      "node",
+      "npm",
+      "wasm_bindgen",
+      "cmake",
+      "powershell",
+    ]),
+  })],
+]));
+const RELEASE_SHARD_FILES = Object.freeze(new Map(
+  [...RELEASE_ACCEPTANCE_SHARDS.keys()].map((shard) => [
+    shard,
+    `clearra-release-acceptance-${shard}-shard.v1.json`,
+  ]),
+));
+const DELEGATED_RELEASE_EVIDENCE = Object.freeze([
+  Object.freeze({
+    evidence: "complete_required_keeps_candidate",
+    deferred_by: "NoProductDebt",
+    owner_stage: "RustExactTests",
+    owner_shard: "rust",
+  }),
+  Object.freeze({
+    evidence: "renderer_png_artifact",
+    deferred_by: "NoProductDebt",
+    owner_stage: "RenderGolden",
+    owner_shard: "rust",
+  }),
+  Object.freeze({
+    evidence: "renderer_gif_artifact",
+    deferred_by: "NoProductDebt",
+    owner_stage: "RenderGolden",
+    owner_shard: "rust",
+  }),
+  Object.freeze({
+    evidence: "desktop_real_app_request",
+    deferred_by: "NoProductDebt",
+    owner_stage: "DesktopHost",
+    owner_shard: "foundation",
+  }),
+  Object.freeze({
+    evidence: "adversarial_rust_tests",
+    deferred_by: "AdversarialCorrectness",
+    owner_stage: "RustExactTests",
+    owner_shard: "rust",
+  }),
 ]);
 const SURFACE_OWNERS = Object.freeze(new Map([
   ["desktop", Object.freeze(["NoProductDebt", "ProductE2E", "DesktopHost"])],
@@ -76,10 +158,34 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Verify accepted CTK3 distribution",
     "Verify Clearrabot contracts",
   ])],
-  ["release-acceptance", Object.freeze([
-    "Run canonical release acceptance",
+  ["release-acceptance-foundation", Object.freeze([
+    "Verify canonical ReleaseAcceptance shard mapping",
+    "Run canonical release acceptance foundation shard",
+    "Seal canonical release acceptance foundation shard",
+    "Upload canonical release acceptance foundation shard",
+  ])],
+  ["release-acceptance-sanitizer", Object.freeze([
+    "Run canonical release acceptance sanitizer shard",
+    "Seal canonical release acceptance sanitizer shard",
+    "Upload canonical release acceptance sanitizer shard",
+  ])],
+  ["release-acceptance-rust", Object.freeze([
+    "Download accepted CTK3 distribution",
+    "Run canonical release acceptance rust shard",
+    "Seal canonical release acceptance rust shard",
+    "Upload canonical release acceptance rust shard",
+  ])],
+  ["release-acceptance-pages", Object.freeze([
+    "Run canonical release acceptance Pages shard",
     "Stamp and verify the accepted Pages build",
+    "Seal canonical release acceptance Pages shard",
     "Upload accepted Pages build",
+    "Upload canonical release acceptance Pages shard",
+  ])],
+  ["release-acceptance", Object.freeze([
+    "Download all canonical release acceptance shard evidence",
+    "Produce canonical release gate evidence",
+    "Upload canonical release gate evidence",
   ])],
   ["windows-products", Object.freeze([
     "Build and exercise standalone WASM CPU CLI",
@@ -147,17 +253,227 @@ export async function writeReleaseGateReports(outputDirectory, authority, toolch
   const root = resolve(outputDirectory);
   await mkdir(root, { recursive: true });
   const reports = createReleaseGateReports(authority, toolchains);
+  await writeReleaseGateFiles(root, reports);
+  return reports;
+}
+
+export function createReleaseAcceptanceShardEvidence(
+  authority,
+  shard,
+  toolchains,
+) {
+  const identity = validateAuthority(authority);
+  const contract = requireReleaseShard(shard);
+  const tools = validateReleaseShardToolchains(toolchains, contract);
+  return sealCanonicalReport({
+    schema_id: RELEASE_ACCEPTANCE_SHARD_SCHEMA,
+    source_commit: identity.sourceCommit,
+    run_id: identity.runId,
+    run_attempt: identity.runAttempt,
+    workflow_path: WORKFLOW_PATH,
+    job: contract.job,
+    shard,
+    task: "ReleaseAcceptance",
+    command: contract.command,
+    status: "passed",
+    stages: contract.stages,
+    toolchains: tools,
+  });
+}
+
+export function validateReleaseAcceptanceShardEvidence(
+  report,
+  authority,
+  expectedShard,
+) {
+  verifyCanonicalReportHash(report, `${expectedShard} release shard evidence`);
+  const expected = createReleaseAcceptanceShardEvidence(
+    authority,
+    expectedShard,
+    report?.toolchains,
+  );
+  if (canonicalJson(report) !== canonicalJson(expected)) {
+    throw new Error(`${expectedShard} release shard evidence differs from its closed contract`);
+  }
+  return true;
+}
+
+export async function writeReleaseAcceptanceShardEvidence(
+  outputPath,
+  authority,
+  shard,
+  toolchains,
+) {
+  const report = createReleaseAcceptanceShardEvidence(authority, shard, toolchains);
+  const output = resolve(outputPath);
+  if (output.split(/[\\/]/u).at(-1) !== RELEASE_SHARD_FILES.get(shard)) {
+    throw new Error(`${shard} release shard evidence has an invalid output filename`);
+  }
+  await mkdir(dirname(output), { recursive: true });
+  await writeCanonicalFile(output, report);
+  return report;
+}
+
+export async function readReleaseAcceptanceShardEvidence(
+  directory,
+  authority,
+) {
+  const root = resolve(directory);
+  const entries = await readdir(root, { withFileTypes: true });
+  const expectedFiles = [...RELEASE_SHARD_FILES.values()].sort();
+  const actualFiles = entries.map((entry) => entry.name).sort();
+  if (
+    actualFiles.join(",") !== expectedFiles.join(",") ||
+    entries.some((entry) => !entry.isFile() || entry.isSymbolicLink())
+  ) {
+    throw new Error("release shard evidence directory must contain the exact four canonical files");
+  }
+  const reports = [];
+  for (const [shard, filename] of RELEASE_SHARD_FILES) {
+    const path = resolve(root, filename);
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) {
+      throw new Error(`${shard} release shard evidence is not a non-empty regular file`);
+    }
+    const report = await readJson(path, `${shard} release shard evidence`);
+    validateReleaseAcceptanceShardEvidence(report, authority, shard);
+    reports.push(report);
+  }
+  return Object.freeze(reports);
+}
+
+export function createShardedReleaseGateReports(authority, shardReports) {
+  const identity = validateAuthority(authority);
+  const reports = validateReleaseShardReportSet(shardReports, identity);
+  const pages = reports.find((report) => report.shard === "pages");
+  const rust = reports.find((report) => report.shard === "rust");
+  const sanitizer = reports.find((report) => report.shard === "sanitizer");
+  const foundation = reports.find((report) => report.shard === "foundation");
+  for (const tool of ["rust", "cargo", "node", "npm", "cmake", "powershell"]) {
+    const versions = reports
+      .filter((report) => Object.hasOwn(report.toolchains, tool))
+      .map((report) => report.toolchains[tool]);
+    if (new Set(versions).size !== 1) {
+      throw new Error(`release shards disagree on the ${tool} toolchain version`);
+    }
+  }
+  const tools = validateToolchains({
+    rust: rust.toolchains.rust,
+    cargo: rust.toolchains.cargo,
+    node: pages.toolchains.node,
+    npm: pages.toolchains.npm,
+    wasm_bindgen: pages.toolchains.wasm_bindgen,
+    cmake: sanitizer.toolchains.cmake,
+    powershell: foundation.toolchains.powershell,
+  });
+  const shardProjections = reports.map((report) => Object.freeze({
+    shard: report.shard,
+    job: report.job,
+    command: report.command,
+    stages: report.stages,
+    sha256: report.report_sha256,
+  }));
+  const gate = sealCanonicalReport({
+    schema_id: "clearra.canonical-release-gate.v1",
+    source_commit: identity.sourceCommit,
+    run_id: identity.runId,
+    run_attempt: identity.runAttempt,
+    workflow_path: WORKFLOW_PATH,
+    job: "release-acceptance",
+    task: "ReleaseAcceptance",
+    command: "canonical four-shard ReleaseAcceptance fan-in",
+    execution_mode: "isolated-four-shard",
+    status: "passed",
+    readiness_open_count: 0,
+    stages: RELEASE_STAGES,
+    shards: shardProjections,
+    delegated_evidence: DELEGATED_RELEASE_EVIDENCE,
+  });
+  const toolchainManifest = sealCanonicalReport({
+    schema_id: "clearra.release-toolchains.v1",
+    source_commit: identity.sourceCommit,
+    run_id: identity.runId,
+    run_attempt: identity.runAttempt,
+    workflow_path: WORKFLOW_PATH,
+    job: "release-acceptance",
+    execution_mode: "isolated-four-shard",
+    ...tools,
+    shard_toolchains: reports.map((report) => ({
+      shard: report.shard,
+      job: report.job,
+      evidence_sha256: report.report_sha256,
+      tools: report.toolchains,
+    })),
+  });
+  const surfaces = [...SURFACE_OWNERS.entries()].map(([surface, stageOwners]) =>
+    sealCanonicalReport({
+      schema_id: "clearra.release-surface-report.v1",
+      source_commit: identity.sourceCommit,
+      run_id: identity.runId,
+      run_attempt: identity.runAttempt,
+      workflow_path: WORKFLOW_PATH,
+      job: "release-acceptance",
+      surface,
+      status: "passed",
+      gate_report_sha256: gate.report_sha256,
+      stage_owners: stageOwners,
+    }));
+  const index = sealCanonicalReport({
+    schema_id: "clearra.release-gate-index.v1",
+    source_commit: identity.sourceCommit,
+    run_id: identity.runId,
+    run_attempt: identity.runAttempt,
+    canonical_gate_sha256: gate.report_sha256,
+    toolchain_manifest_sha256: toolchainManifest.report_sha256,
+    shard_reports: reports.map((report) => ({
+      shard: report.shard,
+      sha256: report.report_sha256,
+    })),
+    surface_reports: surfaces.map((report) => ({
+      surface: report.surface,
+      sha256: report.report_sha256,
+    })),
+  });
+  return Object.freeze({
+    gate,
+    toolchainManifest,
+    surfaces: Object.freeze(surfaces),
+    index,
+    shardReports: reports,
+  });
+}
+
+export async function writeShardedReleaseGateReports(
+  outputDirectory,
+  shardEvidenceDirectory,
+  authority,
+) {
+  const root = resolve(outputDirectory);
+  const shardReports = await readReleaseAcceptanceShardEvidence(
+    shardEvidenceDirectory,
+    authority,
+  );
+  const reports = createShardedReleaseGateReports(authority, shardReports);
+  await mkdir(root, { recursive: true });
+  await writeReleaseGateFiles(root, reports);
+  const shardRoot = resolve(root, "shards");
+  await mkdir(shardRoot);
+  await Promise.all(reports.shardReports.map((report) =>
+    writeCanonicalFile(
+      resolve(shardRoot, RELEASE_SHARD_FILES.get(report.shard)),
+      report,
+    )));
+  return reports;
+}
+
+async function writeReleaseGateFiles(root, reports) {
   await Promise.all([
     writeCanonicalFile(resolve(root, "canonical-gate.v1.json"), reports.gate),
     writeCanonicalFile(resolve(root, "toolchains.v1.json"), reports.toolchainManifest),
     ...reports.surfaces.map((report) =>
-      writeCanonicalFile(
-        resolve(root, `surface-${report.surface}.v1.json`),
-        report,
-      )),
+      writeCanonicalFile(resolve(root, `surface-${report.surface}.v1.json`), report)),
     writeCanonicalFile(resolve(root, RELEASE_GATE_INDEX_FILE), reports.index),
   ]);
-  return reports;
 }
 
 export function collectLocalToolchains(dependencies = {}) {
@@ -169,22 +485,52 @@ export function collectLocalToolchains(dependencies = {}) {
         Object.freeze(["/d", "/s", "/c", "npm.cmd --version"]),
       ])
     : Object.freeze(["npm", Object.freeze(["--version"])]);
-  return Object.freeze({
-    rust: firstLine(run("rustc", ["--version"]), "rustc"),
-    cargo: firstLine(run("cargo", ["--version"]), "cargo"),
-    node: firstLine(run("node", ["--version"]), "node"),
-    npm: firstLine(run(...npmInvocation), "npm"),
-    wasm_bindgen: firstLine(run("wasm-bindgen", ["--version"]), "wasm-bindgen"),
-    cmake: firstLine(run("cmake", ["--version"]), "cmake"),
-    powershell: firstLine(
-      run("powershell", [
-        "-NoProfile",
-        "-Command",
-        "$PSVersionTable.PSVersion.ToString()",
-      ]),
+  const invocations = new Map([
+    ["rust", ["rustc", ["--version"], "rustc"]],
+    ["cargo", ["cargo", ["--version"], "cargo"]],
+    ["node", ["node", ["--version"], "node"]],
+    ["npm", [...npmInvocation, "npm"]],
+    ["wasm_bindgen", ["wasm-bindgen", ["--version"], "wasm-bindgen"]],
+    ["cmake", ["cmake", ["--version"], "cmake"]],
+    ["powershell", [
+      "powershell",
+      ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
       "PowerShell",
-    ),
-  });
+    ]],
+  ]);
+  return collectToolchainSet([...invocations.keys()], invocations, run);
+}
+
+export function collectReleaseShardToolchains(shard, dependencies = {}) {
+  const contract = requireReleaseShard(shard);
+  const run = dependencies.run ?? runVersionCommand;
+  const platform = dependencies.platform ?? process.platform;
+  const npmInvocation = platform === "win32"
+    ? ["cmd.exe", ["/d", "/s", "/c", "npm.cmd --version"], "npm"]
+    : ["npm", ["--version"], "npm"];
+  const invocations = new Map([
+    ["rust", ["rustc", ["--version"], "rustc"]],
+    ["cargo", ["cargo", ["--version"], "cargo"]],
+    ["node", ["node", ["--version"], "node"]],
+    ["npm", npmInvocation],
+    ["wasm_bindgen", ["wasm-bindgen", ["--version"], "wasm-bindgen"]],
+    ["cmake", ["cmake", ["--version"], "cmake"]],
+    ["powershell", [
+      "powershell",
+      ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+      "PowerShell",
+    ]],
+  ]);
+  return collectToolchainSet(contract.toolchains, invocations, run);
+}
+
+function collectToolchainSet(keys, invocations, run) {
+  const tools = {};
+  for (const key of keys) {
+    const [command, arguments_, label] = invocations.get(key);
+    tools[key] = firstLine(run(command, arguments_), label);
+  }
+  return Object.freeze(tools);
 }
 
 export async function createCanonicalAcceptanceEvidence(options) {
@@ -421,6 +767,30 @@ export function validateReleaseJobs(payload, authorityValue) {
 
 async function readAndValidateGateReports(directory, authority) {
   const root = resolve(directory);
+  const rootEntries = await readdir(root, { withFileTypes: true });
+  const expectedRootEntries = [
+    "canonical-gate.v1.json",
+    "shards",
+    "surface-desktop.v1.json",
+    "surface-discord.v1.json",
+    "surface-native.v1.json",
+    "surface-wasm.v1.json",
+    "toolchains.v1.json",
+    RELEASE_GATE_INDEX_FILE,
+  ].sort();
+  if (
+    rootEntries.map((entry) => entry.name).sort().join(",") !==
+      expectedRootEntries.join(",") ||
+    rootEntries.some((entry) => entry.isSymbolicLink()) ||
+    rootEntries.some((entry) =>
+      entry.name === "shards" ? !entry.isDirectory() : !entry.isFile())
+  ) {
+    throw new Error("release gate evidence must contain the exact canonical file set");
+  }
+  const shardReports = await readReleaseAcceptanceShardEvidence(
+    resolve(root, "shards"),
+    authority,
+  );
   const [gate, toolchainManifest, index, ...surfaces] = await Promise.all([
     readJson(resolve(root, "canonical-gate.v1.json"), "canonical gate"),
     readJson(resolve(root, "toolchains.v1.json"), "toolchain manifest"),
@@ -428,53 +798,30 @@ async function readAndValidateGateReports(directory, authority) {
     ...[...SURFACE_OWNERS.keys()].map((surface) =>
       readJson(resolve(root, `surface-${surface}.v1.json`), `${surface} surface report`)),
   ]);
-  for (const [label, report] of [
-    ["canonical gate", gate],
-    ["toolchain manifest", toolchainManifest],
-    ["release gate index", index],
-    ...surfaces.map((report) => [`${report.surface} surface report`, report]),
+  const expected = createShardedReleaseGateReports(authority, shardReports);
+  for (const [label, actual, canonical] of [
+    ["canonical gate", gate, expected.gate],
+    ["toolchain manifest", toolchainManifest, expected.toolchainManifest],
+    ["release gate index", index, expected.index],
+    ...surfaces.map((report, index_) => [
+      `${report?.surface ?? "unknown"} surface report`,
+      report,
+      expected.surfaces[index_],
+    ]),
   ]) {
-    verifyCanonicalReportHash(report, label);
-    requireReportAuthority(report, authority, label);
-  }
-  if (
-    gate.schema_id !== "clearra.canonical-release-gate.v1" ||
-    gate.status !== "passed" ||
-    gate.readiness_open_count !== 0 ||
-    canonicalJson(gate.stages) !== canonicalJson(RELEASE_STAGES)
-  ) {
-    throw new Error("canonical gate report differs from the closed ReleaseAcceptance contract");
-  }
-  if (toolchainManifest.schema_id !== "clearra.release-toolchains.v1") {
-    throw new Error("toolchain manifest schema is invalid");
-  }
-  validateToolchains(toolchainManifest);
-  const expectedSurfaces = [...SURFACE_OWNERS.keys()];
-  if (surfaces.map((report) => report.surface).join(",") !== expectedSurfaces.join(",")) {
-    throw new Error("surface reports are not in canonical order");
-  }
-  for (const report of surfaces) {
-    if (
-      report.schema_id !== "clearra.release-surface-report.v1" ||
-      report.status !== "passed" ||
-      report.gate_report_sha256 !== gate.report_sha256 ||
-      canonicalJson(report.stage_owners) !== canonicalJson(SURFACE_OWNERS.get(report.surface))
-    ) {
-      throw new Error(`${report.surface} surface report differs from its gate authority`);
+    verifyCanonicalReportHash(actual, label);
+    requireReportAuthority(actual, authority, label);
+    if (canonicalJson(actual) !== canonicalJson(canonical)) {
+      throw new Error(`${label} differs from the canonical four-shard fan-in`);
     }
   }
-  if (
-    index.schema_id !== "clearra.release-gate-index.v1" ||
-    index.canonical_gate_sha256 !== gate.report_sha256 ||
-    index.toolchain_manifest_sha256 !== toolchainManifest.report_sha256 ||
-    canonicalJson(index.surface_reports) !== canonicalJson(surfaces.map((report) => ({
-      surface: report.surface,
-      sha256: report.report_sha256,
-    })))
-  ) {
-    throw new Error("release gate index differs from the sealed report set");
-  }
-  return Object.freeze({ gate, toolchainManifest, surfaces, index });
+  return Object.freeze({
+    gate,
+    toolchainManifest,
+    surfaces: Object.freeze(surfaces),
+    index,
+    shardReports,
+  });
 }
 
 async function collectReleaseArtifacts(directory, version, sourceCommit) {
@@ -522,6 +869,48 @@ function validateAuthority(value) {
     throw new Error("canonical acceptance evidence forbids workflow reruns");
   }
   return Object.freeze(authority);
+}
+
+function requireReleaseShard(shard) {
+  const name = requireNonEmptyString(shard, "release shard").toLowerCase();
+  const contract = RELEASE_ACCEPTANCE_SHARDS.get(name);
+  if (!contract) {
+    throw new Error(`unknown ReleaseAcceptance shard: ${name}`);
+  }
+  return contract;
+}
+
+function validateReleaseShardToolchains(value, contract) {
+  requirePlainObject(value, "release shard toolchains");
+  if (Object.keys(value).sort().join(",") !== [...contract.toolchains].sort().join(",")) {
+    throw new Error("release shard toolchains differ from the closed shard contract");
+  }
+  const tools = {};
+  for (const key of contract.toolchains) {
+    tools[key] = requireNonEmptyString(value[key], `release shard toolchains.${key}`);
+  }
+  return Object.freeze(tools);
+}
+
+function validateReleaseShardReportSet(shardReports, authority) {
+  if (!Array.isArray(shardReports) || shardReports.length !== RELEASE_ACCEPTANCE_SHARDS.size) {
+    throw new Error("release gate requires the exact four shard reports");
+  }
+  const byShard = new Map();
+  for (const report of shardReports) {
+    const shard = requireNonEmptyString(report?.shard, "release shard report name");
+    if (byShard.has(shard) || !RELEASE_ACCEPTANCE_SHARDS.has(shard)) {
+      throw new Error("release gate shard report set is duplicate or unknown");
+    }
+    validateReleaseAcceptanceShardEvidence(report, authority, shard);
+    byShard.set(shard, report);
+  }
+  if ([...byShard.keys()].sort().join(",") !== [...RELEASE_ACCEPTANCE_SHARDS.keys()].sort().join(",")) {
+    throw new Error("release gate shard report set is incomplete");
+  }
+  return Object.freeze(
+    [...RELEASE_ACCEPTANCE_SHARDS.keys()].map((shard) => byShard.get(shard)),
+  );
 }
 
 function validateToolchains(value) {
@@ -627,6 +1016,32 @@ async function main() {
   const command = process.argv[2];
   const arguments_ = process.argv.slice(3);
   try {
+    if (command === "shard") {
+      const { values } = parseArgs({
+        args: arguments_,
+        options: {
+          "source-commit": { type: "string" },
+          "run-id": { type: "string" },
+          "run-attempt": { type: "string" },
+          shard: { type: "string" },
+          output: { type: "string" },
+        },
+        strict: true,
+      });
+      const shard = requireNonEmptyString(values.shard, "release shard").toLowerCase();
+      const contract = requireReleaseShard(shard);
+      if (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_JOB !== contract.job) {
+        throw new Error(`${shard} shard evidence must be produced by ${contract.job}`);
+      }
+      const report = await writeReleaseAcceptanceShardEvidence(
+        values.output,
+        gateCliOptions(values),
+        shard,
+        collectReleaseShardToolchains(shard),
+      );
+      console.log(`canonical_release_shard=passed shard=${shard} sha256=${report.report_sha256}`);
+      return;
+    }
     if (command === "gate") {
       const { values } = parseArgs({
         args: arguments_,
@@ -634,6 +1049,7 @@ async function main() {
           "source-commit": { type: "string" },
           "run-id": { type: "string" },
           "run-attempt": { type: "string" },
+          shards: { type: "string" },
           output: { type: "string" },
         },
         strict: true,
@@ -641,10 +1057,10 @@ async function main() {
       if (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_JOB !== "release-acceptance") {
         throw new Error("release gate evidence must be produced by the release-acceptance job");
       }
-      const reports = await writeReleaseGateReports(
+      const reports = await writeShardedReleaseGateReports(
         values.output,
+        values.shards,
         gateCliOptions(values),
-        collectLocalToolchains(),
       );
       console.log(`canonical_gate_evidence=passed sha256=${reports.index.report_sha256}`);
       return;
@@ -711,7 +1127,9 @@ async function main() {
       console.log(`canonical_acceptance_evidence=verified sha256=${report.report_sha256}`);
       return;
     }
-    throw new Error("canonical acceptance evidence command must be gate, collect, or verify");
+    throw new Error(
+      "canonical acceptance evidence command must be shard, gate, collect, or verify",
+    );
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown failure";
     console.error(

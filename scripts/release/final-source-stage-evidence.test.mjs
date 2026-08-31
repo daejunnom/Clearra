@@ -324,6 +324,10 @@ function acceptanceEvidence(sourceCommit) {
       "ctk3",
       "linux-cli",
       "discord-bot",
+      "release-acceptance-foundation",
+      "release-acceptance-sanitizer",
+      "release-acceptance-rust",
+      "release-acceptance-pages",
       "release-acceptance",
       "windows-products",
     ].map((name, index) => ({

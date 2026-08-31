@@ -13,13 +13,18 @@ import test from "node:test";
 import {
   CANONICAL_ACCEPTANCE_EVIDENCE_FILE,
   collectLocalToolchains,
+  collectReleaseShardToolchains,
   createCanonicalAcceptanceEvidence,
+  createReleaseAcceptanceShardEvidence,
   createReleaseGateReports,
+  createShardedReleaseGateReports,
   validateCanonicalAcceptanceEvidence,
+  validateReleaseAcceptanceShardEvidence,
   validateReleaseJobs,
   verifyCanonicalAcceptanceEvidence,
   writeCanonicalAcceptanceEvidence,
-  writeReleaseGateReports,
+  writeReleaseAcceptanceShardEvidence,
+  writeShardedReleaseGateReports,
 } from "./canonical-acceptance-evidence.mjs";
 import { verifyCanonicalReportHash } from "./canonical-release-evidence.mjs";
 import { stampAcceptedPagesBuild } from "./accepted-pages-build.mjs";
@@ -38,6 +43,28 @@ const TOOLCHAINS = Object.freeze({
   wasm_bindgen: "wasm-bindgen 0.2.126",
   cmake: "cmake version 3.31.0",
   powershell: "5.1.26100.4768",
+});
+const SHARD_TOOLCHAINS = Object.freeze({
+  foundation: Object.freeze({
+    rust: TOOLCHAINS.rust,
+    cargo: TOOLCHAINS.cargo,
+    node: TOOLCHAINS.node,
+    npm: TOOLCHAINS.npm,
+    cmake: TOOLCHAINS.cmake,
+    powershell: TOOLCHAINS.powershell,
+  }),
+  sanitizer: Object.freeze({
+    cmake: TOOLCHAINS.cmake,
+    powershell: TOOLCHAINS.powershell,
+  }),
+  rust: Object.freeze({
+    rust: TOOLCHAINS.rust,
+    cargo: TOOLCHAINS.cargo,
+    node: TOOLCHAINS.node,
+    cmake: TOOLCHAINS.cmake,
+    powershell: TOOLCHAINS.powershell,
+  }),
+  pages: TOOLCHAINS,
 });
 
 const REQUIRED_JOB_STEPS = Object.freeze(new Map([
@@ -58,10 +85,34 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Verify accepted CTK3 distribution",
     "Verify Clearrabot contracts",
   ]],
-  ["release-acceptance", [
-    "Run canonical release acceptance",
+  ["release-acceptance-foundation", [
+    "Verify canonical ReleaseAcceptance shard mapping",
+    "Run canonical release acceptance foundation shard",
+    "Seal canonical release acceptance foundation shard",
+    "Upload canonical release acceptance foundation shard",
+  ]],
+  ["release-acceptance-sanitizer", [
+    "Run canonical release acceptance sanitizer shard",
+    "Seal canonical release acceptance sanitizer shard",
+    "Upload canonical release acceptance sanitizer shard",
+  ]],
+  ["release-acceptance-rust", [
+    "Download accepted CTK3 distribution",
+    "Run canonical release acceptance rust shard",
+    "Seal canonical release acceptance rust shard",
+    "Upload canonical release acceptance rust shard",
+  ]],
+  ["release-acceptance-pages", [
+    "Run canonical release acceptance Pages shard",
     "Stamp and verify the accepted Pages build",
+    "Seal canonical release acceptance Pages shard",
     "Upload accepted Pages build",
+    "Upload canonical release acceptance Pages shard",
+  ]],
+  ["release-acceptance", [
+    "Download all canonical release acceptance shard evidence",
+    "Produce canonical release gate evidence",
+    "Upload canonical release gate evidence",
   ]],
   ["windows-products", [
     "Build and exercise standalone WASM CPU CLI",
@@ -121,6 +172,75 @@ test("release gate reports deterministically bind toolchains and four surfaces",
   }
 });
 
+test("four isolated shard reports preserve full order and delegated evidence ownership", () => {
+  const shards = Object.entries(SHARD_TOOLCHAINS).map(([shard, tools]) =>
+    createReleaseAcceptanceShardEvidence(authority(), shard, tools));
+  const reports = createShardedReleaseGateReports(authority(), shards);
+  assert.equal(reports.gate.execution_mode, "isolated-four-shard");
+  assert.deepEqual(
+    reports.gate.shards.map((entry) => entry.shard),
+    ["foundation", "sanitizer", "rust", "pages"],
+  );
+  assert.deepEqual(
+    reports.gate.shards.flatMap((entry) => entry.stages).sort(),
+    [
+      "NoProductDebt",
+      "AdversarialCorrectness",
+      "CSanitizer",
+      "RustExactTests",
+      "ProductE2E",
+      "WasmBuildTest",
+      "DesktopHost",
+      "RenderGolden",
+    ].sort(),
+  );
+  assert.deepEqual(
+    reports.gate.delegated_evidence.map((entry) => [
+      entry.deferred_by,
+      entry.owner_stage,
+      entry.owner_shard,
+    ]),
+    [
+      ["NoProductDebt", "RustExactTests", "rust"],
+      ["NoProductDebt", "RenderGolden", "rust"],
+      ["NoProductDebt", "RenderGolden", "rust"],
+      ["NoProductDebt", "DesktopHost", "foundation"],
+      ["AdversarialCorrectness", "RustExactTests", "rust"],
+    ],
+  );
+  for (const shard of shards) {
+    assert.equal(
+      validateReleaseAcceptanceShardEvidence(shard, authority(), shard.shard),
+      true,
+    );
+  }
+
+  const duplicate = [...shards.slice(0, 3), shards[0]];
+  assert.throws(
+    () => createShardedReleaseGateReports(authority(), duplicate),
+    /duplicate or unknown/u,
+  );
+  const tampered = structuredClone(shards[0]);
+  tampered.stages.reverse();
+  assert.throws(
+    () => createShardedReleaseGateReports(authority(), [tampered, ...shards.slice(1)]),
+    /SHA-256 differs|closed contract/u,
+  );
+
+  const inconsistentPages = createReleaseAcceptanceShardEvidence(
+    authority(),
+    "pages",
+    { ...SHARD_TOOLCHAINS.pages, rust: "rustc 9.99.0" },
+  );
+  assert.throws(
+    () => createShardedReleaseGateReports(
+      authority(),
+      [...shards.slice(0, 3), inconsistentPages],
+    ),
+    /disagree on the rust toolchain/u,
+  );
+});
+
 test("toolchain collection uses closed commands and keeps only first version lines", () => {
   const calls = [];
   const tools = collectLocalToolchains({
@@ -153,6 +273,18 @@ test("Windows toolchain collection invokes npm through a closed command interpre
   assert.equal(calls.some(([command]) => command === "npm.cmd"), false);
 });
 
+test("shard toolchain collection invokes only the closed shard tool set", () => {
+  const calls = [];
+  const tools = collectReleaseShardToolchains("sanitizer", {
+    run(command, arguments_) {
+      calls.push([command, arguments_]);
+      return `${command} version\n`;
+    },
+  });
+  assert.deepEqual(Object.keys(tools), ["cmake", "powershell"]);
+  assert.deepEqual(calls.map(([command]) => command), ["cmake", "powershell"]);
+});
+
 test(
   "Windows npm version probe executes while child-process shell expansion stays disabled",
   { skip: process.platform !== "win32" },
@@ -162,7 +294,7 @@ test(
 );
 
 test("release job evidence rejects duplicate jobs and any failed required step", () => {
-  assert.equal(validateReleaseJobs(jobsPayload(), authority()).length, 6);
+  assert.equal(validateReleaseJobs(jobsPayload(), authority()).length, 10);
   const duplicate = jobsPayload();
   duplicate.jobs.push(structuredClone(duplicate.jobs[0]));
   duplicate.total_count += 1;
@@ -235,17 +367,27 @@ test("canonical acceptance evidence validates accepted inputs and hashes three r
 async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), "clearra-canonical-acceptance-"));
   const gate = join(root, "gate");
+  const shardInput = join(root, "shard-input");
   const ctk3 = join(root, "ctk3");
   const pages = join(root, "pages");
   const products = join(root, "products");
   const jobs = join(root, "jobs.json");
   await Promise.all([
     mkdir(gate),
+    mkdir(shardInput),
     mkdir(ctk3),
     mkdir(join(pages, "wasm"), { recursive: true }),
     mkdir(products),
   ]);
-  await writeReleaseGateReports(gate, authority(), TOOLCHAINS);
+  for (const [shard, tools] of Object.entries(SHARD_TOOLCHAINS)) {
+    await writeReleaseAcceptanceShardEvidence(
+      join(shardInput, `clearra-release-acceptance-${shard}-shard.v1.json`),
+      authority(),
+      shard,
+      tools,
+    );
+  }
+  await writeShardedReleaseGateReports(gate, shardInput, authority());
 
   for (const [name, payload] of [
     ["decodeWorker.js", "decode"],
