@@ -1870,6 +1870,10 @@ function Invoke-ReleaseIdentityGateValidation {
             "`n      - name: Validate independent release regressions with bounded workers",
             [System.StringComparison]::Ordinal
         )
+        $linuxLegacyTagFixtureStart = $metadataJob.IndexOf(
+            "`n      - name: Prepare approved legacy v0.7.4 annotated-tag fixture",
+            [System.StringComparison]::Ordinal
+        )
         $linuxArchiveStart = $metadataJob.IndexOf(
             "`n      - name: Archive the exact accepted source on Linux",
             [System.StringComparison]::Ordinal
@@ -1887,7 +1891,8 @@ function Invoke-ReleaseIdentityGateValidation {
             [System.StringComparison]::Ordinal
         )
         if ($canonicalPreflightStart -lt 0 -or
-            $linuxRegressionStart -le $canonicalPreflightStart -or
+            $linuxLegacyTagFixtureStart -le $canonicalPreflightStart -or
+            $linuxRegressionStart -le $linuxLegacyTagFixtureStart -or
             $linuxArchiveStart -le $linuxRegressionStart -or
             $linuxArchiveEnd -le $linuxArchiveStart -or
             $windowsArchiveStart -lt 0 -or
@@ -1898,6 +1903,10 @@ function Invoke-ReleaseIdentityGateValidation {
             $linuxRegressionStep = $metadataJob.Substring(
                 $linuxRegressionStart,
                 $linuxArchiveStart - $linuxRegressionStart
+            )
+            $linuxLegacyTagFixtureStep = $metadataJob.Substring(
+                $linuxLegacyTagFixtureStart,
+                $linuxRegressionStart - $linuxLegacyTagFixtureStart
             )
             $linuxArchiveStep = $metadataJob.Substring(
                 $linuxArchiveStart,
@@ -1930,6 +1939,7 @@ function Invoke-ReleaseIdentityGateValidation {
                         '- uses: actions/checkout@v4',
                         '- uses: actions/setup-node@v4',
                         '- name: Require exact main and zero prior canonical success',
+                        '- name: Prepare approved legacy v0.7.4 annotated-tag fixture',
                         '- name: Validate independent release regressions with bounded workers',
                         '- name: Archive the exact accepted source on Linux'
                     ) `
@@ -1947,8 +1957,12 @@ function Invoke-ReleaseIdentityGateValidation {
                         $linuxStepsStart,
                         $canonicalPreflightStart - $linuxStepsStart
                     ) `
-                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22" `
+                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n        with:`n          fetch-depth: 1`n          fetch-tags: false`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22" `
                     -Contract 'Linux protected checkout and Node setup'
+                Assert-ReleaseExactText `
+                    -Text $linuxLegacyTagFixtureStep `
+                    -Expected "`n      - name: Prepare approved legacy v0.7.4 annotated-tag fixture`n        if: github.event_name == 'workflow_dispatch'`n        shell: bash`n        run: |`n          git fetch --no-tags --depth=1 origin refs/tags/v0.7.4:refs/tags/v0.7.4`n          tag_object=`"`$(git rev-parse --verify 'refs/tags/v0.7.4^{tag}')`"`n          peeled_commit=`"`$(git rev-parse --verify 'refs/tags/v0.7.4^{commit}')`"`n          if [[ `"`$tag_object`" != 'a95973dbc1c3c1919478328d12e4d25ddaedea71' ]]; then`n            echo 'approved legacy tag ref does not resolve to the fixed annotated-tag object' >&2`n            exit 2`n          fi`n          if [[ `"`$peeled_commit`" != '0438d85f90b47c4ce89835f6a6d665a0415aa25a' ]]; then`n            echo 'approved legacy annotated tag does not peel to the fixed source commit' >&2`n            exit 2`n          fi" `
+                    -Contract 'Linux approved legacy annotated-tag fixture'
                 Assert-ReleaseExactText `
                     -Text $releaseFoundationJob.Substring(
                         $windowsStepsStart,

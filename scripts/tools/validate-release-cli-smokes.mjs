@@ -151,7 +151,7 @@ const acceptedRunStep = section(
 const canonicalAcceptancePreflightStep = section(
   metadataJob,
   "\n      - name: Require exact main and zero prior canonical success",
-  "\n      - name: Validate independent release regressions with bounded workers",
+  "\n      - name: Prepare approved legacy v0.7.4 annotated-tag fixture",
 );
 const crossRunDownloadStep = section(
   publishJob,
@@ -165,6 +165,11 @@ const linuxArchiveRegressionStep = section(
   metadataJob,
   "\n      - name: Validate independent release regressions with bounded workers",
   "\n      - name: Archive the exact accepted source on Linux",
+);
+const linuxLegacyTagFixtureStep = section(
+  metadataJob,
+  "\n      - name: Prepare approved legacy v0.7.4 annotated-tag fixture",
+  "\n      - name: Validate independent release regressions with bounded workers",
 );
 const linuxAcceptedArchiveStep = section(
   metadataJob,
@@ -2156,6 +2161,7 @@ for (const [name, prelude] of [
           "- uses: actions/checkout@v4",
           "- uses: actions/setup-node@v4",
           "- name: Require exact main and zero prior canonical success",
+          "- name: Prepare approved legacy v0.7.4 annotated-tag fixture",
           "- name: Validate independent release regressions with bounded workers",
           "- name: Archive the exact accepted source on Linux",
         ]
@@ -2169,8 +2175,13 @@ for (const [name, prelude] of [
 }
 requireExactNormalizedText(
   linuxCheckoutStep,
-  "\n      - uses: actions/checkout@v4",
+  "\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 1\n          fetch-tags: false",
   "Linux protected checkout step",
+);
+requireExactNormalizedText(
+  linuxLegacyTagFixtureStep,
+  "\n      - name: Prepare approved legacy v0.7.4 annotated-tag fixture\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n        run: |\n          git fetch --no-tags --depth=1 origin refs/tags/v0.7.4:refs/tags/v0.7.4\n          tag_object=\"$(git rev-parse --verify 'refs/tags/v0.7.4^{tag}')\"\n          peeled_commit=\"$(git rev-parse --verify 'refs/tags/v0.7.4^{commit}')\"\n          if [[ \"$tag_object\" != 'a95973dbc1c3c1919478328d12e4d25ddaedea71' ]]; then\n            echo 'approved legacy tag ref does not resolve to the fixed annotated-tag object' >&2\n            exit 2\n          fi\n          if [[ \"$peeled_commit\" != '0438d85f90b47c4ce89835f6a6d665a0415aa25a' ]]; then\n            echo 'approved legacy annotated tag does not peel to the fixed source commit' >&2\n            exit 2\n          fi",
+  "Linux approved legacy annotated-tag fixture step",
 );
 requireExactNormalizedText(
   linuxSetupNodeStep,

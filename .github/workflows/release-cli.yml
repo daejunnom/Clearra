@@ -26,6 +26,9 @@ jobs:
       accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          fetch-tags: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -52,6 +55,21 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --source-commit "$GITHUB_SHA" \
             --require zero
+      - name: Prepare approved legacy v0.7.4 annotated-tag fixture
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin refs/tags/v0.7.4:refs/tags/v0.7.4
+          tag_object="$(git rev-parse --verify 'refs/tags/v0.7.4^{tag}')"
+          peeled_commit="$(git rev-parse --verify 'refs/tags/v0.7.4^{commit}')"
+          if [[ "$tag_object" != 'a95973dbc1c3c1919478328d12e4d25ddaedea71' ]]; then
+            echo 'approved legacy tag ref does not resolve to the fixed annotated-tag object' >&2
+            exit 2
+          fi
+          if [[ "$peeled_commit" != '0438d85f90b47c4ce89835f6a6d665a0415aa25a' ]]; then
+            echo 'approved legacy annotated tag does not peel to the fixed source commit' >&2
+            exit 2
+          fi
       - name: Validate independent release regressions with bounded workers
         if: github.event_name == 'workflow_dispatch'
         shell: bash

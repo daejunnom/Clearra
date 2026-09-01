@@ -119,6 +119,26 @@ test("rejects bypassing the bounded release regression owner", async () => {
   assert.notEqual(result.status, 0, diagnostic(result));
 });
 
+test("rejects removal of the approved legacy annotated-tag fixture", async () => {
+  const fixturelessWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "      - name: Prepare approved legacy v0.7.4 annotated-tag fixture\n        if: github.event_name == 'workflow_dispatch'\n        shell: bash\n        run: |\n          git fetch --no-tags --depth=1 origin refs/tags/v0.7.4:refs/tags/v0.7.4\n          tag_object=\"$(git rev-parse --verify 'refs/tags/v0.7.4^{tag}')\"\n          peeled_commit=\"$(git rev-parse --verify 'refs/tags/v0.7.4^{commit}')\"\n          if [[ \"$tag_object\" != 'a95973dbc1c3c1919478328d12e4d25ddaedea71' ]]; then\n            echo 'approved legacy tag ref does not resolve to the fixed annotated-tag object' >&2\n            exit 2\n          fi\n          if [[ \"$peeled_commit\" != '0438d85f90b47c4ce89835f6a6d665a0415aa25a' ]]; then\n            echo 'approved legacy annotated tag does not peel to the fixed source commit' >&2\n            exit 2\n          fi\n",
+    "",
+  );
+  const result = await runValidator(fixturelessWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects broadening the approved legacy fixture fetch to all tags", async () => {
+  const broadTagWorkflow = replaceExactlyOnce(
+    normalizedWorkflow,
+    "          git fetch --no-tags --depth=1 origin refs/tags/v0.7.4:refs/tags/v0.7.4\n",
+    "          git fetch --tags --depth=1 origin\n",
+  );
+  const result = await runValidator(broadTagWorkflow);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
 test("rejects disabled Linux typed pc.tiling result enforcement", async () => {
   const disabledPackageScript = replaceExactlyOnce(
     canonicalPackageScript,
