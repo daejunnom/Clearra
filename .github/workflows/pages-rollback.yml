@@ -51,6 +51,7 @@ jobs:
       contents: read
       actions: read
       pages: read
+      deployments: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +80,7 @@ jobs:
       contents: read
       actions: read
       pages: read
+      deployments: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

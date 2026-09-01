@@ -500,6 +500,11 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
   );
   assert.doesNotMatch(captureJobs, /pages: write|id-token: write|actions\/deploy-pages/u);
   assert.equal(
+    (captureJobs.match(/deployments: read/gu) ?? []).length,
+    2,
+    "both bootstrap authority readbacks must have deployment read permission",
+  );
+  assert.equal(
     (captureJobs.match(/PAGES_AUTHORITY_MODE: \$\{\{ inputs\.mode \}\}/gu) ?? []).length,
     2,
   );

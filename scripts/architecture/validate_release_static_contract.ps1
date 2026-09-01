@@ -2409,6 +2409,9 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError "Pages bootstrap capture must remain production-read-only and contains '$forbiddenCaptureMutation'"
             }
         }
+        if ([regex]::Matches($captureSection, '(?m)^\s{6}deployments: read\s*$').Count -ne 2) {
+            Add-ArchitectureError 'Pages bootstrap authority readbacks must have exactly two deployment read permissions'
+        }
     }
     foreach ($required in @(
         'refs/heads/main',
