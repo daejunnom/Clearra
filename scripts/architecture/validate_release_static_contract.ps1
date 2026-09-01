@@ -2734,7 +2734,12 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Pages rollback authority verifier is missing fail-closed contract '$required'"
         }
     }
-    if ($pagesRollbackAuthority -notmatch '(?s)async function fetchPublicStatus\(url\).*?cache: "no-store",\s*redirect: "error",\s*\}\);') {
+    $publicStatusStart = $pagesRollbackAuthority.IndexOf('async function fetchPublicStatus(url)', [System.StringComparison]::Ordinal)
+    $publicBytesStart = $pagesRollbackAuthority.IndexOf('async function fetchPublicBytes(url, label)', [System.StringComparison]::Ordinal)
+    if ($publicStatusStart -lt 0 -or $publicBytesStart -le $publicStatusStart) {
+        Add-ArchitectureError 'Legacy Pages public identity absence probe must have a closed function boundary'
+    }
+    elseif ($pagesRollbackAuthority.Substring($publicStatusStart, $publicBytesStart - $publicStatusStart) -notmatch '(?s)cache: "no-store",.*redirect: "error",') {
         Add-ArchitectureError 'Legacy Pages public identity absence probe must reject redirects and bypass caches'
     }
     foreach ($required in @(

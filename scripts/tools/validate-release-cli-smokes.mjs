@@ -293,6 +293,11 @@ const pagesUploadStep = pagesBuildJob.slice(
   pagesBuildJob.indexOf("\n      - name: Upload Pages artifact"),
 );
 const pagesDeployHeader = section(pagesDeployJob, "\n  deploy:", "\n    steps:");
+const pagesDeployPermissions = section(
+  pagesDeployHeader,
+  "\n    permissions:",
+  "\n    environment:",
+);
 const pagesLateAcceptedRunStep = section(
   pagesDeployJob,
   "\n      - name: Revalidate accepted source immediately before deployment",
@@ -1770,9 +1775,23 @@ for (const marker of [
 requireExactYamlKeySet(
   pagesDeployHeader,
   4,
-  ["environment", "runs-on", "needs"],
+  ["permissions", "environment", "runs-on", "needs"],
   "Pages deploy header",
 );
+requireExactYamlKeySet(
+  pagesDeployPermissions,
+  6,
+  ["contents", "actions", "pages", "id-token"],
+  "Pages deploy permissions",
+);
+for (const [key, value, label] of [
+  ["contents", "read", "Pages deploy contents permission"],
+  ["actions", "read", "Pages deploy actions permission"],
+  ["pages", "write", "Pages deploy mutation permission"],
+  ["id-token", "write", "Pages deploy OIDC permission"],
+]) {
+  requireExactYamlScalar(pagesDeployPermissions, key, value, label, 6);
+}
 requireExactYamlFlowSequence(
   pagesDeployHeader,
   "needs",

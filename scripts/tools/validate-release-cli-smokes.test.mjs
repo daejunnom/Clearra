@@ -749,6 +749,33 @@ for (const [name, mutate] of [
       ),
   ],
   [
+    "rejects Pages deploy with broadened contents authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      contents: read\n      actions: read\n      pages: write\n      id-token: write\n",
+        "      contents: write\n      actions: read\n      pages: write\n      id-token: write\n",
+      ),
+  ],
+  [
+    "rejects Pages deploy without Pages mutation authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      contents: read\n      actions: read\n      pages: write\n      id-token: write\n",
+        "      contents: read\n      actions: read\n      pages: read\n      id-token: write\n",
+      ),
+  ],
+  [
+    "rejects Pages deploy without exact OIDC authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      contents: read\n      actions: read\n      pages: write\n      id-token: write\n",
+        "      contents: read\n      actions: read\n      pages: write\n      id-token: read\n",
+      ),
+  ],
+  [
     "rejects Pages upload without external artifact ID propagation",
     (source) =>
       replaceExactlyOnce(
