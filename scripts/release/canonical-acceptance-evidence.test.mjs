@@ -45,12 +45,21 @@ const TOOLCHAINS = Object.freeze({
   powershell: "5.1.26100.4768",
 });
 const SHARD_TOOLCHAINS = Object.freeze({
-  foundation: Object.freeze({
+  "foundation-no-product-debt": Object.freeze({
+    rust: TOOLCHAINS.rust,
+    cargo: TOOLCHAINS.cargo,
+    cmake: TOOLCHAINS.cmake,
+    powershell: TOOLCHAINS.powershell,
+  }),
+  "foundation-adversarial-correctness": Object.freeze({
+    cmake: TOOLCHAINS.cmake,
+    powershell: TOOLCHAINS.powershell,
+  }),
+  "foundation-desktop-host": Object.freeze({
     rust: TOOLCHAINS.rust,
     cargo: TOOLCHAINS.cargo,
     node: TOOLCHAINS.node,
     npm: TOOLCHAINS.npm,
-    cmake: TOOLCHAINS.cmake,
     powershell: TOOLCHAINS.powershell,
   }),
   sanitizer: Object.freeze({
@@ -85,11 +94,22 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Verify accepted CTK3 distribution",
     "Verify Clearrabot contracts",
   ]],
-  ["release-acceptance-foundation", [
+  ["release-acceptance-foundation-no-product-debt", [
+    "Archive the exact accepted source on Windows",
     "Verify canonical ReleaseAcceptance shard mapping",
-    "Run canonical release acceptance foundation shard",
-    "Seal canonical release acceptance foundation shard",
-    "Upload canonical release acceptance foundation shard",
+    "Run canonical release acceptance NoProductDebt leaf",
+    "Seal canonical release acceptance NoProductDebt leaf",
+    "Upload canonical release acceptance NoProductDebt leaf",
+  ]],
+  ["release-acceptance-foundation-adversarial-correctness", [
+    "Run canonical release acceptance AdversarialCorrectness leaf",
+    "Seal canonical release acceptance AdversarialCorrectness leaf",
+    "Upload canonical release acceptance AdversarialCorrectness leaf",
+  ]],
+  ["release-acceptance-foundation-desktop-host", [
+    "Run canonical release acceptance DesktopHost leaf",
+    "Seal canonical release acceptance DesktopHost leaf",
+    "Upload canonical release acceptance DesktopHost leaf",
   ]],
   ["release-acceptance-sanitizer", [
     "Run canonical release acceptance sanitizer shard",
@@ -175,14 +195,21 @@ test("release gate reports deterministically bind toolchains and four surfaces",
   }
 });
 
-test("four isolated shard reports preserve full order and delegated evidence ownership", () => {
+test("six isolated shard reports preserve unique stage ownership and delegated evidence", () => {
   const shards = Object.entries(SHARD_TOOLCHAINS).map(([shard, tools]) =>
     createReleaseAcceptanceShardEvidence(authority(), shard, tools));
   const reports = createShardedReleaseGateReports(authority(), shards);
-  assert.equal(reports.gate.execution_mode, "isolated-four-shard");
+  assert.equal(reports.gate.execution_mode, "isolated-six-shard");
   assert.deepEqual(
     reports.gate.shards.map((entry) => entry.shard),
-    ["foundation", "sanitizer", "rust", "pages"],
+    [
+      "foundation-no-product-debt",
+      "foundation-adversarial-correctness",
+      "foundation-desktop-host",
+      "sanitizer",
+      "rust",
+      "pages",
+    ],
   );
   assert.deepEqual(
     reports.gate.shards.flatMap((entry) => entry.stages).sort(),
@@ -207,7 +234,7 @@ test("four isolated shard reports preserve full order and delegated evidence own
       ["NoProductDebt", "RustExactTests", "rust"],
       ["NoProductDebt", "RenderGolden", "rust"],
       ["NoProductDebt", "RenderGolden", "rust"],
-      ["NoProductDebt", "DesktopHost", "foundation"],
+      ["NoProductDebt", "DesktopHost", "foundation-desktop-host"],
       ["AdversarialCorrectness", "RustExactTests", "rust"],
     ],
   );
@@ -218,13 +245,18 @@ test("four isolated shard reports preserve full order and delegated evidence own
     );
   }
 
-  const duplicate = [...shards.slice(0, 3), shards[0]];
+  assert.equal(
+    new Set(reports.gate.shards.flatMap((entry) => entry.stages)).size,
+    reports.gate.shards.flatMap((entry) => entry.stages).length,
+  );
+
+  const duplicate = [...shards.slice(0, -1), shards[0]];
   assert.throws(
     () => createShardedReleaseGateReports(authority(), duplicate),
     /duplicate or unknown/u,
   );
   const tampered = structuredClone(shards[0]);
-  tampered.stages.reverse();
+  tampered.stages[0] = "DesktopHost";
   assert.throws(
     () => createShardedReleaseGateReports(authority(), [tampered, ...shards.slice(1)]),
     /SHA-256 differs|closed contract/u,
@@ -238,7 +270,7 @@ test("four isolated shard reports preserve full order and delegated evidence own
   assert.throws(
     () => createShardedReleaseGateReports(
       authority(),
-      [...shards.slice(0, 3), inconsistentPages],
+      [...shards.slice(0, -1), inconsistentPages],
     ),
     /disagree on the rust toolchain/u,
   );

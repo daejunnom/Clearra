@@ -198,7 +198,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: node --test tests/contracts/product_capability_registry.test.mjs
 
-  release-acceptance-foundation:
+  release-acceptance-foundation-no-product-debt:
     if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: windows-latest
@@ -243,23 +243,107 @@ jobs:
       - name: Verify canonical ReleaseAcceptance shard mapping
         shell: pwsh
         run: pwsh -NoProfile -File scripts/test_release_acceptance_shards.ps1
-      - name: Run canonical release acceptance foundation shard
-        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Foundation -ExecutionSurface Trusted
-      - name: Seal canonical release acceptance foundation shard
+      - name: Run canonical release acceptance NoProductDebt leaf
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationNoProductDebt -ExecutionSurface Trusted
+      - name: Seal canonical release acceptance NoProductDebt leaf
         shell: pwsh
         run: |
           node scripts/release/canonical-acceptance-evidence.mjs shard `
             --source-commit $env:GITHUB_SHA `
             --run-id $env:GITHUB_RUN_ID `
             --run-attempt $env:GITHUB_RUN_ATTEMPT `
-            --shard foundation `
-            --output release-shard-evidence/clearra-release-acceptance-foundation-shard.v1.json
-          if ($LASTEXITCODE -ne 0) { throw "foundation shard evidence failed" }
-      - name: Upload canonical release acceptance foundation shard
+            --shard foundation-no-product-debt `
+            --output release-shard-evidence/clearra-release-acceptance-foundation-no-product-debt-shard.v1.json
+          if ($LASTEXITCODE -ne 0) { throw "NoProductDebt leaf evidence failed" }
+      - name: Upload canonical release acceptance NoProductDebt leaf
         uses: actions/upload-artifact@v4
         with:
-          name: release-acceptance-foundation-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: release-shard-evidence/clearra-release-acceptance-foundation-shard.v1.json
+          name: release-acceptance-foundation-no-product-debt-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: release-shard-evidence/clearra-release-acceptance-foundation-no-product-debt-shard.v1.json
+          if-no-files-found: error
+
+  release-acceptance-foundation-adversarial-correctness:
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: release_toolchain_cache
+        name: Restore canonical release toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+      - name: Run canonical release acceptance AdversarialCorrectness leaf
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationAdversarialCorrectness -ExecutionSurface Trusted
+      - name: Seal canonical release acceptance AdversarialCorrectness leaf
+        shell: pwsh
+        run: |
+          node scripts/release/canonical-acceptance-evidence.mjs shard `
+            --source-commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --shard foundation-adversarial-correctness `
+            --output release-shard-evidence/clearra-release-acceptance-foundation-adversarial-correctness-shard.v1.json
+          if ($LASTEXITCODE -ne 0) { throw "AdversarialCorrectness leaf evidence failed" }
+      - name: Upload canonical release acceptance AdversarialCorrectness leaf
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-acceptance-foundation-adversarial-correctness-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: release-shard-evidence/clearra-release-acceptance-foundation-adversarial-correctness-shard.v1.json
+          if-no-files-found: error
+
+  release-acceptance-foundation-desktop-host:
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: release_toolchain_cache
+        name: Restore canonical release toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+      - name: Install JavaScript workspace
+        run: npm ci --ignore-scripts
+      - name: Run canonical release acceptance DesktopHost leaf
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationDesktopHost -ExecutionSurface Trusted
+      - name: Seal canonical release acceptance DesktopHost leaf
+        shell: pwsh
+        run: |
+          node scripts/release/canonical-acceptance-evidence.mjs shard `
+            --source-commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --shard foundation-desktop-host `
+            --output release-shard-evidence/clearra-release-acceptance-foundation-desktop-host-shard.v1.json
+          if ($LASTEXITCODE -ne 0) { throw "DesktopHost leaf evidence failed" }
+      - name: Upload canonical release acceptance DesktopHost leaf
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-acceptance-foundation-desktop-host-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: release-shard-evidence/clearra-release-acceptance-foundation-desktop-host-shard.v1.json
           if-no-files-found: error
 
   release-acceptance-sanitizer:
@@ -438,7 +522,7 @@ jobs:
   release-acceptance:
     if: github.event_name == 'workflow_dispatch'
     needs:
-      [metadata, release-acceptance-foundation, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]
+      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

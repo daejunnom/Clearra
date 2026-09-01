@@ -19,6 +19,9 @@ $script:ClearraAllowedTasks = @(
 $script:ReleaseAcceptanceShardTestMarkers = @{
     'full-local-order' = 'release_acceptance_shard_test=full-local-order status=passed'
     'foundation-order' = 'release_acceptance_shard_test=foundation-order status=passed'
+    'foundation-no-product-debt-leaf' = 'release_acceptance_shard_test=foundation-no-product-debt-leaf status=passed'
+    'foundation-adversarial-correctness-leaf' = 'release_acceptance_shard_test=foundation-adversarial-correctness-leaf status=passed'
+    'foundation-desktop-host-leaf' = 'release_acceptance_shard_test=foundation-desktop-host-leaf status=passed'
     'sanitizer-order' = 'release_acceptance_shard_test=sanitizer-order status=passed'
     'rust-order' = 'release_acceptance_shard_test=rust-order status=passed'
     'pages-order' = 'release_acceptance_shard_test=pages-order status=passed'
@@ -61,6 +64,15 @@ Assert-Sequence 'full-local-order' `
 Assert-Sequence 'foundation-order' `
     @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard Foundation) `
     $foundation
+Assert-Sequence 'foundation-no-product-debt-leaf' `
+    @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard FoundationNoProductDebt) `
+    @('NoProductDebt')
+Assert-Sequence 'foundation-adversarial-correctness-leaf' `
+    @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard FoundationAdversarialCorrectness) `
+    @('AdversarialCorrectness')
+Assert-Sequence 'foundation-desktop-host-leaf' `
+    @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard FoundationDesktopHost) `
+    @('DesktopHost')
 Assert-Sequence 'sanitizer-order' `
     @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard Sanitizer) `
     $sanitizer
@@ -71,7 +83,8 @@ Assert-Sequence 'pages-order' `
     @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard Pages) `
     $pages
 
-$shardedStages = @($foundation + $sanitizer + $rust + $pages | Sort-Object)
+$foundationLeaves = @('NoProductDebt', 'AdversarialCorrectness', 'DesktopHost')
+$shardedStages = @($foundationLeaves + $sanitizer + $rust + $pages | Sort-Object)
 Assert-Sequence 'shard-union-equals-full' $shardedStages @($full | Sort-Object)
 
 $rejected = $false

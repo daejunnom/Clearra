@@ -24,6 +24,15 @@ function Get-ClearraReleaseAcceptanceTasks([string]$Shard = "Full") {
                 "DesktopHost"
             )
         }
+        "FoundationNoProductDebt" {
+            return [string[]]@("NoProductDebt")
+        }
+        "FoundationAdversarialCorrectness" {
+            return [string[]]@("AdversarialCorrectness")
+        }
+        "FoundationDesktopHost" {
+            return [string[]]@("DesktopHost")
+        }
         "Sanitizer" {
             return [string[]]@("CSanitizer")
         }
@@ -48,7 +57,16 @@ function Get-ClearraReleaseAcceptanceTasks([string]$Shard = "Full") {
 function Expand-ClearraTasks {
     param(
         [string[]]$RequestedTasks,
-        [ValidateSet("Full", "Foundation", "Sanitizer", "Rust", "Pages")]
+        [ValidateSet(
+            "Full",
+            "Foundation",
+            "FoundationNoProductDebt",
+            "FoundationAdversarialCorrectness",
+            "FoundationDesktopHost",
+            "Sanitizer",
+            "Rust",
+            "Pages"
+        )]
         [string]$ReleaseAcceptanceShard = "Full"
     )
 

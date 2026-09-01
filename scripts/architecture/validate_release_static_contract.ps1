@@ -522,6 +522,9 @@ function Invoke-AdversarialReleaseGateWiringValidation {
     $taskDispatch = Read-PhysicalText 'scripts/lib/clearra-task-dispatch.ps1'
     foreach ($requiredSingleOwnerMarker in @(
         'ClearraNoProductDebtArchitecturePassed',
+        'ClearraReleaseAcceptanceShard',
+        'FoundationDesktopHost',
+        '$architectureOwnedByParallelLeaf',
         '$script:ClearraNoProductDebtArchitecturePassed = $true',
         '$desktopHostArgs["ArchitectureValidatedByNoProductDebt"] = $true'
     )) {
@@ -535,6 +538,9 @@ function Invoke-AdversarialReleaseGateWiringValidation {
     foreach ($requiredShardTestMarker in @(
         'release_acceptance_shard_test=full-local-order',
         'release_acceptance_shard_test=foundation-order',
+        'release_acceptance_shard_test=foundation-no-product-debt-leaf',
+        'release_acceptance_shard_test=foundation-adversarial-correctness-leaf',
+        'release_acceptance_shard_test=foundation-desktop-host-leaf',
         'release_acceptance_shard_test=sanitizer-order',
         'release_acceptance_shard_test=rust-order',
         'release_acceptance_shard_test=pages-order',
@@ -1219,7 +1225,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'clearra.release-acceptance-shard.v1',
         'createShardedReleaseGateReports',
         'delegated_evidence',
-        'isolated-four-shard',
+        'isolated-six-shard',
         'release_version',
         'pages_base_path',
         'downloaded release products differ from canonical acceptance evidence',
@@ -1239,7 +1245,7 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($requiredEvidenceTestMarker in @(
         'deterministically bind toolchains and four surfaces',
-        'four isolated shard reports preserve full order and delegated evidence ownership',
+        'six isolated shard reports preserve unique stage ownership and delegated evidence',
         'shard toolchain collection invokes only the closed shard tool set',
         'rejects duplicate jobs and any failed required step',
         'hashes three real products',
@@ -1441,7 +1447,9 @@ function Invoke-ReleaseIdentityGateValidation {
     $ctk3JobStart = $release.IndexOf("`n  ctk3:", [System.StringComparison]::Ordinal)
     $linuxJobStart = $release.IndexOf("`n  linux-cli:", [System.StringComparison]::Ordinal)
     $discordJobStart = $release.IndexOf("`n  discord-bot:", [System.StringComparison]::Ordinal)
-    $releaseFoundationJobStart = $release.IndexOf("`n  release-acceptance-foundation:", [System.StringComparison]::Ordinal)
+    $releaseFoundationNoProductDebtJobStart = $release.IndexOf("`n  release-acceptance-foundation-no-product-debt:", [System.StringComparison]::Ordinal)
+    $releaseFoundationAdversarialCorrectnessJobStart = $release.IndexOf("`n  release-acceptance-foundation-adversarial-correctness:", [System.StringComparison]::Ordinal)
+    $releaseFoundationDesktopHostJobStart = $release.IndexOf("`n  release-acceptance-foundation-desktop-host:", [System.StringComparison]::Ordinal)
     $releaseSanitizerJobStart = $release.IndexOf("`n  release-acceptance-sanitizer:", [System.StringComparison]::Ordinal)
     $releaseRustJobStart = $release.IndexOf("`n  release-acceptance-rust:", [System.StringComparison]::Ordinal)
     $releasePagesJobStart = $release.IndexOf("`n  release-acceptance-pages:", [System.StringComparison]::Ordinal)
@@ -1454,8 +1462,10 @@ function Invoke-ReleaseIdentityGateValidation {
         $ctk3JobStart -le $metadataJobStart -or
         $linuxJobStart -le $ctk3JobStart -or
         $discordJobStart -le $linuxJobStart -or
-        $releaseFoundationJobStart -le $discordJobStart -or
-        $releaseSanitizerJobStart -le $releaseFoundationJobStart -or
+        $releaseFoundationNoProductDebtJobStart -le $discordJobStart -or
+        $releaseFoundationAdversarialCorrectnessJobStart -le $releaseFoundationNoProductDebtJobStart -or
+        $releaseFoundationDesktopHostJobStart -le $releaseFoundationAdversarialCorrectnessJobStart -or
+        $releaseSanitizerJobStart -le $releaseFoundationDesktopHostJobStart -or
         $releaseRustJobStart -le $releaseSanitizerJobStart -or
         $releasePagesJobStart -le $releaseRustJobStart -or
         $releaseAcceptanceJobStart -le $releasePagesJobStart -or
@@ -1469,11 +1479,20 @@ function Invoke-ReleaseIdentityGateValidation {
         $metadataJob = $release.Substring($metadataJobStart, $ctk3JobStart - $metadataJobStart)
         $ctk3Job = $release.Substring($ctk3JobStart, $linuxJobStart - $ctk3JobStart)
         $linuxJob = $release.Substring($linuxJobStart, $discordJobStart - $linuxJobStart)
-        $discordJob = $release.Substring($discordJobStart, $releaseFoundationJobStart - $discordJobStart)
-        $releaseFoundationJob = $release.Substring(
-            $releaseFoundationJobStart,
-            $releaseSanitizerJobStart - $releaseFoundationJobStart
+        $discordJob = $release.Substring($discordJobStart, $releaseFoundationNoProductDebtJobStart - $discordJobStart)
+        $releaseFoundationNoProductDebtJob = $release.Substring(
+            $releaseFoundationNoProductDebtJobStart,
+            $releaseFoundationAdversarialCorrectnessJobStart - $releaseFoundationNoProductDebtJobStart
         )
+        $releaseFoundationAdversarialCorrectnessJob = $release.Substring(
+            $releaseFoundationAdversarialCorrectnessJobStart,
+            $releaseFoundationDesktopHostJobStart - $releaseFoundationAdversarialCorrectnessJobStart
+        )
+        $releaseFoundationDesktopHostJob = $release.Substring(
+            $releaseFoundationDesktopHostJobStart,
+            $releaseSanitizerJobStart - $releaseFoundationDesktopHostJobStart
+        )
+        $releaseFoundationJob = $releaseFoundationNoProductDebtJob
         $releaseSanitizerJob = $release.Substring(
             $releaseSanitizerJobStart,
             $releaseRustJobStart - $releaseSanitizerJobStart
@@ -1529,12 +1548,14 @@ function Invoke-ReleaseIdentityGateValidation {
             -Key 'needs' `
             -ExpectedValues @(
                 'metadata',
-                'release-acceptance-foundation',
+                'release-acceptance-foundation-no-product-debt',
+                'release-acceptance-foundation-adversarial-correctness',
+                'release-acceptance-foundation-desktop-host',
                 'release-acceptance-sanitizer',
                 'release-acceptance-rust',
                 'release-acceptance-pages'
             ) `
-            -Contract 'Canonical acceptance exact four-shard fan-in dependencies'
+            -Contract 'Canonical acceptance exact six-shard fan-in dependencies'
         Assert-ReleaseYamlExactScalar `
             -Text $releaseAcceptanceJob `
             -Indentation 4 `
@@ -1542,7 +1563,9 @@ function Invoke-ReleaseIdentityGateValidation {
             -ExpectedValue 'ubuntu-latest' `
             -Contract 'Canonical acceptance fan-in runner'
         foreach ($shardJob in @(
-            @{ Name = 'Foundation'; Text = $releaseFoundationJob; Needs = @('metadata') },
+            @{ Name = 'Foundation NoProductDebt'; Text = $releaseFoundationNoProductDebtJob; Needs = @('metadata') },
+            @{ Name = 'Foundation AdversarialCorrectness'; Text = $releaseFoundationAdversarialCorrectnessJob; Needs = @('metadata') },
+            @{ Name = 'Foundation DesktopHost'; Text = $releaseFoundationDesktopHostJob; Needs = @('metadata') },
             @{ Name = 'Sanitizer'; Text = $releaseSanitizerJob; Needs = @('metadata') },
             @{ Name = 'Rust'; Text = $releaseRustJob; Needs = @('metadata', 'ctk3') },
             @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata') }
@@ -1728,7 +1751,9 @@ function Invoke-ReleaseIdentityGateValidation {
         }
 
         foreach ($requiredShardMarker in @(
-            '-ReleaseAcceptanceShard Foundation -ExecutionSurface Trusted',
+            '-ReleaseAcceptanceShard FoundationNoProductDebt -ExecutionSurface Trusted',
+            '-ReleaseAcceptanceShard FoundationAdversarialCorrectness -ExecutionSurface Trusted',
+            '-ReleaseAcceptanceShard FoundationDesktopHost -ExecutionSurface Trusted',
             '-ReleaseAcceptanceShard Sanitizer -ExecutionSurface Trusted',
             '-ReleaseAcceptanceShard Rust -ExecutionSurface Trusted',
             '-ReleaseAcceptanceShard Pages -ExecutionSurface Trusted',
@@ -1739,26 +1764,35 @@ function Invoke-ReleaseIdentityGateValidation {
                 $release,
                 [regex]::Escape($requiredShardMarker)
             ).Count
-            $expectedCount = if ($requiredShardMarker -eq 'node scripts/release/canonical-acceptance-evidence.mjs shard `') { 4 } else { 1 }
+            $expectedCount = if ($requiredShardMarker -eq 'node scripts/release/canonical-acceptance-evidence.mjs shard `') { 6 } else { 1 }
             if ($markerCount -ne $expectedCount) {
                 Add-ArchitectureError "Canonical ReleaseAcceptance shard contract differs for '$requiredShardMarker'"
             }
         }
-        if ($canonicalAcceptanceEvidence.IndexOf('canonical four-shard ReleaseAcceptance fan-in', [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance evidence must bind the four-shard fan-in command'
+        if ($canonicalAcceptanceEvidence.IndexOf('canonical six-shard ReleaseAcceptance fan-in', [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError 'Canonical ReleaseAcceptance evidence must bind the six-shard fan-in command'
         }
         $releaseAcceptanceCacheText = @(
-            $releaseFoundationJob,
+            $releaseFoundationNoProductDebtJob,
+            $releaseFoundationAdversarialCorrectnessJob,
+            $releaseFoundationDesktopHostJob,
             $releaseSanitizerJob,
             $releaseRustJob,
             $releasePagesJob
         ) -join "`n"
-        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 4 -or
+        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 6 -or
             [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 0 -or
             [regex]::Matches($release, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 2) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance must use four restore-only cache readers without automatic or explicit cache writers'
+            Add-ArchitectureError 'Canonical ReleaseAcceptance must use six restore-only cache readers without automatic or explicit cache writers'
         }
-        foreach ($shardCacheJob in @($releaseFoundationJob, $releaseSanitizerJob, $releaseRustJob, $releasePagesJob)) {
+        foreach ($shardCacheJob in @(
+            $releaseFoundationNoProductDebtJob,
+            $releaseFoundationAdversarialCorrectnessJob,
+            $releaseFoundationDesktopHostJob,
+            $releaseSanitizerJob,
+            $releaseRustJob,
+            $releasePagesJob
+        )) {
             foreach ($requiredRestoreMarker in @(
                 'actions/cache/restore@v4',
                 '~/AppData/Local/Clearra/build',

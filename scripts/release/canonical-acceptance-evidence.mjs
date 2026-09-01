@@ -43,16 +43,26 @@ const RELEASE_STAGES = Object.freeze([
   "RenderGolden",
 ]);
 export const RELEASE_ACCEPTANCE_SHARDS = Object.freeze(new Map([
-  ["foundation", Object.freeze({
-    job: "release-acceptance-foundation",
-    stages: Object.freeze([
-      "NoProductDebt",
-      "AdversarialCorrectness",
-      "DesktopHost",
-    ]),
+  ["foundation-no-product-debt", Object.freeze({
+    job: "release-acceptance-foundation-no-product-debt",
+    stages: Object.freeze(["NoProductDebt"]),
     command:
-      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Foundation -ExecutionSurface Trusted",
-    toolchains: Object.freeze(["rust", "cargo", "node", "npm", "cmake", "powershell"]),
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationNoProductDebt -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["rust", "cargo", "cmake", "powershell"]),
+  })],
+  ["foundation-adversarial-correctness", Object.freeze({
+    job: "release-acceptance-foundation-adversarial-correctness",
+    stages: Object.freeze(["AdversarialCorrectness"]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationAdversarialCorrectness -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["cmake", "powershell"]),
+  })],
+  ["foundation-desktop-host", Object.freeze({
+    job: "release-acceptance-foundation-desktop-host",
+    stages: Object.freeze(["DesktopHost"]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationDesktopHost -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["rust", "cargo", "node", "npm", "powershell"]),
   })],
   ["sanitizer", Object.freeze({
     job: "release-acceptance-sanitizer",
@@ -113,7 +123,7 @@ const DELEGATED_RELEASE_EVIDENCE = Object.freeze([
     evidence: "desktop_real_app_request",
     deferred_by: "NoProductDebt",
     owner_stage: "DesktopHost",
-    owner_shard: "foundation",
+    owner_shard: "foundation-desktop-host",
   }),
   Object.freeze({
     evidence: "adversarial_rust_tests",
@@ -158,11 +168,22 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Verify accepted CTK3 distribution",
     "Verify Clearrabot contracts",
   ])],
-  ["release-acceptance-foundation", Object.freeze([
+  ["release-acceptance-foundation-no-product-debt", Object.freeze([
+    "Archive the exact accepted source on Windows",
     "Verify canonical ReleaseAcceptance shard mapping",
-    "Run canonical release acceptance foundation shard",
-    "Seal canonical release acceptance foundation shard",
-    "Upload canonical release acceptance foundation shard",
+    "Run canonical release acceptance NoProductDebt leaf",
+    "Seal canonical release acceptance NoProductDebt leaf",
+    "Upload canonical release acceptance NoProductDebt leaf",
+  ])],
+  ["release-acceptance-foundation-adversarial-correctness", Object.freeze([
+    "Run canonical release acceptance AdversarialCorrectness leaf",
+    "Seal canonical release acceptance AdversarialCorrectness leaf",
+    "Upload canonical release acceptance AdversarialCorrectness leaf",
+  ])],
+  ["release-acceptance-foundation-desktop-host", Object.freeze([
+    "Run canonical release acceptance DesktopHost leaf",
+    "Seal canonical release acceptance DesktopHost leaf",
+    "Upload canonical release acceptance DesktopHost leaf",
   ])],
   ["release-acceptance-sanitizer", Object.freeze([
     "Run canonical release acceptance sanitizer shard",
@@ -329,7 +350,7 @@ export async function readReleaseAcceptanceShardEvidence(
     actualFiles.join(",") !== expectedFiles.join(",") ||
     entries.some((entry) => !entry.isFile() || entry.isSymbolicLink())
   ) {
-    throw new Error("release shard evidence directory must contain the exact four canonical files");
+    throw new Error("release shard evidence directory must contain the exact six canonical files");
   }
   const reports = [];
   for (const [shard, filename] of RELEASE_SHARD_FILES) {
@@ -351,7 +372,9 @@ export function createShardedReleaseGateReports(authority, shardReports) {
   const pages = reports.find((report) => report.shard === "pages");
   const rust = reports.find((report) => report.shard === "rust");
   const sanitizer = reports.find((report) => report.shard === "sanitizer");
-  const foundation = reports.find((report) => report.shard === "foundation");
+  const foundationNoProductDebt = reports.find(
+    (report) => report.shard === "foundation-no-product-debt",
+  );
   for (const tool of ["rust", "cargo", "node", "npm", "cmake", "powershell"]) {
     const versions = reports
       .filter((report) => Object.hasOwn(report.toolchains, tool))
@@ -367,7 +390,7 @@ export function createShardedReleaseGateReports(authority, shardReports) {
     npm: pages.toolchains.npm,
     wasm_bindgen: pages.toolchains.wasm_bindgen,
     cmake: sanitizer.toolchains.cmake,
-    powershell: foundation.toolchains.powershell,
+    powershell: foundationNoProductDebt.toolchains.powershell,
   });
   const shardProjections = reports.map((report) => Object.freeze({
     shard: report.shard,
@@ -384,8 +407,8 @@ export function createShardedReleaseGateReports(authority, shardReports) {
     workflow_path: WORKFLOW_PATH,
     job: "release-acceptance",
     task: "ReleaseAcceptance",
-    command: "canonical four-shard ReleaseAcceptance fan-in",
-    execution_mode: "isolated-four-shard",
+    command: "canonical six-shard ReleaseAcceptance fan-in",
+    execution_mode: "isolated-six-shard",
     status: "passed",
     readiness_open_count: 0,
     stages: RELEASE_STAGES,
@@ -399,7 +422,7 @@ export function createShardedReleaseGateReports(authority, shardReports) {
     run_attempt: identity.runAttempt,
     workflow_path: WORKFLOW_PATH,
     job: "release-acceptance",
-    execution_mode: "isolated-four-shard",
+    execution_mode: "isolated-six-shard",
     ...tools,
     shard_toolchains: reports.map((report) => ({
       shard: report.shard,
@@ -815,7 +838,7 @@ async function readAndValidateGateReports(directory, authority) {
     verifyCanonicalReportHash(actual, label);
     requireReportAuthority(actual, authority, label);
     if (canonicalJson(actual) !== canonicalJson(canonical)) {
-      throw new Error(`${label} differs from the canonical four-shard fan-in`);
+      throw new Error(`${label} differs from the canonical six-shard fan-in`);
     }
   }
   return Object.freeze({
@@ -897,7 +920,7 @@ function validateReleaseShardToolchains(value, contract) {
 
 function validateReleaseShardReportSet(shardReports, authority) {
   if (!Array.isArray(shardReports) || shardReports.length !== RELEASE_ACCEPTANCE_SHARDS.size) {
-    throw new Error("release gate requires the exact four shard reports");
+    throw new Error("release gate requires the exact six shard reports");
   }
   const byShard = new Map();
   for (const report of shardReports) {
@@ -911,9 +934,18 @@ function validateReleaseShardReportSet(shardReports, authority) {
   if ([...byShard.keys()].sort().join(",") !== [...RELEASE_ACCEPTANCE_SHARDS.keys()].sort().join(",")) {
     throw new Error("release gate shard report set is incomplete");
   }
-  return Object.freeze(
+  const ordered = Object.freeze(
     [...RELEASE_ACCEPTANCE_SHARDS.keys()].map((shard) => byShard.get(shard)),
   );
+  const ownedStages = ordered.flatMap((report) => report.stages);
+  if (
+    ownedStages.length !== RELEASE_STAGES.length ||
+    new Set(ownedStages).size !== RELEASE_STAGES.length ||
+    ownedStages.slice().sort().join(",") !== RELEASE_STAGES.slice().sort().join(",")
+  ) {
+    throw new Error("release gate shard stages must have complete non-duplicate ownership");
+  }
+  return ordered;
 }
 
 function validateToolchains(value) {

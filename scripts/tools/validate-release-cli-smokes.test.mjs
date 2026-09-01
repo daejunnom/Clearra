@@ -350,8 +350,8 @@ for (const [name, mutate] of [
       );
       return replaceExactlyOnce(
         withSkippedJob,
-        "  release-acceptance-foundation:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n",
-        "  release-acceptance-foundation:\n    if: github.event_name == 'workflow_dispatch'\n    needs: skip-acceptance\n",
+        "  release-acceptance-foundation-no-product-debt:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n",
+        "  release-acceptance-foundation-no-product-debt:\n    if: github.event_name == 'workflow_dispatch'\n    needs: skip-acceptance\n",
       );
     },
   ],
@@ -573,12 +573,12 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects an incomplete four-shard fan-in",
+    "rejects an incomplete six-shard fan-in",
     (source) =>
       replaceExactlyOnce(
         source,
-        "      [metadata, release-acceptance-foundation, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]\n",
-        "      [metadata, release-acceptance-foundation, release-acceptance-rust, release-acceptance-pages]\n",
+        "      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]\n",
+        "      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]\n",
       ),
   ],
   [
@@ -586,7 +586,7 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "-ReleaseAcceptanceShard Foundation -ExecutionSurface Trusted\n",
+        "-ReleaseAcceptanceShard FoundationNoProductDebt -ExecutionSurface Trusted\n",
         "-ExecutionSurface Trusted\n",
       ),
   ],
