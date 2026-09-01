@@ -26,15 +26,16 @@ import {
 
 const SNAPSHOT = "1".repeat(40);
 const AUTHORITY = "2".repeat(40);
+const LEGACY_SNAPSHOT = "0438d85f90b47c4ce89835f6a6d665a0415aa25a";
 const ARTIFACT_DIGEST = `sha256:${"3".repeat(64)}`;
 const TAR_DIGEST = "4".repeat(64);
-const TAG_OBJECT = "5".repeat(40);
+const TAG_OBJECT = "a95973dbc1c3c1919478328d12e4d25ddaedea71";
 
 function legacyBootstrapFixture() {
   return {
     repository: "daejunnom/Clearra",
     legacyReleaseTag: LEGACY_BOOTSTRAP_RELEASE_TAG,
-    snapshotSha: SNAPSHOT,
+    snapshotSha: LEGACY_SNAPSHOT,
     tagRef: {
       ref: `refs/tags/${LEGACY_BOOTSTRAP_RELEASE_TAG}`,
       object: { type: "tag", sha: TAG_OBJECT },
@@ -42,7 +43,7 @@ function legacyBootstrapFixture() {
     annotatedTag: {
       sha: TAG_OBJECT,
       tag: LEGACY_BOOTSTRAP_RELEASE_TAG,
-      object: { type: "commit", sha: SNAPSHOT },
+      object: { type: "commit", sha: LEGACY_SNAPSHOT },
       tagger: {
         name: "Release Bot",
         email: "release@example.invalid",
@@ -57,7 +58,7 @@ function legacyBootstrapFixture() {
     },
     deployments: [{
       id: 6181925865,
-      sha: SNAPSHOT,
+      sha: LEGACY_SNAPSHOT,
       ref: "main",
       task: "deploy",
       environment: "github-pages",
@@ -260,35 +261,6 @@ test("full Pages and WASM identity contract is required", () => {
   }
 });
 
-test("bootstrap manifest preparation upgrades exact v0.7.4 legacy manifests atomically without changing artifacts", async () => {
-  const root = await mkdtemp(join(tmpdir(), "clearra-pages-bootstrap-manifest-"));
-  try {
-    const legacy = v074LegacyWasmManifest();
-    const originalProjection = structuredClone(legacy);
-    const paths = await writeManifestPair(root, serializeV074LegacyWasmManifest(legacy));
-    assert.deepEqual(await preparePagesRollbackManifests({
-      captureMode: "bootstrap-capture",
-      snapshotSha: SNAPSHOT,
-      ...paths,
-    }), { mode: "bootstrap-capture", updated: true });
-
-    const [staticRaw, buildRaw] = await Promise.all([
-      readFile(paths.staticManifestPath, "utf8"),
-      readFile(paths.buildManifestPath, "utf8"),
-    ]);
-    assert.equal(staticRaw, buildRaw);
-    assert.equal(Buffer.byteLength(staticRaw, "utf8"), 1280);
-    const prepared = JSON.parse(staticRaw);
-    assert.deepEqual(prepared.build.runtime_identity, exactRuntimeIdentity());
-    delete prepared.build.runtime_identity;
-    assert.deepEqual(prepared, originalProjection);
-    assert.equal(prepared.bindings.sha256, legacy.bindings.sha256);
-    assert.equal(prepared.wasm.sha256, legacy.wasm.sha256);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("regular capture verifies manifests without rewriting them and rejects missing or wrong identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "clearra-pages-capture-manifest-"));
   try {
@@ -335,74 +307,13 @@ test("regular capture verifies manifests without rewriting them and rejects miss
   }
 });
 
-test("bootstrap manifest preparation rejects identity, partial identity, legacy drift, mismatch, and extra fields before mutation", async () => {
-  const cases = [
-    ["already identity-valid", (manifest) => {
-      manifest.build.runtime_identity = exactRuntimeIdentity();
-    }, /runtime_identity must be absent/u],
-    ["partial identity", (manifest) => {
-      manifest.build.runtime_identity = { source_commit: SNAPSHOT };
-    }, /runtime_identity must be absent/u],
-    ["wrong legacy contract", (manifest) => {
-      manifest.build.contract_version = 2;
-    }, /not the exact v0\.7\.4 legacy contract/u],
-    ["extra root input", (manifest) => {
-      manifest.unapproved = true;
-    }, /closed schema/u],
-    ["wrong artifact path", (manifest) => {
-      manifest.wasm.path = "clearra_wasm_bg.wasm";
-    }, /content-addressed artifact/u],
-  ];
-  for (const [label, mutate, expected] of cases) {
-    const root = await mkdtemp(join(tmpdir(), "clearra-pages-bootstrap-negative-"));
-    try {
-      const manifest = v074LegacyWasmManifest();
-      mutate(manifest);
-      const raw = Object.hasOwn(manifest.build, "runtime_identity")
-        ? `${JSON.stringify(manifest)}\n`
-        : serializeV074LegacyWasmManifest(manifest);
-      const paths = await writeManifestPair(root, raw);
-      await assert.rejects(
-        preparePagesRollbackManifests({
-          captureMode: "bootstrap-capture",
-          snapshotSha: SNAPSHOT,
-          ...paths,
-        }),
-        expected,
-        label,
-      );
-      assert.equal(await readFile(paths.staticManifestPath, "utf8"), raw, label);
-      assert.equal(await readFile(paths.buildManifestPath, "utf8"), raw, label);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }
-
-  const root = await mkdtemp(join(tmpdir(), "clearra-pages-bootstrap-mismatch-"));
-  try {
-    const staticManifest = v074LegacyWasmManifest();
-    const buildManifest = v074LegacyWasmManifest();
-    buildManifest.build.source_sha256 = "d".repeat(64);
-    const staticRaw = serializeV074LegacyWasmManifest(staticManifest);
-    const buildRaw = serializeV074LegacyWasmManifest(buildManifest);
-    const paths = await writeManifestPair(root, staticRaw, buildRaw);
-    await assert.rejects(
-      preparePagesRollbackManifests({
-        captureMode: "bootstrap-capture",
-        snapshotSha: SNAPSHOT,
-        ...paths,
-      }),
-      /manifests differ before bootstrap/u,
-    );
-    assert.equal(await readFile(paths.staticManifestPath, "utf8"), staticRaw);
-    assert.equal(await readFile(paths.buildManifestPath, "utf8"), buildRaw);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-
+test("legacy manifest handling is excluded from the modern preparation path", async () => {
   await assert.rejects(
-    preparePagesRollbackManifests({ captureMode: "restore", snapshotSha: SNAPSHOT }),
-    /mode must be capture or bootstrap-capture/u,
+    preparePagesRollbackManifests({
+      captureMode: "bootstrap-capture",
+      snapshotSha: LEGACY_SNAPSHOT,
+    }),
+    /only for regular capture/u,
   );
 });
 
@@ -411,7 +322,7 @@ test("legacy Pages bootstrap binds one approved annotated release to the active 
   assert.deepEqual(validateLegacyPagesBootstrapAuthority(valid), {
     repository: "daejunnom/Clearra",
     legacyReleaseTag: "v0.7.4",
-    snapshotSha: SNAPSHOT,
+    snapshotSha: LEGACY_SNAPSHOT,
     deploymentId: "6181925865",
   });
 
@@ -419,6 +330,13 @@ test("legacy Pages bootstrap binds one approved annotated release to the active 
     ["arbitrary tag", (value) => { value.legacyReleaseTag = "v0.7.3"; }],
     ["lightweight tag", (value) => { value.tagRef.object.type = "commit"; }],
     ["mismatched tag", (value) => { value.annotatedTag.object.sha = AUTHORITY; }],
+    ["moved tag object and snapshot", (value) => {
+      value.snapshotSha = AUTHORITY;
+      value.tagRef.object.sha = "5".repeat(40);
+      value.annotatedTag.sha = "5".repeat(40);
+      value.annotatedTag.object.sha = AUTHORITY;
+      value.deployments[0].sha = AUTHORITY;
+    }],
     ["draft release", (value) => { value.release.draft = true; }],
     ["prerelease", (value) => { value.release.prerelease = true; }],
     ["inactive snapshot", (value) => { value.deployments[0].sha = AUTHORITY; }],
@@ -490,7 +408,13 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
     "PAGES_AUTHORITY_MODE: prepare-manifests",
     "PAGES_CAPTURE_MODE: ${{ inputs.mode }}",
     "Stamp exact rollback identity",
+    "Stamp separate reconstructed v0.7.4 identity",
+    "node authority-source/scripts/release/pages-legacy-contract.mjs",
+    "legacy_initial_evidence_base64",
+    "LEGACY_PREARTIFACT_EVIDENCE_BASE64",
+    "Download uploaded rollback artifact by exact run-bound name",
     "Seal exact rollback capture authority",
+    "Verify downloaded rollback package against sealed capture report",
   ]) {
     assert.ok(workflow.includes(marker), `missing bootstrap workflow marker: ${marker}`);
   }
@@ -516,6 +440,22 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
     captureJobs.indexOf("Prepare exact rollback manifest contract") <
       captureJobs.indexOf("Stamp exact rollback identity"),
     "manifest preparation must finish before the shared identity verification and stamp",
+  );
+  const modernStamp = captureJobs.slice(
+    captureJobs.indexOf("- name: Stamp exact rollback identity"),
+    captureJobs.indexOf("- name: Stamp separate reconstructed v0.7.4 identity"),
+  );
+  assert.match(modernStamp, /if: \$\{\{ inputs\.mode == 'capture' \}\}/u);
+  const legacyStamp = captureJobs.slice(
+    captureJobs.indexOf("- name: Stamp separate reconstructed v0.7.4 identity"),
+    captureJobs.indexOf("- name: Validate portable rollback tree"),
+  );
+  assert.match(legacyStamp, /if: \$\{\{ inputs\.mode == 'bootstrap-capture' \}\}/u);
+  assert.doesNotMatch(legacyStamp, /snapshot-source\/scripts\/release/u);
+  assert.ok(
+    captureJobs.indexOf("Seal exact rollback capture authority") <
+      captureJobs.indexOf("Verify downloaded rollback package against sealed capture report"),
+    "freshly sealed capture report must validate the downloaded tar before report upload",
   );
 });
 
@@ -655,6 +595,7 @@ test("capture report seals actual artifact ID, digest, run attempt, tar hash, an
     };
     const report = await produceRollbackCaptureReport({
       repository: "daejunnom/Clearra",
+      captureMode: "capture",
       snapshotSha: SNAPSHOT,
       authoritySha: AUTHORITY,
       captureRunId: runId,
@@ -766,6 +707,7 @@ test("capture report rejects short retention and wrong active run attempt", asyn
     };
     const input = {
       repository: "daejunnom/Clearra",
+      captureMode: "capture",
       snapshotSha: SNAPSHOT,
       authoritySha: AUTHORITY,
       captureRunId: "12345",

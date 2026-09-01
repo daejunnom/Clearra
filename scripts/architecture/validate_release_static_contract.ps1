@@ -582,6 +582,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $discordRuntimeRecovery = Read-Text 'scripts/release/invoke-discord-runtime-recovery-v080.ps1'
     $pagesRollbackAuthority = Read-Text 'scripts/release/pages-rollback-authority.mjs'
     $pagesRollbackAuthorityTest = Read-Text 'scripts/release/pages-rollback-authority.test.mjs'
+    $pagesLegacyContract = Read-Text 'scripts/release/pages-legacy-contract.mjs'
+    $pagesLegacyContractTest = Read-Text 'scripts/release/pages-legacy-contract.test.mjs'
     $pagesRollbackPackage = Read-Text 'scripts/release/pages-rollback-package.mjs'
     $pagesRollbackPackageTest = Read-Text 'scripts/release/pages-rollback-package.test.mjs'
     $pagesDeploymentAuthority = Read-Text 'scripts/release/pages-deployment-authority.mjs'
@@ -847,6 +849,18 @@ function Invoke-ReleaseIdentityGateValidation {
     $releasePublicationEvidence = Read-Text 'scripts/release/release-publication-evidence.mjs'
     $releasePublicationEvidenceTest = Read-Text 'scripts/release/release-publication-evidence.test.mjs'
     $remainingWorkPlan = Read-Text 'docs/v0.8.0-remaining-work-plan.md'
+
+    foreach ($pagesSchema in @(
+        'clearra.pages.rollback-capture-authority.v2',
+        'clearra.pages.deployment-authority.v2'
+    )) {
+        if ($remainingWorkPlan.IndexOf($pagesSchema, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Active v0.8.0 plan is missing current Pages authority schema '$pagesSchema'"
+        }
+    }
+    if ($remainingWorkPlan -match 'clearra\.pages\.(rollback-capture|deployment)-authority\.v1') {
+        Add-ArchitectureError 'Active v0.8.0 plan must not retain superseded Pages authority v1 schemas'
+    }
 
     foreach ($required in @(
         'validate-release-metadata.mjs',
@@ -1990,6 +2004,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 'scripts/release/finalize-discord-production-checkpoint.test.mjs',
                 'scripts/release/observe-production-surfaces.test.mjs',
                 'scripts/release/pages-deployment-authority.test.mjs',
+                'scripts/release/pages-legacy-contract.test.mjs',
                 'scripts/release/pages-rollback-authority.test.mjs',
                 'scripts/release/pages-rollback-package.test.mjs',
                 'scripts/release/release-publication-evidence.test.mjs',
@@ -2301,9 +2316,11 @@ function Invoke-ReleaseIdentityGateValidation {
         'CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}',
         'Download durable rollback capture before Pages build',
         'Verify exact rollback package before Pages build',
+        'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json',
         'Redownload durable rollback capture immediately before deployment',
         'Redownload sealed rollback capture report immediately before deployment',
         'Revalidate exact rollback package immediately before deployment',
+        'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-report-predeploy/pages-rollback-capture-authority.json',
         'Revalidate durable rollback capture immediately before deployment',
         'scripts/release/pages-rollback-authority.mjs',
         'scripts/release/pages-rollback-package.mjs',
@@ -2328,6 +2345,129 @@ function Invoke-ReleaseIdentityGateValidation {
         ([regex]::Matches($pages, 'pages-rollback-package\.mjs')).Count -ne 2) {
         Add-ArchitectureError 'Pages forward workflow must resolve one sealed report and verify rollback metadata and package before build and immediately before deployment'
     }
+    $forwardResolveIndex = $pages.IndexOf('Resolve sealed rollback capture report before Pages build', [System.StringComparison]::Ordinal)
+    $forwardReportDownloadIndex = $pages.IndexOf('Download sealed rollback capture report before Pages build', [System.StringComparison]::Ordinal)
+    $forwardAuthorityIndex = $pages.IndexOf('Verify durable rollback capture before Pages build', [System.StringComparison]::Ordinal)
+    $forwardTarDownloadIndex = $pages.IndexOf('Download durable rollback capture before Pages build', [System.StringComparison]::Ordinal)
+    $forwardPackageIndex = $pages.IndexOf('Verify exact rollback package before Pages build', [System.StringComparison]::Ordinal)
+    $forwardLateTarIndex = $pages.IndexOf('Redownload durable rollback capture immediately before deployment', [System.StringComparison]::Ordinal)
+    $forwardLateReportIndex = $pages.IndexOf('Redownload sealed rollback capture report immediately before deployment', [System.StringComparison]::Ordinal)
+    $forwardLatePackageIndex = $pages.IndexOf('Revalidate exact rollback package immediately before deployment', [System.StringComparison]::Ordinal)
+    $forwardLateAuthorityIndex = $pages.IndexOf('Revalidate durable rollback capture immediately before deployment', [System.StringComparison]::Ordinal)
+    $forwardDeployIndex = $pages.IndexOf('actions/deploy-pages@v4', [System.StringComparison]::Ordinal)
+    if ($forwardResolveIndex -lt 0 -or
+        $forwardReportDownloadIndex -le $forwardResolveIndex -or
+        $forwardAuthorityIndex -le $forwardReportDownloadIndex -or
+        $forwardTarDownloadIndex -le $forwardAuthorityIndex -or
+        $forwardPackageIndex -le $forwardTarDownloadIndex -or
+        $forwardLateTarIndex -le $forwardPackageIndex -or
+        $forwardLateReportIndex -le $forwardLateTarIndex -or
+        $forwardLatePackageIndex -le $forwardLateReportIndex -or
+        $forwardLateAuthorityIndex -le $forwardLatePackageIndex -or
+        $forwardDeployIndex -le $forwardLateAuthorityIndex) {
+        Add-ArchitectureError 'Pages forward deployment must validate the sealed report and exact tar both initially and immediately before deployment'
+    } else {
+        $forwardInitialReportDownloadStep = $pages.Substring($forwardReportDownloadIndex, $forwardAuthorityIndex - $forwardReportDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ steps.rollback-report.outputs.report_artifact_name }}',
+            'path: rollback-report-initial',
+            'run-id: ${{ inputs.rollback_capture_run_id }}'
+        )) {
+            if ($forwardInitialReportDownloadStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages initial forward report download is missing exact binding '$required'"
+            }
+        }
+
+        $forwardInitialAuthorityStep = $pages.Substring($forwardAuthorityIndex, $forwardTarDownloadIndex - $forwardAuthorityIndex)
+        foreach ($required in @(
+            'CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json',
+            'CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}',
+            'CAPTURE_REPORT_ARTIFACT_NAME: ${{ steps.rollback-report.outputs.report_artifact_name }}',
+            'CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ steps.rollback-report.outputs.report_artifact_digest }}'
+        )) {
+            if ($forwardInitialAuthorityStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages initial forward authority verification is missing exact binding '$required'"
+            }
+        }
+
+        $forwardInitialTarDownloadStep = $pages.Substring($forwardTarDownloadIndex, $forwardPackageIndex - $forwardTarDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ steps.rollback-authority.outputs.capture_artifact_name }}',
+            'path: rollback-capture-initial',
+            'run-id: ${{ inputs.rollback_capture_run_id }}'
+        )) {
+            if ($forwardInitialTarDownloadStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages initial forward tar download is missing exact binding '$required'"
+            }
+        }
+
+        $forwardBuildJobIndex = $pages.IndexOf("`n  build:", $forwardPackageIndex, [System.StringComparison]::Ordinal)
+        if ($forwardBuildJobIndex -le $forwardPackageIndex) {
+            Add-ArchitectureError 'Pages initial forward package verification is not bounded by the accepted build job'
+        } else {
+            $forwardInitialPackageStep = $pages.Substring($forwardPackageIndex, $forwardBuildJobIndex - $forwardPackageIndex)
+            foreach ($required in @(
+                'SNAPSHOT_TAR_SHA256: ${{ steps.rollback-authority.outputs.capture_tar_sha256 }}',
+                'PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-initial',
+                'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json'
+            )) {
+                if ($forwardInitialPackageStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                    Add-ArchitectureError "Pages initial forward package verification is missing exact binding '$required'"
+                }
+            }
+        }
+
+        $forwardLateTarDownloadStep = $pages.Substring($forwardLateTarIndex, $forwardLateReportIndex - $forwardLateTarIndex)
+        foreach ($required in @(
+            'name: ${{ needs.accepted-source.outputs.rollback_capture_artifact_name }}',
+            'path: rollback-capture-predeploy',
+            'run-id: ${{ inputs.rollback_capture_run_id }}'
+        )) {
+            if ($forwardLateTarDownloadStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages predeploy forward tar download is missing exact binding '$required'"
+            }
+        }
+
+        $forwardLateReportDownloadStep = $pages.Substring($forwardLateReportIndex, $forwardLatePackageIndex - $forwardLateReportIndex)
+        foreach ($required in @(
+            'name: ${{ needs.accepted-source.outputs.rollback_report_artifact_name }}',
+            'path: rollback-report-predeploy',
+            'run-id: ${{ inputs.rollback_capture_run_id }}'
+        )) {
+            if ($forwardLateReportDownloadStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages predeploy forward report download is missing exact binding '$required'"
+            }
+        }
+
+        $forwardLatePackageStep = $pages.Substring($forwardLatePackageIndex, $forwardLateAuthorityIndex - $forwardLatePackageIndex)
+        foreach ($required in @(
+            'SNAPSHOT_TAR_SHA256: ${{ needs.accepted-source.outputs.rollback_capture_tar_sha256 }}',
+            'PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-predeploy',
+            'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-report-predeploy/pages-rollback-capture-authority.json'
+        )) {
+            if ($forwardLatePackageStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages predeploy forward package verification is missing exact binding '$required'"
+            }
+        }
+
+        $forwardLateAuthorityStep = $pages.Substring($forwardLateAuthorityIndex, $forwardDeployIndex - $forwardLateAuthorityIndex)
+        foreach ($required in @(
+            'CAPTURE_REPORT_PATH: rollback-report-predeploy/pages-rollback-capture-authority.json',
+            'CAPTURE_REPORT_ARTIFACT_ID: ${{ needs.accepted-source.outputs.rollback_report_artifact_id }}',
+            'CAPTURE_REPORT_ARTIFACT_NAME: ${{ needs.accepted-source.outputs.rollback_report_artifact_name }}',
+            'CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ needs.accepted-source.outputs.rollback_report_artifact_digest }}'
+        )) {
+            if ($forwardLateAuthorityStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages predeploy forward authority verification is missing exact binding '$required'"
+            }
+        }
+    }
+    if ($pages -notmatch '(?ms)^  build:\s*\r?\n\s+needs: accepted-source\s*$') {
+        Add-ArchitectureError 'Pages accepted build reuse must depend on initial rollback admission'
+    }
+    if ($pages -notmatch '(?ms)^  deploy:.*?^    needs: \[accepted-source, build\]\s*$') {
+        Add-ArchitectureError 'Pages forward deployment must depend on initial rollback admission and the accepted build'
+    }
     foreach ($required in @(
         'name: Preserve or Restore GitHub Pages',
         'mode:',
@@ -2345,21 +2485,44 @@ function Invoke-ReleaseIdentityGateValidation {
         'cancel-in-progress: false',
         "inputs.mode == 'capture' || inputs.mode == 'bootstrap-capture'",
         'PAGES_AUTHORITY_MODE: ${{ inputs.mode }}',
+        'legacy_initial_evidence_base64: ${{ steps.authority.outputs.legacy_evidence_base64 }}',
         'LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}',
         'REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}',
+        'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
+        'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}',
+        'pages-rollback-wasm-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-',
+        '[[ "$HOME" == "/home/runner" ]]',
+        '[[ "${CARGO_HOME:-$HOME/.cargo}" == "/home/runner/.cargo" ]]',
+        'rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal',
+        'rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown',
+        'wasm-bindgen-cli --version 0.2.126 --locked',
         'Prepare exact rollback manifest contract',
         'PAGES_AUTHORITY_MODE: prepare-manifests',
         'PAGES_CAPTURE_MODE: ${{ inputs.mode }}',
         'STATIC_MANIFEST_PATH: snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json',
         'BUILD_MANIFEST_PATH: snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json',
         'Stamp exact rollback identity',
+        'Stamp separate reconstructed v0.7.4 identity',
+        'PAGES_LEGACY_CONTRACT_MODE: stamp',
+        'node authority-source/scripts/release/pages-legacy-contract.mjs',
         'Revalidate capture authority immediately before artifact creation',
         'clearra-pages-rollback-${SNAPSHOT_SHA}-authority-${AUTHORITY_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}',
         'actions/upload-pages-artifact@v3',
         'retention-days: 90',
+        'Download uploaded rollback artifact by exact run-bound name',
         'Seal exact rollback capture authority',
         'PAGES_AUTHORITY_MODE: capture-report',
-        'CAPTURE_TAR_PATH: ${{ runner.temp }}/artifact.tar',
+        'CAPTURE_ARTIFACT_NAME: ${{ steps.artifact-authority.outputs.artifact_name }}',
+        'CAPTURE_ARTIFACT_ID: ${{ steps.snapshot.outputs.artifact_id }}',
+        'CAPTURE_TAR_PATH: captured-pages-artifact/artifact.tar',
+        'CAPTURE_REPORT_PATH: ${{ runner.temp }}/pages-rollback-capture-authority.json',
+        'LEGACY_IDENTITY_PATH: ${{ inputs.mode == ''bootstrap-capture'' && ''snapshot-source/apps/clearra-web/build/clearra-build-identity.json'' || '''' }}',
+        'LEGACY_INITIAL_EVIDENCE_BASE64: ${{ needs.capture-authority.outputs.legacy_initial_evidence_base64 }}',
+        'LEGACY_PREARTIFACT_EVIDENCE_BASE64: ${{ steps.artifact-authority.outputs.legacy_evidence_base64 }}',
+        'Verify downloaded rollback package against sealed capture report',
+        'SNAPSHOT_TAR_SHA256: ${{ steps.capture-report.outputs.artifact_tar_sha256 }}',
+        'PAGES_ROLLBACK_PACKAGE_DIR: captured-pages-artifact',
+        'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: ${{ runner.temp }}/pages-rollback-capture-authority.json',
         'Upload sealed rollback capture authority',
         'Resolve sealed rollback capture report',
         'PAGES_AUTHORITY_MODE: resolve-restore',
@@ -2368,6 +2531,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'actions/download-artifact@v4',
         'github-token: ${{ github.token }}',
         'run-id: ${{ inputs.snapshot_run_id }}',
+        'Download sealed rollback capture report for package validation',
+        'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-capture-report-package/pages-rollback-capture-authority.json',
         'node authority-source/scripts/release/pages-rollback-package.mjs',
         'Upload exact rollback Pages artifact',
         'name: github-pages',
@@ -2375,6 +2540,12 @@ function Invoke-ReleaseIdentityGateValidation {
         'Revalidate rollback artifact immediately before deployment',
         'actions/deploy-pages@v4',
         'Seal restored Pages authority from API and public readback',
+        'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-capture-report-predeploy/pages-rollback-capture-authority.json',
+        'CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}',
+        'CAPTURE_REPORT_ARTIFACT_ID: ${{ needs.restore-authority.outputs.report_artifact_id }}',
+        'CAPTURE_REPORT_ARTIFACT_NAME: ${{ needs.restore-authority.outputs.report_artifact_name }}',
+        'CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ needs.restore-authority.outputs.report_artifact_digest }}',
+        'CAPTURE_REPORT_FILE_SHA256: ${{ steps.predeploy-authority.outputs.capture_report_file_sha256 }}',
         'pages-deployment-authority.mjs',
         'Upload sealed Pages restore authority'
     )) {
@@ -2412,6 +2583,73 @@ function Invoke-ReleaseIdentityGateValidation {
         if ([regex]::Matches($captureSection, '(?m)^\s{6}deployments: read\s*$').Count -ne 2) {
             Add-ArchitectureError 'Pages bootstrap authority readbacks must have exactly two deployment read permissions'
         }
+        foreach ($requiredBootstrapProducer in @(
+            'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
+            'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}',
+            'if [[ "$CAPTURE_MODE" == "bootstrap-capture" ]]; then',
+            '[[ "$HOME" == "/home/runner" ]]',
+            '[[ "${CARGO_HOME:-$HOME/.cargo}" == "/home/runner/.cargo" ]]'
+        )) {
+            if ($captureSection.IndexOf($requiredBootstrapProducer, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages bootstrap producer scope is missing '$requiredBootstrapProducer'"
+            }
+        }
+        if ($captureSection -match '(?m)^\s+(HOME|CARGO_HOME):\s*') {
+            Add-ArchitectureError 'Pages bootstrap producer must validate the natural hosted-runner HOME and CARGO_HOME without overriding them'
+        }
+        foreach ($conditionalScalar in @(
+            'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
+            'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}'
+        )) {
+            if ([regex]::Matches($captureSection, [regex]::Escape($conditionalScalar)).Count -ne 1) {
+                Add-ArchitectureError "Pages bootstrap producer must own conditional scalar exactly once: '$conditionalScalar'"
+            }
+        }
+        $rustPrepareStart = $captureSection.IndexOf('- name: Prepare Rust WASM toolchain', [System.StringComparison]::Ordinal)
+        $dependencyInstallStart = $captureSection.IndexOf('- name: Install GUI dependencies', [System.StringComparison]::Ordinal)
+        if ($rustPrepareStart -lt 0 -or $dependencyInstallStart -le $rustPrepareStart) {
+            Add-ArchitectureError 'Pages bootstrap Rust producer step is not a closed section'
+        } else {
+            $rustPrepareStep = $captureSection.Substring($rustPrepareStart, $dependencyInstallStart - $rustPrepareStart)
+            $captureModeIndex = $rustPrepareStep.IndexOf('CAPTURE_MODE: ${{ inputs.mode }}', [System.StringComparison]::Ordinal)
+            $bootstrapIfIndex = $rustPrepareStep.IndexOf('if [[ "$CAPTURE_MODE" == "bootstrap-capture" ]]; then', [System.StringComparison]::Ordinal)
+            $homeCheckIndex = $rustPrepareStep.IndexOf('[[ "$HOME" == "/home/runner" ]]', [System.StringComparison]::Ordinal)
+            $cargoHomeCheckIndex = $rustPrepareStep.IndexOf('[[ "${CARGO_HOME:-$HOME/.cargo}" == "/home/runner/.cargo" ]]', [System.StringComparison]::Ordinal)
+            $bootstrapFiIndex = $rustPrepareStep.IndexOf('fi', [Math]::Max(0, $cargoHomeCheckIndex), [System.StringComparison]::Ordinal)
+            $toolchainInstallIndex = $rustPrepareStep.IndexOf('rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal', [System.StringComparison]::Ordinal)
+            $targetInstallIndex = $rustPrepareStep.IndexOf('rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown', [System.StringComparison]::Ordinal)
+            if ($captureModeIndex -lt 0 -or
+                $bootstrapIfIndex -le $captureModeIndex -or
+                $homeCheckIndex -le $bootstrapIfIndex -or
+                $cargoHomeCheckIndex -le $homeCheckIndex -or
+                $bootstrapFiIndex -le $cargoHomeCheckIndex -or
+                $toolchainInstallIndex -le $bootstrapFiIndex -or
+                $targetInstallIndex -le $toolchainInstallIndex) {
+                Add-ArchitectureError 'Pages bootstrap Rust producer must scope natural runner-path checks inside bootstrap before pinned toolchain setup'
+            }
+        }
+        $modernPrepareStart = $captureSection.IndexOf('- name: Prepare exact rollback manifest contract', [System.StringComparison]::Ordinal)
+        $modernStampStart = $captureSection.IndexOf('- name: Stamp exact rollback identity', [System.StringComparison]::Ordinal)
+        $legacyStampStart = $captureSection.IndexOf('- name: Stamp separate reconstructed v0.7.4 identity', [System.StringComparison]::Ordinal)
+        $portableTreeStart = $captureSection.IndexOf('- name: Validate portable rollback tree', [System.StringComparison]::Ordinal)
+        if ($modernPrepareStart -lt 0 -or
+            $modernStampStart -le $modernPrepareStart -or
+            $legacyStampStart -le $modernStampStart -or
+            $portableTreeStart -le $legacyStampStart) {
+            Add-ArchitectureError 'Pages capture identity routes are not a closed modern/legacy sequence'
+        } else {
+            $modernPrepareStep = $captureSection.Substring($modernPrepareStart, $modernStampStart - $modernPrepareStart)
+            $modernStampStep = $captureSection.Substring($modernStampStart, $legacyStampStart - $modernStampStart)
+            $legacyStampStep = $captureSection.Substring($legacyStampStart, $portableTreeStart - $legacyStampStart)
+            if ($modernPrepareStep.IndexOf("if: `${{ inputs.mode == 'capture' }}", [System.StringComparison]::Ordinal) -lt 0 -or
+                $modernStampStep.IndexOf("if: `${{ inputs.mode == 'capture' }}", [System.StringComparison]::Ordinal) -lt 0 -or
+                $legacyStampStep.IndexOf("if: `${{ inputs.mode == 'bootstrap-capture' }}", [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError 'Pages capture must keep modern manifest/identity stamping disjoint from legacy reconstruction'
+            }
+            if ($legacyStampStep.IndexOf('snapshot-source/scripts/release', [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError 'Pages legacy reconstruction must never invoke a modern helper from the v0.7.4 snapshot'
+            }
+        }
     }
     foreach ($required in @(
         'refs/heads/main',
@@ -2428,23 +2666,34 @@ function Invoke-ReleaseIdentityGateValidation {
         'MINIMUM_RETENTION_MS',
         'forward and restore mutations require a fresh workflow dispatch, not a rerun',
         'clearra-pages-rollback-${snapshot}-authority-${authority}-run-${runId}-attempt-${attempt}',
-        'clearra.pages.rollback-capture-authority.v1',
+        'clearra.pages.rollback-capture-authority.v2',
+        '"capture_kind"',
+        '"legacy_snapshot"',
+        'const captureKind = input.captureMode === "bootstrap-capture"',
+        'capture_kind: captureKind',
+        'legacy_snapshot: legacySnapshot === null ? null : structuredClone(legacySnapshot)',
+        'downloaded capture artifact must contain exactly one artifact.tar',
+        'capture_report_file_sha256=${reportFileSha256}',
         'resolveCaptureReportArtifact',
         'readRollbackCaptureReport',
         'capture run must contain exactly one sealed report artifact',
         'validatePagesIdentity(identity, manifest, currentPagesSha)',
-        'LEGACY_BOOTSTRAP_RELEASE_TAG = "v0.7.4"',
+        'LEGACY_PAGES_RELEASE_TAG',
+        'LEGACY_PAGES_SNAPSHOT_SHA',
+        'LEGACY_PAGES_TAG_OBJECT_SHA',
         'validateLegacyPagesBootstrapAuthority',
         'validatePagesCaptureRequestInputs',
         'preparePagesRollbackManifests',
-        'LEGACY_WASM_MANIFEST_BYTES = 768',
-        'LEGACY_WASM_CAPABILITIES_SHA256',
-        'serializeClearraWasmManifest',
-        'runtime_identity must be absent before legacy bootstrap',
-        'bytes do not match the deterministic v0.7.4 producer format',
-        'open(temporaryPath, "wx"',
-        'rename(staticTemporaryPath, staticRecord.target)',
-        'rename(buildTemporaryPath, buildRecord.target)',
+        'modern rollback manifest preparation is available only for regular capture',
+        'readLegacyReconstructedIdentity',
+        'decodeLegacyPublicReadbackEvidence',
+        'initial_public_readback',
+        'preartifact_public_readback',
+        'rebuilt_payload_set_sha256',
+        'legacy reconstructed identity SHA-256 differs from its canonical producer bytes',
+        'legacy Pages public authority changed between initial and preartifact readback',
+        'approved v0.7.4 snapshot must not be fabricated as a modern Pages capture',
+        'PAGES_CAPTURE_MODE must be capture or bootstrap-capture for capture report sealing',
         'PAGES_AUTHORITY_MODE must be prepare-manifests',
         '/git/ref/tags/${encodeURIComponent(legacyReleaseTag)}',
         '/git/tags/${requireSha(tagRef.object.sha, "legacy annotated tag object SHA")}',
@@ -2473,6 +2722,24 @@ function Invoke-ReleaseIdentityGateValidation {
         'Pages rollback tar contains a link or special entry',
         'Pages rollback tar contains a duplicate member path',
         'Downloaded Pages artifact.tar differs from the captured SHA-256',
+        'validateRollbackCaptureReport(captureReport, { expectedSnapshotSha: sha })',
+        'captureReport.artifact_tar_sha256 !== expectedDigest',
+        'Pages rollback tar SHA-256 differs from the sealed capture report',
+        'PAGES_ROLLBACK_CAPTURE_REPORT_PATH is required',
+        'readRollbackCaptureReport(captureReportPath)',
+        'captureReport.capture_kind === "legacy-v0.7.4"',
+        'expectedAuthoritySha: captureReport.authority_source_commit',
+        'expectedCaptureRunId: captureReport.capture_run_id',
+        'expectedCaptureRunAttempt: captureReport.capture_run_attempt',
+        'captureReport.legacy_snapshot.legacy_identity_sha256 !==',
+        'validateLegacyReconstructedIdentityBytes',
+        'legacyReconstructedIdentitySha256',
+        'validateLegacyDeployedPagesSnapshot',
+        'LEGACY_PAGES_PAYLOAD.manifest.path',
+        'LEGACY_PAGES_PAYLOAD.bindings.path',
+        'LEGACY_PAGES_PAYLOAD.wasm.path',
+        'captureReport.capture_kind !== "modern-v2"',
+        'Pages rollback capture report kind is unsupported',
         'clearra-build-identity.json',
         'wasm/clearra_wasm.manifest.json',
         'validatePagesIdentity(identity, manifest, sha)'
@@ -2482,12 +2749,55 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
+        'clearra.pages.identity.legacy-reconstructed.v1',
+        'clearra.pages.legacy-public-readback.v1',
+        'LEGACY_PAGES_VERSION = "0.7.4"',
+        'LEGACY_PAGES_ORIGINAL_IDENTITY_STATUS = 404',
+        'a95973dbc1c3c1919478328d12e4d25ddaedea71',
+        '0438d85f90b47c4ce89835f6a6d665a0415aa25a',
+        '64520ce1a37e1e710748a6644339ea0b497a685169e4a13bb3f07e3585352e53',
+        '512fd4e7ea2b5432679da44c1b74850b2d9022f2dc41b6d05db8822c00bf471a',
+        '7690c81f5a63702a9154b4e9bcce77a71457291cb2abf74c0fa4968fefffd276',
+        'path: "wasm/clearra_wasm.manifest.json"',
+        'path: "wasm/clearra_wasm.512fd4e7ea2b5432679da44c.js"',
+        'path: "wasm/clearra_wasm_bg.7690c81f5a63702a9154b4e9.wasm"',
+        'bytes: 768',
+        'bytes: 42201',
+        'bytes: 4235934',
+        'capturedPublicIdentityStatus',
+        'validateLegacyPagesWasmManifest',
+        'must not fabricate modern runtime_identity semantics',
+        'validateLegacyPagesPayloadBytes',
+        'serializeLegacyReconstructedIdentity',
+        'legacyReconstructedIdentitySha256',
+        'createLegacyPublicReadbackEvidence',
+        'validateLegacyPagesPublicSnapshot',
+        'identityPath, "wx", 0o600',
+        'rebuilt static and deployable legacy Pages payloads differ'
+    )) {
+        if ($pagesLegacyContract.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages legacy contract owner is missing immutable v0.7.4 authority '$required'"
+        }
+    }
+    foreach ($required in @(
+        'approved legacy constants match the real annotated v0.7.4 git object',
+        'approved manifest bytes preserve the 768-byte v1 schema without v2 semantics',
+        'legacy identity is separate, canonical, exact-keyed, and capture-bound',
+        'public readback evidence is phase-bound, canonical, and tamper-evident',
+        'public identity or any public byte drift fails closed',
+        'bootstrap path never assumes the absent v0.7.4 modern release helper',
+        'sealed v0.7.4 fixture is bound end-to-end across capture package and deployment'
+    )) {
+        if ($pagesLegacyContractTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Pages legacy contract regression is missing adversarial case '$required'"
+        }
+    }
+    foreach ($required in @(
         'canonical acceptance requires one exact success and rejects duplicate or wrong authority',
         'legacy Pages bootstrap binds one approved annotated release to the active 404 site',
         'bootstrap capture requires its explicit tag and rejects every restore-only extra input',
-        'bootstrap manifest preparation upgrades exact v0.7.4 legacy manifests atomically without changing artifacts',
         'regular capture verifies manifests without rewriting them and rejects missing or wrong identity',
-        'bootstrap manifest preparation rejects identity, partial identity, legacy drift, mismatch, and extra fields before mutation',
+        'legacy manifest handling is excluded from the modern preparation path',
         'Pages rollback workflow keeps bootstrap capture read-only and reuses the sealed capture path',
         'canonical acceptance query pins the main branch and a non-truncating exact SHA page',
         'capture authority binds the run attempt, job, artifact, retention, and consumer order',
@@ -2503,8 +2813,10 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'validates the exact tar hash and both complete identity documents',
+        'rejects an incorrect tar authority before reading identity',
         'rejects traversal, links, duplicate identities, and forged identity',
-        'rejects corrupted headers and data after the tar end marker'
+        'rejects corrupted headers and data after the tar end marker',
+        'sealed legacy mode rejects a fabricated v2 identity before payload downgrade'
     )) {
         if ($pagesRollbackPackageTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages rollback package regression is missing adversarial case '$required'"
@@ -2518,6 +2830,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'Stamp exact rollback identity',
         [System.StringComparison]::Ordinal
     )
+    $legacyIdentityStampIndex = $pagesRollback.IndexOf(
+        'Stamp separate reconstructed v0.7.4 identity',
+        [System.StringComparison]::Ordinal
+    )
     $captureValidationIndex = $pagesRollback.IndexOf(
         'Revalidate capture authority immediately before artifact creation',
         [System.StringComparison]::Ordinal
@@ -2526,8 +2842,16 @@ function Invoke-ReleaseIdentityGateValidation {
         'Upload durable Pages rollback artifact',
         [System.StringComparison]::Ordinal
     )
+    $captureDownloadIndex = $pagesRollback.IndexOf(
+        'Download uploaded rollback artifact by exact run-bound name',
+        [System.StringComparison]::Ordinal
+    )
     $captureReadbackIndex = $pagesRollback.IndexOf(
         'Seal exact rollback capture authority',
+        [System.StringComparison]::Ordinal
+    )
+    $capturePackageValidationIndex = $pagesRollback.IndexOf(
+        'Verify downloaded rollback package against sealed capture report',
         [System.StringComparison]::Ordinal
     )
     $captureReportUploadIndex = $pagesRollback.IndexOf(
@@ -2536,22 +2860,57 @@ function Invoke-ReleaseIdentityGateValidation {
     )
     if ($manifestPreparationIndex -lt 0 -or
         $identityStampIndex -le $manifestPreparationIndex -or
-        $captureValidationIndex -le $identityStampIndex -or
+        $legacyIdentityStampIndex -le $identityStampIndex -or
+        $captureValidationIndex -le $legacyIdentityStampIndex -or
         $captureUploadIndex -le $captureValidationIndex -or
-        $captureReadbackIndex -le $captureUploadIndex -or
-        $captureReportUploadIndex -le $captureReadbackIndex) {
-        Add-ArchitectureError 'Pages rollback capture must prepare manifests, stamp identity, revalidate, create the exact Pages tar, seal actual authorities, and upload the sealed report in order'
+        $captureDownloadIndex -le $captureUploadIndex -or
+        $captureReadbackIndex -le $captureDownloadIndex -or
+        $capturePackageValidationIndex -le $captureReadbackIndex -or
+        $captureReportUploadIndex -le $capturePackageValidationIndex) {
+        Add-ArchitectureError 'Pages rollback capture must preserve modern or legacy manifests, stamp a separate identity, read back the exact Pages tar, seal it, validate its payloads, and upload the sealed report in order'
+    } else {
+        $captureDownloadStep = $pagesRollback.Substring($captureDownloadIndex, $captureReadbackIndex - $captureDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ steps.artifact-authority.outputs.artifact_name }}',
+            'path: captured-pages-artifact'
+        )) {
+            if ($captureDownloadStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages capture artifact readback step is missing exact binding '$required'"
+            }
+        }
+    }
+    if ($pagesRollback -notmatch '(?ms)^  capture-build:.*?^    needs: capture-authority\s*$') {
+        Add-ArchitectureError 'Pages capture build must depend on the completed initial capture authority'
+    }
+    $restoreResolveIndex = $pagesRollback.IndexOf('Resolve sealed rollback capture report', [System.StringComparison]::Ordinal)
+    $restoreInitialReportDownloadIndex = $pagesRollback.IndexOf('Download sealed rollback capture report', [Math]::Max(0, $restoreResolveIndex), [System.StringComparison]::Ordinal)
+    $restoreInitialAuthorityIndex = $pagesRollback.IndexOf('Verify rollback run and artifact authority', [System.StringComparison]::Ordinal)
+    $restoreTarDownloadIndex = $pagesRollback.IndexOf('Download exact rollback package', [System.StringComparison]::Ordinal)
+    if ($restoreResolveIndex -lt 0 -or
+        $restoreInitialReportDownloadIndex -le $restoreResolveIndex -or
+        $restoreInitialAuthorityIndex -le $restoreInitialReportDownloadIndex -or
+        $restoreTarDownloadIndex -le $restoreInitialAuthorityIndex) {
+        Add-ArchitectureError 'Pages restore must resolve, download, and verify the sealed report before downloading its tar'
     }
     $rollbackDownloadIndex = $pagesRollback.IndexOf(
         'Download exact rollback package',
         [System.StringComparison]::Ordinal
     )
+    $rollbackReportDownloadIndex = $pagesRollback.IndexOf(
+        'Download sealed rollback capture report for package validation',
+        [System.StringComparison]::Ordinal
+    )
     $rollbackPackageValidationIndex = $pagesRollback.IndexOf(
         'Verify downloaded rollback package',
+        [Math]::Max(0, $rollbackDownloadIndex),
         [System.StringComparison]::Ordinal
     )
     $rollbackUploadIndex = $pagesRollback.IndexOf(
         'Upload exact rollback Pages artifact',
+        [System.StringComparison]::Ordinal
+    )
+    $rollbackPredeployReportDownloadIndex = $pagesRollback.IndexOf(
+        'Redownload sealed rollback capture report immediately before restore',
         [System.StringComparison]::Ordinal
     )
     $rollbackLateValidationIndex = $pagesRollback.IndexOf(
@@ -2570,22 +2929,95 @@ function Invoke-ReleaseIdentityGateValidation {
         'Upload sealed Pages restore authority',
         [System.StringComparison]::Ordinal
     )
+    if ($restoreInitialReportDownloadIndex -ge 0 -and $restoreInitialAuthorityIndex -gt $restoreInitialReportDownloadIndex) {
+        $restoreInitialReportStep = $pagesRollback.Substring($restoreInitialReportDownloadIndex, $restoreInitialAuthorityIndex - $restoreInitialReportDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ steps.rollback-report.outputs.report_artifact_name }}',
+            'path: rollback-capture-report'
+        )) {
+            if ($restoreInitialReportStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages initial restore report download is missing exact binding '$required'"
+            }
+        }
+    }
+    if ($rollbackDownloadIndex -ge 0 -and $rollbackReportDownloadIndex -gt $rollbackDownloadIndex) {
+        $restoreTarDownloadStep = $pagesRollback.Substring($rollbackDownloadIndex, $rollbackReportDownloadIndex - $rollbackDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ needs.restore-authority.outputs.artifact_name }}',
+            'path: rollback-package'
+        )) {
+            if ($restoreTarDownloadStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages restore tar download is missing exact binding '$required'"
+            }
+        }
+    }
+    if ($rollbackReportDownloadIndex -ge 0 -and $rollbackPackageValidationIndex -gt $rollbackReportDownloadIndex) {
+        $restorePackageReportStep = $pagesRollback.Substring($rollbackReportDownloadIndex, $rollbackPackageValidationIndex - $rollbackReportDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ needs.restore-authority.outputs.report_artifact_name }}',
+            'path: rollback-capture-report-package'
+        )) {
+            if ($restorePackageReportStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages restore package report download is missing exact binding '$required'"
+            }
+        }
+    }
+    if ($rollbackPredeployReportDownloadIndex -ge 0 -and $rollbackLateValidationIndex -gt $rollbackPredeployReportDownloadIndex) {
+        $restorePredeployReportStep = $pagesRollback.Substring($rollbackPredeployReportDownloadIndex, $rollbackLateValidationIndex - $rollbackPredeployReportDownloadIndex)
+        foreach ($required in @(
+            'name: ${{ needs.restore-authority.outputs.report_artifact_name }}',
+            'path: rollback-capture-report-predeploy'
+        )) {
+            if ($restorePredeployReportStep.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages predeploy restore report download is missing exact binding '$required'"
+            }
+        }
+    }
+    if ($pagesRollback -notmatch '(?ms)^  restore-package:.*?^    needs: restore-authority\s*$') {
+        Add-ArchitectureError 'Pages restore package must depend on the verified restore authority'
+    }
+    if ($pagesRollback -notmatch '(?ms)^  deploy-restore:.*?^    needs:\s*\r?\n\s+- restore-authority\s*\r?\n\s+- restore-package\s*$') {
+        Add-ArchitectureError 'Pages restore deployment must depend on both restore authority and the validated package'
+    }
     if ($rollbackDownloadIndex -lt 0 -or
-        $rollbackPackageValidationIndex -le $rollbackDownloadIndex -or
+        $rollbackReportDownloadIndex -le $rollbackDownloadIndex -or
+        $rollbackPackageValidationIndex -le $rollbackReportDownloadIndex -or
         $rollbackUploadIndex -le $rollbackPackageValidationIndex -or
-        $rollbackLateValidationIndex -le $rollbackUploadIndex -or
+        $rollbackPredeployReportDownloadIndex -le $rollbackUploadIndex -or
+        $rollbackLateValidationIndex -le $rollbackPredeployReportDownloadIndex -or
         $rollbackDeployIndex -le $rollbackLateValidationIndex -or
         $rollbackReadbackIndex -le $rollbackDeployIndex -or
         $rollbackAuthorityUploadIndex -le $rollbackReadbackIndex) {
-        Add-ArchitectureError 'Pages rollback must download, validate, re-upload, revalidate, deploy, seal, and upload the exact snapshot authority in order'
+        Add-ArchitectureError 'Pages rollback must download the tar and sealed report, validate, re-upload, redownload the report, revalidate, deploy, seal, and upload the exact snapshot authority in order'
     }
     foreach ($required in @(
-        'clearra.pages.deployment-authority.v1',
+        'clearra.pages.deployment-authority.v2',
         'validateWorkflowRun',
         '/pages/deployments/${encodeURIComponent(deploymentId)}',
         'artifact_api_readback_sha256',
         'deployment_api_readback_sha256',
         'live_identity_sha256',
+        'live_payload_set_sha256',
+        'rollback_capture_report_sha256',
+        'rollback_artifact_sha256',
+        'rollback_tar_sha256',
+        'rollback_capture_run_id',
+        'rollback_report_artifact_id',
+        'rollback_report_artifact_name',
+        'rollback_report_artifact_digest',
+        'rollback_report_artifact_api_readback_sha256',
+        'rollback_report_file_sha256',
+        'validateRollbackCaptureReport',
+        'expectedCaptureReportArtifactName',
+        'validateCaptureReportArtifact',
+        'rollbackCaptureReport.capture_kind !== "legacy-v0.7.4"',
+        'rollback capture run differs from the sealed capture report',
+        'rollback report artifact name differs from the sealed capture authority',
+        'restored legacy Pages authority requires a public byte reader',
+        'validateLegacyDeployedPagesSnapshot',
+        '/actions/artifacts/${rollbackReportArtifactId}',
+        'local rollback capture report SHA-256 differs from predeploy authority',
+        'forward Pages authority must not invent rollback capture bindings',
         'open(target, "wx", 0o600)'
     )) {
         if ($pagesDeploymentAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2596,6 +3028,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'seals forward artifact, run-attempt, deployment status, and live identity API readbacks',
         'restore authority derives accepted identity and queries the deploy action workflow SHA',
         'rejects artifact digest, run attempt, deployment status, and public identity drift',
+        'restore late binding rejects report artifact substitution and public byte drift',
         'writes one canonical exclusive report file and rejects tampering'
     )) {
         if ($pagesDeploymentAuthorityTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {

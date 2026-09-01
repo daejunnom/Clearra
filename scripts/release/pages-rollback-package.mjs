@@ -3,7 +3,17 @@ import { readFile, readdir, lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-import { validatePagesIdentity } from "./pages-rollback-authority.mjs";
+import {
+  readRollbackCaptureReport,
+  validatePagesIdentity,
+  validateRollbackCaptureReport,
+} from "./pages-rollback-authority.mjs";
+import {
+  LEGACY_PAGES_PAYLOAD,
+  legacyReconstructedIdentitySha256,
+  validateLegacyDeployedPagesSnapshot,
+  validateLegacyReconstructedIdentityBytes,
+} from "./pages-legacy-contract.mjs";
 
 const BLOCK_SIZE = 512;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -176,7 +186,19 @@ function parseRequiredJson(entries, path, label) {
   }
 }
 
-export function validateRollbackPackageBuffer(buffer, { expectedSha, expectedTarSha256 }) {
+function requireFileEntry(entries, path, label) {
+  const entry = entries.get(path);
+  if (entry?.type !== "0") {
+    fail(`${label} is missing from the Pages rollback tar`);
+  }
+  return entry.content;
+}
+
+export function validateRollbackPackageBuffer(buffer, {
+  expectedSha,
+  expectedTarSha256,
+  captureReport,
+}) {
   const sha = requirePattern(expectedSha, SHA_PATTERN, "snapshot SHA");
   const expectedDigest = requirePattern(
     expectedTarSha256,
@@ -188,16 +210,60 @@ export function validateRollbackPackageBuffer(buffer, { expectedSha, expectedTar
     fail("Downloaded Pages artifact.tar differs from the captured SHA-256");
   }
 
+  validateRollbackCaptureReport(captureReport, { expectedSnapshotSha: sha });
+  if (captureReport.artifact_tar_sha256 !== expectedDigest) {
+    fail("Pages rollback tar SHA-256 differs from the sealed capture report");
+  }
+
   const entries = parseRollbackTar(buffer);
+  if (captureReport.capture_kind === "legacy-v0.7.4") {
+    const identityBytes = requireFileEntry(entries, REQUIRED_IDENTITY_PATH, "legacy Pages identity");
+    const identity = validateLegacyReconstructedIdentityBytes(identityBytes, {
+      expectedSnapshotSha: sha,
+      expectedAuthoritySha: captureReport.authority_source_commit,
+      expectedCaptureRunId: captureReport.capture_run_id,
+      expectedCaptureRunAttempt: captureReport.capture_run_attempt,
+    });
+    const expectedIdentity = captureReport.legacy_snapshot.identity;
+    if (
+      captureReport.legacy_snapshot.legacy_identity_sha256 !==
+      legacyReconstructedIdentitySha256(identity)
+    ) {
+      fail("legacy Pages tar identity SHA-256 differs from the sealed capture report");
+    }
+    validateLegacyDeployedPagesSnapshot({
+      identity,
+      expectedIdentity,
+      manifestBytes: requireFileEntry(
+        entries,
+        LEGACY_PAGES_PAYLOAD.manifest.path,
+        "legacy Pages WASM manifest",
+      ),
+      bindingsBytes: requireFileEntry(
+        entries,
+        LEGACY_PAGES_PAYLOAD.bindings.path,
+        "legacy Pages WASM bindings",
+      ),
+      wasmBytes: requireFileEntry(
+        entries,
+        LEGACY_PAGES_PAYLOAD.wasm.path,
+        "legacy Pages WASM binary",
+      ),
+    });
+    return { actualDigest, entries, identity, captureKind: captureReport.capture_kind };
+  }
+  if (captureReport.capture_kind !== "modern-v2") {
+    fail("Pages rollback capture report kind is unsupported");
+  }
   const identity = parseRequiredJson(entries, REQUIRED_IDENTITY_PATH, "Pages identity");
   const manifest = parseRequiredJson(entries, REQUIRED_MANIFEST_PATH, "Pages WASM manifest");
   validatePagesIdentity(identity, manifest, sha);
-  return { actualDigest, entries };
+  return { actualDigest, entries, identity, captureKind: captureReport.capture_kind };
 }
 
 export async function validateRollbackPackageDirectory(
   directory,
-  { expectedSha, expectedTarSha256 },
+  { expectedSha, expectedTarSha256, captureReport },
 ) {
   const resolvedDirectory = resolve(directory);
   const names = (await readdir(resolvedDirectory)).sort();
@@ -212,6 +278,7 @@ export async function validateRollbackPackageDirectory(
   return validateRollbackPackageBuffer(await readFile(tarPath), {
     expectedSha,
     expectedTarSha256,
+    captureReport,
   });
 }
 
@@ -219,10 +286,19 @@ async function main() {
   const directory = process.env.PAGES_ROLLBACK_PACKAGE_DIR;
   const expectedSha = process.env.SNAPSHOT_SHA;
   const expectedTarSha256 = process.env.SNAPSHOT_TAR_SHA256;
+  const captureReportPath = process.env.PAGES_ROLLBACK_CAPTURE_REPORT_PATH;
   if (typeof directory !== "string" || directory.length === 0) {
     fail("PAGES_ROLLBACK_PACKAGE_DIR is required");
   }
-  await validateRollbackPackageDirectory(directory, { expectedSha, expectedTarSha256 });
+  if (typeof captureReportPath !== "string" || captureReportPath.length === 0) {
+    fail("PAGES_ROLLBACK_CAPTURE_REPORT_PATH is required");
+  }
+  const { report } = await readRollbackCaptureReport(captureReportPath);
+  await validateRollbackPackageDirectory(directory, {
+    expectedSha,
+    expectedTarSha256,
+    captureReport: report,
+  });
   console.log("pages_rollback_package=passed");
 }
 
