@@ -74,7 +74,15 @@ function Invoke-ClearraTask([string]$TaskName, [string]$Root) {
                 -Name ClearraNoProductDebtArchitecturePassed `
                 -Scope Script `
                 -ErrorAction SilentlyContinue
-            if ($null -ne $noProductDebtArchitecture -and [bool]$noProductDebtArchitecture.Value) {
+            $releaseAcceptanceShard = Get-Variable `
+                -Name ClearraReleaseAcceptanceShard `
+                -Scope Script `
+                -ErrorAction SilentlyContinue
+            $architectureOwnedByParallelLeaf =
+                $null -ne $releaseAcceptanceShard -and
+                [string]$releaseAcceptanceShard.Value -eq "FoundationDesktopHost"
+            if (($null -ne $noProductDebtArchitecture -and [bool]$noProductDebtArchitecture.Value) -or
+                $architectureOwnedByParallelLeaf) {
                 $desktopHostArgs["ArchitectureValidatedByNoProductDebt"] = $true
             }
             if ($VerboseLog.IsPresent) {

@@ -87,14 +87,25 @@ const linuxJob = section(workflow, "\n  linux-cli:", "\n  discord-bot:");
 const discordJob = section(
   workflow,
   "\n  discord-bot:",
-  "\n  release-acceptance-foundation:",
+  "\n  release-acceptance-foundation-no-product-debt:",
 );
 const metadataJob = section(workflow, "\n  metadata:", "\n  ctk3:");
-const releaseAcceptanceFoundationJob = section(
+const releaseAcceptanceFoundationNoProductDebtJob = section(
   workflow,
-  "\n  release-acceptance-foundation:",
+  "\n  release-acceptance-foundation-no-product-debt:",
+  "\n  release-acceptance-foundation-adversarial-correctness:",
+);
+const releaseAcceptanceFoundationAdversarialCorrectnessJob = section(
+  workflow,
+  "\n  release-acceptance-foundation-adversarial-correctness:",
+  "\n  release-acceptance-foundation-desktop-host:",
+);
+const releaseAcceptanceFoundationDesktopHostJob = section(
+  workflow,
+  "\n  release-acceptance-foundation-desktop-host:",
   "\n  release-acceptance-sanitizer:",
 );
+const releaseAcceptanceFoundationJob = releaseAcceptanceFoundationNoProductDebtJob;
 const releaseAcceptanceSanitizerJob = section(
   workflow,
   "\n  release-acceptance-sanitizer:",
@@ -298,7 +309,7 @@ const pagesDeploymentAuthorityUploadStep = pagesDeployJob.slice(
 const productAuthorityStep = section(
   workflow,
   "\n      - name: Require the product capability and alias parser authority",
-  "\n\n  release-acceptance-foundation:",
+  "\n\n  release-acceptance-foundation-no-product-debt:",
 );
 const upstreamAuthorityStep = section(
   metadataJob,
@@ -1116,16 +1127,33 @@ requireExactYamlScalar(
   8,
 );
 for (const [name, job, skeleton] of [
-  ["foundation", releaseAcceptanceFoundationJob, [
+  ["foundation NoProductDebt", releaseAcceptanceFoundationNoProductDebtJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
     "- name: Archive the exact accepted source on Windows",
     "- id: release_toolchain_cache",
     "- name: Install JavaScript workspace",
     "- name: Verify canonical ReleaseAcceptance shard mapping",
-    "- name: Run canonical release acceptance foundation shard",
-    "- name: Seal canonical release acceptance foundation shard",
-    "- name: Upload canonical release acceptance foundation shard",
+    "- name: Run canonical release acceptance NoProductDebt leaf",
+    "- name: Seal canonical release acceptance NoProductDebt leaf",
+    "- name: Upload canonical release acceptance NoProductDebt leaf",
+  ]],
+  ["foundation AdversarialCorrectness", releaseAcceptanceFoundationAdversarialCorrectnessJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- id: release_toolchain_cache",
+    "- name: Run canonical release acceptance AdversarialCorrectness leaf",
+    "- name: Seal canonical release acceptance AdversarialCorrectness leaf",
+    "- name: Upload canonical release acceptance AdversarialCorrectness leaf",
+  ]],
+  ["foundation DesktopHost", releaseAcceptanceFoundationDesktopHostJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- id: release_toolchain_cache",
+    "- name: Install JavaScript workspace",
+    "- name: Run canonical release acceptance DesktopHost leaf",
+    "- name: Seal canonical release acceptance DesktopHost leaf",
+    "- name: Upload canonical release acceptance DesktopHost leaf",
   ]],
   ["sanitizer", releaseAcceptanceSanitizerJob, [
     "- uses: actions/checkout@v4",
@@ -1172,12 +1200,14 @@ requireExactStepSkeleton(
   "canonical release acceptance fan-in",
 );
 requireText(
-  releaseAcceptanceFoundationJob,
+  releaseAcceptanceFoundationNoProductDebtJob,
   "run: pwsh -NoProfile -File scripts/test_release_acceptance_shards.ps1",
   "canonical ReleaseAcceptance shard mapping regression",
 );
 const releaseShardJobs = [
-  releaseAcceptanceFoundationJob,
+  releaseAcceptanceFoundationNoProductDebtJob,
+  releaseAcceptanceFoundationAdversarialCorrectnessJob,
+  releaseAcceptanceFoundationDesktopHostJob,
   releaseAcceptanceSanitizerJob,
   releaseAcceptanceRustJob,
   releaseAcceptancePagesJob,
@@ -1204,7 +1234,9 @@ if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 0) {
   throw new Error("canonical acceptance must remain restore-only with no explicit cache writer");
 }
 if (
-  releaseAcceptanceFoundationJob.includes("actions/cache/save@v4") ||
+  releaseAcceptanceFoundationNoProductDebtJob.includes("actions/cache/save@v4") ||
+  releaseAcceptanceFoundationAdversarialCorrectnessJob.includes("actions/cache/save@v4") ||
+  releaseAcceptanceFoundationDesktopHostJob.includes("actions/cache/save@v4") ||
   releaseAcceptanceSanitizerJob.includes("actions/cache/save@v4") ||
   releaseAcceptanceRustJob.includes("actions/cache/save@v4") ||
   releaseAcceptancePagesJob.includes("actions/cache/save@v4")
@@ -1212,7 +1244,9 @@ if (
   throw new Error("no canonical acceptance shard may write a cache");
 }
 for (const [shard, job, caseName] of [
-  ["foundation", releaseAcceptanceFoundationJob, "Foundation"],
+  ["foundation-no-product-debt", releaseAcceptanceFoundationNoProductDebtJob, "FoundationNoProductDebt"],
+  ["foundation-adversarial-correctness", releaseAcceptanceFoundationAdversarialCorrectnessJob, "FoundationAdversarialCorrectness"],
+  ["foundation-desktop-host", releaseAcceptanceFoundationDesktopHostJob, "FoundationDesktopHost"],
   ["sanitizer", releaseAcceptanceSanitizerJob, "Sanitizer"],
   ["rust", releaseAcceptanceRustJob, "Rust"],
   ["pages", releaseAcceptancePagesJob, "Pages"],
@@ -1895,7 +1929,7 @@ if (
   );
 }
 requireExactYamlScalar(
-  releaseAcceptanceFoundationJob,
+  releaseAcceptanceFoundationNoProductDebtJob,
   "runs-on",
   "windows-latest",
   "Windows foundation acceptance runner",
@@ -1923,7 +1957,9 @@ requireExactYamlLiteralScript(
 );
 for (const [name, job] of [
   ["Linux metadata", metadataJob],
-  ["Windows foundation acceptance", releaseAcceptanceFoundationJob],
+  ["Windows foundation NoProductDebt acceptance", releaseAcceptanceFoundationNoProductDebtJob],
+  ["Windows foundation AdversarialCorrectness acceptance", releaseAcceptanceFoundationAdversarialCorrectnessJob],
+  ["Windows foundation DesktopHost acceptance", releaseAcceptanceFoundationDesktopHostJob],
   ["Windows sanitizer acceptance", releaseAcceptanceSanitizerJob],
   ["Windows Rust acceptance", releaseAcceptanceRustJob],
   ["Windows Pages acceptance", releaseAcceptancePagesJob],
@@ -1944,13 +1980,15 @@ for (const [name, job] of [
   }
 }
 requireExactYamlScalar(
-  releaseAcceptanceFoundationJob,
+  releaseAcceptanceFoundationNoProductDebtJob,
   "if",
   "github.event_name == 'workflow_dispatch'",
   "Windows foundation acceptance dispatch-only condition",
 );
 for (const [name, job] of [
-  ["foundation", releaseAcceptanceFoundationJob],
+  ["foundation NoProductDebt", releaseAcceptanceFoundationNoProductDebtJob],
+  ["foundation AdversarialCorrectness", releaseAcceptanceFoundationAdversarialCorrectnessJob],
+  ["foundation DesktopHost", releaseAcceptanceFoundationDesktopHostJob],
   ["sanitizer", releaseAcceptanceSanitizerJob],
   ["rust", releaseAcceptanceRustJob],
   ["Pages", releaseAcceptancePagesJob],
@@ -1965,10 +2003,24 @@ for (const [name, job] of [
   );
 }
 requireExactYamlScalar(
-  releaseAcceptanceFoundationJob,
+  releaseAcceptanceFoundationNoProductDebtJob,
   "needs",
   "metadata",
-  "foundation acceptance metadata dependency",
+  "foundation NoProductDebt acceptance metadata dependency",
+  4,
+);
+requireExactYamlScalar(
+  releaseAcceptanceFoundationAdversarialCorrectnessJob,
+  "needs",
+  "metadata",
+  "foundation AdversarialCorrectness acceptance metadata dependency",
+  4,
+);
+requireExactYamlScalar(
+  releaseAcceptanceFoundationDesktopHostJob,
+  "needs",
+  "metadata",
+  "foundation DesktopHost acceptance metadata dependency",
   4,
 );
 requireExactYamlScalar(
@@ -1996,12 +2048,14 @@ requireExactYamlFlowSequence(
   "needs",
   [
     "metadata",
-    "release-acceptance-foundation",
+    "release-acceptance-foundation-no-product-debt",
+    "release-acceptance-foundation-adversarial-correctness",
+    "release-acceptance-foundation-desktop-host",
     "release-acceptance-sanitizer",
     "release-acceptance-rust",
     "release-acceptance-pages",
   ],
-  "release acceptance exact four-shard fan-in dependencies",
+  "release acceptance exact six-shard fan-in dependencies",
 );
 requireExactYamlScalar(
   releaseAcceptanceJob,
