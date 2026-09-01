@@ -434,7 +434,7 @@ function pagesIdentityFixture() {
 
 function pagesDeploymentReportFixture(liveIdentity = pagesIdentityFixture()) {
   return sealCanonicalReport({
-    schema_id: "clearra.pages.deployment-authority.v1",
+    schema_id: "clearra.pages.deployment-authority.v2",
     mode: "forward",
     repository: "daejunnom/Clearra",
     source_commit: COMMIT,
@@ -457,6 +457,16 @@ function pagesDeploymentReportFixture(liveIdentity = pagesIdentityFixture()) {
     base_path: "/Clearra",
     pages_configuration_api_readback_sha256: "4".repeat(64),
     live_identity_sha256: canonicalSha256(liveIdentity),
+    live_payload_set_sha256: null,
+    rollback_capture_report_sha256: null,
+    rollback_artifact_sha256: null,
+    rollback_tar_sha256: null,
+    rollback_capture_run_id: null,
+    rollback_report_artifact_id: null,
+    rollback_report_artifact_name: null,
+    rollback_report_artifact_digest: null,
+    rollback_report_artifact_api_readback_sha256: null,
+    rollback_report_file_sha256: null,
     status: "active",
   });
 }

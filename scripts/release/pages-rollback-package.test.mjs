@@ -2,12 +2,120 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
+import { canonicalSha256, sealCanonicalReport } from "./canonical-release-evidence.mjs";
+import { expectedCaptureArtifactName } from "./pages-rollback-authority.mjs";
+import {
+  LEGACY_PAGES_PAYLOADS,
+  LEGACY_PAGES_READBACK_SCHEMA,
+  LEGACY_PAGES_RELEASE_TAG,
+  LEGACY_PAGES_SNAPSHOT_SHA,
+  LEGACY_PAGES_TAG_OBJECT_SHA,
+  createLegacyReconstructedIdentity,
+  legacyReconstructedIdentitySha256,
+} from "./pages-legacy-contract.mjs";
+
 import {
   parseRollbackTar,
   validateRollbackPackageBuffer,
 } from "./pages-rollback-package.mjs";
 
 const SHA = "1".repeat(40);
+const AUTHORITY = "2".repeat(40);
+
+function captureReport(tarSha256) {
+  return sealCanonicalReport({
+    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    repository: "daejunnom/Clearra",
+    snapshot_source_commit: SHA,
+    authority_source_commit: AUTHORITY,
+    capture_run_id: "12345",
+    capture_run_attempt: "1",
+    workflow_path: ".github/workflows/pages-rollback.yml",
+    workflow_run_api_readback_sha256: "4".repeat(64),
+    artifact_id: "67890",
+    artifact_name: expectedCaptureArtifactName({
+      snapshotSha: SHA,
+      authoritySha: AUTHORITY,
+      captureRunId: "12345",
+      captureRunAttempt: "1",
+    }),
+    artifact_digest: `sha256:${"3".repeat(64)}`,
+    artifact_sha256: "3".repeat(64),
+    artifact_tar_sha256: tarSha256,
+    artifact_api_readback_sha256: "5".repeat(64),
+    artifact_created_at: "2026-08-28T00:00:00.000Z",
+    artifact_expires_at: "2026-11-26T00:00:00.000Z",
+    retention_seconds: 90 * 24 * 60 * 60,
+    capture_kind: "modern-v2",
+    legacy_snapshot: null,
+    status: "captured",
+  });
+}
+
+function legacyReadback(phase) {
+  return sealCanonicalReport({
+    schema_id: LEGACY_PAGES_READBACK_SCHEMA,
+    phase,
+    repository: "daejunnom/Clearra",
+    page_url: "https://daejunnom.github.io/Clearra/",
+    release_tag: LEGACY_PAGES_RELEASE_TAG,
+    tag_object_sha: LEGACY_PAGES_TAG_OBJECT_SHA,
+    snapshot_source_commit: LEGACY_PAGES_SNAPSHOT_SHA,
+    deployment_id: "6181925865",
+    identity_status: 404,
+    payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
+    payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
+    tag_ref_api_readback_sha256: "1".repeat(64),
+    annotated_tag_api_readback_sha256: "2".repeat(64),
+    release_api_readback_sha256: "3".repeat(64),
+    deployment_api_readback_sha256: "4".repeat(64),
+    deployment_statuses_api_readback_sha256: "5".repeat(64),
+    status: "verified",
+  });
+}
+
+function legacyCaptureReport(tarSha256) {
+  const identityValue = createLegacyReconstructedIdentity({
+    snapshotSha: LEGACY_PAGES_SNAPSHOT_SHA,
+    authoritySha: AUTHORITY,
+    captureRunId: "12345",
+    captureRunAttempt: "1",
+  });
+  return sealCanonicalReport({
+    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    repository: "daejunnom/Clearra",
+    snapshot_source_commit: LEGACY_PAGES_SNAPSHOT_SHA,
+    authority_source_commit: AUTHORITY,
+    capture_run_id: "12345",
+    capture_run_attempt: "1",
+    workflow_path: ".github/workflows/pages-rollback.yml",
+    workflow_run_api_readback_sha256: "6".repeat(64),
+    artifact_id: "67890",
+    artifact_name: expectedCaptureArtifactName({
+      snapshotSha: LEGACY_PAGES_SNAPSHOT_SHA,
+      authoritySha: AUTHORITY,
+      captureRunId: "12345",
+      captureRunAttempt: "1",
+    }),
+    artifact_digest: `sha256:${"7".repeat(64)}`,
+    artifact_sha256: "7".repeat(64),
+    artifact_tar_sha256: tarSha256,
+    artifact_api_readback_sha256: "8".repeat(64),
+    artifact_created_at: "2026-08-28T00:00:00.000Z",
+    artifact_expires_at: "2026-11-26T00:00:00.000Z",
+    retention_seconds: 90 * 24 * 60 * 60,
+    capture_kind: "legacy-v0.7.4",
+    legacy_snapshot: {
+      identity: identityValue,
+      legacy_identity_sha256: legacyReconstructedIdentitySha256(identityValue),
+      initial_public_readback: legacyReadback("initial"),
+      preartifact_public_readback: legacyReadback("preartifact"),
+      rebuilt_payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
+      rebuilt_payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
+    },
+    status: "captured",
+  });
+}
 
 function identity() {
   return {
@@ -97,6 +205,7 @@ test("validates the exact tar hash and both complete identity documents", () => 
   const result = validateRollbackPackageBuffer(tar, {
     expectedSha: SHA,
     expectedTarSha256,
+    captureReport: captureReport(expectedTarSha256),
   });
   assert.equal(result.actualDigest, expectedTarSha256);
   assert.equal(result.entries.get("clearra-build-identity.json").type, "0");
@@ -107,6 +216,7 @@ test("rejects an incorrect tar authority before reading identity", () => {
     () => validateRollbackPackageBuffer(validTar(), {
       expectedSha: SHA,
       expectedTarSha256: "2".repeat(64),
+      captureReport: captureReport("2".repeat(64)),
     }),
     /differs from the captured SHA-256/u,
   );
@@ -136,6 +246,7 @@ test("rejects traversal, links, duplicate identities, and forged identity", () =
     assert.throws(() => validateRollbackPackageBuffer(tar, {
       expectedSha: SHA,
       expectedTarSha256: createHash("sha256").update(tar).digest("hex"),
+      captureReport: captureReport(createHash("sha256").update(tar).digest("hex")),
     }));
   }
 });
@@ -148,4 +259,25 @@ test("rejects corrupted headers and data after the tar end marker", () => {
   const trailing = Buffer.concat([validTar(), Buffer.alloc(512)]);
   trailing[trailing.length - 1] = 1;
   assert.throws(() => parseRollbackTar(trailing), /after its end marker/u);
+});
+
+test("sealed legacy mode rejects a fabricated v2 identity before payload downgrade", () => {
+  const tar = makeTar([
+    { path: "./", type: "5" },
+    { path: "./wasm/", type: "5" },
+    {
+      path: "./clearra-build-identity.json",
+      content: JSON.stringify({ ...identity(), sourceCommit: LEGACY_PAGES_SNAPSHOT_SHA }),
+    },
+    { path: "./wasm/clearra_wasm.manifest.json", content: JSON.stringify(manifest()) },
+  ]);
+  const tarSha256 = createHash("sha256").update(tar).digest("hex");
+  assert.throws(
+    () => validateRollbackPackageBuffer(tar, {
+      expectedSha: LEGACY_PAGES_SNAPSHOT_SHA,
+      expectedTarSha256: tarSha256,
+      captureReport: legacyCaptureReport(tarSha256),
+    }),
+    /closed schema|legacy Pages identity schema/u,
+  );
 });

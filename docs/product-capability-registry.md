@@ -359,7 +359,7 @@ The Pages portion of that machinery includes separate capture, forward, and rest
 authorities. Before the v0.8.0 Pages mutation, capture binds the live prior identity to
 a non-expired 90-day Actions artifact containing the official Pages `artifact.tar`,
 then uploads a separate run-attempt-bound
-`clearra.pages.rollback-capture-authority.v1` report artifact. The report seals the
+`clearra.pages.rollback-capture-authority.v2` report artifact. The report seals the
 capture run/attempt, rollback artifact ID/name/API digest, inner-tar SHA-256, retention,
 and exact authority-main bracket. Forward and restore accept only the snapshot SHA and
 capture run ID, exact-one resolve that sealed report through the Actions API, derive the
@@ -368,7 +368,7 @@ build and immediately before public mutation. No manual artifact ID/name/digest/
 input exists. Restore also requires the exact `ROLLBACK:<current>:TO:<snapshot>`
 sentinel, unchanged live candidate and WASM identity, and the absence of the v0.8.0 tag
 and release. After an actual forward or restore deployment, a separate 90-day
-`clearra.pages.deployment-authority.v1` report seals the workflow run/attempt,
+`clearra.pages.deployment-authority.v2` report seals the workflow run/attempt,
 upload-pages artifact ID/name/API digest, Pages configuration, deployment-status API
 readback, and public identity readback. Retention never broadens either report beyond
 its exact bracket. Capture reruns receive distinct attempt-bound artifacts, while

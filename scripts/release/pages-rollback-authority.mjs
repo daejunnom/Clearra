@@ -1,6 +1,6 @@
 // SRP rationale: rollback authority stays cohesive here because the behavior-level change reason is to capture, resolve, validate, and consume one exact Pages snapshot through a closed provenance chain.
-import { createHash, randomUUID } from "node:crypto";
-import { appendFile, lstat, open, readFile, rename, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, lstat, open, readFile, readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,10 +19,25 @@ import {
 } from "./canonical-acceptance-run.mjs";
 
 import {
+  LEGACY_PAGES_RELEASE_TAG,
+  LEGACY_PAGES_SNAPSHOT_SHA,
+  LEGACY_PAGES_TAG_OBJECT_SHA,
+  LEGACY_PAGES_PAYLOAD,
+  LEGACY_PAGES_PAYLOADS,
+  createLegacyPublicReadbackEvidence,
+  decodeLegacyPublicReadbackEvidence,
+  encodeLegacyPublicReadbackEvidence,
+  legacyReconstructedIdentitySha256,
+  readLegacyReconstructedIdentity,
+  validateLegacyPublicReadbackEvidence,
+  validateLegacyPagesPublicSnapshot,
+  validateLegacyReconstructedIdentity,
+} from "./pages-legacy-contract.mjs";
+
+import {
   CLEARRA_ARTIFACT_SCHEMA_VERSION,
   CLEARRA_CONTRACT_SCHEMA_VERSION,
   CLEARRA_SUPPLY_SEMANTICS_ID,
-  serializeClearraWasmManifest,
 } from "../tools/clearra-wasm-build-contract.mjs";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -30,10 +45,7 @@ const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const DECIMAL_ID_PATTERN = /^[1-9][0-9]*$/u;
 const RELEASE_TAG = "v0.8.0";
-export const LEGACY_BOOTSTRAP_RELEASE_TAG = "v0.7.4";
-const LEGACY_WASM_MANIFEST_BYTES = 768;
-const LEGACY_WASM_CAPABILITIES_SHA256 =
-  "6e6e2c1e973f62c6d6fa28f571b326104aec625e6879c4aca67df3364029d98b";
+export const LEGACY_BOOTSTRAP_RELEASE_TAG = LEGACY_PAGES_RELEASE_TAG;
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
 const EXPECTED_CONTRACT = Object.freeze({
   schema: "clearra.pages.identity.v2",
@@ -42,7 +54,7 @@ const EXPECTED_CONTRACT = Object.freeze({
   artifactSchemaVersion: CLEARRA_ARTIFACT_SCHEMA_VERSION,
 });
 export const PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID =
-  "clearra.pages.rollback-capture-authority.v1";
+  "clearra.pages.rollback-capture-authority.v2";
 const CAPTURE_REPORT_FIELDS = Object.freeze([
   "schema_id",
   "repository",
@@ -61,6 +73,8 @@ const CAPTURE_REPORT_FIELDS = Object.freeze([
   "artifact_created_at",
   "artifact_expires_at",
   "retention_seconds",
+  "capture_kind",
+  "legacy_snapshot",
   "status",
   "report_sha256",
 ]);
@@ -181,67 +195,6 @@ function validateRollbackManifestRuntimeIdentity(manifestValue, expectedSha, lab
   return manifest;
 }
 
-function validateLegacyArtifact(value, label, prefix, suffix) {
-  const artifact = requireObject(value, label);
-  requireExactKeys(artifact, ["path", "bytes", "sha256"], label);
-  const sha256 = requirePattern(artifact.sha256, SHA256_PATTERN, `${label} SHA-256`);
-  if (!Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0) {
-    fail(`${label} bytes must be a positive safe integer`);
-  }
-  if (artifact.path !== `${prefix}.${sha256.slice(0, 24)}${suffix}`) {
-    fail(`${label} path does not match the v0.7.4 content-addressed artifact`);
-  }
-}
-
-function serializeLegacyWasmManifest(manifest) {
-  const json = JSON.stringify(manifest);
-  const byteLength = Buffer.byteLength(json, "utf8") + 1;
-  if (byteLength > LEGACY_WASM_MANIFEST_BYTES) {
-    fail("legacy Pages WASM manifest exceeds the v0.7.4 fixed-byte contract");
-  }
-  return `${json}${" ".repeat(LEGACY_WASM_MANIFEST_BYTES - byteLength)}\n`;
-}
-
-export function validateLegacyPagesWasmManifest(manifestValue, rawBytes, label) {
-  const manifest = requireObject(manifestValue, label);
-  requireExactKeys(manifest, ["schema_version", "build", "bindings", "wasm"], label);
-  if (manifest.schema_version !== 1) {
-    fail(`${label} schema_version is not the v0.7.4 manifest schema`);
-  }
-  const build = requireObject(manifest.build, `${label} build`);
-  if (Object.hasOwn(build, "runtime_identity")) {
-    fail(`${label} runtime_identity must be absent before legacy bootstrap`);
-  }
-  requireExactKeys(
-    build,
-    ["contract_version", "source_sha256", "source_file_count", "capabilities_sha256"],
-    `${label} build`,
-  );
-  if (
-    build.contract_version !== 1 ||
-    !SHA256_PATTERN.test(build.source_sha256) ||
-    !Number.isSafeInteger(build.source_file_count) ||
-    build.source_file_count <= 0 ||
-    build.capabilities_sha256 !== LEGACY_WASM_CAPABILITIES_SHA256
-  ) {
-    fail(`${label} build is not the exact v0.7.4 legacy contract`);
-  }
-  validateLegacyArtifact(manifest.bindings, `${label} bindings`, "clearra_wasm", ".js");
-  validateLegacyArtifact(manifest.wasm, `${label} wasm`, "clearra_wasm_bg", ".wasm");
-  if (rawBytes !== serializeLegacyWasmManifest(manifest)) {
-    fail(`${label} bytes do not match the deterministic v0.7.4 producer format`);
-  }
-  return manifest;
-}
-
-function manifestWithoutRuntimeIdentity(manifestValue) {
-  const manifest = structuredClone(manifestValue);
-  if (manifest?.build && typeof manifest.build === "object") {
-    delete manifest.build.runtime_identity;
-  }
-  return manifest;
-}
-
 async function readRollbackManifest(path, label) {
   const target = resolve(requireString(path, `${label} path`));
   await assertSafeDirectoryChain(dirname(target));
@@ -259,29 +212,14 @@ async function readRollbackManifest(path, label) {
   return Object.freeze({ target, metadata, raw, manifest });
 }
 
-async function stageAtomicManifestReplacement(record, bytes) {
-  const temporaryPath = `${record.target}.clearra-${randomUUID()}.tmp`;
-  const handle = await open(temporaryPath, "wx", record.metadata.mode & 0o777);
-  try {
-    await handle.writeFile(bytes, "utf8");
-    await handle.sync();
-  } catch (error) {
-    await handle.close();
-    await rm(temporaryPath, { force: true });
-    throw error;
-  }
-  await handle.close();
-  return temporaryPath;
-}
-
 export async function preparePagesRollbackManifests({
   captureMode,
   snapshotSha,
   staticManifestPath,
   buildManifestPath,
 }) {
-  if (!new Set(["capture", "bootstrap-capture"]).has(captureMode)) {
-    fail("rollback manifest preparation mode must be capture or bootstrap-capture");
+  if (captureMode !== "capture") {
+    fail("modern rollback manifest preparation is available only for regular capture");
   }
   const sha = requireSha(snapshotSha, "rollback manifest snapshot SHA");
   const [staticRecord, buildRecord] = await Promise.all([
@@ -292,100 +230,12 @@ export async function preparePagesRollbackManifests({
     fail("static and built Pages WASM manifests must be distinct files");
   }
 
-  if (captureMode === "capture") {
-    validateRollbackManifestRuntimeIdentity(staticRecord.manifest, sha, "static Pages WASM manifest");
-    validateRollbackManifestRuntimeIdentity(buildRecord.manifest, sha, "built Pages WASM manifest");
-    if (canonicalJson(staticRecord.manifest) !== canonicalJson(buildRecord.manifest)) {
-      fail("static and built Pages WASM manifests differ before capture");
-    }
-    return Object.freeze({ mode: captureMode, updated: false });
-  }
-
-  validateLegacyPagesWasmManifest(
-    staticRecord.manifest,
-    staticRecord.raw,
-    "static Pages WASM manifest",
-  );
-  validateLegacyPagesWasmManifest(
-    buildRecord.manifest,
-    buildRecord.raw,
-    "built Pages WASM manifest",
-  );
+  validateRollbackManifestRuntimeIdentity(staticRecord.manifest, sha, "static Pages WASM manifest");
+  validateRollbackManifestRuntimeIdentity(buildRecord.manifest, sha, "built Pages WASM manifest");
   if (staticRecord.raw !== buildRecord.raw) {
-    fail("static and built v0.7.4 Pages WASM manifests differ before bootstrap");
+    fail("static and built Pages WASM manifests differ before capture");
   }
-
-  const originalProjection = canonicalJson(staticRecord.manifest);
-  const upgradedManifest = structuredClone(staticRecord.manifest);
-  upgradedManifest.build.runtime_identity = exactRuntimeIdentity(sha);
-  if (canonicalJson(manifestWithoutRuntimeIdentity(upgradedManifest)) !== originalProjection) {
-    fail("legacy Pages WASM manifest non-identity content changed during bootstrap");
-  }
-  const upgradedBytes = serializeClearraWasmManifest(upgradedManifest);
-  let staticTemporaryPath = "";
-  let buildTemporaryPath = "";
-  let staticCommitted = false;
-  let buildCommitted = false;
-  try {
-    staticTemporaryPath = await stageAtomicManifestReplacement(staticRecord, upgradedBytes);
-    buildTemporaryPath = await stageAtomicManifestReplacement(buildRecord, upgradedBytes);
-    const [currentStatic, currentBuild] = await Promise.all([
-      readFile(staticRecord.target, "utf8"),
-      readFile(buildRecord.target, "utf8"),
-    ]);
-    if (currentStatic !== staticRecord.raw || currentBuild !== buildRecord.raw) {
-      fail("Pages WASM manifests changed while bootstrap replacement was staged");
-    }
-    await rename(staticTemporaryPath, staticRecord.target);
-    staticCommitted = true;
-    try {
-      await rename(buildTemporaryPath, buildRecord.target);
-      buildCommitted = true;
-    } catch (commitError) {
-      let restoreTemporaryPath = "";
-      try {
-        restoreTemporaryPath = await stageAtomicManifestReplacement(
-          staticRecord,
-          staticRecord.raw,
-        );
-        await rename(restoreTemporaryPath, staticRecord.target);
-        restoreTemporaryPath = "";
-      } catch (restoreError) {
-        throw new AggregateError(
-          [commitError, restoreError],
-          "Pages WASM manifest transaction could not restore its first atomic replacement",
-        );
-      } finally {
-        if (restoreTemporaryPath !== "") {
-          await rm(restoreTemporaryPath, { force: true });
-        }
-      }
-      throw commitError;
-    }
-  } finally {
-    if (!staticCommitted && staticTemporaryPath !== "") {
-      await rm(staticTemporaryPath, { force: true });
-    }
-    if (!buildCommitted && buildTemporaryPath !== "") {
-      await rm(buildTemporaryPath, { force: true });
-    }
-  }
-
-  const [preparedStatic, preparedBuild] = await Promise.all([
-    readRollbackManifest(staticRecord.target, "prepared static Pages WASM manifest"),
-    readRollbackManifest(buildRecord.target, "prepared built Pages WASM manifest"),
-  ]);
-  validateRollbackManifestRuntimeIdentity(preparedStatic.manifest, sha, "prepared static Pages WASM manifest");
-  validateRollbackManifestRuntimeIdentity(preparedBuild.manifest, sha, "prepared built Pages WASM manifest");
-  if (
-    preparedStatic.raw !== upgradedBytes ||
-    preparedBuild.raw !== upgradedBytes ||
-    canonicalJson(manifestWithoutRuntimeIdentity(preparedStatic.manifest)) !== originalProjection ||
-    canonicalJson(manifestWithoutRuntimeIdentity(preparedBuild.manifest)) !== originalProjection
-  ) {
-    fail("prepared Pages WASM manifests did not preserve the exact legacy artifact contract");
-  }
-  return Object.freeze({ mode: captureMode, updated: true });
+  return Object.freeze({ mode: captureMode, updated: false });
 }
 
 export function validateLegacyPagesBootstrapAuthority(value) {
@@ -406,6 +256,9 @@ export function validateLegacyPagesBootstrapAuthority(value) {
     /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u,
     "legacy Pages bootstrap repository",
   );
+  if (repository !== "daejunnom/Clearra") {
+    fail("legacy Pages bootstrap repository differs from the approved release");
+  }
   const legacyReleaseTag = requireString(
     value.legacyReleaseTag,
     "legacy Pages bootstrap release tag",
@@ -414,6 +267,9 @@ export function validateLegacyPagesBootstrapAuthority(value) {
     fail("legacy Pages bootstrap accepts only the exact approved release tag");
   }
   const snapshotSha = requireSha(value.snapshotSha, "legacy Pages snapshot SHA");
+  if (snapshotSha !== LEGACY_PAGES_SNAPSHOT_SHA) {
+    fail("legacy Pages bootstrap snapshot differs from the approved v0.7.4 commit");
+  }
   const tagRef = requireObject(value.tagRef, "legacy release tag ref");
   const tagObjectSha = requireSha(tagRef.object?.sha, "legacy annotated tag object SHA");
   if (
@@ -421,6 +277,9 @@ export function validateLegacyPagesBootstrapAuthority(value) {
     tagRef.object?.type !== "tag"
   ) {
     fail("legacy Pages bootstrap release tag must be an annotated tag");
+  }
+  if (tagObjectSha !== LEGACY_PAGES_TAG_OBJECT_SHA) {
+    fail("legacy Pages bootstrap tag object differs from the approved annotated tag");
   }
   const annotatedTag = requireObject(value.annotatedTag, "legacy annotated tag");
   if (
@@ -521,6 +380,74 @@ export function expectedCaptureReportArtifactName({
   return `clearra-pages-rollback-capture-authority-${snapshot}-authority-${authority}-run-${runId}-attempt-${attempt}`;
 }
 
+function validateLegacySnapshotEvidence(value, {
+  snapshotSha,
+  authoritySha,
+  captureRunId,
+  captureRunAttempt,
+}) {
+  const legacy = requireObject(value, "legacy Pages capture snapshot");
+  requireExactKeys(legacy, [
+    "identity",
+    "legacy_identity_sha256",
+    "initial_public_readback",
+    "preartifact_public_readback",
+    "rebuilt_payloads",
+    "rebuilt_payload_set_sha256",
+  ], "legacy Pages capture snapshot");
+  const identity = validateLegacyReconstructedIdentity(legacy.identity, {
+    expectedSnapshotSha: snapshotSha,
+    expectedAuthoritySha: authoritySha,
+    expectedCaptureRunId: captureRunId,
+    expectedCaptureRunAttempt: captureRunAttempt,
+  });
+  if (legacy.legacy_identity_sha256 !== legacyReconstructedIdentitySha256(identity)) {
+    fail("legacy reconstructed identity SHA-256 differs from its canonical producer bytes");
+  }
+  const initial = validateLegacyPublicReadbackEvidence(
+    legacy.initial_public_readback,
+    { expectedPhase: "initial" },
+  );
+  const preartifact = validateLegacyPublicReadbackEvidence(
+    legacy.preartifact_public_readback,
+    { expectedPhase: "preartifact" },
+  );
+  const { phase: initialPhase, report_sha256: initialReportSha, ...initialProjection } = initial;
+  const {
+    phase: preartifactPhase,
+    report_sha256: preartifactReportSha,
+    ...preartifactProjection
+  } = preartifact;
+  void initialPhase;
+  void initialReportSha;
+  void preartifactPhase;
+  void preartifactReportSha;
+  if (canonicalJson(initialProjection) !== canonicalJson(preartifactProjection)) {
+    fail("legacy Pages public authority changed between initial and preartifact readback");
+  }
+  if (
+    initial.repository !== preartifact.repository ||
+    initial.page_url !== preartifact.page_url ||
+    initial.deployment_id !== preartifact.deployment_id ||
+    initial.payload_set_sha256 !== preartifact.payload_set_sha256
+  ) {
+    fail("legacy Pages public authority projection changed between readbacks");
+  }
+  if (canonicalJson(initial.payloads) !== canonicalJson(preartifact.payloads)) {
+    fail("legacy Pages public payload changed between initial and preartifact readback");
+  }
+  if (canonicalJson(legacy.rebuilt_payloads) !== canonicalJson(LEGACY_PAGES_PAYLOADS)) {
+    fail("rebuilt legacy Pages payload projection differs from the approved bytes");
+  }
+  if (legacy.rebuilt_payload_set_sha256 !== canonicalSha256(LEGACY_PAGES_PAYLOADS)) {
+    fail("rebuilt legacy Pages payload-set SHA-256 differs from the approved bytes");
+  }
+  if (canonicalJson(identity.payloads) !== canonicalJson(legacy.rebuilt_payloads)) {
+    fail("legacy reconstructed identity differs from the rebuilt payload evidence");
+  }
+  return legacy;
+}
+
 export function validateRollbackCaptureReport(report, {
   expectedSnapshotSha,
   expectedAuthoritySha,
@@ -586,6 +513,26 @@ export function validateRollbackCaptureReport(report, {
   ) {
     fail("Pages rollback capture report retention is invalid");
   }
+  if (report.capture_kind === "legacy-v0.7.4") {
+    if (snapshot !== LEGACY_PAGES_SNAPSHOT_SHA) {
+      fail("legacy Pages capture kind is restricted to the approved v0.7.4 snapshot");
+    }
+    validateLegacySnapshotEvidence(report.legacy_snapshot, {
+      snapshotSha: snapshot,
+      authoritySha: authority,
+      captureRunId: runId,
+      captureRunAttempt: runAttempt,
+    });
+  } else if (report.capture_kind === "modern-v2") {
+    if (snapshot === LEGACY_PAGES_SNAPSHOT_SHA) {
+      fail("approved v0.7.4 snapshot must not be fabricated as a modern Pages capture");
+    }
+    if (report.legacy_snapshot !== null) {
+      fail("modern Pages capture report must not contain legacy snapshot authority");
+    }
+  } else {
+    fail("Pages rollback capture report kind is invalid");
+  }
   if (report.status !== "captured") {
     fail("Pages rollback capture report is not captured");
   }
@@ -616,6 +563,22 @@ export async function produceRollbackCaptureReport(input, {
     "capture run attempt",
   );
   const artifactId = requireDecimalId(String(input.artifactId), "capture artifact ID");
+  const captureKind = input.captureMode === "bootstrap-capture"
+    ? "legacy-v0.7.4"
+    : input.captureMode === "capture"
+      ? "modern-v2"
+      : fail("capture report mode must be capture or bootstrap-capture");
+  const legacySnapshot = captureKind === "legacy-v0.7.4"
+    ? validateLegacySnapshotEvidence(input.legacySnapshot, {
+      snapshotSha: snapshot,
+      authoritySha: authority,
+      captureRunId: runId,
+      captureRunAttempt: runAttempt,
+    })
+    : null;
+  if (captureKind === "modern-v2" && input.legacySnapshot != null) {
+    fail("regular capture must not supply legacy snapshot authority");
+  }
   const artifactName = expectedCaptureArtifactName({
     snapshotSha: snapshot,
     authoritySha: authority,
@@ -692,6 +655,10 @@ export async function produceRollbackCaptureReport(input, {
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size <= 0) {
     fail("capture artifact tar must be a non-empty regular non-link file");
   }
+  const tarDirectoryEntries = (await readdir(dirname(tarPath))).sort();
+  if (tarDirectoryEntries.length !== 1 || tarDirectoryEntries[0] !== "artifact.tar") {
+    fail("downloaded capture artifact must contain exactly one artifact.tar");
+  }
   const tarBytes = await readArtifactTar(tarPath);
   const report = sealCanonicalReport({
     schema_id: PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID,
@@ -711,6 +678,8 @@ export async function produceRollbackCaptureReport(input, {
     artifact_created_at: new Date(createdMilliseconds).toISOString(),
     artifact_expires_at: new Date(expiresMilliseconds).toISOString(),
     retention_seconds: retentionSeconds,
+    capture_kind: captureKind,
+    legacy_snapshot: legacySnapshot === null ? null : structuredClone(legacySnapshot),
     status: "captured",
   });
   validateRollbackCaptureReport(report, {
@@ -1117,6 +1086,18 @@ async function fetchPublicStatus(url) {
   return response.status;
 }
 
+async function fetchPublicBytes(url, label) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/octet-stream" },
+    cache: "no-store",
+    redirect: "error",
+  });
+  if (!response.ok) {
+    fail(`${label} request failed with HTTP ${response.status}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
 export function canonicalAcceptanceQuery(sha) {
   const sourceCommit = requireSha(sha, "canonical acceptance query SHA");
   return new URLSearchParams({
@@ -1160,8 +1141,39 @@ async function captureReportMain() {
   const authoritySha = requireSha(env("AUTHORITY_SHA"), "authority SHA");
   assertExact(env("GITHUB_REF"), "refs/heads/main", "workflow ref");
   assertExact(requireSha(env("GITHUB_SHA"), "workflow SHA"), authoritySha, "workflow SHA");
+  const captureMode = env("PAGES_CAPTURE_MODE");
+  let legacySnapshot = null;
+  if (captureMode === "bootstrap-capture") {
+    const identity = await readLegacyReconstructedIdentity(env("LEGACY_IDENTITY_PATH"));
+    legacySnapshot = {
+      identity,
+      legacy_identity_sha256: legacyReconstructedIdentitySha256(identity),
+      initial_public_readback: decodeLegacyPublicReadbackEvidence(
+        env("LEGACY_INITIAL_EVIDENCE_BASE64"),
+        { expectedPhase: "initial" },
+      ),
+      preartifact_public_readback: decodeLegacyPublicReadbackEvidence(
+        env("LEGACY_PREARTIFACT_EVIDENCE_BASE64"),
+        { expectedPhase: "preartifact" },
+      ),
+      rebuilt_payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
+      rebuilt_payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
+    };
+  } else if (captureMode === "capture") {
+    for (const name of [
+      "LEGACY_IDENTITY_PATH",
+      "LEGACY_INITIAL_EVIDENCE_BASE64",
+      "LEGACY_PREARTIFACT_EVIDENCE_BASE64",
+    ]) {
+      assertEmpty(env(name, { optional: true }), name);
+    }
+  } else {
+    fail("PAGES_CAPTURE_MODE must be capture or bootstrap-capture for capture report sealing");
+  }
   const report = await produceRollbackCaptureReport({
     repository,
+    captureMode,
+    legacySnapshot,
     snapshotSha: env("SNAPSHOT_SHA"),
     authoritySha,
     captureRunId: env("GITHUB_RUN_ID"),
@@ -1189,6 +1201,7 @@ async function captureReportMain() {
     `artifact_tar_sha256=${report.artifact_tar_sha256}`,
     `report_sha256=${report.report_sha256}`,
     `report_file_sha256=${reportFileSha256}`,
+    `capture_kind=${report.capture_kind}`,
     "",
   ].join("\n"), "utf8");
   console.log(
@@ -1370,7 +1383,7 @@ async function main() {
       `/git/tags/${requireSha(tagRef.object.sha, "legacy annotated tag object SHA")}`,
       "legacy annotated tag",
     );
-    const [release, deployments, identityStatus] = await Promise.all([
+    const [release, deployments, identityStatus, manifestBytes, bindingsBytes, wasmBytes] = await Promise.all([
       api.get(
         `/releases/tags/${encodeURIComponent(legacyReleaseTag)}`,
         "legacy GitHub Release",
@@ -1381,6 +1394,18 @@ async function main() {
       ),
       fetchPublicStatus(
         `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
+      ),
+      fetchPublicBytes(
+        `${pageUrl}/${LEGACY_PAGES_PAYLOAD.manifest.path}?authority=${cacheBuster}`,
+        "legacy public Pages WASM manifest",
+      ),
+      fetchPublicBytes(
+        `${pageUrl}/${LEGACY_PAGES_PAYLOAD.bindings.path}?authority=${cacheBuster}`,
+        "legacy public Pages WASM bindings",
+      ),
+      fetchPublicBytes(
+        `${pageUrl}/${LEGACY_PAGES_PAYLOAD.wasm.path}?authority=${cacheBuster}`,
+        "legacy public Pages WASM binary",
       ),
     ]);
     if (!Array.isArray(deployments) || deployments.length !== 1) {
@@ -1394,7 +1419,7 @@ async function main() {
       `/deployments/${deploymentId}/statuses?per_page=100`,
       "latest Pages deployment statuses",
     );
-    validateLegacyPagesBootstrapAuthority({
+    const bootstrapAuthority = validateLegacyPagesBootstrapAuthority({
       repository,
       legacyReleaseTag,
       snapshotSha,
@@ -1406,6 +1431,32 @@ async function main() {
       pageUrl,
       identityStatus,
     });
+    validateLegacyPagesPublicSnapshot({
+      identityStatus,
+      manifestBytes,
+      bindingsBytes,
+      wasmBytes,
+    });
+    const evidence = createLegacyPublicReadbackEvidence({
+      phase,
+      repository,
+      pageUrl: `${pageUrl}/`,
+      deploymentId: bootstrapAuthority.deploymentId,
+      identityStatus,
+      tagRef,
+      annotatedTag,
+      release,
+      deployment: deployments[0],
+      deploymentStatuses,
+      manifestBytes,
+      bindingsBytes,
+      wasmBytes,
+    });
+    await appendFile(
+      env("GITHUB_OUTPUT"),
+      `legacy_evidence_base64=${encodeLegacyPublicReadbackEvidence(evidence)}\n`,
+      "utf8",
+    );
   } else {
     const [identity, manifest] = await Promise.all([
       fetchPublicJson(

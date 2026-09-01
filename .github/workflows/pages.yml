@@ -113,6 +113,7 @@ jobs:
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
           SNAPSHOT_TAR_SHA256: ${{ steps.rollback-authority.outputs.capture_tar_sha256 }}
           PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-initial
+          PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-report-initial/pages-rollback-capture-authority.json
         run: node scripts/release/pages-rollback-package.mjs
 
   build:
@@ -195,12 +196,6 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.rollback_capture_run_id }}
-      - name: Revalidate exact rollback package immediately before deployment
-        env:
-          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
-          SNAPSHOT_TAR_SHA256: ${{ needs.accepted-source.outputs.rollback_capture_tar_sha256 }}
-          PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-predeploy
-        run: node authority-source/scripts/release/pages-rollback-package.mjs
       - name: Redownload sealed rollback capture report immediately before deployment
         uses: actions/download-artifact@v4
         with:
@@ -209,6 +204,13 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.rollback_capture_run_id }}
+      - name: Revalidate exact rollback package immediately before deployment
+        env:
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          SNAPSHOT_TAR_SHA256: ${{ needs.accepted-source.outputs.rollback_capture_tar_sha256 }}
+          PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture-predeploy
+          PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-report-predeploy/pages-rollback-capture-authority.json
+        run: node authority-source/scripts/release/pages-rollback-package.mjs
       - name: Revalidate durable rollback capture immediately before deployment
         env:
           GH_TOKEN: ${{ github.token }}

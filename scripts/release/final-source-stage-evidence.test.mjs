@@ -535,7 +535,7 @@ function deploymentFixture() {
 
 function pagesAuthority() {
   return sealCanonicalReport({
-    schema_id: "clearra.pages.deployment-authority.v1",
+    schema_id: "clearra.pages.deployment-authority.v2",
     mode: "forward",
     repository: "daejunnom/Clearra",
     source_commit: COMMIT,
@@ -558,6 +558,16 @@ function pagesAuthority() {
     base_path: "/Clearra",
     pages_configuration_api_readback_sha256: "4".repeat(64),
     live_identity_sha256: "5".repeat(64),
+    live_payload_set_sha256: null,
+    rollback_capture_report_sha256: null,
+    rollback_artifact_sha256: null,
+    rollback_tar_sha256: null,
+    rollback_capture_run_id: null,
+    rollback_report_artifact_id: null,
+    rollback_report_artifact_name: null,
+    rollback_report_artifact_digest: null,
+    rollback_report_artifact_api_readback_sha256: null,
+    rollback_report_file_sha256: null,
     status: "active",
   });
 }
@@ -567,7 +577,7 @@ function pagesRollbackCapture() {
   const captureRunId = "777";
   const captureAttempt = "1";
   return sealCanonicalReport({
-    schema_id: "clearra.pages.rollback-capture-authority.v1",
+    schema_id: "clearra.pages.rollback-capture-authority.v2",
     repository: "daejunnom/Clearra",
     snapshot_source_commit: snapshot,
     authority_source_commit: COMMIT,
@@ -589,6 +599,8 @@ function pagesRollbackCapture() {
     artifact_created_at: "2026-08-30T00:00:00.000Z",
     artifact_expires_at: "2026-11-28T00:00:00.000Z",
     retention_seconds: 90 * 24 * 60 * 60,
+    capture_kind: "modern-v2",
+    legacy_snapshot: null,
     status: "captured",
   });
 }
