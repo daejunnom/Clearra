@@ -150,6 +150,7 @@
       <ProductResultPager
         payload={productResultPayload}
         {language}
+        {targetLines}
         loadNextPage={loadNextProductPage}
         loadMemberPage={loadProductMemberPage}
         releasePages={releaseProductPages}

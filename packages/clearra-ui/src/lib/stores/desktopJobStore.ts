@@ -16,6 +16,7 @@ import {
   type ClearraDesktopResourceStatus
 } from '../host';
 import type { ClearraWasmSearchReport } from '../wasm';
+import { DesktopJobStartGeneration } from './desktopJobStartGeneration';
 
 export type DesktopJobState = {
   request: ClearraDesktopRequest;
@@ -55,6 +56,7 @@ export const desktopJobState = writable(desktopJobInitialState);
 const DESKTOP_JOB_POLL_INTERVAL_MS = 100;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollEpoch = 0;
+const desktopJobStartGeneration = new DesktopJobStartGeneration();
 let gpuWarmupPromise: Promise<void> | null = null;
 let gpuWarmupAttempted = false;
 
@@ -143,10 +145,17 @@ export async function validateDesktopRequest() {
 
 export async function startDesktopJob() {
   const current = get(desktopJobState);
-  if (current.jobId !== null || current.status === 'running' || current.status === 'cancelling') {
+  if (
+    desktopJobStartGeneration.hasPending() ||
+    current.jobId !== null ||
+    current.status === 'running' ||
+    current.status === 'cancelling'
+  ) {
     return;
   }
   stopDesktopJobPolling();
+  const startGeneration = desktopJobStartGeneration.begin();
+  let startAccepted = false;
   const request = get(desktopJobState).request;
   desktopJobState.update((state) => ({
     ...state,
@@ -165,6 +174,11 @@ export async function startDesktopJob() {
   }));
   try {
     const jobId = await startJob(request);
+    if (!desktopJobStartGeneration.complete(startGeneration)) {
+      await cancelDetachedDesktopJob(jobId);
+      return;
+    }
+    startAccepted = true;
     const cancellationRequested = get(desktopJobState).status === 'cancelling';
     desktopJobState.update((state) => ({
       ...state,
@@ -176,6 +190,12 @@ export async function startDesktopJob() {
     }
     scheduleDesktopJobPoll(jobId, pollEpoch, 0);
   } catch (error) {
+    if (!startAccepted) {
+      if (!desktopJobStartGeneration.complete(startGeneration)) {
+        settleDisposedDesktopStart('cancelled', null);
+        return;
+      }
+    }
     desktopJobState.update((state) => ({
       ...state,
       status: 'failed',
@@ -203,6 +223,13 @@ export async function cancelDesktopJob() {
 }
 
 export function disposeDesktopJobPolling() {
+  if (desktopJobStartGeneration.invalidatePending()) {
+    desktopJobState.update((state) =>
+      state.jobId === null && (state.status === 'running' || state.status === 'cancelling')
+        ? { ...state, status: 'cancelling', error: null }
+        : state
+    );
+  }
   stopDesktopJobPolling();
 }
 
@@ -345,6 +372,30 @@ function stopDesktopJobPolling() {
     pollTimer = null;
   }
   pollEpoch += 1;
+}
+
+async function cancelDetachedDesktopJob(jobId: number) {
+  try {
+    await cancelJob(jobId);
+    settleDisposedDesktopStart('cancelled', null);
+  } catch (error) {
+    settleDisposedDesktopStart('failed', errorMessage(error));
+  }
+}
+
+function settleDisposedDesktopStart(
+  status: Extract<DesktopJobState['status'], 'cancelled' | 'failed'>,
+  error: string | null
+) {
+  desktopJobState.update((state) => {
+    if (state.jobId !== null || state.status !== 'cancelling') return state;
+    return {
+      ...state,
+      status,
+      jobId: null,
+      error
+    };
+  });
 }
 
 function errorMessage(error: unknown) {

@@ -6,6 +6,11 @@
     ClearraCoveragePortfolioRuntimePage,
     ClearraProductResultPayload
   } from '../wasm/wasmCommandClient';
+  import SolutionBoardPreview from './SolutionBoardPreview.svelte';
+  import {
+    solutionBoardPreviewFromKey,
+    solutionBoardPreviewFromReplay
+  } from './solutionBoardPreview';
   import {
     CoveragePortfolioPagerController,
     PRODUCT_MEMBER_PAGE_SIZE,
@@ -27,6 +32,7 @@
 
   export let payload: ClearraProductResultPayload | null | undefined = null;
   export let language: WorkspaceLanguage = 'en';
+  export let targetLines = 4;
   export let loadNextPage: ProductNextPageLoader | null = null;
   export let loadMemberPage: ProductMemberPageLoader | null = null;
   export let releasePages: ProductPageRelease | null = null;
@@ -196,6 +202,21 @@
     buildV2?.kind === 'portfolio' ||
     buildV2?.kind === 'score-portfolio';
   $: korean = language === 'ko';
+  $: previewLabels = korean
+    ? {
+        invalid: '보드 미리보기를 생성할 수 없습니다.',
+        rawDetails: '내부 해법 키 보기',
+        copyRaw: '키 복사',
+        copiedRaw: '복사됨',
+        copyFailed: '복사 실패'
+      }
+    : {
+        invalid: 'Board preview is unavailable.',
+        rawDetails: 'Show internal solution key',
+        copyRaw: 'Copy key',
+        copiedRaw: 'Copied',
+        copyFailed: 'Copy failed'
+      };
   $: scoreMinimalCoverage = payload?.contract === 'pc.score-minimals';
   $: scoreOnlyPortfolio = scoreMinimalCoverage || buildV2?.kind === 'score-portfolio';
 
@@ -465,9 +486,24 @@
         <span>{korean ? '최소 해법 크기' : 'Minimum cardinality'}: {coveragePage.optimal_cardinality}</span>
         <span>{korean ? '구성원 페이지' : 'Member page'}: {memberPageNumber} / {coveragePage.total_member_pages}</span>
       </div>
-      <ol>
+      <ol class="solution-preview-list">
         {#each currentMembers as member (member.candidate_id)}
-          <li><code>{member.normalized_solution_key}</code><span>ID {member.candidate_id}</span></li>
+          {@const preview = solutionBoardPreviewFromKey(member.normalized_solution_key, targetLines)}
+          <li class="solution-preview-row">
+            <div class="solution-preview-card">
+              <SolutionBoardPreview
+                board={preview.board}
+                ariaLabel={korean ? `해법 ID ${member.candidate_id} 보드` : `Solution ID ${member.candidate_id} board`}
+                invalidLabel={previewLabels.invalid}
+                rawKey={member.normalized_solution_key}
+                rawKeyDetailsLabel={previewLabels.rawDetails}
+                copyRawKeyLabel={previewLabels.copyRaw}
+                copiedRawKeyLabel={previewLabels.copiedRaw}
+                copyRawKeyFailedLabel={previewLabels.copyFailed}
+              />
+            </div>
+            <span>ID {member.candidate_id}</span>
+          </li>
         {/each}
       </ol>
       <footer>
@@ -481,9 +517,24 @@
             <span>{korean ? '초기 B2B' : 'Initial B2B'}: {buildV2.initial_b2b}</span>
             <span>{korean ? '점수 증거 페이지' : 'Score evidence page'}: {buildScorePageIndex + 1} / {buildScorePageCount}</span>
           </div>
-          <ol start={buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
+          <ol class="solution-preview-list" start={buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
             {#each buildScoreWinners as winner (winner.pattern_id)}
-              <li class="score-row"><code>{winner.candidate_key}</code><span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span></li>
+              {@const preview = solutionBoardPreviewFromKey(winner.candidate_key, targetLines)}
+              <li class="score-row solution-preview-row">
+                <div class="solution-preview-card">
+                  <SolutionBoardPreview
+                    board={preview.board}
+                    ariaLabel={korean ? `패턴 ${winner.pattern_id} 최고 점수 보드` : `Pattern ${winner.pattern_id} maximum-score board`}
+                    invalidLabel={previewLabels.invalid}
+                    rawKey={winner.candidate_key}
+                    rawKeyDetailsLabel={previewLabels.rawDetails}
+                    copyRawKeyLabel={previewLabels.copyRaw}
+                    copiedRawKeyLabel={previewLabels.copiedRaw}
+                    copyRawKeyFailedLabel={previewLabels.copyFailed}
+                  />
+                </div>
+                <span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span>
+              </li>
             {/each}
           </ol>
           <footer>
@@ -517,9 +568,24 @@
         <span>{korean ? '합집합 확률' : 'Union probability'}: {buildV2.union_probability}</span>
       </div>
       {#if buildV2.kind === 'candidate-family'}
-        <ol start={buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
+        <ol class="solution-preview-list" start={buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
           {#each buildCandidatePage as candidate (candidate.candidate_key)}
-            <li><code>{candidate.candidate_key}</code><span>{korean ? '커버 패턴' : 'Covered patterns'} {candidate.covered_pattern_count}</span></li>
+            {@const preview = solutionBoardPreviewFromKey(candidate.candidate_key, targetLines)}
+            <li class="solution-preview-row">
+              <div class="solution-preview-card">
+                <SolutionBoardPreview
+                  board={preview.board}
+                  ariaLabel={korean ? 'Build 후보 보드' : 'Build candidate board'}
+                  invalidLabel={previewLabels.invalid}
+                  rawKey={candidate.candidate_key}
+                  rawKeyDetailsLabel={previewLabels.rawDetails}
+                  copyRawKeyLabel={previewLabels.copyRaw}
+                  copiedRawKeyLabel={previewLabels.copiedRaw}
+                  copyRawKeyFailedLabel={previewLabels.copyFailed}
+                />
+              </div>
+              <span>{korean ? '커버 패턴' : 'Covered patterns'} {candidate.covered_pattern_count}</span>
+            </li>
           {/each}
         </ol>
       {/if}
@@ -544,9 +610,24 @@
         <span>{korean ? '도달 후보' : 'Reachable candidates'}: {buildSetupFamily.reachable_candidate_count} / {buildSetupFamily.source_candidate_count}</span>
         <span>{korean ? '합집합 확률' : 'Union probability'}: {buildSetupFamily.union_probability}</span>
       </div>
-      <ol start={buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
+      <ol class="solution-preview-list" start={buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each buildCandidatePage as candidate (candidate.candidate_key)}
-          <li><code>{candidate.candidate_key}</code><span>{korean ? '커버 패턴' : 'Covered patterns'} {candidate.covered_pattern_count}</span></li>
+          {@const preview = solutionBoardPreviewFromKey(candidate.candidate_key, targetLines)}
+          <li class="solution-preview-row">
+            <div class="solution-preview-card">
+              <SolutionBoardPreview
+                board={preview.board}
+                ariaLabel={korean ? 'Build setup 후보 보드' : 'Build setup candidate board'}
+                invalidLabel={previewLabels.invalid}
+                rawKey={candidate.candidate_key}
+                rawKeyDetailsLabel={previewLabels.rawDetails}
+                copyRawKeyLabel={previewLabels.copyRaw}
+                copiedRawKeyLabel={previewLabels.copiedRaw}
+                copyRawKeyFailedLabel={previewLabels.copyFailed}
+              />
+            </div>
+            <span>{korean ? '커버 패턴' : 'Covered patterns'} {candidate.covered_pattern_count}</span>
+          </li>
         {/each}
       </ol>
     </section>
@@ -657,10 +738,22 @@
         <span>{korean ? '구체화 패턴' : 'Materialized patterns'}: {pathFamily.materialized_pattern_count}</span>
         <span>{korean ? '문제' : 'Problem'}: {pathFamily.problem_id}</span>
       </div>
-      <ol start={pathPageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
+      <ol class="solution-preview-list" start={pathPageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each pathWitnesses as witness (witness.candidate_id + ':' + witness.pattern_id + ':' + witness.normalized_trace_key)}
-          <li class="path-row">
-            <code>{witness.normalized_trace_key}</code>
+          {@const preview = solutionBoardPreviewFromReplay(witness.steps, targetLines)}
+          <li class="path-row solution-preview-row">
+            <div class="solution-preview-card">
+              <SolutionBoardPreview
+                board={preview.board}
+                ariaLabel={korean ? `리플레이 ID ${witness.candidate_id} 보드` : `Replay ID ${witness.candidate_id} board`}
+                invalidLabel={previewLabels.invalid}
+                rawKey={witness.normalized_trace_key}
+                rawKeyDetailsLabel={previewLabels.rawDetails}
+                copyRawKeyLabel={previewLabels.copyRaw}
+                copiedRawKeyLabel={previewLabels.copiedRaw}
+                copyRawKeyFailedLabel={previewLabels.copyFailed}
+              />
+            </div>
             <span>ID {witness.candidate_id} · {korean ? '패턴' : 'Pattern'} {witness.pattern_id} · {korean ? '소비 조각' : 'Consumed pieces'} {witness.consumed_piece_count} · {korean ? '최종 홀드' : 'Terminal hold'} {witness.terminal_hold_piece ?? 'empty'}</span>
             <details>
               <summary>{korean ? '전체 리플레이 단계 확인' : 'Inspect every replay step'} ({witness.steps.length})</summary>
@@ -687,9 +780,24 @@
           <button type="button" disabled={scorePageIndex + 1 >= scorePageCount} on:click={() => (scorePageIndex += 1)}><ChevronRight size={16} /></button>
         </nav>
       </header>
-      <ol start={scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
+      <ol class="solution-preview-list" start={scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each scoreWinners as winner (winner.pattern_id + ':' + winner.candidate_id)}
-          <li class="score-row"><code>{winner.normalized_solution_key}</code><span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · ID {winner.candidate_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span></li>
+          {@const preview = solutionBoardPreviewFromKey(winner.normalized_solution_key, targetLines)}
+          <li class="score-row solution-preview-row">
+            <div class="solution-preview-card">
+              <SolutionBoardPreview
+                board={preview.board}
+                ariaLabel={korean ? `패턴 ${winner.pattern_id} 최고 점수 보드` : `Pattern ${winner.pattern_id} maximum-score board`}
+                invalidLabel={previewLabels.invalid}
+                rawKey={winner.normalized_solution_key}
+                rawKeyDetailsLabel={previewLabels.rawDetails}
+                copyRawKeyLabel={previewLabels.copyRaw}
+                copiedRawKeyLabel={previewLabels.copiedRaw}
+                copyRawKeyFailedLabel={previewLabels.copyFailed}
+              />
+            </div>
+            <span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · ID {winner.candidate_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span>
+          </li>
         {/each}
       </ol>
     </section>
@@ -782,6 +890,8 @@
   li:last-child { border-bottom: 0; }
   code { color: #23322d; font-size: 11px; overflow-wrap: anywhere; }
   footer { border-top: 1px solid #e3e8e5; justify-content: space-between; padding: 9px 15px; }
+  .solution-preview-row { align-items: stretch; flex-direction: column; gap: 7px; }
+  .solution-preview-card { max-width: 220px; width: 100%; }
   .score-row { align-items: flex-start; flex-direction: column; gap: 3px; }
   .build-score-evidence { border-top: 1px solid #dce3df; }
   .path-row, .save-row { align-items: stretch; flex-direction: column; gap: 4px; }

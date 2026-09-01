@@ -2,6 +2,7 @@
   import { AlertTriangle } from '@lucide/svelte';
   import { onDestroy, tick } from 'svelte';
 
+  import SolutionBoardPreview from './SolutionBoardPreview.svelte';
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import {
     formatFinesseInputCount,
@@ -9,12 +10,13 @@
     type BuildProbabilitySolutionFinesse
   } from './buildProbabilityFinesse';
   import {
-    parseSolutionKey,
-    renderSolutionBoard,
     type SolutionCopyFormat,
-    type SolutionExportBoard,
     type SolutionExportPage
   } from './solutionExport';
+  import {
+    solutionBoardPreviewFromKey,
+    type SolutionBoardPreviewView
+  } from './solutionBoardPreview';
   import type { ClearraFinesseRepresentativeWitness } from '../wasm/wasmCommandClient';
   import {
     solutionPageResultIdentity,
@@ -49,10 +51,7 @@
 
   const PAGE_SIZE = 100;
 
-  type SolutionView = {
-    board: SolutionExportBoard | null;
-    page: SolutionExportPage | null;
-  };
+  type SolutionView = SolutionBoardPreviewView;
 
   type PreparedSolution = SolutionView & {
     index: number;
@@ -246,11 +245,7 @@
   ): SolutionView {
     const cached = cache.get(key);
     if (cached) return cached;
-    const page = parseSolutionKey(key);
-    const view = {
-      board: page ? renderSolutionBoard(page, lines) : null,
-      page
-    };
+    const view = solutionBoardPreviewFromKey(key, lines);
     cache.set(key, view);
     return view;
   }
@@ -304,23 +299,11 @@
           />
         </div>
 
-        {#if solution.board}
-          <div
-            class="solution-board"
-            role="img"
-            aria-label={label('solutionBoard', { number: solution.index + 1 })}
-            style={`--solution-rows:${solution.board.height}`}
-          >
-            {#each solution.board.cells as cell}
-              <span class:empty={cell === null} class:garbage={cell === 'G'} class={`cell piece-${cell ?? 'empty'}`} aria-hidden="true"></span>
-            {/each}
-          </div>
-        {:else}
-          <div class="invalid-solution" role="status">
-            <AlertTriangle size={18} />
-            <span>{label('invalidSolutionKey')}</span>
-          </div>
-        {/if}
+        <SolutionBoardPreview
+          board={solution.board}
+          ariaLabel={label('solutionBoard', { number: solution.index + 1 })}
+          invalidLabel={label('invalidSolutionKey')}
+        />
       </li>
     {/each}
   </ol>
@@ -392,39 +375,6 @@
     font-weight: 700;
     overflow-wrap: anywhere;
   }
-
-  .solution-board {
-    aspect-ratio: calc(10 / var(--solution-rows));
-    background: #cbd3ce;
-    border: 1px solid #cbd3ce;
-    border-radius: 4px;
-    display: grid;
-    gap: 0;
-    grid-template-columns: repeat(10, minmax(0, 1fr));
-    grid-template-rows: repeat(var(--solution-rows), minmax(0, 1fr));
-    overflow: hidden;
-    width: 100%;
-  }
-
-  .cell {
-    background: var(--cell-color);
-    box-shadow: 0 0 0 0.5px var(--cell-color);
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .cell.empty {
-    --cell-color: #edf1ef;
-  }
-
-  .cell.garbage { --cell-color: #78817e; }
-  .piece-I { --cell-color: #60d6db; }
-  .piece-O { --cell-color: #f2cb52; }
-  .piece-T { --cell-color: #c47bdc; }
-  .piece-S { --cell-color: #70c982; }
-  .piece-Z { --cell-color: #ec7771; }
-  .piece-J { --cell-color: #6d91e5; }
-  .piece-L { --cell-color: #eaa05d; }
 
   .invalid-solution {
     align-items: center;
